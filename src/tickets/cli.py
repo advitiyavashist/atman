@@ -355,16 +355,15 @@ def cmd_pulse(board: Board, agent: str, args: argparse.Namespace) -> int:
     for t in tickets:
         counts[t.status] = counts.get(t.status, 0) + 1
     held = board.held_by(agent)
+    nxt = board.next_open(agent=agent)
     payload = {
         "board": str(board.root),
         "agent": agent,
         "counts": counts,
         "total": len(tickets),
         "you_hold": [t.id for t in held],
-        "next": (board.next_open(agent=agent) or TicketStub()).id if tickets else None,
+        "next": nxt.id if nxt else None,
     }
-    nxt = board.next_open(agent=agent)
-    payload["next"] = nxt.id if nxt else None
     if args.as_json:
         emit(args, "", payload)
         return 0
@@ -374,10 +373,6 @@ def cmd_pulse(board: Board, agent: str, args: argparse.Namespace) -> int:
     print(f"tickets {len(tickets)}  {bits}")
     print(f"next {payload['next'] or '-'}")
     return 0
-
-
-class TicketStub:
-    id = None
 
 
 def cmd_here(board: Board, agent: str, args: argparse.Namespace) -> int:
@@ -499,9 +494,6 @@ def cmd_dep(board: Board, agent: str, args: argparse.Namespace) -> int:
 def _meta_list(board: Board, key: str) -> list:
     meta = board.meta()
     names = list(meta.get(key) or [])
-    for t in board.all_tickets():
-        value = getattr(t, key[:-1] if key.endswith("s") else key, None)
-        # epic / sprint fields
     for t in board.all_tickets():
         value = t.epic if key == "epics" else t.sprint
         if value and value not in names:

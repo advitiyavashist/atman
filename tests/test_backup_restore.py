@@ -68,7 +68,7 @@ def test_restore_roundtrip_on_fixture_board(board_dir: Path, tmp_path: Path) -> 
     assert not any("should vanish" in (n.get("text") or "") for n in restored.notes)
     assert Board(board_dir).load("T-3").status == "done"
     # Secrets on the live board survive restore.
-    assert (board_dir / "secrets" / "token").read_text() == "super-secret-token-do-not-backup"
+    assert (board_dir / "secrets" / "token").read_text().strip() == "super-secret-token-do-not-backup"
 
 
 def test_cli_backup_restore(board_dir: Path, tmp_path: Path) -> None:

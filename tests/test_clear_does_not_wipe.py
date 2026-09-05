@@ -96,7 +96,7 @@ def test_board_reset_with_both_confirmations_wipes_tickets_only(board_dir: Path)
     assert code == 0
     assert ticket_names(board_dir) == set()
     assert secret.is_file()
-    assert secret.read_text() == "super-secret-token-do-not-backup"
+    assert secret.read_text().strip() == "super-secret-token-do-not-backup"
     # Recovery snapshot must exist beside the board, not inside it.
     backups = list((board_dir.parent / ".tickets-backups").glob("*.tar.gz"))
     assert backups

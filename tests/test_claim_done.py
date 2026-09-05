@@ -56,6 +56,17 @@ def test_double_claim_rejected(empty_board: Path) -> None:
     assert Board(empty_board).load("T-1").claimed_by == "alice"
 
 
+def test_unknown_ticket_fields_are_preserved(empty_board: Path) -> None:
+    path = empty_board / "T-1.json"
+    path.write_text(
+        '{"id":"T-1","title":"x","status":"open","notes":[],"steer_only":{"k":1}}\n',
+        encoding="utf-8",
+    )
+    assert run("note", "T-1", "hello", board=empty_board, agent="alice") == 0
+    data = Board(empty_board).load("T-1").to_dict()
+    assert data["steer_only"] == {"k": 1}
+
+
 def test_pulse_and_list(empty_board: Path) -> None:
     assert run("create", "A", board=empty_board) == 0
     assert run("claim", "T-1", board=empty_board, agent="alice") == 0
