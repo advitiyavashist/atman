@@ -2621,6 +2621,126 @@ def cmd_connect(a, board):
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
 
+# ---- hooks: wire a tool so the board reaches the agent every turn ----------
+
+INBOX_HOOK_CMD = (
+    'PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; '
+    '[ -n "$TICKET_AGENT" ] && tickets inbox --keep --limit 8 2>/dev/null | sed "s/^/[board] /" || true'
+)
+
+CURSOR_HOOK = r'''#!/usr/bin/env python3
+"""Cursor hook installed by `tickets hooks cursor`: surface new board messages.
+Reads the hook event JSON on stdin, writes {additional_context, user_message}
+on stdout. Keeps its own watermark so `tickets inbox` read-state is untouched.
+Identity comes from $TICKET_AGENT (defaults to the name given at install)."""
+import json, os, sys
+from pathlib import Path
+
+AGENT = os.environ.get("TICKET_AGENT", "%(agent)s")
+BOARD = Path(os.environ.get("TICKETS_DIR", %(board)r))
+STATE = Path(__file__).resolve().parent / "state" / ("board-%%s.json" %% AGENT)
+
+def main():
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        event = {}
+    path = BOARD / "messages.jsonl"
+    if not path.is_file():
+        print("{}"); return 0
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    last = ""
+    if STATE.exists():
+        try: last = json.loads(STATE.read_text()).get("last_at", "")
+        except ValueError: pass
+    new = []
+    for ln in path.read_text().splitlines():
+        try: m = json.loads(ln)
+        except ValueError: continue
+        if (m.get("at") or "") <= last: continue
+        to = m.get("to") or ""
+        if to not in ("", "all", "everyone", AGENT): continue
+        if m.get("from") == AGENT and to in ("", "all", "everyone"): continue
+        new.append(m)
+    out = {}
+    if new:
+        lines = ["Ticket board: %%d new message(s) for %%s. Reply with `tickets msg`." %% (len(new), AGENT)]
+        for m in new[-12:]:
+            lines.append("- %%s %%s -> %%s%%s: %%s" %% (m.get("at","?")[5:16], m.get("from","?"), m.get("to") or "everyone",
+                         (" [%%s]" %% m["re"]) if m.get("re") else "", (m.get("text") or "")[:220]))
+        out["additional_context"] = "\n".join(lines)[:3500]
+        out["user_message"] = "%%d new ticket-board message(s) for %%s" %% (len(new), AGENT)
+        STATE.write_text(json.dumps({"last_at": new[-1].get("at", last)}))
+    print(json.dumps(out)); return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def cmd_hooks(a, board):
+    """Install board hooks for a tool: claude (global settings.json) or cursor
+    (project .cursor/hooks). Codex has no hooks; AGENTS.md carries the protocol."""
+    root = os.path.dirname(board)
+    script = os.path.realpath(__file__)
+    if a.tool == "claude":
+        path = os.path.expanduser("~/.claude/settings.json")
+        try:
+            with open(path) as f:
+                s = json.load(f)
+        except (IOError, ValueError):
+            s = {}
+        hooks = s.setdefault("hooks", {})
+        ss = hooks.setdefault("SessionStart", [])
+        ss[:] = [h for h in ss if "tickets" not in json.dumps(h)]
+        ss.append({"matcher": "startup|resume|clear|compact",
+                   "hooks": [{"type": "command", "command": "%s board" % script, "timeout": 10}]})
+        ups = hooks.setdefault("UserPromptSubmit", [])
+        ups[:] = [h for h in ups if "tickets" not in json.dumps(h)]
+        ups.append({"hooks": [{"type": "command", "command": INBOX_HOOK_CMD, "timeout": 10}]})
+        allow = s.setdefault("permissions", {}).setdefault("allow", [])
+        for p in ("Bash(tickets:*)", "Bash(%s:*)" % script):
+            if p not in allow:
+                allow.append(p)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(s, f, indent=2)
+        os.replace(tmp, path)
+        print("Claude Code: SessionStart -> `tickets board`; UserPromptSubmit -> unread inbox for $TICKET_AGENT.")
+        print("Launch sessions as: TICKET_AGENT=<name> claude   (in %s)" % path)
+        return
+    if a.tool == "cursor":
+        hdir = os.path.join(root, ".cursor", "hooks")
+        os.makedirs(hdir, exist_ok=True)
+        sp = os.path.join(hdir, "tickets-board.py")
+        if os.path.exists(sp) and not a.force:
+            print("%s exists; --force to overwrite" % sp)
+        else:
+            with open(sp, "w") as f:
+                f.write(CURSOR_HOOK % {"agent": a.agent or "cursor", "board": board})
+            os.chmod(sp, 0o755)
+        hp = os.path.join(root, ".cursor", "hooks.json")
+        try:
+            with open(hp) as f:
+                cfg = json.load(f)
+        except (IOError, ValueError):
+            cfg = {"version": 1, "hooks": {}}
+        entry = {"command": ".cursor/hooks/tickets-board.py", "timeout": 15}
+        for ev in ("sessionStart", "beforeSubmitPrompt", "stop"):
+            lst = cfg.setdefault("hooks", {}).setdefault(ev, [])
+            if not any("tickets-board" in json.dumps(x) for x in lst):
+                lst.append(dict(entry, **({"loop_limit": 2} if ev == "stop" else {})))
+        with open(hp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        print("Cursor: %s + %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings; "
+              "set TICKET_AGENT in the shell Cursor starts from." % (os.path.relpath(hp, root), os.path.relpath(sp, root)))
+        return
+    if a.tool == "codex":
+        print("Codex has no hook API; it reads AGENTS.md (installed by `tickets init`). Start it as "
+              "TICKET_AGENT=codex codex and it will run `tickets inbox` per the protocol.")
+        return
+
+
 def cmd_mine(a, board):
     owner = whoami(a.owner)
     tickets = load_all(board)
@@ -2852,6 +2972,12 @@ def main():
 
     c = sub.add_parser("connect", help="print how any agent connects to this board")
     c.set_defaults(fn=cmd_connect)
+
+    c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex")
+    c.add_argument("tool", choices=("claude", "cursor", "codex"))
+    c.add_argument("--agent", default="", help="cursor: default TICKET_AGENT baked into the hook")
+    c.add_argument("--force", action="store_true")
+    c.set_defaults(fn=cmd_hooks)
 
     c = sub.add_parser("here", help="check in: record my worktree, branch and ticket")
     c.add_argument("--owner", "-o")
