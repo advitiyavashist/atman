@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ticket-board"
+version = "0.2.0"
+description = "File-based multi-agent ticket board CLI (safe clear + board backup)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Steer contributors" }]
+
+[project.scripts]
+tickets = "ticket_board.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
