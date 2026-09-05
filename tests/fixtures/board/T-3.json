@@ -1,0 +1,24 @@
+{
+  "id": "T-3",
+  "title": "Already done",
+  "body": "Closed work",
+  "status": "done",
+  "assignee": "bob",
+  "claimed_by": "bob",
+  "priority": "p3",
+  "epic": null,
+  "sprint": "s1",
+  "deps": ["T-1"],
+  "collaborators": [],
+  "notes": [
+    {
+      "at": "2026-09-05T14:00:00Z",
+      "by": "bob",
+      "kind": "done",
+      "text": "shipped"
+    }
+  ],
+  "created_at": "2026-09-05T14:00:00Z",
+  "updated_at": "2026-09-05T14:00:00Z",
+  "created_by": "cos"
+}

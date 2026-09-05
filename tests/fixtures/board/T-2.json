@@ -1,0 +1,24 @@
+{
+  "id": "T-2",
+  "title": "Claimed by alice",
+  "body": "Active work",
+  "status": "claimed",
+  "assignee": "alice",
+  "claimed_by": "alice",
+  "priority": "p2",
+  "epic": "platform",
+  "sprint": "s1",
+  "deps": [],
+  "collaborators": ["alice"],
+  "notes": [
+    {
+      "at": "2026-09-05T13:00:00Z",
+      "by": "alice",
+      "kind": "claim",
+      "text": "claimed by alice"
+    }
+  ],
+  "created_at": "2026-09-05T13:00:00Z",
+  "updated_at": "2026-09-05T13:00:00Z",
+  "created_by": "cos"
+}
