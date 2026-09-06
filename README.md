@@ -116,3 +116,17 @@ every claim that agent makes.
 - Python 3.9+, stdlib only.
 
 MIT licensed.
+
+## Making agents start on their own
+
+A session cannot be woken by a hook after its turn ends, so there are two parts:
+
+```sh
+tickets hooks claude                     # Stop hook: keep a turn alive while board work remains (loop-guarded)
+tickets pending --agent claude-opus      # exit 0 if there is work: unread DM, held ticket, or ready ticket in lane
+tickets prompt --agent claude-opus       # the standard worker prompt for a headless run
+tickets watch --agent claude-opus --every 60 --cwd .worktrees/claude-opus \
+  --exec 'claude -p "$(tickets prompt)" --permission-mode acceptEdits'   # poll, launch only when there is work
+```
+
+`watch --once` is the cron/launchd form; `--exec` takes any tool (codex, cursor-agent, a script).

@@ -2547,6 +2547,28 @@ Tool-specific:
 
 To take coordination: `tickets master take`, then `tickets master` and act on
 the HEALTH section.
+
+## Making agents start on their own
+
+A session cannot be woken by a hook once its turn has ended, so use both:
+
+- Keep going while there is work (Claude Code): `tickets hooks claude` installs a
+  `Stop` hook that blocks the stop when the agent has unread messages or a
+  ticket in hand (loop-guarded: one extra continuation per user turn).
+- Start when work appears, without a human: run a watcher per agent from that
+  agent's worktree. It polls `tickets pending` and launches a headless run only
+  when there is something to do:
+
+      cd {root}/.worktrees/claude-opus
+      TICKET_AGENT=claude-opus tickets watch --every 60 --cwd "$PWD" \
+          --exec 'claude -p "$(tickets prompt)" --permission-mode acceptEdits'
+
+  Any tool works in `--exec` (codex, cursor-agent, a shell script). Logs go to
+  `.tickets/agents/<agent>.watch.log`. `tickets watch --once` is the cron-able
+  form (exit 0 = work exists).
+- Interactive sessions you keep open: `/loop 10m` with the prompt
+  `tickets inbox && tickets mine; continue my ticket or tickets next` re-checks
+  the board on a timer.
 """
 
 
@@ -2619,6 +2641,145 @@ def cmd_join(a, board):
 
 def cmd_connect(a, board):
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
+
+
+# ---- wake-up: is there work for this agent, and how to start it ----------
+
+def pending_work(board, owner):
+    """What would make `owner` act right now. Returns a dict (empty = nothing)."""
+    out = {}
+    msgs = unread(board, owner)
+    direct = [m for m in msgs if m.get("to") == owner]
+    if direct:
+        out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
+    if msgs and not direct:
+        out["broadcasts"] = len(msgs)
+    tickets = load_all(board)
+    held = [t for t in tickets if t["status"] == "claimed" and t.get("owner") == owner]
+    if held:
+        out["holding"] = [t["id"] + " " + t["title"][:60] for t in held]
+    roles = roles_for(board, owner, None)
+    ready = [t for t in _filter_ready(unblocked(board, tickets), roles) if can_do(board, owner, t)]
+    mine_first = [t for t in ready if t.get("suggested") == owner]
+    if mine_first:
+        out["suggested_for_me"] = [t["id"] + " " + t["title"][:60] for t in mine_first[:3]]
+    elif ready and not held:
+        out["ready_in_my_lane"] = [t["id"] + " " + t["title"][:60] for t in ready[:3]]
+    return out
+
+
+WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
+Rules: one ticket at a time; own git worktree, never main; `tickets sync` before `tickets review`;
+`tickets update <id> "..."` every 45 minutes; finish with `tickets review <id> --notes "paths, tests, decisions"`;
+never edit .tickets/ by hand; never run `tickets clear`. Board-only comms: `tickets msg`.
+Do now, in order:
+1. `tickets inbox` -- read and, if anything is addressed to you, answer with `tickets msg --to <who>`.
+2. `tickets mine` -- if you hold a ticket, continue it from where the notes left off.
+3. Otherwise `tickets next` -- if it hands you a ticket, read the printed briefing files, then work it.
+4. When the ticket is finished and tests pass: commit, `tickets sync`, `tickets review <id> --notes ...`, then go to 3.
+5. If `tickets next` says nothing is ready and you hold nothing: post one line with `tickets msg "idle: <what you checked>"` and stop.
+{extra}"""
+
+
+def cmd_pending(a, board):
+    owner = whoami(a.agent)
+    p = pending_work(board, owner)
+    if a.json:
+        print(json.dumps({"agent": owner, "pending": bool(p), **p}))
+    elif p:
+        for k, v in p.items():
+            print("%s: %s" % (k, v if not isinstance(v, list) else "; ".join(v)))
+    else:
+        print("nothing pending for %s" % owner)
+    sys.exit(0 if p else 1)
+
+
+def cmd_prompt(a, board):
+    owner = whoami(a.agent)
+    print(WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
+                               extra=(a.extra or "")))
+
+
+def cmd_stop_hook(a, board):
+    """Claude Code `Stop` hook: keep the turn alive while this agent still has work.
+
+    Reads the hook event on stdin. If Claude is already continuing because of a
+    stop hook (`stop_hook_active`), let it stop -- that is the loop guard. Else,
+    if there are unread messages addressed to the agent or a ticket in hand,
+    block the stop with a reason so the session keeps working.
+    """
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        event = {}
+    owner = os.environ.get("TICKET_AGENT") or ""
+    if not owner or event.get("stop_hook_active"):
+        print("{}")
+        return
+    p = pending_work(board, owner)
+    if not p or (set(p) == {"broadcasts"}):
+        print("{}")
+        return
+    reason = "Ticket board still has work for %s: %s. Run `tickets inbox`, then continue your ticket " \
+             "(`tickets mine`) or claim one (`tickets next`). If you are truly done or blocked, say so " \
+             "with `tickets msg` and stop." % (owner, "; ".join(
+                 "%s=%s" % (k, v if not isinstance(v, list) else " | ".join(v)) for k, v in p.items()))
+    print(json.dumps({"decision": "block", "reason": reason[:1500]}))
+
+
+def cmd_watch(a, board):
+    """Poll the board; when there is work for the agent, launch a worker command.
+
+    Default command runs Claude Code headless with the standard worker prompt.
+    One run at a time; the next poll happens after the run ends. Stops after
+    --max-runs, on Ctrl-C, or immediately with --once.
+    """
+    import subprocess
+    import time as _time
+
+    owner = whoami(a.agent)
+    root = os.path.dirname(board)
+    cwd = a.cwd or root
+    cmd = a.exec or (
+        'claude -p "$(tickets prompt)" --permission-mode %s%s' % (
+            a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else "")
+    )
+    log_dir = os.path.join(board, "agents")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, owner + ".watch.log")
+    env = dict(os.environ, TICKET_AGENT=owner, TICKETS_DIR=board,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    runs = 0
+    print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, a.every, cwd, cmd))
+    checkin(board, owner, None, "watch loop online (every %ds)" % a.every)
+    while True:
+        p = pending_work(board, owner)
+        actionable = p and set(p) != {"broadcasts"}
+        if actionable:
+            runs += 1
+            stamp = now()
+            with open(log_path, "a") as lf:
+                lf.write("%s run %d trigger=%s\n" % (stamp, runs, json.dumps(p)[:400]))
+            print("%s work found (%s) -> run %d" % (stamp, ", ".join(p), runs))
+            if a.dry_run:
+                print("  dry-run; would execute: %s" % cmd)
+            else:
+                with open(log_path, "a") as lf:
+                    rc = subprocess.call(cmd, shell=True, cwd=cwd, env=env, stdout=lf, stderr=subprocess.STDOUT)
+                    lf.write("%s run %d exit %s\n" % (now(), runs, rc))
+                print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
+            if a.max_runs and runs >= a.max_runs:
+                print("max-runs reached")
+                return
+        elif a.verbose:
+            print("%s nothing pending" % now())
+        if a.once:
+            sys.exit(0 if actionable else 1)
+        try:
+            _time.sleep(max(5, a.every))
+        except KeyboardInterrupt:
+            print("watch stopped")
+            return
 
 
 # ---- hooks: wire a tool so the board reaches the agent every turn ----------
@@ -2698,6 +2859,11 @@ def cmd_hooks(a, board):
         ups = hooks.setdefault("UserPromptSubmit", [])
         ups[:] = [h for h in ups if "tickets" not in json.dumps(h)]
         ups.append({"hooks": [{"type": "command", "command": INBOX_HOOK_CMD, "timeout": 10}]})
+        # Keep a turn alive while the agent still has board work (loop-guarded
+        # by stop_hook_active, so at most one extra continuation per user turn).
+        st = hooks.setdefault("Stop", [])
+        st[:] = [h for h in st if "tickets" not in json.dumps(h)]
+        st.append({"hooks": [{"type": "command", "command": "%s stop-hook" % script, "timeout": 15}]})
         allow = s.setdefault("permissions", {}).setdefault("allow", [])
         for p in ("Bash(tickets:*)", "Bash(%s:*)" % script):
             if p not in allow:
@@ -2972,6 +3138,32 @@ def main():
 
     c = sub.add_parser("connect", help="print how any agent connects to this board")
     c.set_defaults(fn=cmd_connect)
+
+    c = sub.add_parser("pending", help="exit 0 if there is work for the agent (messages, held or ready ticket)")
+    c.add_argument("--agent", default="")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_pending)
+
+    c = sub.add_parser("prompt", help="print the standard worker prompt for a headless run")
+    c.add_argument("--agent", default="")
+    c.add_argument("--extra", default="", help="extra instructions appended to the prompt")
+    c.set_defaults(fn=cmd_prompt)
+
+    c = sub.add_parser("stop-hook", help="Claude Code Stop hook: block the stop while board work remains")
+    c.set_defaults(fn=cmd_stop_hook)
+
+    c = sub.add_parser("watch", help="poll the board and launch a worker when there is work for the agent")
+    c.add_argument("--agent", default="")
+    c.add_argument("--every", type=int, default=60, help="seconds between polls")
+    c.add_argument("--exec", default="", help="command to run (default: headless claude with `tickets prompt`)")
+    c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
+    c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
+    c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
+    c.add_argument("--max-runs", type=int, default=0)
+    c.add_argument("--once", action="store_true", help="check once; exit 0 if work, 1 if not")
+    c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--verbose", action="store_true")
+    c.set_defaults(fn=cmd_watch)
 
     c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex")
     c.add_argument("tool", choices=("claude", "cursor", "codex"))
