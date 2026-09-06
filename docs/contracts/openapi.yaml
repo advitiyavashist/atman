@@ -762,7 +762,13 @@ components:
             `stop` means "Turn finished". It never implies ticket completion.
             `probe` is the synthetic connection test and never sets
             `hook_health.session_adopted`.
-        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        occurred_at:
+          allOf: [{ $ref: '#/components/schemas/Timestamp' }]
+          description: |
+            Adapter receipt time, not agent-reported (T-224, item 13; T-214
+            ground-truthed this against real Claude Code hook payloads, which
+            carry no timestamp of their own). This is the only honest source
+            -- do not read this field as when the agent's action happened.
         cwd:
           anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
         note:
