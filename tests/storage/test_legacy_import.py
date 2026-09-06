@@ -104,6 +104,38 @@ def test_the_board_around_the_tickets_is_imported_too(store, imported):
     assert stray and stray[0]["ticket_id"] is None
 
 
+def test_an_oversized_document_is_truncated_and_reported(store, sample, monkeypatch):
+    """A multi-MB brief must not land whole in one `legacy_documents` row inside
+    the same atomic transaction as the rest of the board (T-231). Reproduced
+    against the merged importer before this fix: a 6 MB brief imported clean
+    with `truncated_fields` empty, so nothing told the operator it happened.
+
+    The cap is patched down rather than writing a real multi-MB fixture file,
+    but the assertion reads the content back through `legacy_documents` (the
+    reader API), not just the size of the file on disk, so it fails if
+    truncation stops happening at read time even though the cap constant
+    itself is untouched.
+    """
+    monkeypatch.setattr(legacy_module, "LEGACY_DOCUMENT_MAX_BYTES", 64)
+    huge = "brief content " * 20  # 280 bytes, well over the patched 64-byte cap
+    (sample / "briefs" / "huge.md").write_text(huge)
+
+    imported = import_legacy_board(store, sample, project_name="Sample")
+
+    # Not dropped: still imported, just not whole.
+    assert imported.imported_documents == 14  # 13 from the sample board + this one
+    assert imported.truncated_fields.get("document:brief/huge.md") == 1
+
+    docs = {d["name"]: d["content"]
+            for d in legacy_documents(store, imported.project_id, kind="brief")}
+    assert len(docs["huge.md"]) == 64
+    assert docs["huge.md"] == huge[:64]
+    # A document under the cap is untouched -- truncation is per-file, not global.
+    assert docs["agent-alpha.md"] == \
+        (Path(sample) / "briefs" / "agent-alpha.md").read_text()
+    assert "document:brief/agent-alpha.md" not in imported.truncated_fields
+
+
 def test_fields_with_no_contract_home_are_archived_not_dropped(store, imported):
     """priority/epic/sprint/needs/suggested/done_at/review_at/commit/branch/pr.
 
