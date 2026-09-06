@@ -332,6 +332,41 @@ def test_a_stale_session_of_the_owner_is_kept_and_superseded(
     assert [u["body"] for u in kept] == ["what I was doing before the takeover"]
 
 
+def test_omitting_session_id_is_not_a_healthy_update(
+        server, project, enrolled, ticket, operator):
+    """T-239: session_id is OPTIONAL in CreateUpdateRequest, so a client can
+    disable the superseded safeguard just by leaving the field out -- and the
+    displaced session is exactly the caller least likely to send one. Absent
+    must land as a third, unattributed case: kept, but denied the two effects
+    a clean update gets (last_progress_at, next_step), and audited under its
+    own action rather than folded into a plain `ticket.update`.
+    """
+    enrolled["client"].post(
+        "/tickets/{}/claim".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": ticket["version"],
+         "session_id": enrolled["session_id"]})
+    before = operator.get("/tickets/" + ticket["id"]).json()["ticket"]
+
+    update = enrolled["client"].post(
+        "/tickets/{}/updates".format(ticket["id"]),
+        {"request_id": rid(), "body": "still going",
+         "next_step": "should not land"})
+    assert update.status == 201
+    assert update.json()["superseded"] is False, "the boolean has no third state"
+
+    after = operator.get("/tickets/" + ticket["id"]).json()["ticket"]
+    assert after["last_progress_at"] == before["last_progress_at"], \
+        "an unattributed update must not count as progress"
+    assert after["next_step"] == before["next_step"], \
+        "an unattributed update must not overwrite next_step"
+
+    actions = [e["action"] for e in server.store.audit_trail(project["id"])
+              if e["subject_id"] == ticket["id"]]
+    assert "ticket.update.unattributed" in actions
+    assert "ticket.update" not in actions, \
+        "must not read as an ordinary healthy progress update"
+
+
 def test_a_stale_claim_surfaces_as_a_version_conflict(server, operator,
                                                       project, enrolled, ticket):
     """The ruling's second named case: a stale claim, not a stale write.

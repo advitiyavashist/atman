@@ -13,7 +13,9 @@ quietly:
 - Claiming is atomic across processes: state check, capacity check and write
   happen inside one immediate transaction.
 - A late update from a displaced session is stored with `superseded=1` and has
-  no effect on ticket state.
+  no effect on ticket state. An update with no session_id at all is likewise
+  denied effect on ticket state (T-239) -- absent is not "clean", it is a
+  third, unattributed case, audited as such.
 """
 
 import hashlib
@@ -714,11 +716,26 @@ class BoardStore(MessagingMixin):
                    next_step=None, session_id=None, request_id=None):
         """Append a progress update.
 
-        An update arriving from a session that no longer owns the ticket is
-        kept and flagged `superseded`, and is denied any effect on ticket state
-        or progress time. The displaced session's account of what it was doing
-        is often the most useful thing in the trail after a takeover, so it is
-        stored rather than rejected.
+        session_id is optional on the wire (T-178/T-224 contract), so absent
+        is a THIRD state, never collapsed into "clean": an update is only let
+        touch ticket state when it is attributed to the session that
+        currently owns the ticket.
+
+        - valid session (attributed, current owner)  -> applies, `ticket.update`
+        - stale/foreign session (attributed, not owner) -> kept, denied effect,
+          flagged `superseded`, `ticket.update.superseded`
+        - no session_id (unattributed) -> kept, denied effect exactly like a
+          superseded update (`superseded` stays False on the wire -- the
+          contract has no third value for that field -- but it never bumps
+          last_progress_at or next_step), audited as
+          `ticket.update.unattributed` so recovery decisions can tell "a
+          session confirmed this" from "nobody did".
+
+        An absent session_id must not read as equivalent to a valid one: it is
+        precisely the shape a displaced session's write takes when the caller
+        simply omits the field, and last_progress_at (the 90-minute reopen
+        signal) and next_step (what the next owner picks up) are the two
+        fields a client could otherwise corrupt for free.
         """
         body = {"ticket_id": ticket_id, "body": body_text,
                 "next_step": next_step, "session_id": session_id}
@@ -728,12 +745,14 @@ class BoardStore(MessagingMixin):
                 return replay
             row = self._ticket_row(conn, project_id, ticket_id)
 
+            attributed = session_id is not None
             superseded = False
-            if session_id is not None:
+            if attributed:
                 if row["owner_session"] is not None and row["owner_session"] != session_id:
                     superseded = True
                 elif not self._session_is_current(conn, session_id):
                     superseded = True
+            apply_progress = attributed and not superseded
 
             uid = ids.update_id()
             now = ids.now()
@@ -743,7 +762,7 @@ class BoardStore(MessagingMixin):
                 (uid, project_id, ticket_id, _json(author), body_text,
                  next_step, now, 1 if superseded else 0),
             )
-            if not superseded:
+            if apply_progress:
                 conn.execute(
                     "UPDATE tickets SET last_progress_at = ?, updated_at = ?,"
                     " next_step = COALESCE(?, next_step), version = version + 1"
@@ -756,12 +775,18 @@ class BoardStore(MessagingMixin):
                         " version = version + 1 WHERE id = ?",
                         (now, row["owner"]),
                     )
-            self._audit(conn, project_id, author,
-                        "ticket.update.superseded" if superseded else "ticket.update",
+            if superseded:
+                action, summary = ("ticket.update.superseded",
+                                    "late update from a superseded session")
+            elif not attributed:
+                action, summary = ("ticket.update.unattributed",
+                                    "progress update with no session_id;"
+                                    " not attributed, ticket progress unchanged")
+            else:
+                action, summary = "ticket.update", "progress update"
+            self._audit(conn, project_id, author, action,
                         subject_type="ticket", subject_id=ticket_id,
-                        request_id=request_id,
-                        summary=("late update from a superseded session"
-                                 if superseded else "progress update"))
+                        request_id=request_id, summary=summary)
             result = {
                 "id": uid, "ticket_id": ticket_id, "author": author,
                 "body": body_text, "next_step": next_step,
