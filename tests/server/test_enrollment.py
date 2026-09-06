@@ -186,3 +186,67 @@ def test_a_stale_agent_version_is_refused(operator, enrolled):
 def _agent_version(operator, enrolled):
     agents = operator.get("/agents").json()["items"]
     return next(a for a in agents if a["id"] == enrolled["agent_id"])["version"]
+
+
+def test_a_taken_session_id_is_refused_without_spending_the_code(
+        server, operator, project):
+    """The pre-check runs before redemption, so the code survives to retry.
+
+    Ordering is the whole point of the check: if it ran after
+    `consume_enrollment`, a colliding id would burn a single-use code on a
+    request that could never succeed and strand the agent with no way back.
+    """
+    first_code = enroll(operator, name="backend-a").json()["code"]
+    second_code = enroll(operator, name="backend-b").json()["code"]
+    anon = Client(server, project_id=project["id"])
+
+    taken = anon.post("/sessions", {"request_id": rid(), "code": first_code,
+                                    "session_id": "ses_dupdupdup"})
+    assert taken.status == 201
+
+    collision = anon.post("/sessions", {"request_id": rid(), "code": second_code,
+                                        "session_id": "ses_dupdupdup"})
+    assert collision.status == 400
+    assert collision.json()["error"]["code"] == "malformed_request"
+    assert collision.json()["error"]["details"]["rejected_fields"] == ["session_id"]
+
+    # The code was not spent: the same one works on a fresh session id.
+    retry = anon.post("/sessions", {"request_id": rid(), "code": second_code,
+                                    "session_id": "ses_freshfresh"})
+    assert retry.status == 201
+
+
+def test_losing_the_session_id_race_is_a_400_not_a_500(
+        server, operator, project, monkeypatch):
+    """Close the pre-check's TOCTOU window from the losing side.
+
+    Two exchanges racing on one session id can both pass the SELECT before
+    either INSERTs. We reproduce the loser's view by inserting the colliding
+    lease *after* the check has passed -- consume_enrollment is the step that
+    runs in between -- and assert the primary-key violation leaves as the same
+    contract-shaped 400, not an unhandled IntegrityError as a 500.
+    """
+    winner_code = enroll(operator, name="backend-a").json()["code"]
+    loser_code = enroll(operator, name="backend-b").json()["code"]
+    anon = Client(server, project_id=project["id"])
+    consume = server.credentials.consume_enrollment
+
+    def consume_then_lose_the_race(project_id, code):
+        redeemed = consume(project_id, code)
+        if code == loser_code:
+            anon.post("/sessions", {"request_id": rid(), "code": winner_code,
+                                    "session_id": "ses_racedraced"})
+        return redeemed
+
+    monkeypatch.setattr(server.credentials, "consume_enrollment",
+                        consume_then_lose_the_race)
+    lost = anon.post("/sessions", {"request_id": rid(), "code": loser_code,
+                                   "session_id": "ses_racedraced"})
+    assert lost.status == 400
+    assert lost.json()["error"]["code"] == "malformed_request"
+    assert lost.json()["error"]["details"]["rejected_fields"] == ["session_id"]
+    # Exactly one lease exists for the contested id, and it is the winner's.
+    rows = server.store.conn.execute(
+        "SELECT session_id FROM session_leases WHERE session_id = ?",
+        ("ses_racedraced",)).fetchall()
+    assert len(rows) == 1

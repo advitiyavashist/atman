@@ -147,6 +147,14 @@ def test_heartbeats_are_emitted_and_carry_no_resumable_id(server, principal,
 
 def test_a_subscriber_never_sees_another_projects_events(server, principal,
                                                           project, operator):
+    """End to end -- but note WHICH layer this proves.
+
+    `audit_trail` filters by project in SQL, so a foreign row never reaches the
+    ACL filter here and this test stays green with `visible_to` disabled. That
+    is not a defect, it is two layers doing their job, but it means this test
+    is evidence about the query and not about the filter. The filter has its
+    own test below; both are needed.
+    """
     other = server.store.create_project("Other")
     other_session = server.bootstrap_operator(other["id"])
     other_client = Client(server, project_id=other["id"],
@@ -190,3 +198,20 @@ def test_a_payload_that_cannot_be_resolved_does_not_kill_the_stream(
     assert frames[0][1] == "ticket_changed"
     assert frames[0][2]["payload"] is None
     check("StreamEnvelope", frames[0][2])
+
+
+def test_the_acl_filter_rejects_a_foreign_row_on_its_own(server, principal,
+                                                         project):
+    """Directly, because the query above would otherwise hide this.
+
+    `visible_to` is defence in depth today and a seam tomorrow: T-187 puts the
+    per-channel rule ("a subscriber never receives events for a channel it
+    cannot read") in this exact method. If nothing tests the filter itself, that
+    rule can be written wrong and every existing stream test still passes.
+    """
+    foreign = {"project_id": "prj_somebody_else", "action": "ticket.created",
+               "subject_type": "ticket", "subject_id": "OTHER-1"}
+    mine = {"project_id": principal.project_id, "action": "ticket.created",
+            "subject_type": "ticket", "subject_id": "DEMO-1"}
+    assert server.events.visible_to(principal, {}, foreign) is False
+    assert server.events.visible_to(principal, {}, mine) is True

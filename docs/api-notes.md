@@ -178,6 +178,30 @@ ticket reuses `ticket_version_conflict`, because it is the only version-conflict
 code the frozen enum carries. The `details` name the real subject (`agent_id`),
 so nothing is misreported; widening the enum would be a contract amendment.
 
+## The displaced owner: which path each case takes
+
+Asked for by the planner at 12:30Z after a live incident on the Steer board —
+T-202 was reassigned twice inside 60 seconds and the displaced owner kept
+working for ten minutes because nothing ever refused it. There are two cases
+here that look alike and must not be collapsed, so both are named.
+
+| What happened | Route behaviour | Why |
+| --- | --- | --- |
+| A **different agent** now owns the ticket, and the displaced one writes to it (`POST /tickets/{id}/updates`, `/reviews`, `/blocked`) | **403 `forbidden_scope`** | The write is refused and nothing is appended. Not 404 — the ticket plainly exists and the agent can still read it. Not a silent 201 — that is the incident. |
+| The **same agent** on an **older session** posts an update (its `session_id` is no longer the ticket's `owner_session`) | **201 with `superseded: true`** | Deliberately kept. T-179 stores it because a displaced session's account of what it was doing is usually the most useful thing in the trail after a takeover. It gets no effect on ticket state or progress time. |
+| The displaced agent tries to **claim** on the version it last saw | **409 `ticket_version_conflict`**, `details` carrying `expected_version` and `actual_version` | The problem is staleness, not authorization, and describing it as `forbidden_scope` would send the caller to fix the wrong thing. Both numbers mean one re-read settles it. |
+
+The distinction is agent-level, not session-level, and losing it turns the 403
+into a data-loss bug: refuse a *different agent*, keep the *same agent's* stale
+session. `tests/server/test_auth_and_scope.py` covers all three rows, and the
+middle row exists specifically so a future tightening of the first cannot
+quietly swallow it.
+
+Worth knowing for T-182: reassignment itself has **no route in this lane**. The
+master loop is yours, so the tests reassign through the store the way your loop
+will. When you add the route, these three cases are the acceptance bar it has to
+keep passing.
+
 ## Policy numbers, all in one place
 
 None of these are contract. They are named constants a deployment can move.
@@ -257,3 +281,43 @@ real board the first mutation spends the key and the rest are
 `request_id_reused`. Invisible against the fixture-replay stub. **T-185 will hit
 this the moment it points `BOARD_URL` at a real server**; the same case passes when
 run alone, which that test also proves.
+
+### The mutation pass, and what it found
+
+24 defects planted one at a time in `server/`, each attacking a property this
+lane claims: 24/24 caught by `tests/server/`. The run only became useful after
+the first pass, which caught 20 — the four gaps are more informative than the
+green number, so they are recorded here.
+
+1. **`POST /tickets/{id}/updates` had no owner check at all.** `/reviews` and
+   `/blocked` had one; updates did not, so a displaced owner's updates were
+   silently accepted — the live incident above, reproduced in the code that was
+   supposed to prevent it. Fixed, and it is now the first row of the table.
+2. **A *revoked* lease did not block a claim** — only an expired one did. These
+   are different events: expiry is an adapter going quiet, revocation is an
+   operator deciding a session is done. Revocation happened to be covered
+   end-to-end only because revoking a lease also kills the token, so the request
+   failed at authentication. `tests/server/test_claim.py` now revokes the lease
+   while holding the credential valid, which tests the guard rather than its
+   side effect.
+3. **`EventStream.visible_to` was untested, and the test that looked like its
+   test passed for the wrong reason.** `audit_trail` filters by project in SQL,
+   so a foreign row never reaches the ACL filter and
+   `test_a_subscriber_never_sees_another_projects_events` stays green with
+   `visible_to` disabled entirely. Two layers doing their job — but it means the
+   filter had no coverage. **This matters for T-187**: the per-channel rule ("a
+   subscriber never receives events for a channel it cannot read") goes in that
+   exact method, and without a direct test it can be written wrong while every
+   stream test still passes. There is now a direct test, and the older test's
+   docstring says which layer it actually proves.
+4. **A malformed `session_id` reached the lease lookup** before being shape
+   checked on the claim path.
+
+The duplicate-`session_id` guard is two guards, and each is mutation-checked
+separately: the pre-check runs *before* the enrollment code is spent, so a
+collision leaves the code retryable, and an `IntegrityError` backstop catches
+the case where two exchanges race past the pre-check — the loser has already
+spent its code and cannot be made retryable, but it leaves as a contract-shaped
+400 naming the field rather than an unhandled 500.
+
+Reproduce: plant any one of these by hand and run `pytest tests/server -q`.

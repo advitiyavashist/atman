@@ -217,3 +217,145 @@ def test_a_session_id_already_in_use_is_refused_before_the_code_is_spent(
     retried = anon.post("/sessions", {
         "request_id": rid(), "code": code, "session_id": "ses_freshaaa"})
     assert retried.status == 201
+
+
+# ------------------------------------------------------- the displaced owner
+#
+# From the 12:30Z planner note, which came from a live incident on the Steer
+# board: T-202 was reassigned twice inside 60s and the displaced owner kept
+# working for ten minutes because nothing ever refused it. "Reassignment" has
+# no route in this lane -- the master loop that performs it is T-182 -- so
+# these tests reassign through the store, the way that loop will, and then
+# exercise the API surface that has to refuse.
+
+
+def _enroll(server, operator, project, name):
+    created = operator.post("/enrollments", {
+        "request_id": rid(), "agent_name": name, "role": "backend",
+        "connection_mode": "managed"})
+    session_id = "ses_" + uuid.uuid4().hex[:8]
+    exchanged = Client(server, project_id=project["id"]).post("/sessions", {
+        "request_id": rid(), "code": created.json()["code"],
+        "session_id": session_id})
+    payload = exchanged.json()
+    return {"agent_id": payload["agent"]["id"], "session_id": session_id,
+            "client": Client(server, project_id=project["id"],
+                             token=payload["token"], origin=None)}
+
+
+def _reassign(server, ticket_id, agent):
+    """What the T-182 master loop does: hand the ticket to somebody else."""
+    server.store.conn.execute(
+        "UPDATE tickets SET owner = ?, owner_session = ?, version = version + 1"
+        " WHERE id = ?", (agent["agent_id"], agent["session_id"], ticket_id))
+    server.store.conn.commit()
+
+
+def test_a_displaced_owner_cannot_post_an_update(server, operator, project,
+                                                 enrolled, ticket):
+    """403 forbidden_scope -- never 404, never a silent 201.
+
+    404 would be wrong: the ticket plainly exists and the agent can still read
+    it. A silent 201 is the incident itself.
+    """
+    claimed = enrolled["client"].post(
+        "/tickets/{}/claim".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": ticket["version"],
+         "session_id": enrolled["session_id"]})
+    assert claimed.status == 200
+
+    successor = _enroll(server, operator, project, "backend-2")
+    _reassign(server, ticket["id"], successor)
+
+    refused = enrolled["client"].post(
+        "/tickets/{}/updates".format(ticket["id"]),
+        {"request_id": rid(), "body": "still working on the widget",
+         "next_step": "keep going", "session_id": enrolled["session_id"]})
+    assert refused.status == 403
+    assert refused.json()["error"]["code"] == "forbidden_scope"
+    # Refused means refused: nothing was appended to the trail.
+    assert server.store.list_updates(project["id"], ticket["id"]) == []
+
+
+def test_a_displaced_owner_is_refused_on_reviews_and_blocked_too(
+        server, operator, project, enrolled, ticket):
+    """The other two ticket writes the ruling names, on the same boundary."""
+    enrolled["client"].post(
+        "/tickets/{}/claim".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": ticket["version"],
+         "session_id": enrolled["session_id"]})
+    successor = _enroll(server, operator, project, "backend-2")
+    _reassign(server, ticket["id"], successor)
+    current = server.store.get_ticket(project["id"], ticket["id"])
+
+    review = enrolled["client"].post(
+        "/tickets/{}/reviews".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": current["version"],
+         "evidence": {"branch": "b", "sha": "a" * 40}})
+    assert review.status == 403
+    assert review.json()["error"]["code"] == "forbidden_scope"
+
+    blocked = enrolled["client"].post(
+        "/tickets/{}/blocked".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": current["version"],
+         "blocked": True, "reason": "waiting on infra"})
+    assert blocked.status == 403
+    assert blocked.json()["error"]["code"] == "forbidden_scope"
+
+
+def test_a_stale_session_of_the_owner_is_kept_and_superseded(
+        server, project, enrolled, ticket, operator):
+    """The other path, and it deliberately does NOT 403.
+
+    Same *agent*, older *session*. The store keeps this update and flags it
+    `superseded`, because a displaced session's account of what it was doing is
+    the most useful thing in the trail after a takeover. Only a different agent
+    gets refused. Losing this distinction is how the 403 above would turn into
+    a data-loss bug.
+    """
+    enrolled["client"].post(
+        "/tickets/{}/claim".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": ticket["version"],
+         "session_id": enrolled["session_id"]})
+    server.store.conn.execute(
+        "UPDATE tickets SET owner_session = ? WHERE id = ?",
+        ("ses_newersession", ticket["id"]))
+    server.store.conn.commit()
+
+    late = enrolled["client"].post(
+        "/tickets/{}/updates".format(ticket["id"]),
+        {"request_id": rid(), "body": "what I was doing before the takeover",
+         "next_step": "hand over", "session_id": enrolled["session_id"]})
+    assert late.status == 201
+    assert late.json()["superseded"] is True
+    kept = server.store.list_updates(project["id"], ticket["id"])
+    assert [u["body"] for u in kept] == ["what I was doing before the takeover"]
+
+
+def test_a_stale_claim_surfaces_as_a_version_conflict(server, operator,
+                                                      project, enrolled, ticket):
+    """The ruling's second named case: a stale claim, not a stale write.
+
+    The displaced agent re-reads and tries to claim on the version it last saw.
+    That is a version conflict carrying both numbers, so one round trip tells
+    it what actually happened -- not forbidden_scope, which would describe the
+    wrong problem.
+    """
+    stale_version = ticket["version"]
+    successor = _enroll(server, operator, project, "backend-2")
+    successor["client"].post(
+        "/tickets/{}/claim".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": stale_version,
+         "session_id": successor["session_id"]})
+
+    stale = enrolled["client"].post(
+        "/tickets/{}/claim".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": stale_version,
+         "session_id": enrolled["session_id"]})
+    assert stale.status == 409
+    error = stale.json()["error"]
+    assert error["code"] == "ticket_version_conflict"
+    # Both numbers, so the agent re-reads once and knows where it stands
+    # instead of guessing at a bare 409.
+    assert error["details"]["expected_version"] == stale_version
+    assert error["details"]["actual_version"] > stale_version

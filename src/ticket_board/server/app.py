@@ -457,6 +457,23 @@ class BoardServer:
         request_id = validate.request_id(body)
         ticket_id = validate.ticket_id(ctx.params["ticket_id"])
         session_id = validate.text(body, "session_id", max_length=36, required=False)
+        ticket = self.store.get_ticket(ctx.project_id, ticket_id)
+        if ctx.principal.is_agent and ticket.get("owner") not in (
+                None, ctx.principal.agent_id):
+            # The displaced-owner case from the 12:30Z ruling: the ticket has
+            # been reassigned to somebody else, and this agent must be told so
+            # rather than left writing into a ticket it no longer holds.
+            #
+            # This is a different axis from the store's `superseded` flag, and
+            # both are wanted. Superseded is about a stale *session* of the
+            # agent that still owns the ticket -- that update is kept, because
+            # a displaced session's account of what it was doing is the most
+            # useful thing in the trail after a takeover. This check is about a
+            # different *agent* entirely, where there is no such account to
+            # keep and silence is what let the real incident run for 10 min.
+            raise ForbiddenScope(
+                "This ticket is no longer yours; it is owned by another agent.")
+
         author = dict(ctx.principal.actor)
         if session_id:
             author["session_id"] = session_id
@@ -686,16 +703,23 @@ class BoardServer:
             # Checked before the code is spent. A session id collision after
             # redemption would burn a single-use code on a request that cannot
             # succeed, and leave the agent with no way to retry.
-            raise MalformedRequest(
-                "session_id is already in use; start a new runtime session.",
-                {"rejected_fields": ["session_id"]})
+            raise _session_id_taken(session_id)
         redeemed = self.credentials.consume_enrollment(project_id,
                                                        body.get("code"))
         agent_id = redeemed["agent_id"]
 
-        lease = self.store.open_session(
-            agent_id, in_seconds(self.session_lease_seconds),
-            session_id=session_id)
+        try:
+            lease = self.store.open_session(
+                agent_id, in_seconds(self.session_lease_seconds),
+                session_id=session_id)
+        except sqlite3.IntegrityError:
+            # The pre-check above is not the whole guard: session_leases has
+            # session_id as its primary key, and two exchanges racing on the
+            # same id can both pass the check before either inserts. The loser
+            # arrives here having already spent its code, so it cannot be made
+            # retryable -- but it must still leave as a contract-shaped 400
+            # naming the field, not an unhandled IntegrityError as a 500.
+            raise _session_id_taken(session_id)
         runtime = body.get("runtime") or {}
         if not isinstance(runtime, dict) or set(runtime) - {"adapter", "version"}:
             raise MalformedRequest("runtime accepts adapter and version only.",
@@ -930,6 +954,17 @@ def _satisfies(principal, auth):
     if auth == AGENT:
         return principal.is_agent
     return True
+
+
+def _session_id_taken(session_id):
+    """One message for both halves of the duplicate-session guard.
+
+    Callers get the same 400 whether the pre-check saw the row or the insert
+    lost the race, so a client cannot tell the two apart and does not need to.
+    """
+    return MalformedRequest(
+        "session_id is already in use; start a new runtime session.",
+        {"rejected_fields": ["session_id"]})
 
 
 def _require_version(subject_id, expected, actual):
