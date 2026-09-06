@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
-import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 import ticket_board.adapters.claude.adapter as adapter_module
+import ticket_board.adapters.claude.hook as hook_module
 from ticket_board.adapters.claude import (
     AdapterConfig,
     BoardClient,
@@ -49,6 +52,21 @@ def config() -> AdapterConfig:
 
 def fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text())
+
+
+def run_git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+
+def init_git_repo(repo: Path) -> Path:
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+    run_git(repo, "config", "user.email", "test@example.invalid")
+    run_git(repo, "config", "user.name", "Ticket Board Test")
+    (repo / "README.md").write_text("fixture repo\n")
+    run_git(repo, "add", "README.md")
+    run_git(repo, "commit", "-m", "initial")
+    return repo
 
 
 def test_session_start_maps_to_contract_envelope_without_actor(enrollment, config):
@@ -136,15 +154,21 @@ def test_install_is_idempotent_and_preserves_foreign_hooks(tmp_path, enrollment,
     assert after_uninstall["hooks"] == {"PreToolUse": [foreign_hook]}
 
 
-def test_install_refuses_live_agent_worktree(enrollment, config):
+def test_install_refuses_configured_live_agent_worktree_without_host_paths(tmp_path, enrollment, config, monkeypatch):
+    worktree_root = tmp_path / "portable-layout" / ".worktrees"
+    agent_tree = worktree_root / "some-agent"
+    agent_tree.mkdir(parents=True)
+    monkeypatch.setenv("TICKET_BOARD_FORBIDDEN_ROOTS", str(worktree_root))
+
     with pytest.raises(ClaudeHookError, match="live agent worktree"):
-        install_hooks(Path("/Users/kavana/Downloads/steer/.worktrees/some-agent"), enrollment, config)
+        install_hooks(agent_tree, enrollment, config)
 
 
 def test_install_refuses_user_level_claude_config(tmp_path, enrollment, config, monkeypatch):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("HOME", str(tmp_path / "ignored-home"))
+    monkeypatch.setattr(adapter_module, "_real_home_dir", lambda: fake_home.resolve(strict=False))
 
     with pytest.raises(ClaudeHookError, match="user-level Claude settings"):
         install_hooks(fake_home, enrollment, config)
@@ -157,10 +181,36 @@ def test_install_refuses_symlink_to_user_home(tmp_path, enrollment, config, monk
     fake_home.mkdir()
     project_link = tmp_path / "project-link"
     project_link.symlink_to(fake_home, target_is_directory=True)
-    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("HOME", str(tmp_path / "ignored-home"))
+    monkeypatch.setattr(adapter_module, "_real_home_dir", lambda: fake_home.resolve(strict=False))
 
     with pytest.raises(ClaudeHookError, match="user-level Claude settings"):
         install_hooks(project_link, enrollment, config)
+
+
+@pytest.mark.parametrize("checkout", [Path("/Users/kavana/Downloads/steer"), Path("/Users/kavana/Downloads/tickets")])
+def test_project_dir_guard_refuses_current_main_checkouts(checkout):
+    if not (checkout / ".git").exists():
+        pytest.skip("%s is not present on this host" % checkout)
+
+    with pytest.raises(ClaudeHookError, match="git checkout root"):
+        adapter_module._ensure_safe_project_dir(checkout)
+
+
+def test_project_dir_guard_refuses_git_roots_and_worktrees_in_unrelated_location(tmp_path, monkeypatch):
+    monkeypatch.setenv("TICKET_BOARD_FORBIDDEN_ROOTS", "")
+    repo = init_git_repo(tmp_path / "repo-without-host-paths")
+    worktree = tmp_path / "elsewhere" / "agent-worktree"
+    worktree.parent.mkdir()
+    run_git(repo, "worktree", "add", "-b", "agent-worktree", str(worktree), "HEAD")
+
+    cases = [
+        (repo, "git checkout root"),
+        (worktree, "git checkout root"),
+    ]
+    for project_dir, match in cases:
+        with pytest.raises(ClaudeHookError, match=match):
+            adapter_module._ensure_safe_project_dir(project_dir)
 
 
 class FailingClient(BoardClient):
@@ -252,6 +302,36 @@ def test_revoke_requires_note_and_uses_session_lease_route(enrollment):
     assert body["expected_version"] == 7
     assert body["note"] == "operator requested recovery"
     assert token == "agent-token-value"
+
+
+def test_hook_command_refuses_server_url_mismatch_before_delivery(tmp_path, enrollment, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    save_enrollment(project, enrollment)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(fixture("session_start.json"))))
+    stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setattr(
+        hook_module,
+        "deliver_hook_event",
+        lambda *args, **kwargs: pytest.fail("server URL mismatch reached delivery"),
+    )
+
+    result = hook_module.main(
+        [
+            "--project-id",
+            enrollment.project_id,
+            "--server-url",
+            "http://attacker.invalid",
+            "--agent-id",
+            enrollment.agent_id,
+            "--project-dir",
+            str(project),
+        ]
+    )
+
+    assert result == 0
+    assert "identity does not match" in stderr.getvalue()
 
 
 def test_board_client_uses_contract_project_header(monkeypatch):

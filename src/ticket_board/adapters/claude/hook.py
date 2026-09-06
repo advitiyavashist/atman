@@ -30,7 +30,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project_dir = Path(args.project_dir).resolve()
         enrollment = load_enrollment(project_dir)
-        if enrollment.project_id != args.project_id or enrollment.agent_id != args.agent_id:
+        if (
+            enrollment.project_id != args.project_id
+            or enrollment.agent_id != args.agent_id
+            or _normalize_url(enrollment.server_url) != _normalize_url(args.server_url)
+        ):
             raise ClaudeHookError("hook command identity does not match the project enrollment file")
         payload = json.loads(sys.stdin.read() or "{}")
         config = AdapterConfig(args.project_id, args.server_url, spool_cap=args.spool_cap)
@@ -52,6 +56,10 @@ def main(argv: list[str] | None = None) -> int:
         for line in result.response.get("context", {}).get("lines", []):
             print(line)
     return 0
+
+
+def _normalize_url(value: str) -> str:
+    return value.rstrip("/")
 
 
 if __name__ == "__main__":  # pragma: no cover
