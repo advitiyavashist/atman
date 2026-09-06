@@ -19,7 +19,7 @@ TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 
 
 def run(board, *args, agent="", stdin="", env=None, cwd=None):
-    e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "", HOME=str(board.parent / "home"))
+    e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "", HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
     if env:
         e.update(env)
