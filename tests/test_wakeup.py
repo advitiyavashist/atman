@@ -329,3 +329,68 @@ def test_util_and_dash_once(board):
     for section in ("IN FLIGHT", "REVIEW QUEUE", "AGENTS", "UTILIZATION", "HEALTH", "MESSAGES"):
         assert section in r.stdout
     assert "T-001" in r.stdout and "@doc" in r.stdout
+
+
+# ---- master prompt / spawn lifecycle ------------------------------------
+
+def test_prompt_worker_has_stuck_rule_and_no_env_prefix(board):
+    p = run(board, "prompt", "--agent", "doc").stdout
+    assert "stuck:" in p and "TICKET_AGENT is already set" in p and "TICKET_AGENT=doc tickets" not in p
+
+
+def test_prompt_master_variant(board):
+    run(board, "master", "take", agent="boss")
+    p = run(board, "prompt", "--master", "--agent", "boss").stdout
+    assert "MASTER" in p and "UNBLOCK" in p and "tickets merge" in p and "You do not take feature tickets" in p
+
+
+def test_master_pending_keys(board):
+    run(board, "master", "take", agent="boss")
+    run(board, "join", "doc", "--roles", "docs")
+    run(board, "next", agent="doc")
+    run(board, "msg", "stuck: cannot commit", "--to", "boss", agent="doc")
+    rc, p = pending(board, "boss")
+    assert rc == 0 and "stuck_messages" in p
+    # a review submission from a worktree branch shows up as review_queue
+    repo = board.parent
+    (repo / ".gitignore").write_text(".tickets/\n.worktrees/\n")
+    genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "ignore board"], check=True, env=genv)
+    subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "doc"], check=True)
+    r = run(board, "review", "T-001", "--notes", "done", agent="doc", cwd=repo)
+    assert r.returncode == 0, r.stderr
+    rc, p = pending(board, "boss")
+    assert "review_queue" in p and p["review_queue"] == ["T-001"]
+
+
+def test_spawn_lifecycle_with_stub_command(board):
+    run(board, "join", "doc", "--roles", "docs")
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", agent="master")
+    assert r.returncode == 0, r.stderr
+    assert "watcher for doc started" in r.stdout
+    pid_file = board / "agents" / "doc.watch.pid"
+    time.sleep(1.5)
+    assert pid_file.exists()
+    lst = run(board, "spawn", "--list").stdout
+    assert "doc" in lst and "pid" in lst
+    r2 = run(board, "spawn", "doc", "--exec", "true", agent="master")
+    assert "already running" in r2.stdout
+    r3 = run(board, "spawn", "doc", "--stop", agent="master")
+    assert "asked watcher" in r3.stdout
+    for _ in range(20):
+        if not pid_file.exists():
+            break
+        time.sleep(1)
+    assert not pid_file.exists(), "watcher exits and releases its lock on --stop"
+    assert (board.parent / ".worktrees" / "doc").is_dir(), "spawn created the worktree"
+
+
+def test_spawn_inherits_project_settings(board):
+    (board.parent / ".claude").mkdir()
+    (board.parent / ".claude" / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(pytest:*)"]}}))
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", agent="master")
+    assert "inherited project settings" in r.stdout
+    inherited = json.loads((board.parent / ".worktrees" / "doc" / ".claude" / "settings.json").read_text())
+    assert inherited["permissions"]["allow"] == ["Bash(pytest:*)"]
+    run(board, "spawn", "doc", "--stop", agent="master")

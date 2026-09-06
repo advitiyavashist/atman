@@ -2725,6 +2725,18 @@ def pending_work(board, owner):
         out["suggested_for_me"] = [t["id"] + " " + t.get("title", "")[:60] for t in mine_first[:3]]
     elif ready and not held:
         out["ready_in_my_lane"] = [t["id"] + " " + t.get("title", "")[:60] for t in ready[:3]]
+    # the master wakes for different reasons: reviews to merge, stuck agents, health
+    m = _safe(lambda: current_master(board), None)
+    if m and m.get("owner") == owner:
+        rq = [t["id"] for t in tickets if t.get("status") == "review"]
+        if rq:
+            out["review_queue"] = rq[:6]
+        stuck = [fmt_msg(x) for x in msgs if str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
+        if stuck:
+            out["stuck_messages"] = stuck[-5:]
+        crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
+        if crit:
+            out["health_crit"] = [i[1][:80] for i in crit[:3]]
     return out
 
 
@@ -2734,16 +2746,38 @@ def actionable(pending):
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
+TICKET_AGENT is already set in your environment; run `tickets ...` commands plainly (no env prefix).
 Rules: one ticket at a time; own git worktree, never main; `tickets sync` before `tickets review`;
 `tickets update <id> "..."` every 45 minutes; finish with `tickets review <id> --notes "paths, tests, decisions"`;
 never edit .tickets/ by hand; never run `tickets clear`. Board-only comms: `tickets msg`.
-Always prefix ticket commands with TICKET_AGENT={agent}.
+STUCK RULE: if anything blocks you -- a permission you cannot get, a failing test you cannot fix,
+an unclear ticket, missing access or a decision that is not yours -- do not wait and do not stop
+silently. Post `tickets msg "stuck: <what, what you tried, what you need>" --to {master} --re <id>`,
+then `tickets update <id> "stuck: ..."`; if you cannot continue at all, `tickets block <id> --reason "..."`.
+The master's job is to unblock you; yours is to say so early.
 Do now, in order:
 1. `tickets inbox` -- read and, if anything is addressed to you, answer with `tickets msg --to <who>`.
 2. `tickets mine` -- if you hold a ticket, continue it from where the notes left off.
 3. Otherwise `tickets next` -- if it hands you a ticket, read the printed briefing files, then work it.
 4. When the ticket is finished and tests pass: commit, `tickets sync`, `tickets review <id> --notes ...`, then go to 3.
 5. If `tickets next` says nothing is ready and you hold nothing: post one line with `tickets msg "idle: <what you checked>"` and stop.
+{extra}"""
+
+MASTER_PROMPT = """You are {agent}, the MASTER of the shared ticket board at {board} (repo {root}).
+TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets. Your three jobs, every wake-up:
+1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
+   grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
+   (`tickets create ... --blocks <id>`, `tickets dep`), reassign (`tickets assign <id> --owner <who>`), or
+   decide and say so. Never leave a stuck agent without a reply.
+2. REVIEW + MERGE: `tickets master` shows the REVIEW QUEUE. For each entry read the diff against main
+   (`git diff main...<branch>`), check tests ran, then `tickets merge <branch>` (runs the suite, fast-forwards
+   main, closes the ticket). If it is not mergeable, `tickets msg --to <owner> --re <id>` with what to change
+   and `tickets reopen <id>`. Push main with `git push origin main` after merges.
+3. COORDINATE: `tickets dash --once` and `tickets util` -- reopen tickets whose owner is silent > 90 min
+   (`tickets limits` first: AUTH means /login is needed, not a wait), `tickets route` new tickets,
+   keep one ticket per agent, spawn or brief workers when lanes are empty (`tickets spawn <name> --model ...`).
+   Log every non-obvious call: `tickets master log "..."`. Post a short status pulse with `tickets msg`.
+Stop when the inbox is empty, the review queue is empty and no health item needs action.
 {extra}"""
 
 
@@ -2787,6 +2821,12 @@ def ticket_context(board, owner):
 
 def cmd_prompt(a, board):
     owner = whoami(a.agent)
+    m = current_master(board)
+    master = (m["owner"] if m else "the master")
+    if getattr(a, "master", False):
+        print(MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
+                                   extra=(a.extra or "")))
+        return
     parts = []
     brief = agent_brief(board, owner)
     if brief:
@@ -2796,7 +2836,7 @@ def cmd_prompt(a, board):
         parts.append("Context attached to your ticket(s):\n" + tctx)
     if a.extra:
         parts.append(a.extra)
-    print(WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
+    print(WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
                                extra="\n\n".join(parts)))
 
 
@@ -3122,6 +3162,13 @@ def cmd_watch(a, board):
             print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, every, cwd, cmd))
             _safe(lambda: checkin(board, owner, None, "watch loop online (every %ds)" % every), None)
         while not stop["now"]:
+            if os.path.exists(_stop_file(board, owner)):
+                try:
+                    os.unlink(_stop_file(board, owner))
+                except OSError:
+                    pass
+                print("stop requested via tickets spawn --stop")
+                break
             p = _safe(lambda: pending_work(board, owner), {})
             if actionable(p):
                 runs += 1
@@ -3306,9 +3353,156 @@ Safety rails (all on by default):
     logs in .tickets/agents/<name>.watch.log, stops on SIGTERM.
   - An agent that recorded `tickets limit` is never woken until `tickets limit --clear`.
 
+Spawning a team from a master session (models per agent):
+  tickets spawn scribe --model sonnet --roles docs --brief "house style: ..."     # cheap worker
+  tickets spawn core   --model opus   --roles backend --cost high                # hard tickets
+  tickets spawn boss   --master --model sonnet                                   # coordinate / unblock / review / merge
+  tickets spawn --list | tickets spawn <name> --stop
+  Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
+  a detached watcher that runs the tool with that model only when `tickets pending` says there is
+  work. Workers persist until --stop, logout or reboot; new tickets created later are picked up on
+  the next poll. Spawned workers run unattended (no permission prompts); --safe keeps prompts.
+  To survive reboot, add the watcher command from `spawn --list`'s log to a login item / launchd job.
+
+Stuck rule (in every worker prompt): if blocked -- permission, failing test, unclear scope, missing
+access, a decision that is not yours -- post `tickets msg "stuck: ..." --to <master> --re <id>`
+immediately. The master wakes on stuck messages, the review queue and CRIT health, and its prompt
+is: unblock, review+merge, coordinate. Nobody waits silently.
+
 Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
                  tickets who                       (where everyone is)
 """
+
+
+def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False):
+    """The headless command a spawned worker runs. Model comes from --model or
+    the workforce record (`tickets join --model`). Spawned workers run without
+    permission prompts by default: nobody is there to answer them, and the
+    blast radius is the agent's own worktree and branch (--safe for acceptEdits).
+    """
+    model = model or load_workforce(board).get(owner, {}).get("model", "")
+    prompt = "tickets prompt --master" if master else "tickets prompt"
+    if tool == "claude":
+        flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
+                else "--permission-mode %s" % permission_mode)
+        return 'claude -p "$(%s)" %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
+    if tool == "codex":
+        return 'codex exec --full-auto%s "$(%s)"' % ((" --model %s" % model) if model else "", prompt)
+    return tool  # any other executable that reads the prompt itself
+
+
+def _inherit_settings(root, wt):
+    """Copy the project's .claude settings into a new worktree so permission
+    allow-lists and hooks are the same there (a worktree does not inherit the
+    root checkout's .claude/ directory)."""
+    import shutil
+    src = os.path.join(root, ".claude")
+    dst = os.path.join(wt, ".claude")
+    if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
+        return []
+    copied = []
+    os.makedirs(dst, exist_ok=True)
+    for name in ("settings.json", "settings.local.json"):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.isfile(s) and not os.path.exists(d):
+            shutil.copy2(s, d)
+            copied.append(name)
+    return copied
+
+
+def _watcher_pid(board, owner):
+    try:
+        with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
+            pid = int(f.read().strip() or "0")
+    except (OSError, ValueError):
+        return 0
+    return pid if pid and _pid_alive(pid) else 0
+
+
+def _stop_file(board, owner):
+    return os.path.join(agents_dir(board), owner + ".watch.stop")
+
+
+def cmd_spawn(a, board):
+    """Bring up a persistent worker: register it, give it a worktree, and start a
+    detached watcher that launches the tool (with the chosen model) whenever the
+    board has work for it. --stop asks the watcher to exit at its next poll;
+    --list shows who is running. The watcher lives until stopped, logout or
+    reboot; `tickets guide` shows how to make it a login item."""
+    import subprocess
+
+    root = os.path.dirname(board)
+    if a.list:
+        wf = load_workforce(board)
+        print("%-14s %-9s %-8s %-8s %s" % ("agent", "watcher", "model", "seen", "worktree"))
+        for r in sorted(load_agents(board), key=lambda r: r["owner"]):
+            pid = _watcher_pid(board, r["owner"])
+            print("%-14s %-9s %-8s %-8s %s" % (
+                r["owner"][:14], ("pid %d" % pid) if pid else "-", (wf.get(r["owner"], {}).get("model") or "-")[:8],
+                (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
+                (r.get("worktree") or "").replace(os.path.expanduser("~"), "~")))
+        return
+    if not a.name:
+        sys.exit("spawn needs a name (or --list)")
+    owner = a.name
+    if a.stop:
+        pid = _watcher_pid(board, owner)
+        if not pid:
+            print("no running watcher for %s" % owner)
+            return
+        with open(_stop_file(board, owner), "w") as f:
+            f.write(now())
+        print("asked watcher %s (pid %d) to stop at its next poll" % (owner, pid))
+        post_message(board, whoami(), "%s watcher asked to stop" % owner)
+        return
+    ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
+                            model=a.model, best_for=a.best_for or "")
+    _silent(lambda: cmd_join(ns, board))
+    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
+    if not os.path.isdir(wt):
+        base = a.base or _trunk()
+        r = subprocess.run(["git", "-C", root, "worktree", "add", "-q", wt, "-b", owner, base],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            r = subprocess.run(["git", "-C", root, "worktree", "add", "-q", wt, owner], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
+        print("worktree %s (branch %s)" % (wt, owner))
+    if a.brief:
+        bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False, by=whoami())
+        _silent(lambda: cmd_brief(bn, board))
+    inherited = _inherit_settings(root, wt)
+    if inherited:
+        print("inherited project settings into the worktree: %s" % ", ".join(inherited))
+    if a.master:
+        with open(master_state_path(board), "w") as f:
+            json.dump({"owner": owner, "since": now()}, f)
+        _master_log(board, "%s spawned as persistent master" % owner, by=whoami())
+    if _watcher_pid(board, owner):
+        print("watcher for %s already running (pid %d); --stop first" % (owner, _watcher_pid(board, owner)))
+        return
+    try:
+        os.unlink(_stop_file(board, owner))
+    except OSError:
+        pass
+    mode = "acceptEdits" if a.safe else "bypassPermissions"
+    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, a.tool or "claude", master=a.master)
+    argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
+            "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout)]
+    env = dict(os.environ, TICKET_AGENT=owner, TICKETS_DIR=board,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    log_path = os.path.join(agents_dir(board), owner + ".watch.log")
+    with open(log_path, "a") as lf:
+        subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    import time as _time
+    _time.sleep(1.0)
+    pid = _watcher_pid(board, owner)
+    model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
+    print("watcher for %s started%s; model=%s; log %s" % (owner, (" (pid %d)" % pid) if pid else "", model, log_path))
+    print("cmd: %s" % cmd)
+    post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
+                 % (owner, a.tool or "claude", model))
 
 
 def cmd_guide(a, board):
@@ -3576,6 +3770,9 @@ dependency tree with each node's status and owner.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.
+8. Stuck? Say so at once: `tickets msg "stuck: <what, tried, need>" --to <master>
+   --re <id>` and `tickets update <id> "stuck: ..."`; `tickets block` if you
+   cannot continue. The master's job is to unblock you. Never wait silently.
 
 Statuses: TO DO -> IN PROGRESS -> IN REVIEW -> DONE, or BLOCKED. Set them with
 `tickets status <id> todo|in-progress|review|blocked|done` or the dedicated
@@ -3712,8 +3909,9 @@ def main():
     c.add_argument("--json", action="store_true")
     c.set_defaults(fn=cmd_pending)
 
-    c = sub.add_parser("prompt", help="print the standard worker prompt for a headless run")
+    c = sub.add_parser("prompt", help="print the standard worker (or --master) prompt for a headless run")
     c.add_argument("--agent", default="")
+    c.add_argument("--master", action="store_true", help="the coordinating/unblocking/reviewing loop instead")
     c.add_argument("--extra", default="", help="extra instructions appended to the prompt")
     c.set_defaults(fn=cmd_prompt)
 
@@ -3755,6 +3953,27 @@ def main():
     c.add_argument("--cwd", default="")
     c.add_argument("--run-timeout", type=int, default=90)
     c.set_defaults(fn=cmd_boot)
+
+    c = sub.add_parser("spawn", help="start a persistent worker: register, worktree, detached watcher (model per agent)")
+    c.add_argument("name", nargs="?", default="")
+    c.add_argument("--model", default="", help="claude: opus | sonnet | haiku (or a full model id); codex: its model name")
+    c.add_argument("--tool", default="claude", help="claude | codex | <executable>")
+    c.add_argument("--roles", default=None)
+    c.add_argument("--can", default=None)
+    c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
+    c.add_argument("--best-for", default="")
+    c.add_argument("--brief", default="", help="standing context for this worker")
+    c.add_argument("--worktree", default="", help="default .worktrees/<name>")
+    c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
+    c.add_argument("--every", type=int, default=60)
+    c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
+    c.add_argument("--master", action="store_true",
+                   help="spawn the board master (coordinate / unblock / review loop) instead of a worker")
+    c.add_argument("--exec", default="", help="override the worker command entirely")
+    c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
+    c.add_argument("--list", action="store_true")
+    c.set_defaults(fn=cmd_spawn)
 
     c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
     c.set_defaults(fn=cmd_guide)
