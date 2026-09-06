@@ -322,12 +322,30 @@ def _ensure_safe_project_dir(project_dir: Path) -> None:
     if _same_path(target_settings, user_settings) or _path_is_or_under(target_settings, user_claude_dir):
         raise ClaudeHookError("refusing to write user-level Claude settings: %s" % target_settings)
 
-    if any(_path_is_or_under(resolved, root) for root in _configured_forbidden_roots()):
-        raise ClaudeHookError("refusing to enroll a live agent worktree: %s" % resolved)
+    # Protected roots are checkouts that live agents are already working out of.
+    # Two independent checks, because they degrade differently:
+    #   1. path containment -- needs no git, and is the floor: it holds even when
+    #      git is missing, and it also covers roots that are not git checkouts at
+    #      all (a bare `.worktrees` directory).
+    #   2. repository identity -- catches a worktree of a protected checkout that
+    #      was registered somewhere else entirely, where no path comparison can
+    #      see it. Requires git, so it is a superset, never the only line.
+    protected = _protected_roots()
+    for root in protected:
+        if _path_is_or_under(resolved, root):
+            raise ClaudeHookError(
+                "refusing to enroll a live agent worktree: %s is inside the protected checkout %s" % (resolved, root)
+            )
 
-    git_root = _git_toplevel(resolved)
-    if git_root is not None and _same_path(resolved, git_root):
-        raise ClaudeHookError("refusing to enroll a git checkout root as a project dir: %s" % resolved)
+    repo = _git_common_dir(resolved)
+    if repo is not None:
+        for root in protected:
+            root_repo = _git_common_dir(root)
+            if root_repo is not None and _same_path(repo, root_repo):
+                raise ClaudeHookError(
+                    "refusing to enroll a live agent worktree: %s shares the git repository %s with the protected "
+                    "checkout %s" % (resolved, repo, root)
+                )
 
 
 def _real_home_dir() -> Path:
@@ -339,37 +357,51 @@ def _real_home_dir() -> Path:
     return Path.home().resolve(strict=False)
 
 
-def _configured_forbidden_roots() -> Tuple[Path, ...]:
+def _protected_roots() -> Tuple[Path, ...]:
+    """Checkouts that must never be enrolled, from configuration -- never hardcoded.
+
+    ``TICKET_BOARD_FORBIDDEN_ROOTS`` is an os.pathsep-separated list and wins when
+    set, including when set empty to mean "protect nothing". The fallback is this
+    host's two board checkouts, derived from the real home directory so the paths
+    are not literals from one laptop.
+    """
     raw = os.environ.get(FORBIDDEN_ROOTS_ENV)
     if raw is not None:
         return tuple(Path(part).expanduser().resolve(strict=False) for part in raw.split(os.pathsep) if part)
 
     home = _real_home_dir()
     return (
-        (home / "Downloads" / "steer" / ".worktrees").resolve(strict=False),
-        (home / "Downloads" / "tickets" / ".worktrees").resolve(strict=False),
+        (home / "Downloads" / "steer").resolve(strict=False),
+        (home / "Downloads" / "tickets").resolve(strict=False),
     )
 
 
-def _git_toplevel(path: Path) -> Optional[Path]:
+def _git_common_dir(path: Path) -> Optional[Path]:
+    """Identify the repository ``path`` belongs to, or None if it is not in one.
+
+    ``--git-common-dir`` is the shared repository directory: a checkout and every
+    worktree registered against it report the same one no matter where on disk the
+    worktree sits, which is what makes this a structural check and not another
+    path list. Git prints it relative to the directory the command ran in.
+    """
     if not path.exists():
         return None
     try:
         result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
             capture_output=True,
             check=False,
             text=True,
-            timeout=2,
+            timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
-    root = result.stdout.strip()
-    if not root:
+    common = result.stdout.strip()
+    if not common:
         return None
-    return Path(root).resolve(strict=False)
+    return Path(os.path.join(str(path), common)).resolve(strict=False)
 
 
 def _same_path(left: Path, right: Path) -> bool:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -188,29 +189,175 @@ def test_install_refuses_symlink_to_user_home(tmp_path, enrollment, config, monk
         install_hooks(project_link, enrollment, config)
 
 
-@pytest.mark.parametrize("checkout", [Path("/Users/kavana/Downloads/steer"), Path("/Users/kavana/Downloads/tickets")])
-def test_project_dir_guard_refuses_current_main_checkouts(checkout):
-    if not (checkout / ".git").exists():
-        pytest.skip("%s is not present on this host" % checkout)
+@pytest.fixture
+def board_layout(tmp_path, monkeypatch):
+    """A miniature of this host's board layout with no /Users/kavana anywhere in it.
 
-    with pytest.raises(ClaudeHookError, match="git checkout root"):
-        adapter_module._ensure_safe_project_dir(checkout)
+    Two protected checkouts (the equivalents of steer and tickets), an in-tree
+    agent worktree, an out-of-tree agent worktree registered against the same
+    repository, and an ordinary user project that has nothing to do with either.
+    """
+    root = tmp_path / "portable-layout"
+    steer = init_git_repo(root / "boards" / "steer")
+    tickets = init_git_repo(root / "boards" / "tickets")
+
+    in_tree = steer / ".worktrees" / "agent-one"
+    run_git(steer, "worktree", "add", "-b", "agent-one", str(in_tree), "HEAD")
+
+    off_tree = root / "somewhere" / "else" / "agent-two"
+    off_tree.parent.mkdir(parents=True)
+    run_git(steer, "worktree", "add", "-b", "agent-two", str(off_tree), "HEAD")
+
+    user_project = init_git_repo(root / "elsewhere" / "my-app")
+    user_worktree = root / "elsewhere" / "my-app-review"
+    run_git(user_project, "worktree", "add", "-b", "review", str(user_worktree), "HEAD")
+
+    monkeypatch.setenv(
+        adapter_module.FORBIDDEN_ROOTS_ENV, os.pathsep.join([str(steer), str(tickets)])
+    )
+    return {
+        "root": root,
+        "steer": steer,
+        "tickets": tickets,
+        "in_tree": in_tree,
+        "off_tree": off_tree,
+        "user_project": user_project,
+        "user_worktree": user_worktree,
+    }
 
 
-def test_project_dir_guard_refuses_git_roots_and_worktrees_in_unrelated_location(tmp_path, monkeypatch):
-    monkeypatch.setenv("TICKET_BOARD_FORBIDDEN_ROOTS", "")
-    repo = init_git_repo(tmp_path / "repo-without-host-paths")
-    worktree = tmp_path / "elsewhere" / "agent-worktree"
-    worktree.parent.mkdir()
-    run_git(repo, "worktree", "add", "-b", "agent-worktree", str(worktree), "HEAD")
-
-    cases = [
-        (repo, "git checkout root"),
-        (worktree, "git checkout root"),
+def test_project_dir_guard_refuses_protected_checkouts_on_a_portable_layout(board_layout):
+    """Refusals must come from configuration plus git structure, not host paths."""
+    refused = [
+        ("protected checkout root", board_layout["steer"]),
+        ("second protected checkout root", board_layout["tickets"]),
+        ("agent worktree inside a protected checkout", board_layout["in_tree"]),
+        ("agent worktree registered elsewhere on disk", board_layout["off_tree"]),
+        ("subdirectory of a protected checkout", board_layout["steer"] / "docs" / "deep"),
+        ("symlink pointing at a protected checkout", board_layout["root"] / "innocent-link"),
     ]
-    for project_dir, match in cases:
-        with pytest.raises(ClaudeHookError, match=match):
+    (board_layout["steer"] / "docs" / "deep").mkdir(parents=True)
+    (board_layout["root"] / "innocent-link").symlink_to(board_layout["steer"], target_is_directory=True)
+
+    for label, project_dir in refused:
+        with pytest.raises(ClaudeHookError, match="live agent worktree"):
             adapter_module._ensure_safe_project_dir(project_dir)
+        assert not (Path(project_dir) / ".claude").exists(), label
+
+    assert "/Users/kavana" not in str(board_layout["root"])
+
+
+def test_project_dir_guard_survives_case_folding(board_layout):
+    """The T-201 bypass class: on a case-insensitive filesystem a differently
+    cased spelling of a protected checkout is the same directory.
+
+    Path.resolve() does not case-normalise, so `relative_to` reports a folded
+    *subdirectory* as unrelated -- only comparing by filesystem identity catches
+    it. The subdirectory and worktree cases are the ones that matter: the folded
+    root alone would pass on a direct equality check.
+    """
+    steer = board_layout["steer"]
+    (steer / "docs" / "deep").mkdir(parents=True, exist_ok=True)
+
+    def fold(path):
+        return Path(str(path).replace("/boards/", "/BOARDS/"))
+
+    if not fold(steer).exists():
+        pytest.skip("filesystem is case-sensitive; a folded spelling is a different directory")
+
+    for project_dir in (steer, steer / "docs" / "deep", board_layout["in_tree"]):
+        folded = fold(project_dir)
+        assert folded.exists()
+        with pytest.raises(ClaudeHookError, match="live agent worktree"):
+            adapter_module._ensure_safe_project_dir(folded)
+
+
+def test_project_dir_guard_allows_ordinary_projects(board_layout, enrollment, config):
+    """The guard must not refuse the adapter's own primary use case.
+
+    An ordinary git project root is exactly where Claude Code reads
+    `.claude/settings.json` from, so refusing every git root would leave the
+    adapter unable to enroll anything real.
+    """
+    allowed = [
+        ("ordinary user project root", board_layout["user_project"]),
+        ("subdirectory of an ordinary project", board_layout["user_project"] / "src"),
+        ("worktree of an ordinary project", board_layout["user_worktree"]),
+        ("plain directory outside any repository", board_layout["root"] / "scratch"),
+    ]
+    (board_layout["user_project"] / "src").mkdir()
+    (board_layout["root"] / "scratch").mkdir()
+
+    for label, project_dir in allowed:
+        adapter_module._ensure_safe_project_dir(Path(project_dir))
+
+    install_hooks(board_layout["user_project"], enrollment, config)
+    assert (board_layout["user_project"] / ".claude" / "settings.json").exists()
+
+
+def test_project_dir_guard_still_refuses_when_git_cannot_run(board_layout, monkeypatch):
+    """Path containment is the floor: losing git must not open the guard.
+
+    Only the off-tree worktree depends on asking git, so it is the one case that
+    legitimately degrades -- and it degrades to a documented gap, not a silent one.
+    """
+    monkeypatch.setattr(adapter_module, "_git_common_dir", lambda path: None)
+    (board_layout["steer"] / "docs" / "deep").mkdir(parents=True, exist_ok=True)
+
+    grounded = [
+        board_layout["steer"],
+        board_layout["tickets"],
+        board_layout["in_tree"],
+        board_layout["steer"] / "docs" / "deep",
+    ]
+    # With git unavailable the containment check is alone, so it must stand up to
+    # case folding by itself rather than leaning on repository identity.
+    folded = [Path(str(d).replace("/boards/", "/BOARDS/")) for d in grounded]
+    if not folded[0].exists():
+        folded = []
+
+    for project_dir in grounded + folded:
+        with pytest.raises(ClaudeHookError, match="live agent worktree"):
+            adapter_module._ensure_safe_project_dir(project_dir)
+
+
+def test_protected_roots_come_from_configuration(tmp_path, monkeypatch):
+    monkeypatch.delenv(adapter_module.FORBIDDEN_ROOTS_ENV, raising=False)
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(adapter_module, "_real_home_dir", lambda: fake_home.resolve(strict=False))
+    defaults = adapter_module._protected_roots()
+    assert defaults == (
+        (fake_home / "Downloads" / "steer").resolve(strict=False),
+        (fake_home / "Downloads" / "tickets").resolve(strict=False),
+    )
+
+    monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, "~/one" + os.pathsep + str(tmp_path / "two"))
+    monkeypatch.setenv("HOME", str(fake_home))
+    configured = adapter_module._protected_roots()
+    assert configured == (
+        (fake_home / "one").resolve(strict=False),
+        (tmp_path / "two").resolve(strict=False),
+    )
+
+    monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, "")
+    assert adapter_module._protected_roots() == ()
+
+
+@pytest.mark.parametrize(
+    "checkout", [Path("/Users/kavana/Downloads/steer"), Path("/Users/kavana/Downloads/tickets")]
+)
+def test_project_dir_guard_refuses_this_hosts_main_checkouts(checkout, monkeypatch):
+    """The two checkouts named in the ticket, refused under the shipped defaults.
+
+    Skips only where the checkout is genuinely absent; the portable-layout tests
+    above carry the requirement on every other host, so nothing goes untested.
+    """
+    monkeypatch.delenv(adapter_module.FORBIDDEN_ROOTS_ENV, raising=False)
+    if not (checkout / ".git").exists() or adapter_module._real_home_dir() != Path("/Users/kavana"):
+        pytest.skip("%s is not this host's board checkout" % checkout)
+
+    with pytest.raises(ClaudeHookError, match="live agent worktree"):
+        adapter_module._ensure_safe_project_dir(checkout)
 
 
 class FailingClient(BoardClient):

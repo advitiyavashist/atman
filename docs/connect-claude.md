@@ -7,8 +7,21 @@ T-201; live Claude session capture and final operator copy belong to T-181.
 
 - Install hooks only into a project-scoped `.claude/settings.json`.
 - Never write to `~/.claude/settings.json`.
-- Do not enroll live agent worktrees under `steer/.worktrees/*` or
-  `tickets/.worktrees/*`; use scratch project directories for tests.
+- Do not enroll a checkout that live agents are already working out of. The
+  guard refuses the protected checkout itself, anything under it, and any git
+  worktree registered against it -- including a worktree parked far away from
+  the checkout, which it recognises by repository identity
+  (`git rev-parse --git-common-dir`) rather than by comparing paths. Use scratch
+  project directories for tests.
+- Protected checkouts come from `TICKET_BOARD_FORBIDDEN_ROOTS`, an
+  `os.pathsep`-separated list of directories. Setting it replaces the defaults
+  (setting it empty protects nothing); leaving it unset falls back to
+  `~/Downloads/steer` and `~/Downloads/tickets` relative to the invoking user's
+  real home directory, not to `$HOME`. Ordinary git projects are *not* protected
+  -- enrolling one is the adapter's normal use.
+- Repository identity needs `git`. If `git` cannot run, the guard falls back to
+  path containment alone, which still refuses a protected checkout and anything
+  under it, but cannot see a worktree registered outside it.
 - The adapter never forwards raw prompts, tool inputs, tool outputs,
   transcripts, environment values or credentials.
 
