@@ -17,8 +17,20 @@ T-201; live Claude session capture and final operator copy belong to T-181.
   `os.pathsep`-separated list of directories. Setting it replaces the defaults
   (setting it empty protects nothing); leaving it unset falls back to
   `~/Downloads/steer` and `~/Downloads/tickets` relative to the invoking user's
-  real home directory, not to `$HOME`. Ordinary git projects are *not* protected
+  real home directory, not to `$HOME`. Nonempty overrides must contain existing,
+  readable, absolute directories (tilde expansion is supported). Empty list
+  components, relative paths, missing paths and files fail with a configuration
+  error before hooks are written; a bad entry never silently drops protection.
+  Ordinary git projects are *not* protected
   -- enrolling one is the adapter's normal use.
+- Local repository probes use `ticket_board.git_env.clean_git_env()` to remove
+  inherited `GIT_*` overrides and address the requested directory explicitly.
+  Worker launchers can reuse this helper; it does not fix a wrongly supplied cwd.
+- The T-205 host review found no exposed live agent lane, but did find one
+  unprotected non-lane clone at `~/Documents/tickets` (its own `.git`, outside
+  the default roots). Clones are separate repositories, so add their paths to
+  the configured roots if they must also be protected. The review did not
+  enumerate every clone; it does not establish zero exposure.
 - Repository identity needs `git`. If `git` cannot run, the guard falls back to
   path containment alone, which still refuses a protected checkout and anything
   under it, but cannot see a worktree registered outside it.
