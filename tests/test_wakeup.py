@@ -6,6 +6,8 @@ exactly what a hook or a watcher sees. No network, no model, no home-dir writes.
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import time
@@ -523,3 +525,73 @@ def test_spawn_passes_heartbeat_to_watch(board):
         assert rec and rec.get("drive_every") == 15, rec
     finally:
         run(board, "spawn", "boss", "--stop", agent="boss")
+
+
+# ---- bounded growth: watch log, messages.jsonl, MASTER.md decision log ----
+
+def test_watch_caps_run_output_during_a_single_run(board):
+    """A single verbose run must not be able to blow past the log's rotation
+    budget -- the old code only rotated between runs, so one big run grew the
+    log unbounded. TICKETS_WATCH_LOG_MAX_BYTES lets the test use a tiny cap
+    instead of waiting to produce 5 MB of real output."""
+    run(board, "join", "doc", "--roles", "docs")
+    script = "import sys; sys.stdout.write('x' * 50000)"
+    cmd = "%s -c %s" % (sys.executable, shlex.quote(script))
+    r = run(board, "watch", "--agent", "doc", "--once", "--exec", cmd,
+            env={"TICKETS_WATCH_LOG_MAX_BYTES": "1000"})
+    assert r.returncode == 0, r.stderr
+    # the capped run's ~1000 bytes alone clears the same threshold, so the
+    # very next log() call rotates it straight into doc.watch.log.1 -- that
+    # is bounded growth working as intended, just not in the live file.
+    log_dir = board / "agents"
+    log = (log_dir / "doc.watch.log").read_text()
+    rotated = (log_dir / "doc.watch.log.1").read_text() if (log_dir / "doc.watch.log.1").exists() else ""
+    combined = log + rotated
+    # count only the run of x's from the payload, not incidental x's in log
+    # metadata like "exit" or "trigger".
+    longest_run = max((len(g) for g in re.findall(r"x+", combined)), default=0)
+    assert longest_run <= 1000
+    assert "capped at 1000 bytes" in combined
+
+
+def test_watch_log_cap_does_not_truncate_a_small_run(board):
+    run(board, "join", "doc", "--roles", "docs")
+    marker = board.parent / "ran.txt"
+    r = run(board, "watch", "--agent", "doc", "--once", "--exec", "echo hello world > %s" % marker,
+            env={"TICKETS_WATCH_LOG_MAX_BYTES": "1000000"})
+    assert r.returncode == 0 and marker.read_text().strip() == "hello world"
+    log = (board / "agents" / "doc.watch.log").read_text()
+    assert "capped" not in log and "run 1 exit 0" in log
+
+
+def test_messages_rotate_past_cap_and_load_messages_defaults_to_live_file(board):
+    run(board, "join", "alice", "--roles", "backend")
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    for i in range(20):
+        r = run(board, "msg", "message number %d filler filler filler" % i, agent="alice", env=env)
+        assert r.returncode == 0, r.stderr
+    archives = sorted(board.glob("messages.*.jsonl"))
+    assert archives, "expected messages.jsonl to have rotated to a dated archive"
+    assert "message number 0 " in archives[0].read_text()
+    live = (board / "messages.jsonl").read_text()
+    assert "message number 19" in live
+    # unread/live-tail readers only pay for the live file: the oldest posts
+    # rotated out are not visible without asking for full history.
+    assert "message number 0 " not in live
+    out = run(board, "inbox", "--all", "--limit", "100", agent="alice").stdout
+    assert "message number 0 " in out and "message number 19" in out
+
+
+def test_master_decision_log_trims_past_cap_and_archives(board):
+    run(board, "master", "init", agent="boss")
+    env = {"TICKETS_MASTER_LOG_MAX_BYTES": "300", "TICKETS_MASTER_LOG_KEEP_ENTRIES": "3"}
+    for i in range(10):
+        r = run(board, "master", "log", "decision number %d with some extra padding text" % i,
+                agent="boss", env=env)
+        assert r.returncode == 0, r.stderr
+    body = (board / "MASTER.md").read_text()
+    assert "decision number 9" in body, "the most recent decision must never be dropped"
+    assert "decision number 0" not in body, "trimmed entries must leave the inline log"
+    assert "archived to MASTER.decisions.archive.md" in body
+    archive = (board / "MASTER.decisions.archive.md").read_text()
+    assert "decision number 0" in archive, "trimmed entries must survive in the archive"

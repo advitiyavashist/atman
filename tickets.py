@@ -2198,6 +2198,8 @@ def _master_log(board, text, by=None):
     if not os.path.exists(path):
         with open(path, "w") as f:
             f.write(MASTER_TEMPLATE)
+    elif os.path.getsize(path) > MASTER_LOG_MAX_BYTES:
+        _trim_decision_log(board, path)
     with open(path) as f:
         body = f.read()
     entry = "- %s [%s] %s\n" % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), by or whoami(), text)
@@ -2209,6 +2211,37 @@ def _master_log(board, text, by=None):
         body += "\n## Decision log\n" + entry
     with open(path, "w") as f:
         f.write(body)
+
+
+def _trim_decision_log(board, path):
+    """MASTER.md's Decision log only ever grows. Once the file passes
+    MASTER_LOG_MAX_BYTES, move all but the most recent MASTER_LOG_KEEP_ENTRIES
+    '- ' entries to an append-only archive so the briefing stays readable and
+    `tickets master log` stays a small, bounded rewrite."""
+    try:
+        with open(path) as f:
+            body = f.read()
+    except OSError:
+        return
+    head, marker, tail = body.partition("## Decision log\n")
+    if not marker:
+        return
+    entries = [ln for ln in tail.split("\n") if ln.startswith("- ")]
+    if len(entries) <= MASTER_LOG_KEEP_ENTRIES:
+        return
+    overflow = entries[: len(entries) - MASTER_LOG_KEEP_ENTRIES]
+    kept = entries[len(entries) - MASTER_LOG_KEEP_ENTRIES:]
+    archive = os.path.join(board, "MASTER.decisions.archive.md")
+    fd = os.open(archive, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, ("\n".join(overflow) + "\n").encode())
+    finally:
+        os.close(fd)
+    new_body = (head + "## Decision log\n"
+                + "(%d older entries archived to MASTER.decisions.archive.md)\n" % len(overflow)
+                + "\n".join(kept) + "\n")
+    with open(path, "w") as f:
+        f.write(new_body)
 
 
 def health(board, tickets):
@@ -2440,7 +2473,55 @@ def messages_path(board):
     return os.path.join(board, "messages.jsonl")
 
 
+def _rotate_messages_if_big(board):
+    """Move an overflowing live messages.jsonl to a dated archive before the
+    next append. Best-effort: a lock file makes concurrent rotators no-op
+    instead of double-rotating, but a poster mid-append during the swap can
+    still land its message in the archived file -- acceptable for this
+    tool's scale (a handful of agents), and far better than unbounded growth.
+    """
+    path = messages_path(board)
+    try:
+        if os.path.getsize(path) <= MESSAGES_MAX_BYTES:
+            return
+    except OSError:
+        return
+    lock_path = path + ".rotate.lock"
+    try:
+        os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return
+    try:
+        if os.path.getsize(path) <= MESSAGES_MAX_BYTES:
+            return
+        archive = os.path.join(board, "messages.%s.jsonl" % now()[:10])
+        empty_tmp = path + ".rotate.tmp"
+        open(empty_tmp, "wb").close()
+        if os.path.exists(archive):
+            # already rotated once today: fold the live file onto it instead
+            # of clobbering an existing archive.
+            with open(path, "rb") as src:
+                data = src.read()
+            fd = os.open(archive, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(empty_tmp, path)
+        else:
+            os.replace(path, archive)
+            os.replace(empty_tmp, path)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+
+
 def post_message(board, sender, text, to="", re=""):
+    _rotate_messages_if_big(board)
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
     line_ = json.dumps(rec) + "\n"
     # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
@@ -2452,20 +2533,29 @@ def post_message(board, sender, text, to="", re=""):
     return rec
 
 
-def load_messages(board):
+def load_messages(board, include_archives=False):
+    """By default reads only the live messages.jsonl (cheap, since the UI and
+    every watch poll re-read this every few seconds). Pass include_archives=True
+    to also read rotated messages.<date>.jsonl archives, oldest first, for
+    full history.
+    """
+    paths = [messages_path(board)]
+    if include_archives:
+        paths = sorted(glob.glob(os.path.join(board, "messages.*.jsonl"))) + paths
     out = []
-    try:
-        with open(messages_path(board)) as f:
-            for ln in f:
-                ln = ln.strip()
-                if not ln:
-                    continue
-                try:
-                    out.append(json.loads(ln))
-                except ValueError:
-                    continue
-    except IOError:
-        pass
+    for p in paths:
+        try:
+            with open(p) as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        out.append(json.loads(ln))
+                    except ValueError:
+                        continue
+        except IOError:
+            pass
     return out
 
 
@@ -2530,7 +2620,7 @@ def cmd_msg(a, board):
 def cmd_inbox(a, board):
     owner = whoami(a.owner)
     if a.all:
-        msgs = load_messages(board)[-a.limit:]
+        msgs = load_messages(board, include_archives=True)[-a.limit:]
         if not msgs:
             print("no messages yet (tickets msg \"text\" [--to agent] [--re T-001])")
             return
@@ -2769,6 +2859,12 @@ def cmd_connect(a, board):
 
 STOP_HOOK_MAX_PER_HOUR = 4
 WATCH_MIN_INTERVAL = 5
+# Bounds so long-lived boards do not grow files without limit. All overridable
+# for tests; defaults are generous enough to never matter in normal use.
+WATCH_LOG_MAX_BYTES = int(os.environ.get("TICKETS_WATCH_LOG_MAX_BYTES", 5 * 1024 * 1024))
+MESSAGES_MAX_BYTES = int(os.environ.get("TICKETS_MESSAGES_MAX_BYTES", 5 * 1024 * 1024))
+MASTER_LOG_MAX_BYTES = int(os.environ.get("TICKETS_MASTER_LOG_MAX_BYTES", 2 * 1024 * 1024))
+MASTER_LOG_KEEP_ENTRIES = int(os.environ.get("TICKETS_MASTER_LOG_KEEP_ENTRIES", 200))
 
 
 def _safe(fn, default):
@@ -3317,6 +3413,58 @@ def _watch_lock(board, owner):
     return None
 
 
+def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes):
+    """Run cmd with stdout+stderr teed into log_path, capped at cap_bytes for
+    this run alone -- a single verbose run must not be able to blow past the
+    log's rotation budget before the between-run rotation in cmd_watch's
+    log() ever gets a chance to fire. Keeps draining the pipe past the cap so
+    the child never blocks on a full pipe buffer. Returns (rc, timed_out);
+    rc is 124 on timeout, matching the previous subprocess.call behavior.
+    """
+    import subprocess
+    import threading
+
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    state = {"written": 0, "capped": False}
+
+    def pump():
+        def note_capped(lf):
+            if not state["capped"]:
+                lf.write("\n[watch log: run output capped at %d bytes]\n" % cap_bytes)
+                lf.flush()
+                state["capped"] = True
+
+        try:
+            with open(log_path, "a") as lf:
+                for chunk in iter(lambda: proc.stdout.read(65536), b""):
+                    if state["written"] >= cap_bytes:
+                        note_capped(lf)
+                        continue
+                    take = chunk[: cap_bytes - state["written"]]
+                    lf.write(take.decode("utf-8", "replace"))
+                    state["written"] += len(take)
+                    if len(take) < len(chunk):
+                        # this single chunk already carried past the cap --
+                        # there may be no further chunk to trigger the note.
+                        note_capped(lf)
+        except OSError:
+            pass
+
+    pump_thread = threading.Thread(target=pump, daemon=True)
+    pump_thread.start()
+    try:
+        rc = proc.wait(timeout=timeout_s)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        rc = 124
+        timed_out = True
+    pump_thread.join(timeout=5)
+    return rc, timed_out
+
+
 def cmd_watch(a, board):
     """Poll the board; when there is work for the agent, launch a worker command.
 
@@ -3324,7 +3472,6 @@ def cmd_watch(a, board):
     exponential backoff after failed runs, clean exit on SIGTERM/Ctrl-C.
     """
     import signal
-    import subprocess
     import time as _time
 
     owner = whoami(a.agent)
@@ -3357,7 +3504,7 @@ def cmd_watch(a, board):
 
     def log(line):
         try:
-            if os.path.exists(log_path) and os.path.getsize(log_path) > 5 * 1024 * 1024:
+            if os.path.exists(log_path) and os.path.getsize(log_path) > WATCH_LOG_MAX_BYTES:
                 os.replace(log_path, log_path + ".1")
             with open(log_path, "a") as lf:
                 lf.write(line.rstrip("\n") + "\n")
@@ -3387,13 +3534,13 @@ def cmd_watch(a, board):
                     print("  dry-run; would execute: %s" % cmd)
                     rc = 0
                 else:
-                    with open(log_path, "a") as lf:
-                        try:
-                            rc = subprocess.call(cmd, shell=True, cwd=cwd, env=env, stdout=lf,
-                                                 stderr=subprocess.STDOUT,
-                                                 timeout=a.run_timeout * 60 if a.run_timeout else None)
-                        except subprocess.TimeoutExpired:
-                            rc = 124
+                    rc, timed_out = _watch_run_capped(
+                        cmd, cwd, env, log_path,
+                        a.run_timeout * 60 if a.run_timeout else None,
+                        WATCH_LOG_MAX_BYTES,
+                    )
+                    if timed_out:
+                        with open(log_path, "a") as lf:
                             lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))
                     log("%s run %d exit %s" % (now(), runs, rc))
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
