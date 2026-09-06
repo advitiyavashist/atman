@@ -421,21 +421,17 @@ def test_secret_bearing_fields_use_placeholders():
 OPERATOR_HOME_RE = re.compile(
     r"/(?:Users|home)/([A-Za-z0-9_.-]+)(?:/[A-Za-z0-9_.<>-]+)*"
 )
-PLACEHOLDER_HOME_SEGMENTS = {"agent", "operator", "runner", "user"}
+PLACEHOLDER_HOME_SEGMENTS = {"agent", "operator", "runner", "user",
+                             # synthetic handle in the error-leak test
+                             "someone"}
 
 # Literals that still name an operator and are owned by a ticket other than
-# T-210. Keyed by (repo-relative path, the path with the handle replaced by
-# `<operator>`) so that this table itself names nobody, and so a NEW literal --
-# even a new one in the same file -- is still caught rather than covered.
-KNOWN_OPERATOR_PATH_DEBTS = {
-    ("tests/adapters/test_claude_adapter.py",
-     "/Users/<operator>/Downloads/steer/.worktrees/some-agent"):
-        "T-205 owns this line. Pre-T-205 `_ensure_safe_project_dir` hardcodes "
-        "its forbidden roots inside the function body, so there is no seam to "
-        "point this assertion at a tmp_path root -- a host-independent fix "
-        "needs the TICKET_BOARD_FORBIDDEN_ROOTS seam that T-205 introduces, "
-        "and T-205's rewrite of this file already deletes this line.",
-}
+# T-210. Empty, and worth keeping that way: entries are for a literal nobody
+# can fix yet, never for one that is an edit away. Keyed by (repo-relative
+# path, the path with the handle replaced by `<operator>`) so the table names
+# nobody itself, and so a NEW literal -- even one in an already-listed file --
+# is still caught rather than covered.
+KNOWN_OPERATOR_PATH_DEBTS = {}
 
 
 def _anonymise_home(matched: str, handle: str) -> str:
