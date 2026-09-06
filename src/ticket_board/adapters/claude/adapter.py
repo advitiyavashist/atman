@@ -69,6 +69,11 @@ SECRET_RE = re.compile(
     r"eyJ[A-Za-z0-9._-]{12,}|AKIA[0-9A-Z]{16})"
 )
 FORBIDDEN_ROOTS_ENV = "TICKET_BOARD_FORBIDDEN_ROOTS"
+# A shell can turn an unset variable into an empty string by accident
+# (``VAR="$SOME_UNSET_VAR"``), so an empty value must not be read as a
+# deliberate opt-out. Only this literal, which no accidental expansion
+# produces, disables the guard.
+FORBIDDEN_ROOTS_DISABLE_SENTINEL = "NONE"
 
 
 class ClaudeHookError(ValueError):
@@ -363,14 +368,20 @@ def _protected_roots() -> Tuple[Path, ...]:
     """Checkouts that must never be enrolled, from configuration -- never hardcoded.
 
     ``TICKET_BOARD_FORBIDDEN_ROOTS`` is an os.pathsep-separated list and wins when
-    set, including when set empty to mean "protect nothing". The fallback is this
-    host's two board checkouts, derived from the real home directory so the paths
-    are not literals from one laptop.
+    set. The fallback is this host's two board checkouts, derived from the real
+    home directory so the paths are not literals from one laptop.
+
+    An empty string is NOT treated as "protect nothing": a shell produces an
+    empty value by accident (``VAR="$UNSET_VAR"``) far more often than an
+    operator deliberately opts out, and unlike every other malformed value it
+    used to disable the guard without so much as a log line. Deliberate
+    opt-out requires the literal sentinel below, which no accidental
+    expansion produces.
     """
     raw = os.environ.get(FORBIDDEN_ROOTS_ENV)
     if raw is not None:
-        if raw == "":
-            return ()  # Explicit opt-out remains distinct from malformed entries.
+        if raw == FORBIDDEN_ROOTS_DISABLE_SENTINEL:
+            return ()  # Explicit opt-out, spelled so it can't happen by accident.
         roots = []
         for part in raw.split(os.pathsep):
             try:
