@@ -186,21 +186,20 @@ class BoardServer:
         if auth == NONE:
             # This route carries its own proof in the body -- the enrollment
             # code -- so it authenticates nothing, and a credential that happens
-            # to be attached is not part of the decision. Refusing a
-            # present-but-invalid one would break the flow that needs this route
-            # most: an agent whose lease was revoked has a dead token in its
-            # configured headers *by construction*, and re-enrolment is how it
-            # comes back. It must not have to know to strip its own header first.
-            #
-            # This is the only place the present-but-bad rule is relaxed, and it
-            # is relaxed because the route asked for no credential at all -- not
-            # because a bad one is acceptable. Every other auth level falls
-            # through to the call below and still fails closed.
-            try:
-                principals = self.credentials.authenticate_all(request)
-            except Unauthenticated:
-                return None
-            return principals[0] if principals else None
+            # to be attached is not part of the decision: not to refuse the
+            # request over it (an agent whose lease was revoked has a dead
+            # token in its configured headers *by construction*, and
+            # re-enrolment is how it comes back -- it must not have to know to
+            # strip its own header first), and, per T-264, not to hand it to
+            # the handler either. Resolving a credential here and filtering it
+            # by in_scope() would still expose an authenticated identity from a
+            # route whose contract is that no authentication decision is made.
+            # A handler behind auth=NONE that needs caller identity has to read
+            # its own proof from the body, the same shape as this route's
+            # enrollment code -- never from ctx.principal, which is always None
+            # here regardless of what credential (valid, foreign, or dead) was
+            # attached.
+            return None
 
         principals = self.credentials.authenticate_all(request)
         if not principals:
