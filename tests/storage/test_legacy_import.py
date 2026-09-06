@@ -1,8 +1,6 @@
 """Legacy import: counts, dependencies, originals, and the ownership lock."""
 
 import json
-import shutil
-from pathlib import Path
 
 import pytest
 
@@ -15,9 +13,6 @@ from ticket_board.storage.legacy import (
     release_ownership,
     take_ownership,
 )
-
-# The real board this project runs on. Copied, never opened for writing.
-REAL_BOARD = Path("/Users/kavana/Downloads/steer/.tickets")
 
 
 def _legacy_board(tmp_path, tickets):
@@ -149,22 +144,51 @@ def test_rollback_releases_the_board_to_the_legacy_cli(store, tmp_path):
     assert len(read_legacy_board(legacy)) == 1
 
 
-@pytest.mark.skipif(not REAL_BOARD.is_dir(), reason="live board not present")
-def test_imports_the_real_steer_board_without_loss(store, tmp_path):
-    """Import the actual 100+ ticket board this project runs on.
-
-    A synthetic three-ticket board proves very little about an import; this one
-    has real ids, real dependency chains and states written by six different
-    agents over two sprints. Copied first -- the live board is never opened for
-    writing by a test.
+def _large_multi_chain_board(tmp_path):
+    """A synthetic ~60-ticket legacy board with the shape that matters for an
+    import stress test: branching dependency chains (not just a linear one),
+    every legacy status, and more than one owning agent -- without touching
+    this project's own live board or any path specific to one machine.
     """
-    copy = tmp_path / "real"
-    shutil.copytree(REAL_BOARD, copy)
+    directory = tmp_path / "legacy-large"
+    directory.mkdir()
+    agents = ["agent-a", "agent-b", "agent-c", "agent-d", "agent-e", "agent-f"]
+    statuses = ["done", "open", "in progress", "review", "blocked"]
+    tickets = []
+    for i in range(1, 61):
+        deps = []
+        if i > 1:
+            deps.append("T-{:03d}".format(i - 1))
+        if i > 10 and i % 7 == 0:
+            deps.append("T-{:03d}".format(i - 10))
+        tickets.append({
+            "id": "T-{:03d}".format(i),
+            "title": "Synthetic ticket {}".format(i),
+            "status": statuses[i % len(statuses)],
+            "deps": deps,
+            "role": agents[i % len(agents)],
+        })
+    for ticket in tickets:
+        (directory / "{}.json".format(ticket["id"])).write_text(
+            json.dumps(ticket, indent=2)
+        )
+    return directory, tickets
 
-    source = read_legacy_board(copy)
-    assert len(source) > 50, "expected the real board to be substantial"
 
-    report = import_legacy_board(store, copy, project_name="Steer")
+def test_imports_a_large_multi_chain_board_without_loss(store, tmp_path):
+    """Import a board large and varied enough to stress the import path.
+
+    A synthetic three-ticket board proves very little; this one has branching
+    dependency chains (not just a line), every legacy status, and tickets
+    owned by more than one agent -- built fresh under `tmp_path` on every run
+    so the test never reads this project's own live board or depends on any
+    one machine's filesystem layout.
+    """
+    legacy, source_tickets = _large_multi_chain_board(tmp_path)
+    source = read_legacy_board(legacy)
+    assert len(source) == len(source_tickets)
+
+    report = import_legacy_board(store, legacy, project_name="Synthetic")
 
     assert report.imported_tickets == report.source_tickets
     assert report.skipped == [], "no ticket may be silently dropped"
@@ -173,12 +197,14 @@ def test_imports_the_real_steer_board_without_loss(store, tmp_path):
     imported = store.list_tickets(report.project_id)
     assert len(imported) == len(source)
 
-    # Dependency edges survive: check a chain we know exists (T-180 -> T-179).
+    # Dependency edges survive, including a branching one: T-014 depends on
+    # both T-013 (the linear chain) and T-004 (the every-7th-ticket branch).
     by_id = {t["id"]: t for t in imported}
-    assert "LEG-180" in by_id and "LEG-179" in by_id
-    assert "LEG-179" in by_id["LEG-180"]["dependencies"], \
-        "the T-180 -> T-179 edge must survive the import"
+    assert "LEG-14" in by_id and "LEG-13" in by_id and "LEG-4" in by_id
+    assert set(by_id["LEG-14"]["dependencies"]) == {"LEG-13", "LEG-4"}, \
+        "the branching T-014 -> {T-013, T-004} edges must survive the import"
     # And that blocking is derived correctly from the imported edges.
-    assert by_id["LEG-180"]["dependency_blocked"] is (
-        by_id["LEG-179"]["state"] != "done"
+    assert by_id["LEG-14"]["dependency_blocked"] is (
+        by_id["LEG-13"]["state"] != "done"
+        or by_id["LEG-4"]["state"] != "done"
     )

@@ -45,6 +45,13 @@ REPO = Path(__file__).resolve().parents[1]
 SPEC_PATH = REPO / "docs" / "contracts" / "openapi.yaml"
 FIXTURES = REPO / "tests" / "fixtures"
 MANIFEST_PATH = FIXTURES / "manifest.json"
+# tests/fixtures/claude_hooks/ (T-214) holds real, captured Claude Code hook
+# payloads used as adapter-parsing ground truth. They are not contract
+# fixtures -- they were never listed in manifest.json and carry no paired
+# schema -- so the frozen-tree agreement check below must not treat them as
+# unlisted files. They are validated separately by
+# tests/adapters/test_real_hook_fixtures.py, which already asserts no leaked
+# operator paths or identifiers.
 RAW_ADAPTER_FIXTURE_DIRS = {FIXTURES / "claude_hooks"}
 
 SPEC_URI = "urn:ticket-board:openapi"
@@ -267,14 +274,37 @@ def test_error_status_matches_the_code_family():
 # ------------------------------------------------------------------ secrets
 
 SECRET_PATTERNS = [
-    re.compile(r"\bBearer\s+[A-Za-z0-9._-]{8,}", re.I),
+    # Bearer token, including the JSON-escaped whitespace a raw file read sees
+    # when a fixture embeds a literal "\n"/"\r"/"\t" between the scheme and
+    # the token instead of a real space. Whitespace is deliberately restricted
+    # to same-line space/tab (not \s, which includes newlines) so this does
+    # not fire on OpenAPI's unrelated `scheme: bearer` / `bearerFormat:` pair.
+    re.compile(r"\bBearer(?:[ \t]|\\[nrt])+[A-Za-z0-9._-]{8,}", re.I),
     re.compile(r"\bsk[-_][A-Za-z0-9_-]{8,}"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAKIA[0-9A-Za-z]{16}\b", re.I),  # case-insensitive on purpose
     re.compile(r"\bghp_[A-Za-z0-9]{8,}"),
-    re.compile(r"\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b"),  # JWT
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bgho_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}\b", re.I),  # Slack token
+    re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b"),  # Google API key
+    re.compile(r"\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b"),  # JWT, long segments
+    re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{2,}\b"),  # JWT, short segments -- anchored on the "{" header prefix
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),  # PEM private key block
+    re.compile(r"://[^\s/:@]+:[^\s/:@]+@"),  # user:pass@host in a URL
+    # AWS secret access key: 40 chars of base64 charset. Matched only when the
+    # blob mixes upper, lower and digit -- a plain lowercase-hex git SHA (the
+    # other common 40-char string in this repo) never does, so this stays
+    # narrow rather than flagging every commit hash.
+    re.compile(
+        r"(?<![A-Za-z0-9+/=])"
+        r"(?=[A-Za-z0-9+/=]{40}(?![A-Za-z0-9+/=]))"
+        r"(?=[A-Za-z0-9+/=]*[A-Z])(?=[A-Za-z0-9+/=]*[a-z])(?=[A-Za-z0-9+/=]*[0-9])"
+        r"[A-Za-z0-9+/=]{40}"
+    ),
 ]
 
-SECRET_BEARING_FIELDS = ("code", "token")
+SECRET_BEARING_FIELDS = ("code", "token", "api_key", "secret", "password",
+                          "private_key", "access_token")
 PLACEHOLDERS = {
     "<enrollment-code-not-in-fixtures>",
     "<agent-token-not-in-fixtures>",
@@ -282,11 +312,55 @@ PLACEHOLDERS = {
 }
 
 
+_TEXT_SUFFIXES = {".py", ".json", ".md", ".yaml", ".yml", ".html", ".txt"}
+
+
+def _text_files(root: Path) -> list[Path]:
+    return sorted(
+        p for p in root.rglob("*")
+        if p.is_file() and p.suffix in _TEXT_SUFFIXES
+        and "__pycache__" not in p.parts
+    )
+
+
+def _extra_credential_scan_paths() -> list[Path]:
+    """Fixtures are the primary blast radius for a leaked credential, but a
+    planted secret would land just as easily in the spec's `example:` values
+    or in hand-written docs and acceptance code. Scan those too.
+
+    Restricted to known text suffixes (and `__pycache__` excluded) so a stray
+    compiled `.pyc` from an unrelated local test run does not blow up the
+    scan with a binary-decode error.
+    """
+    paths = [SPEC_PATH]
+    paths += _text_files(REPO / "docs")
+    paths += _text_files(REPO / "tests" / "acceptance")
+    return paths
+
+
+# Synthetic values that are shaped like a credential but are not one -- the
+# acceptance harness sends these to its own local stub to exercise credential
+# header wiring, so they are never a real secret. Exact strings only, so a
+# genuine credential that happens to reuse a placeholder-y word still fails.
+SAFE_PLACEHOLDER_SECRETS = {
+    "Bearer stub-agent-token",
+}
+
+
+def _assert_no_credentials(text, where):
+    for pattern in SECRET_PATTERNS:
+        for match in pattern.finditer(text):
+            found = match.group(0)
+            assert found in SAFE_PLACEHOLDER_SECRETS, (
+                f"{where} matches {pattern.pattern}: {found!r}"
+            )
+
+
 def test_no_fixture_contains_anything_shaped_like_a_credential():
     for rel in MANIFEST:
-        text = (FIXTURES / rel).read_text()
-        for pattern in SECRET_PATTERNS:
-            assert not pattern.search(text), f"{rel} matches {pattern.pattern}"
+        _assert_no_credentials((FIXTURES / rel).read_text(), rel)
+    for path in _extra_credential_scan_paths():
+        _assert_no_credentials(path.read_text(), path.relative_to(REPO))
 
 
 @pytest.mark.parametrize("credential", [
