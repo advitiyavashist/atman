@@ -1,3 +1,5 @@
 __pycache__/
-*.pyc
-.tickets/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
