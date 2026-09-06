@@ -311,6 +311,10 @@ def read_legacy_documents(legacy_dir, *, report=None):
                 with path.open("rb") as fh:
                     raw = fh.read(LEGACY_DOCUMENT_MAX_BYTES)
                 content = raw.decode("utf-8", errors="replace")
+                # Replacement characters can expand the stored UTF-8 size.
+                # Drop only a partial trailing code point after clipping.
+                content = content.encode("utf-8")[:LEGACY_DOCUMENT_MAX_BYTES].decode(
+                    "utf-8", errors="ignore")
                 if report is not None:
                     report._bump(report.truncated_fields,
                                  "document:{}/{}".format(kind, path.name))
