@@ -410,3 +410,101 @@ def test_secret_bearing_fields_use_placeholders():
         if schema == "ErrorResponse":
             continue
         check(json.loads((FIXTURES / rel).read_text()), rel)
+
+
+# --------------------------------------- operator home paths in the test tree
+
+# A home directory that names a real person. `/Users/<operator>` and
+# `/home/agent` are the scrubbed placeholder forms the captured adapter
+# fixtures standardised on; any other first segment names whoever happened to
+# run the capture, which is what T-210 exists to keep out of a shared repo.
+OPERATOR_HOME_RE = re.compile(
+    r"/(?:Users|home)/([A-Za-z0-9_.-]+)(?:/[A-Za-z0-9_.<>-]+)*"
+)
+PLACEHOLDER_HOME_SEGMENTS = {"agent", "operator", "runner", "user"}
+
+# Literals that still name an operator and are owned by a ticket other than
+# T-210. Keyed by (repo-relative path, the path with the handle replaced by
+# `<operator>`) so that this table itself names nobody, and so a NEW literal --
+# even a new one in the same file -- is still caught rather than covered.
+KNOWN_OPERATOR_PATH_DEBTS = {
+    ("tests/adapters/test_claude_adapter.py",
+     "/Users/<operator>/Downloads/steer/.worktrees/some-agent"):
+        "T-205 owns this line. Pre-T-205 `_ensure_safe_project_dir` hardcodes "
+        "its forbidden roots inside the function body, so there is no seam to "
+        "point this assertion at a tmp_path root -- a host-independent fix "
+        "needs the TICKET_BOARD_FORBIDDEN_ROOTS seam that T-205 introduces, "
+        "and T-205's rewrite of this file already deletes this line.",
+}
+
+
+def _anonymise_home(matched: str, handle: str) -> str:
+    """Replace the home segment with `<operator>`, for keying and reporting.
+
+    The match always begins `/Users/<handle>` or `/home/<handle>`, so replacing
+    the first occurrence of the handle rewrites exactly that segment.
+    """
+    return matched.replace(handle, "<operator>", 1)
+
+
+def _operator_path_violations(paths, root):
+    """Every (rel, matched) naming a real operator home, known debts excluded.
+
+    The raw match is reported so the failure is actionable, but the debt table
+    is keyed on the anonymised form so this file names no operator itself.
+    """
+    found = []
+    for path in paths:
+        rel = str(path.relative_to(root))
+        for match in OPERATOR_HOME_RE.finditer(path.read_text()):
+            handle = match.group(1)
+            if handle in PLACEHOLDER_HOME_SEGMENTS:
+                continue
+            if (rel, _anonymise_home(match.group(0), handle)) in KNOWN_OPERATOR_PATH_DEBTS:
+                continue
+            found.append((rel, match.group(0)))
+    return found
+
+
+def test_no_test_file_names_a_real_operator_home():
+    """The guard that keeps T-210's scrub from regressing.
+
+    A sweep fixes today's literals; this fails the build on tomorrow's. Use a
+    placeholder (`/Users/<operator>`, `/home/agent`), build the path under
+    `tmp_path`, or read it from an environment variable -- see
+    `TICKET_BOARD_REAL_BOARD` in tests/storage/test_legacy_import.py.
+
+    A literal that genuinely belongs to another in-flight ticket goes in
+    KNOWN_OPERATOR_PATH_DEBTS with the ticket that owns it, so the exception is
+    reviewable and scoped to one exact path rather than to a whole file.
+    """
+    violations = _operator_path_violations(_text_files(REPO / "tests"), REPO)
+    assert not violations, "test files name a real operator home: " + ", ".join(
+        "{} -> {}".format(rel, found) for rel, found in violations
+    )
+
+
+def test_operator_home_guard_catches_a_planted_literal(tmp_path):
+    """The guard bites, and the placeholder forms stay usable.
+
+    Every path here is built by interpolation rather than written out, so that
+    exercising the guard does not plant the literal it exists to forbid.
+    """
+    planted = tmp_path / "planted.py"
+    handle = "somebody"
+
+    planted.write_text('BOARD = "/Users/%s/Downloads/steer"\nCWD = "/home/agent/p"\n'
+                       % "<operator>")
+    assert _operator_path_violations([planted], tmp_path) == []
+
+    planted.write_text('BOARD = "/Users/%s/Downloads/steer/.tickets"\n' % handle)
+    assert _operator_path_violations([planted], tmp_path) == [
+        ("planted.py", "/Users/%s/Downloads/steer/.tickets" % handle)
+    ]
+
+    # A debt is keyed to one exact path, so a different literal in the same
+    # file is still caught rather than waved through.
+    planted.write_text('OTHER = "/Users/%s/Downloads/tickets"\n' % handle)
+    assert _operator_path_violations([planted], tmp_path) == [
+        ("planted.py", "/Users/%s/Downloads/tickets" % handle)
+    ]

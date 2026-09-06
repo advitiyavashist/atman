@@ -12,6 +12,7 @@ see `scripts/make_sample_legacy_board.py` for what each ticket in it is for.
 """
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -36,10 +37,19 @@ from ticket_board.storage.legacy import (
 
 SAMPLE_BOARD = Path(__file__).resolve().parents[1] / "data" / "legacy_board"
 
-# The board this project actually runs on. Present only on the machine it runs
-# on, so it is a supplement to the committed sample board, never the only
-# evidence -- a skipped test proves nothing on anyone else's checkout.
-REAL_BOARD = Path("/Users/kavana/Downloads/steer/.tickets")
+# A real board to round-trip as a supplement to the committed sample board,
+# never the only evidence -- a skipped test proves nothing on anyone else's
+# checkout. Point TICKET_BOARD_REAL_BOARD at a legacy board directory to run it;
+# unset (the default) skips, so no operator's home path is baked into the tests.
+REAL_BOARD_ENV = "TICKET_BOARD_REAL_BOARD"
+
+
+def _real_board():
+    """The configured live board, or None when the check is not enabled."""
+    raw = os.environ.get(REAL_BOARD_ENV)
+    if not raw:
+        return None
+    return Path(raw).expanduser()
 
 
 def _legacy_board(tmp_path, tickets):
@@ -560,7 +570,10 @@ def test_a_ticket_can_be_rebuilt_from_the_database_alone(store, imported):
 
 # ------------------------------------------------- the board this repo runs on
 
-@pytest.mark.skipif(not REAL_BOARD.is_dir(), reason="live board not present")
+@pytest.mark.skipif(
+    _real_board() is None or not _real_board().is_dir(),
+    reason="set %s to a legacy board directory to run this" % REAL_BOARD_ENV,
+)
 def test_the_live_board_also_round_trips(store, tmp_path):
     """A supplement to the sample board, not a substitute for it.
 
@@ -569,7 +582,7 @@ def test_the_live_board_also_round_trips(store, tmp_path):
     Copied first: the live board is never opened for writing by a test.
     """
     copy = tmp_path / "real"
-    shutil.copytree(REAL_BOARD, copy)
+    shutil.copytree(_real_board(), copy)
 
     report = import_legacy_board(store, copy, project_name="Steer")
     assert report.skipped == [], "no ticket may be silently dropped"
