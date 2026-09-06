@@ -15,12 +15,16 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -e '.[contracts]'
-      - name: Validate the contract pack and the storage layer
+      - name: Validate the contract pack, the storage layer and the API
         # The env var turns a missing toolchain into a failure rather than a
         # skipped test, so the acceptance bar cannot pass by not running.
         # This runs tests/storage/ too: the storage layer serializes to the
         # frozen contract shapes, and tests/storage/test_contract_conformance.py
         # is what stops the two drifting apart between lanes.
+        # tests/server/ (T-180) adds the same check one level up:
+        # test_api_conformance.py validates the responses the server actually
+        # sends, which is what the console consumes -- a fixture can be right
+        # while the route that returns it is wrong.
         env:
           TICKET_BOARD_CONTRACTS_REQUIRED: '1'
         run: python -m pytest -q

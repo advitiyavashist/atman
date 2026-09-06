@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -18,6 +19,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib import error, request
+
+try:
+    import pwd
+except ImportError:  # pragma: no cover - Claude Code itself is POSIX, but keep imports portable.
+    pwd = None
 
 
 ALLOWED_CLAUDE_EVENTS = {
@@ -60,6 +66,7 @@ SECRET_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,}|Bearer\s+[A-Za-z0-9._-]{8,}|"
     r"eyJ[A-Za-z0-9._-]{12,}|AKIA[0-9A-Z]{16})"
 )
+FORBIDDEN_ROOTS_ENV = "TICKET_BOARD_FORBIDDEN_ROOTS"
 
 
 class ClaudeHookError(ValueError):
@@ -303,30 +310,116 @@ def exchange_enrollment(
 
 def _ensure_safe_project_dir(project_dir: Path) -> None:
     resolved = project_dir.resolve(strict=False)
-    home = Path.home().resolve(strict=False)
+    home = _real_home_dir()
     user_claude_dir = (home / ".claude").resolve(strict=False)
     target_settings = (resolved / ".claude" / "settings.json").resolve(strict=False)
     user_settings = (user_claude_dir / "settings.json").resolve(strict=False)
 
-    if _is_relative_to(resolved, user_claude_dir):
+    if _same_path(resolved, home):
+        raise ClaudeHookError("refusing to write user-level Claude settings: %s" % target_settings)
+    if _path_is_or_under(resolved, user_claude_dir):
         raise ClaudeHookError("refusing to use user-level Claude config as a project dir: %s" % resolved)
-    if target_settings == user_settings or _is_relative_to(target_settings, user_claude_dir):
+    if _same_path(target_settings, user_settings) or _path_is_or_under(target_settings, user_claude_dir):
         raise ClaudeHookError("refusing to write user-level Claude settings: %s" % target_settings)
 
-    forbidden_roots = (
-        Path("/Users/kavana/Downloads/steer/.worktrees").resolve(strict=False),
-        Path("/Users/kavana/Downloads/tickets/.worktrees").resolve(strict=False),
+    # Protected roots are checkouts that live agents are already working out of.
+    # Two independent checks, because they degrade differently:
+    #   1. path containment -- needs no git, and is the floor: it holds even when
+    #      git is missing, and it also covers roots that are not git checkouts at
+    #      all (a bare `.worktrees` directory).
+    #   2. repository identity -- catches a worktree of a protected checkout that
+    #      was registered somewhere else entirely, where no path comparison can
+    #      see it. Requires git, so it is a superset, never the only line.
+    protected = _protected_roots()
+    for root in protected:
+        if _path_is_or_under(resolved, root):
+            raise ClaudeHookError(
+                "refusing to enroll a live agent worktree: %s is inside the protected checkout %s" % (resolved, root)
+            )
+
+    repo = _git_common_dir(resolved)
+    if repo is not None:
+        for root in protected:
+            root_repo = _git_common_dir(root)
+            if root_repo is not None and _same_path(repo, root_repo):
+                raise ClaudeHookError(
+                    "refusing to enroll a live agent worktree: %s shares the git repository %s with the protected "
+                    "checkout %s" % (resolved, repo, root)
+                )
+
+
+def _real_home_dir() -> Path:
+    if pwd is not None:
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=False)
+        except (KeyError, OSError):
+            pass
+    return Path.home().resolve(strict=False)
+
+
+def _protected_roots() -> Tuple[Path, ...]:
+    """Checkouts that must never be enrolled, from configuration -- never hardcoded.
+
+    ``TICKET_BOARD_FORBIDDEN_ROOTS`` is an os.pathsep-separated list and wins when
+    set, including when set empty to mean "protect nothing". The fallback is this
+    host's two board checkouts, derived from the real home directory so the paths
+    are not literals from one laptop.
+    """
+    raw = os.environ.get(FORBIDDEN_ROOTS_ENV)
+    if raw is not None:
+        return tuple(Path(part).expanduser().resolve(strict=False) for part in raw.split(os.pathsep) if part)
+
+    home = _real_home_dir()
+    return (
+        (home / "Downloads" / "steer").resolve(strict=False),
+        (home / "Downloads" / "tickets").resolve(strict=False),
     )
-    if any(resolved == root or _is_relative_to(resolved, root) for root in forbidden_roots):
-        raise ClaudeHookError("refusing to enroll a live agent worktree: %s" % resolved)
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
+def _git_common_dir(path: Path) -> Optional[Path]:
+    """Identify the repository ``path`` belongs to, or None if it is not in one.
+
+    ``--git-common-dir`` is the shared repository directory: a checkout and every
+    worktree registered against it report the same one no matter where on disk the
+    worktree sits, which is what makes this a structural check and not another
+    path list. Git prints it relative to the directory the command ran in.
+    """
+    if not path.exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    common = result.stdout.strip()
+    if not common:
+        return None
+    return Path(os.path.join(str(path), common)).resolve(strict=False)
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return left == right
+
+
+def _path_is_or_under(path: Path, root: Path) -> bool:
+    if _same_path(path, root):
+        return True
     try:
         path.relative_to(root)
+        return True
     except ValueError:
-        return False
-    return True
+        pass
+    return any(_same_path(parent, root) for parent in path.parents)
 
 
 OWNER_MARKER = "ticket-board-hook"
