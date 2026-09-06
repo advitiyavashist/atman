@@ -12,7 +12,7 @@ Two things here are load-bearing and easy to lose in a later refactor:
    sixth state.
 """
 
-SCHEMA_VERSION = 1
+from .migrations import SCHEMA_VERSION, apply_migrations
 
 DDL = """
 PRAGMA foreign_keys = ON;
@@ -227,6 +227,7 @@ CREATE TABLE IF NOT EXISTS request_log (
 def apply_schema(conn):
     """Create the schema and stamp its version. Safe to run on an open db."""
     conn.executescript(DDL)
+    apply_migrations(conn)
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

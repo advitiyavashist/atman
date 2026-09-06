@@ -118,14 +118,78 @@ unclean shutdown the WAL holds the post-snapshot writes, and copying a snapshot
 over the main file alone lets SQLite replay them, so the restore silently does
 nothing. `tests/storage/test_backup_rollback.py` demonstrates both halves.
 
+## Messaging records (T-202)
+
+Messaging lives on the same `BoardStore` as the T-179 board records, via
+`src/ticket_board/storage/messaging.py` and the additive migration in
+`src/ticket_board/storage/migrations.py`. The base T-179 tables are not edited
+in place; opening a store applies the new messaging tables after the base schema
+exists and stamps `schema_version=2`.
+
+The store serializes these frozen contract records directly: `Member`,
+`Invitation`, `Channel`, `ChannelMember`, `Message`, `Thread`, `Delivery`,
+`WakeJob`, `Run` and `RunnerLease`. The conformance tests in
+`tests/storage/test_contract_conformance.py` validate all of them against
+`docs/contracts/openapi.yaml`.
+
+Use the store APIs rather than rebuilding rows in routes:
+
+```python
+operator = store.create_member(project_id, "human", "Operator", "owner")
+backend = store.create_member(project_id, "agent", "backend-1", "member",
+                              agent_id=agent_id)
+channel = store.create_channel(project_id, "work", "public")
+store.add_channel_member(project_id, channel["id"], operator["id"])
+sent = store.send_message(project_id, channel["id"], actor, "Please take it",
+                          mentions=[backend["id"]], request_id=request_id)
+job = store.create_wake_job(project_id, sent["message"]["id"], agent_id,
+                            sent["deliveries"][0]["id"])
+lease = store.acquire_runner_lease(project_id, "rnr_supervisor1", agent_id,
+                                   expires_at, allowlisted_worktree=worktree)
+```
+
+The traps T-187 should preserve:
+
+- **Message + deliveries are one transaction.** `send_message` writes the
+  message and all mentioned/direct-agent delivery rows together, then stores the
+  response under `request_id`. If a delivery insert fails, the message rolls back
+  too. Do not split this into route-level writes.
+- **Author identity is already bound.** Storage takes the authenticated `Actor`;
+  request bodies must never supply or override `author`. Agent authors do not
+  receive their own delivery when they reply.
+- **Channel reads are project-scoped.** A member from project A cannot read a
+  channel from project B (`forbidden_scope`). Private channels require explicit
+  membership (`not_channel_member`), and revoked members fail with
+  `membership_revoked`.
+- **Message bodies are immutable.** Corrections are new messages with
+  `supersedes_message_id`; the database trigger refuses direct body edits.
+- **Delivery states are closed and versioned.** Use `transition_delivery` with
+  `expected_version`; invalid receipt-chain jumps raise `invalid_state_transition`.
+- **Wake jobs are at-least-once.** `create_wake_job` deduplicates on
+  `message_id:recipient_agent_id`. This suppresses duplicate job rows; it is not
+  exactly-once execution.
+- **Runner leases fence on `epoch`.** `acquire_runner_lease` is atomic under
+  eight racing OS processes; exactly one supervisor holds a live lease and losers
+  get `run_already_active`. `heartbeat_runner_lease` and `expire_runner_lease`
+  require the current runner id plus epoch.
+
+Tests to run for this layer:
+
+```sh
+TICKET_BOARD_CONTRACTS_REQUIRED=1 python3 -m pytest tests/storage -q
+```
+
+The current evidence is correctness on one machine with SQLite process races.
+No HTTP route, wake execution, runner process management, throughput or latency
+claim is made here; T-187/T-188 own those surfaces.
+
 ## What this lane deliberately does not do
 
 No HTTP, auth, sessions-as-credentials, SSE transport, rate limiting or CSRF —
 all T-180. No master lease acquisition loop; the `master_lease` table and
 `Assignment` records exist and `store.assign(...)` queues one, but the routing
-policy is T-182. Messaging records (`Member`, `Channel`, `Message`, `Delivery`,
-`WakeJob`, `Run`, `RunnerLease`) are **not** implemented — they are T-187's,
-and their contracts are already frozen in `openapi.yaml`.
+policy is T-182. Messaging persistence exists now, but channels/membership HTTP,
+task routing, wake execution and runner process management are still T-187/T-188.
 
 Nothing here has been served over a network or measured under load. The
 concurrency claims above are from the tests in this repo on one machine, and

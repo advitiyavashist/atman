@@ -50,6 +50,38 @@ def assignment_id():
     return "asg_" + _suffix(8)
 
 
+def member_id():
+    return "mem_" + _suffix(8)
+
+
+def invitation_id():
+    return "inv_" + _suffix(8)
+
+
+def channel_id():
+    return "chn_" + _suffix(8)
+
+
+def message_id():
+    return "msg_" + _suffix(8)
+
+
+def thread_id():
+    return "thr_" + _suffix(8)
+
+
+def delivery_id():
+    return "dlv_" + _suffix(8)
+
+
+def wake_job_id():
+    return "wjb_" + _suffix(8)
+
+
+def run_id():
+    return "run_" + _suffix(8)
+
+
 def event_id(seq):
     """Monotonic, lexicographically sortable SSE stream id: evt_<12 digits>_<6>.
 
