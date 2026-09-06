@@ -52,21 +52,45 @@ function parseFrame(raw: string): { id: string | null; data: string | null } {
 }
 
 // The contract only guarantees a blank line between frames, not which line
-// ending carries it — a spec-legal CRLF stream ("\r\n\r\n") has no two
-// consecutive "\n" characters, so a plain indexOf("\n\n") never matches and
-// the reader stalls forever with no error. Match whichever boundary style
-// appears first.
-const FRAME_BOUNDARY = /\r\n\r\n|\n\n|\r\r/;
+// ending carries it (CRLF, CR or LF, chosen independently per line — nine
+// legal terminator pairs). readFrames normalises every line ending to "\n"
+// before matching, so this only ever needs to recognise the normalised form.
+const FRAME_BOUNDARY = /\n\n/;
 
 async function readFrames(body: ReadableStream<Uint8Array>, onFrame: (raw: string) => void): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let pending = "";
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      if (done) {
+        // A chunk that ended mid-CRLF is the last chunk: flush the held CR.
+        if (pending) {
+          buffer += "\n";
+          pending = "";
+          let tail: RegExpMatchArray | null;
+          while ((tail = buffer.match(FRAME_BOUNDARY))) {
+            const at = tail.index as number;
+            const raw = buffer.slice(0, at);
+            buffer = buffer.slice(at + tail[0].length);
+            if (raw.trim().length > 0) onFrame(raw);
+          }
+        }
+        break;
+      }
+      // Normalise line endings before framing. SSE terminates each line with
+      // CRLF, CR *or* LF, independently per line, so nine terminator pairs are
+      // legal frame boundaries and a fixed alternation misses some of them.
+      // A chunk may also end mid-CRLF, so a trailing lone CR is held back.
+      let text = pending + decoder.decode(value, { stream: true });
+      pending = "";
+      if (text.endsWith("\r")) {
+        pending = "\r";
+        text = text.slice(0, -1);
+      }
+      buffer += text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       let match: RegExpMatchArray | null;
       while ((match = buffer.match(FRAME_BOUNDARY))) {
         const boundary = match.index as number;

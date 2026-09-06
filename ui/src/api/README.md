@@ -24,10 +24,16 @@ job.
   whose events you receive), resumes with `Last-Event-ID` on every reconnect
   after the first frame, routes `snapshot_required` to its own handler
   instead of treating it as a normal event, and exposes `heartbeat`
-  separately so a caller can tell "dead" from "idle." Frame boundaries are
-  matched against `\r\n\r\n|\n\n|\r\r` (not a plain `\n\n` search), since a
-  spec-legal CRLF stream has no two consecutive `\n` bytes and would
-  otherwise silently stall forever. On a non-2xx response, a 4xx other than
+  separately so a caller can tell "dead" from "idle." SSE terminates each
+  line with CRLF, CR or LF, chosen independently per line, so a frame
+  boundary (a blank line) can be any of nine terminator pairs — matching a
+  fixed alternation like `\r\n\r\n|\n\n|\r\r` still misses some (e.g. a
+  `\n`-terminated data line followed by a `\r\n`-terminated blank line).
+  `readFrames` instead normalises every line ending to `\n` before framing
+  (holding back a trailing lone `\r` in case a chunk ends mid-CRLF, and
+  flushing it when the stream ends there), so `FRAME_BOUNDARY` only ever
+  needs to match the normalised `\n\n` form. Without this, a stream using an
+  uncovered terminator pair stalls forever with no error. On a non-2xx response, a 4xx other than
   408/429 is treated as terminal (stops reconnecting, since a dead or
   unauthorized session returns the same status forever); 5xx, 408, and 429
   keep retrying.
