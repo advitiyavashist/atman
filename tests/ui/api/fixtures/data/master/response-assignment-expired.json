@@ -1,0 +1,11 @@
+{
+  "id": "asg_00000002",
+  "ticket_id": "DEMO-14",
+  "agent_id": "agt_backend01",
+  "state": "expired",
+  "reason": "Only free agent with the backend capability.",
+  "created_at": "2026-09-06T14:35:00Z",
+  "expires_at": "2026-09-06T14:40:00Z",
+  "lease_epoch": 4,
+  "version": 2
+}

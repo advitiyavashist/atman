@@ -1,0 +1,53 @@
+{
+  "enrollment_id": "enr_00000001",
+  "agent": {
+    "id": "agt_backend01",
+    "project_id": "prj_demo0001",
+    "name": "backend-1",
+    "role": "backend",
+    "capabilities": [
+      "python",
+      "pytest"
+    ],
+    "state": "connected",
+    "connection_mode": "managed",
+    "runtime": {
+      "adapter": "claude_code",
+      "version": "2.1.0",
+      "unsupported_capabilities": []
+    },
+    "capacity": {
+      "max_active_tickets": 1,
+      "active_tickets": 0
+    },
+    "current_ticket": null,
+    "session": null,
+    "worktree": "/repos/demo/.worktrees/backend-1",
+    "hook_health": {
+      "config_installed": false,
+      "server_received": false,
+      "response_delivered": false,
+      "session_adopted": false,
+      "last_error": null
+    },
+    "last_heartbeat_at": null,
+    "last_progress_at": null,
+    "version": 0,
+    "created_at": "2026-09-06T14:30:00Z"
+  },
+  "expires_at": "2026-09-06T14:40:00Z",
+  "code": "<enrollment-code-not-in-fixtures>",
+  "install_command": "tickets connect --project prj_demo0001 --server http://127.0.0.1:4319",
+  "config_changes": [
+    {
+      "path": "~/.claude/settings.json",
+      "change": "add",
+      "summary": "Add SessionStart and UserPromptSubmit hook entries owned by Ticket Board."
+    },
+    {
+      "path": "~/.claude/settings.json",
+      "change": "none",
+      "summary": "Unrelated existing hook entries are preserved."
+    }
+  ]
+}

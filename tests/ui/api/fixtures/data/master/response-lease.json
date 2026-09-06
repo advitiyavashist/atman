@@ -1,0 +1,16 @@
+{
+  "holder": {
+    "type": "master",
+    "id": "agt_master001",
+    "display_name": "master-1",
+    "session_id": "ses_9f8e7d6c"
+  },
+  "epoch": 5,
+  "acquired_at": "2026-09-06T14:30:00Z",
+  "expires_at": "2026-09-06T14:45:00Z",
+  "routing_mode": "deterministic_plus_suggestions",
+  "paused": false,
+  "last_sweep_at": "2026-09-06T14:35:00Z",
+  "next_sweep_at": "2026-09-06T14:40:00Z",
+  "sweep_interval_seconds": 30
+}

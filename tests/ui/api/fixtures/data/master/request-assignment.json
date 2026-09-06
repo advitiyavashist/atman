@@ -1,0 +1,9 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "ticket_id": "DEMO-14",
+  "agent_id": "agt_backend01",
+  "reason": "Only free agent with the backend capability.",
+  "lease_epoch": 5,
+  "expected_version": 1,
+  "ttl_seconds": 600
+}

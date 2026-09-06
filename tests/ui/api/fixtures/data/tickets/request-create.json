@@ -1,0 +1,18 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "title": "Add the widget endpoint",
+  "outcome": "GET /widgets returns a cursor page and is covered by tests.",
+  "acceptance": [
+    {
+      "text": "Cursor paging works"
+    },
+    {
+      "text": "Errors use the shared shape"
+    }
+  ],
+  "role": "backend",
+  "dependencies": [],
+  "files": [
+    "src/widgets/"
+  ]
+}

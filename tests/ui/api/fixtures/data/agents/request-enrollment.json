@@ -1,0 +1,12 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "agent_name": "backend-1",
+  "role": "backend",
+  "capabilities": [
+    "python",
+    "pytest"
+  ],
+  "worktree": "/repos/demo/.worktrees/backend-1",
+  "connection_mode": "managed",
+  "max_active_tickets": 1
+}
