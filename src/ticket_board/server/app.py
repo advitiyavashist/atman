@@ -60,7 +60,7 @@ ASSIGNMENT_ID_RE = re.compile(r"^asg_[0-9a-z]{8,32}$")
 ANY = "any"            # either credential type
 OPERATOR = "operator"  # agent tokens get 403 agent_token_insufficient
 AGENT = "agent"        # an operator has no runtime session to act through
-NONE = "none"          # the enrollment code is the proof
+NONE = "none"          # no credential is read; the body carries the proof
 
 
 class Ctx:
@@ -183,9 +183,26 @@ class BoardServer:
         it is not more secure, because both credentials belong to the caller and
         were each validated on their own.
         """
-        principals = self.credentials.authenticate_all(request)
         if auth == NONE:
+            # This route carries its own proof in the body -- the enrollment
+            # code -- so it authenticates nothing, and a credential that happens
+            # to be attached is not part of the decision. Refusing a
+            # present-but-invalid one would break the flow that needs this route
+            # most: an agent whose lease was revoked has a dead token in its
+            # configured headers *by construction*, and re-enrolment is how it
+            # comes back. It must not have to know to strip its own header first.
+            #
+            # This is the only place the present-but-bad rule is relaxed, and it
+            # is relaxed because the route asked for no credential at all -- not
+            # because a bad one is acceptable. Every other auth level falls
+            # through to the call below and still fails closed.
+            try:
+                principals = self.credentials.authenticate_all(request)
+            except Unauthenticated:
+                return None
             return principals[0] if principals else None
+
+        principals = self.credentials.authenticate_all(request)
         if not principals:
             raise Unauthenticated()
 
@@ -236,7 +253,7 @@ class BoardServer:
             " ORDER BY decided_at DESC, rowid DESC LIMIT ?",
             (project_id, limit),
         ).fetchall()
-        return [self.store.get_review(row["id"]) for row in rows]
+        return [self.store.get_review(project_id, row["id"]) for row in rows]
 
     # -------------------------------------------------------------- tickets
 
@@ -296,7 +313,7 @@ class BoardServer:
         request_id = validate.request_id(body)
         ticket = self.store.create_ticket(
             ctx.project_id,
-            self._next_ticket_id(ctx.project_id),
+            lambda conn: self._next_ticket_id(ctx.project_id, conn),
             validate.text(body, "title", max_length=200),
             role=validate.text(body, "role", max_length=40, required=False),
             outcome=validate.text(body, "outcome", max_length=4000),
@@ -308,20 +325,24 @@ class BoardServer:
         )
         return Response(201, ticket)
 
-    def _next_ticket_id(self, project_id):
+    def _next_ticket_id(self, project_id, conn=None):
         """Mint the next human-facing key for a project.
 
         `CreateTicketRequest` has no id field, so the server owns the key. The
         prefix comes from the project name so a board reads the way its
         operators talk about it; the number is the highest existing plus one,
         which keeps ids stable and gapless enough to cite in conversation.
+
+        Called from inside store.create_ticket's transaction, after its replay
+        check -- see that method's docstring for why (T-235).
         """
+        conn = conn if conn is not None else self.store.conn
         project = self.store.get_project(project_id)
         letters = "".join(c for c in project["name"].upper() if c.isalnum())
         prefix = letters[:16] if letters[:1].isalpha() else "TB"
         if len(prefix) < 2:
             prefix = (prefix + "TB")[:2]
-        rows = self.store.conn.execute(
+        rows = conn.execute(
             "SELECT id FROM tickets WHERE project_id = ? AND id LIKE ?",
             (project_id, prefix + "-%"),
         ).fetchall()
@@ -377,7 +398,7 @@ class BoardServer:
             " ORDER BY submitted_at, rowid",
             (project_id, ticket_id),
         ).fetchall()
-        return [self.store.get_review(row["id"]) for row in rows]
+        return [self.store.get_review(project_id, row["id"]) for row in rows]
 
     def _is_master(self, ctx):
         row = master.lease_row(self.store, ctx.project_id)
@@ -526,7 +547,11 @@ class BoardServer:
         evidence_sha = validate.sha(body, "evidence_sha")
         expected_version = validate.integer(body, "expected_version", minimum=0)
 
-        review = self.store.get_review(review_id)
+        # Scoped by ctx.project_id (T-240): review_id is a caller-supplied id
+        # and ticket_id can collide across projects (per-project highest+1),
+        # so an unscoped lookup here let an operator in project A decide a
+        # review that actually belongs to project B's same-named ticket.
+        review = self.store.get_review(ctx.project_id, review_id)
         if review["ticket_id"] != ticket_id:
             raise NotFound("No such review on this ticket.",
                            {"review_id": review_id, "ticket_id": ticket_id})
@@ -604,9 +629,14 @@ class BoardServer:
         note = validate.text(body, "note", max_length=1000)
         expected_version = validate.integer(body, "expected_version", minimum=0)
 
-        agent = self.store.get_agent(agent_id)
-        if agent["project_id"] != ctx.project_id:
-            raise ForbiddenScope()
+        # Scoped by ctx.project_id (T-240): an unscoped get_agent() here,
+        # followed by a project check that raised a *different* error
+        # (ForbiddenScope, 403) than "no such agent" (NotFound, 404), let an
+        # attacker learn whether an agent_id exists in another project from
+        # the status code alone even though the revoke itself was blocked.
+        # get_agent(project_id=...) now raises the identical NotFound either
+        # way, so existence in another project is not observable.
+        agent = self.store.get_agent(agent_id, ctx.project_id)
         if agent["version"] != expected_version:
             raise _version_conflict("agent_id", agent_id, expected_version,
                                     agent["version"])
@@ -633,8 +663,8 @@ class BoardServer:
         #
         # Work is preserved and the ticket is NOT reassigned here; a new claim
         # is a separate, explicit step.
-        return Response(200, views.serialize_agent(self.store,
-                                                   self.store.get_agent(agent_id)))
+        return Response(200, views.serialize_agent(
+            self.store, self.store.get_agent(agent_id, ctx.project_id)))
 
     def create_enrollment(self, ctx):
         body = validate.check_body(
