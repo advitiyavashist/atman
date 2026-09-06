@@ -70,6 +70,45 @@ def test_the_same_key_with_a_different_body_is_409(enrolled, ticket):
     assert second.json()["error"]["code"] == "request_id_reused"
 
 
+def test_replaying_an_update_returns_the_original_and_applies_once(
+        server, enrolled, ticket):
+    """T-255: add_update had only a differing-body test; nothing asserted that
+    a byte-identical retry replays instead of appending a second row.
+    """
+    enrolled["client"].post("/tickets/{}/claim".format(ticket["id"]), {
+        "request_id": rid(), "expected_version": ticket["version"],
+        "session_id": enrolled["session_id"]})
+    key = rid()
+    path = "/tickets/{}/updates".format(ticket["id"])
+    body = {"request_id": key, "body": "did some things", "next_step": "n"}
+    first = enrolled["client"].post(path, body)
+    second = enrolled["client"].post(path, body)
+    assert first.status == 201 and second.status == 201
+    assert first.json() == second.json()
+    count = server.store.conn.execute(
+        "SELECT COUNT(*) FROM ticket_updates WHERE ticket_id = ?", (ticket["id"],)
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_replaying_blocked_returns_the_original_and_applies_once(
+        server, operator, ticket):
+    """T-255: `/blocked` had no replay test at all."""
+    key = rid()
+    path = "/tickets/{}/blocked".format(ticket["id"])
+    body = {"request_id": key, "expected_version": ticket["version"],
+            "blocked": True, "reason": "waiting on T-1"}
+    first = operator.post(path, body)
+    second = operator.post(path, body)
+    assert first.status == 200 and second.status == 200
+    assert first.json() == second.json()
+    detail = operator.get("/tickets/" + ticket["id"]).json()["ticket"]
+    assert detail["state"] == "blocked"
+    # Applied once: a second real block/unblock cycle would have moved the
+    # version by two, or flipped the state back to open.
+    assert detail["version"] == ticket["version"] + 1
+
+
 def test_request_ids_are_scoped_per_project(server, operator, project):
     """The same key in a different project is a different request, not a replay."""
     other = server.store.create_project("Other")
