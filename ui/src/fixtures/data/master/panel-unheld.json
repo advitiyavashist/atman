@@ -1,0 +1,21 @@
+{
+  "lease": {
+    "holder": null,
+    "epoch": 4,
+    "acquired_at": "2026-09-06T14:30:00Z",
+    "expires_at": "2026-09-06T14:45:00Z",
+    "routing_mode": "deterministic",
+    "paused": false,
+    "last_sweep_at": "2026-09-06T14:35:00Z",
+    "next_sweep_at": null,
+    "sweep_interval_seconds": 30
+  },
+  "queue": [],
+  "decisions": [],
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}

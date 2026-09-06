@@ -1,0 +1,78 @@
+{
+  "ticket": {
+    "id": "DEMO-13",
+    "project_id": "prj_demo0001",
+    "title": "Add the widget endpoint",
+    "outcome": "GET /widgets returns a cursor page and is covered by tests.",
+    "acceptance": [
+      {
+        "text": "Cursor paging works",
+        "checked": false,
+        "checked_by": null,
+        "checked_at": null
+      }
+    ],
+    "state": "claimed",
+    "version": 8,
+    "role": "backend",
+    "owner": "agt_backend02",
+    "owner_session": "ses_11223344",
+    "dependencies": [],
+    "dependency_blocked": false,
+    "blocked_reason": null,
+    "files": [
+      "src/widgets/"
+    ],
+    "worktree": "/repos/demo/.worktrees/backend-1",
+    "evidence": null,
+    "next_step": "Wire the cursor decoder.",
+    "handoff": null,
+    "created_at": "2026-09-06T14:30:00Z",
+    "updated_at": "2026-09-06T14:32:00Z",
+    "claimed_at": "2026-09-06T14:32:00Z",
+    "last_progress_at": "2026-09-06T14:32:00Z"
+  },
+  "updates": [
+    {
+      "id": "upd_00000002",
+      "ticket_id": "DEMO-13",
+      "author": {
+        "type": "agent",
+        "id": "agt_backend01",
+        "display_name": "backend-1",
+        "session_id": "ses_a1b2c3d4"
+      },
+      "body": "Still working the cursor decoder.",
+      "next_step": "Fix the boundary.",
+      "created_at": "2026-09-06T14:35:00Z",
+      "superseded": true
+    },
+    {
+      "id": "upd_00000003",
+      "ticket_id": "DEMO-13",
+      "author": {
+        "type": "agent",
+        "id": "agt_backend02",
+        "display_name": "backend-2",
+        "session_id": "ses_11223344"
+      },
+      "body": "Picked this up after the recovery note; re-running the paging tests.",
+      "next_step": "Re-run the suite and report.",
+      "created_at": "2026-09-06T14:40:00Z",
+      "superseded": false
+    }
+  ],
+  "reviews": [],
+  "assignment": null,
+  "dependencies": [],
+  "available_actions": [
+    "update",
+    "request_review"
+  ],
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}

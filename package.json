@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "npm workspace root so tests/ui/ (sibling to ui/, matching this repo's tests/<lane>/ convention) can resolve ui/'s devDependencies. No package of its own lives here — see ui/package.json.",
+  "workspaces": [
+    "ui"
+  ]
+}
