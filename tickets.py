@@ -2222,6 +2222,18 @@ def agent_liveness(board, rec, peers=None):
     return out
 
 
+def _clip(text, n):
+    """Trim to a word boundary. Cutting mid-token turned '11 of them inside
+    90s' into '...inside 9', which changes the number rather than shortening
+    the sentence."""
+    t = " ".join((text or "").split())
+    if len(t) <= n:
+        return t
+    cut = t[:n]
+    sp = cut.rfind(" ")
+    return (cut[:sp] if sp > n // 2 else cut).rstrip(" ,;") + "..."
+
+
 def liveness_mark(live):
     """One character telling a reader HOW the state was reached, so 'a human
     told us' never reads the same as 'the tool worked it out'."""
@@ -3951,7 +3963,7 @@ def cmd_brief(a, board):
     post_message(board, who, "brief updated for %s: %s" % (a.agent, (a.text or a.file)[:160]), to=a.agent)
 
 
-def utilization(board, tickets=None, hours=24):
+def utilization(board, tickets=None, hours=24, live=None):
     """Per-agent throughput and load over the window, plus sprint burn."""
     tickets = tickets if tickets is not None else load_all(board)
     cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
@@ -3972,7 +3984,12 @@ def utilization(board, tickets=None, hours=24):
         # DOWN is no longer reachable only through a hand-typed `tickets limit`
         # record: an agent whose sessions cannot start is down whether or not
         # anyone remembered to say so (T-237).
-        lv = _safe(lambda: agent_liveness(board, r, list(agents.values())), {}) if r else {}
+        # `live` is this refresh's already-computed states. Recomputing here
+        # would double every transcript read on a dash that refreshes in place.
+        # It is passed in per refresh and never cached across refreshes: a
+        # stale liveness cache is precisely the bug this ticket exists to fix.
+        lv = (live.get(n) if live is not None
+              else (_safe(lambda: agent_liveness(board, r, list(agents.values())), {}) if r else {})) or {}
         state = ("DOWN" if lv.get("state") in ("limited", "dead")
                  else ("busy" if any(t["status"] == "claimed" for t in held) else "idle"))
         rows.append({
@@ -4047,15 +4064,19 @@ def cmd_dash(a, board):
         lines.append("AGENTS")
         agents = load_agents(board)
         names = sorted(set([r["owner"] for r in agents] + [k for k, v in load_roles(board).items() if v]))
+        live = {}
         for nme in names:
             r = next((x for x in agents if x["owner"] == nme), {})
-            lv = _safe(lambda: agent_liveness(board, dict(r, owner=nme), agents), {})
+            live[nme] = _safe(lambda r=r, nme=nme: agent_liveness(board, dict(r, owner=nme), agents), {})
+        for nme in names:
+            r = next((x for x in agents if x["owner"] == nme), {})
+            lv = live[nme]
             state, mark = (lv.get("state") or "unknown"), liveness_mark(lv)
             if state in ("limited", "dead"):
                 # DOWN whether a human said so (!) or the tool worked it out
                 # (~) -- but the reader can still tell which, because those are
                 # different levels of evidence.
-                lines.append("  %-13s DOWN%s (%s)" % (nme[:13], mark, (lv.get("detail") or state)[:44]))
+                lines.append("  %-13s DOWN%s (%s)" % (nme[:13], mark, _clip(lv.get("detail") or state, 52)))
                 continue
             p = pending_work(board, nme)
             keys = [k for k in p if k != "broadcasts"]
@@ -4063,7 +4084,7 @@ def cmd_dash(a, board):
                 nme[:13], state, mark,
                 ("seen " + fmt_hours(hours_since(r["seen"]))) if r.get("seen") else "never",
                 ("pending: " + ", ".join(keys)) if keys else (lv.get("detail") or "")[:40]))
-        rows, burn = utilization(board, tickets, hours=24)
+        rows, burn = utilization(board, tickets, hours=24, live=live)
         live = [r for r in rows if r["state"] != "DOWN"]
         lines.append("UTILIZATION 24h  (%d live agents, %d down)" % (len(live), len(rows) - len(live)))
         for r in sorted(live, key=lambda r: -r["done"])[:8]:
