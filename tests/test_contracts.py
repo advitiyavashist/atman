@@ -1,9 +1,13 @@
 """T-178: the contract pack validates.
 
-Every fixture in tests/fixtures/ is validated against the OpenAPI component
-schema named for it in tests/fixtures/manifest.json. This is the acceptance bar
-for the freeze: a fixture that drifts from the contract fails here, and so does
-a contract change that invalidates a published fixture.
+Every contract fixture in tests/fixtures/ is validated against the OpenAPI
+component schema named for it in tests/fixtures/manifest.json. This is the
+acceptance bar for the freeze: a fixture that drifts from the contract fails
+here, and so does a contract change that invalidates a published fixture.
+
+Raw adapter-input fixtures, such as recorded Claude hook payloads, live under
+tests/fixtures/claude_hooks/ and are validated by adapter-specific tests before
+they are converted into contract HookEventRequest envelopes.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ REPO = Path(__file__).resolve().parents[1]
 SPEC_PATH = REPO / "docs" / "contracts" / "openapi.yaml"
 FIXTURES = REPO / "tests" / "fixtures"
 MANIFEST_PATH = FIXTURES / "manifest.json"
+RAW_ADAPTER_FIXTURE_DIRS = {FIXTURES / "claude_hooks"}
 
 SPEC_URI = "urn:ticket-board:openapi"
 
@@ -64,7 +69,11 @@ def _validator(schema_name: str) -> Draft202012Validator:
 
 
 def _fixture_paths() -> list[Path]:
-    return sorted(p for p in FIXTURES.rglob("*.json") if p != MANIFEST_PATH)
+    return sorted(
+        p
+        for p in FIXTURES.rglob("*.json")
+        if p != MANIFEST_PATH and not any(p.is_relative_to(raw_dir) for raw_dir in RAW_ADAPTER_FIXTURE_DIRS)
+    )
 
 
 def _rel(path: Path) -> str:
