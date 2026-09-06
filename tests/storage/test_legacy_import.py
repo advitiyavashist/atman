@@ -153,6 +153,13 @@ def test_an_oversized_document_is_truncated_and_reported(store, sample, monkeypa
     (b"a" * 99 + "é".encode(), "a" * 99, True),
     (b"\xff" * 101, "\ufffd" * 33, True),
     (("é" * 51).encode(), "é" * 50, True),
+    # Under the cap but not valid UTF-8. `path.read_text()` used to decode
+    # these strictly and raise UnicodeDecodeError, which `except OSError`
+    # does not catch, aborting the whole board import over one bad byte --
+    # the same bytes over the cap (the row above) already imported cleanly.
+    (b"\xff" * 99, "\ufffd" * 33, True),  # replacement chars push it back over
+    (b"\xff" * 10, "\ufffd" * 10, False),
+    (b"hello \xff world", "hello \ufffd world", False),
 ])
 def test_document_cap_bounds_stored_utf8_bytes(store, sample, monkeypatch,
                                               raw, expected, truncated):
