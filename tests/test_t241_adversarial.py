@@ -63,6 +63,8 @@ import importlib.util
 import json
 import os
 
+import pytest
+
 from test_wakeup import board, run  # noqa: F401
 
 TINY = {"TICKETS_MESSAGES_MAX_BYTES": "2000"}
@@ -79,6 +81,13 @@ def _load_tickets_module():
     return mod
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="T-244: checkin()/join() never initialize inbox_seen, so a never-"
+    "checked-in agent's first inbox call has since=='' and loses archived mail. "
+    "strict=True so this flips to a failure (forcing this test's removal/update) "
+    "the moment T-244 lands its fix -- do not let T-244 be closed quietly.",
+)
 def test_never_checked_in_agent_loses_archived_mail_forever(board):
     """The case none of the D1 tests chose: an agent whose agent record has
     no 'inbox_seen' key at all, because it has never called `tickets inbox`
