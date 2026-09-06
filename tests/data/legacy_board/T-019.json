@@ -1,0 +1,17 @@
+{
+  "title": "Owner with no runtime record",
+  "body": "What this ticket is for.",
+  "role": "backend",
+  "status": "claimed",
+  "deps": [],
+  "priority": 2,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [],
+  "owner": "agent-echo",
+  "created": "2026-01-02T09:00:00Z",
+  "updated": "2026-01-02T09:00:00Z",
+  "notes": [],
+  "id": "T-019",
+  "claimed_at": "2026-01-11T09:00:00Z"
+}
