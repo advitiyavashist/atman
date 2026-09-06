@@ -1,0 +1,47 @@
+{
+  "ticket": {
+    "id": "DEMO-16",
+    "project_id": "prj_demo0001",
+    "title": "Deploy the widget service",
+    "outcome": "The service runs on the staging host.",
+    "acceptance": [
+      {
+        "text": "Cursor paging works",
+        "checked": false,
+        "checked_by": null,
+        "checked_at": null
+      }
+    ],
+    "state": "blocked",
+    "version": 3,
+    "role": "backend",
+    "owner": null,
+    "owner_session": null,
+    "dependencies": [],
+    "dependency_blocked": false,
+    "blocked_reason": "Waiting on staging credentials from the operator.",
+    "files": [],
+    "worktree": null,
+    "evidence": null,
+    "next_step": null,
+    "handoff": null,
+    "created_at": "2026-09-06T14:30:00Z",
+    "updated_at": "2026-09-06T14:32:00Z",
+    "claimed_at": null,
+    "last_progress_at": null
+  },
+  "updates": [],
+  "reviews": [],
+  "assignment": null,
+  "dependencies": [],
+  "available_actions": [
+    "unblock",
+    "assign"
+  ],
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}
