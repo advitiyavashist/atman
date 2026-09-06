@@ -259,7 +259,8 @@ def test_error_status_matches_the_code_family():
 
 SECRET_PATTERNS = [
     re.compile(r"\bBearer\s+[A-Za-z0-9._-]{8,}", re.I),
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}"),
+    re.compile(r"\bsk[-_][A-Za-z0-9_-]{8,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bghp_[A-Za-z0-9]{8,}"),
     re.compile(r"\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b"),  # JWT
 ]
@@ -277,6 +278,33 @@ def test_no_fixture_contains_anything_shaped_like_a_credential():
         text = (FIXTURES / rel).read_text()
         for pattern in SECRET_PATTERNS:
             assert not pattern.search(text), f"{rel} matches {pattern.pattern}"
+
+
+@pytest.mark.parametrize("credential", [
+    "sk-live_" + "a1B2c3D4" * 3,
+    "sk-proj_" + "a1B2c3D4" * 3,
+    "sk_test_" + "a1B2c3D4" * 3,
+    "AKIA" + "A1B2C3D4" * 2,
+    "sk-" + "a1B2c3D4" * 3,
+    "ghp_" + "a1B2c3D4" * 3,
+    "Bearer " + "a1B2c3D4" * 3,
+    ".".join(["a1B2c3D4" * 2] * 3),
+], ids=["sk-live", "sk-proj", "sk-test", "aws-akia",
+        "legacy-sk", "github", "bearer", "jwt"])
+def test_fixture_scanner_rejects_planted_credentials(tmp_path, monkeypatch, credential):
+    """Exercise the actual fixture scan without changing the frozen fixtures."""
+    rel = "planted.json"
+    fixture = tmp_path / rel
+    monkeypatch.setitem(globals(), "FIXTURES", tmp_path)
+    monkeypatch.setitem(globals(), "MANIFEST", {rel: "unused-by-credential-scan"})
+
+    # The same throwaway fixture passes until a credential is planted in a
+    # free-text field, independently of the code/token placeholder check.
+    fixture.write_text(json.dumps({"description": "synthetic fixture"}))
+    test_no_fixture_contains_anything_shaped_like_a_credential()
+    fixture.write_text(json.dumps({"description": f"synthetic {credential} value"}))
+    with pytest.raises(AssertionError, match=r"planted\.json matches"):
+        test_no_fixture_contains_anything_shaped_like_a_credential()
 
 
 def test_secret_bearing_fields_use_placeholders():
