@@ -302,14 +302,31 @@ def exchange_enrollment(
 
 
 def _ensure_safe_project_dir(project_dir: Path) -> None:
-    resolved = project_dir.resolve()
-    text = str(resolved)
+    resolved = project_dir.resolve(strict=False)
+    home = Path.home().resolve(strict=False)
+    user_claude_dir = (home / ".claude").resolve(strict=False)
+    target_settings = (resolved / ".claude" / "settings.json").resolve(strict=False)
+    user_settings = (user_claude_dir / "settings.json").resolve(strict=False)
+
+    if _is_relative_to(resolved, user_claude_dir):
+        raise ClaudeHookError("refusing to use user-level Claude config as a project dir: %s" % resolved)
+    if target_settings == user_settings or _is_relative_to(target_settings, user_claude_dir):
+        raise ClaudeHookError("refusing to write user-level Claude settings: %s" % target_settings)
+
     forbidden_roots = (
-        "/Users/kavana/Downloads/steer/.worktrees/",
-        "/Users/kavana/Downloads/tickets/.worktrees/",
+        Path("/Users/kavana/Downloads/steer/.worktrees").resolve(strict=False),
+        Path("/Users/kavana/Downloads/tickets/.worktrees").resolve(strict=False),
     )
-    if any(text.startswith(root) for root in forbidden_roots):
+    if any(resolved == root or _is_relative_to(resolved, root) for root in forbidden_roots):
         raise ClaudeHookError("refusing to enroll a live agent worktree: %s" % resolved)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 OWNER_MARKER = "ticket-board-hook"

@@ -141,6 +141,28 @@ def test_install_refuses_live_agent_worktree(enrollment, config):
         install_hooks(Path("/Users/kavana/Downloads/steer/.worktrees/some-agent"), enrollment, config)
 
 
+def test_install_refuses_user_level_claude_config(tmp_path, enrollment, config, monkeypatch):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    with pytest.raises(ClaudeHookError, match="user-level Claude settings"):
+        install_hooks(fake_home, enrollment, config)
+    with pytest.raises(ClaudeHookError, match="user-level Claude config"):
+        install_hooks(fake_home / ".claude" / "projects" / "scratch", enrollment, config)
+
+
+def test_install_refuses_symlink_to_user_home(tmp_path, enrollment, config, monkeypatch):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    project_link = tmp_path / "project-link"
+    project_link.symlink_to(fake_home, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    with pytest.raises(ClaudeHookError, match="user-level Claude settings"):
+        install_hooks(project_link, enrollment, config)
+
+
 class FailingClient(BoardClient):
     def __init__(self):
         pass
