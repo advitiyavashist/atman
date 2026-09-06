@@ -582,6 +582,52 @@ def test_messages_rotate_past_cap_and_load_messages_defaults_to_live_file(board)
     assert "message number 0 " in out and "message number 19" in out
 
 
+def test_first_ever_inbox_check_does_not_silently_hide_rotated_history(board):
+    """T-244: an agent that has never checked its inbox (inbox_seen="") must
+    not lose every rotated-away message with no signal at all. Chosen fix is
+    option (b) from the ticket: since="" stays "live file only" (flooding a
+    brand-new agent with full board history is worse), but `tickets inbox`
+    must say so and name how many archived messages are hidden.
+    """
+    run(board, "join", "alice", "--roles", "backend")
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    for i in range(20):
+        r = run(board, "msg", "message number %d filler filler filler" % i,
+                "--to", "alice", agent="bob", env=env)
+        assert r.returncode == 0, r.stderr
+    archives = sorted(board.glob("messages.*.jsonl"))
+    assert archives, "expected rotation to have fired"
+
+    # since="" (alice has never run `tickets inbox`): the live tail shows,
+    # archives do not flood in, and the gap is named, not silent.
+    out = run(board, "inbox", agent="alice").stdout
+    assert "message number 19" in out
+    assert "message number 0 " not in out
+    assert "archived message" in out and "tickets inbox --all" in out
+
+    full = run(board, "inbox", "--all", "--limit", "100", agent="alice").stdout
+    assert "message number 0 " in full and "message number 19" in full
+
+
+def test_inbox_hint_is_silent_once_inbox_seen_is_set(board):
+    """The archived-message hint is only for the never-checked-in case --
+    once an agent has a real `inbox_seen`, the existing T-212 archive-catchup
+    path applies instead (unread() still reads archives when `since` predates
+    the live file), and this hint must not fire every single time."""
+    run(board, "join", "alice", "--roles", "backend")
+    first = run(board, "inbox", agent="alice")
+    assert first.returncode == 0 and "inbox empty" in first.stdout  # sets inbox_seen
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    for i in range(20):
+        r = run(board, "msg", "later message %d filler filler filler" % i,
+                "--to", "alice", agent="bob", env=env)
+        assert r.returncode == 0, r.stderr
+    assert sorted(board.glob("messages.*.jsonl")), "expected rotation to have fired"
+    out = run(board, "inbox", agent="alice").stdout
+    assert "later message 0 " in out  # since predates the rotation: T-212 path shows it
+    assert "archived message" not in out
+
+
 def test_master_decision_log_trims_past_cap_and_archives(board):
     run(board, "master", "init", agent="boss")
     env = {"TICKETS_MASTER_LOG_MAX_BYTES": "300", "TICKETS_MASTER_LOG_KEEP_ENTRIES": "3"}
