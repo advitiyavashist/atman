@@ -554,6 +554,40 @@ components:
         dashboard renders an agent hard-limited for weeks as merely idle, which
         is the confident-wrong-answer failure mode the board already suffers.
 
+    AgentLimitDetail:
+      type: object
+      additionalProperties: false
+      required: [source]
+      description: |
+        Set only when `Agent.state` is `limited`. A structured replacement for
+        a single free-text reason (T-224, corrected during review): T-230's
+        liveness-truth spec found that today's `limited` signal is
+        self-reported only, and a flat string cannot say whether a given
+        report is confirmed or guessed. `source` carries that distinction so
+        a dashboard never renders a heuristic guess with the same confidence
+        as a derived, evidenced one.
+      properties:
+        source:
+          type: string
+          enum: [manual, derived, heuristic]
+          description: |
+            `manual`: an operator or the agent itself explicitly reported the
+            limit (e.g. the CLI's `tickets limit`). `derived`: computed from a
+            concrete signal the board can point to (a watcher run's exit
+            code, a provider-reported reset time). `heuristic`: inferred from
+            an absence pattern (sustained silence, an overdue heartbeat) with
+            no confirmed cause -- lowest confidence, and must be rendered
+            distinguishably from `derived`, never collapsed into it.
+        since:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: When the limit was first observed or reported. Null if unknown.
+        until:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: Known reset time, when the source reports one. Null if unknown.
+        note:
+          anyOf: [{ type: string, maxLength: 200 }, { type: 'null' }]
+          description: Free text (e.g. "usage limit, resets 2026-10-05").
+
     HookHealth:
       type: object
       description: |
@@ -634,16 +668,12 @@ components:
             active_tickets: { type: integer, minimum: 0 }
         current_ticket:
           anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
-        limit_reason:
-          anyOf: [{ type: string, maxLength: 200 }, { type: 'null' }]
+        limit:
+          anyOf: [{ $ref: '#/components/schemas/AgentLimitDetail' }, { type: 'null' }]
           description: |
-            Set only when `state` is `limited`. Free text (e.g. "usage limit,
-            resets 2026-10-05") -- T-224 deliberately does not enumerate causes
-            here, since the real values seen this sprint (a plan-wide session
-            cap, a hard monthly cap, an auth failure) do not share one taxonomy.
-        limit_until:
-          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
-          description: Known reset time, when the source reports one. Null if unknown.
+            Set only when `state` is `limited`; null otherwise. See
+            `AgentLimitDetail` -- deliberately not a single free-text reason,
+            so a dashboard can tell a confirmed limit from a heuristic guess.
         session:
           anyOf: [{ $ref: '#/components/schemas/SessionLease' }, { type: 'null' }]
         worktree:

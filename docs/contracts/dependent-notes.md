@@ -117,16 +117,21 @@ wrong against a doc — raise it with the master instead.
    here, because the board's real failure mode is masters dying silently, not
    masters being impersonated on a loopback-bound board. Revisit only
    together with decision 11 below, never separately.
-10. **CLI goes read-only at cutover; no dual-write bridge.** (T-224 ruling,
-    planner 18:05Z, resolving T-211 §3 legacy-writer handover.) A dual-write
-    bridge means two writers against one board with no shared transaction —
-    the same failure class as the T-215 cross-repo close and the T-202
-    double-build, introduced deliberately at the exact moment a migration bug
-    would be hardest to tell from a product bug. There is no calendar freeze
-    date: the gate is evidential. Sequence is server read-write behind this
-    contract → T-185/T-190 pass against the live server → CLI flips to
-    read-only in one commit → `legacy_writer_active` stops being a 409 nobody
-    can trigger. Nothing may require CLI read-only *before* T-185/T-190 pass.
+10. **No dual-write bridge; V1 has no cutover to gate.** (T-224 ruling, planner
+    18:05Z, resolving T-211 §3 legacy-writer handover; corrected on reopen —
+    the first draft of this decision wired the flip to T-185/T-190 passing,
+    which the planner struck as a V1 amendment smuggling in a V2 event.) A
+    dual-write bridge means two writers against one board with no shared
+    transaction — the same failure class as the T-215 cross-repo close and
+    the T-202 double-build, introduced deliberately at the exact moment a
+    migration bug would be hardest to tell from a product bug. There is no
+    calendar freeze date *and no evidential one either*: the `.tickets` CLI
+    stays authoritative for the board twelve live agents coordinate on today;
+    T-180's server is authoritative only for its own database. `409
+    legacy_writer_active` is implemented in the contract now but stays OFF in
+    V1 — it is the documented mechanism a *future* V2 cutover will flip, not
+    something T-185/T-190 passing triggers on its own. Nothing in V1 requires
+    the CLI to go read-only.
 11. **No operator sign-in / session-mint route in V1.** (T-224 ruling, planner
     18:05Z, resolving T-211 §7.) See `openapi.yaml`'s `operatorSession`
     scheme description for the contract-prose statement dependents must not
@@ -165,10 +170,35 @@ except where leaving it as-is would make V1 impossible (a required V1
 behavior cannot be expressed) or dishonest (the schema would force
 publishing something known false).* Six edits met that bar — nothing else
 touches `openapi.yaml` under this ticket. `info.version` bumped
-`1.0.0-rc.1` -> `1.0.0-rc.2` for this batch (relaxing `CreateTicketRequest`
-and requiring `GitEvidence.repository` are breaking per README rule 3/4;
-the other four are additive but shipped in the same version bump rather
-than split, since they land in one commit).
+`1.0.0-rc.1` -> `1.0.0-rc.2` for this batch. Per-item, against README's
+freeze rules:
+
+- **Breaking (rule 3), forcing the bump (rule 4):** relaxing
+  `CreateTicketRequest.outcome`/`.acceptance` from required to optional
+  changes what a previously-invalid request means (an omitted `acceptance`
+  now validates, so a client relying on the 422 to catch its own bug no
+  longer gets one), and requiring `GitEvidence.repository` rejects requests
+  a dependent may already send without it. Both are deliberate: rule 3 exists
+  to make a lane raise this with the master before merging, which is exactly
+  what T-224 did (planner sign-off, 17:55Z/18:05Z).
+- **Additive (rule 2), no version bump required on their own account:**
+  `Ticket.priority/epic/sprint/needs`, the widened `AgentId` pattern (a
+  regex superset — every string the old pattern accepted still matches) and
+  the new `POST /tickets/{ticket_id}/reopen` route are all new-optional or
+  new-route, the textbook additive case.
+- **Judged additive, stated explicitly rather than assumed:** a new
+  `AgentState` enum member (`limited`) and a new optional `Agent.limit`
+  object are not covered by either README rule as written — expanding a
+  closed enum can break a consumer that switches on it without a default
+  case. Ruled additive here because no such consumer exists yet: T-180 (the
+  only implementation of this contract) has not shipped, so there is no
+  deployed client to break. This judgment call does not survive T-180
+  shipping — a *future* enum addition, once a real dashboard renders
+  `AgentState`, must be re-examined against actual switch-statement
+  exhaustiveness, not assumed additive by analogy to this one.
+
+All six land in one version bump rather than split, since they land in one
+commit.
 
 | # | Amendment | Rationale |
 |---|---|---|
@@ -177,7 +207,7 @@ than split, since they land in one commit).
 | 3 | `AgentId` pattern widened to `^(agt_[0-9a-z]{8,32}|[a-z][a-z0-9-]{1,31})$`. | 0 of ~35 live agent names match `agt_*`; renaming every identity at cutover touches every brief, hook config and `tickets msg --to` on the board. The human-readable name IS the V1 identity; the `agt_` form stays legal for a server-minted id later. Resolves T-211 amendment item 4. |
 | 4 | New route `POST /tickets/{ticket_id}/reopen` (`ReopenTicketRequest`: `request_id`, `expected_version`, `reason`; operator-gated). Returns the ticket to `open` with owner/owner_session cleared, distinct from `decideReview`'s reject-to-`claimed`. | `MASTER.md` HANDOVER step 2 (recover a silent claim), T-182's assignment loop and T-185's recovery verification all depend on an operation the contract could not express at all. This is the "impossible" bar: recovery is unimplementable without it. Resolves T-211 amendment item 6. |
 | 5 | `GitEvidence.repository` promoted from optional to `required`. `sha`'s 40-hex shape is explicitly NOT relaxed. | T-229 finding (1): `repository` already existed as an optional field — the real fix was always "require it," not "add it." An unqualified sha with no repository is how an unrelated repo's merge can appear to "contain" evidence that was never built there (T-215's live failure). Relaxing `sha` instead would fix the validation error and leave the actual bug armed — legacy `branch@shortsha` evidence is archived verbatim and reported as a mismatch, never fabricated into a fake `GitEvidence` (T-213's settled call, upheld independently twice). Resolves T-211 amendment item 7 / §9, as corrected by T-229. **Consequence found while implementing, reported here since it goes beyond the one-line schema edit**: the legacy importer (`storage/legacy.py: _evidence()`) has no source of repository identity at all today, so it now withholds `GitEvidence` unconditionally (bumping a new `"no repository identity"` mismatch count) rather than fabricate one — including for the one sample ticket whose commit was already a real 40-hex sha, which previously did get real evidence. Zero reviews import from either sample legacy board until a caller can supply real repository identity (T-215's CLI-side work, not done here). Tests updated: `tests/storage/test_legacy_import.py`, `tests/storage/test_contract_conformance.py`. |
-| 6 | `AgentState` gains `limited`. `Agent` gains optional `limit_reason` (free text) and `limit_until` (nullable timestamp). | T-229 finding (4), promoted from a gap to required: gpt-cursor's hard monthly limit and a plan-wide Claude session limit both happened THIS session with no way to represent either. A dashboard that cannot say "out on a usage limit until X" renders a dead agent as idle — the exact confident-wrong-answer failure the board already suffers (T-230's liveness-truth spec, same session, independently reaches the same conclusion from the CLI side: the `limited` signal today is self-reported only, via `tickets limit`, never derived). `limit_reason` is deliberately free text, not an enum — the real causes seen this sprint (session cap, monthly cap, auth failure) do not share one taxonomy yet. |
+| 6 | `AgentState` gains `limited`. `Agent` gains optional `limit` (`AgentLimitDetail`: `source` enum `manual`/`derived`/`heuristic`, plus nullable `since`, `until`, `note`). | T-229 finding (4), promoted from a gap to required: gpt-cursor's hard monthly limit and a plan-wide Claude session limit both happened THIS session with no way to represent either. A dashboard that cannot say "out on a usage limit until X" renders a dead agent as idle — the exact confident-wrong-answer failure the board already suffers. T-230's liveness-truth spec (same session, CLI side) independently reaches a sharper conclusion than the original draft of this row assumed: `limited` is not just self-reported, it is self-reported *only*, with no way to tell a confirmed signal from a guess. A single free-text `limit_reason` cannot carry that distinction, so this was corrected during review from a flat `limit_reason`/`limit_until` pair to the structured `AgentLimitDetail` object, whose `source` field is exactly the manual/derived/heuristic taxonomy T-230 defines. `note` stays free text — the real causes seen this sprint (session cap, monthly cap, auth failure) do not share one closed taxonomy. |
 
 Documentation only, no schema change (T-211 items 1, 5, 10, 13 and T-229
 findings (2), (3)):
