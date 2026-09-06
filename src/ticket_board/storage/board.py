@@ -36,6 +36,7 @@ from .errors import (
     TicketAlreadyClaimed,
     TicketVersionConflict,
 )
+from .messaging import MessagingMixin
 
 ACTIVE_STATES = ("claimed", "review")
 TERMINAL_STATES = ("done",)
@@ -79,8 +80,10 @@ def _omit_none(payload, fields):
     return payload
 
 
-class BoardStore:
+class BoardStore(MessagingMixin):
     """Transactional store for one board database (may hold many projects)."""
+
+    SYSTEM_ACTOR = SYSTEM_ACTOR
 
     def __init__(self, path):
         self.path = str(path)

@@ -28,6 +28,7 @@ import errno
 import glob
 import json
 import os
+import shlex
 import sys
 from datetime import datetime, timezone
 
@@ -368,6 +369,54 @@ def master_path(board):
     return os.path.join(board, "MASTER.md")
 
 
+def objective_path(board):
+    return os.path.join(board, "objective.json")
+
+
+def load_objective(board):
+    """The standing objective the master drives toward (`tickets objective`).
+    {} when none is set."""
+    try:
+        with open(objective_path(board)) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return {}
+
+
+def drive_status(board, tickets=None):
+    """One-paragraph progress picture for the master's heartbeat: sprint burn,
+    review queue, unowned ready work, live workers whose lane is empty."""
+    tickets = tickets if tickets is not None else load_all(board)
+    cur = active_sprint(board)
+    lines = []
+    if cur:
+        mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+        d = sum(1 for t in mine if t.get("status") == "done")
+        lines.append("sprint %s: %d/%d done, %d in flight, %d blocked -- %s" % (
+            cur["id"], d, len(mine), sum(1 for t in mine if t.get("status") in ("claimed", "review")),
+            sum(1 for t in mine if t.get("status") == "blocked"), cur.get("goal", "")[:100]))
+    else:
+        lines.append("no active sprint")
+    rq = [t["id"] for t in tickets if t.get("status") == "review"]
+    lines.append("review queue: %s" % (", ".join(rq) if rq else "empty"))
+    ready = [t for t in unblocked(board, tickets) if not t.get("owner")]
+    lines.append("ready and unowned: %s" % (", ".join(t["id"] for t in ready[:8]) if ready else "none"))
+    idle = []
+    for r in load_agents(board):
+        who = r.get("owner", "")
+        if not who or r.get("limit") or hours_since(r.get("seen", "")) > 2:
+            continue
+        holds = any(t.get("owner") == who and t.get("status") in ("claimed", "review") for t in tickets)
+        if holds:
+            continue
+        roles = roles_for(board, who, None)
+        lane = [t for t in _filter_ready(unblocked(board, tickets), roles) if can_do(board, who, t)]
+        if not lane:
+            idle.append(who)
+    lines.append("live workers with an empty lane: %s" % (", ".join(idle) if idle else "none"))
+    return "\n".join(lines)
+
+
 def master_state_path(board):
     return os.path.join(board, "master.json")
 
@@ -430,7 +479,12 @@ def agents_dir(board):
 def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
     g = git_state() or {}
-    rec = {
+    os.makedirs(agents_dir(board), exist_ok=True)
+    path = os.path.join(agents_dir(board), owner + ".json")
+    # Other commands keep their own state in this record (inbox_seen, limit,
+    # stop_blocks); a check-in must not erase it or every watch poll re-wakes the agent.
+    rec = _agent_rec(board, owner) or {}
+    rec.update({
         "owner": owner,
         "cwd": os.getcwd(),
         "worktree": g.get("top", ""),
@@ -440,9 +494,7 @@ def checkin(board, owner, ticket=None, note=""):
         "ticket": ticket if ticket is not None else _current_ticket(board, owner),
         "note": note,
         "seen": now(),
-    }
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
+    })
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(rec, f, indent=2)
@@ -2039,6 +2091,9 @@ def cmd_master(a, board):
     m = current_master(board)
     print("=" * 72)
     print("MASTER BRIEFING  %s" % board)
+    obj = _safe(lambda: load_objective(board), {})
+    if obj:
+        print("OBJECTIVE%s: %s" % (" (met)" if obj.get("done") else "", obj.get("text", "")[:300]))
     me = whoami()
     if m:
         stale = hours_since(m["since"])
@@ -2414,6 +2469,19 @@ def load_messages(board):
     return out
 
 
+def _agent_set(board, owner, **fields):
+    """Update fields on an agent record without touching the rest of it."""
+    rec = _agent_rec(board, owner) or checkin(board, owner)
+    rec.update(fields)
+    os.makedirs(agents_dir(board), exist_ok=True)
+    path = os.path.join(agents_dir(board), owner + ".json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, path)
+    return rec
+
+
 def _agent_rec(board, owner):
     path = os.path.join(agents_dir(board), owner + ".json")
     try:
@@ -2757,6 +2825,15 @@ def pending_work(board, owner):
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
         if crit:
             out["health_crit"] = [i[1][:80] for i in crit[:3]]
+        # The objective heartbeat: the master seat is woken every `drive_every`
+        # minutes (set by `watch --heartbeat`) even when nothing else is pending,
+        # so it keeps planning toward the objective instead of going quiet.
+        obj = _safe(lambda: load_objective(board), {})
+        every = int(rec.get("drive_every") or 0)
+        if obj and not obj.get("done") and every > 0 and owner == m.get("owner"):
+            last = rec.get("drive_at", "")
+            if not last or hours_since(last) * 60 >= every:
+                out["drive"] = {"objective": obj.get("text", "")[:100], "last": last or "never"}
     return out
 
 
@@ -2819,6 +2896,76 @@ Stop when there is nothing addressed to you, the sprint matches the vision, and 
 {extra}"""
 
 
+DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; `tickets objective` to read it in full):
+{objective}
+
+DRIVE STATUS now:
+{status}
+
+5. DRIVE THE OBJECTIVE (this wake-up may have been a heartbeat with nothing else pending -- that is the point):
+   compare the status above with the objective. If the sprint is done, lanes are empty, or ready work is
+   unowned, plan the next slice toward the objective NOW: `tickets plan`/`tickets create` the missing tickets,
+   `tickets route` + `tickets assign`, `tickets brief` the context, `tickets spawn` where a lane has no live
+   worker, and log the reasoning with `tickets master log`. If the objective is met, run
+   `tickets objective --done "<evidence>"` and post it. If it cannot be met without the user (spend, credentials,
+   a decision they reserved), post exactly what you need with `tickets msg` and log it; do not guess.
+   Never end a heartbeat without either advancing the plan or logging why nothing needed to change."""
+
+
+def cmd_objective(a, board):
+    """Set, show or close the standing objective the master drives toward."""
+    path = objective_path(board)
+    cur = load_objective(board)
+    if a.done is not None:
+        if not cur:
+            sys.exit("no objective set")
+        cur["done"] = True
+        cur["done_at"] = now()
+        cur["evidence"] = a.done
+        with open(path, "w") as f:
+            json.dump(cur, f, indent=2)
+        post_message(board, whoami(a.by), "objective met: %s -- %s" % (cur.get("text", "")[:120], a.done))
+        _master_log(board, "objective met: %s" % a.done, by=whoami(a.by))
+        print("objective marked met")
+        return
+    if a.text:
+        rec = {"text": a.text, "set_by": whoami(a.by), "at": now(), "done": False}
+        with open(path, "w") as f:
+            json.dump(rec, f, indent=2)
+        post_message(board, whoami(a.by), "objective set: %s" % a.text[:200])
+        _master_log(board, "objective set: %s" % a.text, by=whoami(a.by))
+        print("objective set")
+        return
+    if not cur:
+        print("no objective set; `tickets objective \"<what done looks like>\"`")
+        return
+    print("OBJECTIVE%s (set by %s, %s)" % (" -- MET" if cur.get("done") else "", cur.get("set_by", "?"), cur.get("at", "")))
+    print(cur.get("text", ""))
+    if cur.get("done"):
+        print("evidence: %s" % cur.get("evidence", ""))
+    print()
+    print(drive_status(board))
+
+
+def cmd_drive(a, board):
+    """Set the objective and spawn the master seat with a heartbeat, in one go:
+    `tickets drive "<objective>" --as claude-fable --tool cursor+claude --heartbeat 30`."""
+    owner = whoami(a.by)
+    if a.text:
+        ns = argparse.Namespace(text=a.text, done=None, by=owner)
+        cmd_objective(ns, board)
+    elif not load_objective(board):
+        sys.exit("give an objective: tickets drive \"<what done looks like>\"")
+    argv = [sys.executable, os.path.realpath(__file__), "spawn", owner, "--master",
+            "--heartbeat", str(a.heartbeat), "--every", str(a.every), "--tool", a.tool]
+    if a.model:
+        argv += ["--model", a.model]
+    import subprocess
+    if a.restart:
+        subprocess.call([sys.executable, os.path.realpath(__file__), "spawn", owner, "--stop"])
+    sys.exit(subprocess.call(argv))
+
+
 def cos_prompt_text(agent, board, root, extra):
     return MASTER_PROMPT.replace("the MASTER of", "the CHIEF OF STAFF of").replace(
         "Your three jobs, every wake-up:",
@@ -2874,12 +3021,18 @@ def cmd_prompt(a, board):
         print(cos_prompt_text(owner, board, os.path.dirname(board), a.extra or ""))
         return
     if getattr(a, "master", False):
+        extra = a.extra or ""
+        obj = _safe(lambda: load_objective(board), {})
+        if obj and not obj.get("done"):
+            _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
+            extra = DRIVE_PROMPT.format(objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
+                                        status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
         if cos and owner != cos:
             print(PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
-                                        extra=(a.extra or "")))
+                                        extra=extra))
         else:
             print(MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
-                                       extra=(a.extra or "")))
+                                       extra=extra))
         return
     parts = []
     brief = agent_brief(board, owner)
@@ -3115,6 +3268,7 @@ def cmd_stop_hook(a, board):
         print("{}")
         return
     p = _safe(lambda: pending_work(board, owner), {})
+    p.pop("drive", None)  # the heartbeat wakes the watcher; it must never pin an interactive turn open
     if not actionable(p) or not _record_stop_block(board, owner):
         print("{}")
         return
@@ -3215,6 +3369,7 @@ def cmd_watch(a, board):
         if not a.once:
             print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, every, cwd, cmd))
             _safe(lambda: checkin(board, owner, None, "watch loop online (every %ds)" % every), None)
+        _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
             if os.path.exists(_stop_file(board, owner)):
                 try:
@@ -3411,6 +3566,8 @@ Spawning a team from a master session (models per agent):
   tickets spawn scribe --model sonnet --roles docs --brief "house style: ..."     # cheap worker
   tickets spawn core   --model opus   --roles backend --cost high                # hard tickets
   tickets spawn boss   --master --model sonnet                                   # coordinate / unblock / review / merge
+  tickets drive "<what done looks like>" --as boss --heartbeat 30               # objective + master seat that wakes
+                                                                                #   every 30 min to plan toward it
   tickets spawn --list | tickets spawn <name> --stop
   Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
   a detached watcher that runs the tool with that model only when `tickets pending` says there is
@@ -3434,7 +3591,10 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
     permission prompts by default: nobody is there to answer them, and the
     blast radius is the agent's own worktree and branch (--safe for acceptEdits).
     """
-    model = model or load_workforce(board).get(owner, {}).get("model", "")
+    # The workforce record is writable by any agent, so the model name is quoted
+    # before it reaches `watch`, which runs this string through the shell.
+    model = shlex.quote(model or load_workforce(board).get(owner, {}).get("model", "") or "")
+    model = "" if model == "''" else model
     prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
         master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
     if tool == "claude":
@@ -3567,7 +3727,8 @@ def cmd_spawn(a, board):
     kind = "cos" if a.cos else ("master" if a.master else "")
     cmd = a.exec or _worker_cmd(board, owner, a.model, mode, a.tool or "claude", master=kind)
     argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
-            "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout)]
+            "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
+            "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
     env = dict(os.environ, TICKET_AGENT=owner, TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
@@ -3624,7 +3785,7 @@ const s=d.sprint;document.getElementById('sprint').innerHTML=s?('<b>'+esc(s.id)+
 document.getElementById('goals').innerHTML=esc(d.goals||'(no MASTER.md yet -- tickets master init)');
 document.getElementById('util').innerHTML='<tr><th>agent</th><th>state</th><th class="num">done</th><th>avg cycle</th><th>active</th><th>util</th><th class="num">wip</th><th class="num">review</th></tr>'+d.util.map(u=>row([esc(u.agent),'<span class="'+(u.state=='DOWN'?'bad':u.state=='busy'?'ok':'')+'">'+u.state+'</span>','<span class="num">'+u.done+'</span>',h(u.avg_cycle_h),h(u.active_h),'<div class="bar" style="width:120px;display:inline-block;vertical-align:middle"><i style="width:'+u.util_pct+'%"></i></div> '+Math.round(u.util_pct)+'%','<span class="num">'+u.in_flight+'</span>','<span class="num">'+u.in_review+'</span>'])).join('');
 document.getElementById('flight').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>last update</th></tr>'+d.in_flight.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>'])).join('')||row(['—','','',''] );
-document.getElementById('review').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>branch</th></tr>'+d.review.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="mono">'+esc(t.commit)+'</span>'+(t.pr?' PR '+t.pr:'')])).join('')||row(['empty','','','']);
+document.getElementById('review').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>branch</th></tr>'+d.review.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="mono">'+esc(t.commit)+'</span>'+(t.pr?' PR '+esc(t.pr):'')])).join('')||row(['empty','','','']);
 document.getElementById('agents').innerHTML='<tr><th>agent</th><th>state</th><th>model</th><th class="num">done 24h</th><th>seen</th><th>ticket</th></tr>'+d.agents.map(a=>row([esc(a.name),'<span class="'+(a.state=='DOWN'?'bad':a.state=='busy'?'ok':'')+'">'+a.state+(a.watcher?' ●':'')+'</span>',esc(a.model||'-'),'<span class="num">'+a.done+'</span>',h(a.seen_h)+' ago',esc(a.ticket||'')])).join('');
 document.getElementById('health').innerHTML=d.health.length?d.health.map(x=>row(['<span class="'+(x.sev=='CRIT'?'bad':x.sev=='WARN'?'warn':'')+'">'+x.sev+'</span>',esc(x.msg)])).join(''):row(['<span class="ok">clean</span>','']);
 document.getElementById('open').innerHTML='<tr><th>id</th><th>status</th><th>pri</th><th>title</th><th>role</th><th>waits on</th></tr>'+d.open.map(t=>row([t.id,'<span class="tag">'+t.status+'</span>',t.priority,esc(t.title),esc(t.role),esc((t.waiting||[]).join(','))])).join('');
@@ -3669,6 +3830,9 @@ def board_snapshot(board, messages=40):
         goals = "\n\n".join(picked)
     except OSError:
         pass
+    obj = _safe(lambda: load_objective(board), {})
+    if obj:
+        goals = "OBJECTIVE%s\n%s\n\n%s" % (" (met)" if obj.get("done") else "", obj.get("text", ""), goals)
     util_rows = [r for r in rows if r["state"] != "DOWN"]
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
@@ -4141,9 +4305,27 @@ def main():
     c = sub.add_parser("stop-hook", help="Claude Code Stop hook: block the stop while board work remains")
     c.set_defaults(fn=cmd_stop_hook)
 
+    c = sub.add_parser("objective", help="set/show/close the standing objective the master drives toward")
+    c.add_argument("text", nargs="?", default="")
+    c.add_argument("--done", default=None, metavar="EVIDENCE", help="mark the objective met, with evidence")
+    c.add_argument("--by", default="")
+    c.set_defaults(fn=cmd_objective)
+
+    c = sub.add_parser("drive", help="set the objective and spawn the master seat with a heartbeat")
+    c.add_argument("text", nargs="?", default="")
+    c.add_argument("--by", "--as", dest="by", default="", help="agent name for the master seat (default TICKET_AGENT)")
+    c.add_argument("--heartbeat", type=int, default=30, help="minutes between objective wake-ups")
+    c.add_argument("--every", type=int, default=60, help="seconds between board polls")
+    c.add_argument("--tool", default="claude", help="claude | codex | cursor | cursor+claude")
+    c.add_argument("--model", default="")
+    c.add_argument("--restart", action="store_true", help="stop an existing watcher for this seat first")
+    c.set_defaults(fn=cmd_drive)
+
     c = sub.add_parser("watch", help="poll the board and launch a worker when there is work for the agent")
     c.add_argument("--agent", default="")
     c.add_argument("--every", type=int, default=60, help="seconds between polls")
+    c.add_argument("--heartbeat", type=int, default=0,
+                   help="master seat only: also wake every N minutes to drive the objective (0 = off)")
     c.add_argument("--exec", default="", help="command to run (default: headless claude with `tickets prompt`)")
     c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
     c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
@@ -4190,6 +4372,8 @@ def main():
     c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
     c.add_argument("--every", type=int, default=60)
     c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--heartbeat", type=int, default=0,
+                   help="with --master: also wake every N minutes to drive the objective (0 = off)")
     c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
     c.add_argument("--master", action="store_true",
                    help="spawn the board master/planner (scope, routing by complexity, escalations)")
