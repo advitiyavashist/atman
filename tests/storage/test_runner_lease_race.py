@@ -4,11 +4,13 @@ import multiprocessing
 import sys
 from pathlib import Path
 
+import pytest
+
 SRC = str(Path(__file__).resolve().parents[2] / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from ticket_board.storage import BoardStore  # noqa: E402
+from ticket_board.storage import BoardStore, ForbiddenScope, RunAlreadyActive  # noqa: E402
 from ticket_board.storage.errors import BoardError  # noqa: E402
 
 
@@ -90,3 +92,90 @@ def test_runner_lease_heartbeat_and_expiry_are_fenced(store, project, agent):
     )
     assert next_lease["runner_id"] == "rnr_runner02"
     assert next_lease["epoch"] == lease["epoch"] + 1
+
+
+def test_runner_lease_rejects_stale_epoch_heartbeat_after_takeover(store, project, agent):
+    first = store.acquire_runner_lease(
+        project["id"], "rnr_runner01", agent["id"], "2026-09-06T14:35:00Z",
+        allowlisted_worktree="/repos/demo/.worktrees/backend-1",
+        at="2026-09-06T14:30:00Z",
+    )
+    current = store.acquire_runner_lease(
+        project["id"], "rnr_runner01", agent["id"], "2026-09-06T15:00:00Z",
+        allowlisted_worktree="/repos/demo/.worktrees/backend-1",
+        at="2026-09-06T14:36:00Z",
+    )
+
+    with pytest.raises(RunAlreadyActive):
+        store.heartbeat_runner_lease(
+            project["id"], "rnr_runner01", agent["id"],
+            "2026-09-06T15:05:00Z", expected_epoch=first["epoch"],
+            at="2026-09-06T14:37:00Z",
+        )
+    assert store.get_runner_lease(project["id"], agent["id"])["expires_at"] \
+        == current["expires_at"]
+
+
+def test_runner_lease_rejects_expired_heartbeat(store, project, agent):
+    lease = store.acquire_runner_lease(
+        project["id"], "rnr_runner01", agent["id"], "2026-09-06T14:35:00Z",
+        allowlisted_worktree="/repos/demo/.worktrees/backend-1",
+        at="2026-09-06T14:30:00Z",
+    )
+
+    with pytest.raises(RunAlreadyActive):
+        store.heartbeat_runner_lease(
+            project["id"], lease["runner_id"], agent["id"],
+            "2026-09-06T15:00:00Z", expected_epoch=lease["epoch"],
+            at="2026-09-06T14:36:00Z",
+        )
+    assert store.get_runner_lease(project["id"], agent["id"])["expires_at"] \
+        == lease["expires_at"]
+
+
+def test_runner_lease_rejects_stale_epoch_expire(store, project, agent):
+    first = store.acquire_runner_lease(
+        project["id"], "rnr_runner01", agent["id"], "2026-09-06T14:35:00Z",
+        allowlisted_worktree="/repos/demo/.worktrees/backend-1",
+        at="2026-09-06T14:30:00Z",
+    )
+    current = store.acquire_runner_lease(
+        project["id"], "rnr_runner01", agent["id"], "2026-09-06T15:00:00Z",
+        allowlisted_worktree="/repos/demo/.worktrees/backend-1",
+        at="2026-09-06T14:36:00Z",
+    )
+
+    with pytest.raises(RunAlreadyActive):
+        store.expire_runner_lease(
+            project["id"], "rnr_runner01", agent["id"],
+            expected_epoch=first["epoch"], at="2026-09-06T14:37:00Z",
+        )
+    assert store.get_runner_lease(project["id"], agent["id"])["expires_at"] \
+        == current["expires_at"]
+
+
+def test_runner_lease_rejects_expire_by_different_runner(store, project, agent):
+    lease = store.acquire_runner_lease(
+        project["id"], "rnr_runner01", agent["id"], "2026-09-06T15:00:00Z",
+        allowlisted_worktree="/repos/demo/.worktrees/backend-1",
+        at="2026-09-06T14:30:00Z",
+    )
+
+    with pytest.raises(RunAlreadyActive):
+        store.expire_runner_lease(
+            project["id"], "rnr_runner02", agent["id"],
+            expected_epoch=lease["epoch"], at="2026-09-06T14:37:00Z",
+        )
+    assert store.get_runner_lease(project["id"], agent["id"])["expires_at"] \
+        == lease["expires_at"]
+
+
+def test_runner_lease_read_is_scoped_by_project(store, project, agent):
+    other_project = store.create_project("Other")
+    store.acquire_runner_lease(
+        project["id"], "rnr_runner01", agent["id"], "2026-09-06T15:00:00Z",
+        allowlisted_worktree="/repos/demo/.worktrees/backend-1",
+    )
+
+    with pytest.raises(ForbiddenScope):
+        store.get_runner_lease(other_project["id"], agent["id"])

@@ -8,6 +8,7 @@ from ticket_board.storage import (
     MembershipRevoked,
     NotChannelMember,
     RequestIdReused,
+    TicketVersionConflict,
 )
 
 
@@ -117,6 +118,20 @@ def test_private_channel_requires_membership(store, project):
         == private["id"]
 
 
+def test_private_channel_membership_is_scoped_by_project(store, project):
+    member = store.create_member(project["id"], "human", "Operator", "owner")
+    private = store.create_channel(project["id"], "incidents", "private")
+    other_project = store.create_project("Other")
+    store.conn.execute(
+        "INSERT INTO channel_members (project_id, channel_id, member_id, subscribed, joined_at)"
+        " VALUES (?, ?, ?, 1, ?)",
+        (other_project["id"], private["id"], member["id"], "2026-09-06T14:32:00Z"),
+    )
+
+    with pytest.raises(NotChannelMember):
+        store.get_channel(project["id"], private["id"], member_id=member["id"])
+
+
 def test_revoked_member_cannot_read_or_be_added(store, project):
     operator = store.create_member(project["id"], "human", "Operator", "owner")
     channel = store.create_channel(project["id"], "incidents", "private")
@@ -147,6 +162,29 @@ def test_message_body_is_immutable(store, messaging_setup):
         == "Original"
 
 
+def test_list_messages_filters_by_project_even_with_cross_scoped_channel_row(
+    store, messaging_setup
+):
+    project, _agent, _operator, _backend, channel, author = messaging_setup
+    sent = store.send_message(project["id"], channel["id"], author, "Legitimate")
+    other_project = store.create_project("Other")
+    store.conn.execute(
+        "INSERT INTO messages (id, project_id, channel_id, author, body, intent,"
+        " mentions, version, created_at) VALUES (?, ?, ?, ?, ?, 'message', '[]', 1, ?)",
+        (
+            "msg_crossproject1",
+            other_project["id"],
+            channel["id"],
+            '{"type":"system","id":"system"}',
+            "wrong project",
+            "2026-09-06T14:32:00Z",
+        ),
+    )
+
+    listed = store.list_messages(project["id"], channel["id"])["items"]
+    assert [item["id"] for item in listed] == [sent["message"]["id"]]
+
+
 def test_delivery_transitions_are_closed_and_versioned(store, messaging_setup):
     project, agent, operator, backend, channel, author = messaging_setup
     sent = store.send_message(
@@ -167,6 +205,14 @@ def test_delivery_transitions_are_closed_and_versioned(store, messaging_setup):
     )
     assert started["state"] == "started"
     assert started["version"] == delivery["version"] + 1
+
+    with pytest.raises(TicketVersionConflict) as exc:
+        store.transition_delivery(
+            project["id"], delivery["id"], "responded",
+            expected_version=delivery["version"],
+        )
+    assert exc.value.details["expected_version"] == delivery["version"]
+    assert exc.value.details["actual_version"] == started["version"]
 
     with pytest.raises(InvalidStateTransition):
         store.transition_delivery(
