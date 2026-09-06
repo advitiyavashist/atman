@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "ticket_already_claimed",
+    "status": 409,
+    "message": "DEMO-14 was claimed by another agent.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "owner": "agt_backend02",
+      "claimed_at": "2026-09-06T14:35:00Z"
+    }
+  }
+}

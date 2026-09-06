@@ -1,0 +1,14 @@
+{
+  "request_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "outcome": "Widget list loads under the new cursor contract.",
+  "routing": {
+    "mode": "via_master",
+    "agent_id": null
+  },
+  "ticket": {
+    "new_ticket": {
+      "title": "Adopt the cursor contract in the widget list",
+      "role": "console"
+    }
+  }
+}

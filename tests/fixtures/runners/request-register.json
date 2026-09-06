@@ -1,0 +1,9 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "runner_id": "rnr_00000001",
+  "agent_id": "agt_backend01",
+  "allowlisted_worktree": "/repos/demo/.worktrees/backend-1",
+  "runtime_profile": "claude-code-default",
+  "permission_policy": "allowlist",
+  "expected_epoch": 0
+}

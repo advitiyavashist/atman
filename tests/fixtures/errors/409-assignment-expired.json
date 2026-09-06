@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "assignment_expired",
+    "status": 409,
+    "message": "This reservation expired at 14:40 and can no longer be claimed.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "assignment_id": "asg_00000001",
+      "expires_at": "2026-09-06T14:40:00Z"
+    }
+  }
+}

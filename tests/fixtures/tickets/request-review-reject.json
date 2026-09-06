@@ -1,0 +1,7 @@
+{
+  "request_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "expected_version": 5,
+  "decision": "reject",
+  "evidence_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+  "notes": "pytest failed on the pinned SHA."
+}

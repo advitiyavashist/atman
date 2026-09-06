@@ -1,0 +1,74 @@
+{
+  "message": {
+    "id": "msg_00000007",
+    "project_id": "prj_demo0001",
+    "channel_id": "chn_work0001",
+    "thread_id": null,
+    "author": {
+      "type": "human",
+      "id": "mem_operator1",
+      "display_name": "Operator",
+      "session_id": null
+    },
+    "body": "Please review the widget contract.",
+    "intent": "task",
+    "ticket_id": "DEMO-15",
+    "mentions": [],
+    "causation_id": null,
+    "conversation_id": null,
+    "supersedes_message_id": null,
+    "version": 1,
+    "created_at": "2026-09-06T14:32:00Z"
+  },
+  "ticket": {
+    "id": "DEMO-15",
+    "project_id": "prj_demo0001",
+    "title": "Ship the widget dashboard",
+    "outcome": "The dashboard lists widgets from the live endpoint.",
+    "acceptance": [
+      {
+        "text": "Cursor paging works",
+        "checked": false,
+        "checked_by": null,
+        "checked_at": null
+      }
+    ],
+    "state": "open",
+    "version": 2,
+    "role": "backend",
+    "owner": null,
+    "owner_session": null,
+    "dependencies": [
+      "DEMO-13"
+    ],
+    "dependency_blocked": true,
+    "blocked_reason": null,
+    "files": [],
+    "worktree": null,
+    "evidence": null,
+    "next_step": null,
+    "handoff": null,
+    "created_at": "2026-09-06T14:30:00Z",
+    "updated_at": "2026-09-06T14:32:00Z",
+    "claimed_at": null,
+    "last_progress_at": null
+  },
+  "deliveries": [
+    {
+      "id": "dlv_00000005",
+      "message_id": "msg_00000007",
+      "recipient_agent_id": "agt_hookonly1",
+      "state": "queued",
+      "reason": "manual_resume_required",
+      "reason_detail": "Manual resume required.",
+      "run_id": null,
+      "blocking_ticket_id": null,
+      "attempts": 0,
+      "next_attempt_at": null,
+      "created_at": "2026-09-06T14:32:00Z",
+      "updated_at": "2026-09-06T14:35:00Z",
+      "version": 2
+    }
+  ],
+  "wake_job": null
+}

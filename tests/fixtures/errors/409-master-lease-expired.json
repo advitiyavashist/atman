@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "master_lease_expired",
+    "status": 409,
+    "message": "Your master lease was superseded. Routing mutations at epoch 4 are rejected.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "sent_epoch": 4,
+      "current_epoch": 5
+    }
+  }
+}

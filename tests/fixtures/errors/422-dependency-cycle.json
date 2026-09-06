@@ -1,0 +1,15 @@
+{
+  "error": {
+    "code": "dependency_cycle",
+    "status": 422,
+    "message": "These dependencies form a cycle; nothing was created.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "cycle": [
+        "DEMO-15",
+        "DEMO-16",
+        "DEMO-15"
+      ]
+    }
+  }
+}

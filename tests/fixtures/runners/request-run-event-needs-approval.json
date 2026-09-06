@@ -1,0 +1,9 @@
+{
+  "request_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "expected_version": 3,
+  "event": "needs_approval",
+  "session_id": "ses_a1b2c3d4",
+  "ticket_claim": "DEMO-14",
+  "reason": "Needs approval: write outside the allowlisted worktree.",
+  "budget": null
+}

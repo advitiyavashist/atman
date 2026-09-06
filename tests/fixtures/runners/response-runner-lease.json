@@ -1,0 +1,19 @@
+{
+  "runner_id": "rnr_00000001",
+  "agent_id": "agt_backend01",
+  "epoch": 1,
+  "acquired_at": "2026-09-06T14:32:00Z",
+  "expires_at": "2026-09-06T15:00:00Z",
+  "allowlisted_worktree": "/repos/demo/.worktrees/backend-1",
+  "runtime_profile": "claude-code-default",
+  "permission_policy": "allowlist",
+  "concurrency": 1,
+  "budget": {
+    "max_hops": 3,
+    "max_turns": 10,
+    "max_seconds": 900,
+    "hops_used": 0,
+    "turns_used": 0,
+    "seconds_used": 0
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "items": [],
+  "next_cursor": null,
+  "stream": {
+    "state": "live",
+    "snapshot_version": 0,
+    "as_of": "2026-09-06T14:30:00Z",
+    "last_event_id": null
+  },
+  "empty_state": {
+    "headline": "No activity yet.",
+    "detail": null,
+    "primary_action": null
+  }
+}

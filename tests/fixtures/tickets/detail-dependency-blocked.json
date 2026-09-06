@@ -1,0 +1,55 @@
+{
+  "ticket": {
+    "id": "DEMO-15",
+    "project_id": "prj_demo0001",
+    "title": "Ship the widget dashboard",
+    "outcome": "The dashboard lists widgets from the live endpoint.",
+    "acceptance": [
+      {
+        "text": "Cursor paging works",
+        "checked": false,
+        "checked_by": null,
+        "checked_at": null
+      }
+    ],
+    "state": "open",
+    "version": 2,
+    "role": "backend",
+    "owner": null,
+    "owner_session": null,
+    "dependencies": [
+      "DEMO-13"
+    ],
+    "dependency_blocked": true,
+    "blocked_reason": null,
+    "files": [],
+    "worktree": null,
+    "evidence": null,
+    "next_step": null,
+    "handoff": null,
+    "created_at": "2026-09-06T14:30:00Z",
+    "updated_at": "2026-09-06T14:32:00Z",
+    "claimed_at": null,
+    "last_progress_at": null
+  },
+  "updates": [],
+  "reviews": [],
+  "assignment": null,
+  "dependencies": [
+    {
+      "id": "DEMO-13",
+      "title": "Add the widget endpoint",
+      "state": "claimed"
+    }
+  ],
+  "available_actions": [
+    "assign",
+    "block"
+  ],
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}

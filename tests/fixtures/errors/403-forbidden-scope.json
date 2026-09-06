@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "forbidden_scope",
+    "status": 403,
+    "message": "This credential is not authorized for the requested project.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {}
+  }
+}
