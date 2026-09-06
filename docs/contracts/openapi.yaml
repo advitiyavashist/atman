@@ -63,6 +63,16 @@ components:
         header to match the session's CSRF value and an `Origin`/`Referer` that
         matches an allowed origin. Operator sessions may create enrollments,
         accept reviews and take master authority.
+
+        V1 has no session-mint route: the operator session is bootstrapped
+        out of band (a one-time `?token=` on the UI root, written to
+        `operator-session.json`), which is honest only when the server binds
+        loopback. A `POST /session` (or equivalent) mint route is a known,
+        deliberately deferred future amendment for a non-loopback deployment
+        -- it is not solved by anything in this contract today. Do not infer
+        a sign-in flow from this scheme's presence. (T-224 ruling, planner
+        18:05Z, superseding T-211 §7's "deferred" framing with an explicit
+        decision: named and out of scope for V1, not silently assumed.)
     agentToken:
       type: http
       scheme: bearer

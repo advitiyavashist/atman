@@ -105,10 +105,43 @@ wrong against a doc — raise it with the master instead.
    actually buildable: `GET /tickets/{ticket_id}`, `GET /agents`, `GET /activity`,
    `GET /master`, `GET /members` — plus the review decision, blocked toggle and
    session-lease revocation the acceptance criteria require.
+9. **No third, master-authority credential.** (T-224 ruling, planner 18:05Z,
+   resolving T-211 §6.) Any registered agent may take the master lease; the
+   operator session gates only the destructive actions (accept review, pause,
+   assign, take master). A credential that authorized the master seat would,
+   by construction, be a credential the *dead* master held — gating seizure on
+   it breaks the exact recovery path `MASTER.md`'s HANDOVER procedure exists
+   for ("masters are expected to die; any living agent may `tickets master
+   take`"). The control against impersonation is the lease plus an audit
+   trail (T-182), not authentication — visible-and-recorded beats forbidden
+   here, because the board's real failure mode is masters dying silently, not
+   masters being impersonated on a loopback-bound board. Revisit only
+   together with decision 11 below, never separately.
+10. **CLI goes read-only at cutover; no dual-write bridge.** (T-224 ruling,
+    planner 18:05Z, resolving T-211 §3 legacy-writer handover.) A dual-write
+    bridge means two writers against one board with no shared transaction —
+    the same failure class as the T-215 cross-repo close and the T-202
+    double-build, introduced deliberately at the exact moment a migration bug
+    would be hardest to tell from a product bug. There is no calendar freeze
+    date: the gate is evidential. Sequence is server read-write behind this
+    contract → T-185/T-190 pass against the live server → CLI flips to
+    read-only in one commit → `legacy_writer_active` stops being a 409 nobody
+    can trigger. Nothing may require CLI read-only *before* T-185/T-190 pass.
+11. **No operator sign-in / session-mint route in V1.** (T-224 ruling, planner
+    18:05Z, resolving T-211 §7.) See `openapi.yaml`'s `operatorSession`
+    scheme description for the contract-prose statement dependents must not
+    infer past. Confirmed out of scope for V1 (loopback-only); a mint route
+    is the first non-loopback surface on the board and drags TLS termination,
+    session lifetime, CSRF refresh and credential storage in behind it — all
+    deferred by this pack's closing section. The limitation is written down;
+    the route is not added.
 
 Changing any of these after freeze is a breaking change: it needs the master,
 an `info.version` bump, and a check on which lanes already built against the old
-shape. The process is in `README.md` under "Freeze rules".
+shape. The process is in `README.md` under "Freeze rules". (Decisions 9-11 are
+documentation of already-frozen behavior — no schema field or route changed —
+so no version bump applies to them; see `openapi.yaml`'s `operatorSession`
+description for the one prose addition made alongside decision 11.)
 
 ---
 
