@@ -2,9 +2,9 @@ name: contracts
 
 on:
   push:
-    paths: ['docs/contracts/**', 'tests/**', 'pyproject.toml', '.github/workflows/contracts.yml']
+    paths: ['docs/contracts/**', 'src/**', 'tests/**', 'pyproject.toml', '.github/workflows/contracts.yml']
   pull_request:
-    paths: ['docs/contracts/**', 'tests/**', 'pyproject.toml', '.github/workflows/contracts.yml']
+    paths: ['docs/contracts/**', 'src/**', 'tests/**', 'pyproject.toml', '.github/workflows/contracts.yml']
 
 jobs:
   validate:
@@ -15,9 +15,12 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -e '.[contracts]'
-      - name: Validate the contract pack
+      - name: Validate the contract pack and the storage layer
         # The env var turns a missing toolchain into a failure rather than a
         # skipped test, so the acceptance bar cannot pass by not running.
+        # This runs tests/storage/ too: the storage layer serializes to the
+        # frozen contract shapes, and tests/storage/test_contract_conformance.py
+        # is what stops the two drifting apart between lanes.
         env:
           TICKET_BOARD_CONTRACTS_REQUIRED: '1'
         run: python -m pytest -q
