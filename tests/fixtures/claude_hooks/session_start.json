@@ -1,0 +1,7 @@
+{
+  "hook_schema_version": "claude-code-hooks-v1",
+  "hook_event_name": "SessionStart",
+  "session_id": "ses_a1b2c3d4",
+  "occurred_at": "2026-09-06T14:32:00Z",
+  "cwd": "/tmp/ticket-board-scratch/project-a"
+}
