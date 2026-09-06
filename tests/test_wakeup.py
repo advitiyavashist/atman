@@ -430,3 +430,34 @@ def test_ui_snapshot_shape(board):
     assert d["master"] == "planner" and d["in_flight"][0]["id"] == "T-001"
     assert any(a["name"] == "doc" and a["state"] == "busy" for a in d["agents"])
     assert "Mission" in d["goals"] or "MISSION" in d["goals"]
+
+
+# ---- review regressions (2026-09-06) ------------------------------------
+
+def test_worker_cmd_quotes_model_from_workforce(board):
+    # The workforce record is writable by any agent; it must not reach the shell unquoted.
+    import importlib.util
+    run(board, "join", "evil", "--roles", "backend", "--model", "opus; echo INJECTED >pwned")
+    spec = importlib.util.spec_from_file_location("tickets_under_test", TOOL)
+    tk = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tk)
+    cmd = tk._worker_cmd(str(board), "evil")
+    assert "--model 'opus; echo INJECTED >pwned'" in cmd, cmd
+    subprocess.run(cmd.replace("claude -p", "true -p"), shell=True, cwd=board.parent, capture_output=True)
+    assert not (board.parent / "pwned").exists()
+
+
+def test_checkin_preserves_inbox_seen_limit_and_stop_blocks(board):
+    run(board, "join", "bob", "--roles", "backend")
+    run(board, "msg", "bob please look", "--to", "bob", agent="alice")
+    run(board, "inbox", agent="bob")                      # marks inbox_seen
+    run(board, "limit", "bob", "--note", "out", agent="bob")
+    rec_path = board / "agents" / "bob.json"
+    rec = json.loads(rec_path.read_text())
+    assert rec.get("inbox_seen") and rec.get("limit")
+    run(board, "here", agent="bob")                        # any check-in
+    rec2 = json.loads(rec_path.read_text())
+    assert rec2.get("inbox_seen") == rec["inbox_seen"]
+    assert rec2.get("limit") == rec["limit"]
+    rc, p = pending(board, "bob")
+    assert "messages_to_me" not in p, p
