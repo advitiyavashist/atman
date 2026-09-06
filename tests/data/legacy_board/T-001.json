@@ -1,0 +1,45 @@
+{
+  "title": "Define the storage schema",
+  "body": "Tables, indexes, triggers.",
+  "role": "backend",
+  "status": "done",
+  "deps": [],
+  "priority": 1,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [],
+  "owner": "agent-alpha",
+  "created": "2026-01-02T09:00:00Z",
+  "updated": "2026-01-03T17:20:00Z",
+  "notes": [
+    {
+      "by": "agent-alpha",
+      "at": "2026-01-02T10:05:00Z",
+      "text": "claimed"
+    },
+    {
+      "by": "agent-bravo",
+      "at": "2026-01-03T16:00:00Z",
+      "text": "review requested"
+    },
+    {
+      "by": "agent-alpha",
+      "at": "2026-01-03T16:00:00Z",
+      "text": "handing to review"
+    },
+    {
+      "by": "agent-bravo",
+      "at": "2026-01-03T17:20:00Z",
+      "text": "accepted",
+      "kind": "decision"
+    }
+  ],
+  "id": "T-001",
+  "claimed_at": "2026-01-02T10:05:00Z",
+  "done_at": "2026-01-03T17:20:00Z",
+  "review_at": "2026-01-03T16:00:00Z",
+  "commit": "agent-alpha/schema@a1b2c3d",
+  "branch": "agent-alpha/schema",
+  "pr": "12",
+  "suggested": "agent-alpha"
+}

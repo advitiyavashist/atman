@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": "malformed_request",
+    "status": 400,
+    "message": "Request body contained an 'actor' field. Actor is bound from the credential.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "rejected_fields": [
+        "actor"
+      ]
+    }
+  }
+}

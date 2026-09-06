@@ -7,6 +7,7 @@ newer state does not leak the undone writes back in.
 """
 
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,22 @@ import pytest
 from ticket_board.storage import BoardStore, NotFound
 from ticket_board.storage.backup import (
     backup_database,
+    check_snapshot,
     integrity_check,
     restore_database,
 )
+
+
+def _corrupt(path):
+    """Scribble over the b-tree pages, leaving a plausible SQLite header.
+
+    Truncating or emptying the file makes SQLite report a different, easier
+    error. The interesting case is a snapshot that opens fine and is wrong.
+    """
+    data = bytearray(path.read_bytes())
+    for offset in range(4096, min(len(data), 65536)):
+        data[offset] = (data[offset] + 137) % 256
+    path.write_bytes(bytes(data))
 
 
 def test_backup_produces_a_readable_database(store, project, tmp_path):
@@ -162,3 +176,79 @@ def test_backup_is_consistent_under_a_concurrent_writer(db_path, tmp_path):
         assert [t["id"] for t in restored.list_tickets(project["id"])] == ["CONC-1"]
     finally:
         restored.close()
+
+
+def test_a_corrupt_snapshot_is_refused_before_the_target_is_touched(db_path,
+                                                                   tmp_path):
+    """The restore that costs you the last good copy.
+
+    A restore is run by someone who has already lost something. Copying an
+    unusable snapshot over a working database destroys the only remaining good
+    state in order to install a broken one, and the operator finds out on the
+    next read. So the snapshot is checked first, and a failed check leaves the
+    target byte-for-byte as it was.
+    """
+    store = BoardStore(db_path)
+    store.create_project("Intact")
+    snapshot = backup_database(store.conn, tmp_path / "board.bak")
+    store.close()
+
+    _corrupt(snapshot)
+    assert check_snapshot(snapshot) != "ok", \
+        "the corruption must be something SQLite actually objects to"
+
+    before = db_path.read_bytes()
+    with pytest.raises(sqlite3.DatabaseError) as caught:
+        restore_database(snapshot, db_path)
+    assert "integrity_check" in str(caught.value)
+
+    assert db_path.read_bytes() == before, "the live database was not touched"
+    assert not Path(str(db_path) + ".restoring").exists(), \
+        "the staging file must not be left behind"
+
+    # And the database still works, which is the point of refusing.
+    reopened = BoardStore(db_path)
+    try:
+        assert integrity_check(reopened.conn) == "ok"
+    finally:
+        reopened.close()
+
+
+def test_checking_a_snapshot_does_not_modify_it(tmp_path, store, project):
+    """`check_snapshot` opens a copy, never the operator's only backup."""
+    snapshot = backup_database(store.conn, tmp_path / "board.bak")
+    before = snapshot.read_bytes()
+    assert check_snapshot(snapshot) == "ok"
+    assert snapshot.read_bytes() == before
+    assert not Path(str(snapshot) + "-wal").exists()
+    assert not Path(str(snapshot) + "-shm").exists()
+
+
+def test_an_operator_can_force_a_restore_past_the_check(db_path, tmp_path):
+    """`verify=False` is for the operator who has nothing else left."""
+    store = BoardStore(db_path)
+    store.create_project("Doomed")
+    snapshot = backup_database(store.conn, tmp_path / "board.bak")
+    store.close()
+    _corrupt(snapshot)
+
+    result = restore_database(snapshot, db_path, verify=False)
+    assert result["verified"] is False
+    assert db_path.read_bytes() == snapshot.read_bytes()
+
+
+def test_the_replaced_database_is_kept_so_the_rollback_is_reversible(db_path,
+                                                                     tmp_path):
+    store = BoardStore(db_path)
+    project = store.create_project("Drill")
+    snapshot = backup_database(store.conn, tmp_path / "board.bak")
+    store.create_ticket(project["id"], "LATER-1", "After the snapshot")
+    store.close()
+
+    result = restore_database(snapshot, db_path)
+    kept = BoardStore(result["replaced_copy"])
+    try:
+        assert [t["id"] for t in kept.list_tickets(project["id"])] == ["LATER-1"], \
+            "rolling back the rollback has to be possible"
+    finally:
+        kept.close()

@@ -1,0 +1,140 @@
+{
+  "items": [
+    {
+      "id": "DEMO-13",
+      "project_id": "prj_demo0001",
+      "title": "Add the widget endpoint",
+      "outcome": "GET /widgets returns a cursor page and is covered by tests.",
+      "acceptance": [
+        {
+          "text": "Cursor paging works",
+          "checked": false,
+          "checked_by": null,
+          "checked_at": null
+        }
+      ],
+      "state": "claimed",
+      "version": 4,
+      "role": "backend",
+      "owner": "agt_backend01",
+      "owner_session": "ses_a1b2c3d4",
+      "dependencies": [],
+      "dependency_blocked": false,
+      "blocked_reason": null,
+      "files": [
+        "src/widgets/"
+      ],
+      "worktree": "/repos/demo/.worktrees/backend-1",
+      "evidence": null,
+      "next_step": "Wire the cursor decoder.",
+      "handoff": null,
+      "created_at": "2026-09-06T14:30:00Z",
+      "updated_at": "2026-09-06T14:32:00Z",
+      "claimed_at": "2026-09-06T14:32:00Z",
+      "last_progress_at": "2026-09-06T14:32:00Z"
+    },
+    {
+      "id": "DEMO-14",
+      "project_id": "prj_demo0001",
+      "title": "Document the widget endpoint",
+      "outcome": "The widget endpoint is documented in the README.",
+      "acceptance": [
+        {
+          "text": "Cursor paging works",
+          "checked": false,
+          "checked_by": null,
+          "checked_at": null
+        }
+      ],
+      "state": "open",
+      "version": 1,
+      "role": "backend",
+      "owner": null,
+      "owner_session": null,
+      "dependencies": [],
+      "dependency_blocked": false,
+      "blocked_reason": null,
+      "files": [],
+      "worktree": null,
+      "evidence": null,
+      "next_step": null,
+      "handoff": null,
+      "created_at": "2026-09-06T14:30:00Z",
+      "updated_at": "2026-09-06T14:32:00Z",
+      "claimed_at": null,
+      "last_progress_at": null
+    },
+    {
+      "id": "DEMO-15",
+      "project_id": "prj_demo0001",
+      "title": "Ship the widget dashboard",
+      "outcome": "The dashboard lists widgets from the live endpoint.",
+      "acceptance": [
+        {
+          "text": "Cursor paging works",
+          "checked": false,
+          "checked_by": null,
+          "checked_at": null
+        }
+      ],
+      "state": "open",
+      "version": 2,
+      "role": "backend",
+      "owner": null,
+      "owner_session": null,
+      "dependencies": [
+        "DEMO-13"
+      ],
+      "dependency_blocked": true,
+      "blocked_reason": null,
+      "files": [],
+      "worktree": null,
+      "evidence": null,
+      "next_step": null,
+      "handoff": null,
+      "created_at": "2026-09-06T14:30:00Z",
+      "updated_at": "2026-09-06T14:32:00Z",
+      "claimed_at": null,
+      "last_progress_at": null
+    },
+    {
+      "id": "DEMO-16",
+      "project_id": "prj_demo0001",
+      "title": "Deploy the widget service",
+      "outcome": "The service runs on the staging host.",
+      "acceptance": [
+        {
+          "text": "Cursor paging works",
+          "checked": false,
+          "checked_by": null,
+          "checked_at": null
+        }
+      ],
+      "state": "blocked",
+      "version": 3,
+      "role": "backend",
+      "owner": null,
+      "owner_session": null,
+      "dependencies": [],
+      "dependency_blocked": false,
+      "blocked_reason": "Waiting on staging credentials from the operator.",
+      "files": [],
+      "worktree": null,
+      "evidence": null,
+      "next_step": null,
+      "handoff": null,
+      "created_at": "2026-09-06T14:30:00Z",
+      "updated_at": "2026-09-06T14:32:00Z",
+      "claimed_at": null,
+      "last_progress_at": null
+    }
+  ],
+  "next_cursor": "eyJhZnRlciI6IkRFTU8tMTYifQ",
+  "total_matching": 9,
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}
