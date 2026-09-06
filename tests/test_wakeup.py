@@ -461,3 +461,65 @@ def test_checkin_preserves_inbox_seen_limit_and_stop_blocks(board):
     assert rec2.get("limit") == rec["limit"]
     rc, p = pending(board, "bob")
     assert "messages_to_me" not in p, p
+
+
+# ---- objective + heartbeat (master drive mode) ----------------------------
+
+def test_objective_set_show_done(board):
+    r = run(board, "objective", agent="boss")
+    assert "no objective" in r.stdout
+    run(board, "master", "take", agent="boss")
+    assert run(board, "objective", "Ship V1", agent="boss").returncode == 0
+    out = run(board, "objective", agent="boss").stdout
+    assert "Ship V1" in out and "sprint" in out and "review queue" in out
+    assert run(board, "objective", "--done", "gates green", agent="boss").returncode == 0
+    assert "MET" in run(board, "objective", agent="boss").stdout
+    msgs = (board / "messages.jsonl").read_text()
+    assert "objective set" in msgs and "objective met" in msgs
+
+
+def test_master_heartbeat_drives_only_the_master_seat(board):
+    run(board, "master", "take", agent="boss")
+    run(board, "join", "doc", "--roles", "docs")
+    run(board, "next", agent="doc")                          # T-001 claimed: nothing is ready for anyone
+    run(board, "objective", "Ship V1", agent="boss")
+    rc, p = pending(board, "boss")
+    assert "drive" not in p                                   # no heartbeat configured
+    r = run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="boss")
+    rc, p = pending(board, "boss")
+    assert "drive" in p and p["pending"] is True, p
+    # the interactive stop hook never keeps a turn open for a heartbeat
+    assert stop(board, "boss") == {}
+    # printing the master prompt stamps drive_at, so the next poll is quiet
+    out = run(board, "prompt", "--master", agent="boss").stdout
+    assert "DRIVE THE OBJECTIVE" in out and "Ship V1" in out
+    rc, p = pending(board, "boss")
+    assert "drive" not in p
+    # a worker with the same heartbeat setting is never driven
+    run(board, "join", "bob", "--roles", "backend")
+    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob")
+    rc, p = pending(board, "bob")
+    assert "drive" not in p
+    # a met objective stops the heartbeat
+    run(board, "objective", "--done", "shipped", agent="boss")
+    rec = json.loads((board / "agents" / "boss.json").read_text())
+    rec.pop("drive_at", None)
+    (board / "agents" / "boss.json").write_text(json.dumps(rec))
+    rc, p = pending(board, "boss")
+    assert "drive" not in p
+
+
+def test_spawn_passes_heartbeat_to_watch(board):
+    run(board, "master", "take", agent="boss")
+    r = run(board, "spawn", "boss", "--master", "--heartbeat", "15", "--exec", "true", "--every", "5", agent="boss")
+    assert r.returncode == 0, r.stderr
+    try:
+        rec = None
+        for _ in range(40):
+            time.sleep(0.25)
+            rec = json.loads((board / "agents" / "boss.json").read_text())
+            if rec.get("drive_every"):
+                break
+        assert rec and rec.get("drive_every") == 15, rec
+    finally:
+        run(board, "spawn", "boss", "--stop", agent="boss")
