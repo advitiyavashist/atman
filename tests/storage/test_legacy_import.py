@@ -12,6 +12,7 @@ see `scripts/make_sample_legacy_board.py` for what each ticket in it is for.
 """
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -36,10 +37,19 @@ from ticket_board.storage.legacy import (
 
 SAMPLE_BOARD = Path(__file__).resolve().parents[1] / "data" / "legacy_board"
 
-# The board this project actually runs on. Present only on the machine it runs
-# on, so it is a supplement to the committed sample board, never the only
-# evidence -- a skipped test proves nothing on anyone else's checkout.
-REAL_BOARD = Path("/Users/kavana/Downloads/steer/.tickets")
+# A real board to round-trip as a supplement to the committed sample board,
+# never the only evidence -- a skipped test proves nothing on anyone else's
+# checkout. Point TICKET_BOARD_REAL_BOARD at a legacy board directory to run it;
+# unset (the default) skips, so no operator's home path is baked into the tests.
+REAL_BOARD_ENV = "TICKET_BOARD_REAL_BOARD"
+
+
+def _real_board():
+    """The configured live board, or None when the check is not enabled."""
+    raw = os.environ.get(REAL_BOARD_ENV)
+    if not raw:
+        return None
+    return Path(raw).expanduser()
 
 
 def _legacy_board(tmp_path, tickets):
@@ -102,6 +112,38 @@ def test_the_board_around_the_tickets_is_imported_too(store, imported):
     # resolves to no row, rather than being dropped or pointed somewhere wrong.
     stray = [m for m in legacy_messages(store, project) if m["re"] == "T-999"]
     assert stray and stray[0]["ticket_id"] is None
+
+
+def test_an_oversized_document_is_truncated_and_reported(store, sample, monkeypatch):
+    """A multi-MB brief must not land whole in one `legacy_documents` row inside
+    the same atomic transaction as the rest of the board (T-231). Reproduced
+    against the merged importer before this fix: a 6 MB brief imported clean
+    with `truncated_fields` empty, so nothing told the operator it happened.
+
+    The cap is patched down rather than writing a real multi-MB fixture file,
+    but the assertion reads the content back through `legacy_documents` (the
+    reader API), not just the size of the file on disk, so it fails if
+    truncation stops happening at read time even though the cap constant
+    itself is untouched.
+    """
+    monkeypatch.setattr(legacy_module, "LEGACY_DOCUMENT_MAX_BYTES", 64)
+    huge = "brief content " * 20  # 280 bytes, well over the patched 64-byte cap
+    (sample / "briefs" / "huge.md").write_text(huge)
+
+    imported = import_legacy_board(store, sample, project_name="Sample")
+
+    # Not dropped: still imported, just not whole.
+    assert imported.imported_documents == 14  # 13 from the sample board + this one
+    assert imported.truncated_fields.get("document:brief/huge.md") == 1
+
+    docs = {d["name"]: d["content"]
+            for d in legacy_documents(store, imported.project_id, kind="brief")}
+    assert len(docs["huge.md"]) == 64
+    assert docs["huge.md"] == huge[:64]
+    # A document under the cap is untouched -- truncation is per-file, not global.
+    assert docs["agent-alpha.md"] == \
+        (Path(sample) / "briefs" / "agent-alpha.md").read_text()
+    assert "document:brief/agent-alpha.md" not in imported.truncated_fields
 
 
 def test_fields_with_no_contract_home_are_archived_not_dropped(store, imported):
@@ -560,7 +602,10 @@ def test_a_ticket_can_be_rebuilt_from_the_database_alone(store, imported):
 
 # ------------------------------------------------- the board this repo runs on
 
-@pytest.mark.skipif(not REAL_BOARD.is_dir(), reason="live board not present")
+@pytest.mark.skipif(
+    _real_board() is None or not _real_board().is_dir(),
+    reason="set %s to a legacy board directory to run this" % REAL_BOARD_ENV,
+)
 def test_the_live_board_also_round_trips(store, tmp_path):
     """A supplement to the sample board, not a substitute for it.
 
@@ -569,7 +614,7 @@ def test_the_live_board_also_round_trips(store, tmp_path):
     Copied first: the live board is never opened for writing by a test.
     """
     copy = tmp_path / "real"
-    shutil.copytree(REAL_BOARD, copy)
+    shutil.copytree(_real_board(), copy)
 
     report = import_legacy_board(store, copy, project_name="Steer")
     assert report.skipped == [], "no ticket may be silently dropped"

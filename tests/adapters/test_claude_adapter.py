@@ -191,7 +191,7 @@ def test_install_refuses_symlink_to_user_home(tmp_path, enrollment, config, monk
 
 @pytest.fixture
 def board_layout(tmp_path, monkeypatch):
-    """A miniature of this host's board layout with no /Users/kavana anywhere in it.
+    """A miniature of this host's board layout with no operator home path in it.
 
     Two protected checkouts (the equivalents of steer and tickets), an in-tree
     agent worktree, an out-of-tree agent worktree registered against the same
@@ -244,7 +244,7 @@ def test_project_dir_guard_refuses_protected_checkouts_on_a_portable_layout(boar
             adapter_module._ensure_safe_project_dir(project_dir)
         assert not (Path(project_dir) / ".claude").exists(), label
 
-    assert "/Users/kavana" not in str(board_layout["root"])
+    assert str(adapter_module._real_home_dir()) not in str(board_layout["root"])
 
 
 def test_project_dir_guard_survives_case_folding(board_layout):
@@ -343,18 +343,20 @@ def test_protected_roots_come_from_configuration(tmp_path, monkeypatch):
     assert adapter_module._protected_roots() == ()
 
 
-@pytest.mark.parametrize(
-    "checkout", [Path("/Users/kavana/Downloads/steer"), Path("/Users/kavana/Downloads/tickets")]
-)
-def test_project_dir_guard_refuses_this_hosts_main_checkouts(checkout, monkeypatch):
+@pytest.mark.parametrize("index", [0, 1], ids=["steer", "tickets"])
+def test_project_dir_guard_refuses_this_hosts_main_checkouts(index, monkeypatch):
     """The two checkouts named in the ticket, refused under the shipped defaults.
 
-    Skips only where the checkout is genuinely absent; the portable-layout tests
-    above carry the requirement on every other host, so nothing goes untested.
+    The checkouts are read back from `_protected_roots()` rather than written
+    out, so this test names no operator and states the same requirement on any
+    host: whatever the shipped defaults protect must be refused. Skips only
+    where that checkout is genuinely absent; the portable-layout tests above
+    carry the requirement everywhere else, so nothing goes untested.
     """
     monkeypatch.delenv(adapter_module.FORBIDDEN_ROOTS_ENV, raising=False)
-    if not (checkout / ".git").exists() or adapter_module._real_home_dir() != Path("/Users/kavana"):
-        pytest.skip("%s is not this host's board checkout" % checkout)
+    checkout = adapter_module._protected_roots()[index]
+    if not (checkout / ".git").exists():
+        pytest.skip("%s is not a board checkout on this host" % checkout)
 
     with pytest.raises(ClaudeHookError, match="live agent worktree"):
         adapter_module._ensure_safe_project_dir(checkout)
