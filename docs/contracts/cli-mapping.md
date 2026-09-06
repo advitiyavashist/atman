@@ -187,6 +187,38 @@ rediscover them:
    (strike the assumption from `docs/interface-v1.md`/`messages-and-runners.md`
    prose wherever it's implied), not a schema change.
 
+## 9. Review evidence has no repo identity (T-215 — folded in per the planner's 17:20Z note on this ticket)
+
+This is the same disease as §2's `GitEvidence` finding, one level up: the CLI's
+`commit` field is an **unqualified** `branch@shortsha` — no remote URL, no
+repo root, nothing that says *which* git repository the sha is meaningful in.
+`cmd_review`/`cmd_done` (`tickets.py:1219`, `:1784`) both compute
+`stamp = "%s@%s" % (branch, sha)` from whatever repo the caller happened to
+run the command in, with no repo tag attached.
+
+Every E-010 ticket is cross-repo by construction (steer board, tickets-repo
+deliverable), so this is not a hypothetical: **T-214 was closed by
+`cmd_merge` after an unrelated steer merge**, because a steer commit
+trivially "contains" a tickets-repo sha it never actually built on, and the
+merge logic (ancestry-only) had no repo field to check against. `T-211` and
+`T-203` were both live examples of the identical near-miss during this same
+session — `T-211`'s own pin would have been wrong (a steer sha) had `tickets
+review` been run from this repo's steer worktree instead of the tickets-repo
+one; `T-203`'s recorded board pin *was* wrong (`sonnet-console@51e85b8`, a
+steer sha) and had to be overridden by the note the author separately posted.
+T-215 (blocked on T-212) is the tracked fix; T-223 is the follow-on for
+documenting the meantime rule.
+
+**This is not a separate, smaller problem from the `GitEvidence`/SHA-shape
+mismatch in §2 — it's the same root cause wearing two hats.** `GitEvidence`
+needs a real 40-hex sha *and* a repo identity to be trustworthy evidence at
+all; fixing only the hex-shape half (item 7 below) without also carrying repo
+identity reproduces T-215's exact failure mode inside the new schema. Any
+amendment to how review evidence is represented — CLI-side or contract-side —
+must carry repo identity alongside the sha, not the sha alone. Folded into
+amendment item 7 below rather than left as a separate line, since splitting
+them risks fixing the shape and missing the identity a second time.
+
 ---
 
 ## Amendment list
@@ -199,7 +231,7 @@ rediscover them:
 | 4 | `AgentId` pattern (`^agt_...`) vs free-form CLI owner names | **Contract, if the CLI's naming convention survives into V1** — either relax the pattern to accept the board's real names, or accept that migrating to the contract means renaming every live agent identity (`claude-fable` -> `agt_...`) at cutover, which touches every brief, hook, and message on the board. | 0 of ~35 real names match today; this is not a rounding error. |
 | 5 | No session-lease / `request_id` idempotency in the CLI claim path | **CLI, if it stays live alongside the server** — or accept that claim-idempotency and session-lease enforcement are server-only features the legacy CLI never gets, and say so. | The CLI's O_EXCL lock is race-safe but replay-unsafe; a retried `tickets claim` after a dropped response has no idempotency key to detect it was already granted. |
 | 6 | `reopen` has no contract route; reject returns to `claimed` in the contract vs `open` in the CLI | **Contract** — add an explicit reopen/release route distinct from review-rejection, since `MASTER.md`'s own recovery procedure depends on exactly this operation today. | Recovery from a silent/timed-out claim is core, documented board behavior (HANDOVER step 2) with no contract analogue at all. |
-| 7 | `GitEvidence`/review evidence: pinned 40-hex SHA + reviewer≠submitter vs CLI's `branch@shortsha` string + no identity check | **CLI, if evidence is to be trusted by a server** — a resolver step that turns `branch@shortsha` into a real 40-hex SHA (T-213 already stubbed a `sha_resolver` hook for this) is required before any `commit` value can populate `GitEvidence`; the reviewer≠submitter rule needs a real identity check added to `cmd_done`, which the CLI does not have today (anyone can close their own review). | Confirmed independently by two agents (opus-backend-2, cos-opus) during T-213: 115/115 real commit values fail the 40-hex pattern today. Fabricating a SHA to satisfy the schema was explicitly rejected as worse than the mismatch. |
+| 7 | `GitEvidence`/review evidence: pinned 40-hex SHA + reviewer≠submitter vs CLI's `branch@shortsha` string + no identity check, **and no repo identity at all attached to the sha (§9 / T-215)** | **CLI, if evidence is to be trusted by a server** — a resolver step that turns `branch@shortsha` into a real 40-hex SHA (T-213 already stubbed a `sha_resolver` hook for this) is required before any `commit` value can populate `GitEvidence`; the reviewer≠submitter rule needs a real identity check added to `cmd_done`, which the CLI does not have today (anyone can close their own review); **and the sha must carry a repo identifier (remote URL or repo root) alongside it, not just the hex value** — a 40-hex sha with no repo tag reproduces T-215's false-close bug one layer up, just with a longer sha. | Confirmed independently by two agents (opus-backend-2, cos-opus) during T-213: 115/115 real commit values fail the 40-hex pattern today. Fabricating a SHA to satisfy the schema was explicitly rejected as worse than the mismatch. Repo-identity gap is T-214's live failure (closed by an unrelated steer merge) and T-215's tracked fix — the planner flagged folding it in here rather than treating it as separate from the sha-shape problem. |
 | 8 | Legacy-writer handover (409 `legacy_writer_active`) has no CLI-side trigger or mode | **Both** — needs a named decision (freeze date / dual-write bridge / CLI read-only mode), not a schema tweak. | Every E-010 lane is building the server against a board the CLI is still live-mutating; nothing today models "server ownership is active." |
 | 9 | Broadcast messaging (CLI) vs no global fanout (contract) | **CLI usage, if messaging migrates to T-187's model** — `tickets msg` without `--to` needs a channel-scoped replacement (or an explicit "board-ops channel" convention) before broadcast can be dropped without silencing coordination traffic that currently relies on it. | T-187's no-fanout rule is a deliberate design call (don't wake every agent on an unaddressed post) that the CLI's actual daily use directly contradicts. |
 | 10 | Overview `ready` (dependency-aware) vs CLI `open` (not dependency-aware) | **Contract, documentation only** — no schema change; state plainly in dependent-notes that dashboard "ready" and CLI "open" counts will differ and why, so nobody files it as a bug. | Two different, both-correct numbers looking like a discrepancy wastes triage time otherwise. |
