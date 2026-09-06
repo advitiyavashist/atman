@@ -1210,7 +1210,14 @@ def cmd_review(a, board):
         if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
             sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
+    # `owner` decides who the ticket is filed under (unchanged: claim it via
+    # review if nobody holds it yet, otherwise keep the existing owner).
+    # `author` is who actually ran this command -- always whoami(), never
+    # borrowed from `owner` -- so the note, checkin and message below credit
+    # whoever really submitted, even when that is not the recorded owner
+    # (T-238; this was the same by=owner bug as cmd_note, one level up).
     owner = t.get("owner") or whoami(a.owner)
+    author = whoami(a.owner)
     t["status"] = "review"
     t["owner"] = owner
     t["review_at"] = now()
@@ -1223,11 +1230,11 @@ def cmd_review(a, board):
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
-    t["notes"].append({"by": owner, "at": now(), "text": "REVIEW: " + text})
+    t["notes"].append({"by": author, "at": now(), "text": "REVIEW: " + text})
     save(board, t)
-    checkin(board, owner, t["id"], "submitted %s for review" % t["id"])
+    checkin(board, author, t["id"], "submitted %s for review" % t["id"])
     m = current_master(board)
-    post_message(board, owner, "%s ready for review: %s" % (t["id"], text),
+    post_message(board, author, "%s ready for review: %s" % (t["id"], text),
                  to=(m["owner"] if m else ""), re=t["id"])
     tm = timing(t)
     print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
@@ -1786,7 +1793,9 @@ def cmd_done(a, board):
             text = ("%s -- %s" % (stamp, text)) if text else stamp
         t["commit"] = stamp
     if text:
-        t["notes"].append({"by": t.get("owner") or "agent", "at": now(), "text": text})
+        # by=whoami(), not t["owner"]: the note records who wrote it, which is
+        # not always who the ticket is filed under (T-238 -- see cmd_note).
+        t["notes"].append({"by": whoami(), "at": now(), "text": text})
     save(board, t)
     if t.get("owner"):
         checkin(board, t["owner"], "", "finished %s" % a.id)
@@ -1804,18 +1813,37 @@ def cmd_done(a, board):
 def cmd_block(a, board):
     t = load(board, a.id)
     t["status"] = "blocked"
-    t["notes"].append({"by": t.get("owner") or "agent", "at": now(), "text": a.reason})
+    t["notes"].append({"by": whoami(), "at": now(), "text": a.reason})
     save(board, t)
     print("%s blocked: %s" % (a.id, a.reason))
 
 
 def cmd_note(a, board):
+    """Add a note (`tickets note` / `tickets update`).
+
+    `by` is always the caller's own identity (`--by`, else $TICKET_AGENT),
+    never the ticket's `owner` field. T-238: a fallback to `t.get("owner")`
+    here meant a second agent working the same ticket in parallel -- exactly
+    the case a duplicate lane needs to be visible -- had its notes silently
+    relabeled as the owner's, so nothing in the note history could ever
+    reveal the second lane. This was a write-path bug: the on-disk `by` was
+    wrong, not just its rendering in `tickets show`.
+    """
     t = load(board, a.id)
-    t["notes"].append({"by": a.by or t.get("owner") or "agent", "at": now(), "text": a.text})
+    who = whoami(a.by)
+    t["notes"].append({"by": who, "at": now(), "text": a.text})
     save(board, t)
-    who = a.by or t.get("owner")
-    if who and t["status"] == "claimed":
+    if t["status"] == "claimed":
         checkin(board, who, t["id"], a.text[:80])
+    owner = t.get("owner")
+    if owner and owner != who:
+        # Correct attribution only helps a reader who goes looking; a
+        # stranger's note on a claimed ticket needs to actively surface to
+        # the owner, since silent duplicate work is the actual harm.
+        post_message(board, who, "posted on %s (owned by %s): %s" % (
+            t["id"], owner, a.text[:120]), to=owner, re=t["id"])
+        print("warning: %s is owned by %s, not %s -- %s notified" % (
+            t["id"], owner, who, owner))
     tm = timing(t)
     if t["status"] == "claimed" and tm["active"] is not None:
         print("update on %s recorded (%s into the task)" % (a.id, fmt_hours(tm["active"])))
