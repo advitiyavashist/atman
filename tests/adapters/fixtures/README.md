@@ -35,7 +35,7 @@ otherwise untouched:
 
 | Real value (this machine) | Placeholder |
 |---|---|
-| the operator's home directory prefix (`/Users/kavana/...`) | `/home/agent/...` |
+| the operator's home directory prefix (`/Users/<operator>/...`) | `/home/agent/...` |
 | the capture project's absolute cwd | `/home/agent/projects/example-project` |
 | Claude Code's path-flattened transcript project directory | `/home/agent/.claude/projects/example-project` |
 | the real session id (one UUID, reused across every event since they're one session) | `11111111-1111-1111-1111-111111111111` |
