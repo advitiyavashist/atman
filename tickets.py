@@ -2597,6 +2597,13 @@ def _mark_inbox_read(board, owner):
 def unread(board, owner):
     since = _agent_rec(board, owner).get("inbox_seen", "")
     msgs = load_messages(board)
+    # An agent that slept through a rotation has its unread mail sitting in an
+    # archive the fast path never reads, so its inbox would come back silently
+    # empty -- the one failure this whole board is built to prevent. Pay for
+    # the archives only when `since` predates what is left in the live file.
+    if since and (not msgs or since < msgs[0].get("at", "")):
+        if glob.glob(os.path.join(board, "messages.*.jsonl")):
+            msgs = load_messages(board, include_archives=True)
     return [m for m in msgs
             if m.get("from") != owner
             and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
