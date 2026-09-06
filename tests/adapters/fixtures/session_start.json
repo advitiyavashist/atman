@@ -1,0 +1,8 @@
+{
+  "cwd": "/home/agent/projects/example-project",
+  "hook_event_name": "SessionStart",
+  "scratchpad_dir": "/home/agent/projects/example-project/.scratch-root/11111111-1111-1111-1111-111111111111/scratchpad",
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "source": "startup",
+  "transcript_path": "/home/agent/.claude/projects/example-project/11111111-1111-1111-1111-111111111111.jsonl"
+}

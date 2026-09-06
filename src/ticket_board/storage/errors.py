@@ -45,6 +45,47 @@ class NotFound(BoardError):
     status = 404
 
 
+class ForbiddenScope(BoardError):
+    code = "forbidden_scope"
+    status = 403
+
+    def __init__(self, project_id, subject_id=None):
+        details = {"project_id": project_id}
+        if subject_id is not None:
+            details["subject_id"] = subject_id
+        super().__init__("Credential is not authorized for this project.", details)
+
+
+class NotChannelMember(BoardError):
+    code = "not_channel_member"
+    status = 403
+
+    def __init__(self, channel_id, member_id):
+        super().__init__(
+            "Member cannot read that channel.",
+            {"channel_id": channel_id, "member_id": member_id},
+        )
+
+
+class MembershipRevoked(BoardError):
+    code = "membership_revoked"
+    status = 403
+
+    def __init__(self, member_id):
+        super().__init__(
+            "That membership has been revoked.",
+            {"member_id": member_id},
+        )
+
+
+class SenderIdentityRejected(BoardError):
+    code = "sender_identity_rejected"
+    status = 403
+
+    def __init__(self):
+        super().__init__("Message author must come from the credential.")
+
+
 class TicketVersionConflict(BoardError):
     code = "ticket_version_conflict"
     status = 409
@@ -94,6 +135,22 @@ class SessionLeaseExpired(BoardError):
         super().__init__(
             "Session lease is expired or revoked.",
             {"session_id": session_id, **(detail or {})},
+        )
+
+
+class RunAlreadyActive(BoardError):
+    code = "run_already_active"
+    status = 409
+
+    def __init__(self, agent_id, runner_id=None, epoch=None):
+        details = {"agent_id": agent_id}
+        if runner_id is not None:
+            details["runner_id"] = runner_id
+        if epoch is not None:
+            details["epoch"] = epoch
+        super().__init__(
+            "A runner is already active for that agent.",
+            details,
         )
 
 

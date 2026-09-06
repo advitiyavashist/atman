@@ -1,0 +1,6 @@
+{"at": "2026-01-02T08:00:00Z", "from": "agent-alpha", "to": "", "re": "", "text": "joined the board"}
+{"at": "2026-01-02T10:05:00Z", "from": "agent-alpha", "to": "agent-bravo", "re": "T-001", "text": "claimed the schema ticket"}
+{"at": "2026-01-05T08:00:00Z", "from": "agent-charlie", "to": "", "re": "T-003", "text": "starting the API"}
+{not json at all
+{"at": "2026-01-06T12:00:00Z", "from": "agent-delta", "to": "agent-bravo", "re": "T-008", "text": "stuck: no credentials"}
+{"at": "2026-01-11T12:00:00Z", "from": "agent-bravo", "to": "", "re": "T-999", "text": "note about a ticket that is not on the board"}
