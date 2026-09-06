@@ -131,9 +131,10 @@ class EventStream:
             if kind == "ticket_changed":
                 return self.store.get_ticket(project_id, subject)
             if kind == "agent_changed":
-                return serialize_agent(self.store, self.store.get_agent(subject))
+                return serialize_agent(
+                    self.store, self.store.get_agent(subject, project_id))
             if kind == "review_changed":
-                return self.store.get_review(subject)
+                return self.store.get_review(project_id, subject)
             if kind == "assignment_changed":
                 row = self.store.conn.execute(
                     "SELECT * FROM assignments WHERE id = ?", (subject,)

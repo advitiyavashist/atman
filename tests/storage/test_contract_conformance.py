@@ -291,7 +291,7 @@ def test_every_imported_record_matches_the_contract(store, schemas, tmp_path):
     # would fail the schema the moment the server serves it back.
     assert len(reviews) == report.imported_reviews == 0
     for row in reviews:
-        _validate(schemas, "Review", store.get_review(row["id"]))
+        _validate(schemas, "Review", store.get_review(report.project_id, row["id"]))
 
     for event in store.audit_trail(report.project_id, limit=10000):
         _validate(schemas, "AuditEvent", event)

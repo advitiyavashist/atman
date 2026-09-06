@@ -146,6 +146,27 @@ def test_an_oversized_document_is_truncated_and_reported(store, sample, monkeypa
     assert "document:brief/agent-alpha.md" not in imported.truncated_fields
 
 
+@pytest.mark.parametrize("raw, expected, truncated", [
+    (b"a" * 99, "a" * 99, False),
+    (b"a" * 100, "a" * 100, False),
+    (b"a" * 101, "a" * 100, True),
+    (b"a" * 99 + "é".encode(), "a" * 99, True),
+    (b"\xff" * 101, "\ufffd" * 33, True),
+    (("é" * 51).encode(), "é" * 50, True),
+])
+def test_document_cap_bounds_stored_utf8_bytes(store, sample, monkeypatch,
+                                              raw, expected, truncated):
+    monkeypatch.setattr(legacy_module, "LEGACY_DOCUMENT_MAX_BYTES", 100)
+    (sample / "briefs" / "boundary.md").write_bytes(raw)
+    imported = import_legacy_board(store, sample, project_name="Sample")
+    document = next(d for d in legacy_documents(store, imported.project_id,
+                                               kind="brief")
+                    if d["name"] == "boundary.md")
+    assert len(document["content"].encode("utf-8")) <= 100
+    assert document["content"] == expected
+    assert imported.truncated_fields.get("document:brief/boundary.md", 0) == int(truncated)
+
+
 def test_fields_with_no_contract_home_are_archived_not_dropped(store, imported):
     """priority/epic/sprint/needs/suggested/done_at/review_at/commit/branch/pr.
 
