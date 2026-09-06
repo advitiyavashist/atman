@@ -8,7 +8,7 @@
       "priority": 2,
       "deps": [],
       "suggested_owner": "claude-opus",
-      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-opus; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local /Users/kavana/Downloads/tickets-design). Own paths: docs/contracts/, tests/fixtures/. Acceptance: Publish OpenAPI + JSON fixtures for every screen, errors, ticket/lease versions, enrollment, hooks, SSE reconnect and review evidence. Fixtures cover empty, offline, blocked and review states. Validate schemas. Freeze interfaces before dependent implementation. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
+      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-opus; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local ../tickets-design). Own paths: docs/contracts/, tests/fixtures/. Acceptance: Publish OpenAPI + JSON fixtures for every screen, errors, ticket/lease versions, enrollment, hooks, SSE reconnect and review evidence. Fixtures cover empty, offline, blocked and review states. Validate schemas. Freeze interfaces before dependent implementation. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
     },
     {
       "key": "store",
@@ -19,7 +19,7 @@
         "contract"
       ],
       "suggested_owner": "claude-opus",
-      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-opus; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local /Users/kavana/Downloads/tickets-design). Own paths: src/ticket_board/storage/, tests/storage/. Acceptance: SQLite atomic claim/reservation, agent capacity, dependency cycle checks, version conflicts and append-only audit. Legacy fixture import preserves counts/deps; explicit server ownership blocks legacy writers; backup and rollback drill. Race eight claims and stale versions. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
+      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-opus; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local ../tickets-design). Own paths: src/ticket_board/storage/, tests/storage/. Acceptance: SQLite atomic claim/reservation, agent capacity, dependency cycle checks, version conflicts and append-only audit. Legacy fixture import preserves counts/deps; explicit server ownership blocks legacy writers; backup and rollback drill. Race eight claims and stale versions. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
     },
     {
       "key": "api",
@@ -30,7 +30,7 @@
         "store"
       ],
       "suggested_owner": "claude-opus",
-      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-opus; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local /Users/kavana/Downloads/tickets-design). Own paths: src/ticket_board/server/, tests/server/. Acceptance: Implement contract routes, project-scoped agent credentials, operator enrollment/revoke and reviewer privileges. Loopback default, HttpOnly session + CSRF/origin validation. SSE durable cursor/replay/snapshot fallback. Test cross-project access, idempotency and reconnect. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
+      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-opus; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local ../tickets-design). Own paths: src/ticket_board/server/, tests/server/. Acceptance: Implement contract routes, project-scoped agent credentials, operator enrollment/revoke and reviewer privileges. Loopback default, HttpOnly session + CSRF/origin validation. SSE durable cursor/replay/snapshot fallback. Test cross-project access, idempotency and reconnect. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
     },
     {
       "key": "adapter",
@@ -41,7 +41,7 @@
         "contract"
       ],
       "suggested_owner": "claude-sonnet",
-      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-sonnet; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local /Users/kavana/Downloads/tickets-design). Own paths: src/ticket_board/adapters/claude/, tests/adapters/, docs/connect-claude.md. Acceptance: Project-scoped enrollment; durable identity/session ID independent of env. Preserve unrelated hook config, validate real Claude events/version, bound context and retries, suppress raw prompts/tools, diagnose delivery vs actual adoption. Uninstall/revoke and two-session fixture tests. Remote protocol design only for pilot. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
+      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-sonnet; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local ../tickets-design). Own paths: src/ticket_board/adapters/claude/, tests/adapters/, docs/connect-claude.md. Acceptance: Project-scoped enrollment; durable identity/session ID independent of env. Preserve unrelated hook config, validate real Claude events/version, bound context and retries, suppress raw prompts/tools, diagnose delivery vs actual adoption. Uninstall/revoke and two-session fixture tests. Remote protocol design only for pilot. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
     },
     {
       "key": "master",
@@ -52,7 +52,7 @@
         "api"
       ],
       "suggested_owner": "claude-fable",
-      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-fable; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local /Users/kavana/Downloads/tickets-design). Own paths: src/ticket_board/orchestrator/, tests/orchestrator/. Acceptance: Server-fenced single master lease, deterministic eligibility and capacity, reservations + expiry, pause/run-once and logged reasons. Optional model recommendations validated before writes. Recovery checkpoint and stale writer rejection. No autonomous merge or silent worktree takeover. Test two competing masters. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
+      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: claude-fable; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local ../tickets-design). Own paths: src/ticket_board/orchestrator/, tests/orchestrator/. Acceptance: Server-fenced single master lease, deterministic eligibility and capacity, reservations + expiry, pause/run-once and logged reasons. Optional model recommendations validated before writes. Recovery checkpoint and stale writer rejection. No autonomous merge or silent worktree takeover. Test two competing masters. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
     },
     {
       "key": "ui",
@@ -63,7 +63,7 @@
         "contract"
       ],
       "suggested_owner": "codex",
-      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: codex; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local /Users/kavana/Downloads/tickets-design). Own paths: ui/, tests/ui/. Acceptance: Implement Overview/Tickets/Agents/Activity, detail panel, connect dialog, master panel, theme toggle and keyboard flows matching prototype/design. Distinguish queued/claimed/turn-finished/review/done; heartbeat vs progress; labeled fixture mode. No fake live metrics. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
+      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: codex; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local ../tickets-design). Own paths: ui/, tests/ui/. Acceptance: Implement Overview/Tickets/Agents/Activity, detail panel, connect dialog, master panel, theme toggle and keyboard flows matching prototype/design. Distinguish queued/claimed/turn-finished/review/done; heartbeat vs progress; labeled fixture mode. No fake live metrics. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
     },
     {
       "key": "integrate",
@@ -77,7 +77,7 @@
         "ui"
       ],
       "suggested_owner": "codex",
-      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: codex; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local /Users/kavana/Downloads/tickets-design). Own paths: ui/, tests/ui/integration/. Acceptance: Replace fixtures with real API/SSE; display connection loss and timestamps; recover replay gaps; enrollment confirmation, hook doctor, revoke, assign/pause/review controls and errors. Pinned evidence on review, prevent optimistic false success. Verify two-session full loop. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
+      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: codex; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local ../tickets-design). Own paths: ui/, tests/ui/integration/. Acceptance: Replace fixtures with real API/SSE; display connection loss and timestamps; recover replay gaps; enrollment confirmation, hook doctor, revoke, assign/pause/review controls and errors. Pinned evidence on review, prevent optimistic false success. Verify two-session full loop. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
     },
     {
       "key": "release",
@@ -88,7 +88,7 @@
         "integrate"
       ],
       "suggested_owner": "cursor-2",
-      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: cursor-2; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local /Users/kavana/Downloads/tickets-design). Own paths: tests/acceptance/, docs/runbook.md. Acceptance: Disposable two-Claude end-to-end proof, eight-claim race, master failover, hook offline/retry, old lease rejection, retained work on reassign, import/rollback and keyboard testing. Install/run/takeover docs and exact evidence. No live board mutation in tests. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
+      "body": "Repository: advitiyavashist/tickets. Epic E-010. Queued lane assignment: cursor-2; finish current claimed work first. Own a separate tickets worktree; do not implement in Steer. Read docs/interface-v1.md and docs/prototype.html on codex-interface-design (local ../tickets-design). Own paths: tests/acceptance/, docs/runbook.md. Acceptance: Disposable two-Claude end-to-end proof, eight-claim race, master failover, hook offline/retry, old lease rejection, retained work on reassign, import/rollback and keyboard testing. Install/run/takeover docs and exact evidence. No live board mutation in tests. Submit exact commit/PR, tests and dependent contract notes to cursor. Do not mark your own implementation done."
     }
   ]
 }

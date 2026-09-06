@@ -204,16 +204,21 @@ def test_the_report_is_recorded_so_the_conflicts_are_visible(results, capsys):
 
 # ------------------------------------------- why the mutations conflict
 
-def test_the_mutation_conflicts_are_the_harnesss_shared_request_id(board_factory):
-    """The failures above are one cause, and it is not in the routes.
+def test_the_harness_mints_a_fresh_request_id_per_mutation(board_factory):
+    """The shared fixture key would conflict; the harness no longer shares it.
 
     Every request fixture in `tests/fixtures/` carries the *same*
     `request_id` -- `0f1e2d3c-4b5a-4968-8776-655443322110`. Against the
-    fixture-replay stub that is invisible. Against a real board it means the
-    first mutation spends the key and every later one with a different body is
-    409 `request_id_reused`, exactly as the contract requires.
+    fixture-replay stub that is invisible. Against a real board, replaying it
+    means the first mutation spends the key and every later one with a
+    different body is 409 `request_id_reused`, exactly as the contract
+    requires -- which used to fail `claimTicket` whenever it ran after
+    `createTicket` and said nothing about the route.
 
-    Proven both ways: the same case that fails in the full run passes on its own.
+    T-210 gave each mutation its own generated key, so the cases are now
+    independent of each other's order. Both halves are asserted here: the run
+    is clean, and the contract behaviour the old failure relied on is still
+    live on the wire when a key really is reused.
     """
     import urllib.request
     import urllib.error
@@ -229,10 +234,13 @@ def test_the_mutation_conflicts_are_the_harnesss_shared_request_id(board_factory
 
     together = harness.run(board_factory("together"), cases=[create, claim])
     failing = [r for r in together if r.kind == "mutate" and not r.passed]
-    assert [r.label for r in failing] == ["claimTicket"]
+    assert failing == [], \
+        "fresh request_ids should make the cases order-independent: " + str(
+            [(r.label, r.errors) for r in failing])
 
-    # And the reason is the shared key, not the route: re-send the same claim
-    # body and read the code off the wire.
+    # The 409 itself is not gone, only the harness's collision with it: send the
+    # fixture bodies raw, with their shared literal key, and read the code off
+    # the wire.
     base = board_factory("witness")
     for case in (create, claim):
         route = harness.ROUTES[case.operation_id]

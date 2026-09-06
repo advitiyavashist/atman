@@ -11,9 +11,21 @@ For every case in `cases.py` this:
      since the manifest alone does not say which route a fixture belongs to);
   3. validates the response body against that operation's response schema --
      this is (b);
-  4. for every mutation, also resends the same body with an injected
-     top-level `actor` field and asserts it is refused 400
-     `malformed_request` -- this is (c) again, the negative half.
+  4. for every mutation, also resends the same body plus an injected
+     top-level `actor` field, under a fresh `request_id` of its own, and
+     asserts it is refused 400 `malformed_request` -- this is (c) again, the
+     negative half.
+
+Every mutation gets its own freshly generated `request_id` rather than the
+literal one baked into its fixture: fixture bodies share a single hardcoded
+id, and on a real, stateful server (T-180) a second run -- or even the second
+case in the same run -- would collide with a `request_id` already used for a
+different body, which `RequestId` (openapi.yaml) defines as 409
+`request_id_reused`, not the status either call actually wants to prove. The
+actor-reject probe deliberately uses a *different* fresh id than the primary
+mutation, not the same one: replaying the same id with a changed body is
+exactly the 409 `request_id_reused` case, which would mask the 400
+`malformed_request` this check exists to prove.
 
 This module only talks HTTP and reads `openapi.yaml` for the expected
 status/schema; it does not know or care whether `base_url` is the fixture
@@ -26,6 +38,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
@@ -80,6 +93,13 @@ def _send(method: str, url: str, headers: dict, body: object | None) -> tuple[in
         return error.code, parsed
 
 
+def _fresh_request_id() -> str:
+    """A per-call idempotency key, so replaying this harness against a real,
+    stateful server never collides with a `request_id` a previous run (or an
+    earlier case in this run) already used for a different body."""
+    return str(uuid.uuid4())
+
+
 def _url(base_url: str, case: Case, route: Route) -> str:
     path = route.path.format(**case.path_values)
     url = base_url.rstrip("/") + path
@@ -118,12 +138,16 @@ def run(base_url: str, cases: list[Case] = ALL_CASES) -> list[Result]:
 
         headers["Content-Type"] = "application/json"
         request_body = case.request.load()
+        if "request_id" in request_body:
+            request_body["request_id"] = _fresh_request_id()
 
         status, body = _send(route.method, url, headers, request_body)
         results.append(_check(case.label, route.method, route.path, "mutate",
                                route.success_status, status, route.success_schema, body))
 
         mutated = dict(request_body)
+        if "request_id" in mutated:
+            mutated["request_id"] = _fresh_request_id()
         mutated["actor"] = ACTOR_STUB
         reject_status, reject_body = _send(route.method, url, headers, mutated)
         code = (reject_body or {}).get("error", {}).get("code") if isinstance(reject_body, dict) else None
