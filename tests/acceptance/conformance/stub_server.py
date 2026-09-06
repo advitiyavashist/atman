@@ -35,6 +35,16 @@ REJECTED_ACTOR_BODY = json.loads((FIXTURES / "errors" / "400-malformed-request.j
 MutationFn = Callable[[object], object]
 
 
+def _bodies_match(fixture_body: object, sent_body: object) -> bool:
+    """The harness generates a fresh `request_id` per call (see harness.py),
+    so it never equals the literal one baked into the fixture. Everything
+    else must still match byte-for-byte."""
+    if isinstance(fixture_body, dict) and isinstance(sent_body, dict):
+        fixture_body = {k: v for k, v in fixture_body.items() if k != "request_id"}
+        sent_body = {k: v for k, v in sent_body.items() if k != "request_id"}
+    return fixture_body == sent_body
+
+
 def _path_pattern(path_template: str) -> re.Pattern:
     pattern = re.sub(r"\{\w+\}", "[^/]+", path_template)
     return re.compile(f"^{pattern}$")
@@ -69,7 +79,8 @@ class FixtureReplayStub:
         if body is None:
             case = cases[0]
         else:
-            case = next((c for c in cases if c.request is not None and c.request.load() == body), None)
+            case = next((c for c in cases if c.request is not None
+                         and _bodies_match(c.request.load(), body)), None)
             if case is None:
                 return 500, {"error": {"code": "malformed_request", "status": 500,
                                         "message": "stub: request body did not match any known fixture"}}

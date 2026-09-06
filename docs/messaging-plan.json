@@ -10,7 +10,7 @@
         "T-180"
       ],
       "suggested_owner": "claude-opus",
-      "body": "Queued assignment claude-opus, after current work. Repo advitiyavashist/tickets, separate worktree. Read docs/messages-and-runners.md and docs/messages.html in /Users/kavana/Downloads/tickets-design. Own src/ticket_board/messaging/, tests/messaging/. Acceptance: Members/invites, channels/private ACLs, DMs, threads, mentions, ticket links, durable outbox and receipts. Identity from credential, atomic message+outbox, dedup, revocation and SSE permission checks. Submit exact SHA, checks and handoff to cursor; no self-close."
+      "body": "Queued assignment claude-opus, after current work. Repo advitiyavashist/tickets, separate worktree. Read docs/messages-and-runners.md and docs/messages.html in ../tickets-design. Own src/ticket_board/messaging/, tests/messaging/. Acceptance: Members/invites, channels/private ACLs, DMs, threads, mentions, ticket links, durable outbox and receipts. Identity from credential, atomic message+outbox, dedup, revocation and SSE permission checks. Submit exact SHA, checks and handoff to cursor; no self-close."
     },
     {
       "key": "runner",
@@ -23,7 +23,7 @@
         "T-182"
       ],
       "suggested_owner": "claude-sonnet",
-      "body": "Queued assignment claude-sonnet, after current work. Repo advitiyavashist/tickets, separate worktree. Read docs/messages-and-runners.md and docs/messages.html in /Users/kavana/Downloads/tickets-design. Own src/ticket_board/runners/, tests/runners/. Acceptance: Supervisor outlives model turns; authenticated wake queue; explicit session ownership and worktree; claude programmatic resume with stdin input. Atomic task claim, busy queue, reconnect, fenced lease, crash reconciliation, bounded retries/budgets, normal permissions and approval state. No reply loops. Healthy idle start target <=5s, measured. Submit exact SHA, checks and handoff to cursor; no self-close."
+      "body": "Queued assignment claude-sonnet, after current work. Repo advitiyavashist/tickets, separate worktree. Read docs/messages-and-runners.md and docs/messages.html in ../tickets-design. Own src/ticket_board/runners/, tests/runners/. Acceptance: Supervisor outlives model turns; authenticated wake queue; explicit session ownership and worktree; claude programmatic resume with stdin input. Atomic task claim, busy queue, reconnect, fenced lease, crash reconciliation, bounded retries/budgets, normal permissions and approval state. No reply loops. Healthy idle start target <=5s, measured. Submit exact SHA, checks and handoff to cursor; no self-close."
     },
     {
       "key": "chat",
@@ -35,7 +35,7 @@
         "messages"
       ],
       "suggested_owner": "codex",
-      "body": "Queued assignment codex, after current work. Repo advitiyavashist/tickets, separate worktree. Read docs/messages-and-runners.md and docs/messages.html in /Users/kavana/Downloads/tickets-design. Own ui/messages/, tests/ui/messages/. Acceptance: Build docs/messages.html into dashboard. Channels, members, DMs, threads, mentions, ticket chips, Send/Send task, readable receipts and unread counts. Show offline, busy, manual-resume and approval states; no false started status; keyboard flow and authorization errors. Submit exact SHA, checks and handoff to cursor; no self-close."
+      "body": "Queued assignment codex, after current work. Repo advitiyavashist/tickets, separate worktree. Read docs/messages-and-runners.md and docs/messages.html in ../tickets-design. Own ui/messages/, tests/ui/messages/. Acceptance: Build docs/messages.html into dashboard. Channels, members, DMs, threads, mentions, ticket chips, Send/Send task, readable receipts and unread counts. Show offline, busy, manual-resume and approval states; no false started status; keyboard flow and authorization errors. Submit exact SHA, checks and handoff to cursor; no self-close."
     },
     {
       "key": "wakeqa",
@@ -48,7 +48,7 @@
         "T-184"
       ],
       "suggested_owner": "cursor-2",
-      "body": "Queued assignment cursor-2, after current work. Repo advitiyavashist/tickets, separate worktree. Read docs/messages-and-runners.md and docs/messages.html in /Users/kavana/Downloads/tickets-design. Own tests/acceptance/messaging/, docs/runbook.md. Acceptance: Real disposable managed Claude DM -> claim -> run -> reply proof; channel master routing; duplicate and crash replay, busy/offline, interactive-session collision, permission request, revoked/unauthorized send, dependency block, reply-loop limit, cancel and budgets. Confirm human messages alone do not fan out to all agents. Submit exact SHA, checks and handoff to cursor; no self-close."
+      "body": "Queued assignment cursor-2, after current work. Repo advitiyavashist/tickets, separate worktree. Read docs/messages-and-runners.md and docs/messages.html in ../tickets-design. Own tests/acceptance/messaging/, docs/runbook.md. Acceptance: Real disposable managed Claude DM -> claim -> run -> reply proof; channel master routing; duplicate and crash replay, busy/offline, interactive-session collision, permission request, revoked/unauthorized send, dependency block, reply-loop limit, cancel and budgets. Confirm human messages alone do not fan out to all agents. Submit exact SHA, checks and handoff to cursor; no self-close."
     }
   ]
 }
