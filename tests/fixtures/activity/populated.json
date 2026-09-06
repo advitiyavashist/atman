@@ -1,0 +1,96 @@
+{
+  "items": [
+    {
+      "id": "aud_00000001",
+      "event_id": "evt_000000000041_a1b2c3",
+      "project_id": "prj_demo0001",
+      "actor": {
+        "type": "agent",
+        "id": "agt_backend01",
+        "display_name": "backend-1",
+        "session_id": "ses_a1b2c3d4"
+      },
+      "action": "ticket.claimed",
+      "subject_type": "ticket",
+      "subject_id": "DEMO-13",
+      "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+      "occurred_at": "2026-09-06T14:32:00Z",
+      "summary": "backend-1 claimed DEMO-13."
+    },
+    {
+      "id": "aud_00000002",
+      "event_id": "evt_000000000042_a1b2c3",
+      "project_id": "prj_demo0001",
+      "actor": {
+        "type": "master",
+        "id": "agt_master001",
+        "display_name": "master-1",
+        "session_id": "ses_9f8e7d6c"
+      },
+      "action": "assignment.created",
+      "subject_type": "assignment",
+      "subject_id": "asg_00000001",
+      "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+      "occurred_at": "2026-09-06T14:35:00Z",
+      "summary": "Queued DEMO-14 for backend-1: only free agent with the backend capability."
+    },
+    {
+      "id": "aud_00000003",
+      "event_id": "evt_000000000043_a1b2c3",
+      "project_id": "prj_demo0001",
+      "actor": {
+        "type": "human",
+        "id": "mem_operator1",
+        "display_name": "Operator",
+        "session_id": null
+      },
+      "action": "review.accepted",
+      "subject_type": "review",
+      "subject_id": "rev_00000001",
+      "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+      "occurred_at": "2026-09-06T14:35:00Z",
+      "summary": "Operator accepted DEMO-13 at a1b2c3d."
+    },
+    {
+      "id": "aud_00000004",
+      "event_id": "evt_000000000044_a1b2c3",
+      "project_id": "prj_demo0001",
+      "actor": {
+        "type": "human",
+        "id": "mem_operator1",
+        "display_name": "Operator",
+        "session_id": null
+      },
+      "action": "agent.lease.revoked",
+      "subject_type": "agent",
+      "subject_id": "agt_backend01",
+      "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+      "occurred_at": "2026-09-06T14:40:00Z",
+      "summary": "Operator revoked the session lease with a recovery note."
+    },
+    {
+      "id": "aud_00000005",
+      "event_id": "evt_000000000045_a1b2c3",
+      "project_id": "prj_demo0001",
+      "actor": {
+        "type": "system",
+        "id": "system",
+        "display_name": "Ticket Board",
+        "session_id": null
+      },
+      "action": "hook_event.deduplicated",
+      "subject_type": "agent",
+      "subject_id": "agt_backend01",
+      "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+      "occurred_at": "2026-09-06T14:40:00Z",
+      "summary": "Retried hook event hev_0000000000000001 produced no new record."
+    }
+  ],
+  "next_cursor": "eyJhZnRlciI6ImF1ZF8wMDAwMDAwNSJ9",
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}

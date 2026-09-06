@@ -1,0 +1,76 @@
+{
+  "items": [
+    {
+      "id": "mem_operator1",
+      "project_id": "prj_demo0001",
+      "kind": "human",
+      "display_name": "Operator",
+      "role": "owner",
+      "state": "active",
+      "agent_id": null,
+      "availability": "available",
+      "version": 1,
+      "created_at": "2026-09-06T14:30:00Z"
+    },
+    {
+      "id": "mem_teammate1",
+      "project_id": "prj_demo0001",
+      "kind": "human",
+      "display_name": "Teammate",
+      "role": "member",
+      "state": "active",
+      "agent_id": null,
+      "availability": "offline",
+      "version": 1,
+      "created_at": "2026-09-06T14:30:00Z"
+    },
+    {
+      "id": "mem_viewer001",
+      "project_id": "prj_demo0001",
+      "kind": "human",
+      "display_name": "Auditor",
+      "role": "viewer",
+      "state": "active",
+      "agent_id": null,
+      "availability": "unknown",
+      "version": 1,
+      "created_at": "2026-09-06T14:30:00Z"
+    },
+    {
+      "id": "mem_backend01",
+      "project_id": "prj_demo0001",
+      "kind": "agent",
+      "display_name": "backend-1",
+      "role": "member",
+      "state": "active",
+      "agent_id": "agt_backend01",
+      "availability": "busy",
+      "version": 1,
+      "created_at": "2026-09-06T14:30:00Z"
+    },
+    {
+      "id": "mem_master001",
+      "project_id": "prj_demo0001",
+      "kind": "master",
+      "display_name": "master-1",
+      "role": "admin",
+      "state": "active",
+      "agent_id": "agt_master001",
+      "availability": "available",
+      "version": 1,
+      "created_at": "2026-09-06T14:30:00Z"
+    },
+    {
+      "id": "mem_revoked01",
+      "project_id": "prj_demo0001",
+      "kind": "human",
+      "display_name": "Former teammate",
+      "role": "member",
+      "state": "revoked",
+      "agent_id": null,
+      "availability": "unknown",
+      "version": 1,
+      "created_at": "2026-09-06T14:30:00Z"
+    }
+  ]
+}

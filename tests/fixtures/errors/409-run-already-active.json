@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "run_already_active",
+    "status": 409,
+    "message": "Another runner holds this agent's lease; a parallel run was not started.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "agent_id": "agt_backend01",
+      "runner_id": "rnr_00000002"
+    }
+  }
+}

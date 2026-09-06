@@ -1,0 +1,11 @@
+{
+  "accepted": true,
+  "deduplicated": false,
+  "context": {
+    "lines": [
+      "Connection test received. This does not prove session adoption."
+    ],
+    "current_ticket": null,
+    "unread_messages": 0
+  }
+}

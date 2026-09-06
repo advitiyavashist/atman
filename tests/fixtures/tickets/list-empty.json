@@ -1,0 +1,16 @@
+{
+  "items": [],
+  "next_cursor": null,
+  "total_matching": 0,
+  "stream": {
+    "state": "live",
+    "snapshot_version": 0,
+    "as_of": "2026-09-06T14:30:00Z",
+    "last_event_id": null
+  },
+  "empty_state": {
+    "headline": "No tickets match this filter.",
+    "detail": "Clear the filter or create a ticket.",
+    "primary_action": "New ticket"
+  }
+}

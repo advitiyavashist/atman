@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "invalid_review_evidence",
+    "status": 422,
+    "message": "The submitted SHA does not match the review being accepted.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "review_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+      "sent_sha": "b2c3d4e5f60718293a4b5c6d7e8f90123456789a"
+    }
+  }
+}

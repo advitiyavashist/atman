@@ -1,0 +1,18 @@
+{
+  "invitation": {
+    "id": "inv_00000001",
+    "project_id": "prj_demo0001",
+    "role": "member",
+    "state": "pending",
+    "created_by": {
+      "type": "human",
+      "id": "mem_operator1",
+      "display_name": "Operator",
+      "session_id": null
+    },
+    "created_at": "2026-09-06T14:32:00Z",
+    "expires_at": "2026-09-07T14:32:00Z",
+    "accepted_by": null
+  },
+  "code": "<invite-code-not-in-fixtures>"
+}

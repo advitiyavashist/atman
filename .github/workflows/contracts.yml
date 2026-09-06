@@ -1,0 +1,23 @@
+name: contracts
+
+on:
+  push:
+    paths: ['docs/contracts/**', 'tests/**', 'pyproject.toml', '.github/workflows/contracts.yml']
+  pull_request:
+    paths: ['docs/contracts/**', 'tests/**', 'pyproject.toml', '.github/workflows/contracts.yml']
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e '.[contracts]'
+      - name: Validate the contract pack
+        # The env var turns a missing toolchain into a failure rather than a
+        # skipped test, so the acceptance bar cannot pass by not running.
+        env:
+          TICKET_BOARD_CONTRACTS_REQUIRED: '1'
+        run: python -m pytest -q
