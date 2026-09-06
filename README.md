@@ -130,3 +130,23 @@ tickets watch --agent claude-opus --every 60 --cwd .worktrees/claude-opus \
 ```
 
 `watch --once` is the cron/launchd form; `--exec` takes any tool (codex, cursor-agent, a script).
+
+## Driving an objective
+
+Workers wake when there is work for them; the master is different -- it must
+keep planning when nothing is pending, or the board goes quiet with the goal
+unmet. So the master seat has a heartbeat:
+
+```sh
+tickets objective "V1: offline gates green on main, deploy waits on credentials"
+tickets spawn boss --master --heartbeat 30 --model opus     # or, in one go:
+tickets drive "<objective>" --as boss --heartbeat 30 --tool cursor+claude
+tickets objective                                            # objective + drive status (sprint, queue, idle lanes)
+tickets objective --done "evidence"                          # closes it; the heartbeat stops
+```
+
+Every heartbeat the master prompt carries the objective and a status picture
+(sprint burn, review queue, unowned ready work, live workers with an empty
+lane) and the rule that a heartbeat run ends by advancing the plan or logging
+why nothing changed. Only the master seat is driven; the Claude Stop hook
+ignores heartbeats so an interactive session is never pinned open by one.
