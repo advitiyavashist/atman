@@ -1,0 +1,98 @@
+{
+  "project": {
+    "id": "prj_demo0001",
+    "name": "Demo",
+    "version": 12,
+    "created_at": "2026-09-01T09:00:00Z",
+    "source": "native",
+    "paused": false
+  },
+  "counts": {
+    "ready": 3,
+    "in_progress": 2,
+    "awaiting_review": 1,
+    "blocked": 1,
+    "dependency_blocked": 1
+  },
+  "attention": [
+    {
+      "kind": "awaiting_review",
+      "subject_type": "ticket",
+      "subject_id": "DEMO-13",
+      "headline": "DEMO-13 is awaiting review.",
+      "raised_at": "2026-09-06T14:35:00Z",
+      "acknowledged_by": null
+    },
+    {
+      "kind": "progress_stalled",
+      "subject_type": "agent",
+      "subject_id": "agt_backend02",
+      "headline": "Heartbeat is live but no progress since 14:05.",
+      "raised_at": "2026-09-06T14:35:00Z",
+      "acknowledged_by": {
+        "type": "human",
+        "id": "mem_operator1",
+        "display_name": "Operator",
+        "session_id": null
+      }
+    }
+  ],
+  "recent_accepted": [
+    {
+      "id": "rev_00000001",
+      "ticket_id": "DEMO-13",
+      "state": "accepted",
+      "submitted_by": {
+        "type": "agent",
+        "id": "agt_backend01",
+        "display_name": "backend-1",
+        "session_id": "ses_a1b2c3d4"
+      },
+      "submitted_at": "2026-09-06T14:32:00Z",
+      "evidence": {
+        "repository": "advitiyavashist/tickets",
+        "branch": "feature/demo-13",
+        "sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        "pr_url": null,
+        "checks": [
+          {
+            "name": "pytest",
+            "status": "passed",
+            "details_url": null
+          }
+        ]
+      },
+      "notes": "Cursor paging covered by tests.",
+      "decided_by": {
+        "type": "human",
+        "id": "mem_operator1",
+        "display_name": "Operator",
+        "session_id": null
+      },
+      "decided_at": "2026-09-06T14:35:00Z",
+      "decision_notes": "Matches the pinned SHA."
+    }
+  ],
+  "master": {
+    "holder": {
+      "type": "master",
+      "id": "agt_master001",
+      "display_name": "master-1",
+      "session_id": "ses_9f8e7d6c"
+    },
+    "epoch": 4,
+    "acquired_at": "2026-09-06T14:30:00Z",
+    "expires_at": "2026-09-06T14:45:00Z",
+    "routing_mode": "deterministic_plus_suggestions",
+    "paused": false,
+    "last_sweep_at": "2026-09-06T14:35:00Z",
+    "next_sweep_at": "2026-09-06T14:40:00Z",
+    "sweep_interval_seconds": 30
+  },
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}

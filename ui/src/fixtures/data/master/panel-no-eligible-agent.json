@@ -1,0 +1,41 @@
+{
+  "lease": {
+    "holder": {
+      "type": "master",
+      "id": "agt_master001",
+      "display_name": "master-1",
+      "session_id": "ses_9f8e7d6c"
+    },
+    "epoch": 4,
+    "acquired_at": "2026-09-06T14:30:00Z",
+    "expires_at": "2026-09-06T14:45:00Z",
+    "routing_mode": "deterministic_plus_suggestions",
+    "paused": false,
+    "last_sweep_at": "2026-09-06T14:35:00Z",
+    "next_sweep_at": "2026-09-06T14:40:00Z",
+    "sweep_interval_seconds": 30
+  },
+  "queue": [],
+  "decisions": [
+    {
+      "ticket_id": "DEMO-14",
+      "decision": "no_eligible_agent",
+      "reason": "Every capable agent is at capacity 1/1.",
+      "agent_id": null,
+      "decided_at": "2026-09-06T14:35:00Z"
+    },
+    {
+      "ticket_id": "DEMO-17",
+      "decision": "split_recommended",
+      "reason": "Touches src/widgets/ and src/console/, owned by two lanes.",
+      "agent_id": null,
+      "decided_at": "2026-09-06T14:35:00Z"
+    }
+  ],
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}
