@@ -452,6 +452,37 @@ def git(*args):
     return out.stdout.strip()
 
 
+def repo_identity(cwd):
+    """A repo identity that is stable across every worktree of the SAME repo.
+
+    T-215: 'tickets review' pins branch@sha from whatever repo the caller
+    happened to be standing in, and cross-repo work is the norm on this board
+    (every agent works in .worktrees/). The worktree's own toplevel path is
+    useless for identity -- it differs per worktree of the same repo -- so
+    this prefers the origin remote URL (identical across worktrees, and
+    across separate clones of the same repo on different machines) and falls
+    back to the shared .git directory's real path for a repo with no remote
+    configured (e.g. a fresh local board in a test).
+    """
+    import subprocess
+
+    def _git(*args):
+        try:
+            out = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True,
+                                 text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
+
+    url = _git("config", "--get", "remote.origin.url")
+    if url:
+        return url
+    common = _git("rev-parse", "--git-common-dir")
+    if common:
+        return os.path.realpath(os.path.join(cwd, common))
+    return None
+
+
 def git_state():
     """Branch, short sha, dirty-file count, and whether cwd is the main worktree."""
     top = git("rev-parse", "--show-toplevel")
@@ -469,6 +500,7 @@ def git_state():
         "sha": sha,
         "dirty": len(dirty.splitlines()) if dirty else 0,
         "main_tree": is_main_tree,
+        "repo": repo_identity(top),
     }
 
 
@@ -1227,6 +1259,10 @@ def cmd_review(a, board):
         text = "%s -- %s" % (stamp, text)
         t["commit"] = stamp
         t["branch"] = g["branch"]
+        # T-215: record which repo this pin belongs to, so `tickets merge`
+        # can refuse to close it from an unrelated repo's ancestry. Stable
+        # across worktrees -- see repo_identity().
+        t["repo"] = g["repo"]
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
@@ -1386,6 +1422,9 @@ def cmd_merge(a, board):
       - close only tickets whose submitted SHA is ancestor of resulting main
       - refuse blanket -X ours unless --discard-code
       - failed checks leave review tickets untouched
+      - close only tickets IN REVIEW, and only from the repo their pin names
+        (T-215): ancestry alone is not identity -- this repo's own history can
+        trivially "contain" a foreign sha that was never built on it
     """
     import subprocess
     root = os.path.dirname(board)
@@ -1393,6 +1432,7 @@ def cmd_merge(a, board):
     trunk = _trunk()
     owner = whoami(a.owner)
     require_integrator(board, owner, force_master=getattr(a, "force_master", False))
+    merge_repo = repo_identity(root)
 
     def sh(*args, cwd=root):
         return subprocess.run(list(args), cwd=cwd, capture_output=True, text=True)
@@ -1544,9 +1584,30 @@ def cmd_merge(a, board):
         for t2 in queue:
             pin = parse_review_sha(t2.get("commit"))
             if not pin:
+                skipped.append((t2["id"], "review ticket has no recorded commit sha"))
+                continue
+            # T-215: ancestry alone is not identity. This repo's history can
+            # trivially "contain" a sha it never built on (a short-prefix
+            # collision, or an unrelated commit that happens to be an
+            # ancestor) -- refuse to close unless the pin names THIS repo.
+            # A pin from before this field existed is not eligible for an
+            # automatic close either: absence must never read as "matches
+            # everything".
+            recorded_repo = t2.get("repo")
+            if not recorded_repo:
+                skipped.append((t2["id"],
+                    "no repo recorded on this review pin (reviewed before T-215) -- "
+                    "not eligible for an automatic close; verify by hand which repo "
+                    "its deliverable is in, then close it with `tickets done`"))
+                continue
+            if recorded_repo != merge_repo:
+                skipped.append((t2["id"],
+                    "recorded repo %s does not match this merge's repo %s -- "
+                    "refusing a cross-repo close" % (recorded_repo, merge_repo)))
                 continue
             got = sh("git", "rev-parse", pin)
             if got.returncode != 0:
+                skipped.append((t2["id"], "recorded sha %s not found in this repo" % pin))
                 continue
             full = got.stdout.strip()
             if sh("git", "merge-base", "--is-ancestor", full, full_trunk).returncode != 0:
