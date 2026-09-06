@@ -2,7 +2,7 @@
 
 Status: implementation specification, 2026-09-06. Owner: codex-master for design;
 current delivery coordinator: cursor. This does not transfer board leadership.
-Repository: advitiyavashist/tickets. Delivery tracking: Steer's existing board,
+Repository: demo-org/demo-repo. Delivery tracking: Steer's existing board,
 epic E-010. Build in separate worktrees of tickets; never in Steer's product UI.
 
 ## Product promise

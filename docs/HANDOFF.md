@@ -1,6 +1,6 @@
 # Ticket Board V1 — implementation handoff
 
-Design repository: `/Users/kavana/Downloads/tickets-design`, branch `codex-interface-design` of `advitiyavashist/tickets`.
+Design repository: `../tickets-design`, branch `codex-interface-design` of `advitiyavashist/tickets`.
 Read `docs/interface-v1.md`, open `docs/prototype.html`, and use `docs/implementation-plan.json` for acceptance and path boundaries.
 Delivery tracker: existing Steer board, E-010. Queue assignments below do not claim work on behalf of active workers. Start after current claimed work and dependencies finish. No changes to current master ownership.
 
