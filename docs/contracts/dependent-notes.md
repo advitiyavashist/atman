@@ -389,3 +389,15 @@ Non-obvious requirements:
   requires that exceeding it produces `snapshot_required`.
 - Rate-limit thresholds — 429 is specified, the numbers are not.
 - Anything about hosting, TLS termination or remote exposure. V1 binds loopback.
+
+---
+
+## Amendments after freeze
+
+- **T-210, fixture-only, no schema change**: `tests/fixtures/tickets/{request-review,detail-accepted,detail-review-pending,detail-review-rejected}.json`
+  and `tests/fixtures/overview/populated.json` had `"repository": "advitiyavashist/tickets"`
+  (the real project's identity, not a demo value) baked into the `repository`
+  field's example data; replaced with `"demo-org/demo-repo"`. No field, type
+  or schema changed, so nothing dependent on the shape of these fixtures is
+  affected — only the literal string value of one example field. `docs/interface-v1.md:5`
+  had the same real identity in prose and got the same substitution.

@@ -45,6 +45,13 @@ REPO = Path(__file__).resolve().parents[1]
 SPEC_PATH = REPO / "docs" / "contracts" / "openapi.yaml"
 FIXTURES = REPO / "tests" / "fixtures"
 MANIFEST_PATH = FIXTURES / "manifest.json"
+# tests/fixtures/claude_hooks/ (T-214) holds real, captured Claude Code hook
+# payloads used as adapter-parsing ground truth. They are not contract
+# fixtures -- they were never listed in manifest.json and carry no paired
+# schema -- so the frozen-tree agreement check below must not treat them as
+# unlisted files. They are validated separately by
+# tests/adapters/test_real_hook_fixtures.py, which already asserts no leaked
+# operator paths or identifiers.
 RAW_ADAPTER_FIXTURE_DIRS = {FIXTURES / "claude_hooks"}
 
 SPEC_URI = "urn:ticket-board:openapi"
@@ -267,14 +274,37 @@ def test_error_status_matches_the_code_family():
 # ------------------------------------------------------------------ secrets
 
 SECRET_PATTERNS = [
-    re.compile(r"\bBearer\s+[A-Za-z0-9._-]{8,}", re.I),
+    # Bearer token, including the JSON-escaped whitespace a raw file read sees
+    # when a fixture embeds a literal "\n"/"\r"/"\t" between the scheme and
+    # the token instead of a real space. Whitespace is deliberately restricted
+    # to same-line space/tab (not \s, which includes newlines) so this does
+    # not fire on OpenAPI's unrelated `scheme: bearer` / `bearerFormat:` pair.
+    re.compile(r"\bBearer(?:[ \t]|\\[nrt])+[A-Za-z0-9._-]{8,}", re.I),
     re.compile(r"\bsk[-_][A-Za-z0-9_-]{8,}"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAKIA[0-9A-Za-z]{16}\b", re.I),  # case-insensitive on purpose
     re.compile(r"\bghp_[A-Za-z0-9]{8,}"),
-    re.compile(r"\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b"),  # JWT
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bgho_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}\b", re.I),  # Slack token
+    re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b"),  # Google API key
+    re.compile(r"\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b"),  # JWT, long segments
+    re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{2,}\b"),  # JWT, short segments -- anchored on the "{" header prefix
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),  # PEM private key block
+    re.compile(r"://[^\s/:@]+:[^\s/:@]+@"),  # user:pass@host in a URL
+    # AWS secret access key: 40 chars of base64 charset. Matched only when the
+    # blob mixes upper, lower and digit -- a plain lowercase-hex git SHA (the
+    # other common 40-char string in this repo) never does, so this stays
+    # narrow rather than flagging every commit hash.
+    re.compile(
+        r"(?<![A-Za-z0-9+/=])"
+        r"(?=[A-Za-z0-9+/=]{40}(?![A-Za-z0-9+/=]))"
+        r"(?=[A-Za-z0-9+/=]*[A-Z])(?=[A-Za-z0-9+/=]*[a-z])(?=[A-Za-z0-9+/=]*[0-9])"
+        r"[A-Za-z0-9+/=]{40}"
+    ),
 ]
 
-SECRET_BEARING_FIELDS = ("code", "token")
+SECRET_BEARING_FIELDS = ("code", "token", "api_key", "secret", "password",
+                          "private_key", "access_token")
 PLACEHOLDERS = {
     "<enrollment-code-not-in-fixtures>",
     "<agent-token-not-in-fixtures>",
@@ -282,11 +312,55 @@ PLACEHOLDERS = {
 }
 
 
+_TEXT_SUFFIXES = {".py", ".json", ".md", ".yaml", ".yml", ".html", ".txt"}
+
+
+def _text_files(root: Path) -> list[Path]:
+    return sorted(
+        p for p in root.rglob("*")
+        if p.is_file() and p.suffix in _TEXT_SUFFIXES
+        and "__pycache__" not in p.parts
+    )
+
+
+def _extra_credential_scan_paths() -> list[Path]:
+    """Fixtures are the primary blast radius for a leaked credential, but a
+    planted secret would land just as easily in the spec's `example:` values
+    or in hand-written docs and acceptance code. Scan those too.
+
+    Restricted to known text suffixes (and `__pycache__` excluded) so a stray
+    compiled `.pyc` from an unrelated local test run does not blow up the
+    scan with a binary-decode error.
+    """
+    paths = [SPEC_PATH]
+    paths += _text_files(REPO / "docs")
+    paths += _text_files(REPO / "tests" / "acceptance")
+    return paths
+
+
+# Synthetic values that are shaped like a credential but are not one -- the
+# acceptance harness sends these to its own local stub to exercise credential
+# header wiring, so they are never a real secret. Exact strings only, so a
+# genuine credential that happens to reuse a placeholder-y word still fails.
+SAFE_PLACEHOLDER_SECRETS = {
+    "Bearer stub-agent-token",
+}
+
+
+def _assert_no_credentials(text, where):
+    for pattern in SECRET_PATTERNS:
+        for match in pattern.finditer(text):
+            found = match.group(0)
+            assert found in SAFE_PLACEHOLDER_SECRETS, (
+                f"{where} matches {pattern.pattern}: {found!r}"
+            )
+
+
 def test_no_fixture_contains_anything_shaped_like_a_credential():
     for rel in MANIFEST:
-        text = (FIXTURES / rel).read_text()
-        for pattern in SECRET_PATTERNS:
-            assert not pattern.search(text), f"{rel} matches {pattern.pattern}"
+        _assert_no_credentials((FIXTURES / rel).read_text(), rel)
+    for path in _extra_credential_scan_paths():
+        _assert_no_credentials(path.read_text(), path.relative_to(REPO))
 
 
 @pytest.mark.parametrize("credential", [
@@ -336,3 +410,97 @@ def test_secret_bearing_fields_use_placeholders():
         if schema == "ErrorResponse":
             continue
         check(json.loads((FIXTURES / rel).read_text()), rel)
+
+
+# --------------------------------------- operator home paths in the test tree
+
+# A home directory that names a real person. `/Users/<operator>` and
+# `/home/agent` are the scrubbed placeholder forms the captured adapter
+# fixtures standardised on; any other first segment names whoever happened to
+# run the capture, which is what T-210 exists to keep out of a shared repo.
+OPERATOR_HOME_RE = re.compile(
+    r"/(?:Users|home)/([A-Za-z0-9_.-]+)(?:/[A-Za-z0-9_.<>-]+)*"
+)
+PLACEHOLDER_HOME_SEGMENTS = {"agent", "operator", "runner", "user",
+                             # synthetic handle in the error-leak test
+                             "someone"}
+
+# Literals that still name an operator and are owned by a ticket other than
+# T-210. Empty, and worth keeping that way: entries are for a literal nobody
+# can fix yet, never for one that is an edit away. Keyed by (repo-relative
+# path, the path with the handle replaced by `<operator>`) so the table names
+# nobody itself, and so a NEW literal -- even one in an already-listed file --
+# is still caught rather than covered.
+KNOWN_OPERATOR_PATH_DEBTS = {}
+
+
+def _anonymise_home(matched: str, handle: str) -> str:
+    """Replace the home segment with `<operator>`, for keying and reporting.
+
+    The match always begins `/Users/<handle>` or `/home/<handle>`, so replacing
+    the first occurrence of the handle rewrites exactly that segment.
+    """
+    return matched.replace(handle, "<operator>", 1)
+
+
+def _operator_path_violations(paths, root):
+    """Every (rel, matched) naming a real operator home, known debts excluded.
+
+    The raw match is reported so the failure is actionable, but the debt table
+    is keyed on the anonymised form so this file names no operator itself.
+    """
+    found = []
+    for path in paths:
+        rel = str(path.relative_to(root))
+        for match in OPERATOR_HOME_RE.finditer(path.read_text()):
+            handle = match.group(1)
+            if handle in PLACEHOLDER_HOME_SEGMENTS:
+                continue
+            if (rel, _anonymise_home(match.group(0), handle)) in KNOWN_OPERATOR_PATH_DEBTS:
+                continue
+            found.append((rel, match.group(0)))
+    return found
+
+
+def test_no_test_file_names_a_real_operator_home():
+    """The guard that keeps T-210's scrub from regressing.
+
+    A sweep fixes today's literals; this fails the build on tomorrow's. Use a
+    placeholder (`/Users/<operator>`, `/home/agent`), build the path under
+    `tmp_path`, or read it from an environment variable -- see
+    `TICKET_BOARD_REAL_BOARD` in tests/storage/test_legacy_import.py.
+
+    A literal that genuinely belongs to another in-flight ticket goes in
+    KNOWN_OPERATOR_PATH_DEBTS with the ticket that owns it, so the exception is
+    reviewable and scoped to one exact path rather than to a whole file.
+    """
+    violations = _operator_path_violations(_text_files(REPO / "tests"), REPO)
+    assert not violations, "test files name a real operator home: " + ", ".join(
+        "{} -> {}".format(rel, found) for rel, found in violations
+    )
+
+
+def test_operator_home_guard_catches_a_planted_literal(tmp_path):
+    """The guard bites, and the placeholder forms stay usable.
+
+    Every path here is built by interpolation rather than written out, so that
+    exercising the guard does not plant the literal it exists to forbid.
+    """
+    planted = tmp_path / "planted.py"
+    handle = "somebody"
+
+    planted.write_text('BOARD = "/Users/%s/Downloads/steer"\nCWD = "/home/agent/p"\n'
+                       % "<operator>")
+    assert _operator_path_violations([planted], tmp_path) == []
+
+    planted.write_text('BOARD = "/Users/%s/Downloads/steer/.tickets"\n' % handle)
+    assert _operator_path_violations([planted], tmp_path) == [
+        ("planted.py", "/Users/%s/Downloads/steer/.tickets" % handle)
+    ]
+
+    # A debt is keyed to one exact path, so a different literal in the same
+    # file is still caught rather than waved through.
+    planted.write_text('OTHER = "/Users/%s/Downloads/tickets"\n' % handle)
+    assert _operator_path_violations([planted], tmp_path) == [
+        ("planted.py", "/Users/%s/Downloads/tickets" % handle)
+    ]

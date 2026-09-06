@@ -102,6 +102,16 @@ TITLE_MAX = 200
 OUTCOME_MAX = 4000
 UPDATE_BODY_MAX = 4000
 
+# `legacy_documents` has no contract column to bound it -- it is a resource
+# bound, not a schema limit, so it is env-overridable rather than fixed like
+# the ones above. Default is generously above the largest real file on the
+# board this was tuned against (briefs/*, MASTER.md) while still keeping a
+# runaway file from landing whole in one SQLite row inside the same atomic
+# transaction as the rest of the board (T-231).
+LEGACY_DOCUMENT_MAX_BYTES = int(
+    os.environ.get("TICKET_BOARD_LEGACY_DOCUMENT_MAX_BYTES", 1_000_000)
+)
+
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # Full RFC 3339, not just the `...Z` form the CLI usually writes. Two notes on
 # the real board carry `2026-09-05T18:11:02.960071+00:00` -- fractional seconds
@@ -280,22 +290,39 @@ def read_legacy_board(legacy_dir, *, report=None):
     return tickets
 
 
-def read_legacy_documents(legacy_dir):
+def read_legacy_documents(legacy_dir, *, report=None):
     """Everything on the board that is not a ticket and not a message.
 
     `agents/`, `epics/`, `sprints/`, `briefs/`, `coordination/` and the
     board-level `*.json`/`*.md` files. Returned as `(kind, name, content)` with
     the content verbatim, because the point of the archive is that an operator
-    can read the original, not our re-rendering of it.
+    can read the original, not our re-rendering of it -- *below*
+    `LEGACY_DOCUMENT_MAX_BYTES`. A file over that cap is truncated at the byte
+    boundary (decoded with `errors="replace"` so a split multi-byte character
+    at the cut does not raise) rather than imported whole or dropped: an
+    archive that refuses the whole board because one brief grew too large is
+    worse than an archive with one clipped document, and truncating still
+    names the loss in `report.truncated_fields` instead of hiding it the way
+    a silently-oversized row would.
     """
     directory = Path(legacy_dir)
     documents = []
 
     def _add(kind, path):
         try:
-            documents.append((kind, path.name, path.read_text()))
+            size = path.stat().st_size
+            if size <= LEGACY_DOCUMENT_MAX_BYTES:
+                content = path.read_text()
+            else:
+                with path.open("rb") as fh:
+                    raw = fh.read(LEGACY_DOCUMENT_MAX_BYTES)
+                content = raw.decode("utf-8", errors="replace")
+                if report is not None:
+                    report._bump(report.truncated_fields,
+                                 "document:{}/{}".format(kind, path.name))
         except OSError:
-            pass
+            return
+        documents.append((kind, path.name, content))
 
     for path in sorted(directory.glob("*.json")):
         if path.name == SENTINEL_NAME:
@@ -599,7 +626,7 @@ def import_legacy_board(store, legacy_dir, *, project_name=None, prefix="LEG",
     # read, not a ticket that was never there. Counting only what parsed is how
     # a truncated file disappears from both sides of the comparison at once.
     report.source_tickets = len(raw) + len(report.skipped_tickets)
-    documents = read_legacy_documents(legacy_dir)
+    documents = read_legacy_documents(legacy_dir, report=report)
     messages = read_legacy_messages(legacy_dir, report=report)
     agent_records = read_legacy_agents(legacy_dir)
 
