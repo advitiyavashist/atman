@@ -98,10 +98,6 @@ export const ticketDetailScenarios: Scenario<TicketDetailResponse>[] = [
   },
 ];
 
-export const ticketDetailByTicketId: Record<string, TicketDetailResponse> = Object.fromEntries(
-  ticketDetailScenarios.map((s) => [`${s.data.ticket.id}:${s.key}`, s.data]),
-);
-
 export const agentListScenarios: Scenario<AgentListResponse>[] = [
   { key: "populated", label: "Populated", data: agentsPopulated as AgentListResponse },
   { key: "empty", label: "No agents", data: agentsEmpty as AgentListResponse },
