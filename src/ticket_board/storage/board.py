@@ -287,11 +287,20 @@ class BoardStore(MessagingMixin):
                         summary="registered agent {}".format(name))
         return self.get_agent(aid)
 
-    def get_agent(self, agent_id):
+    def get_agent(self, agent_id, project_id=None):
+        """`project_id` is optional so trusted internal callers -- callers
+        that already minted or verified `agent_id` within the project they
+        expect it to belong to -- can keep calling this unscoped. Any caller
+        taking `agent_id` from outside that trust boundary (an API route
+        comparing it against the caller's own ctx.project_id) must pass
+        `project_id`: wrong-project and nonexistent then raise the identical
+        NotFound, so neither is distinguishable from the other (T-240 -- see
+        `__review` above for the matching reasoning on reviews).
+        """
         row = self.conn.execute(
             "SELECT * FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()
-        if row is None:
+        if row is None or (project_id is not None and row["project_id"] != project_id):
             raise NotFound("No such agent.", {"agent_id": agent_id})
         return self._agent_row(row)
 
@@ -897,14 +906,24 @@ class BoardStore(MessagingMixin):
                         request_id=request_id,
                         summary="review requested for {} at {}".format(
                             ticket_id, evidence.get("sha", "")[:12]))
-            result = self.__review(conn, rid)
+            result = self.__review(conn, project_id, rid)
             self._remember(conn, project_id, request_id, "submit_review",
                            body, result)
         return result
 
-    def __review(self, conn, review_id):
+    def __review(self, conn, project_id, review_id):
+        """Scoped by project_id (T-240): review ids are globally unique, but a
+        caller-supplied id must never be looked up without also checking the
+        project it claims to be acting in -- otherwise two same-named
+        projects, whose per-project ticket ids collide by construction, let
+        one project's operator reach into another's review. Wrong project and
+        nonexistent raise the identical NotFound so neither can be
+        distinguished from the other by an attacker (same reason revoke_
+        session_lease's agent lookup below does the same).
+        """
         row = conn.execute(
-            "SELECT * FROM reviews WHERE id = ?", (review_id,)
+            "SELECT * FROM reviews WHERE id = ? AND project_id = ?",
+            (review_id, project_id),
         ).fetchone()
         if row is None:
             raise NotFound("No such review.", {"review_id": review_id})
@@ -919,9 +938,9 @@ class BoardStore(MessagingMixin):
         }
         return _omit_none(payload, ("notes",))
 
-    def get_review(self, review_id):
+    def get_review(self, project_id, review_id):
         with read_txn(self.conn) as conn:
-            return self.__review(conn, review_id)
+            return self.__review(conn, project_id, review_id)
 
     def decide_review(self, project_id, review_id, decision, decided_by, *,
                       evidence_sha, notes=None, request_id=None):
@@ -942,7 +961,7 @@ class BoardStore(MessagingMixin):
             replay = self._replay(conn, project_id, request_id, "decide_review", body)
             if replay is not None:
                 return replay
-            review = self.__review(conn, review_id)
+            review = self.__review(conn, project_id, review_id)
             if review["state"] != "requested":
                 raise InvalidStateTransition(review["ticket_id"],
                                              review["state"], decision)
@@ -967,8 +986,8 @@ class BoardStore(MessagingMixin):
             now = ids.now()
             conn.execute(
                 "UPDATE reviews SET state = ?, decided_by = ?, decided_at = ?,"
-                " decision_notes = ? WHERE id = ?",
-                (decision, _json(decided_by), now, notes, review_id),
+                " decision_notes = ? WHERE id = ? AND project_id = ?",
+                (decision, _json(decided_by), now, notes, review_id, project_id),
             )
             ticket = self._ticket_row(conn, project_id, review["ticket_id"])
             new_state = "done" if decision == "accepted" else "claimed"
@@ -993,7 +1012,7 @@ class BoardStore(MessagingMixin):
                         summary="{} {} at {}".format(decision,
                                                      review["ticket_id"],
                                                      (pinned or "")[:12]))
-            result = self.__review(conn, review_id)
+            result = self.__review(conn, project_id, review_id)
             self._remember(conn, project_id, request_id, "decide_review",
                            body, result)
         return result
