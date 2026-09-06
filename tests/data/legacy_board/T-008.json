@@ -1,0 +1,25 @@
+{
+  "title": "Deploy to staging",
+  "body": "What this ticket is for.",
+  "role": "infra",
+  "status": "blocked",
+  "deps": [],
+  "priority": 2,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [
+    "docker",
+    "network"
+  ],
+  "owner": "agent-delta",
+  "created": "2026-01-02T09:00:00Z",
+  "updated": "2026-01-02T09:00:00Z",
+  "notes": [
+    {
+      "by": "agent-delta",
+      "at": "2026-01-06T12:00:00Z",
+      "text": "blocked on credentials"
+    }
+  ],
+  "id": "T-008"
+}

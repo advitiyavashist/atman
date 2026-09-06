@@ -1,0 +1,19 @@
+{
+  "title": "Verify recovery",
+  "body": "What this ticket is for.",
+  "role": "verification",
+  "status": "open",
+  "deps": [
+    "T-001",
+    "T-001"
+  ],
+  "priority": 2,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [],
+  "owner": "",
+  "created": "2026-01-02T09:00:00Z",
+  "updated": "2026-01-02T09:00:00Z",
+  "notes": [],
+  "id": "T-005"
+}

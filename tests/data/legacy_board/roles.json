@@ -1,0 +1,15 @@
+{
+  "agent-alpha": [
+    "backend"
+  ],
+  "agent-bravo": [
+    "backend",
+    "review"
+  ],
+  "agent-charlie": [
+    "console"
+  ],
+  "agent-delta": [
+    "infra"
+  ]
+}

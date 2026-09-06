@@ -1,0 +1,11 @@
+{
+  "owner": "agent-charlie",
+  "cwd": "/work/board/.worktrees/agent-charlie",
+  "worktree": "/work/board/.worktrees/agent-charlie",
+  "branch": "agent-charlie/lane",
+  "sha": "abc0002",
+  "dirty": 0,
+  "ticket": "T-003",
+  "note": "",
+  "seen": "2026-01-11T12:02:00Z"
+}
