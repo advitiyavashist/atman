@@ -313,7 +313,7 @@ class BoardServer:
         request_id = validate.request_id(body)
         ticket = self.store.create_ticket(
             ctx.project_id,
-            self._next_ticket_id(ctx.project_id),
+            lambda conn: self._next_ticket_id(ctx.project_id, conn),
             validate.text(body, "title", max_length=200),
             role=validate.text(body, "role", max_length=40, required=False),
             outcome=validate.text(body, "outcome", max_length=4000),
@@ -325,20 +325,24 @@ class BoardServer:
         )
         return Response(201, ticket)
 
-    def _next_ticket_id(self, project_id):
+    def _next_ticket_id(self, project_id, conn=None):
         """Mint the next human-facing key for a project.
 
         `CreateTicketRequest` has no id field, so the server owns the key. The
         prefix comes from the project name so a board reads the way its
         operators talk about it; the number is the highest existing plus one,
         which keeps ids stable and gapless enough to cite in conversation.
+
+        Called from inside store.create_ticket's transaction, after its replay
+        check -- see that method's docstring for why (T-235).
         """
+        conn = conn if conn is not None else self.store.conn
         project = self.store.get_project(project_id)
         letters = "".join(c for c in project["name"].upper() if c.isalnum())
         prefix = letters[:16] if letters[:1].isalpha() else "TB"
         if len(prefix) < 2:
             prefix = (prefix + "TB")[:2]
-        rows = self.store.conn.execute(
+        rows = conn.execute(
             "SELECT id FROM tickets WHERE project_id = ? AND id LIKE ?",
             (project_id, prefix + "-%"),
         ).fetchall()

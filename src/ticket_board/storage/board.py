@@ -537,13 +537,16 @@ class BoardStore(MessagingMixin):
     def create_ticket(self, project_id, ticket_id, title, *, role=None,
                       outcome=None, acceptance=None, dependencies=None,
                       files=None, actor=None, request_id=None):
-        if not ids.TICKET_ID_RE.match(ticket_id):
-            raise MalformedRequest(
-                "ticket id must look like DEMO-13.", {"ticket_id": ticket_id}
-            )
+        """`ticket_id` is either the id string, or a callable(conn) that mints
+        one. The mint is resolved *after* the replay check so a retry under
+        the same request_id never burns a second id, and the id -- which the
+        caller never chose -- is never part of what the replay hash asserts
+        was reused unchanged (see T-235: it used to be, which inverted the
+        idempotency contract for server-minted ids).
+        """
         actor = actor or SYSTEM_ACTOR
         body = {
-            "ticket_id": ticket_id, "title": title, "role": role,
+            "title": title, "role": role,
             "outcome": outcome, "acceptance": acceptance or [],
             "dependencies": sorted(dependencies or []), "files": files or [],
         }
@@ -552,22 +555,27 @@ class BoardStore(MessagingMixin):
                                   "create_ticket", body)
             if replay is not None:
                 return replay
+            resolved_id = ticket_id(conn) if callable(ticket_id) else ticket_id
+            if not ids.TICKET_ID_RE.match(resolved_id):
+                raise MalformedRequest(
+                    "ticket id must look like DEMO-13.", {"ticket_id": resolved_id}
+                )
             now = ids.now()
             conn.execute(
                 "INSERT INTO tickets (id, project_id, title, outcome, acceptance,"
                 " state, version, role, files, created_at, updated_at)"
                 " VALUES (?, ?, ?, ?, ?, 'open', 1, ?, ?, ?, ?)",
-                (ticket_id, project_id, title, outcome, _json(acceptance or []),
+                (resolved_id, project_id, title, outcome, _json(acceptance or []),
                  role, _json(files or []), now, now),
             )
-            self._set_dependencies(conn, project_id, ticket_id,
+            self._set_dependencies(conn, project_id, resolved_id,
                                    sorted(dependencies or []))
             self._audit(conn, project_id, actor, "ticket.create",
-                        subject_type="ticket", subject_id=ticket_id,
+                        subject_type="ticket", subject_id=resolved_id,
                         request_id=request_id,
-                        summary="created {}".format(ticket_id))
+                        summary="created {}".format(resolved_id))
             result = self._serialize_ticket(
-                conn, self._ticket_row(conn, project_id, ticket_id)
+                conn, self._ticket_row(conn, project_id, resolved_id)
             )
             self._remember(conn, project_id, request_id, "create_ticket",
                            body, result)

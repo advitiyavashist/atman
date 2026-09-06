@@ -21,6 +21,40 @@ def test_replaying_a_mutation_returns_the_original_and_applies_once(
         first.json()["version"]
 
 
+def test_replaying_post_tickets_returns_the_same_ticket_not_a_409(operator):
+    """T-235: create_ticket used to hash the server-minted id into the replay
+    body. Since a retry always gets a fresh id from `_next_ticket_id`, the
+    hash never matched and a byte-identical retry was always refused as if
+    the body had changed -- which it had not.
+    """
+    key = rid()
+    body = {"request_id": key, "title": "Replay me", "outcome": "o",
+            "acceptance": [{"text": "a"}]}
+    first = operator.post("/tickets", body)
+    second = operator.post("/tickets", body)
+    assert first.status == 201
+    assert second.status == 201
+    assert first.json() == second.json()
+    assert first.json()["id"] == second.json()["id"]
+    # Applied once: no sibling ticket was minted for the retry.
+    listing = operator.get("/tickets").json()["items"]
+    assert len([t for t in listing if t["title"] == "Replay me"]) == 1
+
+
+def test_same_request_id_different_body_still_409_for_post_tickets(operator):
+    """The replay guard itself must survive dropping ticket_id from the hash."""
+    key = rid()
+    first = operator.post("/tickets", {
+        "request_id": key, "title": "Original", "outcome": "o",
+        "acceptance": [{"text": "a"}]})
+    assert first.status == 201
+    second = operator.post("/tickets", {
+        "request_id": key, "title": "Different", "outcome": "o",
+        "acceptance": [{"text": "a"}]})
+    assert second.status == 409
+    assert second.json()["error"]["code"] == "request_id_reused"
+
+
 def test_the_same_key_with_a_different_body_is_409(enrolled, ticket):
     key = rid()
     path = "/tickets/{}/updates".format(ticket["id"])
