@@ -215,3 +215,133 @@ def test_the_acl_filter_rejects_a_foreign_row_on_its_own(server, principal,
             "subject_type": "ticket", "subject_id": "DEMO-1"}
     assert server.events.visible_to(principal, {}, foreign) is False
     assert server.events.visible_to(principal, {}, mine) is True
+
+
+# ------------------------------------------------------ T-187: channel ACL
+# `visible_to` was project-scope only until now, and T-180's own mutation pass
+# recorded that the test above passes with the filter disabled because
+# `audit_trail` already filters by project in SQL. These tests are the ones
+# that fail when the filter is removed: every case below is a row the query
+# *does* return and that the filter has to drop.
+
+
+def _principal_for(server, session_token):
+    from ticket_board.server.wire import Request
+
+    return server.credentials.authenticate(Request(
+        "GET", "/events", headers={"Cookie": "tb_session=" + session_token}))
+
+
+def _private_channel_with_a_message(operator):
+    channel = operator.post("/channels", {
+        "request_id": rid(), "name": "secret", "visibility": "private"})
+    assert channel.status == 201, channel.json()
+    sent = operator.post("/messages", {
+        "request_id": rid(), "channel_id": channel.json()["id"],
+        "body": "internal", "intent": "message"})
+    assert sent.status == 201, sent.json()
+    return channel.json(), sent.json()["message"]
+
+
+def test_a_private_channels_events_do_not_reach_a_non_member(
+        server, project, operator):
+    """The stream must not be a side channel around `GET /messages`.
+
+    Filtering the read route alone would leave a socket that announces private
+    traffic -- ids, timing, and the fact of it -- to every credential in the
+    project. Same project, so the SQL filter passes it through and only
+    `visible_to` can drop it.
+    """
+    before = server.events.start_position(project["id"], None)[0]
+    _private_channel_with_a_message(operator)
+
+    outsider_session = server.bootstrap_operator(project["id"], "Outsider",
+                                                 role="member")
+    outsider = _principal_for(server, outsider_session["session_token"])
+    frames = collect(server, outsider, project["id"],
+                     last_event_id="evt_{:012d}_aaaaaa".format(before),
+                     max_frames=4, timeout=0.4)
+    subjects = [f[2].get("subject_id") for f in frames if f[1] != "heartbeat"]
+    assert all(not str(s).startswith("msg_") for s in subjects), frames
+
+
+def test_a_channel_member_does_receive_its_events(server, project, operator):
+    """The control. Without it the test above passes on a dead stream."""
+    before = server.events.start_position(project["id"], None)[0]
+    _private_channel_with_a_message(operator)
+
+    author = _principal_for(server, _session_of(server, project, operator))
+    frames = collect(server, author, project["id"],
+                     last_event_id="evt_{:012d}_aaaaaa".format(before),
+                     max_frames=4, timeout=0.6)
+    subjects = [f[2].get("subject_id") for f in frames if f[1] != "heartbeat"]
+    assert any(str(s).startswith("msg_") for s in subjects), frames
+
+
+def test_a_public_channels_events_reach_everyone_in_the_project(
+        server, project, operator):
+    """The rule is membership, not secrecy-by-default: public stays public."""
+    before = server.events.start_position(project["id"], None)[0]
+    channel = operator.post("/channels", {
+        "request_id": rid(), "name": "general", "visibility": "public"}).json()
+    operator.post("/messages", {"request_id": rid(), "channel_id": channel["id"],
+                                "body": "hello all", "intent": "message"})
+
+    outsider_session = server.bootstrap_operator(project["id"], "Outsider",
+                                                 role="member")
+    outsider = _principal_for(server, outsider_session["session_token"])
+    frames = collect(server, outsider, project["id"],
+                     last_event_id="evt_{:012d}_aaaaaa".format(before),
+                     max_frames=4, timeout=0.6)
+    subjects = [f[2].get("subject_id") for f in frames if f[1] != "heartbeat"]
+    assert any(str(s).startswith("msg_") for s in subjects), frames
+
+
+def test_ticket_events_are_unaffected_by_the_channel_rule(
+        server, project, operator, ticket):
+    """Only message subjects are channel-bound.
+
+    A filter that quietly dropped everything without a channel would take the
+    ticket and agent events with it -- a much larger outage than the bug it was
+    added to fix, and one that looks like "the dashboard stopped updating".
+    """
+    before = server.events.start_position(project["id"], None)[0]
+    operator.post("/tickets", {"request_id": rid(), "title": "Visible",
+                               "outcome": "o", "acceptance": [{"text": "a"}]})
+    outsider_session = server.bootstrap_operator(project["id"], "Outsider",
+                                                 role="member")
+    outsider = _principal_for(server, outsider_session["session_token"])
+    frames = collect(server, outsider, project["id"],
+                     last_event_id="evt_{:012d}_aaaaaa".format(before),
+                     max_frames=4, timeout=0.6)
+    assert [f for f in frames if f[1] != "heartbeat"], frames
+
+
+def test_a_message_whose_channel_cannot_be_resolved_is_dropped(
+        server, project, operator, monkeypatch):
+    """Fail closed. Guessing the other way puts a private message on a socket."""
+    before = server.events.start_position(project["id"], None)[0]
+    _, message = _private_channel_with_a_message(operator)
+    server.store.conn.execute("DELETE FROM messages WHERE id = ?",
+                              (message["id"],))
+    server.store.conn.commit()
+
+    author = _principal_for(server, _session_of(server, project, operator))
+    frames = collect(server, author, project["id"],
+                     last_event_id="evt_{:012d}_aaaaaa".format(before),
+                     max_frames=4, timeout=0.4)
+    subjects = [f[2].get("subject_id") for f in frames if f[1] != "heartbeat"]
+    assert message["id"] not in subjects
+
+
+def _session_of(server, project, operator):
+    """A fresh session for the bootstrap operator that owns `operator`.
+
+    The fixture hands out a client, not the token, so re-mint one for the same
+    member rather than reaching into the client's internals.
+    """
+    member = operator.get("/members").json()["items"][0]
+    row = server.store.conn.execute(
+        "SELECT id, display_name, role, project_id FROM operators WHERE id = ?",
+        (member["id"],)).fetchone()
+    return server.credentials.open_operator_session(dict(row))["session_token"]

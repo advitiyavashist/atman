@@ -123,6 +123,32 @@ class EnrollmentCodeExpired(BoardError):
         super().__init__(_ENROLLMENT_MESSAGE, details)
 
 
+_INVITATION_MESSAGE = "That invitation code is not usable."
+
+
+class InvitationCodeInvalid(EnrollmentCodeInvalid):
+    """A bad invite code, reported under the enrollment code's frozen name.
+
+    `ErrorCode` is a closed enum and has no `invitation_code_*` member, but the
+    contract's `POST /invitations/exchange` publishes a 422. Widening the enum
+    would be a unilateral amendment to a frozen contract, and answering with
+    `malformed_request` would misreport a *credential* failure as a shape
+    failure. So the code is borrowed and the message names the real subject --
+    the same trade T-180 made for `ticket_version_conflict` on agent records.
+    Recorded for T-224's amendment list; see docs/api-notes.md.
+    """
+
+    def __init__(self, details=None):
+        BoardError.__init__(self, _INVITATION_MESSAGE, details)
+
+
+class InvitationCodeExpired(EnrollmentCodeExpired):
+    """An expired invite code. Borrowed name; see `InvitationCodeInvalid`."""
+
+    def __init__(self, details=None):
+        BoardError.__init__(self, _INVITATION_MESSAGE, details)
+
+
 class RateLimited(BoardError):
     code = "rate_limited"
     status = 429

@@ -32,6 +32,7 @@ import traceback
 from ..storage import BoardStore, ids
 from ..storage.db import write_txn
 from . import hooks, master, validate, views
+from .messaging import MessagingRoutes, TaskRoutes
 from .auth import (
     SAFE_METHODS,
     SESSION_LEASE_SECONDS,
@@ -99,8 +100,13 @@ class Ctx:
         return self._body
 
 
-class BoardServer:
-    """Owns the store, the credentials and the stream for one board file."""
+class BoardServer(MessagingRoutes, TaskRoutes):
+    """Owns the store, the credentials and the stream for one board file.
+
+    The messaging handlers arrive as mixins rather than a second server: they
+    share this router, this `_authorize` and these error shapes. See
+    `server/messaging.py` for why that is not merely convenient.
+    """
 
     def __init__(self, db_path, *, allowed_origins=None, base_url=None,
                  session_lease_seconds=SESSION_LEASE_SECONDS,
@@ -137,6 +143,11 @@ class BoardServer:
         """
         operator = self.credentials.create_operator(project_id, display_name,
                                                     role=role)
+        # T-187: the operator also needs the `Member` record the messaging API
+        # reads. `server/schema.py` mints operator ids with the `mem_` prefix
+        # for exactly this adoption, so it is one insert and not a second
+        # identity to keep in sync.
+        self._adopt_member(project_id, operator)
         return self.credentials.open_operator_session(operator)
 
     # ---------------------------------------------------------------- router
@@ -830,6 +841,11 @@ class BoardServer:
             )
             agent = self.store.get_agent(agent["id"])
 
+        # T-187: an enrolled agent is addressable in conversation from the
+        # moment it exists, not from the moment it first speaks -- the Members
+        # list and a mention picker both have to show it before then.
+        self._adopt_agent_member(ctx.project_id, agent)
+
         enrollment = self.credentials.create_enrollment(ctx.project_id, agent["id"])
         return Response(201, {
             "enrollment_id": enrollment["enrollment_id"],
@@ -1213,21 +1229,6 @@ class BoardServer:
         )
         return Response(200, canceled)
 
-    # ------------------------------------------------- other lanes' routes
-
-    def _not_this_lane(self, ticket):
-        def handler(ctx):
-            raise NotFound(
-                "This route is published in the contract but not implemented in "
-                "this build; {} owns it.".format(ticket),
-                {"owner_ticket": ticket},
-            )
-        return handler
-
-    def messaging_route(self, ctx):
-        return self._not_this_lane("T-187")(ctx)
-
-
 
 # --------------------------------------------------------------- helpers
 
@@ -1367,14 +1368,21 @@ _ROUTE_TABLE = [
     ("POST",   r"^/assignments$", "create_assignment", OPERATOR, True),
     ("GET",    r"^/activity$", "list_activity", ANY, True),
     ("GET",    r"^/events$", "stream_events", ANY, True),
-    # Declared, not implemented. See `_not_this_lane`.
-    ("GET",    r"^/members$", "messaging_route", ANY, True),
-    ("GET",    r"^/channels$", "messaging_route", ANY, True),
-    ("POST",   r"^/channels$", "messaging_route", ANY, True),
-    ("GET",    r"^/messages$", "messaging_route", ANY, True),
-    ("POST",   r"^/messages$", "messaging_route", ANY, True),
-    ("POST",   r"^/invitations$", "messaging_route", ANY, True),
-    ("POST",   r"^/invitations/exchange$", "messaging_route", NONE, True),
+    # Messaging (T-187). `/invitations` is operatorSession-only in the
+    # contract's own `security` block; `/invitations/exchange` publishes
+    # `security: []` because the invite code is the proof.
+    ("GET",    r"^/members$", "list_members", ANY, True),
+    ("POST",   r"^/invitations$", "create_invitation", OPERATOR, True),
+    ("POST",   r"^/invitations/exchange$", "exchange_invitation", NONE, True),
+    ("GET",    r"^/channels$", "list_channels", ANY, True),
+    ("POST",   r"^/channels$", "create_channel", ANY, True),
+    ("POST",   r"^/channels/(?P<channel_id>[^/]+)/members$",
+     "add_channel_member", ANY, True),
+    ("GET",    r"^/messages$", "list_messages", ANY, True),
+    ("POST",   r"^/messages$", "send_message", ANY, True),
+    ("POST",   r"^/messages/(?P<message_id>[^/]+)/task$", "send_task", ANY, True),
+    ("GET",    r"^/messages/(?P<message_id>[^/]+)/deliveries$",
+     "list_deliveries", ANY, True),
     # The runner surface (T-188). Register and job leasing are agent-only:
     # an operator has no runtime session to run work through. Cancel takes
     # either credential -- the dashboard cancels, and so does a supervisor

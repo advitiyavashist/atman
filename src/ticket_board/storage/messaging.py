@@ -490,8 +490,19 @@ class MessagingMixin:
                      intent="message", thread_id=None, mentions=None,
                      ticket_id=None, causation_id=None, conversation_id=None,
                      supersedes_message_id=None, recipient_agent_ids=None,
-                     message_id=None, request_id=None):
-        """Persist a message and all outbox deliveries in one transaction."""
+                     message_id=None, request_id=None, delivery_state="queued"):
+        """Persist a message and all outbox deliveries in one transaction.
+
+        `delivery_state` is the state the outbox rows are born in. It defaults
+        to `queued`, which is what ordinary conversation wants: nobody has been
+        dispatched, and nothing is claimed to have been. `POST /messages/{id}/task`
+        (T-187) passes `sent`, because a dispatched task has to be able to reach
+        either `delivered` or `queued`-with-a-reason afterwards, and
+        `DELIVERY_TRANSITIONS` allows both of those only from `sent`. Creating
+        it as `queued` and transitioning would be illegal in both directions --
+        which is why this is a parameter rather than a second write: the message
+        and its outbox still land in one transaction.
+        """
         _assert_member(intent, MESSAGE_INTENTS, "intent")
         if not isinstance(author, dict) or "type" not in author or "id" not in author:
             raise SenderIdentityRejected()
@@ -505,6 +516,7 @@ class MessagingMixin:
             "conversation_id": conversation_id,
             "supersedes_message_id": supersedes_message_id,
             "recipient_agent_ids": list(recipients),
+            "delivery_state": delivery_state,
         }
         with write_txn(self.conn) as conn:
             replay = self._replay(conn, project_id, request_id, "send_message", body)
@@ -542,7 +554,8 @@ class MessagingMixin:
             )
             deliveries = [
                 self._serialize_delivery(
-                    self._insert_delivery(conn, project_id, mid, agent_id, now=now)
+                    self._insert_delivery(conn, project_id, mid, agent_id,
+                                          state=delivery_state, now=now)
                 )
                 for agent_id in recipients
             ]
@@ -589,6 +602,12 @@ class MessagingMixin:
             row = conn.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
             return self._serialize_thread(row)
 
+    # Chronological rails tiebreak on `rowid`, not on `id`. `ids.now()` is
+    # second-precision and message/delivery/thread ids are `secrets.choice`
+    # random, so `ORDER BY created_at, id` puts two messages posted in the same
+    # second in a *random* order -- a reply above the message it answers, and a
+    # different order on every read of the same rows. `rowid` is insertion
+    # order, which is the order the conversation actually happened in.
     def list_messages(self, project_id, channel_id, *, member_id=None, thread_id=None,
                       limit=50):
         with read_txn(self.conn) as conn:
@@ -596,13 +615,13 @@ class MessagingMixin:
             if thread_id is not None:
                 rows = conn.execute(
                     "SELECT * FROM messages WHERE project_id = ? AND channel_id = ?"
-                    " AND thread_id = ? ORDER BY created_at, id LIMIT ?",
+                    " AND thread_id = ? ORDER BY created_at, rowid LIMIT ?",
                     (project_id, channel_id, thread_id, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT * FROM messages WHERE project_id = ? AND channel_id = ?"
-                    " ORDER BY created_at, id LIMIT ?",
+                    " ORDER BY created_at, rowid LIMIT ?",
                     (project_id, channel_id, limit),
                 ).fetchall()
             message_ids = [r["id"] for r in rows]
@@ -610,14 +629,14 @@ class MessagingMixin:
                 marks = ",".join("?" for _ in message_ids)
                 delivery_rows = conn.execute(
                     "SELECT * FROM deliveries WHERE project_id = ?"
-                    " AND message_id IN ({}) ORDER BY created_at, id".format(marks),
+                    " AND message_id IN ({}) ORDER BY created_at, rowid".format(marks),
                     (project_id, *message_ids),
                 ).fetchall()
             else:
                 delivery_rows = []
             thread_rows = conn.execute(
                 "SELECT * FROM threads WHERE project_id = ? AND channel_id = ?"
-                " ORDER BY updated_at, id",
+                " ORDER BY updated_at, rowid",
                 (project_id, channel_id),
             ).fetchall()
             payload = {
@@ -661,7 +680,7 @@ class MessagingMixin:
     def list_deliveries(self, project_id, message_id):
         rows = self.conn.execute(
             "SELECT * FROM deliveries WHERE project_id = ? AND message_id = ?"
-            " ORDER BY created_at, id",
+            " ORDER BY created_at, rowid",
             (project_id, message_id),
         ).fetchall()
         return {"items": [self._serialize_delivery(r) for r in rows]}

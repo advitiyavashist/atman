@@ -172,10 +172,25 @@ def test_a_wrong_method_on_a_known_route_is_also_404(operator):
     assert operator.delete("/overview").status == 404
 
 
-def test_other_lanes_routes_say_who_owns_them(operator):
-    response = operator.get("/messages")
+def test_other_lanes_routes_say_who_owns_them(enrolled):
+    """Still-unbuilt routes name their owner instead of 404-ing by accident.
+
+    T-187 landed the messaging routes, so `/messages` is no longer one of
+    these; the runner routes are, and they are agent-credentialled. The
+    assertion that matters is unchanged -- a route the contract publishes but
+    this build does not serve says *which ticket owns it*, so the console lane
+    can tell "not built yet" from "broken".
+    """
+    response = enrolled["client"].get("/runners/jobs")
     assert response.status == 404
-    assert response.json()["error"]["details"]["owner_ticket"] == "T-187"
+    assert response.json()["error"]["details"]["owner_ticket"] == "T-188"
+
+
+def test_the_messaging_routes_are_no_longer_stubs(operator):
+    """The inverse of the test above, so the two cannot both rot silently."""
+    response = operator.get("/messages", query="channel_id=chn_00000000")
+    assert response.status != 404 or \
+        "owner_ticket" not in (response.json()["error"].get("details") or {})
 
 
 def test_an_unexpected_failure_becomes_a_response_not_a_dropped_connection(

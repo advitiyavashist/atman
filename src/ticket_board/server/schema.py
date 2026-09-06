@@ -67,6 +67,24 @@ CREATE TABLE IF NOT EXISTS enrollments (
     used_at    TEXT
 );
 
+-- One-time invitation codes (T-187). An invite code is a bearer secret in the
+-- same sense as an enrollment code -- whoever holds it can become a member of
+-- the project -- so it lives here with the other credentials rather than on
+-- T-202's `invitations` record, and only its hash is stored. Single use is
+-- `used_at` rather than a delete, for the same reason as enrollments: an owner
+-- investigating a failed join needs "already spent" to look different from
+-- "never existed" in the audit trail, even though the *caller* is told the
+-- same thing either way.
+CREATE TABLE IF NOT EXISTS invitation_codes (
+    code_hash     TEXT PRIMARY KEY,
+    invitation_id TEXT NOT NULL,
+    project_id    TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    used_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_invitation_codes_invitation
+    ON invitation_codes(invitation_id);
+
 -- Routing decisions shown on the master panel, including the deliberate
 -- non-assignments. A board that only records what it DID assign cannot answer
 -- "why is DEMO-15 still sitting there", which is the question the panel exists
