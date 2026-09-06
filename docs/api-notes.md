@@ -126,6 +126,23 @@ attached by a browser to a cross-site request. An unsafe cookie request with **n
 **Cross-project access is 403 `forbidden_scope`, never 404** — frozen, so project
 existence is not probeable. A project that does not exist answers the same way.
 
+**A present-but-invalid credential is a 401 everywhere a credential is required**
+— it never silently falls back to another credential on the same request, so a
+revoked agent token cannot quietly borrow the operator cookie the same client
+happens to hold. A bad token and a bad cookie give byte-identical refusals; an
+*expired* operator session is the one deliberate exception and says `Session
+expired. Sign in again.`, because its holder already knows they had one.
+
+**`POST /sessions` reads no credential at all** (T-236). It is the enrollment
+exchange: the code in the body is the proof, so the route is declared `auth=NONE`
+and whatever sits in `Authorization` or `Cookie` is ignored rather than refused.
+**Adapter authors (T-181, T-188): you do not have to strip your own headers to
+re-enroll.** This matters because it is the recovery path — an agent whose lease
+was revoked has a dead token in its configured headers by construction, and an
+adapter that configures the header once and reuses it would otherwise be the one
+client that can never come back. The relaxation is scoped to routes declared
+`auth=NONE` and to nothing else.
+
 ## Two contract gaps, raised rather than fixed
 
 Both were posted to the planner on 2026-09-06 and are implemented in the strict

@@ -60,7 +60,7 @@ ASSIGNMENT_ID_RE = re.compile(r"^asg_[0-9a-z]{8,32}$")
 ANY = "any"            # either credential type
 OPERATOR = "operator"  # agent tokens get 403 agent_token_insufficient
 AGENT = "agent"        # an operator has no runtime session to act through
-NONE = "none"          # the enrollment code is the proof
+NONE = "none"          # no credential is read; the body carries the proof
 
 
 class Ctx:
@@ -183,9 +183,26 @@ class BoardServer:
         it is not more secure, because both credentials belong to the caller and
         were each validated on their own.
         """
-        principals = self.credentials.authenticate_all(request)
         if auth == NONE:
+            # This route carries its own proof in the body -- the enrollment
+            # code -- so it authenticates nothing, and a credential that happens
+            # to be attached is not part of the decision. Refusing a
+            # present-but-invalid one would break the flow that needs this route
+            # most: an agent whose lease was revoked has a dead token in its
+            # configured headers *by construction*, and re-enrolment is how it
+            # comes back. It must not have to know to strip its own header first.
+            #
+            # This is the only place the present-but-bad rule is relaxed, and it
+            # is relaxed because the route asked for no credential at all -- not
+            # because a bad one is acceptable. Every other auth level falls
+            # through to the call below and still fails closed.
+            try:
+                principals = self.credentials.authenticate_all(request)
+            except Unauthenticated:
+                return None
             return principals[0] if principals else None
+
+        principals = self.credentials.authenticate_all(request)
         if not principals:
             raise Unauthenticated()
 
