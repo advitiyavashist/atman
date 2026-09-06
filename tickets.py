@@ -1869,7 +1869,10 @@ def cmd_assign(a, board):
             changed.append("owner=%s" % a.owner)
     if not changed:
         sys.exit("nothing to change; see tickets assign --help")
-    t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
+    note_text = "assign: " + ", ".join(changed)
+    if getattr(a, "notes", ""):
+        note_text += " -- " + a.notes
+    t["notes"].append({"by": whoami(a.by), "at": now(), "text": note_text})
     save(board, t)
     print("%s: %s" % (t["id"], ", ".join(changed)))
 
@@ -2326,6 +2329,12 @@ def health(board, tickets):
 
 def cmd_reopen(a, board):
     t = load(board, a.id)
+    if getattr(a, "notes", ""):
+        # Attribute to the acting agent, not the ticket's outgoing owner --
+        # reopen is very often one agent (a reviewer, the master) sending
+        # BACK another agent's ticket, and stamping the reason as though the
+        # outgoing owner wrote it is the same misattribution class as T-238.
+        t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": a.notes})
     t["status"] = "open"
     t["owner"] = ""
     save(board, t)
@@ -4366,8 +4375,28 @@ alwaysApply: true
 """ + PROTOCOL
 
 
+class _LoudArgumentParser(argparse.ArgumentParser):
+    """argparse's default error() writes to stderr only and exits 2. A caller
+    that reads just stdout (a hook, a pipe through tail, a skim) sees an empty
+    string and can reasonably conclude nothing went wrong -- worse, when the
+    rejected argument is free text like a --notes value, the "unrecognized
+    arguments" message ECHOES THAT TEXT BACK, so it reads exactly like the
+    caller's own note succeeding. (T-246: this masked two silent no-op
+    `tickets reopen --notes ...` calls for a full pass before anyone noticed.)
+    Make the failure impossible to miss: still argparse's own usage+error on
+    stderr, but with an explicit NO CHANGE WAS MADE as the trailing line, so
+    the tail of the output is the warning rather than the caller's own text.
+    add_subparsers() propagates this class to every subparser by default
+    (parser_class defaults to type(self)), so this covers all of them."""
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(2, "%(prog)s: error: %(message)s\n%(prog)s: NO CHANGE WAS MADE\n" % {
+            "prog": self.prog, "message": message,
+        })
+
+
 def main():
-    p = argparse.ArgumentParser(prog="tickets", description=__doc__.split("\n")[0])
+    p = _LoudArgumentParser(prog="tickets", description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
@@ -4393,6 +4422,7 @@ def main():
     c.add_argument("--priority", type=int, default=None)
     c.add_argument("--title", default="")
     c.add_argument("--by", default="")
+    c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
     c.set_defaults(fn=cmd_assign)
 
     c = sub.add_parser("epic", help="epics: create | list | show | done")
@@ -4705,7 +4735,8 @@ def main():
 
     c = sub.add_parser("block", help="mark a ticket blocked")
     c.add_argument("id")
-    c.add_argument("--reason", "-n", required=True)
+    c.add_argument("--reason", "--notes", "-n", dest="reason", required=True,
+                    help="why it's blocked (--notes accepted as an alias -- same shape as done/review)")
     c.set_defaults(fn=cmd_block)
 
     c = sub.add_parser("note", help="add a note to a ticket")
@@ -4716,6 +4747,8 @@ def main():
 
     c = sub.add_parser("reopen", help="release a claimed ticket back to open")
     c.add_argument("id")
+    c.add_argument("--notes", "-n", default="", help="why it's being reopened (recorded as a note)")
+    c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
     c.set_defaults(fn=cmd_reopen)
 
     c = sub.add_parser(
