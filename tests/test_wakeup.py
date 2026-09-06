@@ -445,7 +445,14 @@ def test_worker_cmd_quotes_model_from_workforce(board):
     spec.loader.exec_module(tk)
     cmd = tk._worker_cmd(str(board), "evil")
     assert "--model 'opus; echo INJECTED >pwned'" in cmd, cmd
-    subprocess.run(cmd.replace("claude -p", "true -p"), shell=True, cwd=board.parent, capture_output=True)
+    # T-257: this shells out for real (cmd embeds `$(tickets prompt)`), so it
+    # must not inherit the ambient environment -- an operator's real shell
+    # exports TICKETS_DIR pointing at a live board so plain `tickets ...`
+    # just works, and that value would otherwise leak straight through here.
+    e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="evil",
+             HOME=str(board.parent.parent / "home"))
+    subprocess.run(cmd.replace("claude -p", "true -p"), shell=True, cwd=board.parent,
+                   capture_output=True, env=e)
     assert not (board.parent / "pwned").exists()
 
 
