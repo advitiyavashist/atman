@@ -484,6 +484,7 @@ def checkin(board, owner, ticket=None, note=""):
     # Other commands keep their own state in this record (inbox_seen, limit,
     # stop_blocks); a check-in must not erase it or every watch poll re-wakes the agent.
     rec = _agent_rec(board, owner) or {}
+    is_new_agent = not rec
     rec.update({
         "owner": owner,
         "cwd": os.getcwd(),
@@ -495,6 +496,19 @@ def checkin(board, owner, ticket=None, note=""):
         "note": note,
         "seen": now(),
     })
+    if is_new_agent:
+        # T-244: an agent's record starts existing right here, at its first
+        # ever check-in (join, boot, or any command that checks in a name
+        # nobody has used before) -- so this is also where inbox_seen must
+        # start existing. Leaving it unset makes unread()'s since="" branch,
+        # which deliberately means "live file only" (see unread()), apply
+        # to the one agent that most needs the opposite: one with no history
+        # to fall back on. Stamping "now" here means mail from before this
+        # agent existed is never shown (a deliberate policy: a new agent
+        # starts clean, not flooded with the whole board's history) while
+        # mail from this moment on is found normally, including through a
+        # later rotation, because `since` is no longer empty.
+        rec["inbox_seen"] = now()
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(rec, f, indent=2)
@@ -2623,6 +2637,11 @@ def _mark_inbox_read(board, owner):
 
 
 def unread(board, owner):
+    # since="" means "live file only" below, which would silently drop any
+    # already-rotated mail -- checkin() (T-244) stamps inbox_seen at an
+    # agent's first-ever check-in specifically so real agents never reach
+    # this function with since="". It stays possible here (e.g. a record
+    # written before that fix existed) rather than being asserted against.
     since = _agent_rec(board, owner).get("inbox_seen", "")
     msgs = load_messages(board)
     # An agent that slept through a rotation has its unread mail sitting in an

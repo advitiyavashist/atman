@@ -64,6 +64,11 @@ def test_pending_ready_in_lane(board):
 
 def test_pending_direct_message_and_broadcast_only(board):
     run(board, "join", "bob", "--roles", "backend")
+    # T-244 stamps bob's inbox_seen the moment its record is created above.
+    # Without a real gap, alice's broadcast below can land in the SAME
+    # wall-clock second, which the pre-existing, separately-filed T-228 hole
+    # (strict `>` on second-resolution timestamps) would then hide.
+    time.sleep(1.1)
     run(board, "msg", "hello everyone", agent="alice")
     rc, p = pending(board, "bob")
     assert rc == 1 and p.get("broadcasts") == 1 and p["pending"] is False
@@ -582,50 +587,56 @@ def test_messages_rotate_past_cap_and_load_messages_defaults_to_live_file(board)
     assert "message number 0 " in out and "message number 19" in out
 
 
-def test_first_ever_inbox_check_does_not_silently_hide_rotated_history(board):
-    """T-244: an agent that has never checked its inbox (inbox_seen="") must
-    not lose every rotated-away message with no signal at all. Chosen fix is
-    option (b) from the ticket: since="" stays "live file only" (flooding a
-    brand-new agent with full board history is worse), but `tickets inbox`
-    must say so and name how many archived messages are hidden.
+def test_never_checked_in_agent_still_gets_mail_sent_after_it_joined(board):
+    """T-244 (root cause per sonnet-qa's T-241 repro): checkin()/join() used
+    to never initialize inbox_seen, so an agent's guaranteed first state was
+    since="" -- and unread()'s `if since and (...)` treats that falsy since
+    as "skip the archive check", backwards for the agent with the LEAST
+    history to fall back on. A DM addressed to a freshly-joined agent and
+    then rotated away before that agent's first `tickets inbox` call was
+    silently and permanently lost.
+
+    Fix: checkin() now stamps inbox_seen to "now" the moment an agent's
+    record is created (join, or any command that checks a new name in for
+    the first time), so since is never "" for a real agent again -- mail
+    sent after it joined is found via the ordinary T-212 archive-catchup
+    path (since predates the live file's oldest survivor) even once it has
+    rotated out of the live file.
     """
-    run(board, "join", "alice", "--roles", "backend")
+    run(board, "join", "dave", "--roles", "backend")  # dave never runs `tickets inbox`
     env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    r = run(board, "msg", "IMPORTANT-FOR-DAVE", "--to", "dave", agent="alice", env=env)
+    assert r.returncode == 0, r.stderr
     for i in range(20):
-        r = run(board, "msg", "message number %d filler filler filler" % i,
-                "--to", "alice", agent="bob", env=env)
-        assert r.returncode == 0, r.stderr
-    archives = sorted(board.glob("messages.*.jsonl"))
-    assert archives, "expected rotation to have fired"
-
-    # since="" (alice has never run `tickets inbox`): the live tail shows,
-    # archives do not flood in, and the gap is named, not silent.
-    out = run(board, "inbox", agent="alice").stdout
-    assert "message number 19" in out
-    assert "message number 0 " not in out
-    assert "archived message" in out and "tickets inbox --all" in out
-
-    full = run(board, "inbox", "--all", "--limit", "100", agent="alice").stdout
-    assert "message number 0 " in full and "message number 19" in full
-
-
-def test_inbox_hint_is_silent_once_inbox_seen_is_set(board):
-    """The archived-message hint is only for the never-checked-in case --
-    once an agent has a real `inbox_seen`, the existing T-212 archive-catchup
-    path applies instead (unread() still reads archives when `since` predates
-    the live file), and this hint must not fire every single time."""
-    run(board, "join", "alice", "--roles", "backend")
-    first = run(board, "inbox", agent="alice")
-    assert first.returncode == 0 and "inbox empty" in first.stdout  # sets inbox_seen
-    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
-    for i in range(20):
-        r = run(board, "msg", "later message %d filler filler filler" % i,
-                "--to", "alice", agent="bob", env=env)
+        r = run(board, "msg", "filler %d filler filler filler" % i, agent="alice", env=env)
         assert r.returncode == 0, r.stderr
     assert sorted(board.glob("messages.*.jsonl")), "expected rotation to have fired"
-    out = run(board, "inbox", agent="alice").stdout
-    assert "later message 0 " in out  # since predates the rotation: T-212 path shows it
-    assert "archived message" not in out
+
+    out = run(board, "inbox", "--limit", "500", agent="dave").stdout
+    assert "IMPORTANT-FOR-DAVE" in out, (
+        "dave's very first ever inbox check must not silently drop a DM sent "
+        "after he joined just because it was archived before he first checked -- "
+        "got: %r" % out
+    )
+
+
+def test_new_agent_does_not_see_history_from_before_it_joined(board):
+    """The flood question the ticket asked to be decided and written down:
+    a brand-new agent's inbox_seen is stamped to its join time, so mail
+    already on the board before it existed is deliberately NOT unread mail
+    for it -- it is history, visible only via `tickets inbox --all`."""
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    for i in range(20):
+        r = run(board, "msg", "before-carol message %d filler filler" % i, agent="alice", env=env)
+        assert r.returncode == 0, r.stderr
+    run(board, "join", "carol", "--roles", "backend")  # joins after all prior mail
+
+    out = run(board, "inbox", agent="carol").stdout
+    assert "before-carol" not in out
+    assert "inbox empty" in out
+
+    full = run(board, "inbox", "--all", "--limit", "100", agent="carol").stdout
+    assert "before-carol message 19" in full  # still on the board, just not "unread"
 
 
 def test_master_decision_log_trims_past_cap_and_archives(board):
