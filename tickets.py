@@ -28,6 +28,7 @@ import errno
 import glob
 import json
 import os
+import shlex
 import sys
 from datetime import datetime, timezone
 
@@ -430,7 +431,12 @@ def agents_dir(board):
 def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
     g = git_state() or {}
-    rec = {
+    os.makedirs(agents_dir(board), exist_ok=True)
+    path = os.path.join(agents_dir(board), owner + ".json")
+    # Other commands keep their own state in this record (inbox_seen, limit,
+    # stop_blocks); a check-in must not erase it or every watch poll re-wakes the agent.
+    rec = _agent_rec(board, owner) or {}
+    rec.update({
         "owner": owner,
         "cwd": os.getcwd(),
         "worktree": g.get("top", ""),
@@ -440,9 +446,7 @@ def checkin(board, owner, ticket=None, note=""):
         "ticket": ticket if ticket is not None else _current_ticket(board, owner),
         "note": note,
         "seen": now(),
-    }
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
+    })
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(rec, f, indent=2)
@@ -3434,7 +3438,10 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
     permission prompts by default: nobody is there to answer them, and the
     blast radius is the agent's own worktree and branch (--safe for acceptEdits).
     """
-    model = model or load_workforce(board).get(owner, {}).get("model", "")
+    # The workforce record is writable by any agent, so the model name is quoted
+    # before it reaches `watch`, which runs this string through the shell.
+    model = shlex.quote(model or load_workforce(board).get(owner, {}).get("model", "") or "")
+    model = "" if model == "''" else model
     prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
         master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
     if tool == "claude":
@@ -3624,7 +3631,7 @@ const s=d.sprint;document.getElementById('sprint').innerHTML=s?('<b>'+esc(s.id)+
 document.getElementById('goals').innerHTML=esc(d.goals||'(no MASTER.md yet -- tickets master init)');
 document.getElementById('util').innerHTML='<tr><th>agent</th><th>state</th><th class="num">done</th><th>avg cycle</th><th>active</th><th>util</th><th class="num">wip</th><th class="num">review</th></tr>'+d.util.map(u=>row([esc(u.agent),'<span class="'+(u.state=='DOWN'?'bad':u.state=='busy'?'ok':'')+'">'+u.state+'</span>','<span class="num">'+u.done+'</span>',h(u.avg_cycle_h),h(u.active_h),'<div class="bar" style="width:120px;display:inline-block;vertical-align:middle"><i style="width:'+u.util_pct+'%"></i></div> '+Math.round(u.util_pct)+'%','<span class="num">'+u.in_flight+'</span>','<span class="num">'+u.in_review+'</span>'])).join('');
 document.getElementById('flight').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>last update</th></tr>'+d.in_flight.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>'])).join('')||row(['—','','',''] );
-document.getElementById('review').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>branch</th></tr>'+d.review.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="mono">'+esc(t.commit)+'</span>'+(t.pr?' PR '+t.pr:'')])).join('')||row(['empty','','','']);
+document.getElementById('review').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>branch</th></tr>'+d.review.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="mono">'+esc(t.commit)+'</span>'+(t.pr?' PR '+esc(t.pr):'')])).join('')||row(['empty','','','']);
 document.getElementById('agents').innerHTML='<tr><th>agent</th><th>state</th><th>model</th><th class="num">done 24h</th><th>seen</th><th>ticket</th></tr>'+d.agents.map(a=>row([esc(a.name),'<span class="'+(a.state=='DOWN'?'bad':a.state=='busy'?'ok':'')+'">'+a.state+(a.watcher?' ●':'')+'</span>',esc(a.model||'-'),'<span class="num">'+a.done+'</span>',h(a.seen_h)+' ago',esc(a.ticket||'')])).join('');
 document.getElementById('health').innerHTML=d.health.length?d.health.map(x=>row(['<span class="'+(x.sev=='CRIT'?'bad':x.sev=='WARN'?'warn':'')+'">'+x.sev+'</span>',esc(x.msg)])).join(''):row(['<span class="ok">clean</span>','']);
 document.getElementById('open').innerHTML='<tr><th>id</th><th>status</th><th>pri</th><th>title</th><th>role</th><th>waits on</th></tr>'+d.open.map(t=>row([t.id,'<span class="tag">'+t.status+'</span>',t.priority,esc(t.title),esc(t.role),esc((t.waiting||[]).join(','))])).join('');

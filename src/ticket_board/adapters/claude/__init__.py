@@ -1,0 +1,41 @@
+"""Claude Code hook adapter helpers for Ticket Board V1."""
+
+from .adapter import (
+    AdapterConfig,
+    BoardClient,
+    ClaudeHookError,
+    DeliveryResult,
+    DoctorReport,
+    Enrollment,
+    SpoolFull,
+    build_hook_envelope,
+    diagnose,
+    deliver_hook_event,
+    exchange_enrollment,
+    install_hooks,
+    load_enrollment,
+    parse_claude_hook_event,
+    revoke_session_lease,
+    save_enrollment,
+    uninstall_hooks,
+)
+
+__all__ = [
+    "AdapterConfig",
+    "BoardClient",
+    "ClaudeHookError",
+    "DeliveryResult",
+    "DoctorReport",
+    "Enrollment",
+    "SpoolFull",
+    "build_hook_envelope",
+    "diagnose",
+    "deliver_hook_event",
+    "exchange_enrollment",
+    "install_hooks",
+    "load_enrollment",
+    "parse_claude_hook_event",
+    "revoke_session_lease",
+    "save_enrollment",
+    "uninstall_hooks",
+]
