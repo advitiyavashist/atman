@@ -1249,9 +1249,10 @@ def require_integrator(board, owner, force_master=False):
     m = current_master(board)
     if not m or not m.get("owner"):
         sys.exit("refused: no designated integrator in master.json (tickets master take first)")
-    if m["owner"] != owner and not force_master:
-        sys.exit("rejected owner: %s is not the designated integrator (%s); "
-                 "pass --force-master only for break-glass recovery" % (owner, m["owner"]))
+    # The master (planner) and the chief of staff (review/unblock/merge) may both integrate.
+    if owner not in (m["owner"], m.get("cos")) and not force_master:
+        sys.exit("rejected owner: %s is not the designated integrator (master %s, cos %s); "
+                 "pass --force-master only for break-glass recovery" % (owner, m["owner"], m.get("cos") or "-"))
     return m
 
 
@@ -1999,11 +2000,26 @@ def cmd_master(a, board):
             f.write(MASTER_TEMPLATE)
         print("wrote %s -- fill in Mission, Workforce, Sprint plan" % path)
         return
+    if sub == "cos":
+        prev = current_master(board) or {}
+        if not prev.get("owner"):
+            sys.exit("no master yet (tickets master take first)")
+        who = a.text or ""
+        if not who:
+            print("chief of staff: %s" % (prev.get("cos") or "(none)"))
+            return
+        prev["cos"] = "" if who in ("none", "-", "clear") else who
+        with open(master_state_path(board), "w") as f:
+            json.dump(prev, f)
+        _master_log(board, "chief of staff set to %s (master %s keeps planning/scope; cos reviews, unblocks, merges)"
+                    % (prev["cos"] or "none", prev["owner"]))
+        print("chief of staff: %s" % (prev["cos"] or "none"))
+        return
     if sub == "take":
         owner = whoami(a.owner)
         prev = current_master(board)
         with open(master_state_path(board), "w") as f:
-            json.dump({"owner": owner, "since": now()}, f)
+            json.dump({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, f)
         _master_log(board, "%s took over as master%s" % (
             owner, (" from %s" % prev["owner"]) if prev and prev.get("owner") != owner else ""))
         print("%s is master now. Run `tickets master` for the briefing." % owner)
@@ -2727,11 +2743,15 @@ def pending_work(board, owner):
         out["ready_in_my_lane"] = [t["id"] + " " + t.get("title", "")[:60] for t in ready[:3]]
     # the master wakes for different reasons: reviews to merge, stuck agents, health
     m = _safe(lambda: current_master(board), None)
-    if m and m.get("owner") == owner:
+    if m and owner in (m.get("owner"), m.get("cos")):
         rq = [t["id"] for t in tickets if t.get("status") == "review"]
         if rq:
             out["review_queue"] = rq[:6]
-        stuck = [fmt_msg(x) for x in msgs if str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
+        # A stuck message wakes both seats whoever it was addressed to.
+        since = rec.get("inbox_seen", "")
+        stuck = [fmt_msg(x) for x in _safe(lambda: load_messages(board), [])
+                 if x.get("from") != owner and x.get("at", "") > since
+                 and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
         if stuck:
             out["stuck_messages"] = stuck[-5:]
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
@@ -2780,6 +2800,32 @@ TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
 Stop when the inbox is empty, the review queue is empty and no health item needs action.
 {extra}"""
 
+PLANNER_PROMPT = """You are {agent}, the MASTER PLANNER of the shared ticket board at {board} (repo {root}).
+TICKET_AGENT is set; run `tickets ...` plainly. A chief of staff ({cos}) handles review, merge and day-to-day
+unblocking; you do not take feature tickets and you do not merge unless the cos is silent.
+Your jobs, every wake-up:
+1. SCOPE + VISION: `tickets master` and `tickets dash --once`. Keep the sprint pointed at what the user wants
+   (MASTER.md "CEO memo" and decision log). Split, re-scope, or cut tickets that drift; add the ones that are missing
+   (`tickets create ... --blocks/--deps`, `tickets plan`). Log every call: `tickets master log "..."`.
+2. ROUTE BY COMPLEXITY: `tickets route`, then hard-assign where it matters (`tickets assign <id> --owner <agent>`):
+   priority-1 / contract / migration work to high-tier agents (opus); routine docs, tests, polish to low-tier
+   (sonnet, codex). Give each worker the context it needs: `tickets brief <agent> "..."` or `--ticket <id>`.
+3. ESCALATIONS: answer messages addressed to you (scope questions, decisions the cos escalated, anything
+   starting with "stuck:" that the cos has not answered within an hour). Decisions the user reserved
+   (spend, deploy provider, default flips) get a `tickets msg` to the user's attention, not a guess.
+4. STAFFING: if a lane has ready work and no live worker, `tickets spawn <name> --model <tier> --roles ...`;
+   if a worker is silent > 90 min, `tickets limits` then `tickets reopen`.
+Stop when there is nothing addressed to you, the sprint matches the vision, and every ready ticket has an owner.
+{extra}"""
+
+
+def cos_prompt_text(agent, board, root, extra):
+    return MASTER_PROMPT.replace("the MASTER of", "the CHIEF OF STAFF of").replace(
+        "Your three jobs, every wake-up:",
+        "The master planner sets scope and routes by complexity; you review, unblock and merge. "
+        "Escalate scope or vision questions to the planner with `tickets msg --to <master>`. "
+        "Your three jobs, every wake-up:").format(agent=agent, board=board, root=root, extra=extra)
+
 
 def cmd_pending(a, board):
     owner = whoami(a.agent)
@@ -2823,9 +2869,17 @@ def cmd_prompt(a, board):
     owner = whoami(a.agent)
     m = current_master(board)
     master = (m["owner"] if m else "the master")
+    cos = (m or {}).get("cos") or ""
+    if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
+        print(cos_prompt_text(owner, board, os.path.dirname(board), a.extra or ""))
+        return
     if getattr(a, "master", False):
-        print(MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
-                                   extra=(a.extra or "")))
+        if cos and owner != cos:
+            print(PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
+                                        extra=(a.extra or "")))
+        else:
+            print(MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
+                                       extra=(a.extra or "")))
         return
     parts = []
     brief = agent_brief(board, owner)
@@ -3381,13 +3435,28 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
     blast radius is the agent's own worktree and branch (--safe for acceptEdits).
     """
     model = model or load_workforce(board).get(owner, {}).get("model", "")
-    prompt = "tickets prompt --master" if master else "tickets prompt"
+    prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
+        master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
     if tool == "claude":
         flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
                 else "--permission-mode %s" % permission_mode)
         return 'claude -p "$(%s)" %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
     if tool == "codex":
-        return 'codex exec --full-auto%s "$(%s)"' % ((" --model %s" % model) if model else "", prompt)
+        # Codex CLI headless: exec mode; unattended needs the bypass flag (no one
+        # can answer approvals), --safe keeps the workspace-write sandbox instead.
+        mode = ("--dangerously-bypass-approvals-and-sandbox" if permission_mode == "bypassPermissions"
+                else "-s workspace-write")
+        return 'codex exec --skip-git-repo-check %s%s "$(%s)"' % (mode, (" -m %s" % model) if model else "", prompt)
+    if tool == "cursor":
+        # Cursor CLI (`agent`): runs any model Cursor offers (gpt-5.5-high, claude-fable-5-1-thinking-high, ...)
+        force = "--force" if permission_mode == "bypassPermissions" else ""
+        return 'agent -p --output-format text %s%s "$(%s)"' % (force, (" --model %s" % model) if model else "", prompt)
+    if tool == "cursor+claude":
+        # Fable through Cursor first; if that run errors, the same prompt through the
+        # Claude CLI (opus). One identity, two engines -- the master never goes dark.
+        first = _worker_cmd(board, owner, model or "claude-fable-5-1-thinking-high", permission_mode, "cursor", master)
+        second = _worker_cmd(board, owner, "opus", permission_mode, "claude", master)
+        return "%s || %s" % (first, second)
     return tool  # any other executable that reads the prompt itself
 
 
@@ -3475,9 +3544,18 @@ def cmd_spawn(a, board):
     if inherited:
         print("inherited project settings into the worktree: %s" % ", ".join(inherited))
     if a.master:
+        prev = current_master(board) or {}
         with open(master_state_path(board), "w") as f:
-            json.dump({"owner": owner, "since": now()}, f)
-        _master_log(board, "%s spawned as persistent master" % owner, by=whoami())
+            json.dump({"owner": owner, "since": now(), "cos": prev.get("cos", "")}, f)
+        _master_log(board, "%s spawned as persistent master (planner)" % owner, by=whoami())
+    if a.cos:
+        prev = current_master(board) or {}
+        if not prev.get("owner"):
+            sys.exit("no master yet; spawn or take the master seat first")
+        prev["cos"] = owner
+        with open(master_state_path(board), "w") as f:
+            json.dump(prev, f)
+        _master_log(board, "%s spawned as persistent chief of staff (review/unblock/merge)" % owner, by=whoami())
     if _watcher_pid(board, owner):
         print("watcher for %s already running (pid %d); --stop first" % (owner, _watcher_pid(board, owner)))
         return
@@ -3486,7 +3564,8 @@ def cmd_spawn(a, board):
     except OSError:
         pass
     mode = "acceptEdits" if a.safe else "bypassPermissions"
-    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, a.tool or "claude", master=a.master)
+    kind = "cos" if a.cos else ("master" if a.master else "")
+    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, a.tool or "claude", master=kind)
     argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout)]
     env = dict(os.environ, TICKET_AGENT=owner, TICKETS_DIR=board,
@@ -3503,6 +3582,148 @@ def cmd_spawn(a, board):
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, a.tool or "claude", model))
+
+
+UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Ticket board</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#f7f7f5;--fg:#1c1c1a;--mute:#6b6b66;--line:#e2e2dd;--card:#fff;--ok:#2f8f4e;--warn:#c27a00;--bad:#c23b2b;--acc:#2b5fd9}
+@media(prefers-color-scheme:dark){:root{--bg:#141413;--fg:#ececea;--mute:#9a9a94;--line:#2c2c2a;--card:#1d1d1b;--ok:#5ec27f;--warn:#e0a53d;--bad:#e5645a;--acc:#7aa2ff}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif}
+header{display:flex;gap:16px;align-items:baseline;padding:14px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
+h1{font-size:16px;margin:0}small{color:var(--mute)}main{padding:16px 20px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+section h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin:0 0 8px}
+table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:4px 6px;border-top:1px solid var(--line);vertical-align:top;font-size:13px}th{color:var(--mute);font-weight:500;border-top:0}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--acc)}
+.tag{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid var(--line);color:var(--mute)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.msgs div{padding:4px 0;border-top:1px solid var(--line);font-size:13px}.wide{grid-column:1/-1}.num{text-align:right}
+</style></head><body>
+<header><h1 id="title">Ticket board</h1><small id="meta"></small><small id="clock" style="margin-left:auto"></small></header>
+<main>
+<section class="wide"><h2>Goals</h2><div id="goals" style="white-space:pre-wrap;font-size:13px"></div></section>
+<section class="wide"><h2>Sprint</h2><div id="sprint"></div></section>
+<section class="wide"><h2>Utilization (24h)</h2><table id="util"></table></section>
+<section><h2>In flight</h2><table id="flight"></table></section>
+<section><h2>Review queue</h2><table id="review"></table></section>
+<section><h2>Agents</h2><table id="agents"></table></section>
+<section><h2>Health</h2><table id="health"></table></section>
+<section class="wide"><h2>Open tickets</h2><table id="open"></table></section>
+<section class="wide"><h2>Messages</h2><div class="msgs" id="msgs"></div></section>
+</main>
+<script>
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
+function row(cells,cls){return '<tr class="'+(cls||'')+'">'+cells.map(c=>'<td>'+c+'</td>').join('')+'</tr>'}
+async function load(){const r=await fetch('/board.json?'+Date.now());const d=await r.json();
+document.getElementById('title').textContent='Ticket board · '+d.project;
+document.getElementById('meta').textContent='master '+(d.master||'nobody')+(d.cos?' · cos '+d.cos:'')+' · '+d.counts.done+' done / '+d.counts.total+' tickets';
+document.getElementById('clock').textContent='updated '+new Date().toLocaleTimeString();
+const s=d.sprint;document.getElementById('sprint').innerHTML=s?('<b>'+esc(s.id)+'</b> '+esc(s.goal)+'<div class="bar" style="margin:6px 0"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div><small>'+s.done+'/'+s.total+' done · '+s.in_flight+' in flight · '+s.blocked+' blocked · '+s.review+' in review'+(d.burn&&d.burn.done_per_day?' · '+d.burn.done_per_day.toFixed(1)+'/day, ETA '+(d.burn.eta_days?d.burn.eta_days.toFixed(1)+'d':'-'):'')+'</small>'):'no active sprint';
+document.getElementById('goals').innerHTML=esc(d.goals||'(no MASTER.md yet -- tickets master init)');
+document.getElementById('util').innerHTML='<tr><th>agent</th><th>state</th><th class="num">done</th><th>avg cycle</th><th>active</th><th>util</th><th class="num">wip</th><th class="num">review</th></tr>'+d.util.map(u=>row([esc(u.agent),'<span class="'+(u.state=='DOWN'?'bad':u.state=='busy'?'ok':'')+'">'+u.state+'</span>','<span class="num">'+u.done+'</span>',h(u.avg_cycle_h),h(u.active_h),'<div class="bar" style="width:120px;display:inline-block;vertical-align:middle"><i style="width:'+u.util_pct+'%"></i></div> '+Math.round(u.util_pct)+'%','<span class="num">'+u.in_flight+'</span>','<span class="num">'+u.in_review+'</span>'])).join('');
+document.getElementById('flight').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>last update</th></tr>'+d.in_flight.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>'])).join('')||row(['—','','',''] );
+document.getElementById('review').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>branch</th></tr>'+d.review.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="mono">'+esc(t.commit)+'</span>'+(t.pr?' PR '+t.pr:'')])).join('')||row(['empty','','','']);
+document.getElementById('agents').innerHTML='<tr><th>agent</th><th>state</th><th>model</th><th class="num">done 24h</th><th>seen</th><th>ticket</th></tr>'+d.agents.map(a=>row([esc(a.name),'<span class="'+(a.state=='DOWN'?'bad':a.state=='busy'?'ok':'')+'">'+a.state+(a.watcher?' ●':'')+'</span>',esc(a.model||'-'),'<span class="num">'+a.done+'</span>',h(a.seen_h)+' ago',esc(a.ticket||'')])).join('');
+document.getElementById('health').innerHTML=d.health.length?d.health.map(x=>row(['<span class="'+(x.sev=='CRIT'?'bad':x.sev=='WARN'?'warn':'')+'">'+x.sev+'</span>',esc(x.msg)])).join(''):row(['<span class="ok">clean</span>','']);
+document.getElementById('open').innerHTML='<tr><th>id</th><th>status</th><th>pri</th><th>title</th><th>role</th><th>waits on</th></tr>'+d.open.map(t=>row([t.id,'<span class="tag">'+t.status+'</span>',t.priority,esc(t.title),esc(t.role),esc((t.waiting||[]).join(','))])).join('');
+document.getElementById('msgs').innerHTML=d.messages.map(m=>'<div><small>'+esc(m.at)+'</small> <b>'+esc(m.from)+'</b>'+(m.to?' → '+esc(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+' '+esc(m.text)+'</div>').join('');}
+load();setInterval(load,5000);
+</script></body></html>"""
+
+
+def board_snapshot(board, messages=40):
+    """Everything the UI shows, as plain data. Read-only."""
+    tickets = load_all(board)
+    cur = active_sprint(board)
+    m = current_master(board) or {}
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    counts = {"total": len(tickets), "done": len(done)}
+    sprint = None
+    if cur:
+        mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+        d, n, c, b = progress(mine)
+        sprint = {"id": cur["id"], "goal": cur.get("goal", ""), "done": d, "total": n, "in_flight": c, "blocked": b,
+                  "review": len([t for t in mine if t["status"] == "review"])}
+    rows, burn = utilization(board, tickets, hours=24)
+    agents = {r["owner"]: r for r in load_agents(board)}
+    wf = load_workforce(board)
+    out_agents = []
+    for r in rows:
+        rec = agents.get(r["agent"], {})
+        out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
+                           "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
+                           "watcher": bool(_watcher_pid(board, r["agent"]))})
+    out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
+    goals = ""
+    try:
+        with open(master_path(board)) as f:
+            md = f.read()
+        import re as _re
+        picked = []
+        for head in ("CEO memo", "Mission", "Sprint plan"):
+            mm = _re.search(r"^## [^\n]*%s[^\n]*\n(.*?)(?=^## |\Z)" % _re.escape(head), md, _re.S | _re.M)
+            if mm:
+                picked.append("%s\n%s" % (head.upper(), mm.group(1).strip()[:1800]))
+        goals = "\n\n".join(picked)
+    except OSError:
+        pass
+    util_rows = [r for r in rows if r["state"] != "DOWN"]
+    return {
+        "project": os.path.basename(os.path.dirname(board)), "generated": now(),
+        "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
+        "goals": goals,
+        "util": sorted(util_rows, key=lambda r: (-r["done"], r["agent"])),
+        "in_flight": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"], "since_update": timing(t)["since_update"]}
+                      for t in tickets if t["status"] == "claimed"],
+        "review": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"], "commit": t.get("commit", ""), "pr": t.get("pr", "")}
+                   for t in tickets if t["status"] == "review"],
+        "open": [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2), "title": t["title"],
+                  "role": t.get("role", ""), "waiting": [d for d in t.get("deps", []) if d not in done]}
+                 for t in tickets if t["status"] in ("open", "blocked")],
+        "agents": out_agents,
+        "health": [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12],
+        "messages": [{"at": x.get("at", "")[5:16].replace("T", " "), "from": x.get("from", ""), "to": x.get("to", ""),
+                      "re": x.get("re", ""), "text": x.get("text", "")} for x in load_messages(board)[-messages:]][::-1],
+    }
+
+
+def cmd_ui(a, board):
+    """Local status UI: serves an auto-refreshing page and /board.json (read-only)."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    if a.json:
+        print(json.dumps(board_snapshot(board), indent=2))
+        return
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/board.json"):
+                body = json.dumps(_safe(lambda: board_snapshot(board), {"error": "snapshot failed"})).encode()
+                ctype = "application/json"
+            else:
+                body = UI_HTML.encode()
+                ctype = "text/html; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    srv = HTTPServer((a.host, a.port), H)
+    print("board UI: http://%s:%d  (Ctrl-C to stop; read-only)" % (a.host, a.port))
+    if a.open:
+        import subprocess
+        subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
 
 
 def cmd_guide(a, board):
@@ -3882,6 +4103,7 @@ def main():
     x = ms.add_parser("take"); x.add_argument("--owner", "-o")
     x = ms.add_parser("release"); x.add_argument("--owner", "-o")
     x = ms.add_parser("log"); x.add_argument("text"); x.add_argument("--owner", "-o")
+    x = ms.add_parser("cos", help="set/show the chief of staff (review, unblock, merge)"); x.add_argument("text", nargs="?", default=""); x.add_argument("--owner", "-o")
     x = ms.add_parser("init"); x.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_master, master_cmd="brief", owner=None, force=False)
 
@@ -3911,7 +4133,8 @@ def main():
 
     c = sub.add_parser("prompt", help="print the standard worker (or --master) prompt for a headless run")
     c.add_argument("--agent", default="")
-    c.add_argument("--master", action="store_true", help="the coordinating/unblocking/reviewing loop instead")
+    c.add_argument("--master", action="store_true", help="the master/planner loop (or full master loop if no cos)")
+    c.add_argument("--cos", action="store_true", help="the chief-of-staff loop: review, unblock, merge")
     c.add_argument("--extra", default="", help="extra instructions appended to the prompt")
     c.set_defaults(fn=cmd_prompt)
 
@@ -3969,11 +4192,20 @@ def main():
     c.add_argument("--run-timeout", type=int, default=90)
     c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
     c.add_argument("--master", action="store_true",
-                   help="spawn the board master (coordinate / unblock / review loop) instead of a worker")
+                   help="spawn the board master/planner (scope, routing by complexity, escalations)")
+    c.add_argument("--cos", action="store_true",
+                   help="spawn the chief of staff (review, unblock, merge) under the current master")
     c.add_argument("--exec", default="", help="override the worker command entirely")
     c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
     c.add_argument("--list", action="store_true")
     c.set_defaults(fn=cmd_spawn)
+
+    c = sub.add_parser("ui", help="local status page: http://localhost:8765 (read-only, auto-refresh)")
+    c.add_argument("--port", type=int, default=8765)
+    c.add_argument("--host", default="127.0.0.1")
+    c.add_argument("--open", action="store_true", help="open it in the browser")
+    c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
+    c.set_defaults(fn=cmd_ui)
 
     c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
     c.set_defaults(fn=cmd_guide)

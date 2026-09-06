@@ -394,3 +394,39 @@ def test_spawn_inherits_project_settings(board):
     inherited = json.loads((board.parent / ".worktrees" / "doc" / ".claude" / "settings.json").read_text())
     assert inherited["permissions"]["allow"] == ["Bash(pytest:*)"]
     run(board, "spawn", "doc", "--stop", agent="master")
+
+
+# ---- chief of staff seat / ui snapshot -----------------------------------
+
+def test_cos_seat_wakes_and_may_integrate(board):
+    run(board, "master", "take", agent="planner")
+    assert "cos-x" in run(board, "master", "cos", "cos-x", agent="planner").stdout
+    run(board, "join", "doc", "--roles", "docs")
+    run(board, "next", agent="doc")
+    run(board, "msg", "stuck: need a decision", "--to", "planner", agent="doc")
+    rc, p = pending(board, "cos-x")
+    assert rc == 0 and "stuck_messages" in p, "cos wakes on stuck messages too"
+    cp = run(board, "prompt", "--cos", "--agent", "cos-x").stdout
+    assert "CHIEF OF STAFF" in cp and "tickets merge" in cp
+    pp = run(board, "prompt", "--master", "--agent", "planner").stdout
+    assert "MASTER PLANNER" in pp and "cos-x" in pp and "ROUTE BY COMPLEXITY" in pp
+    # take keeps the cos; clearing works
+    run(board, "master", "take", agent="planner2")
+    assert "cos-x" in run(board, "master", "cos", agent="planner2").stdout
+    run(board, "master", "cos", "none", agent="planner2")
+    assert "none" in run(board, "master", "cos", agent="planner2").stdout
+
+
+def test_ui_snapshot_shape(board):
+    run(board, "master", "take", agent="planner")
+    run(board, "master", "init", agent="planner")
+    run(board, "join", "doc", "--roles", "docs")
+    run(board, "next", agent="doc")
+    r = run(board, "ui", "--json")
+    assert r.returncode == 0, r.stderr
+    d = json.loads(r.stdout)
+    for k in ("goals", "util", "sprint", "in_flight", "review", "open", "agents", "health", "messages", "master"):
+        assert k in d
+    assert d["master"] == "planner" and d["in_flight"][0]["id"] == "T-001"
+    assert any(a["name"] == "doc" and a["state"] == "busy" for a in d["agents"])
+    assert "Mission" in d["goals"] or "MISSION" in d["goals"]
