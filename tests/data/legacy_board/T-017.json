@@ -1,0 +1,17 @@
+{
+  "title": "Future field",
+  "body": "What this ticket is for.",
+  "role": "backend",
+  "status": "open",
+  "deps": [],
+  "priority": 2,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [],
+  "owner": "",
+  "created": "2026-01-02T09:00:00Z",
+  "updated": "2026-01-02T09:00:00Z",
+  "notes": [],
+  "id": "T-017",
+  "squad": "platform"
+}

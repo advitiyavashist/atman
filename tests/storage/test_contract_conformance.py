@@ -245,3 +245,49 @@ def test_every_error_renders_the_contract_error_shape(store, project, agent, sch
     for err in samples:
         assert err.code in declared, "{} is not a declared error code".format(err.code)
         _validate(schemas, "ErrorResponse", err.to_error_response())
+
+
+# ------------------------------------------------------- the imported board
+
+def test_every_imported_record_matches_the_contract(store, schemas, tmp_path):
+    """A legacy import must not be a back door around the frozen schemas.
+
+    The import writes tickets, agents, updates and reviews without going
+    through the normal state machine, so nothing else in this suite covers what
+    it produces -- and the values it handles are the awkward ones: a body over
+    `outcome`'s 4000 characters, a note over `TicketUpdate.body`'s, an owner
+    that started life as a bare name, a `commit` that is not a `Sha`. Every one
+    of those is a way to write a row the API cannot legally serve.
+    """
+    import shutil
+
+    from ticket_board.storage.legacy import import_legacy_board
+
+    board = tmp_path / "legacy"
+    shutil.copytree(
+        Path(__file__).resolve().parents[1] / "data" / "legacy_board", board)
+    report = import_legacy_board(store, board, project_name="Conformance")
+
+    _validate(schemas, "Project", store.get_project(report.project_id))
+
+    tickets = store.list_tickets(report.project_id)
+    assert len(tickets) == report.imported_tickets > 0
+    for ticket in tickets:
+        _validate(schemas, "Ticket", ticket)
+        for update in store.list_updates(report.project_id, ticket["id"]):
+            _validate(schemas, "TicketUpdate", update)
+
+    owners = {t["owner"] for t in tickets if t["owner"]}
+    assert owners, "the sample board has owned tickets"
+    for owner in owners:
+        _validate(schemas, "Agent", store.get_agent(owner))
+
+    reviews = store.conn.execute(
+        "SELECT id FROM reviews WHERE project_id = ?", (report.project_id,)
+    ).fetchall()
+    assert len(reviews) == report.imported_reviews > 0
+    for row in reviews:
+        _validate(schemas, "Review", store.get_review(row["id"]))
+
+    for event in store.audit_trail(report.project_id, limit=10000):
+        _validate(schemas, "AuditEvent", event)

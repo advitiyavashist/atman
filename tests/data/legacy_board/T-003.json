@@ -1,0 +1,28 @@
+{
+  "title": "Build the board API",
+  "body": "What this ticket is for.",
+  "role": "backend",
+  "status": "in progress",
+  "deps": [
+    "T-001",
+    "T-002"
+  ],
+  "priority": 1,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [
+    "own-machine"
+  ],
+  "owner": "agent-charlie",
+  "created": "2026-01-03T09:00:00Z",
+  "updated": "2026-01-05T09:00:00Z",
+  "notes": [
+    {
+      "by": "agent-charlie",
+      "at": "2026-01-05T08:00:00Z",
+      "text": "claimed"
+    }
+  ],
+  "id": "T-003",
+  "claimed_at": "2026-01-05T08:00:00Z"
+}

@@ -1,0 +1,28 @@
+{
+  "title": "Publish the API contract",
+  "body": "What this ticket is for.",
+  "role": "backend",
+  "status": "done",
+  "deps": [],
+  "priority": 1,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [],
+  "owner": "agent-bravo",
+  "created": "2026-01-02T09:30:00Z",
+  "updated": "2026-01-04T11:00:00Z",
+  "notes": [
+    {
+      "by": "agent-bravo",
+      "at": "2026-01-04T10:00:00Z",
+      "text": "contract frozen"
+    }
+  ],
+  "id": "T-002",
+  "claimed_at": "2026-01-02T11:00:00Z",
+  "done_at": "2026-01-04T11:00:00Z",
+  "review_at": "2026-01-04T10:00:00Z",
+  "commit": "agent-bravo/contract@0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+  "branch": "agent-bravo/contract",
+  "pr": "https://example.invalid/example/board/pull/13"
+}
