@@ -19,3 +19,19 @@ Implementation branches and PRs belong to **tickets**, not **steer**. Cursor coo
 
 First task: T-178 freezes API/schema fixtures. T-181 adapter and T-183 dashboard then run alongside T-179 storage. T-180 API enables T-182 master; T-184 connects the full product, then T-185 verifies it.
 
+## User scope amendment: messaging and automatic wake
+
+Read `docs/messages-and-runners.md` and open `docs/messages.html`. Managed runner
+execution is now V1, superseding its earlier deferral. Team members and agents
+share channels, DMs and threads. Message delivery must cause a real managed agent
+turn; hooks alone are insufficient. No real runner has been installed by design work.
+
+| Ticket | Queued lane | Dependencies | Deliverable |
+|---|---|---|---|
+| T-187 | claude-opus | T-180 | Team channels, ACLs, messaging and durable outbox |
+| T-188 | claude-sonnet | T-181, T-187, T-182 | Supervised Claude runner and message-triggered wake |
+| T-189 | codex | T-183, T-187 | Messages UI, members, receipts and task composer |
+| T-190 | cursor-2 | T-188, T-189, T-184 | Real message-to-task execution and team isolation QA |
+
+T-178 must include message/member/run contracts before implementation. T-185
+release acceptance additionally depends on T-190; messaging cannot ship as a mock.

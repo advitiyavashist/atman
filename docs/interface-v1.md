@@ -25,10 +25,11 @@ implement the same protocol; do not advertise universal automatic compatibility.
    and explicitly reassigns; replacement master resumes from durable state.
 
 Remote agents use the same HTTP contract later through an authenticated TLS
-endpoint. Hosting, billing, SSO, arbitrary terminal control, automatic agent
-launching, and automatic PR merges are outside this first release. A hook does
-not wake an idle model: queued work is delivered on its next hook/poll. Show that
-state honestly. An optional supervised runner can be a later adapter.
+endpoint. Hosting, billing, SSO, arbitrary terminal control and automatic PR
+merges are outside this first release. **User scope update: a supervised agent
+runner and message-triggered task execution are required in V1.** Hooks collect
+events/context; the runner wakes enrolled managed agents on messages. Hook-only
+external sessions show “Manual resume required”. See messages-and-runners.md.
 
 ## Interface and taste
 
@@ -38,7 +39,7 @@ Readable sans-serif text; monospace IDs and commit hashes. Compact and expressiv
 without simulated terminal noise, sci-fi labels, motivational filler, or fake
 completion percentages. Light mode is first-class. Use text with status colors.
 
-Four navigation items: Overview, Tickets, Agents, Activity. Project switcher and
+Five navigation items: Overview, Tickets, Agents, Messages, Activity. Project switcher and
 Connect agent remain visible. Settings live beneath the project switcher.
 
 | Screen | Content | Primary action |
@@ -48,6 +49,7 @@ Connect agent remain visible. Settings live beneath the project switcher.
 | Ticket detail | Outcome, acceptance checklist, owner, dependencies, files, progress notes, branch/SHA/PR and checks | Assign / request review / accept, by role |
 | Agents | Durable ID, session ID, role, capabilities, current ticket, heartbeat and progress timestamps, hook health | Connect agent |
 | Activity | Chronological assignments, status changes, messages, review decisions and recovery events | Filter or reply |
+| Messages | Project channels, human/agent DMs, threads, mentions, linked tickets and delivery/run receipts | Send / Send task |
 | Master panel | Current holder/lease, routing mode, last sweep, next sweep, queue, decision reasons, pause | Run check / pause assignments |
 
 Empty Overview: “No work yet. Create a ticket or import a board.” No agent:
