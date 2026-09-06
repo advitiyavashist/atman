@@ -11,7 +11,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -101,6 +103,20 @@ class Enrollment:
 
 
 @dataclass(frozen=True)
+class OperatorCredentials:
+    """An operator session, which is a different principal from an agent token.
+
+    The frozen contract makes `DELETE /agents/{id}/session-lease` operator- or
+    master-only, so lease revocation cannot be done with the agent's own bearer
+    token no matter how natural that reads from the adapter's side.
+    """
+
+    session_token: str
+    csrf_token: str
+    origin: str
+
+
+@dataclass(frozen=True)
 class DeliveryResult:
     delivered: bool
     spooled: bool
@@ -116,11 +132,22 @@ class DoctorReport:
     response_delivered: bool
     session_adopted: bool
     remediation: List[str]
+    # Defaulted so the fixture-driven `diagnose()` signature from T-201 keeps
+    # working unchanged; only the live path populates them.
+    hook_executable: Optional[bool] = None
+    hook_executed: Optional[bool] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
-            "config": {"installed": self.config_installed},
+            "config": {
+                "installed": self.config_installed,
+                # Installed and runnable are different facts. A hook command
+                # naming an interpreter that does not exist is installed and
+                # will never run, and nothing else in this report can see that.
+                "hook_executable": self.hook_executable,
+            },
             "delivery": {
+                "hook_executed": self.hook_executed,
                 "server_received": self.server_received,
                 "response_delivered": self.response_delivered,
             },
@@ -154,8 +181,57 @@ def _required_string(payload: Mapping[str, Any], *names: str) -> str:
     raise ClaudeHookError("missing required field: %s" % " or ".join(names))
 
 
-def _event_id(agent_id: str, session_id: str, event_name: str, occurred_at: str) -> str:
-    raw = "%s:%s:%s:%s" % (agent_id, session_id, event_name, occurred_at)
+# Wire fields that identify WHICH event this is, as opposed to what happened in
+# it.  Every one is an opaque correlation id or a small enum -- none of them is
+# prompt text, tool input or tool output, so digesting them cannot leak content
+# (`_assert_no_sensitive_fields` still guards the envelope itself).
+#
+# `tool_use_id` is the load-bearing one: Claude Code emits the same value on the
+# PreToolUse and PostToolUse of a single call and a fresh one per call, so it is
+# exactly the discriminator a per-call event id needs.
+CORRELATION_FIELDS = (
+    "tool_use_id",
+    "prompt_id",
+    "source",
+    "stop_hook_active",
+    "agent_id",
+    "agent_type",
+)
+
+
+def _correlation_digest(payload: Mapping[str, Any]) -> str:
+    """Stable digest of the wire's identity fields, or "" when it carries none."""
+    present = {
+        name: payload[name]
+        for name in CORRELATION_FIELDS
+        if name in payload and isinstance(payload[name], (str, int, float, bool))
+    }
+    if not present:
+        return ""
+    return hashlib.sha256(
+        json.dumps(present, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def _event_id(
+    agent_id: str,
+    session_id: str,
+    event_name: str,
+    occurred_at: str,
+    correlation: str = "",
+) -> str:
+    """Identify one hook event.
+
+    `correlation` is what makes this per-event rather than per-second.  Real
+    payloads carry no timestamp (T-214 ground truth), so `occurred_at` falls back
+    to `utc_now()` at one-second resolution; without a correlation term every
+    tool call inside the same second hashes to the same id and the server's
+    `event_id` dedupe -- which is required behaviour, not a bug -- silently drops
+    all but the first as retries.  Digesting the wire's own correlation ids keeps
+    a genuine retry stable (identical payload -> identical id) while separating
+    distinct calls.
+    """
+    raw = "%s:%s:%s:%s:%s" % (agent_id, session_id, event_name, occurred_at, correlation)
     return "hev_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -198,7 +274,13 @@ def parse_claude_hook_event(
     note = _status_note(payload, event_name, config.max_status_chars)
 
     return {
-        "event_id": _event_id(enrollment.agent_id, session_id, event_name, occurred_at),
+        "event_id": _event_id(
+            enrollment.agent_id,
+            session_id,
+            event_name,
+            occurred_at,
+            _correlation_digest(payload),
+        ),
         "agent_id": enrollment.agent_id,
         "session_id": session_id,
         "kind": kind,
@@ -285,6 +367,13 @@ def exchange_enrollment(
     session_id: str,
     runtime_version: str,
 ) -> Enrollment:
+    # Check the destination BEFORE spending the code. `save_enrollment` guards
+    # the same path, but it runs after the exchange, so a refused project dir
+    # would burn a single-use enrollment code and force the operator to mint a
+    # new one -- and would do it only after talking to the board about a target
+    # we had already decided was forbidden.
+    _ensure_safe_project_dir(project_dir)
+
     body = {
         "request_id": str(uuid.uuid4()),
         "code": code,
@@ -450,8 +539,23 @@ def install_hooks(project_dir: Path, enrollment: Enrollment, config: AdapterConf
             )
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
+    _write_settings(settings_path, settings)
     return settings_path
+
+
+def _write_settings(settings_path: Path, settings: Mapping[str, Any]) -> None:
+    """Write project settings without reformatting anything we do not own.
+
+    No `sort_keys`: `json.load` preserves document order, so a round trip leaves
+    an operator's own keys where they wrote them.  Sorting reorders the whole
+    file on every install/uninstall, which makes "we touched nothing of yours"
+    impossible to demonstrate with a diff -- and a diff is the evidence this
+    ticket has to produce.
+    """
+    rendered = json.dumps(settings, indent=2) + "\n"
+    if settings_path.exists() and settings_path.read_text() == rendered:
+        return  # nothing of ours to change: leave the operator's file alone
+    settings_path.write_text(rendered)
 
 
 def uninstall_hooks(project_dir: Path, enrollment: Enrollment) -> Path:
@@ -470,9 +574,16 @@ def uninstall_hooks(project_dir: Path, enrollment: Enrollment) -> Path:
         hooks[event_name] = [entry for entry in kept if entry is not None]
         if not hooks[event_name]:
             del hooks[event_name]
+    if not hooks:
+        # We added the `hooks` key on a project that had none; take it back out
+        # rather than leaving an empty object behind as a footprint.
+        if not settings.get("hooks"):
+            del settings["hooks"]
 
+    if not settings_path.exists():
+        return settings_path  # nothing installed here; do not create a file
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
+    _write_settings(settings_path, settings)
     return settings_path
 
 
@@ -485,12 +596,107 @@ def _load_settings(settings_path: Path) -> Dict[str, Any]:
     return data
 
 
+def hook_runtime() -> Tuple[str, str]:
+    """The interpreter and import root the installed hook command must use.
+
+    `sys.executable` rather than the string "python": this machine, like a
+    default macOS install, has no `python` on PATH at all -- only `python3` --
+    so a command spelled "python -m ..." dies in the shell with 127 before any
+    adapter code runs.  Claude Code reports nothing for a failed hook and
+    `hook.py` exits 0 on every error by design, so that failure is *silent*:
+    `config_installed` still reads true while not one event is ever delivered.
+    An absolute interpreter path removes the PATH dependency entirely.
+
+    The import root is `ticket_board`'s parent, exported as PYTHONPATH so the
+    hook resolves the package from a source checkout as well as an installed
+    environment.  A hook runs in Claude Code's environment, not in the shell the
+    operator installed from, so it inherits neither a virtualenv nor a PATH.
+    """
+    package_root = Path(__file__).resolve().parents[3]
+    return sys.executable, str(package_root)
+
+
 def _hook_command(project_id: str, server_url: str, agent_id: str) -> str:
+    executable, package_root = hook_runtime()
     return (
-        "python -m ticket_board.adapters.claude.hook "
+        "PYTHONPATH=%s %s -m ticket_board.adapters.claude.hook "
         "--project-id %s --server-url %s --agent-id %s #%s:%s"
-        % (project_id, server_url, agent_id, OWNER_MARKER, agent_id)
+        % (
+            shlex.quote(package_root),
+            shlex.quote(executable),
+            shlex.quote(project_id),
+            shlex.quote(server_url),
+            shlex.quote(agent_id),
+            OWNER_MARKER,
+            agent_id,
+        )
     )
+
+
+PREFLIGHT_MARKER = "ticket-board-hook-preflight-ok"
+
+
+def preflight_hook_command(project_dir: Path, enrollment: Enrollment, config: AdapterConfig) -> Tuple[bool, str]:
+    """Actually execute the installed hook command and prove it can run.
+
+    This is the check that separates "the config file says a hook is installed"
+    from "the hook command is executable on this machine".  Nothing else in the
+    adapter can tell those apart, because a hook that cannot start looks exactly
+    like a hook that started and had nothing to say.
+    """
+    command = _installed_hook_command(project_dir, enrollment.agent_id)
+    if command is None:
+        return False, "no Ticket Board hook is installed in this project"
+    # The owner marker is a trailing `#...` shell comment, so a flag appended to
+    # the end of the command lands INSIDE the comment and is silently ignored.
+    # Insert before it. (Found by running this: the probe reported "missing
+    # required field: hook_event_name" -- the delivery path, not preflight.)
+    head, marker, tail = command.partition("#" + OWNER_MARKER)
+    probe = head.rstrip() + " --preflight" + (" " + marker + tail if marker else "")
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(project_dir),
+            input="{}",
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "hook command could not be executed: %s" % exc
+    if PREFLIGHT_MARKER in (result.stdout or ""):
+        return True, "hook command runs"
+    detail = (result.stderr or result.stdout or "").strip().splitlines()
+    tail = detail[-1] if detail else "no output"
+    return False, "hook command exited %s without the preflight marker: %s" % (result.returncode, tail)
+
+
+def _installed_hook_command(project_dir: Path, agent_id: str) -> Optional[str]:
+    settings_path = project_dir / ".claude" / "settings.json"
+    try:
+        settings = _load_settings(settings_path)
+    except (OSError, ValueError, ClaudeHookError):
+        return None
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, Mapping):
+        return None
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            for hook in entry.get("hooks", []):
+                if not isinstance(hook, Mapping):
+                    continue
+                command = hook.get("command")
+                if not isinstance(command, str):
+                    continue
+                if hook.get("ticket_board_owner") == agent_id or (
+                    "%s:%s" % (OWNER_MARKER, agent_id)
+                ) in command:
+                    return command
+    return None
 
 
 def _has_owned_hook(entries: Iterable[Any], agent_id: str) -> bool:
@@ -564,20 +770,46 @@ class BoardClient:
             raise RuntimeError("board returned %s: %s" % (status, payload))
         return payload
 
+    def get_json(
+        self,
+        path: str,
+        *,
+        token: Optional[str] = None,
+        operator: Optional[OperatorCredentials] = None,
+    ) -> Dict[str, Any]:
+        url = "%s%s" % (self.base_url, path)
+        headers = {"X-Project-Id": self.project_id}
+        if operator is not None:
+            headers["Cookie"] = "tb_session=%s" % operator.session_token
+        elif token:
+            headers["Authorization"] = "Bearer %s" % token
+        req = request.Request(url, headers=headers, method="GET")
+        with request.urlopen(req, timeout=self.timeout) as res:
+            return json.loads(res.read().decode("utf-8") or "{}")
+
     def delete_json(
         self,
         path: str,
         body: Mapping[str, Any],
         *,
-        token: str,
+        token: Optional[str] = None,
+        operator: Optional[OperatorCredentials] = None,
         expected_status: Tuple[int, ...] = (200,),
     ) -> Dict[str, Any]:
         url = "%s%s" % (self.base_url, path)
         headers = {
             "Content-Type": "application/json",
             "X-Project-Id": self.project_id,
-            "Authorization": "Bearer %s" % token,
         }
+        if operator is not None:
+            # Cookie + double-submit CSRF token + Origin: an operator session is
+            # a browser credential, and the server refuses an unsafe method that
+            # arrives without all three.
+            headers["Cookie"] = "tb_session=%s" % operator.session_token
+            headers["X-CSRF-Token"] = operator.csrf_token
+            headers["Origin"] = operator.origin
+        elif token:
+            headers["Authorization"] = "Bearer %s" % token
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
         req = request.Request(url, data=data, headers=headers, method="DELETE")
         try:
@@ -631,21 +863,82 @@ def revoke_session_lease(
     enrollment: Enrollment,
     *,
     note: str,
+    operator: OperatorCredentials,
     expected_version: Optional[int] = None,
 ) -> Dict[str, Any]:
+    """Revoke an agent's board session lease. Operator credentials required.
+
+    `operator` is not optional and deliberately has no agent-token fallback.
+    This call used to send `enrollment.token`; against a real server that is a
+    403 `agent_token_insufficient` on every single invocation, because the
+    frozen contract says "Operator or master only" for this route. Falling back
+    to the agent token would restore a call that cannot ever succeed.
+    """
     if not note.strip():
         raise ClaudeHookError("lease revocation requires an explicit note")
+    if expected_version is None:
+        expected_version = current_agent_version(client, enrollment, operator=operator)
     body = {
         "request_id": str(uuid.uuid4()),
-        "expected_version": expected_version if expected_version is not None else enrollment.lease_version,
+        "expected_version": expected_version,
         "note": note,
     }
     return client.delete_json(
         "/agents/%s/session-lease" % enrollment.agent_id,
         body,
-        token=enrollment.token,
+        operator=operator,
         expected_status=(200,),
     )
+
+
+def current_agent_version(
+    client: BoardClient,
+    enrollment: Enrollment,
+    *,
+    operator: Optional[OperatorCredentials] = None,
+) -> int:
+    """Read the agent's live version for an optimistic-concurrency check.
+
+    `Enrollment.lease_version` is the wrong number twice over and must not be
+    used here. It is the SESSION LEASE's version, while this route compares the
+    AGENT's version; and it is captured once at enrollment and never refreshed,
+    while the agent's version increments on every hook event the board records.
+    Sending it produced a guaranteed 409 `ticket_version_conflict`
+    (expected_version=1, actual_version=7) for any agent that had delivered even
+    a handful of events -- which is every agent that ever worked.
+    """
+    # `items`, per AgentListResponse in the frozen contract -- not `agents`.
+    listing = client.get_json("/agents", token=enrollment.token, operator=operator)
+    for agent in listing.get("items", []):
+        if agent.get("id") == enrollment.agent_id:
+            return int(agent["version"])
+    raise ClaudeHookError("agent %s is not present in this project" % enrollment.agent_id)
+
+
+def disconnect_project(project_dir: Path, enrollment: Enrollment) -> Dict[str, Any]:
+    """Agent-side teardown: stop the hooks and destroy the local credential.
+
+    The counterpart to `revoke_session_lease`, and the half an agent can
+    actually perform. Revoking the board lease is an operator action; removing
+    this machine's copy of the token is not, and leaving the token on disk after
+    an uninstall would keep a working credential in a project nobody is watching.
+    """
+    settings_path = uninstall_hooks(project_dir, enrollment)
+    removed = []
+    for path in (enrollment_path(project_dir), receipts_path(project_dir)):
+        if path.exists():
+            path.unlink()
+            removed.append(str(path))
+
+    spool_dir = project_dir / ".ticket-board" / "spool"
+    spooled = sorted(spool_dir.glob("*.json")) if spool_dir.is_dir() else []
+    return {
+        "settings_path": str(settings_path),
+        "removed": removed,
+        # Reported, never silently deleted: a spooled event is undelivered work,
+        # and the operator decides whether it is still wanted.
+        "spooled_events_left": [str(p) for p in spooled],
+    }
 
 
 def diagnose(
@@ -699,4 +992,165 @@ def _project_has_owned_hooks(project_dir: Path, agent_id: str) -> bool:
     return any(
         isinstance(entries, list) and _has_owned_hook(entries, agent_id)
         for entries in hooks.values()
+    )
+
+
+# --------------------------------------------------------------------------
+# Delivery receipts
+#
+# `diagnose()` from T-201 takes the events and responses as arguments, which is
+# right for a fixture test and unusable for an operator: a live hook runs inside
+# Claude Code's process, so by the time anyone types `doctor` in a shell there is
+# nothing in memory to pass it.  The hook therefore records one bounded receipt
+# per invocation and the live doctor reads them back off disk.
+#
+# A receipt records only outcome metadata -- never prompts, tool input or tool
+# output -- so the file is safe to keep in the project directory.
+# --------------------------------------------------------------------------
+
+RECEIPT_CAP = 200
+RECEIPT_FIELDS = (
+    "ts",
+    "hook_event_name",
+    "kind",
+    "event_id",
+    "session_id",
+    "delivered",
+    "spooled",
+    "status_code",
+    "deduplicated",
+    "context_lines",
+    "synthetic_probe",
+    "error",
+)
+
+
+def receipts_path(project_dir: Path) -> Path:
+    return project_dir / ".ticket-board" / "receipts.jsonl"
+
+
+def append_receipt(project_dir: Path, record: Mapping[str, Any], cap: int = RECEIPT_CAP) -> Path:
+    """Append one bounded receipt, trimming to the most recent `cap` lines."""
+    path = receipts_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Fail closed on the INPUT, then whitelist. Checking only the whitelisted
+    # copy would silently drop a `prompt` a caller wrongly passed in, hiding the
+    # upstream bug; the adapter's privacy bound refuses rather than redacts, and
+    # receipts hold that line too. The whitelist stays as defence in depth.
+    _assert_no_sensitive_fields(dict(record))
+    bounded = {name: record.get(name) for name in RECEIPT_FIELDS if name in record}
+    if isinstance(bounded.get("error"), str):
+        bounded["error"] = _bounded_status(bounded["error"], 180)
+
+    lines = []
+    if path.exists():
+        lines = [line for line in path.read_text().splitlines() if line.strip()]
+    lines.append(json.dumps(bounded, separators=(",", ":"), sort_keys=True))
+    if len(lines) > cap:
+        lines = lines[-cap:]
+    path.write_text("\n".join(lines) + "\n")
+    os.chmod(path, 0o600)
+    return path
+
+
+def load_receipts(project_dir: Path) -> List[Dict[str, Any]]:
+    path = receipts_path(project_dir)
+    if not path.exists():
+        return []
+    receipts = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue  # a torn final write must not break the doctor
+        if isinstance(parsed, dict):
+            receipts.append(parsed)
+    return receipts
+
+
+REAL_SESSION_EVENTS = frozenset(ALLOWED_CLAUDE_EVENTS - {"PreToolUse", "PostToolUse", "Notification"})
+
+
+def diagnose_live(
+    project_dir: Path,
+    enrollment: Enrollment,
+    config: AdapterConfig,
+    *,
+    run_preflight: bool = True,
+) -> DoctorReport:
+    """Diagnose a real enrollment from what is on disk.
+
+    Reports five facts that fail independently, because collapsing them is how a
+    doctor shows green for a connection that will never deliver anything:
+
+    * `config_installed`  -- the project settings name our hook.
+    * `hook_executable`   -- that command actually runs on this machine.
+    * `hook_executed`     -- Claude Code has in fact invoked it at least once.
+    * `server_received`   -- the board answered one of those invocations.
+    * `session_adopted`   -- a REAL session event arrived, not just a probe.
+    """
+    config_installed = _project_has_owned_hooks(project_dir, enrollment.agent_id)
+
+    hook_executable: Optional[bool] = None
+    preflight_detail = ""
+    if run_preflight and config_installed:
+        hook_executable, preflight_detail = preflight_hook_command(project_dir, enrollment, config)
+
+    receipts = load_receipts(project_dir)
+    mine = [r for r in receipts if r.get("session_id") and r.get("event_id")]
+    hook_executed = bool(mine)
+    server_received = any(r.get("status_code") == 200 and r.get("delivered") for r in mine)
+    response_delivered = any(
+        r.get("delivered") and isinstance(r.get("context_lines"), int) for r in mine
+    )
+    session_adopted = any(
+        r.get("hook_event_name") in REAL_SESSION_EVENTS and not r.get("synthetic_probe")
+        for r in mine
+    )
+
+    remediation: List[str] = []
+    if not config_installed:
+        remediation.append(
+            "No Ticket Board hook in this project's .claude/settings.json. Run the project-scoped "
+            "install; never edit user-level Claude settings."
+        )
+    if hook_executable is False:
+        remediation.append(
+            "The installed hook command cannot run: %s. Re-run install so the command is rewritten "
+            "with this machine's interpreter." % preflight_detail
+        )
+    if config_installed and hook_executable is not False and not hook_executed:
+        remediation.append(
+            "The hook is installed and runnable but Claude Code has never invoked it. Start a NEW "
+            "Claude session in this project -- hook settings are read at session start, so a session "
+            "already running when you installed will not pick them up."
+        )
+    if hook_executed and not server_received:
+        spooled = sum(1 for r in mine if r.get("spooled"))
+        remediation.append(
+            "The hook ran but no event reached the board (%d spooled offline). Check the board URL, "
+            "project id and agent token." % spooled
+        )
+    if server_received and not response_delivered:
+        remediation.append(
+            "The board accepted an event but returned no injectable context; inspect response errors."
+        )
+    if not session_adopted:
+        remediation.append(
+            "No real Claude session event has been recorded. Run one real Claude turn in this project; "
+            "a synthetic probe proves reachability, not hook adoption."
+        )
+
+    return DoctorReport(
+        config_installed=config_installed,
+        server_received=server_received,
+        response_delivered=response_delivered,
+        session_adopted=session_adopted,
+        remediation=remediation,
+        hook_executable=hook_executable,
+        hook_executed=hook_executed,
     )
