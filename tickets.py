@@ -1675,6 +1675,568 @@ def cmd_merge(a, board):
                      "before your next `tickets review`." % (trunk, sha, ", ".join(merged_branches)))
 
 
+# ---- liveness truth (T-237, implementing the T-230 spec) ----------------
+#
+# `seen` on an agent record is written by checkin(), and the only caller that
+# writes it on a schedule is the WATCHER, at loop boundaries: once at startup,
+# and once more after the child session exits. It therefore measures "time
+# since the watcher last came back from waiting on its child", not "time since
+# the agent last did something". That single fact fails in BOTH directions at
+# once, and they are the same mechanism seen from two sides:
+#
+#   - A long real session holds `seen` stale for its entire duration, so the
+#     agent doing the most work reads as the deadest, and a master acting on
+#     that number reopens tickets out from under a live session.
+#   - A session that fails instantly (usage limit, dead login) returns in
+#     seconds, so `checkin()` fires on nearly every poll tick and the agent
+#     failing hardest reads as the healthiest.
+#
+# Polling faster cannot fix this: it makes the second direction strictly worse.
+# So this module keeps THREE facts apart instead of folding them into one
+# number, because they are different facts:
+#
+#   watcher alive  -- agents/<name>.watch.pid exists and that pid exists
+#   run in flight  -- agents/<name>.run, heartbeated DURING the child run
+#   agent working  -- the session's own transcript has a recent event
+#
+# Only the third is evidence that work is happening. A fresh in-run heartbeat
+# over a session that cannot start is exactly the false signal this ticket
+# exists to kill, so it is never rendered as "working" on its own.
+#
+# `unknown` is a real state with its own marker. It is never folded into
+# `idle` or `working`: half the damage on this board came from a confident
+# wrong answer, not from a missing one.
+
+RUN_HEARTBEAT_SECS = int(os.environ.get("TICKETS_RUN_HEARTBEAT_SECS") or 30)
+# How recent a transcript event has to be before we will call an agent working.
+LIVENESS_FRESH_SECS = int(os.environ.get("TICKETS_LIVENESS_FRESH_SECS") or 300)
+# A run that starts and exits inside this many seconds did not host real work.
+FAST_FAIL_SECS = int(os.environ.get("TICKETS_FAST_FAIL_SECS") or 90)
+FAST_FAIL_STREAK = int(os.environ.get("TICKETS_FAST_FAIL_STREAK") or 3)
+# Newest codex rollout files to consider when matching one to a worktree.
+CODEX_SCAN_FILES = int(os.environ.get("TICKETS_CODEX_SCAN_FILES") or 60)
+
+# Strings the CLIs themselves print to stderr when a session cannot start.
+# Matched ONLY against a single run's own slice of watch.log -- never against
+# a raw scan of a transcript, which is how the old cmd_limits scan came to
+# report every healthy codex session as limited (every turn writes a
+# `rate_limits` telemetry block).
+CLI_LIMIT_STRINGS = ("session limit", "usage limit", "hit your limit", "limit reached",
+                     "actionrequirederror", "quota exceeded", "out of credits",
+                     "429", "rate limit")
+CLI_AUTH_STRINGS = ("authentication_error", "token has been revoked", "please run /login",
+                    "invalid api key", "not logged in", "oauth token")
+
+STATE_WORDS = ("working", "idle", "limited", "dead", "unknown")
+
+# A source saying "I looked and there was nothing here" is not the same as one
+# saying "I looked and could not make sense of what I found". The second is a
+# real finding and must survive to the reader; folding both into one `unknown`
+# is how a diagnosis gets thrown away on the way to the screen.
+NOTHING_FOUND = ""
+
+
+def fmt_age(secs):
+    """Short age for a number of seconds. Distinct from fmt_hours() because a
+    liveness answer is worth reading at second resolution: 'transcript active
+    0s ago' is the whole point, and '0m' would throw it away."""
+    if secs is None:
+        return "?"
+    if secs < 90:
+        return "%ds" % int(secs)
+    if secs < 3600:
+        return "%dm" % int(round(secs / 60.0))
+    if secs < 48 * 3600:
+        return "%.1fh" % (secs / 3600.0)
+    return "%.1fd" % (secs / 86400.0)
+
+
+def _age_secs(stamp):
+    """Seconds since an ISO-8601 stamp, tolerating both the tool's own
+    '...Z' form and the fractional-second form the transcripts use."""
+    if not stamp:
+        return None
+    s = str(stamp).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, datetime.now(timezone.utc).timestamp() - dt.timestamp())
+
+
+def _tail_text(path, max_bytes=65536):
+    """Last max_bytes of a file as text. Seeks from the end: these transcripts
+    run to hundreds of KB and the answer is always in the last few lines."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - max_bytes))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _newest(paths):
+    """(path, mtime) of the most recently modified path, ('', -1) if none."""
+    best, best_mt = "", -1.0
+    for p in paths:
+        try:
+            mt = os.stat(p).st_mtime
+        except OSError:
+            continue
+        if mt > best_mt:
+            best, best_mt = p, mt
+    return best, best_mt
+
+
+def _mtime_age(mtime):
+    return None if mtime is None or mtime < 0 else max(0.0, datetime.now(timezone.utc).timestamp() - mtime)
+
+
+def _looks_limited(text):
+    low = (text or "").lower()
+    return any(k in low for k in CLI_LIMIT_STRINGS)
+
+
+def _looks_auth(text):
+    low = (text or "").lower()
+    return any(k in low for k in CLI_AUTH_STRINGS)
+
+
+# ---- in-run heartbeat ---------------------------------------------------
+
+def _run_file(board, owner):
+    return os.path.join(agents_dir(board), owner + ".run")
+
+
+def _run_beat(board, owner, **fields):
+    """Write the in-run heartbeat.
+
+    Deliberately its OWN file rather than a field on agents/<name>.json: the
+    child session runs `tickets` commands that read-modify-write that record,
+    and a heartbeat thread rewriting it every few seconds would race them and
+    silently drop whatever the child had just written (inbox_seen, limit,
+    ticket). One watcher per agent holds the pid lock, so this file has a
+    single writer.
+    """
+    try:
+        os.makedirs(agents_dir(board), exist_ok=True)
+        path = _run_file(board, owner)
+        rec = _read_run(board, owner)
+        rec.update(fields)
+        rec["beat"] = now()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _read_run(board, owner):
+    try:
+        with open(_run_file(board, owner)) as f:
+            rec = json.load(f)
+        return rec if isinstance(rec, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def _run_begin(board, owner, run_no, cwd):
+    _run_beat(board, owner, pid=os.getpid(), run=run_no, cwd=cwd,
+              started=now(), active=True, rc=None, ended="")
+
+
+def _run_end(board, owner, run_no, rc):
+    _run_beat(board, owner, run=run_no, active=False, rc=rc, ended=now())
+
+
+# ---- ground truth per tool ---------------------------------------------
+
+def _claude_project_dir(cwd):
+    """Claude Code stores a session transcript per working directory, under a
+    name built by replacing '/', '.' and '_' in the absolute path with '-'."""
+    import re as _re
+    return os.path.join(os.path.expanduser("~"), ".claude", "projects", _re.sub(r"[/._]", "-", cwd or ""))
+
+
+def _claude_transcript_state(cwd):
+    """(state, age_secs, detail) from the Claude transcript for `cwd`.
+
+    Reliable: every transcript line carries a `timestamp`, written as the turn
+    happens, by the session itself -- not by the watcher wrapped around it.
+    """
+    if not cwd:
+        return ("unknown", None, "no cwd recorded for this agent")
+    d = _claude_project_dir(cwd)
+    path, mt = _newest(glob.glob(os.path.join(d, "*.jsonl")))
+    if not path:
+        return ("unknown", None, "no Claude transcript under %s" % _tilde(d))
+    for ln in reversed(_tail_text(path).splitlines()):
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            continue  # a tail read can slice the first line in half
+        if not isinstance(ev, dict) or not ev.get("timestamp"):
+            continue
+        age = _age_secs(ev["timestamp"])
+        if age is None:
+            continue
+        if age <= LIVENESS_FRESH_SECS:
+            return ("working", age, "transcript active %s ago" % fmt_age(age))
+        return ("idle", age, "transcript quiet %s" % fmt_age(age))
+    age = _mtime_age(mt)
+    if age is not None and age <= LIVENESS_FRESH_SECS:
+        return ("working", age, "transcript written %s ago (no parseable timestamp)" % fmt_age(age))
+    return ("unknown", age, "transcript tail carries no parseable timestamp")
+
+
+def _codex_rollouts():
+    """[(mtime, path)] newest first for the local codex rollout files, computed
+    once per process -- `dash` asks for every agent's state on every refresh."""
+    global _CODEX_ROLLOUTS
+    try:
+        return _CODEX_ROLLOUTS
+    except NameError:
+        pass
+    home = os.path.expanduser("~")
+    out = []
+    for p in glob.glob(os.path.join(home, ".codex", "sessions", "**", "*.jsonl"), recursive=True):
+        try:
+            out.append((os.stat(p).st_mtime, p))
+        except OSError:
+            continue
+    out.sort(reverse=True)
+    _CODEX_ROLLOUTS = out
+    return out
+
+
+def _codex_transcript_state(cwd):
+    """(state, age_secs, detail) from the newest codex rollout for `cwd`.
+
+    Reads the last `task_complete` event's `payload.error`, which is the CLI's
+    own verdict on the turn. Specifically NOT the raw substring scan the old
+    cmd_limits used: every codex turn writes a `rate_limits` telemetry block,
+    so that scan hits on healthy and dead sessions alike and carries zero
+    information.
+    """
+    if not cwd:
+        return ("unknown", None, "no cwd recorded for this agent")
+    needles = ('"cwd":"%s"' % cwd, '"cwd": "%s"' % cwd)
+    for mt, p in _codex_rollouts()[:CODEX_SCAN_FILES]:
+        try:
+            with open(p, "rb") as f:
+                head = f.read(8192).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if not any(n in head for n in needles):
+            continue
+        return _codex_last_turn(p, mt)
+    return ("unknown", None, NOTHING_FOUND)
+
+
+def _codex_last_turn(path, mtime):
+    file_age = _mtime_age(mtime)
+    for ln in reversed(_tail_text(path, 262144).splitlines()):
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        pay = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        if pay.get("type") != "task_complete" and ev.get("type") != "task_complete":
+            continue
+        err = pay.get("error") if pay else ev.get("error")
+        age = _age_secs(ev.get("timestamp"))
+        if age is None:
+            age = file_age
+        if err:
+            msg = (err.get("message") if isinstance(err, dict) else str(err)) or "turn failed"
+            msg = " ".join(str(msg).split())
+            if _looks_limited(msg):
+                return ("limited", age, msg[:110])
+            # A failed turn that is not a usage limit is a broken host, a dead
+            # login, or something nobody here has classified. Saying "idle"
+            # would be the confident wrong answer this ticket is about.
+            return ("unknown", age, "last turn failed: %s" % msg[:90])
+        if file_age is not None and file_age <= LIVENESS_FRESH_SECS:
+            return ("working", file_age, "rollout active %s ago" % fmt_age(file_age))
+        return ("idle", age if age is not None else file_age,
+                "last turn ok %s ago" % fmt_age(age if age is not None else file_age))
+    if file_age is not None and file_age <= LIVENESS_FRESH_SECS:
+        return ("working", file_age, "rollout active %s ago (no task_complete yet)" % fmt_age(file_age))
+    return ("unknown", file_age, "no task_complete in the rollout tail")
+
+
+# ---- watcher / watch-log signals ---------------------------------------
+
+def _watcher_pid(board, owner):
+    try:
+        with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
+            return int((f.read() or "0").strip() or 0)
+    except (IOError, ValueError):
+        return 0
+
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _watch_runs(board, owner, keep=12):
+    """Parse the tail of watch.log into [{n, start, exit_at, rc, text}] oldest
+    first. `exit_at` is None for a run still executing."""
+    import re as _re
+    path = os.path.join(agents_dir(board), owner + ".watch.log")
+    text = _tail_text(path, 131072)
+    if not text:
+        return []
+    runs = {}
+    order = []
+    cur = None
+    line_re = _re.compile(r"^(\S+) run (\d+) (trigger=|exit |TIMEOUT)(.*)$")
+    for ln in text.splitlines():
+        m = line_re.match(ln)
+        if not m:
+            if cur is not None:
+                runs[cur]["text"].append(ln)
+            continue
+        stamp, n, kind, rest = m.group(1), int(m.group(2)), m.group(3), m.group(4)
+        if kind == "trigger=":
+            runs[n] = {"n": n, "start": stamp, "exit_at": None, "rc": None, "text": []}
+            order.append(n)
+            cur = n
+        elif n in runs:
+            if kind.startswith("exit"):
+                runs[n]["exit_at"] = stamp
+                runs[n]["rc"] = rest.strip()
+            else:
+                runs[n]["text"].append(ln)
+    out = [runs[n] for n in order if n in runs]
+    return out[-keep:]
+
+
+def _watch_log_state(board, owner):
+    """(state, detail) from the watcher's own log and pid.
+
+    Corroborating evidence, always labeled heuristic when it is the only
+    source: it can see that a run started, that it ended fast, and what the
+    CLI printed while failing -- never that the agent thought about anything.
+    """
+    pid = _watcher_pid(board, owner)
+    runs = _watch_runs(board, owner)
+    if not runs:
+        if pid and not _pid_alive(pid):
+            return ("dead", "watcher pid %d is gone, no runs logged" % pid)
+        return ("unknown", NOTHING_FOUND)
+    last = runs[-1]
+    if last["exit_at"] is None:
+        age = _age_secs(last["start"])
+        if pid and not _pid_alive(pid):
+            return ("dead", "watcher pid %d died mid-run %d" % (pid, last["n"]))
+        return ("working", "run %d in flight %s (watcher alive)" % (last["n"], fmt_age(age)))
+    # Closed runs: walk back over CONSECUTIVE FAILING runs. The evidence that
+    # makes this `limited` is the CLI's own error text inside those runs' own
+    # log slices -- watch.log holds the CLI's human-readable stderr, never a
+    # transcript's per-turn telemetry, which is what made the old raw scan
+    # useless. Run duration is corroboration reported in the detail, NOT a
+    # gate: gpt-cursor sat hard-limited until October with 37 failures in a
+    # row, and gating on speed dropped it the moment one of those failures
+    # happened to take 97 seconds instead of 7.
+    streak = []
+    for r in reversed(runs):
+        if r["exit_at"] is None or r["rc"] in ("0", None):
+            break
+        streak.append(r)
+    if len(streak) >= FAST_FAIL_STREAK:
+        blob = "\n".join("\n".join(r["text"]) for r in streak)
+        why = _first_match(blob, CLI_LIMIT_STRINGS + CLI_AUTH_STRINGS)
+        kind = "auth" if _looks_auth(blob) and not _looks_limited(blob) else "limit"
+        fast = len([r for r in streak
+                    if (_span_secs(r["start"], r["exit_at"]) or FAST_FAIL_SECS + 1) <= FAST_FAIL_SECS])
+        detail = "%d runs failed in a row, %d of them inside %ds%s" % (
+            len(streak), fast, FAST_FAIL_SECS, (" -- %s" % why) if why else "")
+        if why:
+            return ("limited", ("dead login: " if kind == "auth" else "") + detail)
+        # Repeated failure with nothing quotable is not enough to call an agent
+        # limited, and it is certainly not enough to call it healthy.
+        return ("unknown", detail + " -- no CLI error text in the log, read it by hand")
+    if pid and not _pid_alive(pid):
+        return ("dead", "watcher pid %d is gone" % pid)
+    age = _age_secs(last["exit_at"])
+    return ("idle", "last run %d exited %s ago" % (last["n"], fmt_age(age)))
+
+
+def _span_secs(a, b):
+    aa, bb = _age_secs(a), _age_secs(b)
+    return None if aa is None or bb is None else max(0.0, aa - bb)
+
+
+def _first_match(text, needles):
+    """The first log LINE containing one of `needles`, trimmed. Line-scoped
+    rather than a byte window around the match, so the quote does not drag in
+    the tail of whatever unrelated line came before it."""
+    for ln in (text or "").splitlines():
+        low = ln.lower()
+        if any(n in low for n in needles):
+            return " ".join(ln.split())[:110]
+    return ""
+
+
+def _tilde(p):
+    home = os.path.expanduser("~")
+    return "~" + p[len(home):] if p and p.startswith(home) else (p or "")
+
+
+# ---- the one answer who / dash / limits all read -----------------------
+
+def _cwd_sharers(board, owner, cwd, peers=None):
+    """Other agent records claiming the same working directory.
+
+    A Claude transcript is keyed by directory and carries no agent name, so if
+    two agents' records point at one directory the transcript cannot say whose
+    activity it is. That is not hypothetical: three records on this board
+    (claude-fable, cursor, cursor-2) point at one worktree, and reading the
+    transcript naively reports all three as working when at most one is.
+    """
+    if not cwd:
+        return []
+    recs = peers if peers is not None else load_agents(board)
+    return sorted(r["owner"] for r in recs
+                  if r.get("owner") and r["owner"] != owner
+                  and (r.get("cwd") or r.get("worktree") or "") == cwd)
+
+
+def agent_liveness(board, rec, peers=None):
+    """One per-agent state, derived from ground truth rather than from the
+    watcher's own `seen` field.
+
+    Returns {state, detail, source, heuristic, watcher, run, seen_age}.
+    `state` is one of STATE_WORDS. `heuristic` marks an answer that rests on
+    run cadence or on an unattributable transcript rather than on this agent's
+    own confirmed activity, so the renderer can show it as weaker evidence
+    instead of dressing it up as a fact.
+    """
+    owner = (rec or {}).get("owner") or ""
+    cwd = (rec or {}).get("cwd") or (rec or {}).get("worktree") or ""
+    pid = _watcher_pid(board, owner)
+    run = _read_run(board, owner)
+    beat_age = _age_secs(run.get("beat"))
+    out = {"state": "unknown", "detail": "", "source": "none", "heuristic": True,
+           "watcher": bool(pid and _pid_alive(pid)),
+           "run": run if run.get("active") else {},
+           "seen_age": _age_secs((rec or {}).get("seen"))}
+
+    # 1. A human asserting a state always wins: `tickets limit` is a person
+    #    saying "I read the log". Keep it, but it is no longer the ONLY path
+    #    to a limited render -- that is how gpt-cursor sat on this board for a
+    #    day looking healthy while hard-limited until October.
+    lim = (rec or {}).get("limit")
+    if lim:
+        out.update(state="limited", source="manual", heuristic=False,
+                   detail="asserted by hand%s%s" % (
+                       (", back %s" % lim["until"]) if lim.get("until") else "",
+                       (" -- %s" % lim["note"]) if lim.get("note") else ""))
+        return out
+
+    wstate, wdetail = _safe(lambda: _watch_log_state(board, owner), ("unknown", "watch log unreadable"))
+
+    # 2. A fast-fail streak outranks any transcript freshness, because a
+    #    session that fails instantly manufactures fresh-looking artefacts by
+    #    construction -- that IS the bug. Checked before the transcript, not
+    #    after it.
+    if wstate == "limited":
+        out.update(state="limited", source="watchlog", heuristic=True, detail=wdetail)
+        return out
+
+    tstate, tage, tdetail = _safe(lambda: _claude_transcript_state(cwd), ("unknown", None, "transcript unreadable"))
+    tsource = "claude"
+    if tstate == "unknown":
+        cstate, cage, cdetail = _safe(lambda: _codex_transcript_state(cwd), ("unknown", None, "rollout unreadable"))
+        if cdetail != NOTHING_FOUND:
+            # A codex rollout that exists but ended on an error nobody has
+            # classified ("spawn codex-code-mode-host ENOENT") is a FINDING.
+            # Taking it only when it resolved to a confident state would drop
+            # exactly the cases a master needs to go and look at.
+            tstate, tage, tdetail, tsource = cstate, cage, cdetail, "codex"
+        elif "no Claude transcript" in tdetail:
+            # Neither tool left a transcript for this cwd: say so, and say
+            # which two we looked for, rather than picking one's error message.
+            tdetail = "no Claude or Codex transcript for %s" % _tilde(cwd)
+
+    if tstate != "unknown":
+        out.update(state=tstate, source=tsource, heuristic=False, detail=tdetail)
+        # A dead watcher under a quiet transcript is a real dead lane; a dead
+        # watcher under a live transcript is just an agent running by hand.
+        if tstate == "idle" and pid and not _pid_alive(pid):
+            out.update(state="dead", detail="%s; watcher pid %d is gone" % (tdetail, pid))
+        shared = _safe(lambda: _cwd_sharers(board, owner, cwd, peers), [])
+        if shared:
+            # Keep the state -- the activity is real -- but stop presenting it
+            # as a fact about THIS agent, and name who else it could be so the
+            # reader can go and settle it.
+            out.update(heuristic=True,
+                       detail="%s; cwd shared with %s -- transcript cannot say which"
+                              % (out["detail"], ", ".join(shared)))
+        return out
+
+    if wstate == "dead":
+        out.update(state="dead", source="watchlog", heuristic=True, detail=wdetail)
+        return out
+
+    # 3. A run in flight with a fresh heartbeat proves the WATCHER is alive and
+    #    a child is up. It does not prove the agent is doing anything, and it
+    #    must not be rendered as if it did -- so it stays `unknown` and says
+    #    exactly what it knows.
+    if run.get("active") and beat_age is not None and beat_age <= max(RUN_HEARTBEAT_SECS * 3, 90):
+        out.update(state="unknown", source="heartbeat", heuristic=True,
+                   detail="run %s in flight, heartbeat %s ago -- watcher alive, no transcript to confirm work"
+                          % (run.get("run", "?"), fmt_age(beat_age)))
+        return out
+
+    if wstate == "working":
+        out.update(state="unknown", source="watchlog", heuristic=True,
+                   detail="%s -- no transcript ground truth for this tool" % wdetail)
+        return out
+
+    # Nothing was conclusive. Report everything that was actually observed,
+    # both sources, rather than letting one source's "I found nothing" hide
+    # the other's "I found something I cannot explain".
+    parts = [d for d in (wdetail, tdetail) if d and d != NOTHING_FOUND]
+    out.update(state="unknown", source="watchlog" if wdetail else "none", heuristic=True,
+               detail="; ".join(parts) or "no ground-truth source for this agent")
+    return out
+
+
+def liveness_mark(live):
+    """One character telling a reader HOW the state was reached, so 'a human
+    told us' never reads the same as 'the tool worked it out'."""
+    if live.get("state") == "unknown":
+        return "?"
+    if live.get("source") == "manual":
+        return "!"
+    return "~" if live.get("heuristic") else " "
+
+
+def liveness_line(live):
+    m = liveness_mark(live)
+    return "%-8s%s %s" % (live.get("state", "unknown"), m, live.get("detail", ""))
+
+
 # ---- usage limits -------------------------------------------------------
 
 LIMIT_PATTERNS = ("usage limit", "rate limit", "rate_limit", "hit your limit", "limit reached",
@@ -1782,32 +2344,57 @@ def cmd_limits(a, board):
         print("  nobody")
     print("")
     home = os.path.expanduser("~")
-    sources = {
-        "claude": glob.glob(os.path.join(home, ".claude", "projects", "*", "*.jsonl")),
-        "codex": glob.glob(os.path.join(home, ".codex", "sessions", "**", "*.jsonl"), recursive=True)
-                 + glob.glob(os.path.join(home, ".codex", "log", "*")),
-        "cursor": glob.glob(os.path.join(home, ".cursor", "chats", "**", "*.json*"), recursive=True)
-                  + glob.glob(os.path.join(home, ".cursor", "*.log")),
-    }
-    print("Local tool logs mentioning limits or auth failures (last %dh):" % a.hours)
-    found = False
-    for tool, paths in sources.items():
-        hits = _scan_logs(paths, a.hours)
-        hits.sort(key=lambda x: -x[2])
-        for p, n, mt, kind, agent, last in hits[:6]:
-            found = True
-            short = p.replace(home, "~")
-            print("  %-7s %-5s %3d hits  %s ago  agent=%s  %s" % (
-                tool, kind.upper(), n, fmt_hours((datetime.now(timezone.utc).timestamp() - mt) / 3600.0),
-                agent or "?", short[-70:]))
-            if last and getattr(a, "verbose", False):
-                print("          last: %s" % last[:180])
-    if not found:
-        print("  none found (grok/other tools: record manually with `tickets limit`)")
+    # The old section here scanned every recent tool log for the substring
+    # "rate_limit" and printed the hit count as if it were evidence. Every
+    # codex turn writes a `rate_limits` telemetry block, so a perfectly
+    # healthy session and a hard-limited one produced identical output --
+    # MASTER.md already told masters not to trust it. It is replaced by the
+    # per-agent state derived in agent_liveness(), and kept only behind
+    # --raw-scan, labelled for what it is.
+    print("Live state (from each session's own transcript, not from the watcher's `seen`):")
+    agents = load_agents(board)
+    if not agents:
+        print("  nobody has checked in yet")
+    for r in sorted(agents, key=lambda r: r.get("owner", "")):
+        lv = _safe(lambda r=r: agent_liveness(board, r, agents),
+                   {"state": "unknown", "detail": "liveness read failed",
+                    "source": "none", "heuristic": True})
+        print("  %-14s %-8s%s %-9s %s" % (r["owner"][:14], lv["state"], liveness_mark(lv),
+                                          "via " + (lv.get("source") or "none"), (lv.get("detail") or "")[:70]))
+    print("  legend: ! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- read the log by hand")
+    if getattr(a, "raw_scan", False):
+        sources = {
+            "claude": glob.glob(os.path.join(home, ".claude", "projects", "*", "*.jsonl")),
+            "codex": glob.glob(os.path.join(home, ".codex", "sessions", "**", "*.jsonl"), recursive=True)
+                     + glob.glob(os.path.join(home, ".codex", "log", "*")),
+            "cursor": glob.glob(os.path.join(home, ".cursor", "chats", "**", "*.json*"), recursive=True)
+                      + glob.glob(os.path.join(home, ".cursor", "*.log")),
+        }
+        print("")
+        print("RAW SUBSTRING SCAN, last %dh -- NOT EVIDENCE OF ANYTHING." % a.hours)
+        print("  Codex writes a `rate_limits` telemetry block on every turn, so a healthy session "
+              "scores hits here exactly like a dead one. Shown only because it is occasionally useful "
+              "for finding WHICH file to open by hand.")
+        found = False
+        for tool, paths in sources.items():
+            hits = _scan_logs(paths, a.hours)
+            hits.sort(key=lambda x: -x[2])
+            for p, n, mt, kind, agent, last in hits[:6]:
+                found = True
+                short = p.replace(home, "~")
+                print("  %-7s %-5s %3d hits  %s ago  agent=%s  %s" % (
+                    tool, kind.upper(), n, fmt_hours((datetime.now(timezone.utc).timestamp() - mt) / 3600.0),
+                    agent or "?", short[-70:]))
+                if last and getattr(a, "verbose", False):
+                    print("          last: %s" % last[:180])
+        if not found:
+            print("  no files matched")
     print("")
     print("AUTH means the session's login died (revoked/expired token): the fix is `/login` in that "
           "session, not waiting. LIMIT means a usage/rate cap: wait for the reset or switch accounts. "
-          "Either way, if the agent holds a ticket, `tickets reopen` it so someone else can continue.")
+          "Either way, if the agent holds a ticket, `tickets reopen` it so someone else can continue. "
+          "UNKNOWN means this tool cannot tell you -- go read the log; it is not a synonym for fine, "
+          "and nothing should be reopened on it alone.")
 
 
 def cmd_status(a, board):
@@ -2584,7 +3171,12 @@ def cmd_who(a, board):
         print("nobody has checked in yet (agents check in automatically on next/claim/update/done)")
         return
     tickets = dict((t["id"], t) for t in load_all(board))
-    print("%-14s %-8s %-34s %-22s %s" % ("agent", "seen", "branch@sha", "ticket", "worktree"))
+    live = {} if getattr(a, "no_liveness", False) else dict(
+        (r["owner"], _safe(lambda r=r: agent_liveness(board, r, agents),
+                           {"state": "unknown", "detail": "liveness read failed",
+                            "source": "none", "heuristic": True}))
+        for r in agents)
+    print("%-14s %-9s %-8s %-30s %-20s %s" % ("agent", "state", "loop-seen", "branch@sha", "ticket", "worktree"))
     for r in sorted(agents, key=lambda r: r.get("seen", ""), reverse=True):
         tid = r.get("ticket") or ""
         t = tickets.get(tid)
@@ -2596,8 +3188,15 @@ def cmd_who(a, board):
         home = os.path.expanduser("~")
         if wt.startswith(home):
             wt = "~" + wt[len(home):]
-        print("%-14s %-8s %-34s %-22s %s" % (
-            r["owner"][:14], fmt_hours(hours_since(r.get("seen"))) + " ago", b[:34], tdesc[:22], wt))
+        lv = live.get(r["owner"]) or {}
+        # `loop-seen` is named, not hidden: it is still the honest answer to
+        # "when did the watcher last idle", it is just not the answer to "is
+        # this agent alive" -- which is what reading it as `seen` implied.
+        print("%-14s %-8s%s %-8s %-30s %-20s %s" % (
+            r["owner"][:14], (lv.get("state") or "-")[:8], liveness_mark(lv) if lv else " ",
+            fmt_hours(hours_since(r.get("seen"))) + " ago", b[:30], tdesc[:20], wt))
+        if lv.get("detail"):
+            print("%-14s %s" % ("", lv["detail"][:100]))
         if r.get("limit"):
             lim = r["limit"]
             print("%-14s !! USAGE LIMIT hit %s ago%s" % ("", fmt_hours(hours_since(lim["at"])),
@@ -2615,6 +3214,10 @@ def cmd_who(a, board):
     on_main = [r["owner"] for r in agents if r.get("branch") in ("main", "master")]
     if on_main:
         print("!! on main/master: %s -- rule 4, move to a worktree" % ", ".join(on_main))
+    if live:
+        print("")
+        print("state is read from the session's own transcript, not from loop-seen.  "
+              "! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- go read the log")
 
 
 # ---- message board ------------------------------------------------------
@@ -3366,7 +3969,12 @@ def utilization(board, tickets=None, hours=24):
         held = [t for t in mine if t["status"] in ("claimed", "review")]
         r = agents.get(n, {})
         seen = hours_since(r["seen"]) if r.get("seen") else None
-        state = "DOWN" if r.get("limit") else ("busy" if any(t["status"] == "claimed" for t in held) else "idle")
+        # DOWN is no longer reachable only through a hand-typed `tickets limit`
+        # record: an agent whose sessions cannot start is down whether or not
+        # anyone remembered to say so (T-237).
+        lv = _safe(lambda: agent_liveness(board, r, list(agents.values())), {}) if r else {}
+        state = ("DOWN" if lv.get("state") in ("limited", "dead")
+                 else ("busy" if any(t["status"] == "claimed" for t in held) else "idle"))
         rows.append({
             "agent": n, "state": state, "done": len(recent), "done_total": len(done),
             "avg_cycle_h": (sum(cycles) / len(cycles)) if cycles else None,
@@ -3441,13 +4049,20 @@ def cmd_dash(a, board):
         names = sorted(set([r["owner"] for r in agents] + [k for k, v in load_roles(board).items() if v]))
         for nme in names:
             r = next((x for x in agents if x["owner"] == nme), {})
-            if r.get("limit"):
-                lines.append("  %-13s DOWN (%s)" % (nme[:13], (r["limit"].get("note") or "limit")[:40]))
+            lv = _safe(lambda: agent_liveness(board, dict(r, owner=nme), agents), {})
+            state, mark = (lv.get("state") or "unknown"), liveness_mark(lv)
+            if state in ("limited", "dead"):
+                # DOWN whether a human said so (!) or the tool worked it out
+                # (~) -- but the reader can still tell which, because those are
+                # different levels of evidence.
+                lines.append("  %-13s DOWN%s (%s)" % (nme[:13], mark, (lv.get("detail") or state)[:44]))
                 continue
             p = pending_work(board, nme)
             keys = [k for k in p if k != "broadcasts"]
-            lines.append("  %-13s seen %-7s %s" % (nme[:13], fmt_hours(hours_since(r["seen"])) + " ago" if r.get("seen") else "never",
-                                                   ("pending: " + ", ".join(keys)) if keys else "idle"))
+            lines.append("  %-13s %-8s%s %-9s %s" % (
+                nme[:13], state, mark,
+                ("seen " + fmt_hours(hours_since(r["seen"]))) if r.get("seen") else "never",
+                ("pending: " + ", ".join(keys)) if keys else (lv.get("detail") or "")[:40]))
         rows, burn = utilization(board, tickets, hours=24)
         live = [r for r in rows if r["state"] != "DOWN"]
         lines.append("UTILIZATION 24h  (%d live agents, %d down)" % (len(live), len(rows) - len(live)))
@@ -3570,13 +4185,19 @@ def _watch_lock(board, owner):
     return None
 
 
-def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes):
+def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
+                      on_beat=None, beat_secs=None):
     """Run cmd with stdout+stderr teed into log_path, capped at cap_bytes for
     this run alone -- a single verbose run must not be able to blow past the
     log's rotation budget before the between-run rotation in cmd_watch's
     log() ever gets a chance to fire. Keeps draining the pipe past the cap so
     the child never blocks on a full pipe buffer. Returns (rc, timed_out);
     rc is 124 on timeout, matching the previous subprocess.call behavior.
+
+    `on_beat` is called every `beat_secs` for as long as the child is running
+    (T-237). It is a separate ticker thread rather than a hook on the output
+    pump because a session that is thinking writes nothing for minutes, and a
+    heartbeat that only fires when the child speaks reports silence as death.
     """
     import subprocess
     import threading
@@ -3610,6 +4231,18 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes):
 
     pump_thread = threading.Thread(target=pump, daemon=True)
     pump_thread.start()
+
+    beat_stop = threading.Event()
+    if on_beat:
+        interval = beat_secs or RUN_HEARTBEAT_SECS
+
+        def beat():
+            while not beat_stop.wait(interval):
+                _safe(on_beat, None)
+
+        _safe(on_beat, None)  # stamp the start of the run, do not wait a tick
+        threading.Thread(target=beat, daemon=True).start()
+
     try:
         rc = proc.wait(timeout=timeout_s)
         timed_out = False
@@ -3618,6 +4251,8 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes):
         proc.wait()
         rc = 124
         timed_out = True
+    finally:
+        beat_stop.set()
     pump_thread.join(timeout=5)
     return rc, timed_out
 
@@ -3691,11 +4326,19 @@ def cmd_watch(a, board):
                     print("  dry-run; would execute: %s" % cmd)
                     rc = 0
                 else:
+                    # The whole point of T-237: something must record that this
+                    # agent is alive WHILE the child runs. checkin() cannot --
+                    # the next call to it is on the far side of this line.
+                    _safe(lambda: _run_begin(board, owner, runs, cwd), None)
                     rc, timed_out = _watch_run_capped(
                         cmd, cwd, env, log_path,
                         a.run_timeout * 60 if a.run_timeout else None,
                         WATCH_LOG_MAX_BYTES,
+                        on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
+                                                  cwd=cwd, active=True),
+                        beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
                     )
+                    _safe(lambda: _run_end(board, owner, runs, rc), None)
                     if timed_out:
                         with open(log_path, "a") as lf:
                             lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))
@@ -4657,6 +5300,8 @@ def main():
     c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
     c.add_argument("--max-runs", type=int, default=0)
     c.add_argument("--run-timeout", type=int, default=90, help="minutes per run before it is killed (0 = none)")
+    c.add_argument("--beat-every", type=int, default=0,
+                   help="seconds between in-run heartbeats (0 = TICKETS_RUN_HEARTBEAT_SECS, default 30)")
     c.add_argument("--once", action="store_true", help="check once; exit 0 if work, 1 if not")
     c.add_argument("--dry-run", action="store_true")
     c.add_argument("--verbose", action="store_true")
@@ -4755,6 +5400,8 @@ def main():
     c.set_defaults(fn=cmd_here)
 
     c = sub.add_parser("who", help="where every agent is working")
+    c.add_argument("--no-liveness", action="store_true",
+                   help="skip the transcript reads and show locations only")
     c.set_defaults(fn=cmd_who)
 
     c = sub.add_parser("msg", help="post to the message board")
@@ -4804,8 +5451,11 @@ def main():
     c.add_argument("--clear", action="store_true")
     c.set_defaults(fn=cmd_limit)
 
-    c = sub.add_parser("limits", help="who is limited: records, silence, and local tool logs")
+    c = sub.add_parser("limits", help="who is limited: records, silence, and per-agent live state")
     c.add_argument("--hours", type=int, default=24)
+    c.add_argument("--raw-scan", action="store_true",
+                   help="also print the old substring hit-count scan (not evidence; see the label)")
+    c.add_argument("--verbose", action="store_true")
     c.set_defaults(fn=cmd_limits)
 
     c = sub.add_parser("status", help="set status: todo | in-progress | review | blocked | done")
