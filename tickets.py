@@ -1522,10 +1522,30 @@ def cmd_merge(a, board):
 
 LIMIT_PATTERNS = ("usage limit", "rate limit", "rate_limit", "hit your limit", "limit reached",
                   "out of credits", "quota exceeded", "429", "resets at", "try again in")
+# A dead session is not always a rate limit: revoked tokens and expired logins
+# look identical from the board (silence), so the scan reports them too.
+AUTH_PATTERNS = ("authentication_error", "token has been revoked", "please run /login",
+                 "invalid api key", "401", "not logged in", "oauth")
+
+
+def _classify(line):
+    low = line.lower()
+    if any(k in low for k in AUTH_PATTERNS) and ("auth" in low or "revoked" in low or "login" in low or "401" in low):
+        return "auth"
+    if any(k in low for k in LIMIT_PATTERNS) and ("limit" in low or "429" in low or "credit" in low or "quota" in low):
+        return "limit"
+    return None
+
+
+def _agent_from_path(path):
+    """Best-effort: worktree names encode the agent (…-worktrees-claude-opus/…)."""
+    import re
+    m = re.search(r"worktrees?-([a-z0-9-]+?)(?:-work)?(?:/|$)", path)
+    return m.group(1) if m else ""
 
 
 def _scan_logs(paths, hours):
-    """Return [(path, hits, last_mtime)] for files touched within `hours` containing limit text."""
+    """[(path, hits, last_mtime, kind, agent, last_line)] for recent files mentioning limits/auth."""
     import time
     cutoff = time.time() - hours * 3600
     out = []
@@ -1537,16 +1557,21 @@ def _scan_logs(paths, hours):
         if st.st_mtime < cutoff or st.st_size > 200 * 1024 * 1024:
             continue
         hits = 0
+        kind = None
+        last = ""
         try:
             with open(p, "r", errors="ignore") as f:
                 for ln in f:
-                    low = ln.lower()
-                    if any(k in low for k in LIMIT_PATTERNS) and ("limit" in low or "429" in low or "credit" in low or "quota" in low):
+                    k = _classify(ln)
+                    if k:
                         hits += 1
+                        kind = k if kind != "auth" else kind
+                        i = ln.lower().find("error")
+                        last = ln[max(0, i - 40):i + 160].strip() if i >= 0 else ln.strip()[:200]
         except OSError:
             continue
         if hits:
-            out.append((p, hits, st.st_mtime))
+            out.append((p, hits, st.st_mtime, kind or "limit", _agent_from_path(p), last))
     return out
 
 
@@ -1607,17 +1632,25 @@ def cmd_limits(a, board):
         "cursor": glob.glob(os.path.join(home, ".cursor", "chats", "**", "*.json*"), recursive=True)
                   + glob.glob(os.path.join(home, ".cursor", "*.log")),
     }
-    print("Local tool logs mentioning limits (last %dh):" % a.hours)
+    print("Local tool logs mentioning limits or auth failures (last %dh):" % a.hours)
     found = False
     for tool, paths in sources.items():
         hits = _scan_logs(paths, a.hours)
         hits.sort(key=lambda x: -x[2])
-        for p, n, mt in hits[:5]:
+        for p, n, mt, kind, agent, last in hits[:6]:
             found = True
             short = p.replace(home, "~")
-            print("  %-7s %3d hits  %s ago  %s" % (tool, n, fmt_hours((datetime.now(timezone.utc).timestamp() - mt) / 3600.0), short[-90:]))
+            print("  %-7s %-5s %3d hits  %s ago  agent=%s  %s" % (
+                tool, kind.upper(), n, fmt_hours((datetime.now(timezone.utc).timestamp() - mt) / 3600.0),
+                agent or "?", short[-70:]))
+            if last and a.verbose:
+                print("          last: %s" % last[:180])
     if not found:
         print("  none found (grok/other tools: record manually with `tickets limit`)")
+    print("")
+    print("AUTH means the session's login died (revoked/expired token): the fix is `/login` in that "
+          "session, not waiting. LIMIT means a usage/rate cap: wait for the reset or switch accounts. "
+          "Either way, if the agent holds a ticket, `tickets reopen` it so someone else can continue.")
 
 
 def cmd_status(a, board):
@@ -2644,34 +2677,67 @@ def cmd_connect(a, board):
 
 
 # ---- wake-up: is there work for this agent, and how to start it ----------
+#
+# Two mechanisms, because a session cannot be woken by a hook once its turn
+# has ended: `stop-hook` keeps a Claude Code turn alive while board work
+# remains; `watch` starts a headless run when work appears. Both are built on
+# `pending_work`, which never raises and never mutates the board.
+
+STOP_HOOK_MAX_PER_HOUR = 4
+WATCH_MIN_INTERVAL = 5
+
+
+def _safe(fn, default):
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001 - wake-up paths must never take a session down
+        return default
+
 
 def pending_work(board, owner):
-    """What would make `owner` act right now. Returns a dict (empty = nothing)."""
+    """What would make `owner` act right now. Empty dict = nothing.
+
+    Keys: messages_to_me, broadcasts (count), holding, suggested_for_me,
+    ready_in_my_lane, limited (agent recorded a usage limit; do not wake).
+    """
     out = {}
-    msgs = unread(board, owner)
+    if not owner or not os.path.isdir(board):
+        return out
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    if rec.get("limit"):
+        out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
+        return out
+    msgs = _safe(lambda: unread(board, owner), [])
     direct = [m for m in msgs if m.get("to") == owner]
     if direct:
         out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
-    if msgs and not direct:
+    elif msgs:
         out["broadcasts"] = len(msgs)
-    tickets = load_all(board)
-    held = [t for t in tickets if t["status"] == "claimed" and t.get("owner") == owner]
+    tickets = _safe(lambda: load_all(board), [])
+    held = [t for t in tickets if t.get("status") == "claimed" and t.get("owner") == owner]
     if held:
-        out["holding"] = [t["id"] + " " + t["title"][:60] for t in held]
-    roles = roles_for(board, owner, None)
-    ready = [t for t in _filter_ready(unblocked(board, tickets), roles) if can_do(board, owner, t)]
+        out["holding"] = [t["id"] + " " + t.get("title", "")[:60] for t in held]
+    roles = _safe(lambda: roles_for(board, owner, None), None)
+    ready = _safe(lambda: [t for t in _filter_ready(unblocked(board, tickets), roles)
+                           if can_do(board, owner, t)], [])
     mine_first = [t for t in ready if t.get("suggested") == owner]
     if mine_first:
-        out["suggested_for_me"] = [t["id"] + " " + t["title"][:60] for t in mine_first[:3]]
+        out["suggested_for_me"] = [t["id"] + " " + t.get("title", "")[:60] for t in mine_first[:3]]
     elif ready and not held:
-        out["ready_in_my_lane"] = [t["id"] + " " + t["title"][:60] for t in ready[:3]]
+        out["ready_in_my_lane"] = [t["id"] + " " + t.get("title", "")[:60] for t in ready[:3]]
     return out
+
+
+def actionable(pending):
+    """Broadcast-only noise or a recorded usage limit should not start a run."""
+    return bool(pending) and not (set(pending) <= {"broadcasts", "limited"})
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
 Rules: one ticket at a time; own git worktree, never main; `tickets sync` before `tickets review`;
 `tickets update <id> "..."` every 45 minutes; finish with `tickets review <id> --notes "paths, tests, decisions"`;
 never edit .tickets/ by hand; never run `tickets clear`. Board-only comms: `tickets msg`.
+Always prefix ticket commands with TICKET_AGENT={agent}.
 Do now, in order:
 1. `tickets inbox` -- read and, if anything is addressed to you, answer with `tickets msg --to <who>`.
 2. `tickets mine` -- if you hold a ticket, continue it from where the notes left off.
@@ -2685,101 +2751,568 @@ def cmd_pending(a, board):
     owner = whoami(a.agent)
     p = pending_work(board, owner)
     if a.json:
-        print(json.dumps({"agent": owner, "pending": bool(p), **p}))
+        print(json.dumps({"agent": owner, "pending": actionable(p), **p}))
     elif p:
         for k, v in p.items():
             print("%s: %s" % (k, v if not isinstance(v, list) else "; ".join(v)))
     else:
         print("nothing pending for %s" % owner)
-    sys.exit(0 if p else 1)
+    sys.exit(0 if actionable(p) else 1)
+
+
+def brief_path(board, owner):
+    return os.path.join(board, "briefs", owner + ".md")
+
+
+def agent_brief(board, owner, limit=6000):
+    """The agent's standing context (.tickets/briefs/<agent>.md), if any."""
+    try:
+        with open(brief_path(board, owner)) as f:
+            text = f.read().strip()
+    except OSError:
+        return ""
+    return text if len(text) <= limit else text[:limit] + "\n...(brief truncated; read the file)"
+
+
+def ticket_context(board, owner):
+    """Context notes attached to the agent's held ticket(s)."""
+    out = []
+    for t in load_all(board):
+        if t.get("status") == "claimed" and t.get("owner") == owner:
+            ctx = [n["text"] for n in t.get("notes", []) if n.get("kind") == "context"]
+            if ctx:
+                out.append("%s %s:\n  - %s" % (t["id"], t.get("title", "")[:60], "\n  - ".join(ctx)))
+    return "\n".join(out)
 
 
 def cmd_prompt(a, board):
     owner = whoami(a.agent)
+    parts = []
+    brief = agent_brief(board, owner)
+    if brief:
+        parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
+    tctx = ticket_context(board, owner)
+    if tctx:
+        parts.append("Context attached to your ticket(s):\n" + tctx)
+    if a.extra:
+        parts.append(a.extra)
     print(WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
-                               extra=(a.extra or "")))
+                               extra="\n\n".join(parts)))
+
+
+def cmd_brief(a, board):
+    """Give an agent (or a ticket) context. Shown on every claim, in `tickets
+    prompt`, and in `boot`. Appends with a timestamp; --file replaces from a file;
+    --show prints; --ticket attaches to a ticket instead of an agent."""
+    who = whoami(a.by)
+    if a.ticket and not a.text and a.agent:
+        a.text, a.agent = a.agent, ""  # `brief --ticket T-1 "text"`: first positional is the text
+    if a.ticket:
+        t = load(board, a.ticket)
+        if a.show:
+            for n in t.get("notes", []):
+                if n.get("kind") == "context":
+                    print("- [%s] %s" % (n.get("by", "?"), n["text"]))
+            return
+        text = a.text or (open(a.file).read().strip() if a.file else "")
+        if not text:
+            sys.exit("give context text, --file, or --show")
+        t["notes"].append({"by": who, "at": now(), "kind": "context", "text": text})
+        save(board, t)
+        if t.get("owner") and t.get("status") == "claimed":
+            post_message(board, who, "context added to %s: %s" % (t["id"], text[:160]), to=t["owner"], re=t["id"])
+        print("context attached to %s%s" % (t["id"], (" (owner %s messaged)" % t["owner"]) if t.get("owner") else ""))
+        return
+    if not a.agent:
+        sys.exit("brief needs an agent name or --ticket")
+    path = brief_path(board, a.agent)
+    if a.show:
+        print(agent_brief(board, a.agent) or "(no brief for %s)" % a.agent)
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if a.file:
+        with open(a.file) as f:
+            body = f.read()
+        with open(path, "w") as f:
+            f.write(body if body.endswith("\n") else body + "\n")
+        print("brief for %s replaced from %s" % (a.agent, a.file))
+    elif a.text:
+        exists = os.path.exists(path)
+        with open(path, "a") as f:
+            if not exists:
+                f.write("# Brief for %s\n\n" % a.agent)
+            f.write("- %s [%s] %s\n" % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), who, a.text))
+        print("added to %s" % path)
+    else:
+        sys.exit("give context text, --file, or --show")
+    post_message(board, who, "brief updated for %s: %s" % (a.agent, (a.text or a.file)[:160]), to=a.agent)
+
+
+def utilization(board, tickets=None, hours=24):
+    """Per-agent throughput and load over the window, plus sprint burn."""
+    tickets = tickets if tickets is not None else load_all(board)
+    cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
+    agents = {r["owner"]: r for r in load_agents(board)}
+    names = sorted(set(list(agents) + [t.get("owner") for t in tickets if t.get("owner")]))
+    rows = []
+    for n in names:
+        if not n or n.startswith("agent-"):
+            continue
+        mine = [t for t in tickets if t.get("owner") == n]
+        done = [t for t in mine if t["status"] == "done" and t.get("done_at")]
+        recent = [t for t in done if _safe(lambda: datetime.strptime(t["done_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp(), 0) >= cutoff]
+        cycles = [timing(t)["active"] for t in recent if timing(t)["active"] is not None]
+        active_hours = sum(cycles)
+        held = [t for t in mine if t["status"] in ("claimed", "review")]
+        r = agents.get(n, {})
+        seen = hours_since(r["seen"]) if r.get("seen") else None
+        state = "DOWN" if r.get("limit") else ("busy" if any(t["status"] == "claimed" for t in held) else "idle")
+        rows.append({
+            "agent": n, "state": state, "done": len(recent), "done_total": len(done),
+            "avg_cycle_h": (sum(cycles) / len(cycles)) if cycles else None,
+            "active_h": active_hours, "util_pct": min(100.0, 100.0 * active_hours / hours) if hours else 0.0,
+            "in_flight": len([t for t in held if t["status"] == "claimed"]),
+            "in_review": len([t for t in held if t["status"] == "review"]),
+            "seen_h": seen,
+        })
+    cur = active_sprint(board)
+    burn = None
+    if cur:
+        mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+        d, n, c, b = progress(mine)
+        started = hours_since(cur["start"]) if cur.get("start") else None
+        burn = {"sprint": cur["id"], "done": d, "total": n, "in_flight": c, "blocked": b,
+                "elapsed_h": started, "done_per_day": (d / (started / 24.0)) if started and started > 1 else None,
+                "eta_days": ((n - d) / (d / (started / 24.0))) if started and started > 1 and d else None}
+    return rows, burn
+
+
+def cmd_util(a, board):
+    rows, burn = utilization(board, hours=a.hours)
+    if a.json:
+        print(json.dumps({"window_hours": a.hours, "agents": rows, "sprint": burn}, indent=2))
+        return
+    print("Utilization, last %dh" % a.hours)
+    print("  %-14s %-5s %5s %8s %8s %6s %6s %6s %s" % ("agent", "state", "done", "avg cyc", "active", "util%", "wip", "review", "seen"))
+    for r in rows:
+        print("  %-14s %-5s %5d %8s %8s %5.0f%% %6d %6d %s" % (
+            r["agent"][:14], r["state"], r["done"], fmt_hours(r["avg_cycle_h"]) if r["avg_cycle_h"] is not None else "-",
+            fmt_hours(r["active_h"]), r["util_pct"], r["in_flight"], r["in_review"],
+            (fmt_hours(r["seen_h"]) + " ago") if r["seen_h"] is not None else "never"))
+    if burn:
+        print("Sprint %s: %d/%d done, %d in flight, %d blocked, elapsed %s, %s/day, ETA %s" % (
+            burn["sprint"], burn["done"], burn["total"], burn["in_flight"], burn["blocked"],
+            fmt_hours(burn["elapsed_h"]) if burn["elapsed_h"] is not None else "?",
+            ("%.1f" % burn["done_per_day"]) if burn["done_per_day"] else "?",
+            ("%.1f days" % burn["eta_days"]) if burn["eta_days"] else "?"))
+    print("util% = hours of measured ticket cycle time completed in the window / window; 'active' is that sum.")
+
+
+def cmd_dash(a, board):
+    """Master's one-screen view, refreshing in place: sprint, in flight with
+    staleness, review queue, per-agent pending, health, last messages."""
+    import time as _time
+    while True:
+        tickets = load_all(board)
+        cur = active_sprint(board)
+        m = current_master(board)
+        lines = []
+        lines.append("=" * 78)
+        lines.append("BOARD %s   %s   master: %s" % (os.path.basename(os.path.dirname(board)), now(),
+                                                    m["owner"] if m else "nobody"))
+        if cur:
+            mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+            d, n, c, b = progress(mine)
+            lines.append("sprint %s %s  %d in flight, %d blocked | %s" % (cur["id"], bar(d, n), c, b, cur.get("goal", "")[:60]))
+        lines.append("-" * 78)
+        lines.append("IN FLIGHT")
+        for t in tickets:
+            if t["status"] == "claimed":
+                tm = timing(t)
+                su = tm["since_update"]
+                flag = "!!" if su is not None and su * 60 > UPDATE_EVERY_MIN * 2 else ("! " if su is not None and su * 60 > UPDATE_EVERY_MIN else "  ")
+                lines.append(" %s %-6s @%-13s %-40s upd %s" % (flag, t["id"], (t.get("owner") or "?")[:13], t["title"][:40], fmt_hours(su)))
+        rq = [t for t in tickets if t["status"] == "review"]
+        lines.append("REVIEW QUEUE (%d)%s" % (len(rq), ": tickets merge" if rq else ""))
+        for t in rq:
+            lines.append("    %-6s @%-13s %-40s %s%s" % (t["id"], (t.get("owner") or "?")[:13], t["title"][:40], t.get("commit", "")[:24], (" PR " + t["pr"]) if t.get("pr") else ""))
+        lines.append("AGENTS")
+        agents = load_agents(board)
+        names = sorted(set([r["owner"] for r in agents] + [k for k, v in load_roles(board).items() if v]))
+        for nme in names:
+            r = next((x for x in agents if x["owner"] == nme), {})
+            if r.get("limit"):
+                lines.append("  %-13s DOWN (%s)" % (nme[:13], (r["limit"].get("note") or "limit")[:40]))
+                continue
+            p = pending_work(board, nme)
+            keys = [k for k in p if k != "broadcasts"]
+            lines.append("  %-13s seen %-7s %s" % (nme[:13], fmt_hours(hours_since(r["seen"])) + " ago" if r.get("seen") else "never",
+                                                   ("pending: " + ", ".join(keys)) if keys else "idle"))
+        rows, burn = utilization(board, tickets, hours=24)
+        live = [r for r in rows if r["state"] != "DOWN"]
+        lines.append("UTILIZATION 24h  (%d live agents, %d down)" % (len(live), len(rows) - len(live)))
+        for r in sorted(live, key=lambda r: -r["done"])[:8]:
+            lines.append("  %-13s %-4s done %2d  avg %-5s  wip %d  rev %d  util %3.0f%%" % (
+                r["agent"][:13], r["state"], r["done"], fmt_hours(r["avg_cycle_h"]) if r["avg_cycle_h"] is not None else "-",
+                r["in_flight"], r["in_review"], r["util_pct"]))
+        if burn and burn.get("done_per_day"):
+            lines.append("  burn: %.1f tickets/day, ETA %s" % (burn["done_per_day"], ("%.1f days" % burn["eta_days"]) if burn.get("eta_days") else "-"))
+        issues = health(board, tickets)
+        crit = [i for i in issues if i[0] in ("CRIT", "WARN")]
+        lines.append("HEALTH  %d issues (%d need action)" % (len(issues), len(crit)))
+        for sev, msg, fix in crit[:6]:
+            lines.append("  [%s] %s" % (sev, msg[:70]))
+        lines.append("MESSAGES")
+        for mm in load_messages(board)[-a.messages:]:
+            lines.append("  " + fmt_msg(mm)[:76])
+        lines.append("-" * 78)
+        lines.append("tickets assign <id> --owner X | tickets brief X \"...\" | tickets msg \"...\" --to X | tickets merge | tickets reopen <id>")
+        if not a.once:
+            sys.stdout.write("\033[2J\033[H")
+        print("\n".join(lines))
+        if a.once:
+            return
+        try:
+            _time.sleep(max(3, a.every))
+        except KeyboardInterrupt:
+            return
+
+
+def _record_stop_block(board, owner):
+    """Rate-limit continuations: returns False when the hourly cap is reached."""
+    path = os.path.join(agents_dir(board), owner + ".json")
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    cutoff = datetime.now(timezone.utc).timestamp() - 3600
+    stamps = [s for s in rec.get("stop_blocks", []) if _safe(lambda: datetime.strptime(
+        s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp(), 0) > cutoff]
+    if len(stamps) >= STOP_HOOK_MAX_PER_HOUR:
+        return False
+    stamps.append(now())
+    rec["stop_blocks"] = stamps
+    try:
+        os.makedirs(agents_dir(board), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return True
 
 
 def cmd_stop_hook(a, board):
     """Claude Code `Stop` hook: keep the turn alive while this agent still has work.
 
-    Reads the hook event on stdin. If Claude is already continuing because of a
-    stop hook (`stop_hook_active`), let it stop -- that is the loop guard. Else,
-    if there are unread messages addressed to the agent or a ticket in hand,
-    block the stop with a reason so the session keeps working.
+    Never raises, always exits 0. Lets the session stop when: no TICKET_AGENT,
+    TICKETS_STOP_HOOK=off, the event says stop_hook_active (we already continued
+    once this turn), the agent recorded a usage limit, only broadcasts are
+    unread, or the hourly cap of continuations is reached.
     """
     try:
-        event = json.loads(sys.stdin.read() or "{}")
-    except ValueError:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+        event = json.loads(raw or "{}")
+        if not isinstance(event, dict):
+            event = {}
+    except Exception:  # noqa: BLE001
         event = {}
     owner = os.environ.get("TICKET_AGENT") or ""
-    if not owner or event.get("stop_hook_active"):
+    if (not owner or os.environ.get("TICKETS_STOP_HOOK", "").lower() in ("off", "0", "false")
+            or event.get("stop_hook_active")):
         print("{}")
         return
-    p = pending_work(board, owner)
-    if not p or (set(p) == {"broadcasts"}):
+    p = _safe(lambda: pending_work(board, owner), {})
+    if not actionable(p) or not _record_stop_block(board, owner):
         print("{}")
         return
-    reason = "Ticket board still has work for %s: %s. Run `tickets inbox`, then continue your ticket " \
-             "(`tickets mine`) or claim one (`tickets next`). If you are truly done or blocked, say so " \
-             "with `tickets msg` and stop." % (owner, "; ".join(
-                 "%s=%s" % (k, v if not isinstance(v, list) else " | ".join(v)) for k, v in p.items()))
+    detail = "; ".join("%s=%s" % (k, v if not isinstance(v, list) else " | ".join(v))
+                       for k, v in p.items() if k != "broadcasts")
+    reason = ("Ticket board still has work for %s: %s. Run `TICKET_AGENT=%s tickets inbox`, then "
+              "continue your ticket (`tickets mine`) or claim one (`tickets next`). If you are truly "
+              "done or blocked, say so with `tickets msg` and stop." % (owner, detail, owner))
     print(json.dumps({"decision": "block", "reason": reason[:1500]}))
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _watch_lock(board, owner):
+    """One watcher per agent name. Returns the lock path or None if another runs."""
+    os.makedirs(agents_dir(board), exist_ok=True)
+    path = os.path.join(agents_dir(board), owner + ".watch.pid")
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return path
+        except FileExistsError:
+            try:
+                with open(path) as f:
+                    other = int(f.read().strip() or "0")
+            except (OSError, ValueError):
+                other = 0
+            if other and _pid_alive(other):
+                return None
+            try:
+                os.unlink(path)  # stale lock from a dead watcher
+            except OSError:
+                return None
+    return None
 
 
 def cmd_watch(a, board):
     """Poll the board; when there is work for the agent, launch a worker command.
 
-    Default command runs Claude Code headless with the standard worker prompt.
-    One run at a time; the next poll happens after the run ends. Stops after
-    --max-runs, on Ctrl-C, or immediately with --once.
+    One watcher per agent (pid lock), one run at a time, per-run timeout,
+    exponential backoff after failed runs, clean exit on SIGTERM/Ctrl-C.
     """
+    import signal
     import subprocess
     import time as _time
 
     owner = whoami(a.agent)
+    if owner.startswith("agent-"):
+        sys.exit("set --agent or TICKET_AGENT to a real name")
     root = os.path.dirname(board)
-    cwd = a.cwd or root
+    cwd = os.path.abspath(a.cwd or root)
+    if not os.path.isdir(cwd):
+        sys.exit("--cwd %s does not exist" % cwd)
     cmd = a.exec or (
-        'claude -p "$(tickets prompt)" --permission-mode %s%s' % (
-            a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else "")
+        'claude -p "$(tickets prompt)" --permission-mode %s%s'
+        % (a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else "")
     )
-    log_dir = os.path.join(board, "agents")
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, owner + ".watch.log")
+    every = max(WATCH_MIN_INTERVAL, int(a.every))
+    lock = None
+    if not a.once:
+        lock = _watch_lock(board, owner)
+        if lock is None:
+            sys.exit("another watcher for %s is already running (see %s)" % (
+                owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
+    log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     env = dict(os.environ, TICKET_AGENT=owner, TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
-    runs = 0
-    print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, a.every, cwd, cmd))
-    checkin(board, owner, None, "watch loop online (every %ds)" % a.every)
-    while True:
-        p = pending_work(board, owner)
-        actionable = p and set(p) != {"broadcasts"}
-        if actionable:
-            runs += 1
-            stamp = now()
-            with open(log_path, "a") as lf:
-                lf.write("%s run %d trigger=%s\n" % (stamp, runs, json.dumps(p)[:400]))
-            print("%s work found (%s) -> run %d" % (stamp, ", ".join(p), runs))
-            if a.dry_run:
-                print("  dry-run; would execute: %s" % cmd)
-            else:
-                with open(log_path, "a") as lf:
-                    rc = subprocess.call(cmd, shell=True, cwd=cwd, env=env, stdout=lf, stderr=subprocess.STDOUT)
-                    lf.write("%s run %d exit %s\n" % (now(), runs, rc))
-                print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
-            if a.max_runs and runs >= a.max_runs:
-                print("max-runs reached")
-                return
-        elif a.verbose:
-            print("%s nothing pending" % now())
-        if a.once:
-            sys.exit(0 if actionable else 1)
+    stop = {"now": False}
+
+    def _term(signum, frame):
+        stop["now"] = True
+
+    signal.signal(signal.SIGTERM, _term)
+
+    def log(line):
         try:
-            _time.sleep(max(5, a.every))
-        except KeyboardInterrupt:
+            if os.path.exists(log_path) and os.path.getsize(log_path) > 5 * 1024 * 1024:
+                os.replace(log_path, log_path + ".1")
+            with open(log_path, "a") as lf:
+                lf.write(line.rstrip("\n") + "\n")
+        except OSError:
+            pass
+
+    runs = failures = 0
+    try:
+        if not a.once:
+            print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, every, cwd, cmd))
+            _safe(lambda: checkin(board, owner, None, "watch loop online (every %ds)" % every), None)
+        while not stop["now"]:
+            p = _safe(lambda: pending_work(board, owner), {})
+            if actionable(p):
+                runs += 1
+                log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
+                print("%s work found (%s) -> run %d" % (now(), ", ".join(p), runs))
+                if a.dry_run:
+                    print("  dry-run; would execute: %s" % cmd)
+                    rc = 0
+                else:
+                    with open(log_path, "a") as lf:
+                        try:
+                            rc = subprocess.call(cmd, shell=True, cwd=cwd, env=env, stdout=lf,
+                                                 stderr=subprocess.STDOUT,
+                                                 timeout=a.run_timeout * 60 if a.run_timeout else None)
+                        except subprocess.TimeoutExpired:
+                            rc = 124
+                            lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))
+                    log("%s run %d exit %s" % (now(), runs, rc))
+                    print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
+                failures = failures + 1 if rc not in (0, None) else 0
+                if a.max_runs and runs >= a.max_runs:
+                    print("max-runs reached")
+                    break
+            elif a.verbose:
+                print("%s nothing pending%s" % (now(), " (limited)" if p.get("limited") else ""))
+            if a.once:
+                sys.exit(0 if actionable(p) else 1)
+            wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
+            _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
+            try:
+                _time.sleep(wait)
+            except KeyboardInterrupt:
+                break
+    finally:
+        if lock:
+            try:
+                os.unlink(lock)
+            except OSError:
+                pass
+        if not a.once:
             print("watch stopped")
+
+
+# ---- native Codex hook (SessionStart / UserPromptSubmit context) ----------
+
+def cmd_codex_hook(a, board):
+    """Codex hook body: print board context as hookSpecificOutput.additionalContext.
+
+    Scoped to --worktree via the event cwd so one install is silent elsewhere.
+    Read-only: does not acknowledge messages or touch tickets.
+    """
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+        if not isinstance(event, dict):
+            event = {}
+    except Exception:  # noqa: BLE001
+        event = {}
+    name = event.get("hook_event_name") or ""
+    if name not in ("SessionStart", "UserPromptSubmit"):
+        return
+    cwd = event.get("cwd") or os.getcwd()
+    if a.worktree:
+        try:
+            os.path.relpath(os.path.realpath(cwd), os.path.realpath(a.worktree)).startswith("..") and (_ for _ in ()).throw(ValueError())
+        except (ValueError, OSError):
             return
+    owner = a.agent
+    p = _safe(lambda: pending_work(board, owner), {})
+    lines = [
+        "Ticket board context (%s):" % owner,
+        "- Agent: %s. Prefix every ticket command with TICKET_AGENT=%s." % (owner, owner),
+        "- Board: %s" % board,
+    ]
+    for k in ("holding", "messages_to_me", "suggested_for_me", "ready_in_my_lane", "limited"):
+        if k in p:
+            v = p[k]
+            lines.append("- %s: %s" % (k, "; ".join(v) if isinstance(v, list) else v))
+    if p.get("broadcasts"):
+        lines.append("- %d unread broadcasts: `tickets inbox`" % p["broadcasts"])
+    lines.append("- Loop: tickets inbox -> tickets mine / tickets next -> work -> tickets update -> tickets sync -> tickets review")
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": name, "additionalContext": "\n".join(lines)[:1900]}}))
+
+
+# ---- boot: every startup step for any tool, in one command -----------------
+
+def cmd_boot(a, board):
+    """Bring an agent online: join, hooks, check-in, briefing, next action.
+
+    Idempotent; safe to run at every session start. --watch continues into the
+    watch loop; --tool installs that tool's hooks.
+    """
+    owner = whoami(a.agent)
+    if owner.startswith("agent-"):
+        sys.exit("boot needs --agent <name> or TICKET_AGENT")
+    if not os.path.isdir(board):
+        sys.exit("no board at %s (run `tickets init` in the project first)" % board)
+    root = os.path.dirname(board)
+    steps = []
+    # 1. identity + roles
+    wf = load_workforce(board)
+    roles = load_roles(board)
+    if owner not in wf or (a.roles is not None):
+        ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
+                                model=a.model, best_for="")
+        _silent(lambda: cmd_join(ns, board))
+        steps.append("joined as %s (roles=%s)" % (owner, a.roles or roles.get(owner, [])))
+    else:
+        steps.append("identity ok: %s roles=%s" % (owner, roles.get(owner, [])))
+    # 2. hooks for the tool
+    if a.tool in ("claude", "cursor", "codex"):
+        hn = argparse.Namespace(tool=a.tool, agent=owner, force=False, settings=a.settings,
+                                hooks_file=a.hooks_file, worktree=a.worktree or "", stop=True)
+        _silent(lambda: cmd_hooks(hn, board))
+        steps.append("%s hooks installed/verified" % a.tool)
+    # 3. check-in with location
+    rec = checkin(board, owner, None, "boot (%s)" % (a.tool or "shell"))
+    warn = worktree_warning(owner)
+    steps.append("checked in at %s [%s]" % (rec.get("worktree") or rec.get("cwd"), rec.get("branch") or "?"))
+    # 4. briefing
+    p = pending_work(board, owner)
+    m = current_master(board)
+    print("BOOT %s @ %s" % (owner, board))
+    for s in steps:
+        print("  - " + s)
+    print("  - master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    if warn:
+        print("  ! " + warn.replace("\n", "\n    "))
+    if not p:
+        print("  - nothing pending: no messages, no held ticket, nothing ready in your lane")
+    for k, v in p.items():
+        print("  - %s: %s" % (k, "; ".join(v) if isinstance(v, list) else v))
+    nxt = ("tickets mine" if p.get("holding") else "tickets next") if actionable(p) else "tickets msg \"idle\""
+    print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
+    if a.watch:
+        wn = argparse.Namespace(agent=owner, every=a.every, exec=a.exec, cwd=a.cwd or root,
+                                permission_mode="acceptEdits", allowed_tools="", max_runs=0,
+                                once=False, dry_run=False, verbose=False, run_timeout=a.run_timeout)
+        cmd_watch(wn, board)
+
+
+def _silent(fn):
+    import io
+    import contextlib
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            fn()
+    except SystemExit:
+        pass
+    return buf.getvalue()
+
+
+GUIDE = """# Startup guide -- connecting any agent to the board
+
+One command does every step (join, hooks, check-in, briefing):
+
+    export TICKET_AGENT=<unique-name>          # claude-opus, claude-sonnet, codex, cursor-2 ...
+    cd <repo or your worktree>
+    tickets boot --tool claude|codex|cursor [--roles backend] [--watch]
+
+What `boot` guarantees, idempotently:
+  1. identity registered (roles/cost/capabilities) so routing knows you
+  2. the tool's hooks installed:
+       claude : SessionStart -> board, UserPromptSubmit -> inbox, Stop -> keep working while work remains
+       codex  : SessionStart + UserPromptSubmit -> board context (scoped to your worktree)
+       cursor : .cursor/hooks.json sessionStart / beforeSubmitPrompt / stop -> board digest
+  3. check-in (worktree, branch, sha) so `tickets who` is truthful
+  4. a briefing: unread messages, held ticket, ready tickets in your lane, and the exact NEXT command
+
+Per tool, after boot:
+  Claude Code (interactive):  TICKET_AGENT=<name> claude      -- hooks do the rest each turn
+  Claude Code (unattended):   tickets boot --tool claude --watch    (or: tickets watch --every 60)
+                              runs `claude -p "$(tickets prompt)"` only when `tickets pending` says there is work
+  Codex:                      TICKET_AGENT=<name> codex        -- hook injects board context; AGENTS.md carries the rules
+  Cursor:                     open the repo/worktree; enable Hooks in settings; set TICKET_AGENT in the launching shell
+  Anything else:              `tickets prompt` prints the worker instructions; `tickets watch --exec '<your cli>'`
+
+Safety rails (all on by default):
+  - Stop hook: at most one extra continuation per user turn (stop_hook_active) and 4 per hour;
+    off with TICKETS_STOP_HOOK=off; never fires without TICKET_AGENT; never for broadcasts only.
+  - watch: one watcher per agent name (pid lock), one run at a time, --run-timeout, backoff on failures,
+    logs in .tickets/agents/<name>.watch.log, stops on SIGTERM.
+  - An agent that recorded `tickets limit` is never woken until `tickets limit --clear`.
+
+Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
+                 tickets who                       (where everyone is)
+"""
+
+
+def cmd_guide(a, board):
+    print(GUIDE)
 
 
 # ---- hooks: wire a tool so the board reaches the agent every turn ----------
@@ -2844,8 +3377,14 @@ def cmd_hooks(a, board):
     (project .cursor/hooks). Codex has no hooks; AGENTS.md carries the protocol."""
     root = os.path.dirname(board)
     script = os.path.realpath(__file__)
+    def ours(entry):
+        for hk in entry.get("hooks", []) if isinstance(entry, dict) else []:
+            cmd = str(hk.get("command", ""))
+            if script in cmd or "tickets.py" in cmd or cmd == INBOX_HOOK_CMD or "tickets inbox --keep" in cmd:
+                return True
+        return False
     if a.tool == "claude":
-        path = os.path.expanduser("~/.claude/settings.json")
+        path = os.path.expanduser(getattr(a, "settings", "") or "~/.claude/settings.json")
         try:
             with open(path) as f:
                 s = json.load(f)
@@ -2853,27 +3392,60 @@ def cmd_hooks(a, board):
             s = {}
         hooks = s.setdefault("hooks", {})
         ss = hooks.setdefault("SessionStart", [])
-        ss[:] = [h for h in ss if "tickets" not in json.dumps(h)]
+        ss[:] = [h for h in ss if not ours(h)]
         ss.append({"matcher": "startup|resume|clear|compact",
                    "hooks": [{"type": "command", "command": "%s board" % script, "timeout": 10}]})
         ups = hooks.setdefault("UserPromptSubmit", [])
-        ups[:] = [h for h in ups if "tickets" not in json.dumps(h)]
+        ups[:] = [h for h in ups if not ours(h)]
         ups.append({"hooks": [{"type": "command", "command": INBOX_HOOK_CMD, "timeout": 10}]})
-        # Keep a turn alive while the agent still has board work (loop-guarded
-        # by stop_hook_active, so at most one extra continuation per user turn).
+        # Keep a turn alive while the agent still has board work. Loop-guarded
+        # (stop_hook_active) and rate-capped; --no-stop removes it.
         st = hooks.setdefault("Stop", [])
-        st[:] = [h for h in st if "tickets" not in json.dumps(h)]
-        st.append({"hooks": [{"type": "command", "command": "%s stop-hook" % script, "timeout": 15}]})
+        st[:] = [h for h in st if not ours(h)]
+        if getattr(a, "stop", True):
+            st.append({"hooks": [{"type": "command", "command": "%s stop-hook" % script, "timeout": 15}]})
+        if not st:
+            hooks.pop("Stop", None)
         allow = s.setdefault("permissions", {}).setdefault("allow", [])
         for p in ("Bash(tickets:*)", "Bash(%s:*)" % script):
             if p not in allow:
                 allow.append(p)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(s, f, indent=2)
         os.replace(tmp, path)
-        print("Claude Code: SessionStart -> `tickets board`; UserPromptSubmit -> unread inbox for $TICKET_AGENT.")
-        print("Launch sessions as: TICKET_AGENT=<name> claude   (in %s)" % path)
+        print("Claude Code hooks in %s: SessionStart -> board; UserPromptSubmit -> inbox; Stop -> %s."
+              % (path, "keep working while board work remains" if getattr(a, "stop", True) else "off"))
+        print("Launch sessions as: TICKET_AGENT=<name> claude")
+        return
+    if a.tool == "codex":
+        hp = os.path.expanduser(getattr(a, "hooks_file", "") or "~/.codex/hooks.json")
+        agent = a.agent or whoami()
+        if agent.startswith("agent-"):
+            sys.exit("codex hooks need --agent <name> (or TICKET_AGENT)")
+        wt = os.path.abspath(a.worktree) if getattr(a, "worktree", "") else ""
+        try:
+            with open(hp) as f:
+                cfg = json.load(f)
+        except (IOError, ValueError):
+            cfg = {}
+        hooks = cfg.setdefault("hooks", {})
+        cmd = "%s codex-hook --agent %s%s" % (script, agent, (" --worktree %s" % wt) if wt else "")
+        for ev in ("SessionStart", "UserPromptSubmit"):
+            lst = hooks.setdefault(ev, [])
+            # replace only our own earlier entry for this agent; keep everything else
+            lst[:] = [e for e in lst if not ("codex-hook --agent %s" % agent) in json.dumps(e)]
+            lst.append({"hooks": [{"type": "command", "command": cmd, "timeout": 5,
+                                   "statusMessage": "Checking the ticket board",
+                                   "additionalContextLimit": 2000}]})
+        os.makedirs(os.path.dirname(hp) or ".", exist_ok=True)
+        tmp = hp + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, hp)
+        print("Codex hooks in %s for %s%s: SessionStart + UserPromptSubmit -> board context. "
+              "Trust it with /hooks in Codex; AGENTS.md carries the rules." % (hp, agent, (" (scoped to %s)" % wt) if wt else ""))
         return
     if a.tool == "cursor":
         hdir = os.path.join(root, ".cursor", "hooks")
@@ -2900,10 +3472,6 @@ def cmd_hooks(a, board):
             json.dump(cfg, f, indent=2)
         print("Cursor: %s + %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings; "
               "set TICKET_AGENT in the shell Cursor starts from." % (os.path.relpath(hp, root), os.path.relpath(sp, root)))
-        return
-    if a.tool == "codex":
-        print("Codex has no hook API; it reads AGENTS.md (installed by `tickets init`). Start it as "
-              "TICKET_AGENT=codex codex and it will run `tickets inbox` per the protocol.")
         return
 
 
@@ -3160,16 +3728,66 @@ def main():
     c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
     c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
     c.add_argument("--max-runs", type=int, default=0)
+    c.add_argument("--run-timeout", type=int, default=90, help="minutes per run before it is killed (0 = none)")
     c.add_argument("--once", action="store_true", help="check once; exit 0 if work, 1 if not")
     c.add_argument("--dry-run", action="store_true")
     c.add_argument("--verbose", action="store_true")
     c.set_defaults(fn=cmd_watch)
 
+    c = sub.add_parser("codex-hook", help="(hook body) Codex SessionStart/UserPromptSubmit board context")
+    c.add_argument("--agent", required=True)
+    c.add_argument("--worktree", default="")
+    c.set_defaults(fn=cmd_codex_hook)
+
+    c = sub.add_parser("boot", help="every startup step: join, hooks, check-in, briefing (idempotent)")
+    c.add_argument("--agent", default="")
+    c.add_argument("--tool", default="", help="claude | codex | cursor (installs that tool's hooks)")
+    c.add_argument("--roles", default=None)
+    c.add_argument("--can", default=None)
+    c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
+    c.add_argument("--model", default="")
+    c.add_argument("--worktree", default="", help="codex: scope the hook to this worktree")
+    c.add_argument("--settings", default="", help="claude: settings.json to write (default ~/.claude/settings.json)")
+    c.add_argument("--hooks-file", default="", help="codex: hooks.json to write (default ~/.codex/hooks.json)")
+    c.add_argument("--watch", action="store_true", help="continue into the watch loop")
+    c.add_argument("--every", type=int, default=60)
+    c.add_argument("--exec", default="")
+    c.add_argument("--cwd", default="")
+    c.add_argument("--run-timeout", type=int, default=90)
+    c.set_defaults(fn=cmd_boot)
+
+    c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
+    c.set_defaults(fn=cmd_guide)
+
+    c = sub.add_parser("brief", help="give an agent or a ticket context (shown on claim, in prompt, in boot)")
+    c.add_argument("agent", nargs="?", default="")
+    c.add_argument("text", nargs="?", default="")
+    c.add_argument("--ticket", default="", help="attach to a ticket instead (owner is messaged)")
+    c.add_argument("--file", default="", help="replace the agent brief from a file")
+    c.add_argument("--show", action="store_true")
+    c.add_argument("--by", default="")
+    c.set_defaults(fn=cmd_brief)
+
+    c = sub.add_parser("util", help="per-agent throughput, cycle time, load and sprint burn")
+    c.add_argument("--hours", type=int, default=24)
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_util)
+
+    c = sub.add_parser("dash", help="master dashboard, refreshing in place (Ctrl-C to leave)")
+    c.add_argument("--every", type=int, default=10)
+    c.add_argument("--messages", type=int, default=6)
+    c.add_argument("--once", action="store_true")
+    c.set_defaults(fn=cmd_dash)
+
     c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex")
     c.add_argument("tool", choices=("claude", "cursor", "codex"))
-    c.add_argument("--agent", default="", help="cursor: default TICKET_AGENT baked into the hook")
+    c.add_argument("--agent", default="", help="agent name baked into the hook (codex/cursor)")
+    c.add_argument("--worktree", default="", help="codex: only fire inside this worktree")
+    c.add_argument("--settings", default="", help="claude: settings.json path (default ~/.claude/settings.json)")
+    c.add_argument("--hooks-file", default="", help="codex: hooks.json path (default ~/.codex/hooks.json)")
+    c.add_argument("--no-stop", dest="stop", action="store_false", help="claude: do not install the Stop hook")
     c.add_argument("--force", action="store_true")
-    c.set_defaults(fn=cmd_hooks)
+    c.set_defaults(fn=cmd_hooks, stop=True)
 
     c = sub.add_parser("here", help="check in: record my worktree, branch and ticket")
     c.add_argument("--owner", "-o")
@@ -3361,8 +3979,15 @@ def main():
     c.add_argument("--track", action="store_true", help="commit the board to git instead of gitignoring it")
     c.set_defaults(fn=cmd_init)
 
-    from ticket_coordination import register
-    register(sub, globals())
+    # Optional extension (identity / role / handover / pulse) installed beside
+    # this file by tools/tickets/install.py; the core CLI must not depend on it.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        from ticket_coordination import register
+    except ImportError:
+        register = None
+    if register:
+        register(sub, globals())
 
     a = p.parse_args()
     if not a.cmd:
