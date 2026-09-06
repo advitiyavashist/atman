@@ -126,14 +126,110 @@ def test_assignment_matches_the_contract(store, project, agent, schemas):
     _validate(schemas, "Assignment", assignment)
 
 
+def test_messaging_records_match_the_contract(store, project, agent, schemas):
+    operator = store.create_member(
+        project["id"], "human", "Operator", "owner",
+        member_id="mem_operator1", availability="available",
+    )
+    backend = store.create_member(
+        project["id"], "agent", "backend-1", "member",
+        agent_id=agent["id"], member_id="mem_backend01", availability="busy",
+    )
+    channel = store.create_channel(
+        project["id"], "work", "public", topic="Task routing",
+        designated_master=agent["id"], channel_id="chn_work0001",
+    )
+    membership = store.add_channel_member(
+        project["id"], channel["id"], operator["id"], subscribed=True
+    )
+    sent = store.send_message(
+        project["id"], channel["id"],
+        {"type": "human", "id": operator["id"], "display_name": "Operator",
+         "session_id": None},
+        "Can you take this?", mentions=[backend["id"]], ticket_id="DEMO-14",
+        message_id="msg_root0001",
+    )
+    thread = store.create_thread(
+        project["id"], channel["id"], sent["message"]["id"],
+        ticket_id="DEMO-14", thread_id="thr_root0001",
+    )
+    delivery = sent["deliveries"][0]
+    wake_job = store.create_wake_job(
+        project["id"], sent["message"]["id"], agent["id"], delivery["id"],
+        ticket_id="DEMO-14", wake_job_id="wjb_root0001",
+    )
+    run = store.create_run(
+        project["id"], agent["id"], wake_job_id=wake_job["id"],
+        ticket_claim="DEMO-14", run_id="run_root0001",
+    )
+    lease = store.acquire_runner_lease(
+        project["id"], "rnr_root0001", agent["id"], "2099-01-01T00:00:00Z",
+        allowlisted_worktree="/repos/demo/.worktrees/backend-1",
+        permission_policy="allowlist",
+    )
+    invitation = store.create_invitation(
+        project["id"], "member", "2099-01-01T00:00:00Z",
+        created_by={"type": "human", "id": operator["id"],
+                    "display_name": "Operator", "session_id": None},
+        invitation_id="inv_root0001", code="<invite-code-not-in-fixtures>",
+    )
+    system_invitation = store.create_invitation(
+        project["id"], "viewer", "2099-01-01T00:00:00Z",
+        invitation_id="inv_root0002", code="<invite-code-not-in-fixtures>",
+    )
+
+    _validate(schemas, "Member", operator)
+    _validate(schemas, "Member", backend)
+    _validate(schemas, "Channel", channel)
+    _validate(schemas, "ChannelMember", membership)
+    _validate(schemas, "Message", sent["message"])
+    _validate(schemas, "Delivery", delivery)
+    _validate(schemas, "Thread", thread)
+    _validate(schemas, "WakeJob", wake_job)
+    _validate(schemas, "Run", run)
+    _validate(schemas, "RunnerLease", lease)
+    _validate(schemas, "CreateInvitationResponse", invitation)
+    _validate(schemas, "CreateInvitationResponse", system_invitation)
+
+
+def test_messaging_list_responses_match_the_contract(store, project, agent, schemas):
+    operator = store.create_member(project["id"], "human", "Operator", "owner")
+    backend = store.create_member(project["id"], "agent", "backend-1", "member",
+                                  agent_id=agent["id"])
+    channel = store.create_channel(project["id"], "general", "public")
+    sent = store.send_message(
+        project["id"], channel["id"],
+        {"type": "human", "id": operator["id"], "display_name": "Operator",
+         "session_id": None},
+        "Hello", mentions=[backend["id"]],
+    )
+    delivery = sent["deliveries"][0]
+    store.create_wake_job(project["id"], sent["message"]["id"], agent["id"],
+                          delivery["id"])
+
+    _validate(schemas, "MemberListResponse", store.list_members(project["id"]))
+    _validate(schemas, "ChannelListResponse", store.list_channels(project["id"]))
+    _validate(schemas, "MessageListResponse",
+              store.list_messages(project["id"], channel["id"],
+                                  member_id=operator["id"]))
+    _validate(schemas, "DeliveryListResponse",
+              store.list_deliveries(project["id"], sent["message"]["id"]))
+    _validate(schemas, "WakeJobListResponse", store.list_wake_jobs(project["id"]))
+
+
 def test_every_error_renders_the_contract_error_shape(store, project, agent, schemas):
     """Each storage error must serialize to a publishable ErrorResponse."""
     from ticket_board.storage import errors as E
 
     samples = [
+        E.ForbiddenScope("prj_demo0001", "mem_other"),
+        E.NotChannelMember("chn_private1", "mem_viewer001"),
+        E.MembershipRevoked("mem_revoked01"),
+        E.SenderIdentityRejected(),
         E.TicketVersionConflict("DEMO-1", 1, 2),
         E.TicketAlreadyClaimed("DEMO-1", "agt_x"),
         E.CapacityExhausted("agt_x", 1, 1),
+        E.RunAlreadyActive("agt_x", "rnr_old", 1),
         E.RequestIdReused("11111111-2222-3333-4444-555555555555"),
         E.DependencyCycle(["A-1", "A-2", "A-1"]),
         E.DependencyUnmet("DEMO-1", ["DEMO-2"]),
