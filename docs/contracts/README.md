@@ -77,7 +77,7 @@ These were judgment calls, not transcription. Each is documented inline in
   equal the SHA on the submitted review. This is what makes "done requires
   reviewer acceptance of the exact submitted artifact" enforceable rather than
   aspirational; re-resolving a branch name at accept time would not.
-- **Tasks are created through `POST /messages/{id}/task`, not by setting
+- **Tasks are created through `POST /messages/{message_id}/task`, not by setting
   `intent: task` on a send.** Keeps the required outcome/assignee/ticket
   validation in one place.
 - **`started` is not spawn.** A run reports `started` only once its runtime
@@ -86,7 +86,7 @@ These were judgment calls, not transcription. Each is documented inline in
 - **Heartbeat and progress are separate fields** on both `Agent` and `Ticket`,
   so a live-but-stalled session is visible rather than hidden behind liveness.
 - **Routes the design docs implied but did not list** were added so each screen
-  can be built: `GET /tickets/{id}`, `/agents`, `/activity`, `/master`,
+  can be built: `GET /tickets/{ticket_id}`, `/agents`, `/activity`, `/master`,
   `/members`, plus the review decision, blocked toggle and session-lease
   revocation the acceptance criteria require.
 

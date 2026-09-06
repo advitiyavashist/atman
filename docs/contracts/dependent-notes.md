@@ -15,6 +15,103 @@ cat tests/fixtures/manifest.json
 
 ---
 
+## Fixture layout — how to find the shape you need
+
+`tests/fixtures/manifest.json` is the **authoritative** map: every key is a
+fixture path relative to `tests/fixtures/`, every value is the name of the
+component schema in `openapi.yaml` that the fixture validates against.
+
+```json
+{
+  "tickets/detail-claimed.json": "TicketDetailResponse",
+  "messages/request-send.json":  "SendMessageRequest",
+  "errors/409-ticket-version-conflict.json": "ErrorResponse"
+}
+```
+
+So: **path → schema name via the manifest**, not via a filename rule. Read the
+manifest, do not infer. `test_manifest_and_fixture_tree_agree` fails on any
+unlisted file or any missing file, so the manifest and the tree cannot drift.
+
+The top-level directory is the screen or surface the fixture belongs to:
+
+| Directory | Fixtures | Surface |
+|---|---|---|
+| `overview/` | 4 | Board overview screen |
+| `tickets/` | 18 | Ticket list, detail, and mutation bodies |
+| `agents/` | 11 | Agent list, enrollment, session credentials |
+| `master/` | 10 | Master lease and assignment loop |
+| `messages/` | 25 | Channels, DMs, sends, tasks, deliveries |
+| `runners/` | 12 | Wake jobs, runs, runner leases |
+| `hooks/` | 6 | Claude hook adapter payloads |
+| `events/` | 6 | SSE stream frames and reconnect/replay |
+| `errors/` | 28 | One per declared error code |
+| `activity/` | 2 | Activity feed |
+| `project/` | 2 | Project settings |
+
+Filename prefixes are a **readability convention, not a rule the suite
+enforces** — where a file does not fit one, the manifest still names its schema:
+
+- `request-*` (28) — a request body you must accept.
+- `response-*` (19) — a response body you must produce.
+- `list-*` (11) / `detail-*` (8) — collection and single-record reads.
+- `<status>-<code>.json` in `errors/` (e.g. `409-ticket-version-conflict.json`)
+  — the status code is part of the name, and
+  `test_error_status_matches_the_code_family` checks the two agree.
+- State suffixes name the case: `-empty`, `-populated`, `-offline`, `-blocked`,
+  `-stale`, `-revoked`, `-paused`, `-imported`.
+
+Adding a fixture means adding its manifest entry in the same commit. Adding a
+screen means adding an `-empty` fixture for it too —
+`test_empty_state_is_covered_for_every_listing_screen` is not advisory.
+
+---
+
+## Decisions dependents must match
+
+These eight calls **supersede the design docs**. They were judgment calls made
+at freeze time, and `docs/interface-v1.md` / `docs/messages-and-runners.md` are
+either silent on them or say something different. Match them; do not
+re-litigate them from the design docs, and do not "fix" a fixture that looks
+wrong against a doc — raise it with the master instead.
+
+1. **Actor comes from the credential; an `actor` field in a body is rejected
+   400.** The two design docs conflict here — `interface-v1.md` says every
+   mutation carries `actor`, `messages-and-runners.md` says sender identity
+   comes from the credential "never from request body fields". The stricter
+   rule won. Mutation bodies carry `request_id` and `expected_version` (plus a
+   lease field where required) and nothing else identifying. This one changes
+   **every mutation signature**, so it is the decision most likely to bite you.
+   See `MutationEnvelope`. Confirmed frozen by the planner.
+2. **`dependency_blocked` is a derived boolean, not a `TicketState` member.**
+   A dependency-blocked ticket is an `open` ticket with the flag set. Blocked is
+   an explicit state; dependency-blocked is computed. Do not add it to the enum.
+3. **Review acceptance pins a SHA.** `ReviewDecisionRequest.evidence_sha` must
+   equal the SHA on the submitted review, and acceptance refuses if any check
+   failed. Re-resolving a branch name at accept time would make "done requires
+   acceptance of the exact submitted artifact" unenforceable.
+4. **Tasks are created by `POST /messages/{message_id}/task`, not by `intent: task` on a
+   send.** Outcome/assignee/ticket validation lives in one place.
+5. **`started` is not spawn.** A run reports `started` only once its runtime
+   session exists and, for an execution request, its claim succeeded; anything
+   else is 422. Delivery is not acknowledgement.
+6. **Heartbeat and progress are separate fields** on both `Agent` and `Ticket`.
+   A live-but-stalled session must stay visible instead of hiding behind
+   liveness.
+7. **Every record carries `version`; leases also carry `epoch`.** Mutations take
+   `expected_version` and fail the write on mismatch — never last-write-wins.
+   The 409 body carries `expected_version` and `actual_version` in `details`.
+8. **Five routes exist that no design doc lists**, added so each screen is
+   actually buildable: `GET /tickets/{ticket_id}`, `GET /agents`, `GET /activity`,
+   `GET /master`, `GET /members` — plus the review decision, blocked toggle and
+   session-lease revocation the acceptance criteria require.
+
+Changing any of these after freeze is a breaking change: it needs the master,
+an `info.version` bump, and a check on which lanes already built against the old
+shape. The process is in `README.md` under "Freeze rules".
+
+---
+
 ## T-179 — transactional board state and legacy import
 
 **You own the records, not the routes.** Implement storage for: `Project`,
@@ -87,7 +184,7 @@ Non-obvious requirements:
 ## T-181 — Claude hook adapter and doctor
 
 Your surface is `POST /enrollments`, `POST /sessions`, `POST /hook-events`, and
-`DELETE /agents/{id}/session-lease`.
+`DELETE /agents/{agent_id}/session-lease`.
 
 Non-obvious requirements:
 
@@ -133,8 +230,8 @@ Build against `tests/fixtures/` alone; do not wait for T-180.
 ## T-187 — channels, membership and message delivery
 
 Your surface is `/members`, `/invitations`, `/invitations/exchange`,
-`/channels`, `/channels/{id}/members`, `/messages`, `/messages/{id}/task`,
-`/messages/{id}/deliveries`.
+`/channels`, `/channels/{channel_id}/members`, `/messages`, `/messages/{message_id}/task`,
+`/messages/{message_id}/deliveries`.
 
 Non-obvious requirements:
 
@@ -168,7 +265,7 @@ Non-obvious requirements:
 
 ## T-188 / T-192 — runner and permission presets
 
-`/runners/register`, `/runners/jobs`, `/runs/{id}/events`, `/runs/{id}/cancel`.
+`/runners/register`, `/runners/jobs`, `/runs/{run_id}/events`, `/runs/{run_id}/cancel`.
 
 - **`RunnerLease` fences on `epoch`**; a second supervisor for the same agent
   gets 409 `run_already_active` rather than starting a parallel session.
