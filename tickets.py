@@ -1644,7 +1644,7 @@ def cmd_limits(a, board):
             print("  %-7s %-5s %3d hits  %s ago  agent=%s  %s" % (
                 tool, kind.upper(), n, fmt_hours((datetime.now(timezone.utc).timestamp() - mt) / 3600.0),
                 agent or "?", short[-70:]))
-            if last and a.verbose:
+            if last and getattr(a, "verbose", False):
                 print("          last: %s" % last[:180])
     if not found:
         print("  none found (grok/other tools: record manually with `tickets limit`)")
