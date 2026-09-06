@@ -236,7 +236,7 @@ class BoardServer:
             " ORDER BY decided_at DESC, rowid DESC LIMIT ?",
             (project_id, limit),
         ).fetchall()
-        return [self.store.get_review(row["id"]) for row in rows]
+        return [self.store.get_review(project_id, row["id"]) for row in rows]
 
     # -------------------------------------------------------------- tickets
 
@@ -377,7 +377,7 @@ class BoardServer:
             " ORDER BY submitted_at, rowid",
             (project_id, ticket_id),
         ).fetchall()
-        return [self.store.get_review(row["id"]) for row in rows]
+        return [self.store.get_review(project_id, row["id"]) for row in rows]
 
     def _is_master(self, ctx):
         row = master.lease_row(self.store, ctx.project_id)
@@ -526,7 +526,11 @@ class BoardServer:
         evidence_sha = validate.sha(body, "evidence_sha")
         expected_version = validate.integer(body, "expected_version", minimum=0)
 
-        review = self.store.get_review(review_id)
+        # Scoped by ctx.project_id (T-240): review_id is a caller-supplied id
+        # and ticket_id can collide across projects (per-project highest+1),
+        # so an unscoped lookup here let an operator in project A decide a
+        # review that actually belongs to project B's same-named ticket.
+        review = self.store.get_review(ctx.project_id, review_id)
         if review["ticket_id"] != ticket_id:
             raise NotFound("No such review on this ticket.",
                            {"review_id": review_id, "ticket_id": ticket_id})
@@ -604,9 +608,14 @@ class BoardServer:
         note = validate.text(body, "note", max_length=1000)
         expected_version = validate.integer(body, "expected_version", minimum=0)
 
-        agent = self.store.get_agent(agent_id)
-        if agent["project_id"] != ctx.project_id:
-            raise ForbiddenScope()
+        # Scoped by ctx.project_id (T-240): an unscoped get_agent() here,
+        # followed by a project check that raised a *different* error
+        # (ForbiddenScope, 403) than "no such agent" (NotFound, 404), let an
+        # attacker learn whether an agent_id exists in another project from
+        # the status code alone even though the revoke itself was blocked.
+        # get_agent(project_id=...) now raises the identical NotFound either
+        # way, so existence in another project is not observable.
+        agent = self.store.get_agent(agent_id, ctx.project_id)
         if agent["version"] != expected_version:
             raise _version_conflict("agent_id", agent_id, expected_version,
                                     agent["version"])
@@ -633,8 +642,8 @@ class BoardServer:
         #
         # Work is preserved and the ticket is NOT reassigned here; a new claim
         # is a separate, explicit step.
-        return Response(200, views.serialize_agent(self.store,
-                                                   self.store.get_agent(agent_id)))
+        return Response(200, views.serialize_agent(
+            self.store, self.store.get_agent(agent_id, ctx.project_id)))
 
     def create_enrollment(self, ctx):
         body = validate.check_body(
