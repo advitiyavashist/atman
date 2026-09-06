@@ -11,16 +11,35 @@ fails *quietly* -- its errors are printed and its exit codes mean something.
 
 ## Safety boundaries
 
-- Hooks are installed only into a project-scoped `.claude/settings.json`.
-- **Never** `~/.claude/settings.json`. The guard refuses `$HOME`, anything under
-  `~/.claude`, and any project dir that is a symlink to either.
-- A checkout that live agents are already working out of is refused, along with
-  anything under it and any git worktree registered against it -- recognised by
-  repository identity (`git rev-parse --git-common-dir`), not by comparing path
-  strings. Protected checkouts come from `TICKET_BOARD_FORBIDDEN_ROOTS`, an
-  `os.pathsep`-separated list; setting it replaces the defaults, and setting it
-  empty protects nothing. Ordinary projects are not protected -- enrolling one
-  is the normal use.
+- Install hooks only into a project-scoped `.claude/settings.json`.
+- Never write to `~/.claude/settings.json`.
+- Do not enroll a checkout that live agents are already working out of. The
+  guard refuses the protected checkout itself, anything under it, and any git
+  worktree registered against it -- including a worktree parked far away from
+  the checkout, which it recognises by repository identity
+  (`git rev-parse --git-common-dir`) rather than by comparing paths. Use scratch
+  project directories for tests.
+- Protected checkouts come from `TICKET_BOARD_FORBIDDEN_ROOTS`, an
+  `os.pathsep`-separated list of directories. Setting it replaces the defaults
+  (setting it empty protects nothing); leaving it unset falls back to
+  `~/Downloads/steer` and `~/Downloads/tickets` relative to the invoking user's
+  real home directory, not to `$HOME`. Nonempty overrides must contain existing,
+  readable, absolute directories (tilde expansion is supported). Empty list
+  components, relative paths, missing paths and files fail with a configuration
+  error before hooks are written; a bad entry never silently drops protection.
+  Ordinary git projects are *not* protected
+  -- enrolling one is the adapter's normal use.
+- Local repository probes use `ticket_board.git_env.clean_git_env()` to remove
+  inherited `GIT_*` overrides and address the requested directory explicitly.
+  Worker launchers can reuse this helper; it does not fix a wrongly supplied cwd.
+- The T-205 host review found no exposed live agent lane, but did find one
+  unprotected non-lane clone at `~/Documents/tickets` (its own `.git`, outside
+  the default roots). Clones are separate repositories, so add their paths to
+  the configured roots if they must also be protected. The review did not
+  enumerate every clone; it does not establish zero exposure.
+- Repository identity needs `git`. If `git` cannot run, the guard falls back to
+  path containment alone, which still refuses a protected checkout and anything
+  under it, but cannot see a worktree registered outside it.
 - The adapter never forwards raw prompts, tool inputs, tool outputs,
   transcripts, environment values or credentials. The bound is fail-closed: it
   refuses to forward a sensitive field rather than redacting it.

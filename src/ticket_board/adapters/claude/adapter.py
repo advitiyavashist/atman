@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib import error, request
 
+from ticket_board.git_env import clean_git_env
+
 try:
     import pwd
 except ImportError:  # pragma: no cover - Claude Code itself is POSIX, but keep imports portable.
@@ -456,7 +458,27 @@ def _protected_roots() -> Tuple[Path, ...]:
     """
     raw = os.environ.get(FORBIDDEN_ROOTS_ENV)
     if raw is not None:
-        return tuple(Path(part).expanduser().resolve(strict=False) for part in raw.split(os.pathsep) if part)
+        if raw == "":
+            return ()  # Explicit opt-out remains distinct from malformed entries.
+        roots = []
+        for part in raw.split(os.pathsep):
+            try:
+                if not part or not part.strip():
+                    raise ValueError("empty entry")
+                root = Path(part).expanduser()
+                if not root.is_absolute():
+                    raise ValueError("entry must be absolute (or start with ~)")
+                root = root.resolve(strict=True)
+                # Opening the directory checks both directory type and access.
+                with os.scandir(root) as entries:
+                    next(entries, None)
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise ClaudeHookError(
+                    "%s has an invalid or unreadable root %r: %s" %
+                    (FORBIDDEN_ROOTS_ENV, part, exc)
+                ) from exc
+            roots.append(root)
+        return tuple(roots)
 
     home = _real_home_dir()
     return (
@@ -478,6 +500,7 @@ def _git_common_dir(path: Path) -> Optional[Path]:
     try:
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
+            env=clean_git_env(),
             capture_output=True,
             check=False,
             text=True,

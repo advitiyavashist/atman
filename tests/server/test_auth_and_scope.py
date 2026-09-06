@@ -332,6 +332,41 @@ def test_a_stale_session_of_the_owner_is_kept_and_superseded(
     assert [u["body"] for u in kept] == ["what I was doing before the takeover"]
 
 
+def test_omitting_session_id_is_not_a_healthy_update(
+        server, project, enrolled, ticket, operator):
+    """T-239: session_id is OPTIONAL in CreateUpdateRequest, so a client can
+    disable the superseded safeguard just by leaving the field out -- and the
+    displaced session is exactly the caller least likely to send one. Absent
+    must land as a third, unattributed case: kept, but denied the two effects
+    a clean update gets (last_progress_at, next_step), and audited under its
+    own action rather than folded into a plain `ticket.update`.
+    """
+    enrolled["client"].post(
+        "/tickets/{}/claim".format(ticket["id"]),
+        {"request_id": rid(), "expected_version": ticket["version"],
+         "session_id": enrolled["session_id"]})
+    before = operator.get("/tickets/" + ticket["id"]).json()["ticket"]
+
+    update = enrolled["client"].post(
+        "/tickets/{}/updates".format(ticket["id"]),
+        {"request_id": rid(), "body": "still going",
+         "next_step": "should not land"})
+    assert update.status == 201
+    assert update.json()["superseded"] is False, "the boolean has no third state"
+
+    after = operator.get("/tickets/" + ticket["id"]).json()["ticket"]
+    assert after["last_progress_at"] == before["last_progress_at"], \
+        "an unattributed update must not count as progress"
+    assert after["next_step"] == before["next_step"], \
+        "an unattributed update must not overwrite next_step"
+
+    actions = [e["action"] for e in server.store.audit_trail(project["id"])
+              if e["subject_id"] == ticket["id"]]
+    assert "ticket.update.unattributed" in actions
+    assert "ticket.update" not in actions, \
+        "must not read as an ordinary healthy progress update"
+
+
 def test_a_stale_claim_surfaces_as_a_version_conflict(server, operator,
                                                       project, enrolled, ticket):
     """The ruling's second named case: a stale claim, not a stale write.
@@ -359,3 +394,166 @@ def test_a_stale_claim_surfaces_as_a_version_conflict(server, operator,
     # instead of guessing at a bare 409.
     assert error["details"]["expected_version"] == stale_version
     assert error["details"]["actual_version"] > stale_version
+
+
+# ---------------------------------------------------------------- T-236
+# A route declared `auth=NONE` proves the caller some other way -- the
+# enrollment code in the body, for `POST /sessions`. Authenticating it anyway
+# breaks the one flow that needs it most: recovery. An agent whose lease was
+# revoked has, by construction, a dead bearer token in its configured headers,
+# and re-enrolment is how it is supposed to come back.
+
+
+def _revoked_agent(server, operator, project, name="recover-1"):
+    """An agent whose session lease -- and therefore whose token -- is revoked."""
+    agent = _enroll(server, operator, project, name)
+    listed = operator.get("/agents").json()
+    rows = listed.get("agents") or listed.get("items") or []
+    version = next(r["version"] for r in rows if r["id"] == agent["agent_id"])
+    revoked = operator.delete(
+        "/agents/{}/session-lease".format(agent["agent_id"]),
+        {"request_id": rid(), "expected_version": version, "note": "operator revoked"})
+    assert revoked.status == 200, revoked.json()
+    return agent
+
+
+def _fresh_code(operator, name):
+    created = operator.post("/enrollments", {
+        "request_id": rid(), "agent_name": name, "role": "backend",
+        "connection_mode": "managed"})
+    assert created.status == 201, created.json()
+    return created.json()["code"]
+
+
+def test_a_revoked_agent_can_re_enrol_with_its_dead_token_still_attached(
+        server, operator, project):
+    """Acceptance 1: the recovery path, with the natural client implementation.
+
+    The obvious way to write an adapter is to configure the Authorization header
+    once and reuse it. That client is exactly the one that cannot recover if
+    `POST /sessions` authenticates: its token died with the lease, so the call
+    that is supposed to give it a new one is refused for holding the old one.
+    """
+    dead = _revoked_agent(server, operator, project)
+    assert dead["client"].get("/tickets").status == 401, "precondition: token is dead"
+
+    exchanged = Client(server, project_id=project["id"],
+                       token=dead["client"].token).post("/sessions", {
+                           "request_id": rid(),
+                           "code": _fresh_code(operator, "recover-2"),
+                           "session_id": "ses_" + uuid.uuid4().hex[:8]})
+    assert exchanged.status == 201, exchanged.json()
+    assert exchanged.json()["token"] != dead["client"].token
+
+
+@pytest.mark.parametrize("label,extra", [
+    ("absent", {}),
+    ("unknown-bearer", {"Authorization": "Bearer tbk_not_a_token"}),
+    ("empty-bearer", {"Authorization": "Bearer "}),
+    ("not-bearer", {"Authorization": "Basic aGk6dGhlcmU="}),
+    ("no-scheme", {"Authorization": "tbk_not_a_token"}),
+    ("dead-cookie", {"Cookie": "tb_session=not-a-session"}),
+])
+def test_post_sessions_ignores_whatever_is_in_the_credential_headers(
+        server, operator, project, label, extra):
+    """Acceptance 2: absent, malformed and unknown credentials all still work.
+
+    The code in the body is the proof. Nothing about the headers may change the
+    answer -- including a header that is not a bearer token at all, which
+    `authenticate_all` treats as its own kind of refusal.
+    """
+    exchanged = Client(server, project_id=project["id"]).post(
+        "/sessions",
+        {"request_id": rid(), "code": _fresh_code(operator, "hdr-" + label),
+         "session_id": "ses_" + uuid.uuid4().hex[:8]},
+        headers=extra)
+    assert exchanged.status == 201, exchanged.json()
+
+
+def test_a_bad_code_is_still_refused_on_an_unauthenticated_route(server, project):
+    """Ignoring the header must not mean ignoring the proof that does count."""
+    response = Client(server, project_id=project["id"]).post("/sessions", {
+        "request_id": rid(), "code": "not-a-real-code",
+        "session_id": "ses_" + uuid.uuid4().hex[:8]})
+    assert response.status == 422
+    assert response.json()["error"]["code"] == "enrollment_code_invalid"
+
+
+def test_no_auth_none_route_rejects_a_present_but_invalid_credential(
+        server, project, operator_session):
+    """Acceptance 3: pin the rule at the seam, not at the one route that broke.
+
+    This is a mismatch between a route's *declared* auth level and what
+    `_authorize` does, so the test walks the route table rather than naming
+    `/sessions`. A new `auth=NONE` route that reintroduces the bug fails here
+    without anyone remembering to write a test for it.
+    """
+    from ticket_board.server.app import NONE, _ROUTE_TABLE
+
+    none_routes = [(m, p) for m, p, _h, a, _s in _ROUTE_TABLE if a == NONE]
+    assert none_routes, "the route table has no auth=NONE routes to check"
+
+    for method, pattern in none_routes:
+        path = pattern.strip("^$")
+        assert "(?P<" not in path, "T-236 needs a literal path for {}".format(path)
+        for bad in (Client(server, project_id=project["id"], token="tbk_dead"),
+                    Client(server, project_id=project["id"], cookie="dead-cookie")):
+            response = bad.request(method, path, body={})
+            assert response.status != 401, (
+                "{} {} is declared auth=NONE but rejected a present-but-invalid "
+                "credential with 401".format(method, path))
+
+
+def test_a_revoked_token_still_fails_closed_on_routes_that_require_it(
+        server, operator, project):
+    """Acceptance 4: the fix must not weaken anything that actually authenticates.
+
+    Ignoring credentials is correct only where the route asked for none. On every
+    other route a dead token is still a dead token, and -- the property T-225
+    verified -- it must not silently fall through to a cookie the same client
+    happens to hold either.
+    """
+    dead = _revoked_agent(server, operator, project, "still-dead")
+    token = dead["client"].token
+
+    assert Client(server, project_id=project["id"], token=token).get(
+        "/overview").status == 401
+    assert Client(server, project_id=project["id"], token=token).post(
+        "/tickets", {"request_id": rid(), "title": "t", "outcome": "o",
+                     "acceptance": [{"text": "a"}]}).status == 401
+    # ...and still no fall-through to a valid operator session on the same request.
+    session = server.bootstrap_operator(project["id"])
+    both = Client(server, project_id=project["id"], token=token,
+                  cookie=session["session_token"], csrf=session["csrf_token"])
+    assert both.get("/overview").status == 401
+
+
+def test_an_expired_session_is_told_to_sign_in_again(server, project,
+                                                     operator_session):
+    """Acceptance 4, second half: the fix must not flatten `authenticate_all`.
+
+    The tempting over-broad repair for T-236 is to swallow `Unauthenticated`
+    around the shared call and let the generic "no credential" refusal fall out
+    below. It still fails closed, so nothing about scope or fall-through
+    notices -- but it silently discards the one 401 that is not interchangeable.
+    An operator whose session merely aged out needs to be told to sign in again;
+    answering "no valid credential" sends them looking for a bug instead.
+
+    This is deliberately *not* in tension with the byte-identical refusals for a
+    bad token and a bad cookie: those are indistinguishable because telling the
+    two apart helps an attacker, whereas the holder of an expired cookie already
+    knows they had one.
+    """
+    server.store.conn.execute(
+        "UPDATE operator_sessions SET expires_at = '2000-01-01T00:00:00Z'"
+        " WHERE token_hash IS NOT NULL")
+    server.store.conn.commit()
+
+    expired = Client(server, project_id=project["id"],
+                     cookie=operator_session["session_token"]).get("/overview")
+    assert expired.status == 401
+    assert expired.json()["error"]["message"] == "Session expired. Sign in again."
+
+    anonymous = Client(server, project_id=project["id"]).get("/overview")
+    assert anonymous.json()["error"]["message"] != \
+        expired.json()["error"]["message"]

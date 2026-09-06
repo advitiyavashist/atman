@@ -128,6 +128,102 @@ def test_revoked_session_update_is_superseded(store, project, agent):
     assert late["superseded"] is True
 
 
+def test_omitted_session_id_is_unattributed_and_denied_effect(store, project, agent):
+    """session_id is optional on the wire; absent must not read as clean."""
+    session = store.open_session(agent["id"], "2099-01-01T00:00:00Z")
+    ticket = store.create_ticket(project["id"], "UNATTR-1", "Working")
+    store.claim_ticket(project["id"], "UNATTR-1", agent["id"],
+                       expected_version=ticket["version"],
+                       session_id=session["session_id"])
+    before = store.get_ticket(project["id"], "UNATTR-1")
+
+    update = store.add_update(
+        project["id"], "UNATTR-1",
+        {"type": "agent", "id": agent["id"], "display_name": "backend-1"},
+        "still going", next_step="should not land",
+    )  # no session_id at all
+
+    assert update["superseded"] is False, \
+        "the wire has no third value for this field"
+    after = store.get_ticket(project["id"], "UNATTR-1")
+    assert after["last_progress_at"] == before["last_progress_at"], \
+        "an unattributed update must not count as progress"
+    assert after["next_step"] == before["next_step"], \
+        "an unattributed update must not overwrite next_step"
+
+
+def test_a_displaced_agent_omitting_session_id_does_not_read_as_healthy(store, project):
+    """The exact case from the T-225/T-239 report, both ways at once: same
+    displaced agent, same dead session -- WITH session_id must be superseded,
+    WITHOUT must not silently pass as an ordinary progress update either."""
+    a = store.create_agent(project["id"], "first")
+    b = store.create_agent(project["id"], "second")
+    session_a = store.open_session(a["id"], "2099-01-01T00:00:00Z")
+    ticket = store.create_ticket(project["id"], "DISP-1", "Handover")
+    claimed = store.claim_ticket(project["id"], "DISP-1", a["id"],
+                                 expected_version=ticket["version"],
+                                 session_id=session_a["session_id"])
+    store.transition(project["id"], "DISP-1", "open",
+                     expected_version=claimed["version"])
+    reopened = store.get_ticket(project["id"], "DISP-1")
+    session_b = store.open_session(b["id"], "2099-01-01T00:00:00Z")
+    store.claim_ticket(project["id"], "DISP-1", b["id"],
+                       expected_version=reopened["version"],
+                       session_id=session_b["session_id"])
+    before = store.get_ticket(project["id"], "DISP-1")
+
+    with_session = store.add_update(
+        project["id"], "DISP-1",
+        {"type": "agent", "id": a["id"], "display_name": "first"},
+        "with session_id", session_id=session_a["session_id"],
+    )
+    without_session = store.add_update(
+        project["id"], "DISP-1",
+        {"type": "agent", "id": a["id"], "display_name": "first"},
+        "without session_id",
+    )
+
+    assert with_session["superseded"] is True
+    assert without_session["superseded"] is False, "the boolean has no third state"
+    after = store.get_ticket(project["id"], "DISP-1")
+    assert after["last_progress_at"] == before["last_progress_at"]
+    assert after["owner"] == b["id"]
+
+    trail = [e for e in store.audit_trail(project["id"])
+             if e["subject_id"] == "DISP-1" and e["action"].startswith("ticket.update")]
+    assert [e["action"] for e in trail] == [
+        "ticket.update.superseded", "ticket.update.unattributed",
+    ], "must never collapse into an ordinary ticket.update"
+
+
+def test_valid_superseded_and_unattributed_audit_actions_are_never_collapsed(
+        store, project, agent):
+    """The three session states each need their own audit action so a reader
+    can tell them apart without re-deriving them from raw session state."""
+    session = store.open_session(agent["id"], "2099-01-01T00:00:00Z")
+    ticket = store.create_ticket(project["id"], "AXIS-1", "Working")
+    store.claim_ticket(project["id"], "AXIS-1", agent["id"],
+                       expected_version=ticket["version"],
+                       session_id=session["session_id"])
+
+    store.add_update(project["id"], "AXIS-1",
+                     {"type": "agent", "id": agent["id"], "display_name": "b"},
+                     "clean", session_id=session["session_id"])
+    store.revoke_session(session["session_id"], note="operator revoked")
+    store.add_update(project["id"], "AXIS-1",
+                     {"type": "agent", "id": agent["id"], "display_name": "b"},
+                     "stale", session_id=session["session_id"])
+    store.add_update(project["id"], "AXIS-1",
+                     {"type": "agent", "id": agent["id"], "display_name": "b"},
+                     "unattributed")
+
+    actions = [e["action"] for e in store.audit_trail(project["id"])
+              if e["subject_id"] == "AXIS-1" and e["action"].startswith("ticket.update")]
+    assert actions == [
+        "ticket.update", "ticket.update.superseded", "ticket.update.unattributed",
+    ]
+
+
 def test_heartbeat_does_not_touch_progress(store, project, agent):
     """A live-but-stalled agent must stay visible. Two fields, two meanings."""
     session = store.open_session(agent["id"], "2099-01-01T00:00:00Z")

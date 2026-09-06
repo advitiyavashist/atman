@@ -335,6 +335,8 @@ def test_protected_roots_come_from_configuration(tmp_path, monkeypatch):
         (fake_home / "Downloads" / "tickets").resolve(strict=False),
     )
 
+    (fake_home / "one").mkdir(parents=True)
+    (tmp_path / "two").mkdir()
     monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, "~/one" + os.pathsep + str(tmp_path / "two"))
     monkeypatch.setenv("HOME", str(fake_home))
     configured = adapter_module._protected_roots()
@@ -534,3 +536,54 @@ def test_board_client_uses_contract_project_header(monkeypatch):
         "project": "prj_demo0001",
         "authorization": "Bearer tok",
     }
+
+
+@pytest.mark.parametrize("variable", [
+    "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+])
+def test_guard_ignores_inherited_git_location(board_layout, monkeypatch, variable):
+    protected = board_layout["steer"]
+    monkeypatch.setenv(variable, str(protected / ".git"))
+    # Probe identity as well as admission: an unavailable identity must not
+    # accidentally allow an off-tree worktree of the protected repository.
+    assert adapter_module._git_common_dir(board_layout["user_project"]) == (
+        board_layout["user_project"] / ".git").resolve()
+    adapter_module._ensure_safe_project_dir(board_layout["user_project"])
+    with pytest.raises(ClaudeHookError, match="live agent worktree"):
+        adapter_module._ensure_safe_project_dir(board_layout["off_tree"])
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "relative", "blank", "mixed"])
+def test_invalid_forbidden_roots_refuses_before_writes(tmp_path, monkeypatch,
+                                                       enrollment, config, kind):
+    project = tmp_path / "project"
+    project.mkdir()
+    file = tmp_path / "file"
+    file.write_text("not a directory")
+    values = {"missing": str(tmp_path / "absent"), "file": str(file),
+              "relative": "relative-root", "blank": os.pathsep,
+              "mixed": str(tmp_path) + os.pathsep + str(tmp_path / "absent")}
+    monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, values[kind])
+    with pytest.raises(ClaudeHookError, match="TICKET_BOARD_FORBIDDEN_ROOTS"):
+        install_hooks(project, enrollment, config)
+    assert not (project / ".claude").exists()
+
+
+def test_unreadable_forbidden_root_refuses(tmp_path, monkeypatch, enrollment, config):
+    root = tmp_path / "unreadable"
+    root.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, str(root))
+    original_scandir = os.scandir
+
+    def deny_root(path):
+        if Path(path) == root:
+            raise PermissionError("test unreadable root")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", deny_root)
+    with pytest.raises(ClaudeHookError, match="TICKET_BOARD_FORBIDDEN_ROOTS"):
+        install_hooks(project, enrollment, config)
+    assert not (project / ".claude").exists()
