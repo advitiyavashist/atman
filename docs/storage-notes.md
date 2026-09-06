@@ -89,31 +89,95 @@ else, preserve that property.
 
 ## Legacy import and the ownership lock (operator-facing)
 
-`import_legacy_board(store, path)` reads a directory of `T-NNN.json` files and
-returns an `ImportReport`. Verified against the real 119-ticket Steer board:
-119/119 tickets, 42/42 dependency edges, nothing skipped, no unmapped states.
+`import_legacy_board(store, path)` imports a whole legacy board — tickets,
+notes, dependencies, agents, epics, sprints, briefs, coordination state and
+`messages.jsonl` — and returns an `ImportReport`. Measured on the real Steer
+board (T-213): 133/133 tickets, 56/56 edges, 1062/1062 notes each keeping its
+own timestamp, 2134 messages, 33 agents, 93 documents, nothing skipped, no
+unmapped states, and **zero field differences** on a full round-trip.
 
+- **The whole import is one `BEGIN IMMEDIATE` transaction.** A cycle, a
+  duplicate id or a disk error leaves the database exactly as it was. It used
+  to be one transaction per ticket, per state change and per note, so a failure
+  partway through committed everything before it and the re-run built a second
+  project holding a second copy of the board.
+- **Nothing is dropped silently.** Every source key either maps to a contract
+  field or lands in `legacy_ticket_fields`, and a key the importer has never
+  seen is archived *and* counted in `report.unknown_fields`. Read that counter
+  before trusting an import of a board newer than this code.
+- **Prove it rather than believe it.** `verify_round_trip(store, report, path)`
+  rebuilds every source ticket from the database and diffs it field by field
+  against the file it came from. An empty list is the acceptance criterion; the
+  only things excluded are drops the report itself names.
 - **Originals are never modified or deleted.** Rollback is
   `release_ownership(path)`; the files are untouched, so the old CLI resumes.
 - **Legacy ids are re-prefixed.** `T-179` becomes `LEG-179`, because the
   contract's `TicketId` pattern needs at least two characters before the dash.
-  The number is preserved. If you surface these to operators who cite "T-179",
-  say so in the UI.
+  The number is preserved, and the original id is archived as `legacy_id`. If
+  you surface these to operators who cite "T-179", say so in the UI.
+- **Owners become real agent rows**, in state `offline` — they have never
+  connected to this server. Without this, `tickets.owner` (a foreign key to
+  `agents(id)`) stays null and the dashboard renders ~110 tickets in progress
+  with nobody on them.
 - **A dependency on a ticket not in the source board is reported**, in
-  `report.dropped_dependencies`, never silently dropped. Same for unmapped
-  legacy states (`report.unmapped_states`) — they import as `open` and are
-  counted, not guessed.
+  `report.dropped_dependencies`, never silently dropped. Same for a cycle
+  (the edge is dropped, the other 130 tickets still import), a duplicate edge,
+  and unmapped legacy states (`report.unmapped_states` — they import as `open`
+  and are counted, not guessed).
 - **Ownership is a visible sentinel file** (`.server-owned.json`) in the legacy
-  directory. `assert_writable(path)` raises `LegacyWriterActive` (409) while it
-  exists. Call it from any legacy write path; an operator who sees their CLI
-  refuse can open the file and read why.
+  directory, checked *before* the first write. `assert_writable(path)` raises
+  `LegacyWriterActive` (409) while it exists. Call it from any legacy write
+  path; an operator who sees their CLI refuse can open the file and read why.
+
+### What the frozen contract cannot hold, and what the import does about it
+
+Ten legacy fields have no `Ticket` property: `priority`, `epic`, `sprint`,
+`needs`, `suggested`, `done_at`, `review_at`, `commit`, `branch`, `pr`. They are
+archived in `legacy_ticket_fields` and listed with counts in
+`report.archived_fields`. **That list is input to T-211's amendment map; this
+lane does not amend a frozen contract.**
+
+The sharpest case is review evidence. `Sha` is `^[0-9a-f]{40}$` and
+`GitEvidence.pr_url` is a URI, but **all 106** `commit` values on the real board
+are `branch@shortsha` and `pr` is a bare number. Writing those into
+`tickets.evidence` produces rows that fail the published schema the moment a
+route serves them, so the import writes `evidence` and a `reviews` row only for
+values that genuinely conform, counts the rest in
+`report.contract_mismatches`, and keeps the originals. Pass `sha_resolver` if
+you can expand short shas against a real repository — the code path is the
+same, it just gets conforming input.
+
+Two smaller ones, both observed: a note longer than `TicketUpdate.body`'s 4000
+characters is stored as several contract-legal rows and rejoined by
+`legacy_notes()`; a `title` or `body` past its limit is truncated in the column
+and kept whole in the archive.
+
+### Reading the archive
+
+`legacy_fields(store, project_id, ticket_id)`,
+`legacy_documents(store, project_id, kind=...)`,
+`legacy_messages(store, project_id, ticket_id=...)`,
+`legacy_notes(store, project_id, ticket_id)` and
+`reconstruct_legacy_ticket(store, project_id, ticket_id)`. The archive tables
+are created by the import and are **never served as part of a contract record**,
+so `additionalProperties: false` is not at risk. Archived messages carry both
+the legacy citation (`re`) and the imported key (`ticket_id`), so they join to
+`tickets` without the caller re-deriving the prefix rule.
+
+The test board is committed at `tests/data/legacy_board` and is synthetic —
+`scripts/make_sample_legacy_board.py` documents what each of its 20 tickets is
+for. It replaces a `skipif` on an absolute path that silently disabled the only
+real-board assertion on every machine but one.
 
 ## Backup and rollback
 
 `backup_database(conn, dest)` uses SQLite's online backup API, not a file copy,
 so a snapshot taken during a concurrent write is still consistent.
-`restore_database(snapshot, db_path)` keeps a copy of what it replaced and
-**deletes the `-wal`/`-shm` sidecars**. That last part is not tidiness: after an
+`restore_database(snapshot, db_path)` checks the snapshot's
+`PRAGMA integrity_check` before touching the target and refuses a corrupt one
+(`verify=False` for the operator who has nothing else left), stages the file
+beside the target and `os.replace`s it so the swap is atomic, keeps a copy of
+what it replaced, and **deletes the `-wal`/`-shm` sidecars**. That last part is not tidiness: after an
 unclean shutdown the WAL holds the post-snapshot writes, and copying a snapshot
 over the main file alone lets SQLite replay them, so the restore silently does
 nothing. `tests/storage/test_backup_rollback.py` demonstrates both halves.

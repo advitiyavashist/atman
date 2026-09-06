@@ -1,0 +1,22 @@
+{
+  "title": "Fractional timestamp",
+  "body": "What this ticket is for.",
+  "role": "backend",
+  "status": "open",
+  "deps": [],
+  "priority": 2,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [],
+  "owner": "",
+  "created": "2026-01-02T09:00:00Z",
+  "updated": "2026-01-02T09:00:00Z",
+  "notes": [
+    {
+      "by": "agent-charlie",
+      "at": "2026-01-10T11:22:33.456789+00:00",
+      "text": "released the auto-claim"
+    }
+  ],
+  "id": "T-016"
+}

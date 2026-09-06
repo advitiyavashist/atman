@@ -1,0 +1,18 @@
+{
+  "title": "Wire the dashboard",
+  "body": "What this ticket is for.",
+  "role": "console",
+  "status": "open",
+  "deps": [
+    "T-999"
+  ],
+  "priority": 2,
+  "epic": "E-002",
+  "sprint": "S-02",
+  "needs": [],
+  "owner": "",
+  "created": "2026-01-02T09:00:00Z",
+  "updated": "2026-01-02T09:00:00Z",
+  "notes": [],
+  "id": "T-004"
+}

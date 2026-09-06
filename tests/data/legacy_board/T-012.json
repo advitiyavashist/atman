@@ -1,0 +1,26 @@
+{
+  "title": "Message delivery API",
+  "body": "What this ticket is for.",
+  "role": "backend",
+  "status": "in review",
+  "deps": [],
+  "priority": 2,
+  "epic": "E-001",
+  "sprint": "S-01",
+  "needs": [],
+  "owner": "agent-bravo",
+  "created": "2026-01-02T09:00:00Z",
+  "updated": "2026-01-02T09:00:00Z",
+  "notes": [
+    {
+      "by": "agent-bravo",
+      "at": "2026-01-08T09:00:00Z",
+      "text": "submitted"
+    }
+  ],
+  "id": "T-012",
+  "claimed_at": "2026-01-07T09:00:00Z",
+  "review_at": "2026-01-08T09:00:00Z",
+  "commit": "agent-bravo/messages@9f8e7d6",
+  "branch": "agent-bravo/messages"
+}
