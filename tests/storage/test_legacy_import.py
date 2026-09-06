@@ -512,7 +512,11 @@ def test_review_evidence_is_not_forced_into_a_shape_it_does_not_fit(
     assert legacy_fields(store, imported.project_id, "LEG-2")["commit"] == \
         "agent-bravo/contract@0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
     assert imported.contract_mismatches["no repository identity"] == 1
-    assert imported.imported_reviews == 0
+    # T-224 planner ruling: a review that genuinely happened imports even
+    # without evidence (null, not fabricated) -- withholding it would lose
+    # real history, and the mismatch above already tells T-211 why it has no
+    # evidence. All 20 sample tickets have a usable review_at/updated.
+    assert imported.imported_reviews == 20
 
 
 def test_a_sha_resolver_turns_a_short_commit_into_real_evidence(store, sample):
@@ -535,7 +539,11 @@ def test_a_sha_resolver_turns_a_short_commit_into_real_evidence(store, sample):
     # resolver does not match still fails on sha shape, unaffected.
     assert report.contract_mismatches["no repository identity"] == 2
     assert report.contract_mismatches["commit is not a 40-hex Sha"] == 1
-    assert report.imported_reviews == 0
+    # T-224 planner ruling: the resolver clearing the sha shape does not
+    # change whether a review imports, only what its evidence looks like --
+    # every one of the 20 sample tickets with a usable review_at/updated
+    # still gets a (null-evidence) review row.
+    assert report.imported_reviews == 20
 
 
 def test_values_over_a_contract_limit_are_truncated_and_the_original_kept(

@@ -73,6 +73,15 @@ components:
         a sign-in flow from this scheme's presence. (T-224 ruling, planner
         18:05Z, superseding T-211 §7's "deferred" framing with an explicit
         decision: named and out of scope for V1, not silently assumed.)
+
+        No third, master-specific credential exists in V1: master authority is
+        gated by this same `operatorSession` scheme, the same as enrollment
+        and review acceptance. This is a deliberate divergence from the
+        existing `tickets master take` CLI command, which today is open to
+        any agent -- the API does not reproduce that. Revisit only if T-182's
+        assignment loop produces a concrete case for a narrower master
+        credential; it is its own ticket, not a default this contract assumes.
+        (T-224 ruling, planner 22:45Z.)
     agentToken:
       type: http
       scheme: bearer
@@ -521,7 +530,7 @@ components:
     Review:
       type: object
       additionalProperties: false
-      required: [id, ticket_id, state, submitted_by, submitted_at, evidence]
+      required: [id, ticket_id, state, submitted_by, submitted_at]
       properties:
         id: { type: string, pattern: '^rev_[0-9a-z]{8,32}$' }
         ticket_id: { $ref: '#/components/schemas/TicketId' }
@@ -534,7 +543,17 @@ components:
             cannot approve its own implementation (403 `forbidden_scope`).
         submitted_by: { $ref: '#/components/schemas/Actor' }
         submitted_at: { $ref: '#/components/schemas/Timestamp' }
-        evidence: { $ref: '#/components/schemas/GitEvidence' }
+        evidence:
+          anyOf: [{ $ref: '#/components/schemas/GitEvidence' }, { type: 'null' }]
+          description: |
+            Null only for reviews imported from the legacy board (T-213/T-224
+            planner ruling, 2026-09-06): the legacy board had no repository
+            concept, so a review that genuinely happened there cannot be given
+            real, repository-qualified evidence without fabricating it. This is
+            a resource-side relaxation only -- `CreateReviewRequest.evidence`
+            stays required, so every review minted through this API still
+            carries real evidence. A null here means "imported, no repository
+            identity", never "the going-forward guarantee was skipped".
         notes: { type: string, maxLength: 4000 }
         decided_by:
           anyOf: [{ $ref: '#/components/schemas/Actor' }, { type: 'null' }]

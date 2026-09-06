@@ -820,9 +820,8 @@ def _import_ticket(conn, store, project_id, key, item, agent_ids, report,
          created, updated, claimed_at),
     )
 
-    if evidence is not None:
-        _import_review(conn, store, project_id, key, item, evidence, owner_name,
-                       state, report)
+    _import_review(conn, store, project_id, key, item, evidence, owner_name,
+                   state, report)
 
     # Archive: every key with no contract home, plus the originals of anything
     # a contract limit forced us to truncate, plus any key this importer has
@@ -857,12 +856,17 @@ def _import_ticket(conn, store, project_id, key, item, agent_ids, report,
 
 def _import_review(conn, store, project_id, key, item, evidence, owner_name,
                    state, report):
-    """A `reviews` row, but only when the evidence is contract-valid.
+    """A `reviews` row -- `evidence` may be `None` (T-224 planner ruling,
+    2026-09-06).
 
-    `reviews.evidence` is served as `GitEvidence`; a row built from a short sha
-    would fail the published schema the first time the review is read. So this
-    runs only on the `sha_resolver` path or on a board whose commits are full
-    shas -- and `review_at` is archived either way.
+    A review that genuinely happened on the legacy board is real history even
+    when it cannot be given contract-valid `GitEvidence`: `Review.evidence` is
+    nullable precisely so this importer is not forced to choose between
+    fabricating evidence and dropping the review entirely. `evidence` is
+    `None` whenever `_evidence()` could not produce a real, repository-
+    qualified sha (bad sha, or a real sha with no repository identity --
+    either way `report.contract_mismatches` already counted it). `review_at`
+    is archived either way, regardless of whether a row is written here.
     """
     submitted_at = item.get("review_at") or item.get("updated")
     if not isinstance(submitted_at, str) or not TIMESTAMP_RE.match(submitted_at):
@@ -874,7 +878,7 @@ def _import_review(conn, store, project_id, key, item, evidence, owner_name,
         (rid, project_id, key, "accepted" if state == "done" else "requested",
          _json({"type": "agent", "id": owner_name or "legacy",
                 "display_name": owner_name or "legacy"}),
-         submitted_at, _json(evidence),
+         submitted_at, _json(evidence) if evidence else None,
          "Imported from the legacy board."),
     )
     report.imported_reviews += 1
