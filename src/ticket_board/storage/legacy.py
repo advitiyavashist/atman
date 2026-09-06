@@ -52,8 +52,14 @@ fail the published schema the moment T-180 serves them, and inventing a 40-hex
 sha would be worse. So evidence is archived verbatim, the mismatch is reported
 in `report.contract_mismatches` with counts, and `evidence`/`reviews` rows are
 written only for values that genuinely satisfy the contract. Pass a
-`sha_resolver` if you can expand short shas against a real repository; the code
-path is the same, it just gets contract-valid input.
+`sha_resolver` if you can expand short shas against a real repository.
+
+T-224 promoted `GitEvidence.repository` from optional to required. The legacy
+record has no repository concept at all -- not even a real 40-hex `commit`
+carries one -- so today `_evidence()` withholds evidence unconditionally,
+`sha_resolver` included, and counts a `"no repository identity"` mismatch
+instead. A `sha_resolver` alone no longer produces contract-valid evidence;
+supplying real repository identity is T-215's work.
 """
 
 import datetime as _dt
@@ -547,19 +553,17 @@ def _evidence(item, report, sha_resolver):
                          "commit is not a 40-hex Sha")
         return None
 
-    # `commit` on this board is `branch@sha`; that branch is more specific than
-    # the ticket's own `branch` field, so it wins when both are present.
-    from_commit = commit.rsplit("@", 1)[0].strip() if "@" in commit else ""
-    fallback = branch if isinstance(branch, str) else ""
-    evidence = {"branch": from_commit or fallback or "unknown", "sha": sha}
-
-    pr = item.get("pr")
-    if isinstance(pr, str) and pr:
-        if re.match(r"^https?://", pr):
-            evidence["pr_url"] = pr
-        else:
-            report._bump(report.contract_mismatches, "pr is not a URI")
-    return evidence
+    # T-224: GitEvidence.repository is now required (the T-215 fix at the
+    # contract layer). The legacy record has no repository concept at all --
+    # `commit` is `branch@sha` with no remote or repo root attached, which is
+    # the exact ambiguity T-215 exists to close. Inventing a repository value
+    # would be the same mistake as inventing a sha: a real sha with a fake
+    # repository is not honest evidence. So a genuinely 40-hex commit -- direct
+    # or via `sha_resolver` -- still cannot become `GitEvidence` on this
+    # importer until a caller can supply real repository identity; reported
+    # the same way a bad sha is, so T-211/T-215 see the count.
+    report._bump(report.contract_mismatches, "no repository identity")
+    return None
 
 
 def _archive_field(conn, project_id, key, field, value):

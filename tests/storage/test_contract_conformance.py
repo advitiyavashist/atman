@@ -285,7 +285,11 @@ def test_every_imported_record_matches_the_contract(store, schemas, tmp_path):
     reviews = store.conn.execute(
         "SELECT id FROM reviews WHERE project_id = ?", (report.project_id,)
     ).fetchall()
-    assert len(reviews) == report.imported_reviews > 0
+    # T-224: GitEvidence.repository is now required, and this legacy fixture
+    # (like the real board) has no repository identity for any commit -- so
+    # zero reviews import, honestly, rather than one built on evidence that
+    # would fail the schema the moment the server serves it back.
+    assert len(reviews) == report.imported_reviews == 0
     for row in reviews:
         _validate(schemas, "Review", store.get_review(row["id"]))
 
