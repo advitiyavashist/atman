@@ -19,11 +19,18 @@ job.
   (`decideReview(..., { decision: "accept" }`) is what moves a ticket to
   `done`.
 - `subscribeToEvents` (`sse.ts`): fetch-based SSE reader (not `EventSource` —
-  it cannot send `X-Project-Id`/`Last-Event-ID`). Resumes with
-  `Last-Event-ID` on every reconnect after the first frame, routes
-  `snapshot_required` to its own handler instead of treating it as a normal
-  event, and exposes `heartbeat` separately so a caller can tell "dead" from
-  "idle."
+  it cannot send `X-Project-Id`/`Last-Event-ID`). Sends `X-Project-Id` on
+  every connection (the stream is the one call where project scoping decides
+  whose events you receive), resumes with `Last-Event-ID` on every reconnect
+  after the first frame, routes `snapshot_required` to its own handler
+  instead of treating it as a normal event, and exposes `heartbeat`
+  separately so a caller can tell "dead" from "idle." Frame boundaries are
+  matched against `\r\n\r\n|\n\n|\r\r` (not a plain `\n\n` search), since a
+  spec-legal CRLF stream has no two consecutive `\n` bytes and would
+  otherwise silently stall forever. On a non-2xx response, a 4xx other than
+  408/429 is treated as terminal (stops reconnecting, since a dead or
+  unauthorized session returns the same status forever); 5xx, 408, and 429
+  keep retrying.
 - `BoardError` (`errors.ts`): every failure — the server's `ErrorResponse`
   envelope and this client's own boundary failures (`unexpected_status`,
   `invalid_response_shape`, `network_error`, `client_malformed_request`) —
@@ -55,11 +62,14 @@ job.
 - **No real reconnect timing is exercised.** Tests use `reconnectDelayMs: 0`
   and a mock `fetch` returning a fixed sequence of responses. Backoff,
   jitter, and what happens when the network is actually flaky are T-184's
-  (or T-185's) to prove against a live or simulated server.
+  (or T-185's) to prove against a live or simulated server. Deciding
+  *whether* to retry at all (terminal 4xx vs. transient 5xx/408/429) is this
+  client's job and is tested; the timing of retries is not.
 - **CSRF**: `BoardClientConfig.csrfToken` is threaded through to
-  `X-CSRF-Token` on unsafe operator-session methods, but nothing here
-  obtains or refreshes that token — that is session-management, which is
-  T-184's screen-level concern, not this client's.
+  `X-CSRF-Token` on unsafe operator-session methods only (never with an
+  agent token, never on GET — tested in `tests/ui/api/client.test.ts`), but
+  nothing here obtains or refreshes that token — that is session-management,
+  which is T-184's screen-level concern, not this client's.
 - **`/members` is intentionally not implemented.** It is a real route (see
   `docs/contracts/dependent-notes.md` decision #8) but reads as
   messaging-surface (T-187/T-189), and the ticket's stated scope for this
@@ -74,5 +84,7 @@ client's tests exercise (not the full `tests/fixtures/` set, and not the
 same trimmed set `ui/src/fixtures/` keeps for T-183's screens — that one is
 scoped to screen scenarios, this one to route request/response pairs).
 `tests/ui/api/fixtures-parity.test.ts` fails if any file in the copy drifts
-from the canonical `tests/fixtures/`, same mechanism as
-`tests/ui/fixtures-parity.test.ts` from T-183.
+from the canonical `tests/fixtures/` (compared byte-for-byte, not by parsed
+JSON equality), and fails outright — not skip — if the canonical
+`manifest.json` is missing. Same mechanism as `tests/ui/fixtures-parity.test.ts`
+from T-183.

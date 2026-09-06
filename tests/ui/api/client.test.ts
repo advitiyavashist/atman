@@ -15,7 +15,7 @@ import type {
   TicketDetailResponse,
   TicketListResponse,
 } from "../../../ui/src/types";
-import type { CreateEnrollmentResponse, MasterLease, SessionCredentialResponse } from "../../../ui/src/api/types";
+import type { ClaimTicketRequest, CreateEnrollmentResponse, MasterLease, SessionCredentialResponse } from "../../../ui/src/api/types";
 import { loadFixture } from "./support/fixtures";
 import { baseConfig, jsonResponse, lastCallHeaders, lastCallUrl, sequenceFetch } from "./support/mock-fetch";
 
@@ -272,5 +272,60 @@ describe("BoardClient credentials", () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(init!.credentials).toBeUndefined();
     expect(lastCallHeaders(fetchMock).get("Authorization")).toBe("Bearer tok_abc123");
+  });
+});
+
+describe("BoardClient request headers", () => {
+  it("sends X-Request-Id from the mutation body's request_id, the frozen idempotency key the server's request_log/replay honors", async () => {
+    const request = loadFixture("tickets/request-claim.json") as ClaimTicketRequest;
+    const response = loadFixture<TicketDetailResponse>("tickets/detail-claimed.json").ticket;
+    const fetchMock = sequenceFetch([jsonResponse(response, 200)]);
+    const client = new BoardClient(baseConfig(fetchMock));
+
+    await client.claimTicket("DEMO-13", request);
+
+    expect(lastCallHeaders(fetchMock).get("X-Request-Id")).toBe(request.request_id);
+  });
+
+  it("sends X-Request-Id on a GET call when the caller supplies one", async () => {
+    const fixture = loadFixture<OverviewResponse>("overview/populated.json");
+    const fetchMock = sequenceFetch([jsonResponse(fixture, 200)]);
+    const client = new BoardClient(baseConfig(fetchMock));
+
+    await client.getOverview("req_caller_supplied_1");
+
+    expect(lastCallHeaders(fetchMock).get("X-Request-Id")).toBe("req_caller_supplied_1");
+  });
+
+  it("sends X-CSRF-Token on an unsafe operator-session call when csrfToken is configured", async () => {
+    const request = loadFixture("tickets/request-claim.json") as ClaimTicketRequest;
+    const response = loadFixture<TicketDetailResponse>("tickets/detail-claimed.json").ticket;
+    const fetchMock = sequenceFetch([jsonResponse(response, 200)]);
+    const client = new BoardClient(baseConfig(fetchMock, { csrfToken: "csrf_xyz" }));
+
+    await client.claimTicket("DEMO-13", request);
+
+    expect(lastCallHeaders(fetchMock).get("X-CSRF-Token")).toBe("csrf_xyz");
+  });
+
+  it("omits X-CSRF-Token on a GET even when csrfToken is configured — it is not an unsafe method", async () => {
+    const fixture = loadFixture<OverviewResponse>("overview/populated.json");
+    const fetchMock = sequenceFetch([jsonResponse(fixture, 200)]);
+    const client = new BoardClient(baseConfig(fetchMock, { csrfToken: "csrf_xyz" }));
+
+    await client.getOverview();
+
+    expect(lastCallHeaders(fetchMock).has("X-CSRF-Token")).toBe(false);
+  });
+
+  it("omits X-CSRF-Token when an agent token is configured — CSRF is an operator-session cookie concern only", async () => {
+    const request = loadFixture("tickets/request-claim.json") as ClaimTicketRequest;
+    const response = loadFixture<TicketDetailResponse>("tickets/detail-claimed.json").ticket;
+    const fetchMock = sequenceFetch([jsonResponse(response, 200)]);
+    const client = new BoardClient(baseConfig(fetchMock, { csrfToken: "csrf_xyz", agentToken: "tok_abc123" }));
+
+    await client.claimTicket("DEMO-13", request);
+
+    expect(lastCallHeaders(fetchMock).has("X-CSRF-Token")).toBe(false);
   });
 });

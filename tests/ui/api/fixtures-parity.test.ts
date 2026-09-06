@@ -26,9 +26,16 @@ function listFiles(dir: string): string[] {
 
 describe("api client fixtures copy stays in sync with tests/fixtures/", () => {
   const manifestPath = resolve(canonicalDir, "manifest.json");
-  const hasCanonical = existsSync(manifestPath);
 
-  it.runIf(hasCanonical)("every fixture this client's tests bundle matches its canonical original exactly", () => {
+  // The canonical pack going missing (a bad checkout, a moved fixtures dir)
+  // is exactly the moment this guard must be loud, not skip quietly — a
+  // runIf(hasCanonical) here would turn "the drift guard is gone" into a
+  // silent pass instead of a failure.
+  it("the canonical fixture pack this copy is checked against is present", () => {
+    expect(existsSync(manifestPath)).toBe(true);
+  });
+
+  it("every fixture this client's tests bundle matches its canonical original byte-for-byte", () => {
     const copiedFiles = listFiles(apiCopyDir).map((f) => f.slice(apiCopyDir.length + 1));
     expect(copiedFiles.length).toBeGreaterThan(0);
     const mismatches: string[] = [];
@@ -40,9 +47,13 @@ describe("api client fixtures copy stays in sync with tests/fixtures/", () => {
         missingFromManifest.push(posixPath);
         continue;
       }
-      const canonical = readFileSync(resolve(canonicalDir, posixPath), "utf-8");
-      const copy = readFileSync(resolve(apiCopyDir, posixPath), "utf-8");
-      if (JSON.stringify(JSON.parse(canonical)) !== JSON.stringify(JSON.parse(copy))) {
+      // Raw buffer comparison, not JSON.stringify(JSON.parse(...)) — that
+      // compares parsed values, not bytes, so it would wave through a
+      // reformatted copy that "byte-for-byte" (this file's own docstring
+      // and README.md's claim) says cannot happen.
+      const canonical = readFileSync(resolve(canonicalDir, posixPath));
+      const copy = readFileSync(resolve(apiCopyDir, posixPath));
+      if (!canonical.equals(copy)) {
         mismatches.push(posixPath);
       }
     }

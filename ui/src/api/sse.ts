@@ -51,6 +51,13 @@ function parseFrame(raw: string): { id: string | null; data: string | null } {
   return { id, data: dataLines.length > 0 ? dataLines.join("\n") : null };
 }
 
+// The contract only guarantees a blank line between frames, not which line
+// ending carries it — a spec-legal CRLF stream ("\r\n\r\n") has no two
+// consecutive "\n" characters, so a plain indexOf("\n\n") never matches and
+// the reader stalls forever with no error. Match whichever boundary style
+// appears first.
+const FRAME_BOUNDARY = /\r\n\r\n|\n\n|\r\r/;
+
 async function readFrames(body: ReadableStream<Uint8Array>, onFrame: (raw: string) => void): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -60,10 +67,11 @@ async function readFrames(body: ReadableStream<Uint8Array>, onFrame: (raw: strin
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      let boundary: number;
-      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+      let match: RegExpMatchArray | null;
+      while ((match = buffer.match(FRAME_BOUNDARY))) {
+        const boundary = match.index as number;
         const rawFrame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
+        buffer = buffer.slice(boundary + match[0].length);
         if (rawFrame.trim().length > 0) onFrame(rawFrame);
       }
     }
@@ -74,6 +82,16 @@ async function readFrames(body: ReadableStream<Uint8Array>, onFrame: (raw: strin
 
 function sleep(ms: number): Promise<void> {
   return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+/**
+ * A 4xx (other than 408/429) is not a transient condition — a dead or
+ * unauthorized session will return the same status forever, so retrying it
+ * is an infinite hot loop against a live server, not resilience. 5xx and the
+ * two retry-after-flavored 4xx codes are worth another attempt.
+ */
+function isTerminalStatus(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
 export function subscribeToEvents(config: BoardClientConfig, handlers: StreamHandlers, options: SubscribeOptions = {}): EventStreamHandle {
@@ -98,6 +116,7 @@ export function subscribeToEvents(config: BoardClientConfig, handlers: StreamHan
 
     if (!response.ok || !response.body) {
       handlers.onError?.(new BoardError("unexpected_status", response.status, `GET /events returned ${response.status}`));
+      if (isTerminalStatus(response.status)) closed = true;
       return;
     }
 

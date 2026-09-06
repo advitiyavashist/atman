@@ -8,6 +8,10 @@ function sseFrame(id: string, envelope: unknown): string {
   return `id: ${id}\ndata: ${JSON.stringify(envelope)}\n\n`;
 }
 
+function crlfSseFrame(id: string, envelope: unknown): string {
+  return `id: ${id}\r\ndata: ${JSON.stringify(envelope)}\r\n\r\n`;
+}
+
 function streamResponse(frames: string[]): Response {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
@@ -184,5 +188,119 @@ describe("subscribeToEvents", () => {
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ code: "unexpected_status", status: 401 });
+  });
+
+  it("sends X-Project-Id on the stream request — the one call project scoping matters most on, since it decides whose events you receive", async () => {
+    const heartbeat = loadFixture<StreamEnvelope>("events/heartbeat.json");
+    const fetchMock = vi.fn(async () => streamResponse([sseFrame(heartbeat.event_id, heartbeat)]));
+    const control = closeableHandlers();
+
+    const handle = subscribeToEvents(
+      baseConfig(fetchMock as unknown as typeof fetch, { projectId: "prj_scoped0001" }),
+      { onEvent: () => {}, onSnapshotRequired: () => {}, onHeartbeat: () => control.close() },
+      { reconnectDelayMs: 0 },
+    );
+    control.bind(handle);
+
+    await handle.done;
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [unknown, RequestInit];
+    expect(new Headers(init.headers).get("X-Project-Id")).toBe("prj_scoped0001");
+  });
+
+  it("parses a CRLF-delimited stream — a spec-legal frame separator with no two consecutive LF bytes", async () => {
+    const ticketChanged = loadFixture<StreamEnvelope>("events/ticket-changed.json");
+    const fetchMock = vi.fn(async () => streamResponse([crlfSseFrame(ticketChanged.event_id, ticketChanged)]));
+    const events: StreamEnvelope[] = [];
+    const control = closeableHandlers();
+
+    const handle = subscribeToEvents(
+      baseConfig(fetchMock as unknown as typeof fetch),
+      {
+        onEvent: (e) => {
+          events.push(e);
+          control.close();
+        },
+        onSnapshotRequired: () => {},
+      },
+      { reconnectDelayMs: 0 },
+    );
+    control.bind(handle);
+
+    await handle.done;
+
+    expect(events).toHaveLength(1);
+    expect(events[0].event_id).toBe(ticketChanged.event_id);
+  });
+
+  it("stops reconnecting on a terminal 4xx (401) instead of hot-looping against a dead session", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 401 }));
+    const errors: unknown[] = [];
+
+    const handle = subscribeToEvents(
+      baseConfig(fetchMock as unknown as typeof fetch),
+      { onEvent: () => {}, onSnapshotRequired: () => {}, onError: (err) => errors.push(err) },
+      { reconnectDelayMs: 0 },
+    );
+
+    await handle.done;
+
+    expect(errors).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops reconnecting on a terminal 4xx (404) without needing the caller to close", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 404 }));
+
+    const handle = subscribeToEvents(
+      baseConfig(fetchMock as unknown as typeof fetch),
+      { onEvent: () => {}, onSnapshotRequired: () => {} },
+      { reconnectDelayMs: 0 },
+    );
+
+    await handle.done;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps retrying a 5xx — a transient server failure, not a dead session", async () => {
+    const heartbeat = loadFixture<StreamEnvelope>("events/heartbeat.json");
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async () => new Response(null, { status: 503 }))
+      .mockImplementationOnce(async () => new Response(null, { status: 503 }))
+      .mockImplementation(async () => streamResponse([sseFrame(heartbeat.event_id, heartbeat)]));
+    const control = closeableHandlers();
+
+    const handle = subscribeToEvents(
+      baseConfig(fetchMock as unknown as typeof fetch),
+      { onEvent: () => {}, onSnapshotRequired: () => {}, onHeartbeat: () => control.close() },
+      { reconnectDelayMs: 0 },
+    );
+    control.bind(handle);
+
+    await handle.done;
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([408, 429])("keeps retrying a %d — a retry-after-flavored status, not a dead session", async (status) => {
+    const heartbeat = loadFixture<StreamEnvelope>("events/heartbeat.json");
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async () => new Response(null, { status }))
+      .mockImplementation(async () => streamResponse([sseFrame(heartbeat.event_id, heartbeat)]));
+    const control = closeableHandlers();
+
+    const handle = subscribeToEvents(
+      baseConfig(fetchMock as unknown as typeof fetch),
+      { onEvent: () => {}, onSnapshotRequired: () => {}, onHeartbeat: () => control.close() },
+      { reconnectDelayMs: 0 },
+    );
+    control.bind(handle);
+
+    await handle.done;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
