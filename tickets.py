@@ -941,6 +941,29 @@ def _clear_agent_ticket(board, agent, tid):
     _agent_update(board, agent, mutate)
 
 
+def _drop_unowned_agent_ticket(board, owner):
+    """T-439: drop agents/<me>.json ticket= when the live owner of that id is not me.
+
+    Keeps cwd/branch/sha. Missing ticket files count as unowned. Call at
+    watch/spawn start so a STOPPED seat's leftover bind cannot reach run_start.
+    """
+    if not owner:
+        return
+    rec = _agent_rec(board, owner) or {}
+    tid = rec.get("ticket") or ""
+    if not tid:
+        return
+    t = None
+    try:
+        with open(ticket_path(board, tid)) as f:
+            t = json.load(f)
+    except (IOError, ValueError):
+        t = None
+    if isinstance(t, dict) and t.get("owner") == owner:
+        return
+    _clear_agent_ticket(board, owner, tid)
+
+
 def _bind_agent_ticket(board, agent, tid):
     """Set ticket= on the new owner's existing record without clobbering cwd."""
     if not agent or not tid:
@@ -6201,6 +6224,7 @@ def cmd_watch(a, board):
     owner = whoami(a.agent)
     if owner.startswith("agent-"):
         sys.exit("set --agent or TICKET_AGENT to a real name")
+    _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     root = os.path.dirname(board)
     cwd = os.path.abspath(a.cwd or root)
     if not os.path.isdir(cwd):
@@ -6294,7 +6318,8 @@ def cmd_watch(a, board):
                 # are message text and ticket titles, and neither belongs in
                 # the trajectory log (T-311 privacy rule).
                 run_started = now()
-                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or None
+                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or (
+                    _agent_rec(board, owner) or {}).get("ticket") or None
                 _safe(lambda: traj_event(board, "run_start", agent=owner,
                                          ticket=held_ticket, run_no=runs,
                                          trigger=sorted(p), harness_cmd=harness,
@@ -6821,6 +6846,7 @@ def cmd_spawn(a, board):
     if _watcher_pid(board, owner):
         print("watcher for %s already running (pid %d); --stop first" % (owner, _watcher_pid(board, owner)))
         return
+    _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     try:
         os.unlink(_stop_file(board, owner))
     except OSError:

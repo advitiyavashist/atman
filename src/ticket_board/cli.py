@@ -574,6 +574,7 @@ def agents_dir(board):
 
 def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
+    _drop_unowned_agent_ticket(board, owner)
     g = git_state() or {}
     rec = {
         "owner": owner,
@@ -612,6 +613,32 @@ def _clear_agent_ticket(board, agent, tid):
     with open(tmp, "w") as f:
         json.dump(rec, f, indent=2)
     os.replace(tmp, path)
+
+
+def _drop_unowned_agent_ticket(board, owner):
+    """T-439: drop ticket= when the live owner of that id is not me. Keep cwd/branch/sha."""
+    if not owner:
+        return
+    path = os.path.join(agents_dir(board), owner + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        return
+    if not isinstance(rec, dict):
+        return
+    tid = rec.get("ticket") or ""
+    if not tid:
+        return
+    t = None
+    try:
+        with open(ticket_path(board, tid)) as f:
+            t = json.load(f)
+    except (IOError, ValueError):
+        t = None
+    if isinstance(t, dict) and t.get("owner") == owner:
+        return
+    _clear_agent_ticket(board, owner, tid)
 
 
 def _bind_agent_ticket(board, agent, tid):
