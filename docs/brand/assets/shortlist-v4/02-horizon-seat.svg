@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="t d">
+  <title id="t">Horizon seat</title>
+  <desc id="d">A pitch horizon with one bone seat above the line and quiet field mates behind. Self rises from the whole field.</desc>
+  <rect width="32" height="32" rx="7" fill="#0c0e12"/>
+  <line x1="5.5" y1="22.4" x2="26.5" y2="22.4" stroke="#8a8d96" stroke-width="1.35" stroke-linecap="butt"/>
+  <circle cx="8.8" cy="10.6" r="1.35" fill="#8a8d96"/>
+  <circle cx="23.2" cy="11.2" r="1.35" fill="#8a8d96"/>
+  <circle cx="15.6" cy="14.8" r="3.05" fill="#e8e6e1"/>
+</svg>

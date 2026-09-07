@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="t d">
+  <title id="t">Shared stroke</title>
+  <desc id="d">One continuum: thin mute field ring, heavier bone arc on the same path. Same stroke, different intensity - not a spinner.</desc>
+  <rect width="32" height="32" rx="7" fill="#0c0e12"/>
+  <circle cx="16" cy="16" r="9.6" fill="none" stroke="#8a8d96" stroke-width="1.3"/>
+  <path d="M 16 6.4 A9.6 9.6 0 0 1 25.2 20.8" fill="none" stroke="#e8e6e1" stroke-width="2.45" stroke-linecap="butt"/>
+</svg>
