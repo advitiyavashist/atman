@@ -81,7 +81,10 @@ def test_promise_chips_strip_on_home_objective():
     assert "median turns" in ui
     assert "yield@cost" in ui
     assert "fmtMedian" in ui and "fmtYield" in ui
-    assert "hdrMedianVal" in ui and "stripMedianVal" in ui
+    assert "hdrMedianVal" in ui
+    assert "stripMedianVal" not in ui
+    # Craft bar: numbers once on home (hero); chips hide on Board.
+    assert "body[data-tab=board] .promise-chips{display:none}" in ui
 
 
 def test_promise_hero_copy_nits():

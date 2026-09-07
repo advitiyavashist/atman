@@ -6461,16 +6461,16 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
 .hero-eyebrow{margin:0 0 6px;font-size:12px;color:var(--mute);font-weight:650}
-.promise-strip{display:flex;gap:10px 14px;align-items:center;padding:8px 16px;border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+.promise-strip{display:flex;gap:10px 14px;align-items:baseline;padding:6px 16px;border-bottom:1px solid var(--line);font-size:13px}
 .promise-strip .lbl{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--mute)}
-.promise-strip .msg{flex:1;min-width:160px;color:var(--fg)}
-.promise-strip .chip{font-variant-numeric:tabular-nums}
+.promise-strip .msg{color:var(--mute)}
 .chip.promise{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
-.promise-hero{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.promise-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px}
-.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
-.promise-card .v{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums;margin:4px 0;line-height:1.15}
-.promise-card .h{font-size:12px;color:var(--mute)}
+body[data-tab=board] .promise-chips{display:none}
+.promise-hero{display:flex;gap:32px;align-items:flex-end;padding:2px 0 12px;border-bottom:1px solid var(--line)}
+.promise-card{display:flex;flex-direction:column;gap:2px;min-width:132px;background:transparent;border:0;padding:0}
+.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
+.promise-card .v{font-size:32px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.05}
+.promise-card .h{font-size:11px;color:var(--mute)}
 .promise-panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .promise-panel h2{margin:0 0 4px;font-size:13px}
 .promise-panel summary{cursor:pointer;list-style:none;font-size:13px;font-weight:650}
@@ -6510,7 +6510,8 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
   .ob-steps{flex-direction:column;align-items:flex-start}
   .kanban{grid-template-columns:1fr}
-  .promise-hero,.turns-grid{grid-template-columns:1fr}
+  .promise-hero{flex-wrap:wrap;gap:16px}
+  .turns-grid{grid-template-columns:1fr}
   nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
   .agents{grid-template-columns:1fr}
   .sprint{min-width:0}
@@ -6529,8 +6530,8 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 </header>
 <details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
-<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span><span class="chip promise" id="stripMedian"><b>median turns</b> <span id="stripMedianVal">—</span></span><span class="chip promise" id="stripYield"><b>yield@cost</b> <span id="stripYieldVal">—</span></span></div>
-<details class="onboard" id="onboardBox" open><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
+<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
+<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
   <button type="button" data-tab-btn="board" class="on">Board</button>
@@ -6541,7 +6542,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <div class="pane" id="pane-board">
   <div id="emptyBoard" class="empty-board" hidden></div>
   <section id="objectivePromise" data-fold="objective">
-    <p class="hero-eyebrow" id="heroEyebrow">Fewest turns. Max output at least cost.</p>
+    <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
     <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."><!-- V1 MUST: home median turns + yield@cost; T-344 worst-10 is NICE only -->
       <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Lower is better · unknown is not zero</div></article>
       <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
@@ -6638,8 +6639,8 @@ function fmtYield(p){return(!p||p.yield_per_usd==null)?'—':(Number(p.yield_per
 function setTxt(id,v){const el=document.getElementById(id);if(el)el.textContent=v}
 function renderPromise(p){
   const med=fmtMedian(p),yld=fmtYield(p);
-  setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);setTxt('stripMedianVal',med);
-  setTxt('heroYieldVal',yld);setTxt('hdrYieldVal',yld);setTxt('stripYieldVal',yld);
+  setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);
+  setTxt('heroYieldVal',yld);setTxt('hdrYieldVal',yld);
   const yh=document.getElementById('heroYieldHint');
   if(!yh)return;
   if(!p||p.yield_per_usd==null)yh.textContent=(p&&p.n_unmeasured_cost)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';
