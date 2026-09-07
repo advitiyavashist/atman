@@ -214,9 +214,19 @@ class MessagingMixin:
 
     def create_invitation(self, project_id, role, expires_at, *, created_by=None,
                           invitation_id=None, code=None, request_id=None):
+        """Create an invitation. `code` is for direct/offline callers only.
+
+        The API route (`server/messaging.py`) never passes `code` -- it mints
+        and hashes its own, registering it in `credentials` rather than here.
+        This method used to fabricate a throwaway code when none was given
+        and remember THAT in the replay log (T-286): a byte-identical replay
+        then served a well-formed placeholder that was never registered and
+        422'd on redemption. Minting nothing when `code` is omitted, and
+        omitting the key entirely from what gets remembered, means the replay
+        log can no longer hold a string that looks like a redeemable secret.
+        """
         _assert_member(role, PROJECT_ROLES, "role")
         iid = invitation_id or ids.invitation_id()
-        invite_code = code or ids._suffix(24)
         body = {"role": role, "expires_at": expires_at}
         with write_txn(self.conn) as conn:
             replay = self._replay(conn, project_id, request_id, "create_invitation", body)
@@ -236,7 +246,9 @@ class MessagingMixin:
             invitation = self._serialize_invitation(
                 conn.execute("SELECT * FROM invitations WHERE id = ?", (iid,)).fetchone()
             )
-            result = {"invitation": invitation, "code": invite_code}
+            result = {"invitation": invitation}
+            if code is not None:
+                result["code"] = code
             self._remember(conn, project_id, request_id, "create_invitation", body, result)
             return result
 

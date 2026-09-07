@@ -7,6 +7,7 @@ interesting failure for messaging is never "the route 500s", it is "the route
 returns something the caller should not have been able to read".
 """
 
+import json
 import uuid
 
 import pytest
@@ -224,7 +225,13 @@ def test_replaying_an_invitation_is_refused_not_reissued(server, operator, proje
     served a placeholder that was never registered: 201, well-formed, and a
     guaranteed 422 if anyone tried to redeem it. This drives the repro all
     the way to redemption, not just the response shape, because a schema
-    check alone cannot tell a real code from a dud one.
+    check alone cannot tell a real code from a dud one. Covers the planner's
+    four required cases: (i) the first code redeems, (ii) an identical-body
+    replay is refused with the new code, and no `code` anywhere in that
+    response, (iii) a different-body reuse of the same `request_id` is
+    unaffected (still `request_id_reused`), (iv) the stored replay record
+    itself -- not just the response the client saw -- carries no redeemable
+    code.
     """
     key = rid()
     first = operator.post("/invitations", {"request_id": key, "role": "member"})
@@ -232,15 +239,29 @@ def test_replaying_an_invitation_is_refused_not_reissued(server, operator, proje
     check("CreateInvitationResponse", first.json(), label="POST /invitations")
     real_code = first.json()["code"]
 
+    # (ii) identical body, same request_id: refused, not reissued.
     replay = operator.post("/invitations", {"request_id": key, "role": "member"})
     assert replay.status == 409, replay.json()
     check("ErrorResponse", replay.json(), label="POST /invitations (replay)")
-    assert replay.json()["error"]["code"] == "request_id_reused"
-    # The refusal must not itself mint or register anything the real code's
-    # redemption could collide with.
+    assert replay.json()["error"]["code"] == "request_id_not_replayable"
     assert "code" not in replay.json()
+    assert set(replay.json().keys()) == {"error"}
 
-    # The ORIGINAL code is unaffected by the refused replay and still redeems.
+    # (iii) same request_id, DIFFERENT body: the general rule is un-regressed.
+    conflict = operator.post("/invitations", {"request_id": key, "role": "admin"})
+    assert conflict.status == 409, conflict.json()
+    assert conflict.json()["error"]["code"] == "request_id_reused"
+
+    # (iv) the STORED replay record, not just what the client saw, holds no
+    # redeemable code -- the fix removes the placeholder at the source.
+    stored = server.store.conn.execute(
+        "SELECT response FROM request_log WHERE request_id = ?", (key,),
+    ).fetchone()
+    stored_response = json.loads(stored["response"])
+    assert "code" not in stored_response, stored_response
+    assert stored_response == {"invitation": first.json()["invitation"]}
+
+    # (i) the ORIGINAL code is unaffected by the refused replay and redeems.
     anonymous = Client(server, project_id=project["id"])
     joined = anonymous.post("/invitations/exchange", {
         "request_id": rid(), "code": real_code, "display_name": "Dana"})
@@ -255,7 +276,7 @@ def test_a_third_identical_invitation_request_is_also_refused(operator):
     for _ in range(2):
         replay = operator.post("/invitations", {"request_id": key, "role": "member"})
         assert replay.status == 409, replay.json()
-        assert replay.json()["error"]["code"] == "request_id_reused"
+        assert replay.json()["error"]["code"] == "request_id_not_replayable"
 
 
 # ----------------------------------------------------------------- channels

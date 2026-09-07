@@ -189,13 +189,11 @@ class MessagingRoutes:
             created_by=ctx.principal.actor, request_id=request_id,
         )
         # A replayed request_id lands here after the first call already
-        # minted, registered and returned a real code -- the store's own
-        # idempotency record cannot hold it (only `credentials` keeps a
-        # hash of it), so `store.create_invitation`'s replayed response
-        # carries a placeholder that was never registered and 422s if
-        # redeemed. Registering a second code would put two live codes on
-        # one invitation, so the only honest answer left is to refuse the
-        # replay (T-286; see `InvitationReplayRefused`).
+        # minted, registered and returned a real code -- `store.create_invitation`
+        # never fabricates or remembers a placeholder for it (T-286), only
+        # `credentials` keeps a hash. Registering a second code would put two
+        # live codes on one invitation, so the only honest answer left is to
+        # refuse the replay (see `InvitationReplayRefused`).
         if self._invitation_code_exists(created["invitation"]["id"]):
             raise InvitationReplayRefused(request_id)
         code = mint_secret(24)

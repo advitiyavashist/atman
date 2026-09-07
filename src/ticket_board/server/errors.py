@@ -149,29 +149,32 @@ class InvitationCodeExpired(EnrollmentCodeExpired):
         BoardError.__init__(self, _INVITATION_MESSAGE, details)
 
 
-class InvitationReplayRefused(RequestIdReused):
+class InvitationReplayRefused(BoardError):
     """A replay of `POST /invitations` that cannot be re-answered honestly.
 
-    `ErrorCode` has no member for "this one-time secret was already issued
-    and cannot be reissued", so the code is borrowed the same way
-    `InvitationCodeInvalid` borrows `enrollment_code_invalid` -- widening the
-    enum is a contract amendment, not a route-layer decision. Recorded for
-    T-224's amendment list; see docs/api-notes.md.
+    T-286 (planner-authorised additive amendment, freeze rule 2): `code` is a
+    bearer secret returned exactly once and never stored in plaintext, so a
+    byte-identical replay of `request_id`, once the first call has already
+    minted and registered a code, has nothing honest to return. The
+    alternative -- passing the API's minted code into the store so replay
+    could echo it -- was rejected because it would put a live bearer secret
+    in plaintext in the replay log, the exact thing hashing it in
+    `credentials` exists to prevent (T-284's finding on this defect).
 
-    T-286: `store.create_invitation`'s idempotency record cannot hold the real
-    code (only its hash is kept, in `credentials`), so a byte-identical replay
-    of `request_id` has nothing honest to return -- the stored placeholder
-    was never registered and 422s if redeemed. Refusing the replay outright
-    keeps the invite code a write-once bearer secret that is never persisted
-    in plaintext in the replay log; the alternative (passing the API's minted
-    code into the store so replay could echo it) was rejected for exactly
-    that reason in T-284's review of this defect.
+    `request_id_not_replayable` is its own enum member, distinct from
+    `request_id_reused` (same id, *different* body): collapsing the two would
+    leave a caller unable to tell "your retry conflicts" from "this one is
+    not replayable, mint a new invitation". See
+    `docs/contracts/dependent-notes.md` for the exception this carves out of
+    the general idempotency rule, and `docs/api-notes.md` for the write-up.
     """
 
+    code = "request_id_not_replayable"
+    status = 409
+
     def __init__(self, request_id):
-        BoardError.__init__(
-            self,
-            "This request_id already issued a one-time invitation code; it "
+        super().__init__(
+            "This request_id already issued a one-time invitation code and "
             "cannot be replayed. Issue a new invitation instead.",
             {"request_id": request_id},
         )

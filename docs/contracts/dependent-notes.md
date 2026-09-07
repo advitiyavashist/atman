@@ -260,6 +260,15 @@ Non-obvious requirements:
   `tests/fixtures/errors/422-dependency-cycle.json`.
 - **`request_id` is an idempotency key.** Same id + identical body returns the
   original result; same id + different body is 409 `request_id_reused`.
+  **One exception (T-286, additive per freeze rule 2): `POST /invitations`.**
+  `code` is a bearer secret returned exactly once and never stored in
+  plaintext, so a byte-identical replay has nothing honest to re-answer with
+  once the first call already minted and registered one. That replay is
+  refused 409 `request_id_not_replayable` instead of re-serving the original
+  result; replaying with a *different* body is unaffected and still 409
+  `request_id_reused`. No other route gets this treatment — a route with the
+  same mint-and-forget shape needs its own ticket, not a silent extension of
+  this one.
 - **Late updates from a superseded session are kept, not dropped.** Store them
   with `superseded: true` and do not let them modify ticket state. See
   `tests/fixtures/tickets/detail-superseded-update.json`.

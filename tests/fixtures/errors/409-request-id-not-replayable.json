@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "request_id_not_replayable",
+    "status": 409,
+    "message": "This request_id already issued a one-time invitation code and cannot be replayed. Issue a new invitation instead.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110"
+    }
+  }
+}
