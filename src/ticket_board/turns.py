@@ -25,6 +25,8 @@ import sys
 from datetime import datetime, timezone
 from statistics import mean, median
 
+from ticket_board.prices import fmt_cost_cell, ticket_cost_fields
+
 TURNS_JSON_V = 1
 
 
@@ -362,6 +364,9 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
         mdl = _model(evs, owner, workforce)
         if model and mdl != model:
             continue
+        harness_cost = _measured_cost(evs)
+        cost_usd, cost_usd_est, cost_source, cost_price_as_of = ticket_cost_fields(
+            evs, harness_cost)
         row = {
             "ticket": tid,
             "owner": owner,
@@ -371,7 +376,10 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "reopens": sum(1 for e in evs if e.get("kind") == "reopen"),
             "stuck": _stuck_count(messages, tid),
             "outcome": _outcome(evs, t),
-            "cost_usd": _measured_cost(evs),
+            "cost_usd": cost_usd,
+            "cost_usd_est": cost_usd_est,
+            "cost_source": cost_source,
+            "cost_price_as_of": cost_price_as_of,
             "tokens_in": _measured_tokens(evs, "tokens_in"),
             "tokens_out": _measured_tokens(evs, "tokens_out"),
         }
@@ -387,6 +395,11 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
     cost_agg = _agg(costed)
     cost_agg["total"] = round(sum(costed), 6) if costed else None
     cost_agg["n_unmeasured"] = sum(1 for r in rows if r["cost_usd"] is None)
+    ested = [r["cost_usd_est"] for r in rows if r.get("cost_usd_est") is not None]
+    cost_est_agg = _agg(ested)
+    cost_est_agg["total"] = round(sum(ested), 6) if ested else None
+    cost_est_agg["n_unmeasured"] = sum(
+        1 for r in rows if r.get("cost_usd_est") is None and r.get("cost_usd") is None)
 
     def group_agg(keyfn, label):
         buckets = {}
@@ -404,17 +417,17 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
-    def cost_group(keyfn, label):
+    def cost_group(keyfn, label, field="cost_usd"):
         """Same shape as group_agg, over cost instead of turns. Kept separate
         because a row can be measured for one and unmeasured for the other."""
         buckets = {}
         for r in rows:
-            if r["cost_usd"] is None:
+            if r.get(field) is None:
                 continue
             k = keyfn(r)
             if k is None or k == "":
                 continue
-            buckets.setdefault(k, []).append(r["cost_usd"])
+            buckets.setdefault(k, []).append(r[field])
         out = []
         for k in sorted(buckets, key=lambda x: (str(type(x)), str(x))):
             rec = _agg(buckets[k])
@@ -423,7 +436,16 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
-    public_rows = [{k: r[k] for k in ROW_KEYS} for r in rows]
+    public_rows = []
+    for r in rows:
+        pub = {k: r[k] for k in ROW_KEYS}
+        if r.get("cost_usd_est") is not None:
+            pub["cost_usd_est"] = r["cost_usd_est"]
+        if r.get("cost_source"):
+            pub["cost_source"] = r["cost_source"]
+        if r.get("cost_price_as_of"):
+            pub["cost_price_as_of"] = r["cost_price_as_of"]
+        public_rows.append(pub)
     return {
         "v": TURNS_JSON_V,
         "tickets": public_rows,
@@ -439,6 +461,11 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "cost": cost_agg,
             "cost_by_agent": cost_group(lambda r: r.get("owner"), "agent"),
             "cost_by_model": cost_group(lambda r: r.get("model"), "model"),
+            "cost_est": cost_est_agg,
+            "cost_est_by_agent": cost_group(
+                lambda r: r.get("owner"), "agent", field="cost_usd_est"),
+            "cost_est_by_model": cost_group(
+                lambda r: r.get("model"), "model", field="cost_usd_est"),
         },
     }
 
@@ -454,9 +481,9 @@ def _fmt_wall(seconds):
     return "%.1fd" % (h / 24.0)
 
 
-def _fmt_cost(usd):
+def _fmt_cost(usd, est_usd=None):
     """'-' means UNMEASURED, and it is not $0.00. See _measured_cost."""
-    return "-" if usd is None else ("$%.4f" % usd)
+    return fmt_cost_cell(usd, est_usd)
 
 
 def _fmt_tokens(n):
@@ -482,7 +509,7 @@ def render_turns_table(report):
             (r.get("model") or "-")[:12],
             "-" if turns is None else str(turns),
             _fmt_wall(r.get("wall_clock_s")),
-            _fmt_cost(r.get("cost_usd")),
+            _fmt_cost(r.get("cost_usd"), r.get("cost_usd_est")),
             _fmt_tokens(r.get("tokens_in")),
             _fmt_tokens(r.get("tokens_out")),
             int(r.get("reopens") or 0),
@@ -519,8 +546,13 @@ def render_turns_table(report):
         cost.get("n") or 0, cost.get("n_unmeasured") or 0,
         _fmt_cost(cost.get("total")), _fmt_cost(cost.get("mean")),
         _fmt_cost(cost.get("median"))))
-    lines.append("'-' is UNMEASURED, not $0.00: a harness reports a cost only when it was "
-                 "asked for a JSON output format, and no cost is ever estimated.")
+    lines.append("'-' is UNMEASURED, not $0.00. Harness cost needs a JSON output format; "
+                 "'est' is a list-price token estimate (T-480), never written to jsonl.")
+    cost_est = agg.get("cost_est") or {}
+    if (cost_est.get("n") or 0) > 0:
+        lines.append("cost est (list price) measured %d ticket(s); unmeasured %d  total %s" % (
+            cost_est.get("n") or 0, cost_est.get("n_unmeasured") or 0,
+            _fmt_cost(None, cost_est.get("total"))))
 
     def dump_cost(title, rows, key):
         if not rows:

@@ -5355,34 +5355,28 @@ def _traj_line(e):
     return " ".join(bits) + ("  " + " ".join(extra) if extra else "")
 
 
+def _prices_mod():
+    try:
+        from ticket_board import prices as mod
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import prices as mod
+    return mod
+
+
 def _traj_summary(events):
     """The numbers this log exists for: turns-to-done per ticket."""
+    prices = _prices_mod()
+    table = prices.load_price_table()
     by_ticket = {}
     for e in events:
         tid = e.get("ticket")
         if not tid:
             continue
-        s = by_ticket.setdefault(tid, {"runs": 0, "updates": 0, "msgs": 0,
-                                       "reopens": 0, "agents": set(), "outcome": "",
-                                       "turns": 0, "cost_usd": 0.0, "cost_known": False})
-        k = e.get("kind")
-        if k == "run_end":
-            s["runs"] += 1
-            if isinstance(e.get("turns"), int):
-                s["turns"] += e["turns"]
-            if isinstance(e.get("cost_usd"), (int, float)):
-                s["cost_usd"] += e["cost_usd"]
-                s["cost_known"] = True
-        elif k == "update":
-            s["updates"] += 1
-        elif k == "msg":
-            s["msgs"] += 1
-        elif k == "reopen":
-            s["reopens"] += 1
-        if k in ("done", "merge", "review", "block"):
-            s["outcome"] = e.get("outcome") or k
-        if e.get("agent"):
-            s["agents"].add(e["agent"])
+        s = by_ticket.setdefault(tid, prices.traj_summary_bucket())
+        prices.traj_summary_add_event(s, e, table=table)
     return by_ticket
 
 
@@ -5434,10 +5428,7 @@ def cmd_trajectories(a, board):
             "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
             "agents / outcome"))
         for tid, s in sorted(_traj_summary(sel).items()):
-            # '-' is not $0.00: no harness on this board reports a cost unless
-            # the operator asked for a JSON output format, and a zero would
-            # read as a free ticket (T-396 null-not-zero).
-            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            cost = _prices_mod().traj_summary_cost_cell(s)
             print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
                 tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
                 s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",

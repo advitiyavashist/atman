@@ -66,8 +66,11 @@ reopens, stuck, outcome.
 - **reopens** — `reopen` events
 - **stuck** — messages whose text starts with `stuck` and `--re` that ticket
 - **outcome** — last of done / merge / review / block / reopen, else ticket status
-- **cost** — summed `cost_usd` over the ticket's `run_end` events, or `-` / `null`
-  if no run reported one (T-396)
+- **cost** — summed harness `cost_usd` over the ticket's `run_end` events, or
+  `-` / `null` if no run reported one (T-396). When tokens and a priced model
+  exist but harness cost is absent, `cost_usd_est` carries a list-price estimate
+  (labelled `est` in the table; `cost_source: "estimate"`) — never written to
+  jsonl (T-480).
 - **tok in / tok out** — summed `tokens_in` / `tokens_out`, same rule
 
 ### Cost is measured separately from turns
@@ -125,9 +128,12 @@ Row keys are exactly: `ticket`, `owner`, `model`, `turns`, `wall_clock_s`,
 tickets from mean/median; `n_unmeasured` counts them.
 
 T-396 added `cost_usd`, `tokens_in`, `tokens_out` and the three `cost*`
-aggregates. The addition is **additive**: `v` stays `1`, no existing key was
-renamed, removed or reordered, and the pre-existing keys above are still
-present on every row.
+aggregates. T-480 adds optional `cost_usd_est`, `cost_source`, and
+`cost_price_as_of` on rows that have tokens but no harness cost, plus
+`aggregates.cost_est*` (list-price estimates from `src/ticket_board/prices.json`;
+not a bill and not fed into T-415 ranking until T-470). The addition is
+**additive**: `v` stays `1`, no existing key was renamed, removed or reordered,
+and the pre-existing keys above are still present on every row.
 
 Console (T-372): home hero reads `aggregates.median`; the turns-efficiency
 panel shows worst-10 + per-agent medians from this same object. Do not

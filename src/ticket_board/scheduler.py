@@ -1069,8 +1069,9 @@ def render_scorecard_doc(rep, generated_at):
         "never one silent pct. Small *n* on disagreement medians is",
         "`-` when either side has fewer than %d comparable finished tickets." % MIN_COMPARE,
         "Turns come from the same `_measured_turns` / `tickets turns --json`",
-        "source as T-416 (T-425 idle FLAG is not reimplemented here). No cost",
-        "axis until T-403 lands.",
+        "source as T-416 (T-425 idle FLAG is not reimplemented here). Cost",
+        "estimates (T-480) are available via `tickets turns --json` (`cost_usd_est`,",
+        "labelled `est` in tables); shadow ranking still uses harness `cost_usd` only.",
         "",
     ]
     return "\n".join(lines)
