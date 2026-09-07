@@ -7,12 +7,14 @@ model call.
 
 ## What this verifies against
 
-At the time of writing none of the three lanes was on `tickets main`
-(`origin/main` = `a401ac3`, no `/messages` or `/runners` routes). The steer
-board recorded them "merged", but that is a steer-side delivery record, not an
-integration into this repo (`docs/INTEGRATION.md`). So this branch,
-`cursor-demo/t190-messaging-acceptance`, is cut from `origin/main` and merges
-the three feature branches by hand:
+When this branch was cut none of the three lanes was on `tickets main`
+(`origin/main` = `a401ac3`, no `/messages` or `/runners` routes). So
+`cursor-demo/t190-messaging-acceptance` merges the three feature branches by
+hand. Since then main moved to `7af4553`, which contains T-188 (`bc5c29a`) and
+T-189 (`401cf36`) but **still stubs T-187** (`_not_this_lane("T-187")` on
+every `/messages` route; T-187 is IN REVIEW). Main was merged back into this
+branch as `1f2cf72` -- cleanly, because the T-188/T-189 commits were already
+ancestors -- so the suite here runs against current main plus T-187.
 
 | lane  | branch@sha                                      | merge commit |
 |-------|-------------------------------------------------|--------------|
@@ -25,10 +27,19 @@ Two conflicts, both in `src/ticket_board/server/app.py` and
 `_not_this_lane`. Resolution: drop the stubs, keep both real route tables.
 Nothing under `docs/contracts/` or `tests/fixtures/` was touched.
 
-**Consequence for the verdict:** every PASS below is a pass against this
-synthetic integration, not against `tickets main`. It becomes a pass for main
-only when main contains these three lanes (or their successors) and the suite
-is re-run there. The ticket title says the same: no PASS until main has routes.
+**Consequence for the verdict:** every PASS below is a pass against main +
+T-187, not against `tickets main` alone. It becomes a pass for main only when
+T-187 (or its successor) lands there and the suite is re-run. The ticket title
+says the same: no PASS until main has the routes.
+
+Two pre-existing failures in the whole-repo run, neither introduced here and
+both reproduced at the T-187-only merge commit `375dd44`:
+`tests/server/test_auth_and_scope.py::test_other_lanes_routes_say_who_owns_them`
+(main's test expects `/messages` to be a stub; it stops being one the moment
+T-187 lands) and
+`tests/server/test_t326_t187_acceptance.py::test_f3_the_response_validates_against_the_frozen_contract`
+(the test `$ref`s `#/components/schemas/Error`, which the frozen contract does
+not define). Both belong to the T-187 merge, not to this suite.
 
 ## How the tests work
 
