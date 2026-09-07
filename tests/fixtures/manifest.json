@@ -20,6 +20,7 @@
   "errors/403-not-channel-member.json": "ErrorResponse",
   "errors/403-sender-identity-rejected.json": "ErrorResponse",
   "errors/404-not-found.json": "ErrorResponse",
+  "errors/409-acceptance-not-editable.json": "ErrorResponse",
   "errors/409-assignment-expired.json": "ErrorResponse",
   "errors/409-capacity-exhausted.json": "ErrorResponse",
   "errors/409-legacy-writer-active.json": "ErrorResponse",
@@ -121,6 +122,7 @@
   "tickets/request-review-accept.json": "ReviewDecisionRequest",
   "tickets/request-review-reject.json": "ReviewDecisionRequest",
   "tickets/request-review.json": "CreateReviewRequest",
+  "tickets/request-set-acceptance.json": "SetTicketAcceptanceRequest",
   "tickets/request-set-blocked.json": "SetTicketBlockedRequest",
   "tickets/request-update.json": "CreateUpdateRequest"
 }

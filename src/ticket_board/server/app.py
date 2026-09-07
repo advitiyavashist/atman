@@ -723,6 +723,45 @@ class BoardServer:
             err.status = 409
             raise
 
+    def set_ticket_acceptance(self, ctx):
+        """T-297: the door the T-224 amendment assumed existed.
+
+        T-224 moved ticket quality from a create-time schema minimum to
+        "enforced later" at the review gate, on the objective's forcing
+        reason that T-213's legacy import must be lossless. But nothing could
+        write `acceptance` after create, so every ticket that arrived without
+        it -- which is every imported ticket, the importer hardcodes `[]` --
+        could never reach review through the API at all. Additive under
+        freeze rule 2; the review gate itself is untouched.
+        """
+        body = validate.check_body(
+            ctx.body(),
+            required=("request_id", "expected_version", "acceptance"),
+        )
+        request_id = validate.request_id(body)
+        ticket_id = validate.ticket_id(ctx.params["ticket_id"])
+        expected_version = validate.integer(body, "expected_version", minimum=0)
+        # `validate.acceptance` on a route whose whole purpose is to supply
+        # criteria: an empty list here is a caller mistake, not a lossless
+        # import, and silently re-arming the dead end this ticket exists to
+        # close would be the worst possible success.
+        criteria = validate.acceptance(body)
+        if not criteria:
+            raise MalformedRequest("acceptance must have at least one item.",
+                                   {"rejected_fields": ["acceptance"]})
+
+        ticket = self.store.get_ticket(ctx.project_id, ticket_id)
+        if ctx.principal.is_agent and ticket.get("owner") not in (
+                None, ctx.principal.agent_id):
+            raise ForbiddenScope("Only the ticket's owner or an operator can "
+                                 "set its acceptance criteria.")
+        result = self.store.set_acceptance(
+            ctx.project_id, ticket_id, criteria,
+            expected_version=expected_version, actor=ctx.principal.actor,
+            request_id=request_id,
+        )
+        return Response(200, result)
+
     # --------------------------------------------------------------- agents
 
     def list_agents(self, ctx):
@@ -1544,6 +1583,8 @@ _ROUTE_TABLE = [
      "set_ticket_blocked", ANY, True),
     ("POST",   r"^/tickets/(?P<ticket_id>[^/]+)/reopen$",
      "reopen_ticket", OPERATOR, True),
+    ("POST",   r"^/tickets/(?P<ticket_id>[^/]+)/acceptance$",
+     "set_ticket_acceptance", ANY, True),
     ("GET",    r"^/agents$", "list_agents", ANY, True),
     ("DELETE", r"^/agents/(?P<agent_id>[^/]+)/session-lease$",
      "revoke_session_lease", OPERATOR, True),
