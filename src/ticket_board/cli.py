@@ -3496,6 +3496,10 @@ def main():
                    help="T-315: print rule vs learned/prior pick; do not assign")
     c.add_argument("--report", action="store_true",
                    help="with --shadow: agreement rate and realized turns")
+    c.add_argument("--by", choices=["turns", "cost"], default="turns",
+                   help="with --shadow: rank learned pick by turns then cost (default) or cost then turns")
+    c.add_argument("--json", action="store_true",
+                   help="with --shadow: print additive JSON (T-315/T-415 shape)")
     c.add_argument("--apply", action="store_true",
                    help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)
