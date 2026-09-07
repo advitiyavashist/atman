@@ -1,0 +1,11 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "outcome": "DEMO-14 paging returns the final page without duplicates.",
+  "routing": {
+    "mode": "direct",
+    "agent_id": "agt_backend01"
+  },
+  "ticket": {
+    "existing_ticket_id": "DEMO-14"
+  }
+}
