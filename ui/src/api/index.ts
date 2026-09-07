@@ -6,6 +6,7 @@ export { subscribeToEvents } from "./sse";
 export type { EventStreamHandle, StreamHandlers, SubscribeOptions } from "./sse";
 export type {
   ClaimTicketRequest,
+  ClientErrorCode,
   CreateAssignmentRequest,
   CreateEnrollmentRequest,
   CreateEnrollmentResponse,

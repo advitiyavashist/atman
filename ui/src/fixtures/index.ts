@@ -1,7 +1,12 @@
 // Fixture loader. Files under ./data are a verbatim copy of the frozen contract's
-// tests/fixtures/ (opus-backend/e010-contract@855e15a, docs/contracts/manifest.json
-// is the source of truth for what validates against what). T-183 builds against
-// these alone — no live API call happens anywhere in this package; that is T-184.
+// tests/fixtures/ (docs/contracts/manifest.json is the source of truth for what
+// validates against what), kept byte-identical by tests/ui/fixtures-parity.test.ts.
+//
+// SINCE T-184 NO SCREEN READS THESE. Every screen reads the live API through
+// BoardClient; these remain only as canned, contract-exact payloads for the
+// screen tests in tests/ui/, so a test asserts against a shape the board really
+// produces rather than one a test author invented. Nothing here is bundled into
+// the app — no application module imports this file.
 
 import type {
   ActivityResponse,
