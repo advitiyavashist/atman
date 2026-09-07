@@ -225,6 +225,50 @@ def test_helper_unreadable_shim_stays_and_logs_once(tmp_path):
     assert "unreadable" in logs[0]
 
 
+def test_helper_same_size_tamper_does_not_hop(tmp_path):
+    tk = load_tickets()
+    tk.watch_idle_reexec._warned = set()
+    shim, rel_a, rel_b, sha_a, sha_b = make_releases(tmp_path)
+    path = rel_b / "tickets.py"
+    data = bytearray(path.read_bytes())
+    data[0] ^= 0x01
+    path.write_bytes(bytes(data))
+    recorded = __import__("json").loads((rel_b / "release.json").read_text())
+    assert path.stat().st_size == recorded["files"]["tickets.py"]["size"]
+    write_shim(shim, path)
+    hopped = []
+    logs = []
+    tk.watch_idle_reexec(
+        executing_file=str(rel_a / "tickets.py"),
+        shim_path=str(shim),
+        argv=["watch"],
+        log=logs.append,
+        execv=lambda *a: hopped.append(a),
+    )
+    assert hopped == []
+    assert any("not a verified release" in line for line in logs)
+
+
+def test_helper_size_mismatch_does_not_hop(tmp_path):
+    tk = load_tickets()
+    tk.watch_idle_reexec._warned = set()
+    shim, rel_a, rel_b, sha_a, sha_b = make_releases(tmp_path)
+    with open(rel_b / "tickets.py", "ab") as source:
+        source.write(b"#")
+    write_shim(shim, rel_b / "tickets.py")
+    hopped = []
+    logs = []
+    tk.watch_idle_reexec(
+        executing_file=str(rel_a / "tickets.py"),
+        shim_path=str(shim),
+        argv=["watch"],
+        log=logs.append,
+        execv=lambda *a: hopped.append(a),
+    )
+    assert hopped == []
+    assert any("not a verified release" in line for line in logs)
+
+
 def test_helper_unverified_target_does_not_hop(tmp_path):
     tk = load_tickets()
     tk.watch_idle_reexec._warned = set()

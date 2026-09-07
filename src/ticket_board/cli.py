@@ -3831,8 +3831,8 @@ def _t427_verified_sha(tickets_py):
             expected_sha, expected_size = (
                 (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
                 else (recorded, None))
-            if expected_size is not None and os.stat(path).st_size == expected_size:
-                continue
+            if expected_size is not None and os.stat(path).st_size != expected_size:
+                return ""
             with open(path, "rb") as source:
                 actual = hashlib.sha256(source.read()).hexdigest()
             if actual != expected_sha:
