@@ -2,15 +2,19 @@
 
 Status: **CEO / Advitiya review.** Soft-lock pending ACCEPT. No SVG assets in this PR (T-347 waits ACCEPT). Does not change `tickets.py` `UI_HTML` (T-345 owns UI).
 
-Atman is a **BYOA runtime**. One-liner:
+Atman **is** a **BYOA runtime** (bring-your-own-agent *harness* — you do not install our model). One-liner:
 
 > Bring the agents you already use. We make them one team.
 
-UX is a **TEAM view**, not a DAG. Total Football: fluid roles, coverage over fixed identity. Agent-facing objective: task completion in the **fewest turns**.
+Feels like TEAM: **objective → allocate → concurrent → handoffs → review → replan.** North star: task completion in the **fewest turns**. Total Football: fluid roles, coverage over fixed identity.
 
-Not a multi-agent SDK. Not shared-memory-only. Not model-router-only.
+**Atman is not:** a multi-agent framework / SDK; a shared-memory product; one API for Claude/Codex; a model router alone; a DAG toy. Do not promise a learned router or shadow optimizer as V1 brand (T-313 / T-315 = NICE). Do not collapse Atman into tickets-CLI marketing — the product is the team runtime; the CLI is how it runs today.
 
-Contrast product: [steer.md](https://steer.md) = "Policy for what your AI says" — light instrument panel, slight-pixel `^`, paper / ink / lime. Atman is a **different product-family member**, not a Steer reskin.
+**Contrast (PM, keep):** Atman = *who works / how the team finishes*. SteerMD = *what the agent may see/say*. Launch hero: "Runtime policy checks for AI agents." Visual: light instrument panel, slight-pixel `^`, paper / ink / lime. Atman is a **different product-family member**, not a Steer reskin. Do not mix Steer claims into Atman.
+
+Steer (keep separate): advisory allow / block / escalate + evidence. DLP = GTM wedge. Cite only GO-WITH-DEBT / ACCEPT-with-limits. **Path B decided** — product name SteerMD, domain `steermd.com`. Do not reopen A/B/C. T-138 is not an open HOLD; only Advitiya registration residual remains. Do not rebrand Steer.
+
+Steer launch is **P0, parallel** with Atman (dual-track). Soft-hold Steer landing hero **T-341** only for this Atman direction turn — not "Steer waits forever."
 
 ---
 
@@ -23,7 +27,7 @@ Contrast product: [steer.md](https://steer.md) = "Policy for what your AI says" 
 | UI chrome / wordmark | `atman` lowercase |
 | Prose, tickets, docs | Atman (title case) |
 
-**HOLD** hard domain / URL purchase. Same deferral pattern as Steer T-138. Do not invent or recommend a domain in this review.
+**HOLD** Atman hard domain / URL purchase in this review (do not invent a domain). Steer domain is already decided — see §2. Do not write HOLD T-138.
 
 ---
 
@@ -33,14 +37,15 @@ Contrast product: [steer.md](https://steer.md) = "Policy for what your AI says" 
 
 ## 2. Positioning contrast vs Steer
 
-| | Steer | Atman |
+| | SteerMD (`steermd.com`, Path B decided) | Atman |
 |---|---|---|
-| Job-to-be-done | Policy for what your AI **says** | Runtime that makes the agents you already use **one team** |
+| Job-to-be-done | What the agent may **see/say**. Launch hero: "Runtime policy checks for AI agents." | Who **works** / how the team **finishes**. BYOA runtime: one team, fewest turns. |
 | Visual temperature | Light paper / ink / lime instrument panel | Dark command / pitch `#0c0e12` |
 | Mark language | Slight-pixel `^` (direction, policy) | Team formation (coverage, seats on a pitch) |
-| Claims honesty | No fake metrics | No fake metrics, no fake telemetry walls |
+| Claims honesty | Advisory allow/block/escalate + evidence. DLP = GTM wedge. Cite GO-WITH-DEBT / ACCEPT-with-limits only. No fake metrics. | No fake metrics, no fake telemetry walls. Never mix Steer policy claims into Atman. |
+| Track | P0 launch, **parallel** with Atman. T-341 hero paused *this turn only*. | This direction turn. Does not stall Steer. |
 
-Same family, different job. Sharing a lime or a `^` would read as a reskin. Do not do that.
+Same family, different job. Sharing a lime or a `^` would read as a reskin. Do not do that. Do not reopen Steer A/B/C.
 
 ---
 
@@ -104,9 +109,9 @@ No fake utilization percentages. Status color is evidence-backed or it is not sh
 
 ## 5. Tone rules
 
-**Use:** team, seats, lanes, coverage, intervene, objective, roster, BYOA, fewest turns.
+**Use:** teammates, seats, lanes, coverage, next step, handoff, intervene, objective, roster, BYOA, fewest turns.
 
-**Ban:** DAG, nodes, edges, orchestration framework, "multi-agent SDK", fake telemetry walls, Purview / compliance chrome, spiritual kitsch.
+**Ban:** DAG, nodes, edges, orchestration framework, "multi-agent SDK", fake telemetry walls, Purview / compliance / shield / enforce chrome, spiritual kitsch.
 
 The board is a pitch. Empty seats are uncovered work. The operator intervenes; the product does not silently auto-promote.
 
@@ -120,6 +125,8 @@ In this PR: wordmark rule + recommended mark direction (A) + token draft.
 
 **T-345** (ui, after T-276 / T-323): apply tokens and mark in `UI_HTML`. Out of scope here.
 
-**HOLD:** Steer T-138 / T-341 domain and hard-URL decisions stay soft-hold. Same rule for Atman.
+**Steer (do not reopen):** Path B decided — product name SteerMD, domain `steermd.com`. T-138 is not an open HOLD; Advitiya registration residual only. Dual-track: Steer launch stays P0 parallel with Atman. Soft-hold T-341 landing hero **this Atman direction turn only**.
+
+**Atman domain:** HOLD purchase in this review. No invented URL.
 
 See also: [TEAM IA v1](../product/atman-team-ia-v1.md) (T-348).

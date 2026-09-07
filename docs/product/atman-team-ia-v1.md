@@ -2,7 +2,15 @@
 
 Status: **lock for V1.** Surface is a TEAM view, not a DAG editor. UI implementation is T-345 (`UI_HTML`); this doc does not change that file.
 
-Atman = BYOA runtime. One-liner: *Bring the agents you already use. We make them one team.* Total Football: seats cover lanes; identity is fluid. Agent-facing objective: finish work in the **fewest turns**.
+Atman **is** a BYOA runtime (bring-your-own-agent *harness*, not "install our model"). One-liner: *Bring the agents you already use. We make them one team.*
+
+Feels like TEAM: **objective → allocate → concurrent → handoffs → review → replan.** Total Football: seats cover lanes; identity is fluid. North star: finish work in the **fewest turns**.
+
+**Not:** multi-agent framework, shared-memory product, one API for Claude/Codex, model router alone, DAG toy. Product is the team runtime; CLI is how it runs today — do not collapse marketing into `tickets`.
+
+**PM contrast (keep):** Atman = **who works / how the team finishes**. SteerMD = **what the agent may see/say** (launch hero: "Runtime policy checks for AI agents"). Steer stays advisory allow/block/escalate + evidence; DLP = GTM wedge; cite GO-WITH-DEBT / ACCEPT-with-limits only — never mix into Atman claims.
+
+**Path B decided** — SteerMD / `steermd.com`. Do not reopen Steer A/B/C. Do not write HOLD T-138 (registration residual only). Dual-track: Steer launch is P0 parallel with Atman. Soft-hold T-341 landing hero **this Atman direction turn only** — not "Steer waits forever."
 
 Related: [brand direction v1](../brand/atman-brand-direction-v1.md) (T-346). Tickets: T-345, T-276, T-323, T-346, T-347, T-348.
 
@@ -32,7 +40,7 @@ T-276's agents pane is the seed. Rename and reframe to Team in T-345.
 
 Kanban: **Blocked | Ready | In flight | Review**.
 
-This is the work surface, not a dependency-graph editor. Deps may appear as waiting-on chips on a card. Operators do not draw nodes or edges.
+Language: teammates, lanes, next step, handoff — not nodes / edges / SDK. This is the work surface, not a dependency-graph editor. Deps may appear as waiting-on chips on a card. Operators do not draw nodes or edges.
 
 T-276 already ships this four-column board. Keep it. Do not replace it with a DAG.
 
@@ -86,4 +94,4 @@ If a step needs a write the UI does not have yet, stop and show the honesty stri
 
 T-348 is this IA lock. T-345 implements it. T-347 does not start until brand shortlist ACCEPT.
 
-**HOLD:** Steer T-138 / T-341 domain / URL soft-hold. No Atman URL decision in this doc.
+**Steer (do not reopen):** Path B decided — SteerMD / `steermd.com`. T-138 is not an open HOLD (Advitiya registration residual only). T-341 hero copy is soft-held **this turn only**; Steer launch stays P0 parallel. No Atman URL decision in this doc.
