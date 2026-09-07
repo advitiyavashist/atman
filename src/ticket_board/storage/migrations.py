@@ -210,37 +210,63 @@ def _migrate_hook_events_pk(conn):
     `event_id` collision then hits the table's own PK and raises
     `IntegrityError` instead of the pre-T-266 silent drop it was meant to
     replace.
+
+    Wrapped in a single transaction (T-328): the connection is opened with
+    `isolation_level=None` (autocommit), so each statement in the rebuild
+    used to commit on its own -- a crash between the RENAME and the final
+    CREATE INDEX left `hook_events` either missing or half-populated, and
+    since `apply_schema`'s `CREATE TABLE IF NOT EXISTS` silently recreates
+    an empty table with the new PK on the next boot, the old rows (still
+    sitting under `hook_events_pre_t266`) become permanently unreachable
+    with no error raised anywhere. SQLite DDL is transactional, so a literal
+    BEGIN/COMMIT around the script makes the rebuild atomic: either the full
+    new table is in place, or a crash rolls back to the untouched original
+    and the migration retries from scratch on the next successful open. This
+    must stay a literal BEGIN/COMMIT inside the script text, not a Python-level
+    `conn.execute("BEGIN")` before it -- `executescript()` issues an implicit
+    COMMIT of any pending transaction before it runs, which would otherwise
+    close the transaction before the DDL even starts. This migration never
+    toggles `PRAGMA foreign_keys` (that pragma is a no-op inside a
+    transaction), so nothing needs to sequence outside the BEGIN/COMMIT.
     """
     if not _hook_events_keyed_on_event_id_alone(conn):
         return
-    conn.executescript("""
-        ALTER TABLE hook_events RENAME TO hook_events_pre_t266;
+    try:
+        conn.executescript("""
+            BEGIN;
 
-        CREATE TABLE hook_events (
-            event_id    TEXT NOT NULL,
-            project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            agent_id    TEXT NOT NULL,
-            session_id  TEXT NOT NULL,
-            kind        TEXT NOT NULL
-                        CHECK (kind IN ('session_start', 'user_prompt_submit',
-                                        'stop', 'probe')),
-            occurred_at TEXT NOT NULL,
-            cwd         TEXT,
-            note        TEXT,
-            PRIMARY KEY (project_id, event_id)
-        );
+            ALTER TABLE hook_events RENAME TO hook_events_pre_t266;
 
-        INSERT INTO hook_events (event_id, project_id, agent_id, session_id,
-                                  kind, occurred_at, cwd, note)
-            SELECT event_id, project_id, agent_id, session_id,
-                   kind, occurred_at, cwd, note
-            FROM hook_events_pre_t266;
+            CREATE TABLE hook_events (
+                event_id    TEXT NOT NULL,
+                project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                agent_id    TEXT NOT NULL,
+                session_id  TEXT NOT NULL,
+                kind        TEXT NOT NULL
+                            CHECK (kind IN ('session_start', 'user_prompt_submit',
+                                            'stop', 'probe')),
+                occurred_at TEXT NOT NULL,
+                cwd         TEXT,
+                note        TEXT,
+                PRIMARY KEY (project_id, event_id)
+            );
 
-        DROP TABLE hook_events_pre_t266;
+            INSERT INTO hook_events (event_id, project_id, agent_id, session_id,
+                                      kind, occurred_at, cwd, note)
+                SELECT event_id, project_id, agent_id, session_id,
+                       kind, occurred_at, cwd, note
+                FROM hook_events_pre_t266;
 
-        CREATE INDEX IF NOT EXISTS idx_hook_events_agent
-            ON hook_events(agent_id, occurred_at);
-    """)
+            DROP TABLE hook_events_pre_t266;
+
+            CREATE INDEX IF NOT EXISTS idx_hook_events_agent
+                ON hook_events(agent_id, occurred_at);
+
+            COMMIT;
+        """)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def apply_migrations(conn):
