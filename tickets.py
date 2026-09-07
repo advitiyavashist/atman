@@ -680,16 +680,77 @@ def agents_dir(board):
     return os.path.join(board, "agents")
 
 
+class _AgentLock:
+    """Serialize read-modify-write on one agents/<name>.json across processes.
+
+    The lock lives on a SEPARATE <name>.json.lock file, never on the record
+    itself: the record is published with os.replace, which swaps the inode out
+    from under any lock held on it, so locking the record would appear to work
+    and serialize nothing.
+
+    Blocking LOCK_EX, not the LOCK_NB used by merge.lock. A heartbeat must wait
+    its turn, never fail: the point of this lock is that no writer silently
+    loses, and refusing a check-in would trade a lost write for a dead agent.
+    flock is released by the kernel when the holder exits, so an agent killed
+    mid-write cannot strand the file the way an O_EXCL lockfile would.
+    """
+
+    def __init__(self, board, owner):
+        os.makedirs(agents_dir(board), exist_ok=True)
+        self.path = os.path.join(agents_dir(board), owner + ".json.lock")
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:  # no flock on this platform; degrade to today's behaviour
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
+def _agent_update(board, owner, mutate):
+    """Read-modify-write an agent record with the READ INSIDE the lock.
+
+    Every writer of agents/<name>.json goes through here. Doing the read
+    outside is the whole defect: os.replace makes each write atomic, but two
+    writers that both read the pre-image and then write in turn silently drop
+    whichever field the loser did not know about -- and both print success.
+
+    `mutate(rec)` edits the dict in place; returning False aborts without
+    writing. Anything slow (git, load_all, subprocesses) belongs OUTSIDE this
+    call: the critical section is meant to be a read, a dict update and a
+    rename, so a blocking lock is never held long enough to matter.
+    """
+    path = os.path.join(agents_dir(board), owner + ".json")
+    with _AgentLock(board, owner):
+        rec = _agent_rec(board, owner) or {}
+        if mutate(rec) is False:
+            return None
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+        os.replace(tmp, path)
+    return rec
+
+
 def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
     _state, _mismatch = _git_state_raw()
     g = _state or {}
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
-    # Other commands keep their own state in this record (inbox_seen, limit,
-    # stop_blocks); a check-in must not erase it or every watch poll re-wakes the agent.
-    rec = _agent_rec(board, owner) or {}
-    rec.update({
+    # git_state and _current_ticket shell out; keep them off the critical section.
+    fields = {
         "owner": owner,
         "cwd": os.getcwd(),
         "worktree": g.get("top", ""),
@@ -702,12 +763,12 @@ def checkin(board, owner, ticket=None, note=""):
         "ticket": ticket if ticket is not None else _current_ticket(board, owner),
         "note": note,
         "seen": now(),
-    })
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f, indent=2)
-    os.replace(tmp, path)
-    return rec
+    }
+    # Other commands keep their own state in this record (inbox_seen, limit,
+    # stop_blocks); a check-in must not erase it or every watch poll re-wakes
+    # the agent. rec.update preserves them against the ORDERING hazard; the
+    # lock in _agent_update is what preserves them against the CONCURRENCY one.
+    return _agent_update(board, owner, lambda rec: rec.update(fields))
 
 
 def _current_ticket(board, owner):
@@ -1882,20 +1943,20 @@ def _scan_logs(paths, hours):
 def cmd_limit(a, board):
     """Record (or clear) that an agent hit a usage limit; shown in who/master."""
     owner = a.agent or whoami()
-    rec = _agent_rec(board, owner) or checkin(board, owner)
+    if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
+        checkin(board, owner)
     if a.clear:
-        rec.pop("limit", None)
+        mutate = lambda rec: rec.pop("limit", None)
         msg = "%s is back (limit cleared)" % owner
     else:
-        rec["limit"] = {"at": now(), "until": a.until or "", "note": a.note or ""}
+        limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
+        mutate = lambda rec: rec.update({"limit": limit})
         msg = "%s hit a usage limit%s%s" % (owner, (" until %s" % a.until) if a.until else "",
                                             (": %s" % a.note) if a.note else "")
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f, indent=2)
-    os.replace(tmp, path)
+    # Read-modify-write under the lock: a watch-loop heartbeat lands on this
+    # same record every 60s, and unsynchronised it would drop the limit while
+    # this command still printed success -- the exact bug this guards.
+    _agent_update(board, owner, mutate)
     post_message(board, owner, msg)
     print(msg)
     held = [t for t in load_all(board) if t["status"] == "claimed" and t.get("owner") == owner]
@@ -2866,15 +2927,9 @@ def load_messages(board, include_archives=False):
 
 def _agent_set(board, owner, **fields):
     """Update fields on an agent record without touching the rest of it."""
-    rec = _agent_rec(board, owner) or checkin(board, owner)
-    rec.update(fields)
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f, indent=2)
-    os.replace(tmp, path)
-    return rec
+    if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
+        checkin(board, owner)
+    return _agent_update(board, owner, lambda rec: rec.update(fields))
 
 
 def _agent_rec(board, owner):
@@ -2887,16 +2942,10 @@ def _agent_rec(board, owner):
 
 
 def _mark_inbox_read(board, owner):
-    rec = _agent_rec(board, owner)
-    if not rec:
-        rec = checkin(board, owner)
-    rec["inbox_seen"] = now()
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f, indent=2)
-    os.replace(tmp, path)
+    if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
+        checkin(board, owner)
+    stamp = now()
+    _agent_update(board, owner, lambda rec: rec.update({"inbox_seen": stamp}))
 
 
 def unread(board, owner):
@@ -3634,25 +3683,29 @@ def cmd_dash(a, board):
 
 
 def _record_stop_block(board, owner):
-    """Rate-limit continuations: returns False when the hourly cap is reached."""
-    path = os.path.join(agents_dir(board), owner + ".json")
-    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    """Rate-limit continuations: returns False when the hourly cap is reached.
+
+    Counting and appending both happen inside the lock. Read the count outside
+    it and two stop hooks firing together each see the same pre-image, each
+    decide they are under the cap, and the agent gets more continuations than
+    the cap allows -- the same read-modify-write hole as the limit/heartbeat
+    race, cashed out as a rate limit that does not hold.
+    """
     cutoff = datetime.now(timezone.utc).timestamp() - 3600
-    stamps = [s for s in rec.get("stop_blocks", []) if _safe(lambda: datetime.strptime(
-        s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp(), 0) > cutoff]
-    if len(stamps) >= STOP_HOOK_MAX_PER_HOUR:
-        return False
-    stamps.append(now())
-    rec["stop_blocks"] = stamps
-    try:
-        os.makedirs(agents_dir(board), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(rec, f, indent=2)
-        os.replace(tmp, path)
-    except OSError:
-        pass
-    return True
+    capped = []
+
+    def mutate(rec):
+        stamps = [s for s in rec.get("stop_blocks", []) if _safe(lambda: datetime.strptime(
+            s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp(), 0) > cutoff]
+        if len(stamps) >= STOP_HOOK_MAX_PER_HOUR:
+            capped.append(True)
+            return False  # over the cap: abort without writing
+        stamps.append(now())
+        rec["stop_blocks"] = stamps
+
+    # Never raises: this is a hook, and a write failure must not stop the turn.
+    _safe(lambda: _agent_update(board, owner, mutate), None)
+    return not capped
 
 
 def cmd_stop_hook(a, board):
