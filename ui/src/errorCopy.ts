@@ -54,6 +54,10 @@ const HEADLINES: Partial<Record<ErrorCode | ClientErrorCode, string>> = {
     "The evidence does not match the review that was submitted, or a check has failed.",
   enrollment_code_invalid: "That enrollment code has already been used or is not valid.",
   enrollment_code_expired: "That enrollment code expired. Issue a new one.",
+  not_channel_member: "You are not a member of this channel. Ask an owner or admin to add you.",
+  membership_revoked: "Your membership in this project was revoked.",
+  sender_identity_rejected:
+    "The board rejected this message's sender field. The composer never sends one — reload and retry.",
   rate_limited: "The board is rate-limiting this client. Wait a moment, then retry.",
   not_found: "The board has no such record.",
   malformed_request: "The board rejected the request as malformed.",

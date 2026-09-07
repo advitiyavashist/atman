@@ -1,0 +1,72 @@
+{
+  "message": {
+    "id": "msg_00000006",
+    "project_id": "prj_demo0001",
+    "channel_id": "chn_work0001",
+    "thread_id": null,
+    "author": {
+      "type": "human",
+      "id": "mem_operator1",
+      "display_name": "Operator",
+      "session_id": null
+    },
+    "body": "Please fix the DEMO-14 paging boundary.",
+    "intent": "task",
+    "ticket_id": "DEMO-14",
+    "mentions": [],
+    "causation_id": null,
+    "conversation_id": null,
+    "supersedes_message_id": null,
+    "version": 1,
+    "created_at": "2026-09-06T14:32:00Z"
+  },
+  "ticket": {
+    "id": "DEMO-14",
+    "project_id": "prj_demo0001",
+    "title": "Document the widget endpoint",
+    "outcome": "The widget endpoint is documented in the README.",
+    "acceptance": [
+      {
+        "text": "Cursor paging works",
+        "checked": false,
+        "checked_by": null,
+        "checked_at": null
+      }
+    ],
+    "state": "open",
+    "version": 1,
+    "role": "backend",
+    "owner": null,
+    "owner_session": null,
+    "dependencies": [],
+    "dependency_blocked": false,
+    "blocked_reason": null,
+    "files": [],
+    "worktree": null,
+    "evidence": null,
+    "next_step": null,
+    "handoff": null,
+    "created_at": "2026-09-06T14:30:00Z",
+    "updated_at": "2026-09-06T14:32:00Z",
+    "claimed_at": null,
+    "last_progress_at": null
+  },
+  "deliveries": [
+    {
+      "id": "dlv_00000004",
+      "message_id": "msg_00000006",
+      "recipient_agent_id": "agt_backend01",
+      "state": "queued",
+      "reason": "runner_offline",
+      "reason_detail": "Queued - runner offline.",
+      "run_id": null,
+      "blocking_ticket_id": null,
+      "attempts": 0,
+      "next_attempt_at": "2026-09-06T14:40:00Z",
+      "created_at": "2026-09-06T14:32:00Z",
+      "updated_at": "2026-09-06T14:35:00Z",
+      "version": 2
+    }
+  ],
+  "wake_job": null
+}

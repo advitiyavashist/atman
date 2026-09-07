@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "sender_identity_rejected",
+    "status": 403,
+    "message": "Message author is taken from the credential and cannot be set in the body.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {}
+  }
+}

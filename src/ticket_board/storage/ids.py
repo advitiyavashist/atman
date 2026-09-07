@@ -95,3 +95,15 @@ def event_id(seq):
 def now():
     """RFC 3339 UTC, second precision. Timestamps are always server-assigned."""
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse(stamp):
+    """The inverse of `now()`. Every stored timestamp is in exactly this shape."""
+    return _dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=_dt.timezone.utc)
+
+
+def in_seconds(seconds, *, at=None):
+    """An RFC 3339 UTC timestamp `seconds` from `at` (default now)."""
+    base = _dt.datetime.now(_dt.timezone.utc) if at is None else parse(at)
+    return (base + _dt.timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")

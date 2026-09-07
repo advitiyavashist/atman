@@ -9,6 +9,7 @@ update` return to an agent -- not the in-process functions.
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,12 @@ def test_a_note_from_a_non_owner_notifies_the_owner(board):
     looking. A stranger's note on a claimed ticket must actively signal the
     owner, since silent duplicate work is the actual harm."""
     assert run(board, "next", agent="agent-a").returncode == 0
+    # T-244 stamps agent-a's inbox_seen the moment its record is created here
+    # (the "next" claim above is its first-ever check-in); without a real gap,
+    # agent-b's note below can land in the SAME wall-clock second, which the
+    # pre-existing, separately-filed T-228 hole (strict `>` on second-resolution
+    # timestamps) would then hide. Not this test's bug to fix -- just avoid it.
+    time.sleep(1.1)
     r = run(board, "update", "T-001", "also working on this", agent="agent-b")
     assert r.returncode == 0, r.stderr
     assert "agent-a" in r.stdout  # the printed warning names the owner

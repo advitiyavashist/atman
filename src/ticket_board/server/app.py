@@ -11,17 +11,22 @@ add to the next route, and the two credential types differ in what they may do,
 not merely in who they are.
 
 Routes belonging to other lanes (`/messages`, `/channels`, `/members`,
-`/invitations`, `/runners`, `/runs`) are declared here and answer 404 with the
-contract's error shape and the owning ticket named in the message. Returning a
-contract-shaped refusal that says "T-187 owns this" is more useful to the
-console lane than a bare connection error, and it cannot be mistaken for a
-working route.
+`/invitations`) are declared here and answer 404 with the contract's error
+shape and the owning ticket named in the message. Returning a contract-shaped
+refusal that says "T-187 owns this" is more useful to the console lane than a
+bare connection error, and it cannot be mistaken for a working route.
+
+The runner surface (`/runners/register`, `/runners/jobs`, `/runs/{id}/events`,
+`/runs/{id}/cancel`) is implemented here as of T-188. It is the server half of
+the managed runner; the supervisor that consumes it lives in
+`ticket_board.runners` and is documented in `docs/managed-runner.md`.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+import time
 import traceback
 
 from ..storage import BoardStore, ids
@@ -37,6 +42,7 @@ from .auth import (
 )
 from .errors import (
     AgentTokenInsufficient,
+    RunAlreadyActive,
     AssignmentExpired,
     BoardError,
     ForbiddenScope,
@@ -55,6 +61,16 @@ SESSION_ID_RE = re.compile(r"^ses_[0-9a-z]{8,32}$")
 REVIEW_ID_RE = re.compile(r"^rev_[0-9a-z]{8,32}$")
 AGENT_ID_RE = re.compile(r"^agt_[0-9a-z]{8,32}$")
 ASSIGNMENT_ID_RE = re.compile(r"^asg_[0-9a-z]{8,32}$")
+RUNNER_ID_RE = re.compile(r"^rnr_[0-9a-z]{8,32}$")
+RUN_ID_RE = re.compile(r"^run_[0-9a-z]{8,32}$")
+
+# How long a runner lease is good for, and how often a long poll re-checks.
+# The design doc's acceptance target is that an idle managed agent starts
+# within 5s of a committed task message, so the poll interval has to be well
+# under that on its own -- a 1s interval would spend a fifth of the budget
+# before the supervisor even sees the job.
+RUNNER_LEASE_SECONDS = 120
+RUNNER_POLL_INTERVAL = 0.05
 
 # Auth requirements, resolved before the handler runs.
 ANY = "any"            # either credential type
@@ -82,6 +98,8 @@ class BoardServer:
 
     def __init__(self, db_path, *, allowed_origins=None, base_url=None,
                  session_lease_seconds=SESSION_LEASE_SECONDS,
+                 runner_lease_seconds=RUNNER_LEASE_SECONDS,
+                 runner_poll_interval=RUNNER_POLL_INTERVAL,
                  rate_limiter=None, event_stream=None):
         self.store = BoardStore(db_path)
         apply_server_schema(self.store.conn)
@@ -93,6 +111,8 @@ class BoardServer:
             self.base_url, "http://127.0.0.1:4319", "http://localhost:4319",
         ])
         self.session_lease_seconds = session_lease_seconds
+        self.runner_lease_seconds = runner_lease_seconds
+        self.runner_poll_interval = runner_poll_interval
 
     def close(self):
         self.store.close()
@@ -968,6 +988,180 @@ class BoardServer:
                             "X-Accel-Buffering": "no",
                         })
 
+    # --------------------------------------------------------------- runners
+
+    def register_runner(self, ctx):
+        """Take the runner lease for the caller's own agent.
+
+        `agent_id` is in the frozen request body, so it cannot be dropped, but
+        it is not the authority for who is registering: the credential is.
+        A body that names a different agent is refused rather than honoured,
+        which is the same actor-bound-from-credential rule the rest of the
+        surface follows -- a runner must not be able to take another agent's
+        lease by asking nicely.
+        """
+        body = validate.check_body(
+            ctx.body(),
+            required=("request_id", "runner_id", "agent_id", "allowlisted_worktree"),
+            allowed=("runtime_profile", "permission_policy", "expected_epoch"),
+        )
+        request_id = validate.request_id(body)
+        runner_id = _runner_id(body)
+        if body.get("agent_id") != ctx.principal.agent_id:
+            raise ForbiddenScope("A runner may only register for its own agent.")
+        expected_epoch = None
+        if body.get("expected_epoch") is not None:
+            expected_epoch = validate.integer(body, "expected_epoch", minimum=0)
+        lease = self.store.acquire_runner_lease(
+            ctx.project_id, runner_id, ctx.principal.agent_id,
+            in_seconds(self.runner_lease_seconds),
+            allowlisted_worktree=validate.text(body, "allowlisted_worktree",
+                                               max_length=300),
+            runtime_profile=validate.text(body, "runtime_profile", max_length=60,
+                                          required=False,
+                                          default="claude-code-default"),
+            permission_policy=validate.enum(
+                body, "permission_policy", ("prompt", "allowlist", "deny_all"),
+                required=False, default="prompt"),
+            expected_epoch=expected_epoch,
+            request_id=request_id,
+        )
+        return Response(200, lease)
+
+    def list_wake_jobs(self, ctx):
+        """Long-poll for work this runner may start.
+
+        The wait is a real wait, not a hint: the acceptance target is a start
+        within 5 seconds of a committed task message, and a runner that has to
+        wait out a fixed poll interval spends most of that budget idle. Each
+        pass re-checks cheaply and only opens a write transaction when there is
+        actually something to lease or reclaim, so a 20-second wait on an idle
+        board is 20 seconds of reads, not 400 write transactions.
+
+        An empty page is a normal answer -- the contract says so, and it is
+        also what a *busy* agent returns, since concurrency is 1 and a queued
+        job is not startable yet.
+        """
+        runner_id = ctx.request.param("runner_id")
+        if not runner_id or not RUNNER_ID_RE.match(runner_id):
+            raise MalformedRequest("runner_id must look like rnr_....",
+                                   {"rejected_fields": ["runner_id"]})
+        wait_seconds = _wait_seconds(ctx.request.param("wait_seconds"))
+        agent_id = ctx.principal.agent_id
+
+        result = self._lease_jobs(ctx.project_id, agent_id, runner_id)
+        deadline = time.monotonic() + wait_seconds
+        while not result["items"] and time.monotonic() < deadline:
+            time.sleep(min(self.runner_poll_interval,
+                           max(0.0, deadline - time.monotonic())))
+            if not self._has_startable_job(ctx.project_id, agent_id):
+                continue
+            result = self._lease_jobs(ctx.project_id, agent_id, runner_id)
+        return Response(200, result)
+
+    def _lease_jobs(self, project_id, agent_id, runner_id):
+        try:
+            lease = self.store.get_runner_lease(project_id, agent_id)
+        except NotFound:
+            # 404 is not one of this route's declared responses, and "you never
+            # registered" is a different fact from "somebody else holds it".
+            raise ForbiddenScope(
+                "This runner holds no lease; POST /runners/register first.")
+        if lease["runner_id"] != runner_id:
+            raise RunAlreadyActive(agent_id, lease["runner_id"], lease["epoch"])
+        if lease["expires_at"] <= ids.now():
+            # This runner's own lease, lapsed. The store would refuse it too,
+            # but as `run_already_active` -- "A runner is already active for
+            # that agent" is exactly the wrong sentence to hand somebody whose
+            # lease has simply run out and whom nobody has replaced. The
+            # recovery is the same as never having registered, so say that.
+            raise ForbiddenScope(
+                "This runner's lease expired at {}; POST /runners/register to "
+                "renew it before asking for work.".format(lease["expires_at"]))
+        return self.store.lease_wake_jobs(project_id, agent_id, runner_id,
+                                          epoch=lease["epoch"])
+
+    def _has_startable_job(self, project_id, agent_id):
+        """A read-only probe: is there anything a lease call could act on?
+
+        Pending work, or a lease that has expired and can be reclaimed. Both
+        are the same question for the poll loop, and neither needs a write.
+        """
+        row = self.store.conn.execute(
+            "SELECT 1 FROM wake_jobs WHERE project_id = ? AND recipient_agent_id = ?"
+            " AND (state = 'pending' OR (state = 'leased'"
+            "      AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))"
+            " LIMIT 1",
+            (project_id, agent_id, ids.now()),
+        ).fetchone()
+        return row is not None
+
+    def post_run_event(self, ctx):
+        """Report run progress, with the reporter bound from the credential.
+
+        The body's `session_id` is the CHILD session the run executes in, not
+        the reporter's identity -- the supervisor mints it and retains it
+        before launching so a crash between claim and spawn can be reconciled.
+        The reporter's own session comes from the agent token and nowhere else.
+        `record_run_event` is where the difference is enforced; see its
+        docstring for the three-state attribution rule.
+        """
+        run_id = ctx.params["run_id"]
+        if not RUN_ID_RE.match(run_id):
+            raise NotFound("No such run.", {"run_id": run_id})
+        body = validate.check_body(
+            ctx.body(),
+            required=("request_id", "expected_version", "event"),
+            allowed=("session_id", "ticket_claim", "reason", "budget"),
+        )
+        request_id = validate.request_id(body)
+        run = self.store.get_run(ctx.project_id, run_id)
+        if run["recipient_agent_id"] != ctx.principal.agent_id:
+            raise ForbiddenScope("A run event may only be posted for the "
+                                 "caller's own run.")
+        updated = self.store.record_run_event(
+            ctx.project_id, run_id,
+            validate.enum(body, "event",
+                          ("starting", "started", "turn_completed",
+                           "needs_approval", "responded", "failed",
+                           "budget_reached")),
+            expected_version=validate.integer(body, "expected_version", minimum=1),
+            reporter_session_id=ctx.principal.session_id,
+            session_id=_child_session_id(body),
+            ticket_claim=(validate.ticket_id(body["ticket_claim"])
+                          if body.get("ticket_claim") is not None else None),
+            reason=validate.text(body, "reason", max_length=300, required=False),
+            budget=_run_budget(body),
+            request_id=request_id,
+        )
+        return Response(200, updated)
+
+    def cancel_run(self, ctx):
+        """Cooperative cancel. It retains artifacts and completes no ticket.
+
+        Open to either credential: an operator cancels from the dashboard, and
+        a supervisor cancels its own run when a budget or a shutdown says so.
+        An agent may only cancel a run that is its own.
+        """
+        run_id = ctx.params["run_id"]
+        if not RUN_ID_RE.match(run_id):
+            raise NotFound("No such run.", {"run_id": run_id})
+        body = validate.check_body(
+            ctx.body(), required=("request_id", "expected_version", "reason"))
+        request_id = validate.request_id(body)
+        run = self.store.get_run(ctx.project_id, run_id)
+        if ctx.principal.is_agent and \
+                run["recipient_agent_id"] != ctx.principal.agent_id:
+            raise ForbiddenScope("A run may only be canceled by its own agent "
+                                 "or by an operator.")
+        canceled = self.store.cancel_run(
+            ctx.project_id, run_id,
+            expected_version=validate.integer(body, "expected_version", minimum=1),
+            reason=validate.text(body, "reason", max_length=300),
+            request_id=request_id,
+        )
+        return Response(200, canceled)
+
     # ------------------------------------------------- other lanes' routes
 
     def _not_this_lane(self, ticket):
@@ -982,8 +1176,6 @@ class BoardServer:
     def messaging_route(self, ctx):
         return self._not_this_lane("T-187")(ctx)
 
-    def runner_route(self, ctx):
-        return self._not_this_lane("T-188")(ctx)
 
 
 # --------------------------------------------------------------- helpers
@@ -1130,6 +1322,84 @@ _ROUTE_TABLE = [
     ("POST",   r"^/messages$", "messaging_route", ANY, True),
     ("POST",   r"^/invitations$", "messaging_route", ANY, True),
     ("POST",   r"^/invitations/exchange$", "messaging_route", NONE, True),
-    ("POST",   r"^/runners/register$", "runner_route", AGENT, True),
-    ("GET",    r"^/runners/jobs$", "runner_route", AGENT, True),
+    # The runner surface (T-188). Register and job leasing are agent-only:
+    # an operator has no runtime session to run work through. Cancel takes
+    # either credential -- the dashboard cancels, and so does a supervisor
+    # whose budget ran out.
+    ("POST",   r"^/runners/register$", "register_runner", AGENT, True),
+    ("GET",    r"^/runners/jobs$", "list_wake_jobs", AGENT, True),
+    ("POST",   r"^/runs/(?P<run_id>[^/]+)/events$", "post_run_event", AGENT, True),
+    ("POST",   r"^/runs/(?P<run_id>[^/]+)/cancel$", "cancel_run", ANY, True),
 ]
+
+
+def _runner_id(body):
+    value = body.get("runner_id")
+    if not isinstance(value, str) or not RUNNER_ID_RE.match(value):
+        raise MalformedRequest("runner_id must look like rnr_....",
+                               {"rejected_fields": ["runner_id"]})
+    return value
+
+
+def _child_session_id(body):
+    """The run's own runtime session, write-once and optional on the wire."""
+    value = body.get("session_id")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not SESSION_ID_RE.match(value):
+        raise MalformedRequest("session_id must look like ses_....",
+                               {"rejected_fields": ["session_id"]})
+    return value
+
+
+# `RunBudget` is `required: [max_hops, max_turns, max_seconds]` with minimums,
+# and `additionalProperties: false`. A partial budget is therefore not a
+# RunBudget at all -- accepting `{"turns_used": 1}` would let a client write a
+# body the published schema rejects, which is exactly the drift validate.py
+# exists to prevent. Found by tests/runners/test_route_conformance.py.
+_BUDGET_LIMITS = {"max_hops": 1, "max_turns": 1, "max_seconds": 30}
+_BUDGET_COUNTERS = ("hops_used", "turns_used", "seconds_used")
+
+
+def _run_budget(body):
+    value = body.get("budget")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise MalformedRequest("budget must be an object.",
+                               {"rejected_fields": ["budget"]})
+    unexpected = sorted(set(value) - set(_BUDGET_LIMITS) - set(_BUDGET_COUNTERS))
+    if unexpected:
+        raise MalformedRequest("budget contained unexpected fields.",
+                               {"rejected_fields": unexpected})
+    missing = sorted(f for f in _BUDGET_LIMITS if f not in value)
+    if missing:
+        raise MalformedRequest(
+            "budget must carry max_hops, max_turns and max_seconds.",
+            {"missing_fields": missing})
+    for key, minimum in _BUDGET_LIMITS.items():
+        validate.integer(value, key, minimum=minimum)
+    for key in _BUDGET_COUNTERS:
+        if key in value and value[key] is not None:
+            validate.integer(value, key, minimum=0)
+    return value
+
+
+def _wait_seconds(raw):
+    """0..60, default 20. Out of range is a 400, not a silent clamp.
+
+    A clamp here would be the quiet kind of wrong: a runner asking for 600
+    would believe it had a ten-minute poll and would instead hammer the board
+    every minute, and nothing would ever say so.
+    """
+    if raw is None or raw == "":
+        return 20
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise MalformedRequest("wait_seconds must be an integer.",
+                               {"rejected_fields": ["wait_seconds"]})
+    if value < 0 or value > 60:
+        raise MalformedRequest("wait_seconds must be between 0 and 60.",
+                               {"rejected_fields": ["wait_seconds"]})
+    return value

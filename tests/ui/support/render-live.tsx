@@ -42,7 +42,18 @@ export interface LiveHarness {
   calls(): { method: string; path: string; body: unknown }[];
 }
 
-const CREATED_ROUTES = ["/updates", "/reviews", "/tickets", "/enrollments", "/sessions", "/assignments"];
+const CREATED_ROUTES = [
+  "/updates",
+  "/reviews",
+  "/tickets",
+  "/enrollments",
+  "/sessions",
+  "/assignments",
+  "/channels",
+  "/messages",
+  "/task",
+  "/members",
+];
 
 /**
  * Build a fetch that serves `routes` and holds `/events` open.
