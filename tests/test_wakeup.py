@@ -504,11 +504,17 @@ def test_master_heartbeat_drives_only_the_master_seat(board):
     assert "DRIVE THE OBJECTIVE" in out and "Ship V1" in out
     rc, p = pending(board, "boss")
     assert "drive" not in p
-    # a worker with the same heartbeat setting is never driven
+    # a plain worker is never driven; a seat spawned with --heartbeat is (standing seat)
     run(board, "join", "bob", "--roles", "backend")
-    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob")
     rc, p = pending(board, "bob")
     assert "drive" not in p
+    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob")
+    rc, p = pending(board, "bob")
+    assert "drive" in p
+    out = run(board, "prompt", agent="bob").stdout
+    assert "HEARTBEAT" in out and "Ship V1" in out
+    rc, p = pending(board, "bob")
+    assert "drive" not in p                                   # prompt stamped drive_at
     # a met objective stops the heartbeat
     run(board, "objective", "--done", "shipped", agent="boss")
     rec = json.loads((board / "agents" / "boss.json").read_text())

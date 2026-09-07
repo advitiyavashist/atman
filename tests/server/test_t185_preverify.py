@@ -10,8 +10,8 @@ Every case here is either:
               has (a genuinely separate deployed process, a real spawned
               agent session, or a component not yet built).
 
-See docs/handoffs/reports/t185-verification-plan.md (steer repo) for the
-full plan this file implements a slice of, and why each GAP is a gap.
+Named GAP cases cannot run without a separate deployed process, a real
+spawned agent session, or a component not yet built.
 """
 
 import http.client
@@ -210,7 +210,7 @@ def test_master_lease_expiry_is_reported_but_is_not_a_fencing_condition(
     unresponsive master hold the board hostage. So an expired lease must
     still (a) be re-takeable by the correct expected_epoch and (b) show up
     as a master_lease_expired attention item in the meantime (the exact bug
-    opus-backend fixed mid-T-180: it was keyed on 'holder is not null and
+    an earlier pass fixed mid-T-180: it was keyed on 'holder is not null and
     expired', but serialize_master_lease nulls holder once a lease lapses,
     so the alert could never fire -- now keyed on epoch>0 and expired).
     """

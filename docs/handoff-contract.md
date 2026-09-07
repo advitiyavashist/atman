@@ -41,8 +41,8 @@ decisions. Written for the next agent, not for the log.
 
 ## Two failure modes that are invisible without a checker
 
-Both of these happened on one board in one day, and neither is caught by tests,
-linting, or code review — they are properties of documentation, not of code.
+Neither of these is caught by tests, linting, or code review — they are
+properties of documentation, not of code.
 
 ### 1. A file that exists but was never filled in
 

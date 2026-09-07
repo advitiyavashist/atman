@@ -28,6 +28,7 @@ import errno
 import glob
 import json
 import os
+import re
 import shlex
 import sys
 import threading
@@ -102,11 +103,11 @@ def _clean_git_env(environ=None):
     agent the watcher launches, which is why the wrong repo tracked "whichever
     worktree was most recently active globally" rather than any one agent.
 
-    Scope, deliberately narrow (T-259 defect 3 / cos-opus's ruling): only the
+    Scope, deliberately narrow: only the
     location family is removed. GIT_AUTHOR_*/GIT_COMMITTER_* must survive --
-    this env is also handed to `cmd_watch`/`cmd_spawn` as the FLEET-LAUNCH
+    this env is also handed to `cmd_watch`/`cmd_spawn` as the launch
     environment, and stripping identity there is the same class of attribution
-    loss as T-238. GIT_SSH_COMMAND/GIT_ASKPASS/GIT_TERMINAL_PROMPT likewise
+    loss. GIT_SSH_COMMAND/GIT_ASKPASS/GIT_TERMINAL_PROMPT likewise
     survive so credential helpers keep working. None of those can redirect
     which repository git resolves, so none of them is this bug's mechanism.
 
@@ -191,14 +192,116 @@ def _repo_root():
     return os.path.dirname(common)
 
 
+def _init_cwd_worktree_root(start=None):
+    """Root of the worktree cwd is LITERALLY in -- deliberately NOT _repo_root().
+
+    _repo_root() resolves `--git-common-dir` and therefore returns the MAIN
+    worktree: correct for board_dir(), because every linked worktree of a
+    project is meant to share one board.  For `init` that is the defect
+    (T-263/T-282).  It made init's "where am I about to write" answer
+    identical BY CONSTRUCTION to the ambient "where will this resolve later"
+    answer, so the refuse-on-disagreement check could never fire inside a
+    linked worktree -- a common configuration for parallel agents.
+    A guard whose two operands come out of the same resolver is not a guard.
+
+    So this function shares no code path with _repo_root().  The filesystem
+    walk is the answer: the first ancestor holding a `.git` entry, which no
+    environment variable can redirect.  git's own `--show-toplevel` is asked
+    only as a cross-check, and on disagreement the filesystem wins (T-243).
+    Returns None when cwd is not inside a git worktree at all.
+    """
+    import subprocess
+    here = os.path.realpath(start if start is not None else os.getcwd())
+    fs_root = None
+    d = here
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            fs_root = d
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    git_root = None
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5,
+                             cwd=here, env=env)
+        if out.returncode == 0 and out.stdout.strip():
+            git_root = os.path.realpath(out.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if fs_root is not None and git_root is not None and fs_root != git_root:
+        sys.stderr.write(
+            "tickets: git says cwd %s is in worktree %s but the filesystem says %s "
+            "-- trusting the filesystem (T-243)\n" % (here, git_root, fs_root))
+    if fs_root is not None:
+        return fs_root
+    return git_root
+
+
+def _same_board(a, b):
+    if a is None or b is None:
+        return False
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _init_resolve_board(a):
+    """(target, why): where `init` will write, decided from cwd alone."""
+    explicit = getattr(a, "board", None)
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit)), "an explicit --board"
+    root = _init_cwd_worktree_root()
+    if root is None:
+        return (os.path.join(os.path.realpath(os.getcwd()), ".tickets"),
+                "the current directory (not inside a git worktree)")
+    return os.path.join(root, ".tickets"), "the git worktree cwd is in (%s)" % root
+
+
+def _init_disagreement_cause(ambient):
+    """Plain-language reason the ambient board is not the cwd board."""
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return ("TICKETS_DIR is set to %r, and board resolution honours it "
+                "before anything on disk." % env)
+    here = _init_cwd_worktree_root()
+    main = _repo_root()
+    if here and main and os.path.realpath(here) != os.path.realpath(main):
+        return ("%s is a LINKED WORKTREE whose main worktree is %s, and every "
+                "linked worktree deliberately shares the main worktree's "
+                "board -- that sharing is the design, not a bug, so init "
+                "must not quietly fork a second board here." % (here, main))
+    return ("an ancestor directory already holds a board (%s) and the "
+            "upward search finds it before this one." % os.path.dirname(ambient))
+
+
+def _init_refusal(target, ambient):
+    return (
+        "REFUSING TO INIT: nothing was written.\n"
+        "  would write to: %s\n"
+        "  but `tickets` run from %s resolves to: %s\n"
+        "  because %s\n"
+        "\n"
+        "Writing anyway is the T-263 defect: init would report success, install "
+        "the protocol files into a DIFFERENT project, and leave every later "
+        "command on the other board (that is how T-256 minted a ticket on a "
+        "live board). Pick one:\n"
+        "  * bind this directory:      export TICKETS_DIR=%s\n"
+        "  * install into the board\n"
+        "    that is actually in effect: tickets init --board %s\n"
+        "  * run init in %s instead\n"
+        % (target, os.getcwd(), ambient, _init_disagreement_cause(ambient),
+           target, ambient, os.path.dirname(ambient))
+    )
+
+
 def _refuse_board_outside_pytest_tmp(path):
-    """T-256: a test suite created a real ticket on the LIVE steer board.
-    Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and every
-    real agent session exports TICKETS_DIR pointing at its live board so
-    plain `tickets ...` just works; a subprocess a test forgets to sandbox
-    (test_wakeup.py's shell=True call for the injection regression, e.g.)
-    inherits that ambient value straight through. pytest sets
-    PYTEST_CURRENT_TEST for the life of every test, and pytest's own
+    """Refuse a board path that escapes the pytest temp dir.
+
+    Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and a
+    subprocess a test forgets to sandbox inherits that ambient value. pytest
+    sets PYTEST_CURRENT_TEST for the life of every test, and pytest's own
     tmp_path/tmpdir fixtures always live under the system temp dir, so that
     combination is a reliable signal a board resolution is about to escape
     its sandbox. Fail loud instead of writing -- a silently-wrong resolution
@@ -579,10 +682,22 @@ def hours_since(stamp):
 # --------------------------------------------------------------------------
 
 def git(*args, cwd=None):
+    """Run git and return stdout, or None if it failed.
+
+    `cwd=` picks the tree to ask. It matters: T-272 -- every caller used to
+    inherit os.getcwd(), so `tickets review` pinned whichever repo the agent
+    happened to be standing in rather than the repo the deliverable is in.
+
+    cwd is necessary and NOT sufficient (T-287). An inherited GIT_DIR,
+    GIT_COMMON_DIR or GIT_WORK_TREE overrides cwd-based discovery inside git
+    itself, so under a leaked env `tickets review --artifact <dir>` pinned the
+    wrong repo and reported success -- the defect T-272 exists to fix,
+    reappearing on the command that fixes it. The scrub and the targeting are
+    one mechanism; neither works alone, so they are applied together here at
+    the single choke point every caller goes through.
+    """
     import subprocess
     try:
-        # cwd + scrubbed env (T-243): cwd alone does NOT stop an inherited
-        # GIT_DIR/GIT_COMMON_DIR from overriding repo discovery.
         out = subprocess.run(["git"] + list(args), capture_output=True, text=True, timeout=10,
                              cwd=cwd or os.getcwd(), env=_clean_git_env())
     except (OSError, subprocess.TimeoutExpired):
@@ -628,10 +743,18 @@ def repo_identity(cwd):
     return None
 
 
-def _git_state_raw():
+def _git_state_raw(cwd=None):
     """(state, mismatch). See git_state() -- this keeps the mismatch signal
-    that git_state() deliberately throws away, for callers that record it."""
-    here = os.getcwd()
+    that git_state() deliberately throws away, for callers that record it.
+
+    `cwd` is the tree to describe, default the process cwd (T-272). All four
+    parts of the answer -- branch, sha, repo identity and dirty count -- are
+    asked of that ONE tree, so the pin they form is internally consistent.
+    The containment refusal below is applied to that tree too, not to the
+    process cwd: with --artifact those are deliberately different directories,
+    and checking the wrong one would refuse every correct cross-repo pin.
+    """
+    here = cwd or os.getcwd()
     top = git("rev-parse", "--show-toplevel", cwd=here)
     if not top:
         return None, False
@@ -660,8 +783,10 @@ def _git_state_raw():
     }, False
 
 
-def git_state():
+def git_state(cwd=None):
     """Branch, short sha, dirty-file count, and whether cwd is the main worktree.
+
+    `cwd` selects the tree to describe (T-272); it defaults to the process cwd.
 
     Returns None -- never a partly-filled dict -- when resolution disagrees
     with cwd. Every caller guards with `g = git_state()` / `if not g`, and the
@@ -673,8 +798,60 @@ def git_state():
     disabled, and `tickets review` would pin an unmergeable "?@?" (T-259
     defect 2). Unresolved must mean None.
     """
-    state, _mismatch = _git_state_raw()
+    state, _mismatch = _git_state_raw(cwd)
     return state
+
+
+def artifact_tree(a):
+    """Resolve `--artifact` to a real git working tree, or None meaning "use cwd".
+
+    `tickets review` used to derive branch, sha and repo from whatever
+    directory the agent ran it in. That is systematically the wrong tree when
+    the CLI is driven from a different clone than the deliverable, so the pin
+    named a repo that never built the work.
+
+    The agent supplies a LOCATION, not an assertion. Everything recorded is
+    still derived by running git inside that tree, so a pin no real tree can
+    produce cannot be recorded -- this is deliberately not a `--repo/--commit`
+    pair taken on trust, because a hand-typed sha is exactly how fiction gets
+    into the close record.
+    """
+    path = getattr(a, "artifact", "") or ""
+    if not path:
+        return None
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        sys.exit("--artifact %s is not a directory" % path)
+    if git("rev-parse", "--show-toplevel", cwd=path) is None:
+        sys.exit("--artifact %s is not inside a git working tree; point it at the "
+                 "checkout the deliverable actually lives in" % path)
+    return path
+
+
+def _record_pin(t, g, art):
+    """Write the (repo, branch, sha) evidence triple onto a ticket.
+
+    All three come from ONE tree (T-272). `repo` stays the field the merge
+    guard compares, so no existing record needs a field rename; `repo_source`
+    lets a reader tell a pin the agent aimed from one the tool merely
+    inherited, and the cwd provenance is kept alongside rather than thrown
+    away.
+    """
+    t["commit"] = "%s@%s" % (g["branch"], g["sha"])
+    t["branch"] = g["branch"]
+    t["repo"] = g["repo"]
+    t["repo_source"] = "artifact" if art else "cwd"
+    if art:
+        t["artifact_dir"] = art
+        cg = git_state()
+        if cg:
+            t["cwd_repo"] = cg["repo"]
+            t["cwd_commit"] = "%s@%s" % (cg["branch"], cg["sha"])
+    else:
+        t.pop("artifact_dir", None)
+        t.pop("cwd_repo", None)
+        t.pop("cwd_commit", None)
+    return t["commit"]
 
 
 def agents_dir(board):
@@ -773,10 +950,22 @@ def checkin(board, owner, ticket=None, note=""):
 
 
 def _current_ticket(board, owner):
-    for t in load_all(board):
-        if t["status"] == "claimed" and t.get("owner") == owner:
-            return t["id"]
-    return ""
+    """Return the ticket this agent is working on: claimed first, else review."""
+    mine = [t for t in load_all(board) if t.get("owner") == owner]
+    claimed = [t for t in mine if t.get("status") == "claimed"]
+    if claimed:
+        return claimed[0]["id"]
+    review = [t for t in mine if t.get("status") == "review"]
+    if not review:
+        return ""
+
+    def _last_touch(t):
+        stamps = [t.get("review_at")] + [n.get("at") for n in t.get("notes", []) if n.get("at")]
+        stamps = [s for s in stamps if s]
+        return max(stamps) if stamps else ""
+
+    review.sort(key=_last_touch, reverse=True)
+    return review[0]["id"]
 
 
 def load_agents(board):
@@ -820,7 +1009,14 @@ def try_claim(board, tid, owner):
     t["owner"] = owner
     t["claimed_at"] = now()
     t["done_at"] = ""
-    return save(board, t)
+    got = save(board, t)
+    # Written here, not in cmd_next/cmd_claim: this is the single point where a
+    # claim actually succeeds, so no future caller can add a claim path that
+    # silently produces no trajectory.
+    _safe(lambda: traj_event(board, "claim", agent=owner, ticket=got,
+                             state_before="open", state_after="claimed",
+                             **_traj_git()), None)
+    return got
 
 
 def fmt_hours(h):
@@ -1470,14 +1666,18 @@ def cmd_review(a, board):
         sys.exit("%s is %s; only in-progress work can be submitted" % (a.id, LABEL[t["status"]]))
     if not a.notes:
         sys.exit('review needs --notes "what to look at: paths, tests run, decisions"')
-    g = git_state()
+    # T-272: every probe below asks the tree the DELIVERABLE is in, which is
+    # not the tree the command was run from whenever --artifact is passed.
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
     if g and g["branch"] in ("main", "master") and not a.force:
         sys.exit("RULE: submit from your own worktree branch, not %r (or --force)" % g["branch"])
     if g and g["dirty"] and not a.force:
-        sys.exit("RULE: %d uncommitted files -- commit before submitting for review (or --force)" % g["dirty"])
+        sys.exit("RULE: %d uncommitted files in %s -- commit before submitting for review "
+                 "(or --force)" % (g["dirty"], g["top"]))
     if g and not a.force:
-        trunk = _trunk()
-        if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
+        trunk = _trunk(cwd=art)
+        if git("merge-base", "--is-ancestor", trunk, "HEAD", cwd=art) is None:
             sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
     # `owner` decides who the ticket is filed under (unchanged: claim it via
@@ -1493,58 +1693,77 @@ def cmd_review(a, board):
     t["review_at"] = now()
     text = a.notes
     if g:
-        stamp = "%s@%s" % (g["branch"], g["sha"])
+        # T-215 records WHICH repo the pin belongs to so `tickets merge` can
+        # refuse a cross-repo ancestry close. T-272 fixes what that repo is:
+        # the artifact's, not the caller's cwd.
+        stamp = _record_pin(t, g, art)
         text = "%s -- %s" % (stamp, text)
-        t["commit"] = stamp
-        t["branch"] = g["branch"]
-        # T-215: record which repo this pin belongs to, so `tickets merge`
-        # can refuse to close it from an unrelated repo's ancestry. Stable
-        # across worktrees -- see repo_identity().
-        t["repo"] = g["repo"]
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
     t["notes"].append({"by": author, "at": now(), "text": "REVIEW: " + text})
     save(board, t)
     checkin(board, author, t["id"], "submitted %s for review" % t["id"])
+    tmr = timing(t)
+    _safe(lambda: traj_event(board, "review", agent=author, ticket=t,
+                             state_before="claimed", state_after="review",
+                             outcome="review", notes_len=len(a.notes or ""),
+                             active_hours=_round3(tmr.get("active")),
+                             pin=t.get("commit", ""),
+                             **_traj_git(cwd=art)), None)
     m = current_master(board)
     post_message(board, author, "%s ready for review: %s" % (t["id"], text),
                  to=(m["owner"] if m else ""), re=t["id"])
     tm = timing(t)
+    if t.get("commit"):
+        print("pinned %s in %s (%s)" % (
+            t["commit"], t.get("repo") or "?",
+            "artifact tree %s" % t["artifact_dir"] if t.get("repo_source") == "artifact"
+            else "this checkout -- pass --artifact <dir> if the deliverable is in another repo"))
     print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
         t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
 
 
-def _trunk():
+def _trunk(cwd=None):
     for b in ("main", "master"):
-        if git("rev-parse", "--verify", "-q", b) is not None:
+        if git("rev-parse", "--verify", "-q", b, cwd=cwd) is not None:
             return b
     return "main"
 
 
 def cmd_sync(a, board):
-    """Agent side: bring main into my branch now, so the master's merge is trivial."""
-    g = git_state()
+    """Agent side: bring main into my branch now, so the master's merge is trivial.
+
+    T-272: `--artifact` syncs the tree the deliverable is in. `tickets review`
+    checks the artifact branch against ITS trunk, so the sync that clears that
+    check has to happen in the same tree -- otherwise the workflow instruction
+    "sync before review" quietly syncs a repo the review never looks at.
+    """
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
     if not g:
         sys.exit("not in a git repo")
-    trunk = _trunk()
+    trunk = _trunk(cwd=art)
     if g["branch"] in ("main", "master"):
         sys.exit("you are on %s; sync is for your own worktree branch" % g["branch"])
     if g["dirty"] and not a.force:
         sys.exit("%d uncommitted files; commit first (sync merges %s into your branch)" % (g["dirty"], trunk))
-    if git("merge-base", "--is-ancestor", trunk, "HEAD") is not None:
+    if git("merge-base", "--is-ancestor", trunk, "HEAD", cwd=art) is not None:
         print("%s already contains %s; nothing to do" % (g["branch"], trunk))
         return
     import subprocess
-    # T-243: `tickets sync` runs from the agent's own worktree cwd with no -C,
-    # so it is exactly as exposed to an ambient GIT_DIR as git_state() was.
+    # cwd=art AND the scrub (T-287). Both, or this merge is wrong in one of two
+    # ways: os.getcwd() merges the repo the agent is standing in rather than the
+    # artifact repo every other call in this function targets, and without the
+    # env scrub an ambient GIT_DIR re-points it anyway. Note this is a real
+    # merge -- getting the tree wrong here writes commits into another repo.
     r = subprocess.run(["git", "merge", "--no-edit", "-m", "Sync %s into %s" % (trunk, g["branch"]), trunk],
-                       cwd=os.getcwd(), env=_clean_git_env(), capture_output=True, text=True)
+                       cwd=art, env=_clean_git_env(), capture_output=True, text=True)
     if r.returncode == 0:
-        print("merged %s into %s -> %s" % (trunk, g["branch"], git("rev-parse", "--short", "HEAD")))
+        print("merged %s into %s -> %s" % (trunk, g["branch"], git("rev-parse", "--short", "HEAD", cwd=art)))
         checkin(board, whoami(), None, "synced with %s" % trunk)
         return
-    conflicted = (git("diff", "--name-only", "--diff-filter=U") or "").splitlines()
+    conflicted = (git("diff", "--name-only", "--diff-filter=U", cwd=art) or "").splitlines()
     print("CONFLICTS merging %s into %s -- these files need you:" % (trunk, g["branch"]))
     for f in conflicted:
         print("  " + f)
@@ -1667,9 +1886,13 @@ def cmd_merge(a, board):
         trivially "contain" a foreign sha that was never built on it
     """
     import subprocess
-    root = os.path.dirname(board)
+    # T-272: the board lives in one repo, the deliverable may live in another.
+    # Integration must be able to happen where the artifact is, or a correctly
+    # pinned cross-repo ticket could never be closed by a merge at all --
+    # `root` used to be the board's own parent unconditionally.
+    root = artifact_tree(a) or os.path.dirname(board)
     cfg = merge_config(board)
-    trunk = _trunk()
+    trunk = _trunk(cwd=root)
     owner = whoami(a.owner)
     require_integrator(board, owner, force_master=getattr(a, "force_master", False))
     merge_repo = repo_identity(root)
@@ -1691,6 +1914,19 @@ def cmd_merge(a, board):
         dirty = sh("git", "status", "--porcelain", "--untracked-files=no").stdout.strip()
         if dirty:
             sys.exit("main checkout has uncommitted tracked changes; commit or move them first:\n" + dirty)
+        # T-272: the final step fast-forwards the CURRENT branch, and the close
+        # loop then tests ancestry against `trunk`. If the repo is parked on
+        # anything else those are two different commits, so every ticket is
+        # skipped with no reason printed -- indistinguishable from the repo
+        # guard rejecting them. Never silent: this is the merger's own repo and
+        # they need to know which.
+        head_branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=root)
+        if head_branch and head_branch != trunk:
+            sys.exit("%s is checked out on %r, not %s. `tickets merge` fast-forwards the "
+                     "branch that is checked out, so merging from here would leave %s "
+                     "untouched and close nothing, without saying why. "
+                     "`git -C %s checkout %s` first." % (
+                         root, head_branch, trunk, trunk, root, trunk))
 
         idir = os.path.join(root, cfg["integration_dir"])
         if os.path.isdir(idir):
@@ -1703,7 +1939,8 @@ def cmd_merge(a, board):
             r = sh("git", "worktree", "add", "-q", idir, "-b", "integration", trunk)
             if r.returncode != 0:
                 sys.exit("could not create integration worktree: " + (r.stderr or r.stdout).strip())
-        print("integration: %s (from %s@%s)" % (idir, trunk, git("rev-parse", "--short", trunk)))
+        print("integration: %s (from %s@%s in %s)" % (
+            idir, trunk, git("rev-parse", "--short", trunk, cwd=root), merge_repo or root))
         stray = os.path.join(idir, ".tickets")
         if os.path.islink(stray):
             os.unlink(stray)
@@ -1814,7 +2051,7 @@ def cmd_merge(a, board):
             print("could not fast-forward %s. Usually an untracked file in the main checkout that a "
                   "branch now tracks; move it aside and rerun:\n%s" % (trunk, (r.stderr or r.stdout).strip()))
             sys.exit(3)
-        sha = git("rev-parse", "--short", trunk)
+        sha = git("rev-parse", "--short", trunk, cwd=root)
         full_trunk = sh("git", "rev-parse", trunk).stdout.strip()
         print("%s -> %s   (push when ready: git push origin %s)" % (trunk, sha, trunk))
 
@@ -1867,6 +2104,13 @@ def cmd_merge(a, board):
                                     trunk, sha, pin)})
             save(board, t2)
             closed.append(t2["id"])
+            _tm2 = timing(t2)
+            _safe(lambda t2=t2, _tm2=_tm2: traj_event(
+                board, "merge", agent=owner, ticket=t2,
+                state_before="review", state_after="done", outcome="done",
+                pin=pin, merged_as=sha, trunk=trunk,
+                prev_owner=t2.get("owner", ""),
+                active_hours=_round3(_tm2.get("active"))), None)
             post_message(board, owner, "%s merged into %s as %s" % (t2["id"], trunk, sha),
                          to=t2.get("owner", ""), re=t2["id"])
         if closed:
@@ -2271,9 +2515,9 @@ def _watch_log_state(board, owner):
     # log slices -- watch.log holds the CLI's human-readable stderr, never a
     # transcript's per-turn telemetry, which is what made the old raw scan
     # useless. Run duration is corroboration reported in the detail, NOT a
-    # gate: gpt-cursor sat hard-limited until October with 37 failures in a
-    # row, and gating on speed dropped it the moment one of those failures
-    # happened to take 97 seconds instead of 7.
+    # gate: a hard-limited agent can fail many times in a row, and gating on
+    # speed dropped it the moment one of those failures happened to take
+    # longer than the usual few seconds.
     streak = []
     for r in reversed(runs):
         if r["exit_at"] is None or r["rc"] in ("0", None):
@@ -2326,9 +2570,9 @@ def _cwd_sharers(board, owner, cwd, peers=None):
 
     A Claude transcript is keyed by directory and carries no agent name, so if
     two agents' records point at one directory the transcript cannot say whose
-    activity it is. That is not hypothetical: three records on this board
-    (claude-fable, cursor, cursor-2) point at one worktree, and reading the
-    transcript naively reports all three as working when at most one is.
+    activity it is. That is not hypothetical: several records can point at
+    one worktree, and reading the transcript naively reports all of them as
+    working when at most one is.
     """
     if not cwd:
         return []
@@ -2379,9 +2623,9 @@ def agent_liveness(board, rec, peers=None):
     run = _read_run(board, owner)
     # Where does this agent's session actually live? The agent RECORD's cwd is
     # whatever directory the last `tickets` command was typed in, and for this
-    # epic that is routinely a second repo -- every E-010 agent runs `tickets
-    # review` from advitiyavashist/tickets while its session runs in a steer
-    # worktree. The WATCHER's cwd, recorded in the run file, is the session's
+    # epic that is routinely a second repo -- `tickets review` may run in the
+    # deliverable clone while the session lives in another worktree. The
+    # WATCHER's cwd, recorded in the run file, is the session's
     # own directory and does not move when a command is run elsewhere, so it
     # is tried first. Both are kept: an agent running by hand has no run file.
     cwds = _dedup([run.get("cwd") or "",
@@ -2396,8 +2640,8 @@ def agent_liveness(board, rec, peers=None):
 
     # 1. A human asserting a state always wins: `tickets limit` is a person
     #    saying "I read the log". Keep it, but it is no longer the ONLY path
-    #    to a limited render -- that is how gpt-cursor sat on this board for a
-    #    day looking healthy while hard-limited until October.
+    #    to a limited render -- that is how an agent can look healthy while
+    #    hard-limited for a long window.
     lim = (rec or {}).get("limit")
     if lim:
         out.update(state="limited", source="manual", heuristic=False,
@@ -2708,6 +2952,47 @@ def cmd_status(a, board):
         return
 
 
+def cmd_repin(a, board):
+    """Correct a review pin so it names the repo the artifact is really in (T-272).
+
+    Backfill. Every pin recorded before `review` learned --artifact was taken
+    from the caller's cwd, which on this board is systematically the wrong
+    clone. Re-running `tickets review` would also fix it, but it resets
+    review_at and re-notifies the master once per ticket, which for a queue
+    this deep is worse than the problem -- so correcting evidence gets its own
+    verb, and leaves an explicit REPIN note rather than silently rewriting
+    history.
+
+    The new pin is the artifact tree's CURRENT HEAD, derived by running git
+    there. Check that tree out at the commit that was actually reviewed first.
+    """
+    t = load(board, a.id)
+    if t["status"] != "review":
+        sys.exit("%s is %s; repin corrects the pin on work that is IN REVIEW "
+                 "(a closed ticket's record is history -- do not rewrite it)" % (
+                     a.id, LABEL[t["status"]]))
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
+    if not g:
+        sys.exit("--artifact %s is not a git working tree" % art)
+    if g["dirty"] and not a.force:
+        sys.exit("RULE: %d uncommitted files in %s -- the pin must name a committed "
+                 "state; commit or check out the reviewed sha first (or --force)" % (
+                     g["dirty"], g["top"]))
+    was_commit, was_repo = t.get("commit"), t.get("repo")
+    stamp = _record_pin(t, g, art)
+    author = whoami(a.owner)
+    t["notes"].append({"by": author, "at": now(), "text": "REPIN: %s in %s (was %s in %s)%s" % (
+        stamp, t.get("repo") or "?", was_commit or "-", was_repo or "-",
+        (" -- " + a.notes) if a.notes else "")})
+    save(board, t)
+    checkin(board, author, None, "repinned %s" % a.id)
+    print("%s repinned" % a.id)
+    print("  was %s in %s" % (was_commit or "-", was_repo or "-"))
+    print("  now %s in %s  (from %s)" % (stamp, t.get("repo") or "?", art))
+    print("  verify this is the sha you submitted; repin records that tree's HEAD.")
+
+
 def cmd_done(a, board):
     t = load(board, a.id)
     if not a.notes and not a.no_notes:
@@ -2715,18 +3000,25 @@ def cmd_done(a, board):
             'done needs --notes "paths, names, decisions the next agent must match" '
             "(or --no-notes if there is truly nothing to hand off)"
         )
-    g = git_state()
+    # T-272: `done` must be aimable at the artifact tree too. Without this,
+    # re-aiming `review` would leave every correctly-pinned cross-repo ticket
+    # permanently unclosable -- T-254's guard below hard-exits on a repo
+    # mismatch and explicitly refuses --force as an override.
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
     # A branch/SHA match is not proof of repository identity (T-254).
     # Check before mutating the ticket; --force only bypasses worktree rules.
     recorded_repo = t.get("repo")
     current_repo = g.get("repo") if g else None
     if (g or recorded_repo) and not current_repo:
         sys.exit("RULE: %s cannot be closed without a verifiable repository; "
-                 "run done from the deliverable's checkout." % a.id)
+                 "run done from the deliverable's checkout, or pass "
+                 "--artifact <dir> pointing at it." % a.id)
     if recorded_repo and recorded_repo != current_repo:
-        sys.exit("RULE: %s recorded repository %r does not match current repository %r; "
-                 "run done from the recorded repository. --force cannot override "
-                 "repository evidence." % (a.id, recorded_repo, current_repo))
+        sys.exit("RULE: %s recorded repository %r does not match %r; close it from the "
+                 "recorded repository, or pass --artifact <dir> pointing at that "
+                 "checkout. --force cannot override repository evidence." % (
+                     a.id, recorded_repo, current_repo))
     if t["status"] == "review":
         # the master closes reviewed work from main after merging; the agent's
         # branch@sha is already on the ticket, so the branch/clean rules do not apply
@@ -2755,16 +3047,23 @@ def cmd_done(a, board):
             print("WARNING: %s previous pin has no recorded repository; its provenance "
                   "cannot be verified. Recording only the current completion repository."
                   % a.id, file=sys.stderr)
-        t["commit"] = stamp
-        t["repo"] = current_repo
+        _record_pin(t, g, art)
     if text:
         # by=whoami(), not t["owner"]: the note records who wrote it, which is
         # not always who the ticket is filed under (T-238 -- see cmd_note).
         t["notes"].append({"by": whoami(), "at": now(), "text": text})
     save(board, t)
+    tm = timing(t)
+    _safe(lambda: traj_event(board, "done", agent=whoami(), ticket=t,
+                             state_before="review" if t.get("review_at") else "claimed",
+                             state_after="done", outcome="done",
+                             notes_len=len(a.notes or ""),
+                             active_hours=_round3(tm.get("active")),
+                             wait_hours=_round3(tm.get("wait")),
+                             pin=t.get("commit", ""),
+                             **_traj_git(cwd=art)), None)
     if t.get("owner"):
         checkin(board, t["owner"], "", "finished %s" % a.id)
-    tm = timing(t)
     print("%s done in %s (waited %s before claim)" % (
         a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
     if g:
@@ -2777,9 +3076,14 @@ def cmd_done(a, board):
 
 def cmd_block(a, board):
     t = load(board, a.id)
+    before = t["status"]
     t["status"] = "blocked"
     t["notes"].append({"by": whoami(), "at": now(), "text": a.reason})
     save(board, t)
+    _safe(lambda: traj_event(board, "block", agent=whoami(), ticket=t,
+                             state_before=before, state_after="blocked",
+                             outcome="blocked", notes_len=len(a.reason or ""),
+                             **_traj_git()), None)
     print("%s blocked: %s" % (a.id, a.reason))
 
 
@@ -2798,6 +3102,11 @@ def cmd_note(a, board):
     who = whoami(a.by)
     t["notes"].append({"by": who, "at": now(), "text": a.text})
     save(board, t)
+    # notes_len only -- the note body is the agent's own prose and never enters
+    # the trajectory log.
+    _safe(lambda: traj_event(board, "update", agent=who, ticket=t,
+                             notes_len=len(a.text or ""), state_after=t["status"],
+                             **_traj_git()), None)
     if t["status"] == "claimed":
         checkin(board, who, t["id"], a.text[:80])
     owner = t.get("owner")
@@ -3328,9 +3637,16 @@ def cmd_reopen(a, board):
         # BACK another agent's ticket, and stamping the reason as though the
         # outgoing owner wrote it is the same misattribution class as T-238.
         t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": a.notes})
+    before = t["status"]
+    prev_owner = t.get("owner", "")
     t["status"] = "open"
     t["owner"] = ""
     save(board, t)
+    _safe(lambda: traj_event(board, "reopen", agent=whoami(getattr(a, "by", "")),
+                             ticket=t, state_before=before, state_after="open",
+                             outcome="reopened", prev_owner=prev_owner,
+                             notes_len=len(getattr(a, "notes", "") or ""),
+                             **_traj_git()), None)
     lock = os.path.join(board, a.id + ".lock")
     if os.path.exists(lock):
         os.unlink(lock)
@@ -3343,11 +3659,11 @@ def is_fixture_board(board):
 
 
 def cmd_clear(a, board):
-    """Delete ticket files — FIXTURE BOARDS ONLY (incident 2026-09-06)."""
+    """Delete ticket files — FIXTURE BOARDS ONLY."""
     if not is_fixture_board(board):
         sys.exit(
             "REFUSED: tickets clear will not wipe a live board (missing .fixture-board).\n"
-            "Incident 2026-09-06: clear deleted all T-*.json on the Steer board.\n"
+            "This command only deletes tickets on disposable fixture boards.\n"
             "Use a disposable fixture board for tests, or:\n"
             "  tickets board-backup --out /tmp/board.tgz\n"
             "  tickets board-restore --archive /tmp/board.tgz --dest /tmp/fixture\n"
@@ -3493,6 +3809,327 @@ def cmd_who(a, board):
               "! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- go read the log")
 
 
+# ---- trajectories: the team's own record of who did what, and at what cost --
+#
+# T-311. One append-only JSONL per board, alongside messages.jsonl, written by
+# the writers that already know a fact rather than reconstructed later by a
+# reader guessing from timestamps.
+#
+# The product objective is TASK COMPLETION IN THE FEWEST TURNS, so this file
+# exists to make "turns" measurable: how many watch runs a ticket cost, how
+# many updates and messages an agent needed, how often work came back. Nothing
+# here is allowed to answer that with a guess -- a field the writer does not
+# actually know is OMITTED, never defaulted. A reader can tell "0 tokens" from
+# "this harness never told us", and only the first is a number.
+#
+# PRIVACY: ids, counts, outcomes and timings only. No prompt text, no tool
+# input or output, no note or message bodies -- their LENGTH is recorded
+# (notes_len, text_len) and nothing else. `msg` events carry from/to/re only.
+
+TRAJ_VERSION = 1
+TRAJ_MAX_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_MAX_BYTES", 50 * 1024 * 1024))
+TRAJ_KINDS = ("run_start", "run_end", "claim", "update", "review", "done",
+              "reopen", "block", "msg", "merge", "shadow_decision")
+
+
+def trajectories_path(board):
+    return os.path.join(board, "trajectories.jsonl")
+
+
+def _rotate_trajectories_if_big(board):
+    """Same swap-under-a-lock as messages.jsonl, and the same honest caveat:
+    a writer already inside an append during the swap can land its line in the
+    archive. Archives are read back by every reader that matters here
+    (`trajectories`, `export`, `backfill`), so a line in the archive is not a
+    lost line -- unlike the live-file-only fast path on the message side.
+    """
+    path = trajectories_path(board)
+    try:
+        if os.path.getsize(path) <= TRAJ_MAX_BYTES:
+            return
+    except OSError:
+        return
+    lock_path = path + ".rotate.lock"
+    try:
+        os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return
+    try:
+        if os.path.getsize(path) <= TRAJ_MAX_BYTES:
+            return
+        archive = os.path.join(board, "trajectories.%s.jsonl" % now()[:10])
+        empty_tmp = path + ".rotate.tmp"
+        open(empty_tmp, "wb").close()
+        if os.path.exists(archive):
+            with open(path, "rb") as src:
+                data = src.read()
+            fd = os.open(archive, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(empty_tmp, path)
+        else:
+            os.replace(path, archive)
+            os.replace(empty_tmp, path)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+
+
+def _objective_id(board):
+    """A stable id for the standing objective.
+
+    `tickets objective` stores no id, and adding one would rewrite a file
+    other seats read, so the id is DERIVED: a hash of the objective's text and
+    set-time. Same objective -> same id across every agent and every process;
+    editing the objective starts a new id, which is the behaviour a reader
+    grouping trajectories by objective actually wants.
+    """
+    obj = load_objective(board)
+    text = obj.get("text") if isinstance(obj, dict) else None
+    if not text:
+        return ""
+    import hashlib
+    h = hashlib.sha1(("%s|%s" % (text, obj.get("at", ""))).encode("utf-8", "replace"))
+    return "obj-" + h.hexdigest()[:8]
+
+
+def _agent_harness(board, owner):
+    """(harness, model, effort) for an agent, from what it registered with
+    `tickets join`. Unregistered -> empty strings, and the caller omits the
+    fields rather than writing a plausible-looking default."""
+    entry = {}
+    try:
+        entry = load_workforce(board).get(owner) or {}
+    except (IOError, ValueError, OSError):
+        entry = {}
+    return (entry.get("harness") or entry.get("tool", "") or "",
+            entry.get("model", "") or "",
+            entry.get("effort", "") or "")
+
+
+def traj_write(board, rec):
+    """Append one event. Best-effort by design: the trajectory log is
+    instrumentation, and instrumentation that can fail a `tickets done` is
+    worse than a missing line. Every writer here is on a command's success
+    path, so a raised exception would abort work that already happened."""
+    try:
+        _rotate_trajectories_if_big(board)
+        line_ = json.dumps(rec) + "\n"
+        fd = os.open(trajectories_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, line_.encode())
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, TypeError):
+        return None
+    return rec
+
+
+def traj_event(board, kind, agent="", ticket=None, **fields):
+    """Build and append one trajectory event.
+
+    `ticket` may be a ticket dict (epic/sprint/state are read off it) or an id
+    string. Optional fields are dropped when empty so a reader can distinguish
+    "not known" from a real zero; `exit` and the token counts are the
+    exception -- 0 is meaningful there, so only None is dropped.
+    """
+    if kind not in TRAJ_KINDS:
+        return None
+    rec = {"v": TRAJ_VERSION, "at": now(), "kind": kind}
+    tid = ""
+    if isinstance(ticket, dict):
+        tid = ticket.get("id", "")
+        for src, dst in (("epic", "epic"), ("sprint", "sprint")):
+            if ticket.get(src):
+                rec[dst] = ticket[src]
+        # NOT the ticket's pinned branch/sha: `branch`/`sha` on an event mean
+        # "the tree this event was recorded from", and a review pin can name a
+        # different repo entirely (T-272). Only the repo id, which is
+        # unambiguous, is taken from the ticket, and callers that know the
+        # deliverable tree pass worktree/branch/sha explicitly.
+        if ticket.get("repo"):
+            rec.setdefault("repo", ticket["repo"])
+    elif ticket:
+        tid = str(ticket)
+    if tid:
+        rec["ticket"] = tid
+    if agent:
+        rec["agent"] = agent
+        harness, model, effort = _agent_harness(board, agent)
+        if harness:
+            rec["harness"] = harness
+        if model:
+            rec["model"] = model
+        if effort:
+            rec["effort"] = effort
+    oid = _safe(lambda: _objective_id(board), "")
+    if oid:
+        rec["objective_id"] = oid
+    for k, v in fields.items():
+        if v is None:
+            continue
+        if v == "" or v == [] or v == {}:
+            continue
+        rec[k] = v
+    return traj_write(board, rec)
+
+
+def _traj_git(cwd=None):
+    """worktree/branch/sha for an event, or {} when git cannot answer.
+
+    git_state() returns None rather than a partly-filled dict on purpose
+    (T-259); this keeps that contract instead of inventing "?" placeholders
+    that would read back as real branches.
+    """
+    g = _safe(lambda: git_state(cwd=cwd), None)
+    if not g:
+        return {}
+    return {"worktree": g.get("top", ""), "branch": g.get("branch", ""),
+            "sha": g.get("sha", "")}
+
+
+def load_trajectories(board, include_archives=True):
+    """Read events oldest-first. Unlike load_messages, archives are ON by
+    default: every reader of this file is analytical (a metric, an export, a
+    backfill dedup check) and a silently truncated history would corrupt the
+    answer rather than merely delay a message."""
+    paths = [trajectories_path(board)]
+    if include_archives:
+        paths = sorted(glob.glob(os.path.join(board, "trajectories.*.jsonl"))) + paths
+    out = []
+    for p in paths:
+        try:
+            with open(p) as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        rec = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if isinstance(rec, dict):
+                        out.append(rec)
+        except IOError:
+            pass
+    return out
+
+
+# ---- harness usage: parse it when the harness reports it, never estimate --
+
+def parse_harness_usage(text):
+    """Pull token/cost/turn counts out of a run's own stdout.
+
+    `claude -p --output-format json` ends a run with one JSON object carrying
+    usage, total_cost_usd, num_turns and duration_ms. When the operator has
+    NOT asked for that format -- which is the default watch command -- there
+    is nothing to parse and this returns {}. It never estimates from output
+    length: a made-up token count is worse than no token count, because the
+    cost-learning layer this data feeds cannot tell the two apart.
+
+    Returns a dict with any of: tokens_in, tokens_out, tokens_cache_read,
+    tokens_cache_write, cost_usd, turns, harness_duration_ms.
+    """
+    if not text:
+        return {}
+    blobs = []
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        blobs.append(stripped)
+    # A JSON result may be pretty-printed across many lines, so also try the
+    # tail from each '{' that starts a line, newest first.
+    lines = stripped.splitlines()
+    for i in range(len(lines) - 1, max(-1, len(lines) - 400) - 1, -1):
+        ln = lines[i]
+        if ln.startswith("{"):
+            blobs.append("\n".join(lines[i:]))
+        elif ln.strip().startswith("{") and ln.strip().endswith("}"):
+            blobs.append(ln.strip())
+    for blob in blobs:
+        try:
+            rec = json.loads(blob)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        usage = rec.get("usage")
+        if not isinstance(usage, dict) and "total_cost_usd" not in rec:
+            continue
+        usage = usage if isinstance(usage, dict) else {}
+        out = {}
+        for src, dst in (("input_tokens", "tokens_in"),
+                         ("output_tokens", "tokens_out"),
+                         ("cache_read_input_tokens", "tokens_cache_read"),
+                         ("cache_creation_input_tokens", "tokens_cache_write")):
+            if isinstance(usage.get(src), int):
+                out[dst] = usage[src]
+        if isinstance(rec.get("total_cost_usd"), (int, float)):
+            out["cost_usd"] = rec["total_cost_usd"]
+        if isinstance(rec.get("num_turns"), int):
+            out["turns"] = rec["num_turns"]
+        if isinstance(rec.get("duration_ms"), int):
+            out["harness_duration_ms"] = rec["duration_ms"]
+        if out:
+            return out
+    return {}
+
+
+TRAJ_USAGE_SCAN_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_SCAN_BYTES", 256 * 1024))
+
+
+def _read_run_slice(log_path, offset, cap=None):
+    """The tail of ONE run's own output from the shared watch log.
+
+    `offset` is the log size taken just before the run started. If the file
+    shrank (the between-run rotation in cmd_watch's log(), or an operator
+    truncating it) the offset no longer means anything, so this returns "" --
+    reading from 0 would hand the parser a previous run's result object and
+    attribute its tokens here.
+    """
+    cap = cap or TRAJ_USAGE_SCAN_BYTES
+    try:
+        size = os.path.getsize(log_path)
+        if size < offset:
+            return ""
+        with open(log_path, "rb") as f:
+            start = max(offset, size - cap)
+            f.seek(start)
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _harness_of_cmd(cmd):
+    """Best-effort harness name from the watch command line. Only the three
+    names the board already knows are claimed; anything else is `custom`,
+    which is a fact, not a guess."""
+    head = os.path.basename(shlex.split(cmd or "")[0]) if (cmd or "").strip() else ""
+    return head if head in ("claude", "codex", "cursor") else ("custom" if head else "")
+
+
+def _round3(x):
+    """timing() reports HOURS as floats; keep the unit in the field name and
+    the precision short enough to diff."""
+    # + 0.0 folds the -0.0 that float subtraction produces for a same-second
+    # span; a negative zero in the log reads like a clock error.
+    return None if x is None else round(float(x), 3) + 0.0
+
+
+def _iso_span_secs(a, b):
+    try:
+        ta = datetime.fromisoformat(str(a).replace("Z", "+00:00"))
+        tb = datetime.fromisoformat(str(b).replace("Z", "+00:00"))
+        return round((tb - ta).total_seconds(), 3)
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 # ---- message board ------------------------------------------------------
 
 def messages_path(board):
@@ -3546,9 +4183,48 @@ def _rotate_messages_if_big(board):
             pass
 
 
+# @cursor, @cursor-2, @claude-fable, @everyone -- not emails, not @@foo.
+# Inline so the installed single-file copy stays self-contained (T-221).
+_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_@])@([A-Za-z][A-Za-z0-9_-]{0,47})")
+_MENTION_BROADCAST = frozenset({"everyone", "all"})
+_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+
+
+def _strip_code_spans(text):
+    return _CODE_SPAN_RE.sub(" ", text)
+
+
+def parse_mentions(text):
+    """Unique @handles in first-seen order (no @). Skip `code` / ```fences```."""
+    out, seen = [], set()
+    for match in _MENTION_RE.finditer(_strip_code_spans(text or "")):
+        handle = match.group(1)
+        key = handle.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(handle)
+    return out
+
+
+def resolve_to_and_mentions(text, to=""):
+    """Empty --to + exactly one named mention becomes that recipient."""
+    mentions = parse_mentions(text)
+    to = (to or "").strip()
+    if to:
+        return to, mentions
+    named = [h for h in mentions if h.lower() not in _MENTION_BROADCAST]
+    if len(named) == 1 and len(named) == len(mentions):
+        return named[0], mentions
+    return to, mentions
+
+
 def post_message(board, sender, text, to="", re=""):
     _rotate_messages_if_big(board)
+    to, mentions = resolve_to_and_mentions(text, to)
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    if mentions:
+        rec["mentions"] = mentions
     line_ = json.dumps(rec) + "\n"
     # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
     fd = os.open(messages_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
@@ -3556,6 +4232,10 @@ def post_message(board, sender, text, to="", re=""):
         os.write(fd, line_.encode())
     finally:
         os.close(fd)
+    # ids and a length, never the body (T-311 privacy rule). Best-effort: a
+    # message that reached the board must not be undone by instrumentation.
+    _safe(lambda: traj_event(board, "msg", agent=sender, ticket=re or None,
+                             to=to or "", text_len=len(text or "")), None)
     return rec
 
 
@@ -3608,8 +4288,48 @@ def _mark_inbox_read(board, owner):
     _agent_update(board, owner, lambda rec: rec.update({"inbox_seen": stamp}))
 
 
+def _addressed_to(msg, owner):
+    """True if *owner* should see *msg*: broadcast, explicit --to, or @mention."""
+    to = (msg.get("to") or "").strip().lower()
+    mentions = {h.lower() for h in (msg.get("mentions") or [])}
+    target = owner.lower()
+    if not to and not mentions:
+        return True
+    if to in _MENTION_BROADCAST or mentions & _MENTION_BROADCAST:
+        return True
+    return to == target or target in mentions
+
+
+def _visible_after_join(msgs, owner, joined):
+    """Hide BROADCAST history from before this agent existed -- never directed mail.
+
+    A brand-new agent has no inbox_seen, so every message ever posted comes back
+    unread (measured: 1392 broadcasts on a real seat's first wake). It then
+    spends its first turn reading other people's mail, which is a direct hit on
+    the fewest-turns objective.
+
+    The tempting fix -- stamp inbox_seen = now() at join -- is wrong in two ways
+    this board would feel, and both are silent mail loss:
+      * a brief posted with `--to <name>` BEFORE the seat joins is destroyed,
+        and posting the brief first is exactly how seats get briefed here;
+      * `tickets spawn` calls cmd_join, so RESPAWNING an existing seat would
+        re-stamp its watermark and wipe everything pending -- including the
+        master's answer to that agent's own `stuck:` message.
+    So scope the suppression to what the ticket actually names, "mail addressed
+    to nobody": drop only broadcasts strictly before `joined`. Same-second
+    posts after join (the wakeup suite does not sleep) must still count.
+    Anything addressed to this agent by name is delivered no matter how old
+    it is. Nothing is deleted -- `tickets inbox --all` still shows history.
+    """
+    if not joined:
+        return msgs  # every pre-existing agent: unchanged, by construction
+    return [m for m in msgs if m.get("to") == owner or m.get("at", "") >= joined]
+
+
 def unread(board, owner):
-    since = _agent_rec(board, owner).get("inbox_seen", "")
+    rec = _agent_rec(board, owner)
+    since = rec.get("inbox_seen", "")
+    joined = rec.get("joined_at", "")
     msgs = load_messages(board)
     # An agent that slept through a rotation has its unread mail sitting in an
     # archive the fast path never reads, so its inbox would come back silently
@@ -3618,16 +4338,34 @@ def unread(board, owner):
     if since and (not msgs or since < msgs[0].get("at", "")):
         if glob.glob(os.path.join(board, "messages.*.jsonl")):
             msgs = load_messages(board, include_archives=True)
-    return [m for m in msgs
-            if m.get("from") != owner
-            and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
-            and m.get("at", "") > since]
+    return _visible_after_join([m for m in msgs
+                                if m.get("from") != owner
+                                and _addressed_to(m, owner)
+                                and m.get("at", "") > since], owner, joined)
+
+
+def fmt_local(iso):
+    """Render a stored UTC ISO timestamp in the reader's LOCAL time.
+
+    Stored values stay UTC; only the display converts. Falls back to the old
+    UTC substring on anything unparseable -- a bad timestamp must never break
+    `tickets msg` or `inbox`, and a wrong-looking time is a smaller failure
+    than a traceback.
+    """
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%m-%d %H:%M")
+    except (ValueError, TypeError, AttributeError):
+        return str(iso)[5:16].replace("T", " ")
 
 
 def fmt_msg(m):
     to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
     re_ = (" [%s]" % m["re"]) if m.get("re") else ""
-    return "%s  %s%s%s: %s" % (m["at"][5:16].replace("T", " "), m.get("from", "?"), to, re_, m.get("text", ""))
+    return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
 
 
 def cmd_msg(a, board):
@@ -3657,6 +4395,263 @@ def cmd_inbox(a, board):
                 print("  " + fmt_msg(m))
     if not a.keep:
         _mark_inbox_read(board, owner)
+
+
+# ---- trajectories: reader, export, backfill ------------------------------
+
+def _traj_filter(events, ticket="", agent="", kind="", since="", until=""):
+    out = []
+    kinds = [k.strip() for k in (kind or "").split(",") if k.strip()]
+    for e in events:
+        if ticket and e.get("ticket") != ticket:
+            continue
+        if agent and e.get("agent") != agent:
+            continue
+        if kinds and e.get("kind") not in kinds:
+            continue
+        at = e.get("at", "")
+        if since and at < since:
+            continue
+        if until and at > until:
+            continue
+        out.append(e)
+    return out
+
+
+def _traj_line(e):
+    bits = ["%s %-9s" % (e.get("at", "?"), e.get("kind", "?"))]
+    bits.append("%-16s" % (e.get("agent") or "-"))
+    bits.append("%-7s" % (e.get("ticket") or "-"))
+    extra = []
+    for k in ("run_no", "exit", "duration_s", "turns", "tokens_in", "tokens_out",
+              "cost_usd", "outcome", "state_before", "state_after", "trigger",
+              "notes_len", "text_len", "to", "pin", "merged_as", "active_hours",
+              "wait_hours", "harness", "harness_cmd", "model", "effort",
+              "timed_out", "src"):
+        if k in e:
+            v = e[k]
+            extra.append("%s=%s" % (k, ",".join(v) if isinstance(v, list) else v))
+    return " ".join(bits) + ("  " + " ".join(extra) if extra else "")
+
+
+def _traj_summary(events):
+    """The numbers this log exists for: turns-to-done per ticket."""
+    by_ticket = {}
+    for e in events:
+        tid = e.get("ticket")
+        if not tid:
+            continue
+        s = by_ticket.setdefault(tid, {"runs": 0, "updates": 0, "msgs": 0,
+                                       "reopens": 0, "agents": set(), "outcome": "",
+                                       "turns": 0, "cost_usd": 0.0, "cost_known": False})
+        k = e.get("kind")
+        if k == "run_end":
+            s["runs"] += 1
+            if isinstance(e.get("turns"), int):
+                s["turns"] += e["turns"]
+            if isinstance(e.get("cost_usd"), (int, float)):
+                s["cost_usd"] += e["cost_usd"]
+                s["cost_known"] = True
+        elif k == "update":
+            s["updates"] += 1
+        elif k == "msg":
+            s["msgs"] += 1
+        elif k == "reopen":
+            s["reopens"] += 1
+        if k in ("done", "merge", "review", "block"):
+            s["outcome"] = e.get("outcome") or k
+        if e.get("agent"):
+            s["agents"].add(e["agent"])
+    return by_ticket
+
+
+def cmd_trajectories(a, board):
+    """Read, export or backfill the trajectory log."""
+    sub = getattr(a, "traj_cmd", "list") or "list"
+    if sub == "backfill":
+        return _traj_backfill(a, board)
+    events = load_trajectories(board)
+    sel = _traj_filter(events, ticket=getattr(a, "ticket", "") or "",
+                       agent=getattr(a, "agent", "") or "",
+                       kind=getattr(a, "kind", "") or "",
+                       since=getattr(a, "since", "") or "",
+                       until=getattr(a, "until", "") or "")
+    if sub == "export":
+        out = getattr(a, "out", "") or ""
+        if not out:
+            sys.exit("export needs --out <file.jsonl>")
+        tmp = out + ".tmp"
+        with open(tmp, "w") as f:
+            for e in sel:
+                f.write(json.dumps(e) + "\n")
+        os.replace(tmp, out)
+        print("exported %d event(s) of %d to %s" % (len(sel), len(events), out))
+        return
+    limit = int(getattr(a, "limit", 0) or 0)
+    shown = sel[-limit:] if limit else sel
+    if getattr(a, "json", False):
+        print(json.dumps(shown, indent=2))
+        return
+    if not events:
+        print("no trajectory events yet (%s)" % trajectories_path(board))
+        print("the log fills as agents claim, update, review and run; "
+              "`tickets trajectories backfill` synthesises the history already on the board")
+        return
+    if not shown:
+        print("no events match (%d in the log)" % len(events))
+        return
+    for e in shown:
+        print(_traj_line(e))
+    print("")
+    print("%d of %d event(s)%s" % (len(shown), len(events),
+                                   " (showing the last %d)" % limit if limit and len(sel) > limit else ""))
+    if getattr(a, "summary", False):
+        print("")
+        print("%-8s %5s %8s %5s %5s %8s  %s" % (
+            "ticket", "runs", "turns", "upd", "msgs", "reopens", "agents / outcome"))
+        for tid, s in sorted(_traj_summary(sel).items()):
+            print("%-8s %5d %8s %5d %5d %8d  %s %s" % (
+                tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
+                s["reopens"], ",".join(sorted(s["agents"])) or "-",
+                ("-> " + s["outcome"]) if s["outcome"] else ""))
+        print("")
+        print("runs = watch runs that reached run_end (the board's own turn count).  "
+              "turns = turns the harness itself reported, '-' when it reported none "
+              "-- an unreported count is never estimated from the run.")
+
+
+def _traj_backfill(a, board):
+    """Synthesise claim/update/review/done events from what the board already
+    records, so the 190+ tickets finished before this log existed are usable.
+
+    Two rules keep a re-run honest:
+
+      1. A synthesised event is stamped src=backfill and carries a
+         deterministic bf_key, so running backfill twice writes nothing new.
+      2. Backfill never writes into the instrumented era. Two separate guards,
+         because the two kinds of event fail differently:
+
+           - claim/review/done happen at most once per ticket, so if a LIVE
+             writer already recorded one, backfill refuses that kind for that
+             ticket outright. The timestamp cannot be trusted to separate
+             them: `claimed_at` is rewritten in place on a re-claim, so a
+             ticket whose stored claim time predates the log would otherwise
+             be counted once by the writer and once by the reader, and a
+             turns metric built on it would be silently inflated.
+           - updates happen many times per ticket, so they are cut at the
+             floor instead: the earliest instant a live writer recorded for
+             that ticket. The pre-instrumentation half of a ticket's note
+             history is recoverable; the instrumented half is already there.
+
+    What it cannot know, it does not write: a synthesised event has no run_no,
+    no exit, no tokens and no cost, because no such record was ever kept.
+    """
+    ONCE_PER_TICKET = ("claim", "review", "done")
+    existing = load_trajectories(board)
+    have_keys = set()
+    live_floor = {}
+    live_kinds = set()
+    for e in existing:
+        if e.get("bf_key"):
+            have_keys.add(e["bf_key"])
+        tid = e.get("ticket")
+        if tid and e.get("src") != "backfill":
+            live_kinds.add((tid, e.get("kind")))
+            at = e.get("at", "")
+            if at and (tid not in live_floor or at < live_floor[tid]):
+                live_floor[tid] = at
+    planned = []
+
+    def plan(t, kind, at, agent, **fields):
+        if not at:
+            return
+        if kind in ONCE_PER_TICKET and (t["id"], kind) in live_kinds:
+            return
+        floor = live_floor.get(t["id"])
+        if floor and at >= floor:
+            return
+        key = "%s:%s:%s" % (t["id"], kind, at)
+        if key in have_keys:
+            return
+        have_keys.add(key)
+        planned.append((t, kind, at, agent, fields))
+
+    for t in load_all(board):
+        owner = t.get("owner") or ""
+        plan(t, "claim", t.get("claimed_at", ""), owner,
+             state_before="open", state_after="claimed")
+        for n in t.get("notes", []):
+            text = str(n.get("text", ""))
+            if text.startswith("REVIEW: "):
+                continue  # the review stamp itself, not a progress update
+            plan(t, "update", n.get("at", ""), n.get("by", "") or owner,
+                 notes_len=len(text))
+        plan(t, "review", t.get("review_at", ""), owner,
+             state_before="claimed", state_after="review", outcome="review",
+             pin=t.get("commit", ""))
+        if t.get("done_at"):
+            plan(t, "done", t["done_at"], owner,
+                 state_before="review" if t.get("review_at") else "claimed",
+                 state_after="done", outcome="done", pin=t.get("commit", ""))
+        # No `block` events are synthesised: the board records a block REASON
+        # as a note but never a block timestamp, and `updated` is only "when
+        # this file was last written by anything". Dating a block from it
+        # would reorder the very sequence a turns metric reads.
+    planned.sort(key=lambda x: (x[2], x[0]["id"]))
+    if getattr(a, "dry_run", False):
+        print("would write %d event(s):" % len(planned))
+        for t, kind, at, agent, fields in planned[:40]:
+            print("  %s %-7s %-8s %s" % (at, kind, t["id"], agent or "-"))
+        if len(planned) > 40:
+            print("  ... and %d more" % (len(planned) - 40))
+        return
+    written = 0
+    ran_at = now()
+    for t, kind, at, agent, fields in planned:
+        # `at` overrides traj_event's wall clock: a synthesised event must
+        # carry the time the thing actually happened, or every backfilled
+        # ticket collapses onto the minute the backfill ran. `backfilled_at`
+        # keeps the wall clock available without pretending it is the event.
+        rec = traj_event(board, kind, agent=agent, ticket=t, at=at,
+                         src="backfill", backfilled_at=ran_at,
+                         bf_key="%s:%s:%s" % (t["id"], kind, at), **fields)
+        if rec:
+            written += 1
+    print("backfill wrote %d event(s) into %s" % (written, trajectories_path(board)))
+    if not planned:
+        print("nothing to synthesise: every claim/update/review/done on this board "
+              "is already in the log")
+
+
+def _turns_cmd():
+    try:
+        from ticket_board.turns import cmd_turns as impl
+        return impl
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.turns import cmd_turns as impl
+        return impl
+
+
+def cmd_turns(a, board):
+    """T-312: table / --json of watch-run turns per ticket. See docs/turns.md."""
+    return _turns_cmd()(
+        a, board, load_all, load_workforce,
+        lambda b: load_messages(b, include_archives=True))
+
+
+def _scheduler_cmd():
+    try:
+        from ticket_board.scheduler import cmd_route_shadow as impl
+        return impl
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.scheduler import cmd_route_shadow as impl
+        return impl
 
 
 # ---- routing: which agent should take which open ticket -----------------
@@ -3690,7 +4685,15 @@ def score_agent(board, name, entry, roles, ticket):
 def cmd_route(a, board):
     """Suggest an owner for every unassigned open ticket, by model, roles,
     capabilities and cost. Writes `suggested`; `tickets next` honours it.
-    Agents still pull -- this is a hint, not a lock -- unless --claim."""
+    Agents still pull -- this is a hint, not a lock -- unless --claim.
+
+    `--shadow` (T-315) is print-only plus one `shadow_decision` event per
+    ready ticket. `--apply` is unimplemented.
+    """
+    if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False):
+        return _scheduler_cmd()(
+            a, board, load_all, load_workforce, load_roles, load_agents,
+            score_agent, traj_event)
     tickets = load_all(board)
     wf = load_workforce(board)
     roles = load_roles(board)
@@ -3804,6 +4807,10 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    # Read this BEFORE checkin(), which creates the record. Only a genuinely new
+    # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
+    # calls straight through here) must leave delivery completely alone.
+    first_join = not _agent_rec(board, owner)
     roles_path = os.path.join(board, "roles.json")
     roles = {}
     if os.path.isfile(roles_path):
@@ -3823,8 +4830,31 @@ def cmd_join(a, board):
     os.replace(tmp, roles_path)
     wf = load_workforce(board)
     entry = wf.get(owner, {})
-    if a.tool:
-        entry["tool"] = a.tool
+    # BYOA: --harness is the current spelling, --tool the original one; they are
+    # the same field. `custom:<cmd>` folds the command into the harness flag.
+    harness, inline_cmd = _split_harness(getattr(a, "harness", "") or a.tool)
+    cmd_template = (getattr(a, "cmd_template", "") or "").strip() or inline_cmd
+    # A bare executable name still works (it is the command). "custom" with
+    # nothing to run is a typo that would otherwise register an agent no
+    # watcher can ever start, so it is refused at the point of the mistake.
+    if harness == "custom" and not cmd_template:
+        sys.exit("--harness custom needs --cmd '<shell template>' "
+                 "(placeholders: %s)" % " ".join(HARNESS_PLACEHOLDERS))
+    if cmd_template and not harness:
+        harness = "custom"
+    prev_harness = entry.get("harness") or entry.get("tool") or ""
+    if harness:
+        entry["harness"] = harness
+        entry["tool"] = harness  # back-compat: older records/readers say "tool"
+    if cmd_template:
+        entry["cmd"] = cmd_template
+    elif harness and prev_harness and harness != prev_harness and entry.pop("cmd", None):
+        # A command template belongs to the harness it was registered with.
+        # Switching harness without a new --cmd must DROP it: keeping it would
+        # make `spawn --harness codex` silently launch the old custom runner,
+        # which is the exact "it ran something else" failure BYOA is here to
+        # make impossible.
+        print("dropped the %s command template (harness is now %s)" % (prev_harness, harness))
     if a.model:
         entry["model"] = a.model
     if a.can is not None:
@@ -3837,13 +4867,26 @@ def cmd_join(a, board):
     entry.setdefault("cost", "medium")
     wf[owner] = entry
     save_workforce(board, wf)
-    rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""))
+    rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
+    if first_join:
+        # setdefault, not update: if two joins race, the earlier stamp wins and
+        # neither can move the watermark forward over unread mail.
+        _agent_update(board, owner, lambda r: r.setdefault("joined_at", now()))
     post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
-        (" via %s" % a.tool) if a.tool else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
+        (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
     root = os.path.dirname(board)
-    print("joined as %s  roles=%s  can=%s  cost=%s" % (
-        owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"]))
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s" % (
+        owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
+        entry.get("harness") or "claude (default)"))
+    if entry.get("cmd"):
+        print("cmd: %s" % entry["cmd"])
+    elif harness and harness not in BUILTIN_HARNESSES:
+        # A typo'd built-in name ("cluade") is indistinguishable from a
+        # deliberate bare executable, so say which reading was taken rather
+        # than discovering it a poll interval later in the watch log.
+        print("note: %r is not a built-in harness, so it is run as the command itself; "
+              "`tickets harness check %s` proves it works" % (harness, owner))
     print("board: %s" % board)
     m = current_master(board)
     print("master: %s" % (m["owner"] if m else "nobody -- `tickets master take` if you are it"))
@@ -3909,7 +4952,7 @@ def pending_work(board, owner):
         out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
         return out
     msgs = _safe(lambda: unread(board, owner), [])
-    direct = [m for m in msgs if m.get("to") == owner]
+    direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
     if direct:
         out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
     elif msgs:
@@ -3934,7 +4977,8 @@ def pending_work(board, owner):
             out["review_queue"] = rq[:6]
         # A stuck message wakes both seats whoever it was addressed to.
         since = rec.get("inbox_seen", "")
-        stuck = [fmt_msg(x) for x in _safe(lambda: load_messages(board), [])
+        stuck = [fmt_msg(x) for x in _visible_after_join(
+                     _safe(lambda: load_messages(board), []), owner, rec.get("joined_at", ""))
                  if x.get("from") != owner and x.get("at", "") > since
                  and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
         if stuck:
@@ -3942,15 +4986,16 @@ def pending_work(board, owner):
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
         if crit:
             out["health_crit"] = [i[1][:80] for i in crit[:3]]
-        # The objective heartbeat: the master seat is woken every `drive_every`
-        # minutes (set by `watch --heartbeat`) even when nothing else is pending,
-        # so it keeps planning toward the objective instead of going quiet.
-        obj = _safe(lambda: load_objective(board), {})
-        every = int(rec.get("drive_every") or 0)
-        if obj and not obj.get("done") and every > 0 and owner == m.get("owner"):
-            last = rec.get("drive_at", "")
-            if not last or hours_since(last) * 60 >= every:
-                out["drive"] = {"objective": obj.get("text", "")[:100], "last": last or "never"}
+    # The objective heartbeat: any seat spawned with --heartbeat N (the master,
+    # or a standing seat such as an optimizer) is woken every N minutes even
+    # when nothing else is pending, so it keeps working its brief toward the
+    # objective instead of going quiet. Opt-in per seat; off for plain workers.
+    obj = _safe(lambda: load_objective(board), {})
+    every = int(rec.get("drive_every") or 0)
+    if obj and not obj.get("done") and every > 0:
+        last = rec.get("drive_at", "")
+        if not last or hours_since(last) * 60 >= every:
+            out["drive"] = {"objective": obj.get("text", "")[:100], "last": last or "never"}
     return out
 
 
@@ -4013,6 +5058,10 @@ Stop when there is nothing addressed to you, the sprint matches the vision, and 
 {extra}"""
 
 
+STANDING_SEAT_PROMPT = """HEARTBEAT: this seat is woken every {every} minutes whether or not anything is pending. This wake-up may be
+such a heartbeat: do the standing brief above end to end, post one short finding with numbers, and stop. The board's
+objective, which your brief serves: {objective}"""
+
 DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; `tickets objective` to read it in full):
 {objective}
 
@@ -4066,7 +5115,7 @@ def cmd_objective(a, board):
 
 def cmd_drive(a, board):
     """Set the objective and spawn the master seat with a heartbeat, in one go:
-    `tickets drive "<objective>" --as claude-fable --tool cursor+claude --heartbeat 30`."""
+    `tickets drive "<objective>" --as boss --tool cursor+claude --heartbeat 30`."""
     owner = whoami(a.by)
     if a.text:
         ns = argparse.Namespace(text=a.text, done=None, by=owner)
@@ -4074,7 +5123,11 @@ def cmd_drive(a, board):
     elif not load_objective(board):
         sys.exit("give an objective: tickets drive \"<what done looks like>\"")
     argv = [sys.executable, os.path.realpath(__file__), "spawn", owner, "--master",
-            "--heartbeat", str(a.heartbeat), "--every", str(a.every), "--tool", a.tool]
+            "--heartbeat", str(a.heartbeat), "--every", str(a.every)]
+    if a.tool:  # absent means "the harness `tickets join` registered for this seat"
+        argv += ["--harness", a.tool]
+    if getattr(a, "cmd_template", ""):
+        argv += ["--cmd", a.cmd_template]
     if a.model:
         argv += ["--model", a.model]
     import subprocess
@@ -4130,13 +5183,22 @@ def ticket_context(board, owner):
 
 
 def cmd_prompt(a, board):
+    print(prompt_text(a, board))
+
+
+def prompt_text(a, board):
+    """The worker/master/cos prompt as a string.
+
+    Split out of cmd_prompt so the watcher can write it to a {prompt_file} for
+    a BYOA harness without shelling back out to `tickets prompt` -- one
+    renderer, so a custom harness and the built-in ones cannot drift.
+    """
     owner = whoami(a.agent)
     m = current_master(board)
     master = (m["owner"] if m else "the master")
     cos = (m or {}).get("cos") or ""
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
-        print(cos_prompt_text(owner, board, os.path.dirname(board), a.extra or ""))
-        return
+        return cos_prompt_text(owner, board, os.path.dirname(board), a.extra or "")
     if getattr(a, "master", False):
         extra = a.extra or ""
         obj = _safe(lambda: load_objective(board), {})
@@ -4145,23 +5207,25 @@ def cmd_prompt(a, board):
             extra = DRIVE_PROMPT.format(objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
                                         status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
         if cos and owner != cos:
-            print(PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
-                                        extra=extra))
-        else:
-            print(MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
-                                       extra=extra))
-        return
+            return PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
+                                         extra=extra)
+        return MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
     parts = []
     brief = agent_brief(board, owner)
     if brief:
         parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    obj = _safe(lambda: load_objective(board), {})
+    if int(rec.get("drive_every") or 0) > 0 and obj and not obj.get("done"):
+        _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
+        parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
     tctx = ticket_context(board, owner)
     if tctx:
         parts.append("Context attached to your ticket(s):\n" + tctx)
     if a.extra:
         parts.append(a.extra)
-    print(WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                               extra="\n\n".join(parts)))
+    return WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
+                                extra="\n\n".join(parts))
 
 
 def cmd_brief(a, board):
@@ -4555,11 +5619,26 @@ def cmd_watch(a, board):
     cwd = os.path.abspath(a.cwd or root)
     if not os.path.isdir(cwd):
         sys.exit("--cwd %s does not exist" % cwd)
-    cmd = a.exec or (
-        'claude -p "$(tickets prompt)" --permission-mode %s%s'
-        % (a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else "")
-    )
+    if a.exec:
+        cmd = a.exec
+    else:
+        # No --exec: run whatever `tickets join` registered for this agent.
+        # Defaulting to claude here would make `tickets watch --agent qwen`
+        # (the cron-able form, used without spawn) launch the wrong harness.
+        harness, cmd_template = harness_of(board, owner)
+        if harness == "claude" and not cmd_template:
+            cmd = ('claude -p "$(tickets prompt)" --permission-mode %s%s'
+                   % (a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else ""))
+        else:
+            cmd = _worker_cmd(board, owner, "", a.permission_mode, harness,
+                              master=getattr(a, "prompt_kind", "") or "", cmd_template=cmd_template)
+    # BYOA: a custom harness command is a template, not a finished command line.
+    # Expansion happens per run rather than once here because {prompt_file} must
+    # be a FRESH prompt every time -- the whole point of the watcher is that the
+    # board changed since the last run.
+    templated = any(ph in cmd for ph in HARNESS_PLACEHOLDERS)
     every = max(WATCH_MIN_INTERVAL, int(a.every))
+    harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
     lock = None
     if not a.once:
         lock = _watch_lock(board, owner)
@@ -4610,16 +5689,53 @@ def cmd_watch(a, board):
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
                 print("%s work found (%s) -> run %d" % (now(), ", ".join(p), runs))
+                run_cmd, cleanup = cmd, None
+                if templated:
+                    pf = ""
+                    if "{prompt_file}" in cmd:
+                        try:
+                            pf, cleanup = _render_prompt_file(board, owner, getattr(a, "prompt_kind", "") or "")
+                        except OSError as e:
+                            log("%s run %d could not write the prompt file: %s" % (now(), runs, e))
+                            print("  run %d skipped: could not write the prompt file (%s)" % (runs, e))
+                            failures += 1
+                            if a.once:
+                                sys.exit(1)
+                            _time.sleep(min(every * (2 ** min(failures, 5)), 900))
+                            continue
+                    run_cmd = _expand_harness_cmd(cmd, agent=owner, cwd=cwd, prompt_file=pf)
+                # The trigger is recorded as the pending KEYS only: the values
+                # are message text and ticket titles, and neither belongs in
+                # the trajectory log (T-311 privacy rule).
+                run_started = now()
+                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or None
+                _safe(lambda: traj_event(board, "run_start", agent=owner,
+                                         ticket=held_ticket, run_no=runs,
+                                         trigger=sorted(p), harness_cmd=harness,
+                                         worktree=cwd), None)
                 if a.dry_run:
-                    print("  dry-run; would execute: %s" % cmd)
+                    print("  dry-run; would execute: %s" % run_cmd)
+                    if cleanup:
+                        cleanup()
                     rc = 0
+                    _safe(lambda: traj_event(board, "run_end", agent=owner,
+                                             ticket=held_ticket, run_no=runs,
+                                             trigger=sorted(p), harness_cmd=harness,
+                                             worktree=cwd, started_at=run_started,
+                                             ended_at=now(), exit=0, dry_run=True,
+                                             duration_s=_iso_span_secs(run_started, now())), None)
                 else:
                     # The whole point of T-237: something must record that this
                     # agent is alive WHILE the child runs. checkin() cannot --
                     # the next call to it is on the far side of this line.
                     _safe(lambda: _run_begin(board, owner, runs, cwd), None)
+                    # Where this run's own output starts in the shared log, so
+                    # the usage parse below reads THIS run's tail and not the
+                    # previous run's result object (T-311: a stale JSON blob
+                    # would attribute one run's tokens to another).
+                    log_before = _safe(lambda: os.path.getsize(log_path), 0) or 0
                     rc, timed_out = _watch_run_capped(
-                        cmd, cwd, env, log_path,
+                        run_cmd, cwd, env, log_path,
                         a.run_timeout * 60 if a.run_timeout else None,
                         WATCH_LOG_MAX_BYTES,
                         on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
@@ -4627,6 +5743,20 @@ def cmd_watch(a, board):
                         beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
                     )
                     _safe(lambda: _run_end(board, owner, runs, rc), None)
+                    if cleanup:
+                        cleanup()
+                    ended = now()
+                    usage = _safe(lambda: parse_harness_usage(
+                        _read_run_slice(log_path, log_before)), {}) or {}
+                    _safe(lambda: traj_event(
+                        board, "run_end", agent=owner, ticket=held_ticket,
+                        run_no=runs, trigger=sorted(p), harness_cmd=harness,
+                        worktree=cwd, started_at=run_started, ended_at=ended,
+                        exit=rc, timed_out=bool(timed_out),
+                        duration_s=_iso_span_secs(run_started, ended),
+                        outcome=("limit" if _looks_limited(
+                            _read_run_slice(log_path, log_before)) else None),
+                        **usage), None)
                     if timed_out:
                         with open(log_path, "a") as lf:
                             lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))
@@ -4716,6 +5846,8 @@ def cmd_boot(a, board):
     roles = load_roles(board)
     if owner not in wf or (a.roles is not None):
         ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
+                                harness=getattr(a, "harness", "") or "",
+                                cmd_template=getattr(a, "cmd_template", "") or "",
                                 model=a.model, best_for="")
         _silent(lambda: cmd_join(ns, board))
         steps.append("joined as %s (roles=%s)" % (owner, a.roles or roles.get(owner, [])))
@@ -4804,6 +5936,12 @@ Spawning a team from a master session (models per agent):
   tickets drive "<what done looks like>" --as boss --heartbeat 30               # objective + master seat that wakes
                                                                                 #   every 30 min to plan toward it
   tickets spawn --list | tickets spawn <name> --stop
+
+Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
+  tickets join qwen --roles backend --harness custom --cmd 'ollama run qwen3:8b < {prompt_file}'
+  tickets harness check qwen          # runs it on 'reply OK' under a 60s cap, records pass/fail + latency
+  tickets spawn qwen                  # no --harness: uses what `join` registered
+  Placeholders: {prompt_file} (this wake-up's prompt, fresh per run) {cwd} (the agent's worktree) {agent}.
   Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
   a detached watcher that runs the tool with that model only when `tickets pending` says there is
   work. Workers persist until --stop, logout or reboot; new tickets created later are picked up on
@@ -4820,39 +5958,153 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 """
 
 
-def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False):
+# ---- BYOA: bring your own agent ------------------------------------------
+#
+# A harness is whatever actually runs the model: the Claude CLI, the Codex CLI,
+# the Cursor agent, or ANY command of your own (`custom:<cmd>` / --cmd). The
+# runtime's side of the contract never changes -- it hands the harness a prompt
+# and a working directory, and reads the board afterwards. docs/byoa.md is the
+# operator-facing version of this.
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude")
+HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
+
+
+def _split_harness(spec):
+    """`custom:<cmd>` -> ("custom", "<cmd>"); anything else -> (spec, "").
+
+    The inline form exists so a harness and its command fit in one flag
+    (`--harness 'custom:my-agent --prompt {prompt_file}'`), which is what a
+    spawn line in a shell script wants. `--cmd` is the same thing, spelled out.
+    """
+    spec = (spec or "").strip()
+    if spec.startswith("custom:"):
+        return "custom", spec[len("custom:"):].strip()
+    return spec, ""
+
+
+def harness_of(board, owner, harness="", cmd=""):
+    """Resolve (harness, cmd_template) for an agent: explicit flags win, then
+    the workforce record written by `tickets join`, then the claude default.
+
+    This is the single place that answers "what runs this agent", so `spawn`,
+    `watch` and `harness check` cannot disagree about it.
+    """
+    harness, inline = _split_harness(harness)
+    cmd = cmd or inline
+    entry = load_workforce(board).get(owner, {}) or {}
+    if not harness:
+        stored, stored_inline = _split_harness(entry.get("harness") or entry.get("tool") or "")
+        harness = stored
+        cmd = cmd or stored_inline or (entry.get("cmd") or "")
+    elif not cmd and harness == (entry.get("harness") or entry.get("tool") or ""):
+        cmd = entry.get("cmd") or ""
+    return (harness or "claude"), cmd
+
+
+def _expand_harness_cmd(template, agent="", cwd="", prompt_file=""):
+    """Substitute {prompt_file} {cwd} {agent} in a custom harness command.
+
+    str.replace, deliberately not str.format: a real harness command carries
+    braces of its own (a curl with a JSON body, an awk program), and .format
+    would raise KeyError on them -- the agent would simply never start, with
+    the failure a hundred lines away from the template that caused it.
+
+    Every substituted value is shell-quoted because the result is run through
+    the shell. The TEMPLATE itself is not: it is a command line by definition,
+    and it comes from whoever ran `tickets join` for this agent.
+    """
+    out = template
+    for name, value in (("{prompt_file}", prompt_file), ("{cwd}", cwd), ("{agent}", agent)):
+        if name in out:
+            out = out.replace(name, shlex.quote(value or ""))
+    return out
+
+
+def _render_prompt_file(board, owner, kind="", text=""):
+    """Write this agent's prompt to a fresh temp file; return (path, cleanup).
+
+    A file, not an argv string: a worker prompt is thousands of characters of
+    briefs and ticket context, and pasting that into a command line is how you
+    meet ARG_MAX on a long board. The file is mode 0600 and removed by the
+    cleanup callable, which never raises -- a harness run must not fail because
+    the prompt file was already gone.
+    """
+    import tempfile
+
+    if not text:
+        ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="")
+        text = _safe(lambda: prompt_text(ns, board), "") or ""
+    fd, path = tempfile.mkstemp(prefix="tickets-prompt-%s-" % re.sub(r"[^A-Za-z0-9_.-]", "_", owner)[:32],
+                                suffix=".txt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+    except OSError:
+        os.close(fd)
+        raise
+
+    def cleanup():
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    return path, cleanup
+
+
+def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False,
+                cmd_template="", prompt_expr=""):
     """The headless command a spawned worker runs. Model comes from --model or
     the workforce record (`tickets join --model`). Spawned workers run without
     permission prompts by default: nobody is there to answer them, and the
     blast radius is the agent's own worktree and branch (--safe for acceptEdits).
+
+    `cmd_template` (from `join --cmd` / `spawn --cmd`) overrides the built-in
+    line for ANY harness, so bringing your own agent is not a second code path:
+    the watcher runs one string either way. `prompt_expr` replaces the shell
+    expression that produces the prompt -- `harness check` passes a literal
+    probe prompt through it so the probe exercises the real command shape.
     """
     # The workforce record is writable by any agent, so the model name is quoted
     # before it reaches `watch`, which runs this string through the shell.
     model = shlex.quote(model or load_workforce(board).get(owner, {}).get("model", "") or "")
     model = "" if model == "''" else model
+    if cmd_template:
+        # Placeholders are expanded per run by the watcher (a fresh prompt file
+        # each time), so the template is returned as written.
+        return cmd_template
+    if tool == "custom":
+        # Without a template there is nothing to run, and the fall-through below
+        # would launch a binary literally named "custom".
+        sys.exit("%s is registered as a custom harness with no command; "
+                 "re-register it: tickets join %s --harness custom --cmd '<shell template>'" % (owner, owner))
     prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
         master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
+    prompt = prompt_expr or '"$(%s)"' % prompt
     if tool == "claude":
         flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
                 else "--permission-mode %s" % permission_mode)
-        return 'claude -p "$(%s)" %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
+        return 'claude -p %s %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
     if tool == "codex":
         # Codex CLI headless: exec mode; unattended needs the bypass flag (no one
         # can answer approvals), --safe keeps the workspace-write sandbox instead.
         mode = ("--dangerously-bypass-approvals-and-sandbox" if permission_mode == "bypassPermissions"
                 else "-s workspace-write")
-        return 'codex exec --skip-git-repo-check %s%s "$(%s)"' % (mode, (" -m %s" % model) if model else "", prompt)
+        return 'codex exec --skip-git-repo-check %s%s %s' % (mode, (" -m %s" % model) if model else "", prompt)
     if tool == "cursor":
         # Cursor CLI (`agent`): runs any model Cursor offers (gpt-5.5-high, claude-fable-5-1-thinking-high, ...)
         force = "--force" if permission_mode == "bypassPermissions" else ""
-        return 'agent -p --output-format text %s%s "$(%s)"' % (force, (" --model %s" % model) if model else "", prompt)
+        return 'agent -p --output-format text %s%s %s' % (force, (" --model %s" % model) if model else "", prompt)
     if tool == "cursor+claude":
         # Fable through Cursor first; if that run errors, the same prompt through the
         # Claude CLI (opus). One identity, two engines -- the master never goes dark.
-        first = _worker_cmd(board, owner, model or "claude-fable-5-1-thinking-high", permission_mode, "cursor", master)
-        second = _worker_cmd(board, owner, "opus", permission_mode, "claude", master)
+        first = _worker_cmd(board, owner, model or "claude-fable-5-1-thinking-high", permission_mode, "cursor",
+                            master, prompt_expr=prompt_expr)
+        second = _worker_cmd(board, owner, "opus", permission_mode, "claude", master, prompt_expr=prompt_expr)
         return "%s || %s" % (first, second)
-    return tool  # any other executable that reads the prompt itself
+    # Any other executable, named directly: it is the command, and it reads the
+    # prompt itself. Kept for the pre-BYOA `spawn --tool ./my-runner` form.
+    return tool
 
 
 def _inherit_settings(root, wt):
@@ -4898,11 +6150,16 @@ def cmd_spawn(a, board):
     root = os.path.dirname(board)
     if a.list:
         wf = load_workforce(board)
-        print("%-14s %-9s %-8s %-8s %s" % ("agent", "watcher", "model", "seen", "worktree"))
+        print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+            "agent", "watcher", "harness", "model", "check", "seen", "worktree"))
         for r in sorted(load_agents(board), key=lambda r: r["owner"]):
             pid = _watcher_pid(board, r["owner"])
-            print("%-14s %-9s %-8s %-8s %s" % (
-                r["owner"][:14], ("pid %d" % pid) if pid else "-", (wf.get(r["owner"], {}).get("model") or "-")[:8],
+            entry = wf.get(r["owner"], {})
+            print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+                r["owner"][:14], ("pid %d" % pid) if pid else "-",
+                (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                (entry.get("model") or "-")[:8],
+                _harness_check_label(r.get("harness_check")),
                 (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
                 (r.get("worktree") or "").replace(os.path.expanduser("~"), "~")))
         return
@@ -4920,8 +6177,15 @@ def cmd_spawn(a, board):
         post_message(board, whoami(), "%s watcher asked to stop" % owner)
         return
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
+                            harness=getattr(a, "harness", "") or "",
+                            cmd_template=getattr(a, "cmd_template", "") or "",
                             model=a.model, best_for=a.best_for or "")
     _silent(lambda: cmd_join(ns, board))
+    # --tool/--harness no longer defaults to "claude" in the parser: an absent
+    # flag must mean "use what `tickets join` registered for this agent",
+    # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
+    harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
+                                       getattr(a, "cmd_template", ""))
     wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
     if not os.path.isdir(wt):
         base = a.base or _trunk()
@@ -4960,9 +6224,10 @@ def cmd_spawn(a, board):
         pass
     mode = "acceptEdits" if a.safe else "bypassPermissions"
     kind = "cos" if a.cos else ("master" if a.master else "")
-    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, a.tool or "claude", master=kind)
+    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, harness, master=kind, cmd_template=cmd_template)
     argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
+            "--prompt-kind", kind,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
     # T-243: strip Git's LOCATION vars before handing the parent's environment
     # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
@@ -4980,59 +6245,815 @@ def cmd_spawn(a, board):
     _time.sleep(1.0)
     pid = _watcher_pid(board, owner)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; model=%s; log %s" % (owner, (" (pid %d)" % pid) if pid else "", model, log_path))
+    print("watcher for %s started%s; harness=%s; model=%s; log %s" % (
+        owner, (" (pid %d)" % pid) if pid else "", harness, model, log_path))
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
-                 % (owner, a.tool or "claude", model))
+                 % (owner, harness, model))
+
+
+HARNESS_PROBE_PROMPT = "reply OK"
+HARNESS_CHECK_TIMEOUT = 60
+
+
+def _harness_check_label(check):
+    """One column's worth of the last `harness check`, for `spawn --list`."""
+    if not check:
+        return "-"
+    age = hours_since(check.get("at", ""))
+    ms = check.get("latency_ms")
+    return "%s %s" % ("ok" if check.get("ok") else "FAIL",
+                      ("%.1fs" % (ms / 1000.0)) if isinstance(ms, (int, float)) else
+                      ((fmt_hours(age) + " ago") if age is not None else ""))
+
+
+def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HARNESS_CHECK_TIMEOUT):
+    """Run the agent's harness on a trivial prompt and report what happened.
+
+    Returns the record stored on the agent: harness, cmd, ok, exit, latency_ms,
+    output (head), at. The probe runs the REAL command shape -- same binary,
+    same flags, same template -- with only the prompt swapped, because the
+    failure this is for ("that harness is not installed / not logged in / the
+    template is wrong") lives in the command, not in the model's answer.
+
+    `ok` is exit status only. Whether the model actually said OK is reported in
+    `replied`, and deliberately does not gate `ok`: a harness that answers a
+    trivial prompt with a preamble is working, and a check that called that a
+    failure would take a live agent out of the fleet.
+    """
+    import subprocess
+    import time as _time
+
+    harness, cmd_template = harness_of(board, owner, harness, cmd)
+    cwd = cwd or (_agent_rec(board, owner) or {}).get("worktree") or os.path.dirname(board)
+    if not os.path.isdir(cwd):
+        cwd = os.path.dirname(board)
+    prompt_file, cleanup = "", None
+    if cmd_template:
+        if "{prompt_file}" in cmd_template:
+            prompt_file, cleanup = _render_prompt_file(board, owner, text=HARNESS_PROBE_PROMPT)
+        run_cmd = _expand_harness_cmd(cmd_template, agent=owner, cwd=cwd, prompt_file=prompt_file)
+    else:
+        run_cmd = _worker_cmd(board, owner, model, "bypassPermissions", harness,
+                              prompt_expr=shlex.quote(HARNESS_PROBE_PROMPT))
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    started = _time.time()
+    out, rc, timed_out = "", None, False
+    try:
+        r = subprocess.run(run_cmd, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=timeout)
+        rc, out = r.returncode, ((r.stdout or "") + (r.stderr or ""))
+    except subprocess.TimeoutExpired as e:
+        timed_out, rc = True, 124
+        out = "".join(x.decode("utf-8", "replace") if isinstance(x, bytes) else (x or "")
+                      for x in (e.stdout, e.stderr))
+    except OSError as e:
+        rc, out = 127, str(e)
+    finally:
+        if cleanup:
+            cleanup()
+    latency_ms = int((_time.time() - started) * 1000)
+    out = out.strip()
+    return {"harness": harness, "cmd": run_cmd, "ok": rc == 0, "exit": rc, "timed_out": timed_out,
+            "latency_ms": latency_ms, "replied": "ok" in out.lower()[:400],
+            "output": out[:400], "at": now()}
+
+
+def cmd_harness(a, board):
+    """`tickets harness check <name>` / `tickets harness list`.
+
+    check: prove the agent's harness actually runs before a watcher spends a
+    poll interval discovering it does not. The result is written to the agent
+    record so `spawn --list` and the master can see who is really reachable.
+    """
+    if a.harness_cmd == "list":
+        wf = load_workforce(board)
+        names = sorted(set(list(wf) + [r["owner"] for r in load_agents(board)]))
+        if not names:
+            print("no agents registered yet -- tickets join <name> --harness ...")
+            return
+        print("%-16s %-12s %-14s %s" % ("agent", "harness", "check", "cmd"))
+        for n in names:
+            e = wf.get(n, {}) or {}
+            rec = _agent_rec(board, n) or {}
+            print("%-16s %-12s %-14s %s" % (
+                n[:16], (e.get("harness") or e.get("tool") or "claude")[:12],
+                _harness_check_label(rec.get("harness_check")),
+                e.get("cmd") or "(built-in)"))
+        return
+    owner = a.name or whoami()
+    if owner.startswith("agent-"):
+        sys.exit("harness check needs an agent name: tickets harness check <name>")
+    harness, cmd_template = harness_of(board, owner, a.harness, a.cmd_template)
+    print("checking %s: harness=%s%s" % (owner, harness, (" cmd=%s" % cmd_template) if cmd_template else ""))
+    res = harness_probe(board, owner, a.harness, a.cmd_template, a.model, a.cwd, a.timeout)
+    _safe(lambda: _agent_set(board, owner, harness_check=res), None)
+    print("  cmd:      %s" % res["cmd"])
+    print("  exit:     %s%s" % (res["exit"], " (TIMEOUT after %ds)" % a.timeout if res["timed_out"] else ""))
+    print("  latency:  %.1fs" % (res["latency_ms"] / 1000.0))
+    print("  replied:  %s" % ("saw 'OK' in the output" if res["replied"] else "no 'OK' in the first 400 chars"))
+    if res["output"]:
+        print("  output:   %s" % res["output"].splitlines()[0][:160])
+    print("%s: %s" % (owner, "harness OK" if res["ok"] else "HARNESS FAILED"))
+    if not res["ok"]:
+        sys.exit(1)
 
 
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Ticket board</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{--bg:#f7f7f5;--fg:#1c1c1a;--mute:#6b6b66;--line:#e2e2dd;--card:#fff;--ok:#2f8f4e;--warn:#c27a00;--bad:#c23b2b;--acc:#2b5fd9}
-@media(prefers-color-scheme:dark){:root{--bg:#141413;--fg:#ececea;--mute:#9a9a94;--line:#2c2c2a;--card:#1d1d1b;--ok:#5ec27f;--warn:#e0a53d;--bad:#e5645a;--acc:#7aa2ff}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif}
-header{display:flex;gap:16px;align-items:baseline;padding:14px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
-h1{font-size:16px;margin:0}small{color:var(--mute)}main{padding:16px 20px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
-section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
-section h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin:0 0 8px}
-table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:4px 6px;border-top:1px solid var(--line);vertical-align:top;font-size:13px}th{color:var(--mute);font-weight:500;border-top:0}
-.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--acc)}
-.tag{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid var(--line);color:var(--mute)}
-.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
-.msgs div{padding:4px 0;border-top:1px solid var(--line);font-size:13px}.wide{grid-column:1/-1}.num{text-align:right}
-</style></head><body>
-<header><h1 id="title">Ticket board</h1><small id="meta"></small><small id="clock" style="margin-left:auto"></small></header>
+:root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
+header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:linear-gradient(180deg,#12151c 0%,#0c0e12 100%);border-bottom:1px solid var(--line)}
+.brand{display:flex;flex-direction:column;gap:1px;min-width:140px}
+.brand .prod{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.brand h1{font-size:16px;margin:0;font-weight:650}
+.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;background:var(--chip);border:1px solid var(--line);font-size:12px}
+.chip b{font-weight:650}
+.chip.master{border-color:color-mix(in srgb,var(--acc) 45%,var(--line))}
+.chip.cos{border-color:color-mix(in srgb,var(--review) 45%,var(--line))}
+.sprint{display:flex;flex-direction:column;gap:3px;min-width:180px;flex:1}
+.sprint .row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--mute)}
+.bar{height:6px;background:#1b1f28;border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--acc)}
+.pulse{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:650}
+.pulse i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.pulse.warn i{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 25%,transparent)}
+.pulse.bad i{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 25%,transparent)}
+#clock{margin-left:auto;font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
+.mission{margin:0 16px;border-bottom:1px solid var(--line)}
+.mission summary{cursor:pointer;list-style:none;padding:8px 0;color:var(--mute);font-size:12px;display:flex;gap:8px;align-items:baseline}
+.mission summary::-webkit-details-marker{display:none}
+.mission summary .k{letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--fg)}
+.mission summary .one{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
+.mission pre{margin:0 0 10px;white-space:pre-wrap;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--mute)}
+nav.tabs{display:flex;gap:4px;padding:8px 16px 0;border-bottom:1px solid var(--line)}
+nav.tabs button{appearance:none;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--mute);padding:8px 12px;font:13px/1 inherit;font-weight:650;cursor:pointer}
+nav.tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
+main{flex:1;min-height:0;padding:14px 16px 18px;overflow:auto}
+.pane{display:none;height:100%}
+body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-tab=messages] #pane-messages{display:flex;flex-direction:column;gap:12px}
+.kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
+@media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
+.col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
+.col h2{margin:0;padding:10px 12px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
+.col h2 .n{font-variant-numeric:tabular-nums;color:var(--mute)}
+.col.blocked h2{color:var(--blocked)}.col.ready h2{color:var(--ready)}.col.flight h2{color:var(--flight)}.col.review h2{color:var(--review)}
+.col .list{padding:0 8px 10px;display:flex;flex-direction:column;gap:8px}
+.card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.card.stale-warn{border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+.card.stale-bad{border-color:color-mix(in srgb,var(--bad) 70%,var(--line));background:color-mix(in srgb,var(--bad) 8%,#10141b)}
+.card-top{display:flex;gap:8px;align-items:center;font:11px/1 ui-monospace,Menlo,monospace}
+.card-top .id{font-weight:700;color:var(--acc)}
+.pri{color:var(--mute)}.card-title{font-weight:600;font-size:13px}
+.card-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--mute);font-size:12px}
+.wait{font-size:11px;color:var(--warn)}
+.empty{color:var(--mute);font-size:12px;padding:8px}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.mute{color:var(--mute)}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.who{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.av{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--acc);color:#fff;font-size:9px;font-weight:700;flex:none}
+.agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.agent{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.agent.head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.agent .st{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px;color:var(--mute)}
+.stats b{display:block;color:var(--fg);font-size:14px}
+.mention{color:var(--acc);font-weight:600;background:var(--chip);border-radius:4px;padding:0 3px}
+.msgs{display:flex;flex-direction:column;gap:8px;padding-bottom:8px}
+.m{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
+.m .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-bottom:4px}
+.tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;border:1px solid var(--line);color:var(--mute)}
+#composer{position:sticky;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px;padding:10px}
+#composer textarea{width:100%;resize:vertical;min-height:56px;font:13px/1.4 inherit;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+#composer select,#composer button,#composer input{font:13px inherit;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+#composer button{background:var(--acc);color:#fff;border-color:var(--acc);cursor:pointer;font-weight:600}
+#composer button:disabled{opacity:.5;cursor:default}
+#composerRow{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+#mentionBar{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;min-height:22px}
+.mchip{cursor:pointer;border:1px solid var(--line);background:var(--chip);border-radius:99px;padding:1px 9px;font-size:12px}
+.mchip:hover{border-color:var(--acc)}
+#composerMsg{font-size:12px;margin-top:4px;min-height:14px}
+.pitch-lede{color:var(--mute);font-size:12px;max-width:720px}
+.pitch-lede b{color:var(--fg)}
+.next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+.next-step .lbl{font-weight:700;color:var(--acc);white-space:nowrap}
+.next-step .msg{flex:1;min-width:160px}
+.next-step .cmd{font:12px/1.35 ui-monospace,Menlo,monospace;color:var(--mute);white-space:nowrap}
+.next-step.unreachable{background:color-mix(in srgb,var(--bad) 14%,var(--card));border-bottom-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
+.next-step.unreachable .lbl{color:var(--bad)}
+.onboard{margin:0 16px;padding:10px 0 12px;border-bottom:1px solid var(--line)}
+.onboard summary{cursor:pointer;list-style:none;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700;display:flex;gap:8px;align-items:center}
+.onboard summary::-webkit-details-marker{display:none}
+.onboard .ob-body{margin-top:8px}
+.ob-steps{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:12px}
+.ob-step{display:inline-flex;align-items:center;gap:5px;color:var(--mute);flex-wrap:wrap}
+.ob-step.done{color:var(--fg)}
+.ob-step i{width:14px;height:14px;border-radius:3px;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-style:normal;flex:none}
+.ob-step.done i{background:var(--ok);border-color:var(--ok);color:#fff}
+.empty-board{background:var(--card);border:1px dashed var(--line);border-radius:14px;padding:20px 18px;max-width:720px;margin-bottom:12px}
+.empty-board p{margin:0 0 10px;color:var(--mute);font-size:13px;line-height:1.55}
+.empty-board b{color:var(--fg)}
+.empty-board .cta{margin-top:14px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
+.col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
+.stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
+.promise-hero{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.promise-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.promise-card .v{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums;margin:4px 0;line-height:1.15}
+.promise-card .h{font-size:12px;color:var(--mute)}
+.promise-panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.promise-panel h2{margin:0 0 4px;font-size:13px}
+.turns-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.subh{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:8px 0 4px}
+.promise-table{width:100%;border-collapse:collapse;font-size:13px}
+.promise-table th,.promise-table td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+.promise-table .num{text-align:right;font-variant-numeric:tabular-nums}
+.usage-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
+.usage-card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:10px}
+.usage-card .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.usage-card .v{font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}
+.pitch{background:radial-gradient(1200px 400px at 50% 0%,#2a7a4c 0%,#14532d 55%,#0f3d24 100%);
+  border:2px solid #0a2a18;border-radius:18px;min-height:460px;display:flex;flex-direction:column;
+  position:relative;overflow:hidden;box-shadow:inset 0 0 0 2px rgba(255,255,255,.06)}
+.pitch:before{content:"";position:absolute;left:50%;top:50%;width:88px;height:88px;margin:-44px 0 0 -44px;
+  border:2px solid rgba(255,255,255,.18);border-radius:50%;pointer-events:none}
+.band{flex:1;display:flex;flex-direction:column;justify-content:center;padding:10px 14px;border-top:1px dashed rgba(255,255,255,.16);min-height:88px}
+.band:first-child{border-top:0}
+.band .lbl{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.55);font-weight:700;margin-bottom:8px}
+.band .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center}
+.player{width:72px;display:flex;flex-direction:column;align-items:center;gap:4px;color:#f4f7f2}
+.player .av{width:36px;height:36px;font-size:12px;background:#f4f7f2;color:#14532d}
+.player.keeper .av{background:var(--warn);color:#1a1204}
+.player.cover .av{background:var(--acc)}
+.player.ghost{opacity:.7}
+.player.ghost .av{background:transparent;border:2px dashed rgba(255,255,255,.55);color:#fff}
+.player .nm{font-size:11px;font-weight:650;text-align:center;max-width:80px;overflow:hidden;text-overflow:ellipsis}
+.player .cov{font-size:10px;color:rgba(255,255,255,.7);text-align:center}
+.bench{display:flex;gap:10px;flex-wrap:wrap;padding:8px 2px}
+.bench .player .av{background:#2a3344;color:#d5dbe6}
+@media(max-width:700px){.pitch{min-height:560px}.player{width:64px}}
+@media(max-width:600px){
+  header.cmd{flex-direction:column;align-items:stretch}
+  #clock{margin-left:0}
+  .next-step{flex-direction:column}
+  .ob-steps{flex-direction:column;align-items:flex-start}
+  .kanban{grid-template-columns:1fr}
+  .promise-hero,.turns-grid{grid-template-columns:1fr}
+  nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  .agents{grid-template-columns:1fr}
+  .sprint{min-width:0}
+}
+</style></head><body data-tab="board">
+<header class="cmd">
+  <div class="brand"><span class="prod">tickets</span><h1 id="title">Ticket board</h1></div>
+  <div class="chips" id="chips"></div>
+  <div class="sprint" id="sprint"></div>
+  <div class="pulse" id="pulse"><i></i><span>clean</span></div>
+  <div id="clock"></div>
+</header>
+<details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
+<div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
+<details class="onboard" id="onboardBox" open><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
+  <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
+<nav class="tabs">
+  <button type="button" data-tab-btn="board" class="on">Board</button>
+  <button type="button" data-tab-btn="agents">Agents</button>
+  <button type="button" data-tab-btn="messages">Messages</button>
+</nav>
 <main>
-<section class="wide"><h2>Goals</h2><div id="goals" style="white-space:pre-wrap;font-size:13px"></div></section>
-<section class="wide"><h2>Sprint</h2><div id="sprint"></div></section>
-<section class="wide"><h2>Utilization (24h)</h2><table id="util"></table></section>
-<section><h2>In flight</h2><table id="flight"></table></section>
-<section><h2>Review queue</h2><table id="review"></table></section>
-<section><h2>Agents</h2><table id="agents"></table></section>
-<section><h2>Health</h2><table id="health"></table></section>
-<section class="wide"><h2>Open tickets</h2><table id="open"></table></section>
-<section class="wide"><h2>Messages</h2><div class="msgs" id="msgs"></div></section>
+<div class="pane" id="pane-board">
+  <div id="emptyBoard" class="empty-board" hidden></div>
+  <div class="promise-hero" id="promiseHero">
+    <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">tickets turns --json · unknown is not zero</div></article>
+    <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
+  </div>
+  <div class="kanban">
+    <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
+    <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
+    <section class="col flight"><h2 title="Tickets actively being worked right now">In flight <span class="n" id="n-flight">0</span><span class="hint">claimed and in progress</span></h2><div class="list" id="col-flight"></div></section>
+    <section class="col review"><h2 title="Finished work waiting for master to merge to main">Review <span class="n" id="n-review">0</span><span class="hint">submitted, awaiting merge</span></h2><div class="list" id="col-review"></div></section>
+  </div>
+  <section class="promise-panel" id="turnsPanel">
+    <h2>Turns efficiency</h2>
+    <small id="turnsSummary" class="mute"></small>
+    <div class="turns-grid"><div><h3 class="subh">Worst tickets (watch runs)</h3><table class="promise-table" id="turnsWorst"></table></div><div><h3 class="subh">Per-agent median</h3><table class="promise-table" id="turnsAgents"></table></div></div>
+  </section>
+</div>
+<div class="pane" id="pane-agents">
+  <p class="pitch-lede" id="coverageLede"><b>Total football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
+  <div class="pitch" id="pitch">
+    <div class="band" data-band="attack"><div class="lbl">Attack · ready / uncovered</div><div class="row" id="band-attack"></div></div>
+    <div class="band" data-band="mid"><div class="lbl">Midfield · in flight</div><div class="row" id="band-mid"></div></div>
+    <div class="band" data-band="back"><div class="lbl">Defense · review</div><div class="row" id="band-back"></div></div>
+    <div class="band" data-band="keep"><div class="lbl">Keeper · master / CoS</div><div class="row" id="band-keep"></div></div>
+  </div>
+  <div class="mute" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px">Bench · idle or down</div>
+  <div class="bench" id="band-bench"></div>
+  <section class="promise-panel" id="usagePanel">
+    <h2>Usage / cost</h2>
+    <small id="usageHonesty" class="mute">Harness-reported only. Not reported by harness stays — never a made-up $0.</small>
+    <div class="usage-cards" id="usageCards"></div>
+    <table class="promise-table" id="usageAgents"></table>
+  </section>
+  <div class="agents" id="agents"></div>
+</div>
+<div class="pane" id="pane-messages">
+  <div class="msgs" id="msgs"></div>
+  <section id="composer">
+    <div id="composerRow">
+      <label class="who"><small>from</small> <select id="cFrom"></select></label>
+      <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
+      <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+    </div>
+    <textarea id="cText" placeholder="Message the board. Type @ to tag an agent (e.g. @cursor) -- mentions reach that agent even if 'to' is someone else."></textarea>
+    <div id="mentionBar"></div>
+    <div id="composerRow" style="margin-top:8px"><button id="cSend">Post</button><small id="composerMsg"></small></div>
+  </section>
+</div>
 </main>
 <script>
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
-function row(cells,cls){return '<tr class="'+(cls||'')+'">'+cells.map(c=>'<td>'+c+'</td>').join('')+'</tr>'}
-async function load(){const r=await fetch('/board.json?'+Date.now());const d=await r.json();
-document.getElementById('title').textContent='Ticket board · '+d.project;
-document.getElementById('meta').textContent='master '+(d.master||'nobody')+(d.cos?' · cos '+d.cos:'')+' · '+d.counts.done+' done / '+d.counts.total+' tickets';
-document.getElementById('clock').textContent='updated '+new Date().toLocaleTimeString();
-const s=d.sprint;document.getElementById('sprint').innerHTML=s?('<b>'+esc(s.id)+'</b> '+esc(s.goal)+'<div class="bar" style="margin:6px 0"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div><small>'+s.done+'/'+s.total+' done · '+s.in_flight+' in flight · '+s.blocked+' blocked · '+s.review+' in review'+(d.burn&&d.burn.done_per_day?' · '+d.burn.done_per_day.toFixed(1)+'/day, ETA '+(d.burn.eta_days?d.burn.eta_days.toFixed(1)+'d':'-'):'')+'</small>'):'no active sprint';
-document.getElementById('goals').innerHTML=esc(d.goals||'(no MASTER.md yet -- tickets master init)');
-document.getElementById('util').innerHTML='<tr><th>agent</th><th>state</th><th class="num">done</th><th>avg cycle</th><th>active</th><th>util</th><th class="num">wip</th><th class="num">review</th></tr>'+d.util.map(u=>row([esc(u.agent),'<span class="'+(u.state=='DOWN'?'bad':u.state=='busy'?'ok':'')+'">'+u.state+'</span>','<span class="num">'+u.done+'</span>',h(u.avg_cycle_h),h(u.active_h),'<div class="bar" style="width:120px;display:inline-block;vertical-align:middle"><i style="width:'+u.util_pct+'%"></i></div> '+Math.round(u.util_pct)+'%','<span class="num">'+u.in_flight+'</span>','<span class="num">'+u.in_review+'</span>'])).join('');
-document.getElementById('flight').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>last update</th></tr>'+d.in_flight.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>'])).join('')||row(['—','','',''] );
-document.getElementById('review').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>branch</th></tr>'+d.review.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="mono">'+esc(t.commit)+'</span>'+(t.pr?' PR '+esc(t.pr):'')])).join('')||row(['empty','','','']);
-document.getElementById('agents').innerHTML='<tr><th>agent</th><th>state</th><th>model</th><th class="num">done 24h</th><th>seen</th><th>ticket</th></tr>'+d.agents.map(a=>row([esc(a.name),'<span class="'+(a.state=='DOWN'?'bad':a.state=='busy'?'ok':'')+'">'+a.state+(a.watcher?' ●':'')+'</span>',esc(a.model||'-'),'<span class="num">'+a.done+'</span>',h(a.seen_h)+' ago',esc(a.ticket||'')])).join('');
-document.getElementById('health').innerHTML=d.health.length?d.health.map(x=>row(['<span class="'+(x.sev=='CRIT'?'bad':x.sev=='WARN'?'warn':'')+'">'+x.sev+'</span>',esc(x.msg)])).join(''):row(['<span class="ok">clean</span>','']);
-document.getElementById('open').innerHTML='<tr><th>id</th><th>status</th><th>pri</th><th>title</th><th>role</th><th>waits on</th></tr>'+d.open.map(t=>row([t.id,'<span class="tag">'+t.status+'</span>',t.priority,esc(t.title),esc(t.role),esc((t.waiting||[]).join(','))])).join('');
-document.getElementById('msgs').innerHTML=d.messages.map(m=>'<div><small>'+esc(m.at)+'</small> <b>'+esc(m.from)+'</b>'+(m.to?' → '+esc(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+' '+esc(m.text)+'</div>').join('');}
-load();setInterval(load,5000);
+// Server sends timestamps as raw ISO-8601 UTC; render in whatever timezone
+// this browser is actually in, not the server's.
+const fmtLocal=iso=>{if(!iso)return '-';const d=new Date(iso);return isNaN(d)?String(iso):d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
+function initials(name){const s=String(name||'?').split(/[-_ ]/).filter(Boolean);
+  return ((s[0]||'?')[0]+(s.length>1?s[1][0]:(s[0]||'?')[1]||'')).toUpperCase()}
+function who(name){if(!name)return '';return '<span class="who"><span class="av">'+esc(initials(name))+'</span>'+esc(name)+'</span>'}
+function mentionText(text){
+  return esc(text).split(/(```[\s\S]*?```|`[^`]*`)/g).map((part,i)=>i%2
+    ?part
+    :part.replace(/(^|[^\w@])@([A-Za-z][A-Za-z0-9_-]{0,47})/g,
+      (m,pre,handle)=>pre+'<span class="mention">@'+handle+'</span>')
+  ).join('')
+}
+function missionLine(goals){
+  const raw=String(goals||'').trim();
+  if(!raw)return '(no MASTER.md yet -- tickets master init)';
+  const lines=raw.split(/\n/).map(l=>l.trim()).filter(Boolean);
+  const first=lines.find(l=>!/^(OBJECTIVE|MISSION|CEO MEMO|SPRINT PLAN)\b/i.test(l))||lines[0];
+  return first.replace(/^[#>*\-]+\s*/,'').slice(0,180);
+}
+function staleClass(t){
+  if(t.since_update==null)return '';
+  if(t.since_update>1.5)return 'stale-bad';
+  if(t.since_update>0.75)return 'stale-warn';
+  return '';
+}
+function card(t,extra){
+  const waiting=(t.waiting||[]).length?'<div class="wait">waiting on '+esc((t.waiting||[]).join(', '))+'</div>':'';
+  const owner=t.owner?who(t.owner):'<span class="mute">unassigned</span>';
+  const pri=t.priority!=null?'<span class="pri">P'+esc(t.priority)+'</span>':'';
+  const age=t.since_update!=null?'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>':'';
+  return '<article class="card '+staleClass(t)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+(extra||'')+'</article>';
+}
+function fillCol(id,items,html){
+  document.getElementById('n-'+id).textContent=items.length;
+  document.getElementById('col-'+id).innerHTML=items.length?html:('<div class="empty">none</div>');
+}
+const dash=x=>x==null?'—':String(x);
+function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(n).toFixed(4):Number(n).toFixed(2)))}
+function renderPromise(p){
+  const med=document.getElementById('heroMedianVal'),mh=document.getElementById('heroMedianHint');
+  const yv=document.getElementById('heroYieldVal'),yh=document.getElementById('heroYieldHint');
+  if(!p){med.textContent='—';yv.textContent='—';return}
+  med.textContent=p.median_turns==null?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0);
+  mh.textContent='measured '+(p.n_turns||0)+' ticket(s); unmeasured '+(p.n_unmeasured_turns||0)+' (no run_end — typically backfill)';
+  if(p.yield_per_usd==null){yv.textContent='—';yh.textContent=(p.n_unmeasured_cost||0)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';}
+  else{yv.textContent=Number(p.yield_per_usd).toFixed(2)+'/ $';yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';}
+}
+function renderTurns(t){
+  const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
+  const row=cells=>'<tr>'+cells.map(c=>'<td>'+c+'</td>').join('')+'</tr>';
+  if(!t||t.v!==1){sum.textContent='';worst.innerHTML=row(['—','','','']);agents.innerHTML=row(['—','','','']);return;}
+  const agg=t.aggregates||{},measured=(t.tickets||[]).filter(r=>r.turns!=null).sort((a,b)=>b.turns-a.turns||(a.ticket>b.ticket?1:-1)).slice(0,10);
+  sum.textContent='measured '+((agg.n)||0)+' ticket(s); unmeasured '+((agg.n_unmeasured)||0)+' (no run_end — typically backfill)';
+  worst.innerHTML='<tr><th>ticket</th><th>owner</th><th class="num">turns</th><th>outcome</th></tr>'+(measured.length?measured.map(r=>row([esc(r.ticket),esc(r.owner||'—'),'<span class="num">'+r.turns+'</span>',esc(r.outcome||'-')])).join(''):row(['—','','','']));
+  const by=agg.by_agent||[];
+  agents.innerHTML='<tr><th>agent</th><th class="num">n</th><th class="num">median</th><th class="num">mean</th></tr>'+(by.length?by.map(r=>row([esc(r.agent),'<span class="num">'+r.n+'</span>','<span class="num">'+dash(r.median)+'</span>','<span class="num">'+dash(r.mean)+'</span>'])).join(''):row(['—','','','']));
+}
+function renderUsage(u){
+  const cards=document.getElementById('usageCards'),tbl=document.getElementById('usageAgents');
+  const cell=(k,v)=>'<div class="usage-card"><div class="k">'+esc(k)+'</div><div class="v">'+v+'</div></div>';
+  if(!u){cards.innerHTML=cell('Cost','—');tbl.innerHTML='';return;}
+  cards.innerHTML=cell('Cost',money(u.cost_usd))+cell('Tokens in',dash(u.tokens_in))+cell('Tokens out',dash(u.tokens_out))+cell('Runs with cost',String(u.n_runs_with_cost||0))+cell('Runs unmeasured',String(u.n_runs_unmeasured||0));
+  const by=u.by_agent||[];
+  tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
+}
+function playerChip(name,cover,kind){
+  return '<div class="player '+(kind||'cover')+'"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span><span class="cov">'+esc(cover||'')+'</span></div>';
+}
+function renderPitch(d){
+  const placed=new Set();
+  const keep=[],back=[],mid=[],attack=[],bench=[];
+  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(playerChip(name,cover,kind))};
+  add(keep,d.master,'master','keeper');
+  add(keep,d.cos,'CoS','keeper');
+  (d.review||[]).forEach(t=>add(back,t.owner,t.id));
+  (d.in_flight||[]).forEach(t=>add(mid,t.owner,t.id));
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  ready.forEach(t=>{if(t.owner)add(attack,t.owner,t.id);else attack.push(playerChip(t.id,'uncovered','ghost'))});
+  (d.agents||[]).forEach(a=>{
+    if(placed.has(a.name))return;
+    const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any shirt';
+    bench.push(playerChip(a.name,(a.state==='DOWN'?'down · ':'idle · ')+hint,a.state==='DOWN'?'ghost':''));
+  });
+  const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
+  put('band-keep',keep.join(''),'no keeper');
+  put('band-back',back.join(''),'nobody covering review');
+  put('band-mid',mid.join(''),'nobody in flight');
+  put('band-attack',attack.join(''),'no uncovered work');
+  put('band-bench',bench.join(''),'everyone is on the pitch');
+}
+function setTab(name){
+  document.body.dataset.tab=name;
+  try{localStorage.setItem('tickets-ui-tab',name)}catch(e){}
+  document.querySelectorAll('[data-tab-btn]').forEach(b=>b.classList.toggle('on',b.dataset.tabBtn===name));
+}
+document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
+try{const saved=localStorage.getItem('tickets-ui-tab');if(saved)setTab(saved)}catch(e){}
+let AGENTS=[];
+function loadAgentPickers(){
+  const from=document.getElementById('cFrom'),to=document.getElementById('cTo');
+  const savedFrom=localStorage.getItem('tickets-ui-from')||'';
+  const prevFrom=from.value||savedFrom, prevTo=to.value;
+  from.innerHTML='<option value="">(pick agent)</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  to.innerHTML='<option value="">everyone</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  if(AGENTS.includes(prevFrom))from.value=prevFrom;
+  if(AGENTS.includes(prevTo))to.value=prevTo;
+}
+function mentionQueryAt(text,caret){
+  const upto=text.slice(0,caret);const m=upto.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
+  return m?m[1]:null;
+}
+function renderMentionBar(){
+  const ta=document.getElementById('cText'),bar=document.getElementById('mentionBar');
+  const q=mentionQueryAt(ta.value,ta.selectionStart||0);
+  if(q===null){bar.innerHTML='';return}
+  const ql=q.toLowerCase();
+  const matches=AGENTS.filter(a=>a.toLowerCase().startsWith(ql)).slice(0,8);
+  bar.innerHTML=(matches.length?matches:AGENTS.slice(0,8)).map(a=>'<span class="mchip" data-agent="'+esc(a)+'">@'+esc(a)+'</span>').join('')
+    || '<small class="mute">no known agents yet</small>';
+}
+function insertMention(agent){
+  const ta=document.getElementById('cText');const caret=ta.selectionStart||0;
+  const before=ta.value.slice(0,caret),after=ta.value.slice(caret);
+  const m=before.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
+  const start=m?caret-m[1].length:caret;
+  ta.value=ta.value.slice(0,start)+agent+' '+after;
+  const pos=start+agent.length+1;ta.focus();ta.setSelectionRange(pos,pos);
+  renderMentionBar();
+}
+document.getElementById('mentionBar').addEventListener('click',e=>{
+  const el=e.target.closest('.mchip');if(el)insertMention(el.dataset.agent);
+});
+document.getElementById('cText').addEventListener('input',renderMentionBar);
+document.getElementById('cText').addEventListener('click',renderMentionBar);
+document.getElementById('cText').addEventListener('keyup',e=>{if(e.key!=='Enter')renderMentionBar()});
+document.getElementById('cSend').addEventListener('click',async()=>{
+  const from=document.getElementById('cFrom').value.trim();
+  const text=document.getElementById('cText').value.trim();
+  const to=document.getElementById('cTo').value.trim();
+  const re=document.getElementById('cRe').value.trim();
+  const btn=document.getElementById('cSend'),msg=document.getElementById('composerMsg');
+  if(!from){msg.className='bad';msg.textContent='pick who you are posting as';return}
+  if(!text){msg.className='bad';msg.textContent='message is empty';return}
+  localStorage.setItem('tickets-ui-from',from);
+  btn.disabled=true;msg.className='';msg.textContent='posting…';
+  try{
+    const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({from,text,to,re})});
+    const out=await r.json();
+    if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
+      document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';load()}
+    else{msg.className='bad';msg.textContent='error: '+(out.error||r.status)}
+  }catch(e){msg.className='bad';msg.textContent='error: '+e}
+  finally{btn.disabled=false}
+});
+function tickClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}
+let snapshotFails=0;
+function unreachableNextStep(msg,cmd){
+  return{kind:'unreachable',label:'Board unavailable',message:msg,cmd:cmd||''};
+}
+async function load(){
+  let d;
+  try{
+    const r=await fetch('/board.json?'+Date.now());
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    d=await r.json();
+  }catch(e){
+    snapshotFails++;
+    renderNextStep(unreachableNextStep(
+      snapshotFails>2?'Cannot reach the board server — is `tickets ui` still running? ('+e+')'
+        :'Board unreachable — retrying… ('+e+')',
+      'tickets ui'));
+    return;
+  }
+  if(d.error){
+    snapshotFails++;
+    renderNextStep(d.next_step||unreachableNextStep(
+      'Board snapshot failed — '+d.error+(snapshotFails>2?' (still failing; check TICKETS_DIR and board files)':''),
+      'tickets ui --json'));
+    d.counts=d.counts||{total:0,done:0};
+  }else snapshotFails=0;
+  document.getElementById('title').textContent=d.project||'Atman';
+  const counts=d.counts||{total:0,done:0};
+  document.getElementById('chips').innerHTML=
+    '<span class="chip master"><b>master</b> '+esc(d.master||'nobody')+'</span>'+
+    '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
+    '<span class="chip"><b>'+esc(counts.done)+'</b>/'+esc(counts.total)+' done</span>';
+  const s=d.sprint;
+  document.getElementById('sprint').innerHTML=s
+    ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
+    :'<div class="row"><span>no active sprint</span></div><div class="bar"><i style="width:0"></i></div>';
+  const crit=(d.health||[]).filter(x=>x.sev==='CRIT').length;
+  const warn=(d.health||[]).filter(x=>x.sev==='WARN').length;
+  const pulse=document.getElementById('pulse');
+  pulse.className='pulse'+(crit?' bad':warn?' warn':'');
+  pulse.innerHTML='<i></i><span>'+(crit?'CRIT '+crit:warn?'WARN '+warn:'clean')+'</span>';
+  tickClock();
+  const goals=d.goals||'(no MASTER.md yet -- tickets master init)';
+  document.getElementById('goals').textContent=goals;
+  document.getElementById('missionOne').textContent=missionLine(goals);
+  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length);
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  fillCol('blocked',blocked,blocked.map(t=>card(t)).join(''));
+  fillCol('ready',ready,ready.map(t=>card(t)).join(''));
+  fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
+  fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
+  renderEmptyBoard(d);
+  if(!d.error)renderNextStep(d.next_step);
+  renderOnboarding(d.onboarding);
+  renderPromise(d.promise);
+  renderTurns(d.turns);
+  renderUsage(d.usage);
+  renderPitch(d);
+  AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
+  const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
+  document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
+    const u=utilBy[a.name]||{};
+    const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
+      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
+      '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
+      '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — a proxy for productive turns">Turns</span></div>'+
+      '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
+      '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div></article>';
+  }).join('')||'<div class="empty">no agents checked in</div>';
+  const thread=(d.messages||[]).slice().reverse();
+  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtLocal(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
+    ||'<div class="empty">no messages yet</div>';
+}
+function renderOnboarding(ob){
+  // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
+  const steps=[
+    ['initialized','Board ready','tickets quickstart --agent <you>'],
+    ['first_ticket','Work on the board','tickets quickstart'],
+    ['first_agent','You registered','tickets quickstart --agent <you>'],
+    ['first_review','First review submitted','tickets review <id> --notes "..."'],
+    ['first_merge','First merge','tickets done <id> --notes "..."'],
+    ['objective_set','Objective set','tickets objective "..."']
+  ];
+  const done=steps.filter(s=>ob&&ob[s[0]]).length;
+  document.getElementById('obProgress').textContent=done+'/'+steps.length;
+  document.getElementById('obSteps').innerHTML=steps.map(s=>{
+    const ok=ob&&ob[s[0]];
+    return '<span class="ob-step'+(ok?' done':'')+'"><i>'+(ok?'✓':'')+'</i><span>'+esc(s[1])+'</span><span class="mute mono">'+esc(s[2])+'</span></span>';
+  }).join('');
+}
+function renderNextStep(ns){
+  const el=document.getElementById('nextStep');
+  if(!ns||!ns.message){el.hidden=true;el.className='next-step';return}
+  el.hidden=false;
+  el.className='next-step'+(ns.kind==='unreachable'?' unreachable':'');
+  el.innerHTML='<span class="lbl">'+esc(ns.label||'Next')+'</span><span class="msg">'+esc(ns.message)+'</span>'+
+    (ns.cmd?'<span class="cmd">'+esc(ns.cmd)+'</span>':'');
+}
+function renderEmptyBoard(d){
+  const el=document.getElementById('emptyBoard');
+  const empty=d.empty_board||!(d.counts&&d.counts.total);
+  el.hidden=!empty;
+  if(!empty)return;
+  el.innerHTML='<p><b>Welcome to Atman.</b> This board coordinates a team of agents on shared work.</p>'+
+    '<p>Tickets are the unit of work — agents claim one at a time, post updates, and submit for review.</p>'+
+    '<p>The master merges finished work; dependencies keep agents from starting too early.</p>'+
+    '<p>Everyone reads the same board state — messages, tickets, and agents live here.</p>'+
+    '<p>New here? Seed a sample board and claim your first ticket in one command.</p>'+
+    '<div class="cta">tickets quickstart --agent &lt;you&gt; &nbsp;·&nbsp; tickets guide &nbsp;·&nbsp; README.md</div>';
+}
+load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
+
+
+def _onboarding_checklist(board, tickets):
+    """First-run checklist ticks for the UI.
+
+    Display labels/cmds in UI_HTML match T-322 quickstart + README
+    (opus-console/t322-quickstart); keys here are the board-state probes.
+    """
+    initialized = os.path.isfile(master_path(board)) or os.path.isfile(os.path.join(board, "roles.json"))
+    agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
+    workforce = load_workforce(board)
+    return {
+        "initialized": initialized,
+        "first_ticket": len(tickets) > 0,
+        "first_agent": bool(agents or workforce),
+        "first_review": any(t.get("status") in ("review", "done") for t in tickets),
+        "first_merge": any(t.get("status") == "done" for t in tickets),
+        "objective_set": bool((load_objective(board) or {}).get("text")),
+    }
+
+
+def _next_step_hint(board, tickets, done_ids):
+    """One-line guidance for the persistent next-step strip."""
+    if not tickets:
+        return {"kind": "start", "label": "Get started",
+                "message": "Board is empty — run quickstart to seed your first tickets.",
+                "cmd": "tickets quickstart --agent <you>"}
+    blocked = [t for t in tickets if t.get("status") == "blocked"]
+    if blocked:
+        t = blocked[0]
+        return {"kind": "unblock", "label": "Unblock",
+                "message": "%s is blocked — read why and clear the blocker." % t["id"],
+                "cmd": "tickets show %s" % t["id"]}
+    review = [t for t in tickets if t.get("status") == "review"]
+    if review:
+        return {"kind": "merge", "label": "Review queue",
+                "message": "%d ticket(s) waiting for master to merge." % len(review),
+                "cmd": "tickets done %s --notes \"...\"" % review[0]["id"]}
+    agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
+    workforce = load_workforce(board)
+    if not (agents or workforce):
+        return {"kind": "spawn", "label": "Spawn an agent",
+                "message": "No agents on the board yet — register one to claim work.",
+                "cmd": "tickets join <name> --roles backend"}
+    ready = [t for t in tickets if t.get("status") == "open"
+             and all(d in done_ids for d in t.get("deps", []))]
+    unowned = [t for t in ready if not t.get("owner")]
+    if unowned:
+        return {"kind": "route", "label": "Route work",
+                "message": "Ready tickets are unowned — claim or assign them.",
+                "cmd": "tickets next"}
+    return {"kind": "ok", "label": "On track",
+            "message": "Workers are moving — post updates every 45 minutes.",
+            "cmd": "tickets update <id> \"...\""}
+
+
+def _turns_mod():
+    try:
+        from ticket_board.turns import build_turns_report, load_trajectory_events
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.turns import build_turns_report, load_trajectory_events
+    return build_turns_report, load_trajectory_events
+
+
+def _empty_turns_snapshot():
+    return {
+        "v": 1,
+        "tickets": [],
+        "aggregates": {
+            "mean": None, "median": None, "n": 0, "n_unmeasured": 0,
+            "by_agent": [], "by_model": [], "by_role": [], "by_priority": [],
+        },
+    }
+
+
+def _turns_snapshot(board, tickets):
+    """Frozen `tickets turns --json` for the console (T-372 / T-344)."""
+    build_turns_report, load_trajectory_events = _turns_mod()
+    return build_turns_report(
+        load_trajectory_events(board),
+        tickets=tickets,
+        workforce=load_workforce(board),
+        messages=load_messages(board, include_archives=True),
+    )
+
+
+def _empty_usage_snapshot():
+    return {
+        "cost_usd": None, "tokens_in": None, "tokens_out": None,
+        "n_runs_with_cost": 0, "n_runs_unmeasured": 0, "by_agent": [],
+    }
+
+
+def _usage_snapshot(events):
+    """Harness-reported usage only. Unknown is omitted, never defaulted to 0."""
+    by = {}
+    n_cost = n_uncost = 0
+    cost_sum = 0.0
+    tin = tout = 0
+    have_cost = have_tin = have_tout = False
+    for e in events or []:
+        if e.get("kind") != "run_end":
+            continue
+        agent = e.get("agent") or ""
+        rec = by.setdefault(agent, {
+            "agent": agent, "cost_usd": None, "tokens_in": None, "tokens_out": None,
+            "n_runs_with_cost": 0, "n_runs_unmeasured": 0,
+        })
+        c = e.get("cost_usd")
+        if isinstance(c, (int, float)):
+            have_cost = True
+            cost_sum += float(c)
+            n_cost += 1
+            rec["n_runs_with_cost"] += 1
+            rec["cost_usd"] = round((rec["cost_usd"] or 0.0) + float(c), 6)
+        else:
+            n_uncost += 1
+            rec["n_runs_unmeasured"] += 1
+        if isinstance(e.get("tokens_in"), int):
+            have_tin = True
+            tin += e["tokens_in"]
+            rec["tokens_in"] = (rec["tokens_in"] or 0) + e["tokens_in"]
+        if isinstance(e.get("tokens_out"), int):
+            have_tout = True
+            tout += e["tokens_out"]
+            rec["tokens_out"] = (rec["tokens_out"] or 0) + e["tokens_out"]
+    return {
+        "cost_usd": round(cost_sum, 6) if have_cost else None,
+        "tokens_in": tin if have_tin else None,
+        "tokens_out": tout if have_tout else None,
+        "n_runs_with_cost": n_cost,
+        "n_runs_unmeasured": n_uncost,
+        "by_agent": [by[k] for k in sorted(by) if k],
+    }
+
+
+def _ticket_costs(events):
+    out = {}
+    for e in events or []:
+        if e.get("kind") != "run_end":
+            continue
+        tid = e.get("ticket")
+        c = e.get("cost_usd")
+        if not tid or not isinstance(c, (int, float)):
+            continue
+        out[tid] = out.get(tid, 0.0) + float(c)
+    return out
+
+
+def _promise_hero(turns, tickets, events):
+    """CEO home hero: median turns + yield@cost. Unknown is never 0."""
+    agg = (turns or {}).get("aggregates") or {}
+    costs = _ticket_costs(events)
+    idx = {t.get("id"): t for t in (tickets or []) if t.get("id")}
+    done_with_cost = 0
+    done_no_cost = 0
+    cost_for_done = 0.0
+    for row in (turns or {}).get("tickets") or []:
+        tid = row.get("ticket")
+        outcome = row.get("outcome")
+        st = (idx.get(tid) or {}).get("status")
+        if outcome not in ("done", "merge") and st != "done":
+            continue
+        if tid in costs:
+            done_with_cost += 1
+            cost_for_done += costs[tid]
+        else:
+            done_no_cost += 1
+    yield_per_usd = None
+    if done_with_cost and cost_for_done > 0:
+        yield_per_usd = round(done_with_cost / cost_for_done, 4)
+    return {
+        "median_turns": agg.get("median"),
+        "n_turns": agg.get("n") or 0,
+        "n_unmeasured_turns": agg.get("n_unmeasured") or 0,
+        "yield_per_usd": yield_per_usd,
+        "done_with_cost": done_with_cost,
+        "cost_usd": round(cost_for_done, 6) if done_with_cost else None,
+        "n_unmeasured_cost": done_no_cost,
+    }
+
+
+def _coverage_snapshot(master, cos, open_rows, in_flight, review, agents):
+    """Total Football coverage: empty shirts = uncovered ready work."""
+    uncovered = [{"id": t["id"], "title": t.get("title", "")}
+                 for t in (open_rows or [])
+                 if t.get("status") != "BLOCKED" and not t.get("waiting") and not t.get("owner")]
+    return {
+        "uncovered_ready": uncovered,
+        "in_flight": [{"id": t["id"], "owner": t.get("owner", "")} for t in (in_flight or [])],
+        "review": [{"id": t["id"], "owner": t.get("owner", "")} for t in (review or [])],
+        "keeper": ([{"name": master, "role": "master"}] if master else []) + (
+            [{"name": cos, "role": "cos"}] if cos else []),
+        "bench": [{"name": a["name"], "state": a.get("state", "")}
+                  for a in (agents or []) if a.get("name")],
+    }
+
+
+def _empty_promise_hero():
+    return {
+        "median_turns": None, "n_turns": 0, "n_unmeasured_turns": 0,
+        "yield_per_usd": None, "done_with_cost": 0, "cost_usd": None,
+        "n_unmeasured_cost": 0,
+    }
 
 
 def board_snapshot(board, messages=40):
@@ -5051,12 +7072,14 @@ def board_snapshot(board, messages=40):
     rows, burn = utilization(board, tickets, hours=24)
     agents = {r["owner"]: r for r in load_agents(board)}
     wf = load_workforce(board)
+    roles = load_roles(board)
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
         out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
-                           "watcher": bool(_watcher_pid(board, r["agent"]))})
+                           "watcher": bool(_watcher_pid(board, r["agent"])),
+                           "roles": roles.get(r["agent"]) or []})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
     try:
@@ -5075,27 +7098,52 @@ def board_snapshot(board, messages=40):
     if obj:
         goals = "OBJECTIVE%s\n%s\n\n%s" % (" (met)" if obj.get("done") else "", obj.get("text", ""), goals)
     util_rows = [r for r in rows if r["state"] != "DOWN"]
+    in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
+                  "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
+                  "waiting": [d for d in t.get("deps", []) if d not in done]}
+                 for t in tickets if t["status"] == "claimed"]
+    review = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
+               "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", "")}
+              for t in tickets if t["status"] == "review"]
+    open_rows = [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2),
+                  "title": t["title"], "role": t.get("role", ""), "owner": t.get("owner", ""),
+                  "waiting": [d for d in t.get("deps", []) if d not in done]}
+                 for t in tickets if t["status"] in ("open", "blocked")]
+    turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
+    events = _safe(lambda: _turns_mod()[1](board), [])
+    usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
+    promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
         "goals": goals,
         "util": sorted(util_rows, key=lambda r: (-r["done"], r["agent"])),
-        "in_flight": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"], "since_update": timing(t)["since_update"]}
-                      for t in tickets if t["status"] == "claimed"],
-        "review": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"], "commit": t.get("commit", ""), "pr": t.get("pr", "")}
-                   for t in tickets if t["status"] == "review"],
-        "open": [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2), "title": t["title"],
-                  "role": t.get("role", ""), "waiting": [d for d in t.get("deps", []) if d not in done]}
-                 for t in tickets if t["status"] in ("open", "blocked")],
+        "in_flight": in_flight,
+        "review": review,
+        "open": open_rows,
         "agents": out_agents,
         "health": [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12],
-        "messages": [{"at": x.get("at", "")[5:16].replace("T", " "), "from": x.get("from", ""), "to": x.get("to", ""),
-                      "re": x.get("re", ""), "text": x.get("text", "")} for x in load_messages(board)[-messages:]][::-1],
+        # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
+        # so the UI can render it in whatever timezone the viewer's browser is
+        # actually in -- truncating/reformatting it here would bake in UTC.
+        "messages": [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
+                      "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or []}
+                     for x in load_messages(board)[-messages:]][::-1],
+        "onboarding": _onboarding_checklist(board, tickets),
+        "next_step": _next_step_hint(board, tickets, done),
+        "empty_board": counts["total"] == 0,
+        "turns": turns,
+        "usage": usage,
+        "promise": promise,
+        "coverage": _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
+                                       open_rows, in_flight, review, out_agents),
     }
 
 
 def cmd_ui(a, board):
-    """Local status UI: serves an auto-refreshing page and /board.json (read-only)."""
+    """Local status UI: serves an auto-refreshing page, /board.json, and a
+    composer POST at /msg that posts through post_message() -- same board,
+    same messages.jsonl, no second store."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     if a.json:
@@ -5105,7 +7153,13 @@ def cmd_ui(a, board):
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.startswith("/board.json"):
-                body = json.dumps(_safe(lambda: board_snapshot(board), {"error": "snapshot failed"})).encode()
+                body = json.dumps(_safe(lambda: board_snapshot(board), {
+                    "error": "snapshot failed",
+                    "counts": {"total": 0, "done": 0},
+                    "next_step": {"kind": "unreachable", "label": "Snapshot failed",
+                                  "message": "Could not read the board — check TICKETS_DIR and board files.",
+                                  "cmd": "tickets ui --json"},
+                })).encode()
                 ctype = "application/json"
             else:
                 body = UI_HTML.encode()
@@ -5117,11 +7171,36 @@ def cmd_ui(a, board):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self):
+            if not self.path.startswith("/msg"):
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                sender = str(payload.get("from") or "").strip()
+                text = str(payload.get("text") or "").strip()
+                to = str(payload.get("to") or "").strip()
+                re_ = str(payload.get("re") or "").strip()
+                if not sender or not text:
+                    raise ValueError("from and text are required")
+                rec = post_message(board, sender, text, to, re_)
+                status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
+            except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
+                status, out = 400, {"ok": False, "error": str(e)}
+            body = json.dumps(out).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *args):
             pass
 
     srv = HTTPServer((a.host, a.port), H)
-    print("board UI: http://%s:%d  (Ctrl-C to stop; read-only)" % (a.host, a.port))
+    print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via tickets msg)" % (a.host, a.port))
     if a.open:
         import subprocess
         subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
@@ -5307,6 +7386,26 @@ def cmd_mine(a, board):
 
 
 def cmd_init(a, board):
+    # `board` is the AMBIENT resolution (board_dir()): where every later
+    # `tickets` command from this cwd will go.  `target` is resolved
+    # independently, from cwd alone.  T-263: they used to be the same value by
+    # construction, so init could report success and write somewhere else.
+    target, why = _init_resolve_board(a)
+    explicit = bool(getattr(a, "board", None))
+
+    # Acceptance 3 -- "which board am I about to write to" is answered BEFORE
+    # the first write, never after it.
+    print("board: %s" % target)
+    print("  resolved from %s" % why)
+    if not _same_board(target, board):
+        print("  ambient:      %s" % board)
+
+    # Acceptance 1 -- create AND bind, or fail loudly. Never success-then-
+    # resolve-elsewhere.
+    if not explicit and not _same_board(target, board):
+        sys.exit(_init_refusal(target, board))
+
+    board = target
     root = os.path.dirname(board)
     os.makedirs(board, exist_ok=True)
     written = []
@@ -5352,9 +7451,24 @@ def cmd_init(a, board):
             f.write(MASTER_TEMPLATE)
         written.append(master_path(board))
 
-    print("board: %s" % board)
     for w in written:
         print("wrote: %s" % w)
+
+    # Acceptance 1 again, after the fact: VERIFY the bind with the real
+    # resolver rather than asserting it. An init that wrote files but did not
+    # bind is exactly the failure this ticket exists to stop.
+    bound = board_dir(discover_children=True)
+    if _same_board(bound, board):
+        print("bound: `tickets` run from %s resolves to this board." % os.getcwd())
+    elif explicit:
+        print("\nNOT BOUND: you asked for --board %s, but `tickets` run from %s "
+              "still resolves to %s.\n  To use the board you just wrote:  "
+              "export TICKETS_DIR=%s" % (board, os.getcwd(), bound, board))
+    else:
+        sys.exit(
+            "INIT WROTE THE BOARD BUT IT IS NOT BOUND: wrote %s, yet `tickets` "
+            "from %s still resolves to %s. Refusing to report success (T-263)."
+            % (board, os.getcwd(), bound))
     print("\nClaude Code picks this up from its global SessionStart hook.")
     print("Codex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.")
 
@@ -5560,15 +7674,42 @@ def main():
     c.add_argument("--roles", default=None, help="backend,console")
     c.add_argument("--can", default=None, help="docker,browser,own-machine,gpu")
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
-    c.add_argument("--tool", default="", help="claude|codex|cursor|grok")
+    c.add_argument("--harness", default="",
+                   help="claude | codex | cursor | cursor+claude | custom | custom:<cmd> | <executable>")
+    c.add_argument("--tool", default="", help="original spelling of --harness")
+    # dest is cmd_template, not cmd: `sub = p.add_subparsers(dest="cmd")` above
+    # means main() dispatches on a.cmd, and a --cmd flag would overwrite the
+    # subcommand name with the harness template (or with "" when absent, which
+    # sends every `join` straight to print_help).
+    c.add_argument("--cmd", dest="cmd_template", default="",
+                   help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
     c.set_defaults(fn=cmd_join)
+
+    c = sub.add_parser("harness", help="BYOA: check or list the harness that actually runs each agent")
+    hs = c.add_subparsers(dest="harness_cmd")
+    x = hs.add_parser("check", help="run the agent's harness on a trivial prompt under a time cap")
+    x.add_argument("name", nargs="?", default="")
+    x.add_argument("--harness", default="", help="override the registered harness for this check")
+    x.add_argument("--cmd", dest="cmd_template", default="", help="override the registered command template")
+    x.add_argument("--model", default="")
+    x.add_argument("--cwd", default="", help="run the probe here (default: the agent's worktree)")
+    x.add_argument("--timeout", type=int, default=HARNESS_CHECK_TIMEOUT, help="seconds (default 60)")
+    hs.add_parser("list", help="every registered agent, its harness and its last check")
+    c.set_defaults(fn=cmd_harness, harness_cmd="list", name="", harness="", cmd_template="", model="", cwd="",
+                   timeout=HARNESS_CHECK_TIMEOUT)
 
     c = sub.add_parser("route", help="master: suggest an owner for every open ticket by model/roles/capabilities/cost")
     c.add_argument("--claim", action="store_true", help="hard-assign the ready ones (claims on their behalf)")
     c.add_argument("--redo", action="store_true", help="recompute tickets that already have a suggestion")
     c.add_argument("--only", nargs="*", help="restrict to these agents")
+    c.add_argument("--shadow", action="store_true",
+                   help="T-315: print rule vs learned/prior pick; do not assign")
+    c.add_argument("--report", action="store_true",
+                   help="with --shadow: agreement rate and realized turns")
+    c.add_argument("--apply", action="store_true",
+                   help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)
 
     c = sub.add_parser("connect", help="print how any agent connects to this board")
@@ -5600,7 +7741,9 @@ def main():
     c.add_argument("--by", "--as", dest="by", default="", help="agent name for the master seat (default TICKET_AGENT)")
     c.add_argument("--heartbeat", type=int, default=30, help="minutes between objective wake-ups")
     c.add_argument("--every", type=int, default=60, help="seconds between board polls")
-    c.add_argument("--tool", default="claude", help="claude | codex | cursor | cursor+claude")
+    c.add_argument("--harness", "--tool", dest="tool", default="",
+                   help="claude | codex | cursor | cursor+claude | custom:<cmd> (default: the registered harness)")
+    c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--model", default="")
     c.add_argument("--restart", action="store_true", help="stop an existing watcher for this seat first")
     c.set_defaults(fn=cmd_drive)
@@ -5610,7 +7753,10 @@ def main():
     c.add_argument("--every", type=int, default=60, help="seconds between polls")
     c.add_argument("--heartbeat", type=int, default=0,
                    help="master seat only: also wake every N minutes to drive the objective (0 = off)")
-    c.add_argument("--exec", default="", help="command to run (default: headless claude with `tickets prompt`)")
+    c.add_argument("--exec", default="", help="command to run (default: headless claude with `tickets prompt`); "
+                                              "{prompt_file} {cwd} {agent} are expanded per run")
+    c.add_argument("--prompt-kind", dest="prompt_kind", default="", choices=("", "master", "cos"),
+                   help="which prompt to write to {prompt_file} (default: the worker prompt)")
     c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
     c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
     c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
@@ -5631,6 +7777,8 @@ def main():
     c = sub.add_parser("boot", help="every startup step: join, hooks, check-in, briefing (idempotent)")
     c.add_argument("--agent", default="")
     c.add_argument("--tool", default="", help="claude | codex | cursor (installs that tool's hooks)")
+    c.add_argument("--harness", default="", help="harness to register for this agent (see `tickets join --harness`)")
+    c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--roles", default=None)
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
@@ -5648,7 +7796,12 @@ def main():
     c = sub.add_parser("spawn", help="start a persistent worker: register, worktree, detached watcher (model per agent)")
     c.add_argument("name", nargs="?", default="")
     c.add_argument("--model", default="", help="claude: opus | sonnet | haiku (or a full model id); codex: its model name")
-    c.add_argument("--tool", default="claude", help="claude | codex | <executable>")
+    c.add_argument("--harness", default="",
+                   help="claude | codex | cursor | cursor+claude | custom:<cmd> | <executable>; "
+                        "default: whatever `tickets join` registered for this agent")
+    c.add_argument("--tool", default="", help="original spelling of --harness")
+    c.add_argument("--cmd", dest="cmd_template", default="",
+                   help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--roles", default=None)
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
@@ -5670,7 +7823,7 @@ def main():
     c.add_argument("--list", action="store_true")
     c.set_defaults(fn=cmd_spawn)
 
-    c = sub.add_parser("ui", help="local status page: http://localhost:8765 (read-only, auto-refresh)")
+    c = sub.add_parser("ui", help="local command board: http://localhost:8765 (auto-refresh + composer)")
     c.add_argument("--port", type=int, default=8765)
     c.add_argument("--host", default="127.0.0.1")
     c.add_argument("--open", action="store_true", help="open it in the browser")
@@ -5734,20 +7887,58 @@ def main():
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_inbox)
 
+    c = sub.add_parser("trajectories", aliases=["traj"],
+                       help="the team trajectory log: query | export | backfill")
+    c.add_argument("--ticket", "-t", default="", help="only this ticket")
+    c.add_argument("--agent", "-a", default="", help="only this agent")
+    c.add_argument("--kind", "-k", default="",
+                   help="run_start,run_end,claim,update,review,done,reopen,block,msg,merge")
+    c.add_argument("--since", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--until", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--limit", type=int, default=200, help="show the last N; 0 = all")
+    c.add_argument("--summary", action="store_true",
+                   help="per-ticket runs/turns/updates/messages/reopens")
+    c.add_argument("--json", action="store_true")
+    ts = c.add_subparsers(dest="traj_cmd")
+    x = ts.add_parser("export", help="write the filtered events to a file")
+    x.add_argument("--out", required=True, help="destination .jsonl")
+    x = ts.add_parser("backfill",
+                      help="synthesise claim/update/review/done from tickets already on the board")
+    x.add_argument("--dry-run", action="store_true", dest="dry_run")
+    c.set_defaults(fn=cmd_trajectories, traj_cmd="list", out="", dry_run=False)
+
+    c = sub.add_parser("turns",
+                       help="watch-run turns per ticket (T-312); --json is frozen for the optimizer")
+    c.add_argument("--ticket", "-t", default="", help="only this ticket")
+    c.add_argument("--agent", "-a", default="", help="only events from this agent")
+    c.add_argument("--model", default="", help="only this model")
+    c.add_argument("--epic", default="", help="only this epic")
+    c.add_argument("--since", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--until", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--json", action="store_true", dest="json",
+                   help="frozen shape: tickets[] + aggregates mean/median")
+    c.set_defaults(fn=cmd_turns)
+
     c = sub.add_parser("review", help="submit finished work for the master to review + merge")
     c.add_argument("id")
     c.add_argument("--notes", "-n", default="", help="what to look at: paths, tests run, decisions")
     c.add_argument("--pr", default="", help="PR number or URL if you opened one")
     c.add_argument("--owner", "-o")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_review)
 
     c = sub.add_parser("sync", help="agent: merge main into my branch now (do this before review)")
+    c.add_argument("--artifact", default="", metavar="DIR",
+                   help="tree the deliverable is in, when it is not this checkout")
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_sync)
 
     c = sub.add_parser("merge", help="master: integrate pinned review SHAs -> test -> FF main -> close by ancestry")
     c.add_argument("branches", nargs="*", help="branches to merge; default = branches in the review queue")
+    c.add_argument("--artifact", default="", metavar="DIR",
+                   help="repo to integrate in, when the deliverable does not live in the "
+                        "board's own repo; only tickets pinned to THAT repo are eligible")
     c.add_argument("--push", action="store_true", help="push main to origin after fast-forward")
     c.add_argument("--no-test", action="store_true", help="merge even if tests fail (not recommended)")
     c.add_argument("--ours", action="append", default=[], metavar="BRANCH",
@@ -5780,6 +7971,7 @@ def main():
     c.add_argument("--notes", "-n", default="")
     c.add_argument("--owner", "-o")
     c.add_argument("--pr", default="")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_status)
 
@@ -5837,8 +8029,18 @@ def main():
     c.add_argument("id")
     c.add_argument("--notes", "-n", default="", help="handoff text for dependent tickets")
     c.add_argument("--no-notes", action="store_true", help="allow empty handoff")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
     c.add_argument("--force", action="store_true", help="skip the branch/clean-tree rule")
     c.set_defaults(fn=cmd_done)
+
+    c = sub.add_parser("repin", help="correct a review pin to name the repo the artifact is in")
+    c.add_argument("id")
+    c.add_argument("--artifact", required=True, metavar="DIR",
+                   help="checkout the deliverable is in; its CURRENT HEAD becomes the pin")
+    c.add_argument("--notes", "-n", default="", help="why the pin was wrong")
+    c.add_argument("--owner", "-o")
+    c.add_argument("--force", action="store_true", help="allow a dirty artifact tree")
+    c.set_defaults(fn=cmd_repin)
 
     c = sub.add_parser("block", help="mark a ticket blocked")
     c.add_argument("id")
@@ -5906,6 +8108,9 @@ def main():
 
     c = sub.add_parser("init", help="install the board protocol into this project")
     c.add_argument("--track", action="store_true", help="commit the board to git instead of gitignoring it")
+    c.add_argument("--board", metavar="DIR", help="write the board HERE instead of the "
+                   "directory init resolves from cwd -- the explicit escape hatch for "
+                   "the case init would otherwise refuse (T-263)")
     c.set_defaults(fn=cmd_init)
 
     # Optional extension (identity / role / handover / pulse) installed beside
