@@ -340,24 +340,49 @@ def format_truncation_notice(dropped_line_count: int, truncated_line_count: int,
     )
 
 
+# Every character (or pair) str.splitlines() treats as a line boundary --
+# not just '\n'/'\r'/'\r\n'. A printed line is whatever ends up between two
+# of these once it reaches stdout, and any of them left unescaped is exactly
+# as forgeable as a bare '\n' (cos-opus, T-289 FIX-FIRST: LINE SEPARATOR,
+# PARAGRAPH SEPARATOR, VT, FF and NEL all carried a forged notice past the
+# '\r'/'\n'/'\r\n'-only escape). '\r\n' must be replaced before the lone
+# '\r' and '\n' entries or it would be double-escaped.
+_LINE_BOUNDARY_ESCAPES = (
+    ("\r\n", "\\r\\n"),
+    ("\n", "\\n"),
+    ("\r", "\\r"),
+    ("\v", "\\v"),
+    ("\f", "\\f"),
+    ("\x1c", "\\x1c"),
+    ("\x1d", "\\x1d"),
+    ("\x1e", "\\x1e"),
+    ("\x85", "\\x85"),
+    (" ", "\\u2028"),
+    (" ", "\\u2029"),
+)
+
+
 def _escape_embedded_newlines(line: str) -> str:
     """Collapse one context.lines element to exactly one printed line.
 
     context.lines is contractually one line per element, but nothing enforces
-    that on the wire: an element containing '\\n' (or '\\r') prints as more
-    than one visual line through the single `print(line)` call in hook.py --
-    it is effectively multiple lines wearing one element's clothing. That
-    matters because _sanitize_notice_lookalike's startswith check only looks
-    at the start of the *element*; a line like 'hello\\n[ticket board: ...]'
-    does not start with NOTICE_RESERVED_PREFIX, but its second printed line
-    does, and that second line reaches the agent's screen as a forged
-    framework notice regardless (T-295 attack 3 / T-289 reopen). Escaping
-    every embedded newline BEFORE that check runs means one element can
-    never produce more than one printed line, so it can never smuggle
-    content past a check that only ever sees where the element itself
-    starts.
+    that on the wire: an element containing any character str.splitlines()
+    treats as a line boundary prints as more than one visual line through the
+    single `print(line)` call in hook.py -- it is effectively multiple lines
+    wearing one element's clothing. That matters because
+    _sanitize_notice_lookalike's startswith check only looks at the start of
+    the *element*; a line like 'hello\\n[ticket board: ...]' does not start
+    with NOTICE_RESERVED_PREFIX, but its second printed line does, and that
+    second line reaches the agent's screen as a forged framework notice
+    regardless (T-295 attack 3 / T-289 reopen; VT/FF/NEL/LS/PS variants,
+    T-289 FIX-FIRST). Escaping every boundary character BEFORE that check
+    runs means one element can never produce more than one printed line, so
+    it can never smuggle content past a check that only ever sees where the
+    element itself starts.
     """
-    return line.replace("\r\n", "\\r\\n").replace("\n", "\\n").replace("\r", "\\r")
+    for raw, escaped in _LINE_BOUNDARY_ESCAPES:
+        line = line.replace(raw, escaped)
+    return line
 
 
 def _sanitize_notice_lookalike(line: str) -> str:
@@ -395,6 +420,15 @@ def bound_context_lines(lines: List[str], config: AdapterConfig) -> Tuple[List[s
     _sanitize_notice_lookalike) -- this runs whether or not truncation
     happens, since a false "nothing was truncated" claim is exactly as
     dangerous as a false "something was truncated" one.
+
+    The char cut is applied to the ESCAPED line, not the raw one (cos-opus,
+    T-289 FIX-FIRST): _escape_embedded_newlines replaces every boundary
+    character with a longer literal (one char becomes two, e.g. '\\n'), so
+    cutting the raw line first and escaping after let a line of exactly
+    `max_context_line_chars` raw newline characters print at DOUBLE the
+    configured cap -- and, since the raw length was within the cap, it was
+    never even counted as truncated. Escaping first and cutting the result
+    keeps the printed length honestly bounded by max_context_line_chars.
     """
     kept = lines[: config.max_context_lines]
     dropped_line_count = len(lines) - len(kept)
@@ -402,10 +436,10 @@ def bound_context_lines(lines: List[str], config: AdapterConfig) -> Tuple[List[s
     bounded: List[str] = []
     truncated_line_count = 0
     for line in kept:
+        line = _escape_embedded_newlines(line)
         if len(line) > config.max_context_line_chars:
             truncated_line_count += 1
             line = line[: config.max_context_line_chars]
-        line = _escape_embedded_newlines(line)
         bounded.append(_sanitize_notice_lookalike(line))
 
     return bounded, dropped_line_count, truncated_line_count
