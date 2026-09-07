@@ -26,6 +26,7 @@ Default roles for those names can be overridden by .tickets/roles.json.
 import argparse
 import errno
 import glob
+import hashlib
 import json
 import os
 import re
@@ -942,11 +943,42 @@ def checkin(board, owner, ticket=None, note=""):
         "note": note,
         "seen": now(),
     }
+
+    def _apply(rec):
+        # T-278 owns the WRITE (read-modify-write inside the flock); T-244 owns
+        # the inbox_seen STAMP. Resolving this toward the T-244 side would
+        # restore the unlocked json.dump/os.replace that T-278 exists to
+        # remove, so the stamp moves inside the lambda instead of the write
+        # moving back out.
+        rec.update(fields)
+        # NO inbox_seen STAMP HERE, and its absence is the fix, not an omission.
+        #
+        # T-244 stamped inbox_seen = now() at an agent's first check-in. Its
+        # target was real -- unread()'s `if since and (...)` treats since=""
+        # as "skip the archive check", which is backwards for the agent with
+        # the least history to fall back on -- but the mechanism overloaded
+        # inbox_seen to mean two different things: "the newest mail this agent
+        # has been SHOWN" (a receipt) and "when this agent APPEARED" (a clock).
+        #
+        # Once T-327 landed joined_at, that second meaning has its own field,
+        # and keeping the stamp is actively destructive: a message sent
+        # `--to <name>` BEFORE the seat joins is older than the stamp and is
+        # therefore never delivered. Posting the brief first is exactly how
+        # seats get briefed on this board, and T-327 measured and rejected
+        # this same regression (test_join_does_not_destroy_a_brief_posted_
+        # before_the_seat_existed, which the stamp turns red).
+        #
+        # So inbox_seen goes back to being a pure receipt that starts empty,
+        # T-327's joined_at owns the flood policy, and T-244's actual defect
+        # is fixed where its own docstring says it lives: at the since=""
+        # branch in _inbox_scan, which now reads the archives for an agent
+        # that has never read anything instead of skipping them.
+
     # Other commands keep their own state in this record (inbox_seen, limit,
     # stop_blocks); a check-in must not erase it or every watch poll re-wakes
     # the agent. rec.update preserves them against the ORDERING hazard; the
     # lock in _agent_update is what preserves them against the CONCURRENCY one.
-    return _agent_update(board, owner, lambda rec: rec.update(fields))
+    return _agent_update(board, owner, _apply)
 
 
 def _current_ticket(board, owner):
@@ -4281,11 +4313,20 @@ def _agent_rec(board, owner):
         return {}
 
 
-def _mark_inbox_read(board, owner):
-    if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
-        checkin(board, owner)
-    stamp = now()
-    _agent_update(board, owner, lambda rec: rec.update({"inbox_seen": stamp}))
+def _msg_id(m):
+    """A stable identity for a message record.
+
+    Messages carry no id on the wire, and adding one would change a format
+    that T-213's legacy import round-trips verbatim, so identity is derived
+    from content instead: the same record hashes the same whether it is read
+    from the live file or from a rotated archive, and nothing already on disk
+    has to be migrated. Two byte-identical messages in the same second do
+    share an identity, which is exactly why the boundary list is consumed as
+    a multiset below -- one delivery per occurrence, not per distinct value.
+    """
+    raw = json.dumps([m.get("at", ""), m.get("from", ""), m.get("to", ""),
+                      m.get("re", ""), m.get("text", "")], sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _addressed_to(msg, owner):
@@ -4326,22 +4367,177 @@ def _visible_after_join(msgs, owner, joined):
     return [m for m in msgs if m.get("to") == owner or m.get("at", "") >= joined]
 
 
-def unread(board, owner):
-    rec = _agent_rec(board, owner)
+def _seen_counts(seen_ids):
+    counts = {}
+    for k in seen_ids or []:
+        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def _addressed(m, owner):
+    """Would this message ever be shown to `owner`? (Own mail is never echoed.)
+
+    Addressing itself is main's `_addressed_to` (T-221 @mentions, T-327), not a
+    second copy of the rule: this function only adds "never echo an agent its
+    own mail", which is the one part the inbox owns.
+    """
+    return m.get("from") != owner and _addressed_to(m, owner)
+
+
+def _seen_since(rec):
+    """The agent's watermark, never read as being AHEAD of the present.
+
+    A stored `inbox_seen` in the future is not evidence that anything was
+    observed -- it is a clock, not a receipt -- and reading it verbatim makes
+    every message posted before wall-clock catches up older than the watermark,
+    and so invisible, silently, for the whole length of the skew.
+
+    The clamp lives on the READ side as well as the write side on purpose: a
+    record poisoned before this fix shipped would otherwise stay blind until
+    its skew expired, and a preventive-only clamp cannot heal it. Clamping down
+    can re-deliver a message already shown; that is the safe direction, and the
+    identity set below keeps it to at most one repeat.
+    """
     since = rec.get("inbox_seen", "")
+    ceiling = now()
+    return ceiling if since > ceiling else since
+
+
+def _is_unread(m, since, remaining):
+    """Is `m` new to an agent whose watermark is `since`?
+
+    Two whole-second stamps cannot order events inside one second, so a strict
+    `at > since` silently and permanently drops everything posted during the
+    very second an agent read its inbox -- the mail stays on disk while the
+    agent is told its inbox is empty. The obvious repair, `>=`, redelivers on
+    every poll forever (a wake storm on a board whose watch loops wake on
+    unread mail), so the ambiguous region is disambiguated by IDENTITY instead:
+    anything at or ahead of the watermark is unread unless this agent has
+    already been shown that specific message.
+
+    "At or ahead" rather than "exactly at" is what makes a future-stamped
+    record safe. The watermark is clamped to the present, so a message stamped
+    ahead of now() sits above the watermark for the length of the skew; it is
+    delivered once, its identity is retained while it stays above the
+    watermark, and it is not redelivered on the next poll.
+
+    Consumes from `remaining` (a multiset of identities already delivered) so
+    that two identical messages in the same second are delivered twice, not
+    once.
+    """
+    at = m.get("at", "")
+    if not at or at < since:
+        return False
+    k = _msg_id(m)
+    if remaining.get(k):
+        remaining[k] -= 1
+        return False
+    return True
+
+
+def _inbox_scan(board, owner):
+    """The read side of the inbox: (unread, watermark, retained_ids).
+
+    The watermark returned is the newest `at` actually observed, clamped to the
+    present, and never wall-clock now() on its own. Both halves are load-bearing
+    and they fail in opposite directions:
+
+      * Stamping now() reopens the same-second hole one second later -- a
+        message posted between the read and the stamp is older than the stamp
+        and newer than anything delivered, so it is skipped forever.
+      * Letting max(at) run free trusts a timestamp that was never observed.
+        One future-stamped record drags the watermark past the present and
+        every message posted after it is invisible until the clock catches up.
+        Note that the max runs over the whole file, BEFORE the addressing
+        filter, so a skewed DM between two other agents blinds a bystander --
+        one bad record blinds every agent that reads its inbox after it.
+
+    So the watermark only ever advances to something this agent has actually
+    seen, and never past the present.
+    """
+    rec = _agent_rec(board, owner)
+    # since="" means "live file only" below, which would silently drop any
+    # already-rotated mail -- checkin() (T-244) stamps inbox_seen at an
+    # agent's first-ever check-in specifically so real agents never reach
+    # this function with since="". It stays possible here (e.g. a record
+    # written before that fix existed) rather than being asserted against.
+    since = _seen_since(rec)
+    # T-327's pre-join broadcast suppression is applied INSIDE this scan rather
+    # than as a filter over unread()'s result, so that the retained-identity set
+    # below is drawn from the same list the agent is actually shown. If the two
+    # disagreed, a broadcast hidden as pre-join could still occupy the watermark
+    # second and be recorded as delivered -- or, worse, not be.
     joined = rec.get("joined_at", "")
+    seen_ids = rec.get("inbox_seen_ids") or []
     msgs = load_messages(board)
     # An agent that slept through a rotation has its unread mail sitting in an
     # archive the fast path never reads, so its inbox would come back silently
     # empty -- the one failure this whole board is built to prevent. Pay for
     # the archives only when `since` predates what is left in the live file.
-    if since and (not msgs or since < msgs[0].get("at", "")):
+    # since="" is an agent that has never read its inbox. That is the agent
+    # with the MOST to catch up on, not the least, so it reads the archives
+    # too -- the original `if since and ...` skipped them for exactly that
+    # agent, which is T-244's defect stated in T-244's own words.
+    if (not since) or (not msgs) or since < msgs[0].get("at", ""):
         if glob.glob(os.path.join(board, "messages.*.jsonl")):
             msgs = load_messages(board, include_archives=True)
-    return _visible_after_join([m for m in msgs
-                                if m.get("from") != owner
-                                and _addressed_to(m, owner)
-                                and m.get("at", "") > since], owner, joined)
+    remaining = _seen_counts(seen_ids)
+    visible = _visible_after_join([m for m in msgs if _addressed(m, owner)],
+                                  owner, joined)
+    out = [m for m in visible if _is_unread(m, since, remaining)]
+    watermark = max([m.get("at", "") for m in msgs] or [""])
+    ceiling = now()
+    if watermark > ceiling:
+        watermark = ceiling    # a future stamp is not something anyone observed
+    if watermark < since:
+        watermark = since      # nothing newer than the agent already knew
+    if not watermark:
+        # A board with no messages at all and no prior watermark: there is
+        # nothing that could be lost by starting from the current second.
+        watermark = now()
+    # Identities are needed only where the timestamp alone cannot settle the
+    # question -- at the watermark second, and above it while a future-stamped
+    # record is waiting for the clock. Everything older is settled by `at`, so
+    # this list is bounded by one second of traffic plus any skewed records,
+    # not by history. It is rebuilt from the file rather than carried forward,
+    # because a message delivered on an EARLIER poll is no longer in `out` and
+    # would otherwise lose its identity and be redelivered.
+    retained = [_msg_id(m) for m in visible if m.get("at", "") >= watermark]
+    return out, watermark, retained
+
+
+def unread(board, owner):
+    return _inbox_scan(board, owner)[0]
+
+
+def _mark_inbox_read(board, owner, scan=None):
+    """Advance the watermark to what was actually observed, inside the lock.
+
+    This function was written against the pre-T-278 world, where every writer
+    of an agent record did its own read / json.dump / os.replace. Keeping that
+    shape after T-278 landed would have made the inbox the one writer still
+    racing outside the flock -- and the field it drops on a lost race is
+    inbox_seen itself, which silently re-delivers or silently swallows mail.
+    So the whole read-modify-write goes through _agent_update.
+
+    _inbox_scan stays OUTSIDE the critical section deliberately: it reads
+    messages.jsonl and possibly a rotated archive, which is exactly the kind
+    of slow work _agent_update's docstring says must not hold the lock.
+    """
+    if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
+        checkin(board, owner)
+    if scan is None:
+        scan = _inbox_scan(board, owner)
+    watermark, retained = scan[1], scan[2]
+
+    def _apply(rec):
+        rec["inbox_seen"] = watermark
+        if retained:
+            rec["inbox_seen_ids"] = retained
+        else:
+            rec.pop("inbox_seen_ids", None)
+
+    _agent_update(board, owner, _apply)
 
 
 def fmt_local(iso):
@@ -4378,6 +4574,7 @@ def cmd_msg(a, board):
 
 def cmd_inbox(a, board):
     owner = whoami(a.owner)
+    scan = None
     if a.all:
         msgs = load_messages(board, include_archives=True)[-a.limit:]
         if not msgs:
@@ -4386,7 +4583,8 @@ def cmd_inbox(a, board):
         for m in msgs:
             print(fmt_msg(m))
     else:
-        msgs = unread(board, owner)
+        scan = _inbox_scan(board, owner)
+        msgs = scan[0]
         if not msgs:
             print("inbox empty for %s (tickets inbox --all for history)" % owner)
         else:
@@ -4394,7 +4592,9 @@ def cmd_inbox(a, board):
             for m in msgs:
                 print("  " + fmt_msg(m))
     if not a.keep:
-        _mark_inbox_read(board, owner)
+        # Mark exactly what this read observed. Recomputing here instead
+        # would advance the watermark past anything that landed in between.
+        _mark_inbox_read(board, owner, scan)
 
 
 # ---- trajectories: reader, export, backfill ------------------------------
@@ -4976,10 +5176,17 @@ def pending_work(board, owner):
         if rq:
             out["review_queue"] = rq[:6]
         # A stuck message wakes both seats whoever it was addressed to.
-        since = rec.get("inbox_seen", "")
+        # Same rule as the inbox itself (T-228), clamp included: a "stuck"
+        # posted in the second the master last read its mail must still wake
+        # it, and a future-stamped record must not blind the master to every
+        # "stuck" that follows it. This scan does not consume, so it gets
+        # its own counts.
+        since = _seen_since(rec)
+        _rem = _seen_counts(rec.get("inbox_seen_ids"))
         stuck = [fmt_msg(x) for x in _visible_after_join(
-                     _safe(lambda: load_messages(board), []), owner, rec.get("joined_at", ""))
-                 if x.get("from") != owner and x.get("at", "") > since
+                     _safe(lambda: load_messages(board), []), owner,
+                     rec.get("joined_at", ""))
+                 if x.get("from") != owner and _is_unread(x, since, _rem)
                  and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
         if stuck:
             out["stuck_messages"] = stuck[-5:]
@@ -5899,6 +6106,16 @@ def _silent(fn):
 
 GUIDE = """# Startup guide -- connecting any agent to the board
 
+NEW HERE? Do this first, then come back:
+
+    cd <your repo> && tickets quickstart        # board + sample work + you, registered
+                                                # then: tickets next
+    docs/first-session.md                       # the same run, captured and annotated
+    README.md                                   # the model, worker loop, master loop
+
+This guide is the next step after that: wiring a REAL agent (Claude Code,
+Codex, Cursor, your own harness) to a board that already exists.
+
 One command does every step (join, hooks, check-in, briefing):
 
     export TICKET_AGENT=<unique-name>          # claude-opus, claude-sonnet, codex, cursor-2 ...
@@ -6461,13 +6678,20 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
 .hero-eyebrow{margin:0 0 6px;font-size:12px;color:var(--mute);font-weight:650}
-.promise-hero{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.promise-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
-.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
-.promise-card .v{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums;margin:4px 0;line-height:1.15}
-.promise-card .h{font-size:12px;color:var(--mute)}
+.promise-strip{display:flex;gap:10px 14px;align-items:baseline;padding:6px 16px;border-bottom:1px solid var(--line);font-size:13px}
+.promise-strip .lbl{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--mute)}
+.promise-strip .msg{color:var(--mute)}
+.chip.promise{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
+body[data-tab=board] .promise-chips{display:none}
+.promise-hero{display:flex;gap:32px;align-items:flex-end;padding:2px 0 12px;border-bottom:1px solid var(--line)}
+.promise-card{display:flex;flex-direction:column;gap:2px;min-width:132px;background:transparent;border:0;padding:0}
+.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
+.promise-card .v{font-size:32px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.05}
+.promise-card .h{font-size:11px;color:var(--mute)}
 .promise-panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .promise-panel h2{margin:0 0 4px;font-size:13px}
+.promise-panel summary{cursor:pointer;list-style:none;font-size:13px;font-weight:650}
+.promise-panel summary::-webkit-details-marker{display:none}
 .turns-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .subh{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:8px 0 4px}
 .promise-table{width:100%;border-collapse:collapse;font-size:13px}
@@ -6500,10 +6724,11 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
   #clock{margin-left:0}
-  .next-step{flex-direction:column}
+  .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
   .ob-steps{flex-direction:column;align-items:flex-start}
   .kanban{grid-template-columns:1fr}
-  .promise-hero,.turns-grid{grid-template-columns:1fr}
+  .promise-hero{flex-wrap:wrap;gap:16px}
+  .turns-grid{grid-template-columns:1fr}
   nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
   .agents{grid-template-columns:1fr}
   .sprint{min-width:0}
@@ -6512,13 +6737,18 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <header class="cmd">
   <div class="brand"><span class="prod">tickets</span><h1 id="title">Ticket board</h1></div>
   <div class="chips" id="chips"></div>
+  <div class="chips promise-chips" id="promiseChips">
+    <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
+    <span class="chip promise" id="hdrYield"><b>yield@cost</b> <span id="hdrYieldVal">—</span></span>
+  </div>
   <div class="sprint" id="sprint"></div>
   <div class="pulse" id="pulse"><i></i><span>clean</span></div>
   <div id="clock"></div>
 </header>
 <details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
-<details class="onboard" id="onboardBox" open><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
+<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
+<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
   <button type="button" data-tab-btn="board" class="on">Board</button>
@@ -6528,24 +6758,24 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <main>
 <div class="pane" id="pane-board">
   <div id="emptyBoard" class="empty-board" hidden></div>
-  <div>
-    <p class="hero-eyebrow" id="heroEyebrow">Fewest turns. Max output at least cost.</p>
-    <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost.">
+  <section id="objectivePromise" data-fold="objective">
+    <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
+    <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."><!-- V1 MUST: home median turns + yield@cost; T-344 worst-10 is NICE only -->
       <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Lower is better · unknown is not zero</div></article>
       <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
     </div>
-  </div>
+  </section>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
     <section class="col flight"><h2 title="Tickets actively being worked right now">In flight <span class="n" id="n-flight">0</span><span class="hint">claimed and in progress</span></h2><div class="list" id="col-flight"></div></section>
     <section class="col review"><h2 title="Finished work waiting for master to merge to main">Review <span class="n" id="n-review">0</span><span class="hint">submitted, awaiting merge</span></h2><div class="list" id="col-review"></div></section>
   </div>
-  <section class="promise-panel" id="turnsPanel">
-    <h2>Turns efficiency</h2>
+  <details class="promise-panel" id="turnsPanel">
+    <summary>Turns efficiency</summary>
     <small id="turnsSummary" class="mute"></small>
     <div class="turns-grid"><div><h3 class="subh">Worst tickets (watch runs)</h3><table class="promise-table" id="turnsWorst"></table></div><div><h3 class="subh">Per-agent median</h3><table class="promise-table" id="turnsAgents"></table></div></div>
-  </section>
+  </details>
 </div>
 <div class="pane" id="pane-agents">
   <p class="pitch-lede" id="coverageLede"><b>Total Football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
@@ -6621,13 +6851,17 @@ function fillCol(id,items,html){
 }
 const dash=x=>x==null?'—':String(x);
 function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(n).toFixed(4):Number(n).toFixed(2)))}
+function fmtMedian(p){return(!p||p.median_turns==null)?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0)}
+function fmtYield(p){return(!p||p.yield_per_usd==null)?'—':(Number(p.yield_per_usd).toFixed(2)+' per $')}
+function setTxt(id,v){const el=document.getElementById(id);if(el)el.textContent=v}
 function renderPromise(p){
-  const med=document.getElementById('heroMedianVal');
-  const yv=document.getElementById('heroYieldVal'),yh=document.getElementById('heroYieldHint');
-  if(!p){med.textContent='—';yv.textContent='—';return}
-  med.textContent=p.median_turns==null?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0);
-  if(p.yield_per_usd==null){yv.textContent='—';yh.textContent=(p.n_unmeasured_cost||0)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';}
-  else{yv.textContent=Number(p.yield_per_usd).toFixed(2)+'/ $';yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';}
+  const med=fmtMedian(p),yld=fmtYield(p);
+  setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);
+  setTxt('heroYieldVal',yld);setTxt('hdrYieldVal',yld);
+  const yh=document.getElementById('heroYieldHint');
+  if(!yh)return;
+  if(!p||p.yield_per_usd==null)yh.textContent=(p&&p.n_unmeasured_cost)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';
+  else yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
 }
 function renderTurns(t){
   const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
@@ -7211,6 +7445,208 @@ def cmd_ui(a, board):
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+QUICKSTART_MARKER = "quickstart.json"
+
+QUICKSTART_TICKETS = [
+    {"key": "schema", "title": "Sample: design the data model",
+     "role": "backend", "priority": 1,
+     "body": "A sample ticket created by `tickets quickstart`.\n\n"
+             "It has no dependencies, so it is the one `tickets next` hands out first.\n"
+             "Work it like a real ticket: claim it, post an update, then send it to review.\n"
+             "Delete the samples whenever you like: tickets quickstart --remove"},
+    {"key": "api", "title": "Sample: build the API on top of the model",
+     "role": "backend", "priority": 2, "deps": ["schema"],
+     "body": "A sample ticket that DEPENDS on the first one.\n\n"
+             "`tickets next` will not offer it until the schema ticket is done -- that is\n"
+             "the dependency graph doing its job, not the board being empty."},
+    {"key": "ui", "title": "Sample: put a screen on the API",
+     "role": "console", "priority": 2, "deps": ["api"],
+     "body": "The third sample, two hops down the chain.\n\n"
+             "Run `tickets graph` to see all three and what is blocking what."},
+]
+
+
+def _quickstart_state(board):
+    """What a previous quickstart made here, or None. Makes the command idempotent."""
+    path = os.path.join(board, QUICKSTART_MARKER)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return None
+
+
+def _quickstart_save(board, state):
+    path = os.path.join(board, QUICKSTART_MARKER)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _quickstart_alive(board, state):
+    """The sample ids from a previous run that still exist (a user may have deleted them)."""
+    if not state:
+        return []
+    have = set(t["id"] for t in load_all(board))
+    return [tid for tid in state.get("tickets", []) if tid in have]
+
+
+def _quickstart_harness():
+    """Which agent harness this machine can actually launch, best first.
+
+    Print-only: T-314's `tickets harness check` is the real probe. Quickstart
+    only names a harness so it can print a spawn line; it never starts one.
+    Returns (name, argv-prefix) or (None, None).
+    """
+    import shutil
+    for name, argv in (("claude", ["claude", "-p"]),
+                       ("codex", ["codex", "exec"]),
+                       ("cursor-agent", ["cursor-agent", "-p"])):
+        if shutil.which(name):
+            return name, argv
+    return None, None
+
+
+def cmd_quickstart(a, board):
+    """Zero to a first ticket claimed by a real agent. Non-interactive, idempotent."""
+    if a.remove:
+        state = _quickstart_state(board)
+        alive = _quickstart_alive(board, state)
+        for tid in alive:
+            try:
+                os.unlink(ticket_path(board, tid))
+            except OSError:
+                pass
+        try:
+            os.unlink(os.path.join(board, QUICKSTART_MARKER))
+        except OSError:
+            pass
+        print("removed %d sample ticket(s)%s" % (
+            len(alive), (" (%s)" % ", ".join(alive)) if alive else ""))
+        if state and state.get("epic"):
+            print("epic %s left in place (it may hold your own work now)" % state["epic"])
+        return
+
+    # 1. Bind before writing anything -- the same T-263 condition `init` enforces,
+    # through the same primitives, so there is one guard and not a second copy
+    # of it that can drift.  Asking only "is there a board?" is not enough: when
+    # an ancestor project already has one, the ambient resolution finds it and
+    # quickstart would cheerfully populate SOMEONE ELSE'S board.
+    explicit = bool(getattr(a, "board", None))
+    target, why = _init_resolve_board(a)
+    if not explicit and not _same_board(target, board):
+        print("board: %s" % target)
+        print("  resolved from %s" % why)
+        print("  ambient:      %s" % board)
+        sys.exit(_init_refusal(target, board))
+
+    if not os.path.isdir(target):
+        # Mirror `tickets init`'s own arguments. The quickstart regression test
+        # runs this path on a fresh repo, so a new init flag fails loudly there
+        # rather than silently at a user's first command.
+        init_args = argparse.Namespace(
+            board=getattr(a, "board", None), track=False, force=False)
+        cmd_init(init_args, board)
+        print("")
+    board = target
+
+    print("board: %s" % board)
+
+    # 2. sample epic + three tickets with a real dependency chain, created once
+    state = _quickstart_state(board)
+    alive = _quickstart_alive(board, state)
+    if alive:
+        print("samples: already here (%s) -- not creating them again" % ", ".join(alive))
+        epic_id = (state or {}).get("epic", "")
+    else:
+        epic = _alloc(epics_dir(board), "E", 3, {
+            "title": "Sample epic: a first slice end to end",
+            "body": "Created by `tickets quickstart` so the board is not empty on day one.\n"
+                    "Remove the samples with `tickets quickstart --remove`.",
+            "status": "open", "created": now(), "updated": now(),
+        })
+        epic_id = epic["id"]
+        keymap, made = {}, []
+        for spec in QUICKSTART_TICKETS:
+            t = create(board, spec["title"], spec["body"], spec.get("role", ""),
+                       [], spec.get("priority", 2), epic_id, "", [])
+            keymap[spec["key"]] = t["id"]
+            made.append(t)
+        for spec, t in zip(QUICKSTART_TICKETS, made):
+            deps = [keymap[d] for d in spec.get("deps", []) if d in keymap]
+            if deps:
+                set_deps(board, t["id"], deps)
+        _quickstart_save(board, {"epic": epic_id,
+                                 "tickets": [t["id"] for t in made],
+                                 "created": now()})
+        print("epic:  %s  %s" % (epic_id, epic["title"]))
+        for spec, t in zip(QUICKSTART_TICKETS, made):
+            dep = spec.get("deps") or []
+            print("  %s  %-42s %s" % (
+                t["id"], t["title"][:42],
+                ("after %s" % keymap[dep[0]]) if dep else "ready now"))
+
+    # 3. register whoever is running this, so `next` has someone to hand work to
+    agent = a.agent or os.environ.get("TICKET_AGENT") or whoami()
+    if agent and not agent.startswith("agent-"):
+        # T-314 grew --harness/--cmd; pin every field cmd_join reads so a new
+        # join flag fails this Namespace in tests instead of at first-run.
+        join_args = argparse.Namespace(
+            name=agent, roles=a.roles, tool="", model="",
+            can=None, cost=None, best_for="", harness="", cmd_template="")
+        # cmd_join prints a full worker briefing; quickstart has its own ending,
+        # so keep the one line that matters and drop the rest.
+        import io, contextlib
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                cmd_join(join_args, board)
+        except SystemExit:
+            print("agent: could not register %r automatically" % agent)
+            print("       run: tickets join <name> --roles backend")
+        else:
+            joined = [ln for ln in buf.getvalue().splitlines() if ln.startswith("joined as ")]
+            print(joined[0] if joined else "agent: %s" % agent)
+    else:
+        agent = ""
+        print("agent: none registered (set TICKET_AGENT, or: tickets join <name> --roles backend)")
+
+    # 4. optionally put a real worker on it
+    if a.with_agent:
+        _quickstart_spawn(a, board, a.with_agent)
+
+    _quickstart_next_steps(board, agent)
+
+
+def _quickstart_spawn(a, board, name):
+    harness, argv = _quickstart_harness()
+    if not harness:
+        print("")
+        print("--with-agent: no agent harness found on PATH (looked for claude, codex, cursor-agent).")
+        print("  Install one, or start a worker by hand:  TICKET_AGENT=%s tickets next" % name)
+        return
+    print("")
+    print("worker: %s will run as %s" % (harness, name))
+    print("  tickets spawn %s --tool %s" % (name, harness))
+    print("  (not launched for you -- quickstart never starts a background process without asking;")
+    print("   run the line above, or: TICKET_AGENT=%s %s \"$(tickets prompt)\")" % (name, " ".join(argv)))
+
+
+def _quickstart_next_steps(board, agent):
+    ident = ("TICKET_AGENT=%s " % agent) if agent else ""
+    print("")
+    print("The three commands that matter:")
+    print("  %stickets next                      claim the next ready ticket" % ident)
+    print("  %stickets update <id> \"...\"         say where you are, at least every 45 min" % ident)
+    print("  %stickets review <id> --notes \"...\" hand it back with evidence" % ident)
+    print("")
+    print("See it: tickets ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
+    print("Learn it: tickets guide   |   docs/first-session.md   |   README.md")
 
 
 def cmd_guide(a, board):
@@ -7833,6 +8269,14 @@ def main():
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
     c.set_defaults(fn=cmd_ui)
 
+    c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
+    c.add_argument("--agent", help="register under this name (default: $TICKET_AGENT)")
+    c.add_argument("--roles", default="backend", help="roles for that agent (default: backend)")
+    c.add_argument("--with-agent", metavar="NAME", help="also print how to put a real worker on the board")
+    c.add_argument("--board", help="initialise this board directory explicitly")
+    c.add_argument("--remove", action="store_true", help="delete the sample tickets this created")
+    c.set_defaults(fn=cmd_quickstart)
+
     c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
     c.set_defaults(fn=cmd_guide)
 
@@ -8137,6 +8581,7 @@ def main():
         "plan",
         "where",
         "init",
+        "quickstart",
         "join",
         "epic",
         "sprint",

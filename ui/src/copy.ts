@@ -2,7 +2,17 @@
 // (T-183 section) and docs/interface-v1.md ("State and ownership", "Interface and
 // taste"). Keep wording centralized here so no screen invents its own phrasing.
 
-import type { AgentState, AssignmentState, HookEventKind, TicketState } from "./types";
+import type {
+  AgentState,
+  AssignmentState,
+  Delivery,
+  DeliveryReason,
+  DeliveryState,
+  HookEventKind,
+  MemberAvailability,
+  MemberKind,
+  TicketState,
+} from "./types";
 
 export const ticketStateLabel: Record<TicketState, string> = {
   open: "Ready",
@@ -91,3 +101,77 @@ export const hookOnlyNote =
 export const noHeartbeatCopy = (minutes: number) => `No heartbeat for ${minutes}m. Check session.`;
 
 export const connectPreviewNote = "Preview only. This does not install a hook or create credentials.";
+
+// ------------------------------------------------------------------ messages
+// docs/contracts/openapi.yaml `Member`, `DeliveryState`, `DeliveryReason` and
+// docs/messages-and-runners.md's receipt-chain section.
+
+// Shown in the Members list beside availability and project role.
+export const memberKindLabel: Record<MemberKind, string> = {
+  human: "Human",
+  agent: "Agent",
+  master: "Master",
+};
+
+export const memberAvailabilityLabel: Record<MemberAvailability, string> = {
+  available: "Available",
+  busy: "Busy",
+  offline: "Offline",
+  unknown: "Unknown",
+};
+
+// The receipt chain's own step names. A reason-driven state (blocked,
+// awaiting_approval, canceled, failed, or a queued with a reason) is never
+// shown as a bare state name from this map — `deliveryReceiptLabel` below
+// prefers `deliveryReasonLabel` whenever `reason` is set, so "started" can
+// only ever appear here, and only when `state` is literally "started".
+export const deliveryStateLabel: Record<DeliveryState, string> = {
+  sent: "Sent",
+  queued: "Queued",
+  delivered: "Delivered to runner",
+  started: "Agent started",
+  responded: "Responded",
+  blocked: "Blocked",
+  awaiting_approval: "Needs approval",
+  canceled: "Canceled",
+  failed: "Failed",
+};
+
+/**
+ * Verbatim-as-possible spec copy for `DeliveryReason` (docs/messages-and-runners.md
+ * "Receipt chain" section). `dependency_unmet` reuses `dependencyWaitingLabel`
+ * when a `blocking_ticket_id` is present, since that is the same "never imply
+ * work started on the blocked ticket" rule the tickets screens already use.
+ */
+export function deliveryReasonLabel(reason: DeliveryReason, blockingTicketId?: string | null): string {
+  switch (reason) {
+    case "runner_offline":
+      return "Queued — runner offline";
+    case "manual_resume_required":
+      return "Manual resume required";
+    case "agent_busy":
+      return "Queued — agent is busy with another claim";
+    case "dependency_unmet":
+      return blockingTicketId ? dependencyWaitingLabel(blockingTicketId) : "Waiting on a dependency";
+    case "permission_required":
+      return "Needs approval";
+    case "budget_exceeded":
+      return "Paused — budget exceeded";
+    case "project_paused":
+      return "Queued — project paused";
+    case "canceled_by_operator":
+      return "Canceled by operator";
+    case "dispatch_failed":
+      return "Failed to dispatch";
+  }
+}
+
+/**
+ * The one line a message's receipt renders. A `reason` always wins over the
+ * bare state name — `blocked`, `awaiting_approval`, `queued` and the rest are
+ * never shown unexplained when the contract gave us a reason to show instead.
+ */
+export function deliveryReceiptLabel(delivery: Pick<Delivery, "state" | "reason" | "blocking_ticket_id">): string {
+  if (delivery.reason) return deliveryReasonLabel(delivery.reason, delivery.blocking_ticket_id);
+  return deliveryStateLabel[delivery.state];
+}

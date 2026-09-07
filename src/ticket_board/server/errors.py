@@ -24,6 +24,7 @@ from ..storage.errors import (  # noqa: F401  (re-exported for the router)
     MissingAcceptanceCriteria,
     NotFound,
     RequestIdReused,
+    RunAlreadyActive,
     SessionLeaseExpired,
     TicketAlreadyClaimed,
     TicketVersionConflict,

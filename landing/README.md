@@ -2,6 +2,10 @@
 
 Static page. No build step, no JavaScript, no framework.
 
+Copy follows the T-380 CEO-accepted brief (Hero / What it is / How / Metrics /
+Start / Close). `docs/product/pm-atman-landing-v1.md` lives on the Steer
+pm-work tree and was not readable from this repo.
+
 ## Open locally
 
 From the repository root:
@@ -16,18 +20,6 @@ Or open `landing/index.html` directly in a browser.
 
 ## Deploy static
 
-Point any static host at this folder (`index.html` is the root).
+Point any static host at this folder. GitHub Pages is optional (`/landing`).
 
-GitHub Pages is optional: set the source to `/landing` (or publish this folder
-as the site root). GitHub will then assign a `*.github.io` URL.
-
-**No custom domain is registered.** Do not invent one. A provider URL exists
-only after you enable a host.
-
-## Copy sources
-
-Hero and positioning follow `docs/brand/` and the T-371 promise
-(*Finish more work at least cost — in the fewest turns*). PM files
-`docs/product/pm-atman-product-promise-v1.md` and
-`docs/product/pm-atman-v1-features-ux.md` were not in the tree when this
-shipped.
+**No custom domain is registered.** Do not invent one.

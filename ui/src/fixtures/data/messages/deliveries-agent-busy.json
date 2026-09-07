@@ -1,0 +1,20 @@
+{
+  "items": [
+    {
+      "id": "dlv_00000007",
+      "message_id": "msg_00000001",
+      "recipient_agent_id": "agt_backend01",
+      "state": "queued",
+      "reason": "agent_busy",
+      "reason_detail": "Queued behind the agent's current claim DEMO-13.",
+      "run_id": null,
+      "blocking_ticket_id": null,
+      "attempts": 1,
+      "next_attempt_at": null,
+      "created_at": "2026-09-06T14:32:00Z",
+      "updated_at": "2026-09-06T14:35:00Z",
+      "version": 2
+    }
+  ],
+  "runs": []
+}

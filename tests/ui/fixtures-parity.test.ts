@@ -40,4 +40,10 @@ describe("ui fixtures copy stays in sync with tests/fixtures/", () => {
       expect(existsSync(resolve(uiCopyDir, dir))).toBe(true);
     }
   });
+
+  it("mirrors the messages domain T-189 owns", () => {
+    for (const dir of ["messages", "errors"]) {
+      expect(existsSync(resolve(uiCopyDir, dir))).toBe(true);
+    }
+  });
 });
