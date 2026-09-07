@@ -776,17 +776,305 @@ class MessagingMixin:
     def list_wake_jobs(self, project_id, *, recipient_agent_id=None):
         if recipient_agent_id is None:
             rows = self.conn.execute(
-                "SELECT * FROM wake_jobs WHERE project_id = ? ORDER BY created_at, id",
+                "SELECT * FROM wake_jobs WHERE project_id = ?"
+                " ORDER BY created_at, rowid",
                 (project_id,),
             ).fetchall()
         else:
             rows = self.conn.execute(
                 "SELECT * FROM wake_jobs WHERE project_id = ? AND recipient_agent_id = ?"
-                " ORDER BY created_at, id",
+                " ORDER BY created_at, rowid",
                 (project_id, recipient_agent_id),
             ).fetchall()
         return {"items": [self._serialize_wake_job(r) for r in rows],
                 "poll_after_seconds": 0}
+
+
+    # The runner is at-least-once by contract, so a wake job it never finished
+    # has to become visible again. Two numbers govern that: how long a lease is
+    # good for, and how many attempts a job gets before it stops being retried
+    # and becomes inspectable instead. `docs/managed-runner.md` is where both
+    # are justified; they are named here so nothing reads them from a literal.
+    WAKE_LEASE_SECONDS = 120
+    WAKE_MAX_ATTEMPTS = 3
+
+    def _run_id_for_wake_job(self, wake_job_id):
+        """The run a wake job mints, derived rather than looked up.
+
+        `WakeJobListResponse` is `additionalProperties: false` over
+        `[items, poll_after_seconds]`, so the frozen contract gives the leasing
+        response nowhere to carry the run it just created -- and there is no
+        `GET /runs` or `POST /runs` for the runner to find it with either. The
+        run id is therefore a pure function of the wake job id: `wjb_abcd1234`
+        mints `run_abcd1234`. Both patterns are `_[0-9a-z]{8,32}`, so the
+        derived id is a valid `RunId`, and the runner computes it locally
+        without a round trip. Raised as a contract gap in docs/api-notes.md;
+        deriving it is the non-amending way to close it.
+        """
+        return "run_" + wake_job_id[4:]
+
+    def _reclaim_expired(self, conn, project_id, agent_id, now):
+        """Take back what a dead supervisor was holding -- and only retry what
+        it is safe to retry.
+
+        The distinction is the whole point, and it is the design doc's rule
+        about uncertain external side effects made concrete:
+
+        - the run never left `pending`: nothing was spawned, so nothing outside
+          the board happened. The job goes back to the queue and the same run
+          is reused on the next attempt. This is an honest retry.
+        - the run reached `starting` or further: a Claude session was retained
+          and probably a process was started. Whether it edited files, pushed a
+          commit or replied to anybody is exactly what nobody can now know. So
+          the run is FAILED with that stated, the job is failed with it, and it
+          is not retried. Re-running a task that may have half-finished is
+          worse than telling a human it is unclear -- and "at-least-once
+          delivery" was never a licence to execute twice.
+        """
+        rows = conn.execute(
+            "SELECT * FROM wake_jobs WHERE project_id = ? AND recipient_agent_id = ?"
+            " AND state = 'leased' AND lease_expires_at IS NOT NULL"
+            " AND lease_expires_at <= ?",
+            (project_id, agent_id, now),
+        ).fetchall()
+        for job in rows:
+            run = conn.execute(
+                "SELECT * FROM runs WHERE wake_job_id = ?", (job["id"],)
+            ).fetchone()
+            if run is not None and run["state"] == "paused":
+                # `paused` is `needs_approval` or `budget_reached`: the run is
+                # waiting for a person, deliberately, and reaping it as an
+                # orphan would quietly discard the approval the pause exists to
+                # get. It keeps its lease on the agent until an operator
+                # cancels or resumes it -- moving on to the next job instead
+                # would be a way to bypass an approval by waiting.
+                continue
+            if run is not None and run["state"] not in ("pending",):
+                if run["state"] not in ("responded", "canceled", "failed"):
+                    reason = ("The runner lease expired while this run was in "
+                              "flight. Its effects are uncertain; it needs "
+                              "review and was not retried.")
+                    conn.execute(
+                        "UPDATE runs SET state = 'failed', terminal_reason = ?,"
+                        " ended_at = ?, version = version + 1 WHERE id = ?",
+                        (reason, now, run["id"]),
+                    )
+                    self._audit(conn, project_id, self.SYSTEM_ACTOR,
+                                "run.event.orphaned", subject_type="run",
+                                subject_id=run["id"], summary=reason)
+                conn.execute(
+                    "UPDATE wake_jobs SET state = 'failed', lease_expires_at = NULL"
+                    " WHERE id = ?", (job["id"],))
+                self._audit(conn, project_id, self.SYSTEM_ACTOR,
+                            "wake_job.failed", subject_type="run",
+                            subject_id=job["id"],
+                            summary="wake job orphaned by an expired runner"
+                                    " lease after its run had started")
+                continue
+            conn.execute(
+                "UPDATE wake_jobs SET state = 'pending', lease_expires_at = NULL"
+                " WHERE id = ?", (job["id"],))
+            self._audit(conn, project_id, self.SYSTEM_ACTOR,
+                        "wake_job.reclaimed", subject_type="run",
+                        subject_id=job["id"],
+                        summary="lease expired before the run started;"
+                                " requeued for another attempt")
+
+    def _agent_is_busy(self, conn, project_id, agent_id):
+        """Is a supervisor working this agent right now?
+
+        Two different facts, and taking only the first is the bug that cost an
+        afternoon here. A run in `starting`/`running`/`paused` is obviously
+        busy. But a run in `pending` is *not*: `pending` is the state a run is
+        minted in at lease time and reset to when a dead supervisor's lease is
+        reclaimed, so treating it as busy deadlocks the agent -- the job goes
+        back to the queue and can never be handed out again, because the run it
+        already minted keeps saying somebody is on it.
+
+        What actually says "somebody is on it" for a not-yet-started run is the
+        wake job's own lease. So: a non-pending run, or a job still leased.
+        """
+        run = conn.execute(
+            "SELECT 1 FROM runs WHERE project_id = ? AND recipient_agent_id = ?"
+            " AND state IN ('starting', 'running', 'paused') LIMIT 1",
+            (project_id, agent_id),
+        ).fetchone()
+        if run is not None:
+            return True
+        return conn.execute(
+            "SELECT 1 FROM wake_jobs WHERE project_id = ? AND recipient_agent_id = ?"
+            " AND state = 'leased' LIMIT 1",
+            (project_id, agent_id),
+        ).fetchone() is not None
+
+    def _assert_runner_lease(self, conn, project_id, agent_id, runner_id, epoch, now):
+        row = conn.execute(
+            "SELECT * FROM runner_leases WHERE agent_id = ?", (agent_id,)
+        ).fetchone()
+        if row is None or row["project_id"] != project_id:
+            raise RunAlreadyActive(agent_id)
+        if row["runner_id"] != runner_id or row["epoch"] != epoch \
+                or row["expires_at"] <= now:
+            raise RunAlreadyActive(agent_id, row["runner_id"], row["epoch"])
+        return row
+
+    def lease_wake_jobs(self, project_id, agent_id, runner_id, *, epoch,
+                        lease_seconds=None, at=None):
+        """Hand a registered runner the work it may start, and nothing else.
+
+        Four rules, all of them enforced here rather than trusted to the
+        supervisor, because a supervisor that has crashed or been superseded is
+        exactly the one that will not enforce them:
+
+        - **Fencing.** Only the runner named in the current, unexpired lease at
+          the epoch it was issued gets jobs. Anyone else gets 409
+          `run_already_active` -- a second supervisor for the same agent must
+          not start a parallel session.
+        - **Concurrency 1.** While this agent has a non-terminal run, no new job
+          is leased. The job stays `pending` and is picked up when the run ends.
+          That is the design doc's "new tasks queue behind its current claim",
+          and it is why a duplicate delivery cannot produce a second live run.
+        - **At-least-once, bounded.** A lease that expires without the job being
+          completed returns the job to `pending` for another attempt. After
+          `WAKE_MAX_ATTEMPTS` it goes to `failed` instead of retrying forever --
+          the inspectable failed queue, not a silent drop and not a hot loop.
+        - **The run exists before the spawn.** Leasing mints the run (id derived
+          from the wake job) so a crash between claim and spawn leaves a record
+          to reconcile against. Re-leasing the same job returns the same run.
+
+        This is not idempotency-keyed: leasing is a read-and-take, and the
+        contract's `GET /runners/jobs` carries no request_id to key it with.
+        Re-delivery is handled by dedupe on the job, not by replay on the call.
+        """
+        lease_seconds = self.WAKE_LEASE_SECONDS if lease_seconds is None else lease_seconds
+        with write_txn(self.conn) as conn:
+            now = at or ids.now()
+            self._assert_runner_lease(conn, project_id, agent_id, runner_id,
+                                      epoch, now)
+
+            # Reclaim what a dead supervisor was holding, then retire whatever
+            # has now burned its attempts. Order matters: a job whose lease just
+            # expired on its last attempt should fail, not be handed out again.
+            self._reclaim_expired(conn, project_id, agent_id, now)
+            retired = conn.execute(
+                "SELECT id FROM wake_jobs WHERE project_id = ? AND recipient_agent_id = ?"
+                " AND state = 'pending' AND attempts >= ?",
+                (project_id, agent_id, self.WAKE_MAX_ATTEMPTS),
+            ).fetchall()
+            for row in retired:
+                conn.execute("UPDATE wake_jobs SET state = 'failed' WHERE id = ?",
+                             (row["id"],))
+                self._audit(conn, project_id, self.SYSTEM_ACTOR, "wake_job.failed",
+                            subject_type="run", subject_id=row["id"],
+                            summary="wake job exhausted {} attempts; moved to the"
+                                    " failed queue".format(self.WAKE_MAX_ATTEMPTS))
+
+            if self._agent_is_busy(conn, project_id, agent_id):
+                return {"items": [], "poll_after_seconds": 1}
+
+            # `ORDER BY created_at, rowid`, not `created_at, id`. Timestamps
+            # here are second-granular and real traffic bursts inside one
+            # second -- T-181 lost a live session to exactly this, where
+            # per-second event ids collided under a few tool calls a second.
+            # Ordering the tie by the random `wjb_...` id makes the wake queue
+            # silently non-FIFO: two task messages sent in the same second get
+            # executed in whichever order their ids happened to sort. `rowid`
+            # is insertion order and has no ties.
+            # Exactly one. `RunnerLease.concurrency` is `minimum: 1, maximum: 1`
+            # in the frozen contract, so there is no configuration under which
+            # a second job is eligible here -- leasing one makes the agent busy
+            # by definition. A `limit` parameter would only be a way to write a
+            # number that could never take effect.
+            row = conn.execute(
+                "SELECT * FROM wake_jobs WHERE project_id = ? AND recipient_agent_id = ?"
+                " AND state = 'pending' ORDER BY created_at, rowid LIMIT 1",
+                (project_id, agent_id),
+            ).fetchone()
+            if row is None:
+                return {"items": [], "poll_after_seconds": 1}
+            conn.execute(
+                "UPDATE wake_jobs SET state = 'leased', attempts = attempts + 1,"
+                " lease_expires_at = ? WHERE id = ?",
+                (ids.in_seconds(lease_seconds, at=now), row["id"]),
+            )
+            self._mint_run_for(conn, project_id, agent_id, row, now)
+            self._audit(conn, project_id, self.SYSTEM_ACTOR, "wake_job.leased",
+                        subject_type="run", subject_id=row["id"],
+                        summary="wake job leased to runner {}".format(runner_id))
+            return {"items": [self._serialize_wake_job(
+                        self._wake_job_row(conn, project_id, row["id"]))],
+                    "poll_after_seconds": 0}
+
+    def _mint_run_for(self, conn, project_id, agent_id, wake_row, now):
+        run_id = self._run_id_for_wake_job(wake_row["id"])
+        existing = conn.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if existing is not None:
+            return run_id
+        conn.execute(
+            "INSERT INTO runs (id, project_id, recipient_agent_id, session_id,"
+            " wake_job_id, ticket_claim, state, terminal_reason, budget,"
+            " needs_approval, started_at, ended_at, created_at, version)"
+            " VALUES (?, ?, ?, NULL, ?, ?, 'pending', NULL, ?, 0, NULL, NULL, ?, 1)",
+            (run_id, project_id, agent_id, wake_row["id"], wake_row["ticket_id"],
+             _json(_budget(self._lease_budget(conn, agent_id))), now),
+        )
+        self._audit(conn, project_id, self.SYSTEM_ACTOR, "run.create",
+                    subject_type="run", subject_id=run_id,
+                    summary="run minted for wake job {}".format(wake_row["id"]))
+        return run_id
+
+    def _lease_budget(self, conn, agent_id):
+        row = conn.execute(
+            "SELECT budget FROM runner_leases WHERE agent_id = ?", (agent_id,)
+        ).fetchone()
+        return json.loads(row["budget"]) if row is not None else None
+
+    def complete_wake_job(self, project_id, wake_job_id, state, *, agent_id=None,
+                          request_id=None):
+        """Close a leased job out. `completed`, `failed` or `canceled` only.
+
+        The runner calls this after the run reaches a terminal state. Leaving it
+        `leased` is also safe -- the lease expires and the job is retried -- but
+        that costs a whole lease window and one of the job's bounded attempts,
+        so a supervisor that knows the answer says so.
+        """
+        if state not in {"completed", "failed", "canceled"}:
+            raise MalformedRequest("wake job state is not terminal.",
+                                   {"rejected_fields": ["state"]})
+        body = {"wake_job_id": wake_job_id, "state": state}
+        with write_txn(self.conn) as conn:
+            replay = self._replay(conn, project_id, request_id,
+                                  "complete_wake_job", body)
+            if replay is not None:
+                return replay
+            row = self._wake_job_row(conn, project_id, wake_job_id)
+            if agent_id is not None and row["recipient_agent_id"] != agent_id:
+                raise ForbiddenScope(project_id, wake_job_id)
+            conn.execute(
+                "UPDATE wake_jobs SET state = ?, lease_expires_at = NULL WHERE id = ?",
+                (state, wake_job_id),
+            )
+            self._audit(conn, project_id, self.SYSTEM_ACTOR,
+                        "wake_job.{}".format(state), subject_type="run",
+                        subject_id=wake_job_id, request_id=request_id,
+                        summary="wake job {}".format(state))
+            result = self._serialize_wake_job(
+                self._wake_job_row(conn, project_id, wake_job_id))
+            self._remember(conn, project_id, request_id, "complete_wake_job",
+                           body, result)
+            return result
+
+    def _close_wake_job_for_run(self, conn, project_id, wake_job_id, state):
+        if not wake_job_id:
+            return
+        conn.execute(
+            "UPDATE wake_jobs SET state = ?, lease_expires_at = NULL"
+            " WHERE id = ? AND project_id = ? AND state IN ('pending', 'leased')",
+            (state, wake_job_id, project_id),
+        )
+
+    def get_run(self, project_id, run_id):
+        return self._serialize_run(self._run_row(self.conn, project_id, run_id))
 
     # ------------------------------------------------------------------- runs
 
@@ -855,12 +1143,52 @@ class MessagingMixin:
             return result
 
     def record_run_event(self, project_id, run_id, event, *, expected_version,
-                         session_id=None, ticket_claim=None, reason=None,
-                         budget=None, request_id=None):
+                         reporter_session_id=None, session_id=None,
+                         ticket_claim=None, reason=None, budget=None,
+                         request_id=None):
+        """Apply one run event -- but only for a reporter that is attributed.
+
+        Two different sessions meet on this call, and conflating them is the
+        whole hazard, so they are named apart:
+
+        - `reporter_session_id` is the SUPERVISOR's runtime session. It is
+          bound from the agent credential in `BoardServer.post_run_event` and
+          is never read from the request body. It is the identity claim, and
+          frozen T-178 (actor bound from the credential) governs it.
+        - `session_id` is the CHILD session this run executes in, retained
+          before the launch so a crash between claim and spawn reconciles
+          against any existing local process. No credential can carry it -- it
+          does not exist until the supervisor mints it -- so it arrives in the
+          body and is bound a different way: write-once.
+
+        T-239's three-state rule, applied here to the reporter:
+
+        - attributed (a live, unrevoked supervisor session, and a child session
+          that either matches the retained one or is the first) -> applies,
+          audited `run.event`
+        - superseded (a revoked session, or a child session that contradicts
+          the one this run already retained) -> recorded, denied effect,
+          audited `run.event.superseded`
+        - unattributed (an agent token carrying no session at all) -> recorded,
+          denied effect, audited `run.event.unattributed`
+
+        Denied effect is total for the run's liveness: no state change, no
+        started_at/ended_at, no needs_approval, no terminal_reason, no budget
+        counters, no session adoption and no version bump -- so an attributed
+        reporter's `expected_version` still holds afterwards. The point is that
+        an anonymous caller must not be able to paint a run green
+        (`started` -> running) or close it (`responded`), which is exactly what
+        omitting an optional identity field buys when absence reads as ordinary.
+
+        A supervisor that genuinely lost its session does not recover by
+        closing the run anonymously. It recovers through the runner lease: the
+        lease expires, a supervisor registers at a new epoch, and reconciles.
+        """
         if event not in RUN_EVENT_TARGETS:
             raise MalformedRequest("event is not a valid run event.", {"event": event})
         body = {
             "run_id": run_id, "event": event, "expected_version": expected_version,
+            "reporter_session_id": reporter_session_id,
             "session_id": session_id, "ticket_claim": ticket_claim,
             "reason": reason, "budget": budget,
         }
@@ -874,8 +1202,38 @@ class MessagingMixin:
             if row["state"] in {"responded", "canceled", "failed"}:
                 raise InvalidStateTransition(run_id, row["state"],
                                              RUN_EVENT_TARGETS[event])
+            # Ordered ahead of the attribution gate on purpose. The contract
+            # names 422 `invalid_state_transition` for "started with no runtime
+            # session", and that answer should not change depending on who is
+            # asking -- an unattributed caller in this position would otherwise
+            # get a 200 where every other caller gets the documented refusal.
             if event == "started" and session_id is None and row["session_id"] is None:
                 raise InvalidStateTransition(run_id, row["state"], "running")
+
+            attributed = reporter_session_id is not None and \
+                self._session_is_current(conn, reporter_session_id)
+            contradicts_child = (
+                session_id is not None
+                and row["session_id"] is not None
+                and session_id != row["session_id"]
+            )
+            if not attributed or contradicts_child:
+                if reporter_session_id is None:
+                    action = "run.event.unattributed"
+                    summary = ("run event {} with no reporter session;"
+                               " not attributed, run unchanged".format(event))
+                else:
+                    action = "run.event.superseded"
+                    summary = ("run event {} from a superseded session;"
+                               " denied effect, run unchanged".format(event))
+                self._audit(conn, project_id, self.SYSTEM_ACTOR, action,
+                            subject_type="run", subject_id=run_id,
+                            request_id=request_id, summary=summary)
+                result = self._serialize_run(row)
+                self._remember(conn, project_id, request_id,
+                               "record_run_event", body, result)
+                return result
+
             now = ids.now()
             new_state = RUN_EVENT_TARGETS[event]
             started_at = row["started_at"]
@@ -904,6 +1262,15 @@ class MessagingMixin:
                 (session_id, ticket_claim, new_state, terminal_reason,
                  _json(next_budget), needs_approval, started_at, ended_at, run_id),
             )
+            if new_state in {"responded", "failed"}:
+                # The job that minted this run is done with. Left `leased` it
+                # would be reclaimed on lease expiry and the same task run a
+                # second time -- at-least-once delivery is not a licence to
+                # execute twice. Same transaction as the state change, so there
+                # is no window where the run is closed and the job is not.
+                self._close_wake_job_for_run(
+                    conn, project_id, row["wake_job_id"],
+                    "completed" if new_state == "responded" else "failed")
             self._audit(conn, project_id, self.SYSTEM_ACTOR, "run.event",
                         subject_type="run", subject_id=run_id,
                         request_id=request_id,
@@ -931,6 +1298,8 @@ class MessagingMixin:
                 " ended_at = ?, version = version + 1 WHERE id = ?",
                 (reason, ids.now(), run_id),
             )
+            self._close_wake_job_for_run(conn, project_id, row["wake_job_id"],
+                                         "canceled")
             self._audit(conn, project_id, self.SYSTEM_ACTOR, "run.cancel",
                         subject_type="run", subject_id=run_id,
                         request_id=request_id, summary="run canceled")
