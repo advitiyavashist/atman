@@ -389,7 +389,7 @@ def test_spawn_lifecycle_with_stub_command(board):
     r2 = run(board, "spawn", "doc", "--exec", "true", agent="master")
     assert "already running" in r2.stdout
     r3 = run(board, "spawn", "doc", "--stop", agent="master")
-    assert "asked watcher" in r3.stdout
+    assert "stopped 1 watcher" in r3.stdout
     for _ in range(20):
         if not pid_file.exists():
             break
@@ -532,6 +532,78 @@ def test_master_heartbeat_drives_only_the_master_seat(board):
     (board / "agents" / "boss.json").write_text(json.dumps(rec))
     rc, p = pending(board, "boss")
     assert "drive" not in p
+
+
+def test_spawn_stop_stops_all_duplicate_watch_loops(board):
+    """spawn --stop must SIGTERM every live loop for the name, not just the pid-file holder."""
+    run(board, "join", "dup", "--roles", "docs")
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="dup",
+               HOME=str(board.parent.parent / "home"))
+    cwd = str(board.parent)
+    argv = [sys.executable, str(TOOL), "watch", "--agent", "dup", "--every", "3600", "--exec", "true"]
+    p1 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    pid_file = board / "agents" / "dup.watch.pid"
+    assert pid_file.exists()
+    os.unlink(pid_file)  # orphan p1 from the lock file so a second loop can start
+    p2 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    r = run(board, "spawn", "dup", "--stop", agent="master")
+    assert r.returncode == 0, r.stderr
+    assert str(p1.pid) in r.stdout and str(p2.pid) in r.stdout
+    assert "stopped" in r.stdout
+    p1.wait(timeout=10)
+    p2.wait(timeout=10)
+
+
+def test_watch_sigterm_exits_within_poll_interval(board):
+    """SIGTERM must not wait for the full --every sleep (T-332 / claude-fable scope)."""
+    run(board, "join", "doc", "--roles", "docs")
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="doc",
+               HOME=str(board.parent.parent / "home"))
+    proc = subprocess.Popen(
+        [sys.executable, str(TOOL), "watch", "--agent", "doc", "--every", "3600", "--exec", "true"],
+        env=env, cwd=str(board.parent), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+    time.sleep(0.5)
+    t0 = time.time()
+    proc.terminate()
+    proc.wait(timeout=5)
+    assert time.time() - t0 < 2.0, "SIGTERM should interrupt the sleep, not wait up to --every"
+
+
+def test_dash_health_flag_duplicate_watchers(board):
+    """T-433: dash/list/health surface watcher_count and flag count != 1."""
+    run(board, "join", "dup", "--roles", "docs")
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="dup",
+               HOME=str(board.parent.parent / "home"))
+    cwd = str(board.parent)
+    argv = [sys.executable, str(TOOL), "watch", "--agent", "dup", "--cwd", cwd,
+            "--every", "3600", "--exec", "true"]
+    p1 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    pid_file = board / "agents" / "dup.watch.pid"
+    assert pid_file.exists()
+    os.unlink(pid_file)
+    p2 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    dash = run(board, "dash", "--once").stdout
+    assert "watchers=2 !!" in dash
+    ui = json.loads(run(board, "ui", "--json").stdout)
+    dup = next(a for a in ui["agents"] if a["name"] == "dup")
+    assert dup["watcher_count"] == 2
+    assert any("2 watch loops" in h["msg"] for h in ui["health"])
+    r = run(board, "spawn", "dup", "--stop", agent="master")
+    assert r.returncode == 0, r.stderr
+    p1.wait(timeout=10)
+    p2.wait(timeout=10)
+    ui2 = json.loads(run(board, "ui", "--json").stdout)
+    dup2 = next(a for a in ui2["agents"] if a["name"] == "dup")
+    assert dup2["watcher_count"] in (0, 1)
 
 
 def test_spawn_passes_heartbeat_to_watch(board):

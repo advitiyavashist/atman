@@ -2644,14 +2644,6 @@ def _codex_last_turn(path, mtime):
 
 # ---- watcher / watch-log signals ---------------------------------------
 
-def _watcher_pid(board, owner):
-    try:
-        with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
-            return int((f.read() or "0").strip() or 0)
-    except (IOError, ValueError):
-        return 0
-
-
 def _pid_alive(pid):
     if not pid:
         return False
@@ -2664,6 +2656,90 @@ def _pid_alive(pid):
     except OSError:
         return False
     return True
+
+
+def _tickets_tool_path():
+    return os.path.realpath(__file__)
+
+
+def _argv_flag_value(argv, flag):
+    """Return the value after `flag` in argv, or '' if absent."""
+    for i, tok in enumerate(argv):
+        if tok == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith(flag + "="):
+            return tok[len(flag) + 1:]
+    return ""
+
+
+def _live_watch_pids(owner=None, board=None):
+    """Live `tickets watch --agent <name>` processes from the OS process table.
+
+    The pid file only tracks one loop per board; duplicates (interrupted pytest
+    runs, races before lock) show up here. `owner` filters to one agent name.
+    When `board` is set, only loops whose --cwd lies under that repo count
+    (spawn/list/dash). Omit `board` for fleet-wide stop of every loop for the name.
+    """
+    import subprocess
+
+    tool = _tickets_tool_path()
+    repo = os.path.realpath(os.path.dirname(board)) if board else None
+    out = []
+    try:
+        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
+    except OSError:
+        return out
+    me = os.getpid()
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        cmd = parts[1]
+        if pid == me or tool not in cmd:
+            continue
+        if " watch" not in cmd and not cmd.rstrip().endswith(" watch"):
+            continue
+        argv = shlex.split(cmd)
+        agent = _argv_flag_value(argv, "--agent")
+        if owner is not None and agent != owner:
+            continue
+        if repo:
+            watch_cwd = _argv_flag_value(argv, "--cwd")
+            if not watch_cwd:
+                continue
+            try:
+                real = os.path.realpath(watch_cwd)
+                if real != repo and not real.startswith(repo + os.sep):
+                    continue
+            except OSError:
+                continue
+        if agent and _pid_alive(pid):
+            out.append(pid)
+    return sorted(set(out))
+
+
+def _watcher_pid(board, owner):
+    """One live watcher pid: process table first, then the board pid file."""
+    live = _live_watch_pids(owner, board=board)
+    if live:
+        return live[0]
+    try:
+        with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
+            pid = int((f.read() or "0").strip() or 0)
+    except (IOError, OSError, ValueError):
+        return 0
+    return pid if pid and _pid_alive(pid) else 0
+
+
+def _watcher_count(owner, board=None):
+    return len(_live_watch_pids(owner, board=board))
 
 
 def _watch_runs(board, owner, keep=12):
@@ -2842,7 +2918,8 @@ def agent_liveness(board, rec, peers=None):
     cwd = cwds[0] if cwds else ""
     beat_age = _age_secs(run.get("beat"))
     out = {"state": "unknown", "detail": "", "source": "none", "heuristic": True,
-           "watcher": bool(pid and _pid_alive(pid)),
+           "watcher": _watcher_count(owner, board) > 0,
+           "watcher_count": _watcher_count(owner, board),
            "run": run if run.get("active") else {},
            "seen_age": _age_secs((rec or {}).get("seen"))}
 
@@ -3832,6 +3909,11 @@ def health(board, tickets):
         if r.get("branch") in ("main", "master") and hours_since(r.get("seen", "")) < 24:
             out.append(("WARN", "%s is working on %s (rule 4)" % (r["owner"], r["branch"]),
                         "git worktree add .worktrees/%s -b %s-work" % (r["owner"], r["owner"])))
+    for r in load_agents(board):
+        n = _watcher_count(r["owner"], board)
+        if n > 1:
+            out.append(("WARN", "%s has %d watch loops running (expected 1)" % (r["owner"], n),
+                        "tickets spawn %s --stop" % r["owner"]))
     if not active_sprint(board):
         out.append(("INFO", "no active sprint", "tickets sprint create \"goal\" --activate"))
     loose = [t["id"] for t in tickets if not t.get("epic") and t["status"] != "done"]
@@ -6189,10 +6271,12 @@ def cmd_dash(a, board):
                 continue
             p = pending_work(board, nme)
             keys = [k for k in p if k != "broadcasts"]
-            lines.append("  %-13s %-8s%s %-9s %s" % (
+            wc = _watcher_count(nme, board)
+            wnote = ("watchers=%d !! " % wc) if wc != 1 else ""
+            lines.append("  %-13s %-8s%s %-9s %s%s" % (
                 nme[:13], state, mark,
                 ("seen " + fmt_hours(hours_since(r["seen"]))) if r.get("seen") else "never",
-                ("pending: " + ", ".join(keys)) if keys else (lv.get("detail") or "")[:40]))
+                wnote, ("pending: " + ", ".join(keys)) if keys else (lv.get("detail") or "")[:40]))
         rows, burn = utilization(board, tickets, hours=24, live=live)
         live = [r for r in rows if r["state"] != "DOWN"]
         lines.append("UTILIZATION 24h  (%d live agents, %d down)" % (len(live), len(rows) - len(live)))
@@ -6451,10 +6535,14 @@ def cmd_watch(a, board):
     # attribution loss (T-259 defect 3).
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    import threading
+    stop_event = threading.Event()
     stop = {"now": False}
 
     def _term(signum, frame):
         stop["now"] = True
+        stop_event.set()
+        raise InterruptedError()
 
     signal.signal(signal.SIGTERM, _term)
 
@@ -6479,6 +6567,7 @@ def cmd_watch(a, board):
                     os.unlink(_stop_file(board, owner))
                 except OSError:
                     pass
+                stop_event.set()
                 print("stop requested via tickets spawn --stop")
                 break
             p = _safe(lambda: pending_work(board, owner), {})
@@ -6589,9 +6678,7 @@ def cmd_watch(a, board):
                 sys.exit(0 if actionable(p) else 1)
             wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
-            try:
-                _time.sleep(wait)
-            except KeyboardInterrupt:
+            if stop_event.wait(timeout=wait):
                 break
     finally:
         if lock:
@@ -6953,15 +7040,6 @@ def _inherit_settings(root, wt):
     return copied
 
 
-def _watcher_pid(board, owner):
-    try:
-        with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
-            pid = int(f.read().strip() or "0")
-    except (OSError, ValueError):
-        return 0
-    return pid if pid and _pid_alive(pid) else 0
-
-
 def _stop_file(board, owner):
     return os.path.join(agents_dir(board), owner + ".watch.stop")
 
@@ -6980,10 +7058,14 @@ def cmd_spawn(a, board):
         print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
             "agent", "watcher", "harness", "model", "check", "seen", "worktree"))
         for r in sorted(load_agents(board), key=lambda r: r["owner"]):
-            pid = _watcher_pid(board, r["owner"])
+            pids = _live_watch_pids(r["owner"], board=board)
+            wc = len(pids)
+            wlabel = ("pid %d" % pids[0]) if wc == 1 else ("%d pids" % wc if wc else "-")
+            if wc > 1:
+                wlabel += " !!"
             entry = wf.get(r["owner"], {})
             print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
-                r["owner"][:14], ("pid %d" % pid) if pid else "-",
+                r["owner"][:14], wlabel,
                 (entry.get("harness") or entry.get("tool") or "claude")[:9],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
@@ -6994,14 +7076,27 @@ def cmd_spawn(a, board):
         sys.exit("spawn needs a name (or --list)")
     owner = a.name
     if a.stop:
-        pid = _watcher_pid(board, owner)
-        if not pid:
+        import signal
+
+        pids = _live_watch_pids(owner)
+        if not pids:
             print("no running watcher for %s" % owner)
             return
-        with open(_stop_file(board, owner), "w") as f:
-            f.write(now())
-        print("asked watcher %s (pid %d) to stop at its next poll" % (owner, pid))
-        post_message(board, whoami(), "%s watcher asked to stop" % owner)
+        try:
+            with open(_stop_file(board, owner), "w") as f:
+                f.write(now())
+        except OSError:
+            pass
+        stopped = 0
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped += 1
+            except ProcessLookupError:
+                pass
+        print("stopped %d watcher(s) for %s (pids %s)" % (
+            stopped, owner, ", ".join(str(p) for p in pids)))
+        post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
         return
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                             harness=getattr(a, "harness", "") or "",
@@ -7042,8 +7137,10 @@ def cmd_spawn(a, board):
         with open(master_state_path(board), "w") as f:
             json.dump(prev, f)
         _master_log(board, "%s spawned as persistent chief of staff (review/unblock/merge)" % owner, by=whoami())
-    if _watcher_pid(board, owner):
-        print("watcher for %s already running (pid %d); --stop first" % (owner, _watcher_pid(board, owner)))
+    live = _live_watch_pids(owner, board=board)
+    if live:
+        print("watcher for %s already running (%d process(es), pids %s); --stop first" % (
+            owner, len(live), ", ".join(str(p) for p in live)))
         return
     _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     try:
@@ -7926,7 +8023,8 @@ def board_snapshot(board, messages=40):
         rec = agents.get(r["agent"], {})
         out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
-                           "watcher": bool(_watcher_pid(board, r["agent"])),
+                           "watcher": _watcher_count(r["agent"], board) > 0,
+                           "watcher_count": _watcher_count(r["agent"], board),
                            "roles": roles.get(r["agent"]) or []})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
