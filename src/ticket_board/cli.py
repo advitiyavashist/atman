@@ -2414,8 +2414,17 @@ def health(board, tickets):
 
 def cmd_reopen(a, board):
     t = load(board, a.id)
-    if getattr(a, "notes", ""):
-        t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": a.notes})
+    notes = getattr(a, "notes", "") or ""
+    # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
+    # ticket to `next` while notes still read as REVIEW. Claimed work that
+    # never entered review stays reopenable without notes (T-246).
+    if (t["status"] == "review" or t.get("review_at")) and not notes.strip():
+        sys.exit(
+            'reopen of IN REVIEW work needs --notes "why" '
+            "(silent reopen returns it to next and looks like a next-reissue bug)"
+        )
+    if notes:
+        t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": notes})
     before = t["status"]
     prev_owner = t.get("owner", "")
     t["status"] = "open"
@@ -3550,7 +3559,8 @@ def main():
 
     c = sub.add_parser("reopen", help="release a claimed ticket back to open")
     c.add_argument("id")
-    c.add_argument("--notes", "-n", default="", help="why it's being reopened (recorded as a note)")
+    c.add_argument("--notes", "-n", default="",
+                   help="why it's being reopened (required for IN REVIEW / review_at)")
     c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
     c.set_defaults(fn=cmd_reopen)
 

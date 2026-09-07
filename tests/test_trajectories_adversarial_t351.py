@@ -122,7 +122,8 @@ def _drive_sequence(run_fn, board, repo):
     )
     r = run_fn(board, "review", tid, "--notes", "paths and tests", agent="alice", cwd=repo)
     assert r.returncode == 0, r.stderr + r.stdout
-    r = run_fn(board, "reopen", tid, agent="carol", cwd=repo)
+    r = run_fn(board, "reopen", tid, "--notes", "FIX-FIRST: drive remaining events",
+               agent="carol", cwd=repo)
     assert r.returncode == 0, r.stderr + r.stdout
     r = run_fn(board, "done", tid, "--notes", "landed", agent="alice", cwd=repo)
     assert r.returncode == 0, r.stderr + r.stdout
