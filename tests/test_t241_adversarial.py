@@ -81,13 +81,15 @@ def _load_tickets_module():
     return mod
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="T-244: checkin()/join() never initialize inbox_seen, so a never-"
-    "checked-in agent's first inbox call has since=='' and loses archived mail. "
-    "strict=True so this flips to a failure (forcing this test's removal/update) "
-    "the moment T-244 lands its fix -- do not let T-244 be closed quietly.",
-)
+# T-228 (opus-authz): this was a strict xfail whose stated job was to flip red
+# "the moment T-244 lands its fix -- do not let T-244 be closed quietly". It has
+# now done that job, so it becomes an ordinary regression test rather than being
+# deleted. Two separate fixes were needed to get here and both are load-bearing:
+# T-244 stamps inbox_seen at first check-in (so `since` is never ""), and T-228
+# stops the boundary second from swallowing the DM. On the T-244 branch alone
+# this test was FLAKY -- three identical runs of f7b5d0c gave xfail / XPASS /
+# xfail -- because whether it passed depended on whether the join and the DM
+# happened to land in the same wall-clock second. It is deterministic now.
 def test_never_checked_in_agent_loses_archived_mail_forever(board):
     """The case none of the D1 tests chose: an agent whose agent record has
     no 'inbox_seen' key at all, because it has never called `tickets inbox`
@@ -123,18 +125,25 @@ def test_since_equals_live_oldest_reduces_to_t228(tmp_path):
     )
     (b / "agents" / "bob.json").write_text(json.dumps({"name": "bob", "inbox_seen": tie}))
 
+    # T-228 (opus-authz) UPDATED THE EXPECTATION HERE, deliberately.
+    # As written, this test asserted that the since==msgs[0].at boundary
+    # behaves the same as the (then unfixed) T-228 hole: the tie message is
+    # dropped. That was the correct reading of a D1-only pass -- the author
+    # was proving this boundary is not a *separate* defect, and they were
+    # right. Now that T-228 is fixed the shared behaviour is the opposite:
+    # a message landing exactly on `since` is delivered once, then never
+    # again. The author's actual claim -- "this boundary is a restatement of
+    # T-228, not a distinct D1 defect" -- is what is still being pinned, so
+    # the assertion now tracks T-228 rather than contradicting it.
     actual = mod.unread(str(b), "bob")
-    forced_msgs = mod.load_messages(str(b), include_archives=True)
-    forced = [
-        m for m in forced_msgs
-        if m.get("from") != "bob"
-        and (not m.get("to") or m.get("to") == "bob" or m.get("to") == "all")
-        and m.get("at", "") > tie
-    ]
-    assert actual == forced == [], (
-        "if this ever diverges, the since==msgs[0].at boundary is a real, distinct "
-        "D1 defect rather than a restatement of T-228: actual=%r forced=%r" % (actual, forced)
-    )
+    assert [m.get("text") for m in actual] == ["live-tie"], (
+        "the tie message must be delivered exactly once now that T-228 is "
+        "fixed -- got %r" % actual)
+
+    # and it must not become a wake storm: mark it read, and it stays read.
+    mod._mark_inbox_read(str(b), "bob", mod._inbox_scan(str(b), "bob"))
+    assert mod.unread(str(b), "bob") == [], "boundary message redelivered -- wake storm"
+    assert mod.unread(str(b), "bob") == []
 
 
 def test_caught_up_agent_never_reads_archives(tmp_path):

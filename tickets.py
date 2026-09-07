@@ -26,6 +26,7 @@ Default roles for those names can be overridden by .tickets/roles.json.
 import argparse
 import errno
 import glob
+import hashlib
 import json
 import os
 import shlex
@@ -2750,26 +2751,74 @@ def _agent_rec(board, owner):
         return {}
 
 
-def _mark_inbox_read(board, owner):
+def _msg_id(m):
+    """A stable identity for a message record.
+
+    Messages carry no id on the wire, and adding one would change a format
+    that T-213's legacy import round-trips verbatim, so identity is derived
+    from content instead: the same record hashes the same whether it is read
+    from the live file or from a rotated archive, and nothing already on disk
+    has to be migrated. Two byte-identical messages in the same second do
+    share an identity, which is exactly why the boundary list is consumed as
+    a multiset below -- one delivery per occurrence, not per distinct value.
+    """
+    raw = json.dumps([m.get("at", ""), m.get("from", ""), m.get("to", ""),
+                      m.get("re", ""), m.get("text", "")], sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _seen_counts(seen_ids):
+    counts = {}
+    for k in seen_ids or []:
+        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def _is_unread(m, since, remaining):
+    """Is `m` new to an agent whose watermark is `since`?
+
+    T-228: `inbox_seen` and a message's `at` are both whole-second stamps, so
+    a strict `at > since` silently and permanently drops every message posted
+    during the very second an agent read its inbox -- the message stays on
+    disk while the agent is told its inbox is empty. The obvious repair,
+    `>=`, redelivers the boundary message on every poll forever (a wake
+    storm), so the boundary second is disambiguated by identity instead:
+    strictly newer is always unread, and landing exactly on `since` is unread
+    unless this agent has already been shown that specific message.
+
+    Consumes from `remaining` (a multiset of boundary identities already
+    delivered) so that two identical messages in the same second are
+    delivered twice, not once.
+    """
+    at = m.get("at", "")
+    if at > since:
+        return True
+    if since and at == since:
+        k = _msg_id(m)
+        if remaining.get(k):
+            remaining[k] -= 1
+            return False
+        return True
+    return False
+
+
+def _inbox_scan(board, owner):
+    """The read side of the inbox: (unread, watermark, boundary_ids).
+
+    The watermark returned is the newest `at` actually observed, never
+    wall-clock now(). Stamping now() reopens this very hole one second later:
+    a message posted between the read and the stamp is older than the stamp
+    and newer than anything delivered, so it would be skipped forever. The
+    watermark only ever advances to something this agent has actually seen.
+    """
     rec = _agent_rec(board, owner)
-    if not rec:
-        rec = checkin(board, owner)
-    rec["inbox_seen"] = now()
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f, indent=2)
-    os.replace(tmp, path)
-
-
-def unread(board, owner):
     # since="" means "live file only" below, which would silently drop any
     # already-rotated mail -- checkin() (T-244) stamps inbox_seen at an
     # agent's first-ever check-in specifically so real agents never reach
     # this function with since="". It stays possible here (e.g. a record
     # written before that fix existed) rather than being asserted against.
-    since = _agent_rec(board, owner).get("inbox_seen", "")
+    since = rec.get("inbox_seen", "")
+    seen_ids = rec.get("inbox_seen_ids") or []
     msgs = load_messages(board)
     # An agent that slept through a rotation has its unread mail sitting in an
     # archive the fast path never reads, so its inbox would come back silently
@@ -2778,10 +2827,49 @@ def unread(board, owner):
     if since and (not msgs or since < msgs[0].get("at", "")):
         if glob.glob(os.path.join(board, "messages.*.jsonl")):
             msgs = load_messages(board, include_archives=True)
-    return [m for m in msgs
-            if m.get("from") != owner
-            and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
-            and m.get("at", "") > since]
+    remaining = _seen_counts(seen_ids)
+    out = [m for m in msgs
+           if m.get("from") != owner
+           and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
+           and _is_unread(m, since, remaining)]
+    watermark = max([m.get("at", "") for m in msgs] or [""])
+    if watermark < since:
+        watermark = since          # nothing newer than the agent already knew
+    if not watermark:
+        # A board with no messages at all and no prior watermark: there is
+        # nothing that could be lost by starting from the current second.
+        watermark = now()
+    # Only the boundary second ever needs identities -- everything older is
+    # settled by the timestamp alone -- so this list is bounded by one
+    # second of traffic rather than growing with history.
+    boundary = [_msg_id(m) for m in out if m.get("at", "") == watermark]
+    if watermark == since:
+        boundary = list(seen_ids) + boundary
+    return out, watermark, boundary
+
+
+def unread(board, owner):
+    return _inbox_scan(board, owner)[0]
+
+
+def _mark_inbox_read(board, owner, scan=None):
+    rec = _agent_rec(board, owner)
+    if not rec:
+        rec = checkin(board, owner)
+    if scan is None:
+        scan = _inbox_scan(board, owner)
+    watermark, boundary = scan[1], scan[2]
+    rec["inbox_seen"] = watermark
+    if boundary:
+        rec["inbox_seen_ids"] = boundary
+    else:
+        rec.pop("inbox_seen_ids", None)
+    os.makedirs(agents_dir(board), exist_ok=True)
+    path = os.path.join(agents_dir(board), owner + ".json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, path)
 
 
 def fmt_msg(m):
@@ -2800,6 +2888,7 @@ def cmd_msg(a, board):
 
 def cmd_inbox(a, board):
     owner = whoami(a.owner)
+    scan = None
     if a.all:
         msgs = load_messages(board, include_archives=True)[-a.limit:]
         if not msgs:
@@ -2808,7 +2897,8 @@ def cmd_inbox(a, board):
         for m in msgs:
             print(fmt_msg(m))
     else:
-        msgs = unread(board, owner)
+        scan = _inbox_scan(board, owner)
+        msgs = scan[0]
         if not msgs:
             print("inbox empty for %s (tickets inbox --all for history)" % owner)
         else:
@@ -2816,7 +2906,9 @@ def cmd_inbox(a, board):
             for m in msgs:
                 print("  " + fmt_msg(m))
     if not a.keep:
-        _mark_inbox_read(board, owner)
+        # Mark exactly what this read observed. Recomputing here instead
+        # would advance the watermark past anything that landed in between.
+        _mark_inbox_read(board, owner, scan)
 
 
 # ---- routing: which agent should take which open ticket -----------------
@@ -3094,8 +3186,12 @@ def pending_work(board, owner):
             out["review_queue"] = rq[:6]
         # A stuck message wakes both seats whoever it was addressed to.
         since = rec.get("inbox_seen", "")
+        # Same boundary-second rule as the inbox itself (T-228): a "stuck"
+        # posted in the second the master last read its mail must still wake
+        # it. This scan does not consume, so it gets its own counts.
+        _rem = _seen_counts(rec.get("inbox_seen_ids"))
         stuck = [fmt_msg(x) for x in _safe(lambda: load_messages(board), [])
-                 if x.get("from") != owner and x.get("at", "") > since
+                 if x.get("from") != owner and _is_unread(x, since, _rem)
                  and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
         if stuck:
             out["stuck_messages"] = stuck[-5:]

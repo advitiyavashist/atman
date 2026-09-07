@@ -631,11 +631,21 @@ def test_new_agent_does_not_see_history_from_before_it_joined(board):
     """The flood question the ticket asked to be decided and written down:
     a brand-new agent's inbox_seen is stamped to its join time, so mail
     already on the board before it existed is deliberately NOT unread mail
-    for it -- it is history, visible only via `tickets inbox --all`."""
+    for it -- it is history, visible only via `tickets inbox --all`.
+
+    T-228 note: the sleep below is load-bearing, not padding. `at` and
+    `inbox_seen` are both whole-second stamps, so without a real clock gap
+    the last filler message can share carol's join second, and "before she
+    joined" then stops being a question this data can answer. That tie is
+    decided deliberately in the other direction -- see
+    test_message_in_the_same_second_as_a_join_is_delivered_not_dropped --
+    so pin the flood policy on mail that is unambiguously older.
+    """
     env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
     for i in range(20):
         r = run(board, "msg", "before-carol message %d filler filler" % i, agent="alice", env=env)
         assert r.returncode == 0, r.stderr
+    time.sleep(1.1)  # make "before" mean an earlier second, not the same one
     run(board, "join", "carol", "--roles", "backend")  # joins after all prior mail
 
     out = run(board, "inbox", agent="carol").stdout
@@ -644,6 +654,30 @@ def test_new_agent_does_not_see_history_from_before_it_joined(board):
 
     full = run(board, "inbox", "--all", "--limit", "100", agent="carol").stdout
     assert "before-carol message 19" in full  # still on the board, just not "unread"
+
+
+def test_message_in_the_same_second_as_a_join_is_delivered_not_dropped(board):
+    """T-228, and the deliberate tie-break against T-244's flood policy.
+
+    Second-resolution stamps cannot distinguish "posted just before this
+    agent joined" from "posted just after", and the two policies collide on
+    exactly that tie. It is resolved in favour of delivery, because the two
+    ways of being wrong are not symmetric: showing one extra message that
+    slightly predates the join is a cosmetic wart, while dropping it loses a
+    DM forever -- and "welcome, take T-123" sent the instant a new agent
+    appears is a real and common shape on this board, not a hypothetical.
+    A new agent still never sees the *flood*; only the boundary second.
+    """
+    run(board, "join", "dave", "--roles", "backend")
+    seen = json.loads((board / "agents" / "dave.json").read_text())["inbox_seen"]
+    # post with the message's own stamp forced onto dave's exact join second
+    (board / "messages.jsonl").write_text(
+        json.dumps({"at": seen, "from": "alice", "to": "dave",
+                    "re": "", "text": "WELCOME-DAVE-TAKE-T123"}) + "\n")
+    out = run(board, "inbox", agent="dave").stdout
+    assert "WELCOME-DAVE-TAKE-T123" in out, (
+        "a DM landing in the very second an agent joined must not be "
+        "silently dropped -- got: %r" % out)
 
 
 def test_legacy_agent_record_missing_inbox_seen_key_gets_stamped_on_next_checkin(board):

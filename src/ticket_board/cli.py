@@ -26,6 +26,7 @@ Default roles for those names can be overridden by .tickets/roles.json.
 import argparse
 import errno
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -2410,11 +2411,17 @@ def _agent_rec(board, owner):
         return {}
 
 
-def _mark_inbox_read(board, owner):
+def _mark_inbox_read(board, owner, scan=None):
     rec = _agent_rec(board, owner)
     if not rec:
         rec = checkin(board, owner)
-    rec["inbox_seen"] = now()
+    if scan is None:
+        scan = _inbox_scan(board, owner)
+    rec["inbox_seen"] = scan[1]
+    if scan[2]:
+        rec["inbox_seen_ids"] = scan[2]
+    else:
+        rec.pop("inbox_seen_ids", None)
     os.makedirs(agents_dir(board), exist_ok=True)
     path = os.path.join(agents_dir(board), owner + ".json")
     tmp = path + ".tmp"
@@ -2423,13 +2430,66 @@ def _mark_inbox_read(board, owner):
     os.replace(tmp, path)
 
 
-def unread(board, owner):
-    since = _agent_rec(board, owner).get("inbox_seen", "")
+def _msg_id(m):
+    """Stable, content-derived identity for a message (see T-228 in the root
+    tickets.py, which carries the full rationale). Derived rather than stored
+    so nothing already written to disk has to be migrated."""
+    raw = json.dumps([m.get("at", ""), m.get("from", ""), m.get("to", ""),
+                      m.get("re", ""), m.get("text", "")], sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _seen_counts(seen_ids):
+    counts = {}
+    for k in seen_ids or []:
+        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def _is_unread(m, since, remaining):
+    """T-228: `inbox_seen` and `at` are both whole-second stamps, so a strict
+    `at > since` permanently drops anything posted during the very second an
+    agent read its inbox. `>=` alone would redeliver the boundary message on
+    every poll (a wake storm), so the boundary second is disambiguated by
+    identity, consumed as a multiset so identical messages both arrive."""
+    at = m.get("at", "")
+    if at > since:
+        return True
+    if since and at == since:
+        k = _msg_id(m)
+        if remaining.get(k):
+            remaining[k] -= 1
+            return False
+        return True
+    return False
+
+
+def _inbox_scan(board, owner):
+    """(unread, watermark, boundary_ids). The watermark is the newest `at`
+    actually observed, never now(): stamping wall-clock time reopens this
+    same hole one second later for anything posted between read and stamp."""
+    rec = _agent_rec(board, owner)
+    since = rec.get("inbox_seen", "")
+    seen_ids = rec.get("inbox_seen_ids") or []
     msgs = load_messages(board)
-    return [m for m in msgs
-            if m.get("from") != owner
-            and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
-            and m.get("at", "") > since]
+    remaining = _seen_counts(seen_ids)
+    out = [m for m in msgs
+           if m.get("from") != owner
+           and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
+           and _is_unread(m, since, remaining)]
+    watermark = max([m.get("at", "") for m in msgs] or [""])
+    if watermark < since:
+        watermark = since
+    if not watermark:
+        watermark = now()
+    boundary = [_msg_id(m) for m in out if m.get("at", "") == watermark]
+    if watermark == since:
+        boundary = list(seen_ids) + boundary
+    return out, watermark, boundary
+
+
+def unread(board, owner):
+    return _inbox_scan(board, owner)[0]
 
 
 def fmt_msg(m):
@@ -2448,6 +2508,7 @@ def cmd_msg(a, board):
 
 def cmd_inbox(a, board):
     owner = whoami(a.owner)
+    scan = None
     if a.all:
         msgs = load_messages(board)[-a.limit:]
         if not msgs:
@@ -2456,7 +2517,8 @@ def cmd_inbox(a, board):
         for m in msgs:
             print(fmt_msg(m))
     else:
-        msgs = unread(board, owner)
+        scan = _inbox_scan(board, owner)
+        msgs = scan[0]
         if not msgs:
             print("inbox empty for %s (tickets inbox --all for history)" % owner)
         else:
@@ -2464,7 +2526,7 @@ def cmd_inbox(a, board):
             for m in msgs:
                 print("  " + fmt_msg(m))
     if not a.keep:
-        _mark_inbox_read(board, owner)
+        _mark_inbox_read(board, owner, scan)
 
 
 # ---- routing: which agent should take which open ticket -----------------
