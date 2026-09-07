@@ -571,6 +571,7 @@ def test_board_client_uses_contract_project_header(monkeypatch):
 
     class Response:
         status = 200
+        _body = b'{"accepted": true}'
 
         def __enter__(self):
             return self
@@ -578,8 +579,8 @@ def test_board_client_uses_contract_project_header(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def read(self):
-            return b'{"accepted": true}'
+        def read(self, amt=None):
+            return self._body if amt is None else self._body[:amt]
 
     def fake_urlopen(req, timeout):
         seen["url"] = req.full_url
@@ -596,6 +597,101 @@ def test_board_client_uses_contract_project_header(monkeypatch):
         "project": "prj_demo0001",
         "authorization": "Bearer tok",
     }
+
+
+class _FakeUrlResponse:
+    """A minimal stand-in for ``http.client.HTTPResponse``.
+
+    Real responses accept ``read(amt)`` and may return fewer than ``amt``
+    bytes only at EOF -- this fake mirrors that so a bounded read against it
+    means the same thing it would mean against a real socket.
+    """
+
+    status = 200
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, amt=None):
+        if amt is None:
+            return self._body
+        return self._body[:amt]
+
+
+def test_board_client_refuses_oversized_response_before_parsing(monkeypatch):
+    oversized = b'{"x":"' + (b"A" * (9 * 1024 * 1024)) + b'"}'  # 9MB, over an 8MB cap
+
+    monkeypatch.setattr(
+        adapter_module.request, "urlopen", lambda req, timeout: _FakeUrlResponse(oversized)
+    )
+    client = BoardClient("http://127.0.0.1:4319", "prj_demo0001", max_response_bytes=8 * 1024 * 1024)
+
+    with pytest.raises(adapter_module.ResponseTooLarge, match=r"8388608 byte cap"):
+        client.post_json("/hook-events", {"request_id": "r"}, token="tok")
+
+    with pytest.raises(adapter_module.ResponseTooLarge):
+        client.get_json("/tickets")
+
+
+def test_board_client_error_response_is_also_bounded(monkeypatch):
+    import urllib.error
+
+    oversized = b'{"error":"' + (b"B" * (9 * 1024 * 1024)) + b'"}'
+
+    def fake_urlopen(req, timeout):
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "bad request", {}, io.BytesIO(oversized)
+        )
+
+    monkeypatch.setattr(adapter_module.request, "urlopen", fake_urlopen)
+    client = BoardClient("http://127.0.0.1:4319", "prj_demo0001", max_response_bytes=8 * 1024 * 1024)
+
+    with pytest.raises(adapter_module.ResponseTooLarge, match="board error"):
+        client.post_json("/hook-events", {"request_id": "r"}, token="tok")
+
+
+def test_board_client_accepts_response_at_exactly_the_cap(monkeypatch):
+    cap = 1024
+    prefix, suffix = b'{"a":"', b'"}'
+    filler = b"C" * (cap - len(prefix) - len(suffix))
+    exactly_at_cap = prefix + filler + suffix
+    assert len(exactly_at_cap) == cap
+
+    monkeypatch.setattr(
+        adapter_module.request, "urlopen", lambda req, timeout: _FakeUrlResponse(exactly_at_cap)
+    )
+    client = BoardClient("http://127.0.0.1:4319", "prj_demo0001", max_response_bytes=cap)
+
+    result = client.post_json("/hook-events", {"request_id": "r"}, token="tok")
+    assert result["a"] == filler.decode()
+
+
+def test_board_client_never_holds_more_than_cap_plus_one_byte(monkeypatch):
+    """The read call itself must be bounded, not just the post-hoc length check."""
+    cap = 4096
+    huge = b'{"x":"' + (b"A" * (50 * 1024 * 1024)) + b'"}'
+    requested_amounts = []
+
+    class TrackingResponse(_FakeUrlResponse):
+        def read(self, amt=None):
+            requested_amounts.append(amt)
+            return super().read(amt)
+
+    monkeypatch.setattr(
+        adapter_module.request, "urlopen", lambda req, timeout: TrackingResponse(huge)
+    )
+    client = BoardClient("http://127.0.0.1:4319", "prj_demo0001", max_response_bytes=cap)
+
+    with pytest.raises(adapter_module.ResponseTooLarge):
+        client.post_json("/hook-events", {"request_id": "r"}, token="tok")
+
+    assert requested_amounts == [cap + 1]
 
 
 @pytest.mark.parametrize("variable", [

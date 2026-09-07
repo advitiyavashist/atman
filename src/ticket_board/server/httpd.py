@@ -27,6 +27,18 @@ from .wire import Request
 
 DEFAULT_PORT = 4319
 
+# T-301: the mirror of BoardClient's unbounded response read (adapter.py) is
+# this handler trusting a client-declared Content-Length and handing it
+# straight to rfile.read(length). No contract request body multiplies a
+# maxLength field by a maxItems array (the schema has exactly one maxItems,
+# on a response), and the single largest field is a 16000-char message body
+# -- so any legitimate request stays in the tens of KB. This cap is checked
+# BEFORE the read, so a declared length above it is refused without ever
+# blocking on -- or buffering -- the bytes behind it.
+MAX_REQUEST_BODY_BYTES = int(
+    os.environ.get("TICKET_BOARD_SERVER_MAX_REQUEST_BYTES", 1024 * 1024)
+)
+
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -41,6 +53,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _dispatch(self):
         split = urlsplit(self.path)
         length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_REQUEST_BODY_BYTES:
+            self._reject_oversized_body(length)
+            return
         body = self.rfile.read(length) if length else b""
         request = Request(
             self.command, split.path, query=split.query,
@@ -55,6 +70,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._write_body(response)
 
     do_GET = do_POST = do_DELETE = do_PUT = do_PATCH = _dispatch
+
+    def _reject_oversized_body(self, declared_length):
+        """Refuse a request body over the cap without ever reading it.
+
+        Mirrors the 500 path's departure from the contract's closed
+        `ErrorResponse.status` enum (400/401/403/404/409/422/429, see
+        docs/api-notes.md): there is no member for "the body was too large to
+        accept", and 413 is the honest HTTP status for that, so this uses the
+        same envelope shape with a status the schema cannot validate rather
+        than force-fitting one that lies about the cause.
+
+        The connection is closed rather than kept alive: the client's
+        undrained body bytes are still arriving on this socket, and reading
+        them to get back to a clean request boundary is exactly the unbounded
+        read this cap exists to avoid.
+        """
+        self.close_connection = True
+        message = "Request body of %d bytes exceeds the %d byte cap." % (
+            declared_length, MAX_REQUEST_BODY_BYTES,
+        )
+        payload = json.dumps({"error": {
+            "code": "request_too_large", "status": 413, "message": message,
+        }}).encode("utf-8")
+        self.send_response(413)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _write_body(self, response):
         payload = response.encoded()
