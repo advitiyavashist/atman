@@ -623,7 +623,7 @@ def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
     _drop_unowned_agent_ticket(board, owner)
     g = git_state() or {}
-    rec = {
+    fields = {
         "owner": owner,
         "cwd": os.getcwd(),
         "worktree": g.get("top", ""),
@@ -634,6 +634,10 @@ def checkin(board, owner, ticket=None, note=""):
         "note": note,
         "seen": now(),
     }
+    # inbox_seen, joined_at, limit, stop_blocks and future fields live here;
+    # merge into the existing record instead of rebuilding it (T-418 / root 9c5c606).
+    rec = _agent_rec(board, owner) or {}
+    rec.update(fields)
     os.makedirs(agents_dir(board), exist_ok=True)
     path = os.path.join(agents_dir(board), owner + ".json")
     tmp = path + ".tmp"
