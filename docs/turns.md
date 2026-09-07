@@ -81,8 +81,9 @@ Row keys are exactly: `ticket`, `owner`, `model`, `turns`, `wall_clock_s`,
 `outcome` may be JSON `null` when unknown. Aggregates omit unmeasured tickets
 from mean/median; `n_unmeasured` counts them.
 
-UI panel (worst-10, per-agent medians on the status page) is a follow-up —
-this ticket is CLI-first.
+Console (T-372): home hero reads `aggregates.median`; the turns-efficiency
+panel shows worst-10 + per-agent medians from this same object. Do not
+reshape `--json` for the UI.
 
 ## Source
 
