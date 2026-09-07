@@ -4220,15 +4220,16 @@ def pending_work(board, owner):
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
         if crit:
             out["health_crit"] = [i[1][:80] for i in crit[:3]]
-        # The objective heartbeat: the master seat is woken every `drive_every`
-        # minutes (set by `watch --heartbeat`) even when nothing else is pending,
-        # so it keeps planning toward the objective instead of going quiet.
-        obj = _safe(lambda: load_objective(board), {})
-        every = int(rec.get("drive_every") or 0)
-        if obj and not obj.get("done") and every > 0 and owner == m.get("owner"):
-            last = rec.get("drive_at", "")
-            if not last or hours_since(last) * 60 >= every:
-                out["drive"] = {"objective": obj.get("text", "")[:100], "last": last or "never"}
+    # The objective heartbeat: any seat spawned with --heartbeat N (the master,
+    # or a standing seat such as an optimizer) is woken every N minutes even
+    # when nothing else is pending, so it keeps working its brief toward the
+    # objective instead of going quiet. Opt-in per seat; off for plain workers.
+    obj = _safe(lambda: load_objective(board), {})
+    every = int(rec.get("drive_every") or 0)
+    if obj and not obj.get("done") and every > 0:
+        last = rec.get("drive_at", "")
+        if not last or hours_since(last) * 60 >= every:
+            out["drive"] = {"objective": obj.get("text", "")[:100], "last": last or "never"}
     return out
 
 
@@ -4290,6 +4291,10 @@ Your jobs, every wake-up:
 Stop when there is nothing addressed to you, the sprint matches the vision, and every ready ticket has an owner.
 {extra}"""
 
+
+STANDING_SEAT_PROMPT = """HEARTBEAT: this seat is woken every {every} minutes whether or not anything is pending. This wake-up may be
+such a heartbeat: do the standing brief above end to end, post one short finding with numbers, and stop. The board's
+objective, which your brief serves: {objective}"""
 
 DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; `tickets objective` to read it in full):
 {objective}
@@ -4433,6 +4438,11 @@ def cmd_prompt(a, board):
     brief = agent_brief(board, owner)
     if brief:
         parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    obj = _safe(lambda: load_objective(board), {})
+    if int(rec.get("drive_every") or 0) > 0 and obj and not obj.get("done"):
+        _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
+        parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
     tctx = ticket_context(board, owner)
     if tctx:
         parts.append("Context attached to your ticket(s):\n" + tctx)
