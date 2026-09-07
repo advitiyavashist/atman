@@ -3017,30 +3017,82 @@ def _seen_counts(seen_ids):
     return counts
 
 
+def _addressed(m, owner):
+    """Would this message ever be shown to `owner`? (Own mail is never echoed.)"""
+    return (m.get("from") != owner
+            and (not m.get("to") or m.get("to") == owner or m.get("to") == "all"))
+
+
+def _seen_since(rec):
+    """The agent's watermark, never read as being AHEAD of the present.
+
+    A stored `inbox_seen` in the future is not evidence that anything was
+    observed -- it is a clock, not a receipt -- and reading it verbatim makes
+    every message posted before wall-clock catches up older than the watermark,
+    and so invisible, silently, for the whole length of the skew.
+
+    The clamp lives on the READ side as well as the write side on purpose: a
+    record poisoned before this fix shipped would otherwise stay blind until
+    its skew expired, and a preventive-only clamp cannot heal it. Clamping down
+    can re-deliver a message already shown; that is the safe direction, and the
+    identity set below keeps it to at most one repeat.
+    """
+    since = rec.get("inbox_seen", "")
+    ceiling = now()
+    return ceiling if since > ceiling else since
+
+
 def _is_unread(m, since, remaining):
-    """T-228: `inbox_seen` and `at` are both whole-second stamps, so a strict
-    `at > since` permanently drops anything posted during the very second an
-    agent read its inbox. `>=` alone would redeliver the boundary message on
-    every poll (a wake storm), so the boundary second is disambiguated by
-    identity, consumed as a multiset so identical messages both arrive."""
+    """Is `m` new to an agent whose watermark is `since`?
+
+    Two whole-second stamps cannot order events inside one second, so a strict
+    `at > since` silently and permanently drops everything posted during the
+    very second an agent read its inbox. The obvious repair, `>=`, redelivers
+    on every poll forever (a wake storm), so the ambiguous region is
+    disambiguated by IDENTITY instead: anything at or ahead of the watermark is
+    unread unless this agent has already been shown that specific message.
+
+    "At or ahead" rather than "exactly at" is what makes a future-stamped
+    record safe: it sits above the clamped watermark for the length of the
+    skew, is delivered once, and is not redelivered on the next poll.
+    """
     at = m.get("at", "")
-    if at > since:
-        return True
-    if since and at == since:
-        k = _msg_id(m)
-        if remaining.get(k):
-            remaining[k] -= 1
-            return False
-        return True
-    return False
+    if not at or at < since:
+        return False
+    k = _msg_id(m)
+    if remaining.get(k):
+        remaining[k] -= 1
+        return False
+    return True
 
 
 def _inbox_scan(board, owner):
-    """(unread, watermark, boundary_ids). The watermark is the newest `at`
-    actually observed, never now(): stamping wall-clock time reopens this
-    same hole one second later for anything posted between read and stamp."""
+    """The read side of the inbox: (unread, watermark, retained_ids).
+
+    The watermark returned is the newest `at` actually observed, clamped to the
+    present, and never wall-clock now() on its own. Both halves are load-bearing
+    and they fail in opposite directions:
+
+      * Stamping now() reopens the same-second hole one second later -- a
+        message posted between the read and the stamp is older than the stamp
+        and newer than anything delivered, so it is skipped forever.
+      * Letting max(at) run free trusts a timestamp that was never observed.
+        One future-stamped record drags the watermark past the present and
+        every message posted after it is invisible until the clock catches up.
+        Note that the max runs over the whole file, BEFORE the addressing
+        filter, so a skewed DM between two other agents blinds a bystander --
+        one bad record blinds every agent that reads its inbox after it.
+
+    Kept deliberately in step with the root tickets.py copy: this file is the
+    packaged entry point (pyproject: tickets = ticket_board.cli:main), and
+    T-228 clamped the root only, which is the drift T-329 exists to close.
+    """
     rec = _agent_rec(board, owner)
-    since = rec.get("inbox_seen", "")
+    # T-329 union resolution across the T-522 orphan: new main brought T-327's
+    # pre-join suppression into this function, and this branch brings T-228's
+    # same-second clamp. Neither side is droppable, and the root tickets.py on
+    # new main carries BOTH -- which is the shape this file exists to match.
+    since = _seen_since(rec)
     # T-327's pre-join broadcast suppression is applied inside the scan, not
     # over its result, so the boundary-identity set below is drawn from the
     # same list the agent is actually shown. Kept in step with the root
@@ -3051,20 +3103,24 @@ def _inbox_scan(board, owner):
     msgs = load_messages(board)
     remaining = _seen_counts(seen_ids)
     visible = _visible_after_join(
-        [m for m in msgs
-         if m.get("from") != owner
-         and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")],
-        owner, joined)
+        [m for m in msgs if _addressed(m, owner)], owner, joined)
     out = [m for m in visible if _is_unread(m, since, remaining)]
     watermark = max([m.get("at", "") for m in msgs] or [""])
+    ceiling = now()
+    if watermark > ceiling:
+        watermark = ceiling    # a future stamp is not something anyone observed
     if watermark < since:
-        watermark = since
+        watermark = since      # nothing newer than the agent already knew
     if not watermark:
         watermark = now()
-    boundary = [_msg_id(m) for m in out if m.get("at", "") == watermark]
-    if watermark == since:
-        boundary = list(seen_ids) + boundary
-    return out, watermark, boundary
+    # Identities are needed only where the timestamp alone cannot settle the
+    # question -- at the watermark second, and above it while a future-stamped
+    # record is waiting for the clock. Rebuilt from the file rather than
+    # carried forward, because a message delivered on an EARLIER poll is no
+    # longer in `out` and would otherwise lose its identity and be redelivered.
+    retained = [_msg_id(m) for m in msgs
+                if _addressed(m, owner) and m.get("at", "") >= watermark]
+    return out, watermark, retained
 
 
 def unread(board, owner):
