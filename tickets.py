@@ -5899,6 +5899,16 @@ def _silent(fn):
 
 GUIDE = """# Startup guide -- connecting any agent to the board
 
+NEW HERE? Do this first, then come back:
+
+    cd <your repo> && tickets quickstart        # board + sample work + you, registered
+                                                # then: tickets next
+    docs/first-session.md                       # the same run, captured and annotated
+    README.md                                   # the model, worker loop, master loop
+
+This guide is the next step after that: wiring a REAL agent (Claude Code,
+Codex, Cursor, your own harness) to a board that already exists.
+
 One command does every step (join, hooks, check-in, briefing):
 
     export TICKET_AGENT=<unique-name>          # claude-opus, claude-sonnet, codex, cursor-2 ...
@@ -7230,6 +7240,208 @@ def cmd_ui(a, board):
         pass
 
 
+QUICKSTART_MARKER = "quickstart.json"
+
+QUICKSTART_TICKETS = [
+    {"key": "schema", "title": "Sample: design the data model",
+     "role": "backend", "priority": 1,
+     "body": "A sample ticket created by `tickets quickstart`.\n\n"
+             "It has no dependencies, so it is the one `tickets next` hands out first.\n"
+             "Work it like a real ticket: claim it, post an update, then send it to review.\n"
+             "Delete the samples whenever you like: tickets quickstart --remove"},
+    {"key": "api", "title": "Sample: build the API on top of the model",
+     "role": "backend", "priority": 2, "deps": ["schema"],
+     "body": "A sample ticket that DEPENDS on the first one.\n\n"
+             "`tickets next` will not offer it until the schema ticket is done -- that is\n"
+             "the dependency graph doing its job, not the board being empty."},
+    {"key": "ui", "title": "Sample: put a screen on the API",
+     "role": "console", "priority": 2, "deps": ["api"],
+     "body": "The third sample, two hops down the chain.\n\n"
+             "Run `tickets graph` to see all three and what is blocking what."},
+]
+
+
+def _quickstart_state(board):
+    """What a previous quickstart made here, or None. Makes the command idempotent."""
+    path = os.path.join(board, QUICKSTART_MARKER)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return None
+
+
+def _quickstart_save(board, state):
+    path = os.path.join(board, QUICKSTART_MARKER)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _quickstart_alive(board, state):
+    """The sample ids from a previous run that still exist (a user may have deleted them)."""
+    if not state:
+        return []
+    have = set(t["id"] for t in load_all(board))
+    return [tid for tid in state.get("tickets", []) if tid in have]
+
+
+def _quickstart_harness():
+    """Which agent harness this machine can actually launch, best first.
+
+    Print-only: T-314's `tickets harness check` is the real probe. Quickstart
+    only names a harness so it can print a spawn line; it never starts one.
+    Returns (name, argv-prefix) or (None, None).
+    """
+    import shutil
+    for name, argv in (("claude", ["claude", "-p"]),
+                       ("codex", ["codex", "exec"]),
+                       ("cursor-agent", ["cursor-agent", "-p"])):
+        if shutil.which(name):
+            return name, argv
+    return None, None
+
+
+def cmd_quickstart(a, board):
+    """Zero to a first ticket claimed by a real agent. Non-interactive, idempotent."""
+    if a.remove:
+        state = _quickstart_state(board)
+        alive = _quickstart_alive(board, state)
+        for tid in alive:
+            try:
+                os.unlink(ticket_path(board, tid))
+            except OSError:
+                pass
+        try:
+            os.unlink(os.path.join(board, QUICKSTART_MARKER))
+        except OSError:
+            pass
+        print("removed %d sample ticket(s)%s" % (
+            len(alive), (" (%s)" % ", ".join(alive)) if alive else ""))
+        if state and state.get("epic"):
+            print("epic %s left in place (it may hold your own work now)" % state["epic"])
+        return
+
+    # 1. Bind before writing anything -- the same T-263 condition `init` enforces,
+    # through the same primitives, so there is one guard and not a second copy
+    # of it that can drift.  Asking only "is there a board?" is not enough: when
+    # an ancestor project already has one, the ambient resolution finds it and
+    # quickstart would cheerfully populate SOMEONE ELSE'S board.
+    explicit = bool(getattr(a, "board", None))
+    target, why = _init_resolve_board(a)
+    if not explicit and not _same_board(target, board):
+        print("board: %s" % target)
+        print("  resolved from %s" % why)
+        print("  ambient:      %s" % board)
+        sys.exit(_init_refusal(target, board))
+
+    if not os.path.isdir(target):
+        # Mirror `tickets init`'s own arguments. The quickstart regression test
+        # runs this path on a fresh repo, so a new init flag fails loudly there
+        # rather than silently at a user's first command.
+        init_args = argparse.Namespace(
+            board=getattr(a, "board", None), track=False, force=False)
+        cmd_init(init_args, board)
+        print("")
+    board = target
+
+    print("board: %s" % board)
+
+    # 2. sample epic + three tickets with a real dependency chain, created once
+    state = _quickstart_state(board)
+    alive = _quickstart_alive(board, state)
+    if alive:
+        print("samples: already here (%s) -- not creating them again" % ", ".join(alive))
+        epic_id = (state or {}).get("epic", "")
+    else:
+        epic = _alloc(epics_dir(board), "E", 3, {
+            "title": "Sample epic: a first slice end to end",
+            "body": "Created by `tickets quickstart` so the board is not empty on day one.\n"
+                    "Remove the samples with `tickets quickstart --remove`.",
+            "status": "open", "created": now(), "updated": now(),
+        })
+        epic_id = epic["id"]
+        keymap, made = {}, []
+        for spec in QUICKSTART_TICKETS:
+            t = create(board, spec["title"], spec["body"], spec.get("role", ""),
+                       [], spec.get("priority", 2), epic_id, "", [])
+            keymap[spec["key"]] = t["id"]
+            made.append(t)
+        for spec, t in zip(QUICKSTART_TICKETS, made):
+            deps = [keymap[d] for d in spec.get("deps", []) if d in keymap]
+            if deps:
+                set_deps(board, t["id"], deps)
+        _quickstart_save(board, {"epic": epic_id,
+                                 "tickets": [t["id"] for t in made],
+                                 "created": now()})
+        print("epic:  %s  %s" % (epic_id, epic["title"]))
+        for spec, t in zip(QUICKSTART_TICKETS, made):
+            dep = spec.get("deps") or []
+            print("  %s  %-42s %s" % (
+                t["id"], t["title"][:42],
+                ("after %s" % keymap[dep[0]]) if dep else "ready now"))
+
+    # 3. register whoever is running this, so `next` has someone to hand work to
+    agent = a.agent or os.environ.get("TICKET_AGENT") or whoami()
+    if agent and not agent.startswith("agent-"):
+        # T-314 grew --harness/--cmd; pin every field cmd_join reads so a new
+        # join flag fails this Namespace in tests instead of at first-run.
+        join_args = argparse.Namespace(
+            name=agent, roles=a.roles, tool="", model="",
+            can=None, cost=None, best_for="", harness="", cmd_template="")
+        # cmd_join prints a full worker briefing; quickstart has its own ending,
+        # so keep the one line that matters and drop the rest.
+        import io, contextlib
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                cmd_join(join_args, board)
+        except SystemExit:
+            print("agent: could not register %r automatically" % agent)
+            print("       run: tickets join <name> --roles backend")
+        else:
+            joined = [ln for ln in buf.getvalue().splitlines() if ln.startswith("joined as ")]
+            print(joined[0] if joined else "agent: %s" % agent)
+    else:
+        agent = ""
+        print("agent: none registered (set TICKET_AGENT, or: tickets join <name> --roles backend)")
+
+    # 4. optionally put a real worker on it
+    if a.with_agent:
+        _quickstart_spawn(a, board, a.with_agent)
+
+    _quickstart_next_steps(board, agent)
+
+
+def _quickstart_spawn(a, board, name):
+    harness, argv = _quickstart_harness()
+    if not harness:
+        print("")
+        print("--with-agent: no agent harness found on PATH (looked for claude, codex, cursor-agent).")
+        print("  Install one, or start a worker by hand:  TICKET_AGENT=%s tickets next" % name)
+        return
+    print("")
+    print("worker: %s will run as %s" % (harness, name))
+    print("  tickets spawn %s --tool %s" % (name, harness))
+    print("  (not launched for you -- quickstart never starts a background process without asking;")
+    print("   run the line above, or: TICKET_AGENT=%s %s \"$(tickets prompt)\")" % (name, " ".join(argv)))
+
+
+def _quickstart_next_steps(board, agent):
+    ident = ("TICKET_AGENT=%s " % agent) if agent else ""
+    print("")
+    print("The three commands that matter:")
+    print("  %stickets next                      claim the next ready ticket" % ident)
+    print("  %stickets update <id> \"...\"         say where you are, at least every 45 min" % ident)
+    print("  %stickets review <id> --notes \"...\" hand it back with evidence" % ident)
+    print("")
+    print("See it: tickets ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
+    print("Learn it: tickets guide   |   docs/first-session.md   |   README.md")
+
+
 def cmd_guide(a, board):
     print(GUIDE)
 
@@ -7850,6 +8062,14 @@ def main():
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
     c.set_defaults(fn=cmd_ui)
 
+    c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
+    c.add_argument("--agent", help="register under this name (default: $TICKET_AGENT)")
+    c.add_argument("--roles", default="backend", help="roles for that agent (default: backend)")
+    c.add_argument("--with-agent", metavar="NAME", help="also print how to put a real worker on the board")
+    c.add_argument("--board", help="initialise this board directory explicitly")
+    c.add_argument("--remove", action="store_true", help="delete the sample tickets this created")
+    c.set_defaults(fn=cmd_quickstart)
+
     c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
     c.set_defaults(fn=cmd_guide)
 
@@ -8154,6 +8374,7 @@ def main():
         "plan",
         "where",
         "init",
+        "quickstart",
         "join",
         "epic",
         "sprint",
