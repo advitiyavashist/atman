@@ -950,10 +950,22 @@ def checkin(board, owner, ticket=None, note=""):
 
 
 def _current_ticket(board, owner):
-    for t in load_all(board):
-        if t["status"] == "claimed" and t.get("owner") == owner:
-            return t["id"]
-    return ""
+    """Return the ticket this agent is working on: claimed first, else review."""
+    mine = [t for t in load_all(board) if t.get("owner") == owner]
+    claimed = [t for t in mine if t.get("status") == "claimed"]
+    if claimed:
+        return claimed[0]["id"]
+    review = [t for t in mine if t.get("status") == "review"]
+    if not review:
+        return ""
+
+    def _last_touch(t):
+        stamps = [t.get("review_at")] + [n.get("at") for n in t.get("notes", []) if n.get("at")]
+        stamps = [s for s in stamps if s]
+        return max(stamps) if stamps else ""
+
+    review.sort(key=_last_touch, reverse=True)
+    return review[0]["id"]
 
 
 def load_agents(board):
@@ -5696,7 +5708,7 @@ def cmd_watch(a, board):
                 # are message text and ticket titles, and neither belongs in
                 # the trajectory log (T-311 privacy rule).
                 run_started = now()
-                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or None
+                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or None
                 _safe(lambda: traj_event(board, "run_start", agent=owner,
                                          ticket=held_ticket, run_no=runs,
                                          trigger=sorted(p), harness_cmd=harness,
@@ -6448,6 +6460,23 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .empty-board .cta{margin-top:14px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
+.hero-eyebrow{margin:0 0 6px;font-size:12px;color:var(--mute);font-weight:650}
+.promise-hero{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.promise-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.promise-card .v{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums;margin:4px 0;line-height:1.15}
+.promise-card .h{font-size:12px;color:var(--mute)}
+.promise-panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.promise-panel h2{margin:0 0 4px;font-size:13px}
+.turns-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.subh{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:8px 0 4px}
+.promise-table{width:100%;border-collapse:collapse;font-size:13px}
+.promise-table th,.promise-table td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+.promise-table .num{text-align:right;font-variant-numeric:tabular-nums}
+.usage-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
+.usage-card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:10px}
+.usage-card .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.usage-card .v{font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}
 .pitch{background:radial-gradient(1200px 400px at 50% 0%,#2a7a4c 0%,#14532d 55%,#0f3d24 100%);
   border:2px solid #0a2a18;border-radius:18px;min-height:460px;display:flex;flex-direction:column;
   position:relative;overflow:hidden;box-shadow:inset 0 0 0 2px rgba(255,255,255,.06)}
@@ -6474,6 +6503,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   .next-step{flex-direction:column}
   .ob-steps{flex-direction:column;align-items:flex-start}
   .kanban{grid-template-columns:1fr}
+  .promise-hero,.turns-grid{grid-template-columns:1fr}
   nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
   .agents{grid-template-columns:1fr}
   .sprint{min-width:0}
@@ -6498,14 +6528,43 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <main>
 <div class="pane" id="pane-board">
   <div id="emptyBoard" class="empty-board" hidden></div>
+  <div>
+    <p class="hero-eyebrow" id="heroEyebrow">Fewest turns. Max output at least cost.</p>
+    <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost.">
+      <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Lower is better · unknown is not zero</div></article>
+      <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
+    </div>
+  </div>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
     <section class="col flight"><h2 title="Tickets actively being worked right now">In flight <span class="n" id="n-flight">0</span><span class="hint">claimed and in progress</span></h2><div class="list" id="col-flight"></div></section>
     <section class="col review"><h2 title="Finished work waiting for master to merge to main">Review <span class="n" id="n-review">0</span><span class="hint">submitted, awaiting merge</span></h2><div class="list" id="col-review"></div></section>
   </div>
+  <section class="promise-panel" id="turnsPanel">
+    <h2>Turns efficiency</h2>
+    <small id="turnsSummary" class="mute"></small>
+    <div class="turns-grid"><div><h3 class="subh">Worst tickets (watch runs)</h3><table class="promise-table" id="turnsWorst"></table></div><div><h3 class="subh">Per-agent median</h3><table class="promise-table" id="turnsAgents"></table></div></div>
+  </section>
 </div>
-<div class="pane" id="pane-agents"><div class="agents" id="agents"></div></div>
+<div class="pane" id="pane-agents">
+  <p class="pitch-lede" id="coverageLede"><b>Total Football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
+  <div class="pitch" id="pitch">
+    <div class="band" data-band="attack"><div class="lbl">Attack · ready / uncovered</div><div class="row" id="band-attack"></div></div>
+    <div class="band" data-band="mid"><div class="lbl">Midfield · in flight</div><div class="row" id="band-mid"></div></div>
+    <div class="band" data-band="back"><div class="lbl">Defense · review</div><div class="row" id="band-back"></div></div>
+    <div class="band" data-band="keep"><div class="lbl">Keeper · master / CoS</div><div class="row" id="band-keep"></div></div>
+  </div>
+  <div class="mute" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px">Bench · idle or down</div>
+  <div class="bench" id="band-bench"></div>
+  <section class="promise-panel" id="usagePanel">
+    <h2>Usage / cost</h2>
+    <small id="usageHonesty" class="mute">Harness-reported only. Not reported by harness stays — never a made-up $0.</small>
+    <div class="usage-cards" id="usageCards"></div>
+    <table class="promise-table" id="usageAgents"></table>
+  </section>
+  <div class="agents" id="agents"></div>
+</div>
 <div class="pane" id="pane-messages">
   <div class="msgs" id="msgs"></div>
   <section id="composer">
@@ -6559,6 +6618,59 @@ function card(t,extra){
 function fillCol(id,items,html){
   document.getElementById('n-'+id).textContent=items.length;
   document.getElementById('col-'+id).innerHTML=items.length?html:('<div class="empty">none</div>');
+}
+const dash=x=>x==null?'—':String(x);
+function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(n).toFixed(4):Number(n).toFixed(2)))}
+function renderPromise(p){
+  const med=document.getElementById('heroMedianVal');
+  const yv=document.getElementById('heroYieldVal'),yh=document.getElementById('heroYieldHint');
+  if(!p){med.textContent='—';yv.textContent='—';return}
+  med.textContent=p.median_turns==null?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0);
+  if(p.yield_per_usd==null){yv.textContent='—';yh.textContent=(p.n_unmeasured_cost||0)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';}
+  else{yv.textContent=Number(p.yield_per_usd).toFixed(2)+'/ $';yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';}
+}
+function renderTurns(t){
+  const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
+  const row=cells=>'<tr>'+cells.map(c=>'<td>'+c+'</td>').join('')+'</tr>';
+  if(!t||t.v!==1){sum.textContent='';worst.innerHTML=row(['—','','','']);agents.innerHTML=row(['—','','','']);return;}
+  const agg=t.aggregates||{},measured=(t.tickets||[]).filter(r=>r.turns!=null).sort((a,b)=>b.turns-a.turns||(a.ticket>b.ticket?1:-1)).slice(0,10);
+  sum.textContent='measured '+((agg.n)||0)+' ticket(s); unmeasured '+((agg.n_unmeasured)||0)+' (no run_end — typically backfill)';
+  worst.innerHTML='<tr><th>ticket</th><th>owner</th><th class="num">turns</th><th>outcome</th></tr>'+(measured.length?measured.map(r=>row([esc(r.ticket),esc(r.owner||'—'),'<span class="num">'+r.turns+'</span>',esc(r.outcome||'-')])).join(''):row(['—','','','']));
+  const by=agg.by_agent||[];
+  agents.innerHTML='<tr><th>agent</th><th class="num">n</th><th class="num">median</th><th class="num">mean</th></tr>'+(by.length?by.map(r=>row([esc(r.agent),'<span class="num">'+r.n+'</span>','<span class="num">'+dash(r.median)+'</span>','<span class="num">'+dash(r.mean)+'</span>'])).join(''):row(['—','','','']));
+}
+function renderUsage(u){
+  const cards=document.getElementById('usageCards'),tbl=document.getElementById('usageAgents');
+  const cell=(k,v)=>'<div class="usage-card"><div class="k">'+esc(k)+'</div><div class="v">'+v+'</div></div>';
+  if(!u){cards.innerHTML=cell('Cost','—');tbl.innerHTML='';return;}
+  cards.innerHTML=cell('Cost',money(u.cost_usd))+cell('Tokens in',dash(u.tokens_in))+cell('Tokens out',dash(u.tokens_out))+cell('Runs with cost',String(u.n_runs_with_cost||0))+cell('Runs unmeasured',String(u.n_runs_unmeasured||0));
+  const by=u.by_agent||[];
+  tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
+}
+function playerChip(name,cover,kind){
+  return '<div class="player '+(kind||'cover')+'"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span><span class="cov">'+esc(cover||'')+'</span></div>';
+}
+function renderPitch(d){
+  const placed=new Set();
+  const keep=[],back=[],mid=[],attack=[],bench=[];
+  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(playerChip(name,cover,kind))};
+  add(keep,d.master,'master','keeper');
+  add(keep,d.cos,'CoS','keeper');
+  (d.review||[]).forEach(t=>add(back,t.owner,t.id));
+  (d.in_flight||[]).forEach(t=>add(mid,t.owner,t.id));
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  ready.forEach(t=>{if(t.owner)add(attack,t.owner,t.id);else attack.push(playerChip(t.id,'uncovered','ghost'))});
+  (d.agents||[]).forEach(a=>{
+    if(placed.has(a.name))return;
+    const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any shirt';
+    bench.push(playerChip(a.name,(a.state==='DOWN'?'down · ':'idle · ')+hint,a.state==='DOWN'?'ghost':''));
+  });
+  const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
+  put('band-keep',keep.join(''),'no keeper');
+  put('band-back',back.join(''),'nobody covering review');
+  put('band-mid',mid.join(''),'nobody in flight');
+  put('band-attack',attack.join(''),'no uncovered work');
+  put('band-bench',bench.join(''),'everyone is on the pitch');
 }
 function setTab(name){
   document.body.dataset.tab=name;
@@ -6679,6 +6791,10 @@ async function load(){
   renderEmptyBoard(d);
   if(!d.error)renderNextStep(d.next_step);
   renderOnboarding(d.onboarding);
+  renderPromise(d.promise);
+  renderTurns(d.turns);
+  renderUsage(d.usage);
+  renderPitch(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
@@ -6790,6 +6906,159 @@ def _next_step_hint(board, tickets, done_ids):
             "cmd": "tickets update <id> \"...\""}
 
 
+def _turns_mod():
+    try:
+        from ticket_board.turns import build_turns_report, load_trajectory_events
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.turns import build_turns_report, load_trajectory_events
+    return build_turns_report, load_trajectory_events
+
+
+def _empty_turns_snapshot():
+    return {
+        "v": 1,
+        "tickets": [],
+        "aggregates": {
+            "mean": None, "median": None, "n": 0, "n_unmeasured": 0,
+            "by_agent": [], "by_model": [], "by_role": [], "by_priority": [],
+        },
+    }
+
+
+def _turns_snapshot(board, tickets):
+    """Frozen `tickets turns --json` for the console (T-372 / T-344)."""
+    build_turns_report, load_trajectory_events = _turns_mod()
+    return build_turns_report(
+        load_trajectory_events(board),
+        tickets=tickets,
+        workforce=load_workforce(board),
+        messages=load_messages(board, include_archives=True),
+    )
+
+
+def _empty_usage_snapshot():
+    return {
+        "cost_usd": None, "tokens_in": None, "tokens_out": None,
+        "n_runs_with_cost": 0, "n_runs_unmeasured": 0, "by_agent": [],
+    }
+
+
+def _usage_snapshot(events):
+    """Harness-reported usage only. Unknown is omitted, never defaulted to 0."""
+    by = {}
+    n_cost = n_uncost = 0
+    cost_sum = 0.0
+    tin = tout = 0
+    have_cost = have_tin = have_tout = False
+    for e in events or []:
+        if e.get("kind") != "run_end":
+            continue
+        agent = e.get("agent") or ""
+        rec = by.setdefault(agent, {
+            "agent": agent, "cost_usd": None, "tokens_in": None, "tokens_out": None,
+            "n_runs_with_cost": 0, "n_runs_unmeasured": 0,
+        })
+        c = e.get("cost_usd")
+        if isinstance(c, (int, float)):
+            have_cost = True
+            cost_sum += float(c)
+            n_cost += 1
+            rec["n_runs_with_cost"] += 1
+            rec["cost_usd"] = round((rec["cost_usd"] or 0.0) + float(c), 6)
+        else:
+            n_uncost += 1
+            rec["n_runs_unmeasured"] += 1
+        if isinstance(e.get("tokens_in"), int):
+            have_tin = True
+            tin += e["tokens_in"]
+            rec["tokens_in"] = (rec["tokens_in"] or 0) + e["tokens_in"]
+        if isinstance(e.get("tokens_out"), int):
+            have_tout = True
+            tout += e["tokens_out"]
+            rec["tokens_out"] = (rec["tokens_out"] or 0) + e["tokens_out"]
+    return {
+        "cost_usd": round(cost_sum, 6) if have_cost else None,
+        "tokens_in": tin if have_tin else None,
+        "tokens_out": tout if have_tout else None,
+        "n_runs_with_cost": n_cost,
+        "n_runs_unmeasured": n_uncost,
+        "by_agent": [by[k] for k in sorted(by) if k],
+    }
+
+
+def _ticket_costs(events):
+    out = {}
+    for e in events or []:
+        if e.get("kind") != "run_end":
+            continue
+        tid = e.get("ticket")
+        c = e.get("cost_usd")
+        if not tid or not isinstance(c, (int, float)):
+            continue
+        out[tid] = out.get(tid, 0.0) + float(c)
+    return out
+
+
+def _promise_hero(turns, tickets, events):
+    """CEO home hero: median turns + yield@cost. Unknown is never 0."""
+    agg = (turns or {}).get("aggregates") or {}
+    costs = _ticket_costs(events)
+    idx = {t.get("id"): t for t in (tickets or []) if t.get("id")}
+    done_with_cost = 0
+    done_no_cost = 0
+    cost_for_done = 0.0
+    for row in (turns or {}).get("tickets") or []:
+        tid = row.get("ticket")
+        outcome = row.get("outcome")
+        st = (idx.get(tid) or {}).get("status")
+        if outcome not in ("done", "merge") and st != "done":
+            continue
+        if tid in costs:
+            done_with_cost += 1
+            cost_for_done += costs[tid]
+        else:
+            done_no_cost += 1
+    yield_per_usd = None
+    if done_with_cost and cost_for_done > 0:
+        yield_per_usd = round(done_with_cost / cost_for_done, 4)
+    return {
+        "median_turns": agg.get("median"),
+        "n_turns": agg.get("n") or 0,
+        "n_unmeasured_turns": agg.get("n_unmeasured") or 0,
+        "yield_per_usd": yield_per_usd,
+        "done_with_cost": done_with_cost,
+        "cost_usd": round(cost_for_done, 6) if done_with_cost else None,
+        "n_unmeasured_cost": done_no_cost,
+    }
+
+
+def _coverage_snapshot(master, cos, open_rows, in_flight, review, agents):
+    """Total Football coverage: empty shirts = uncovered ready work."""
+    uncovered = [{"id": t["id"], "title": t.get("title", "")}
+                 for t in (open_rows or [])
+                 if t.get("status") != "BLOCKED" and not t.get("waiting") and not t.get("owner")]
+    return {
+        "uncovered_ready": uncovered,
+        "in_flight": [{"id": t["id"], "owner": t.get("owner", "")} for t in (in_flight or [])],
+        "review": [{"id": t["id"], "owner": t.get("owner", "")} for t in (review or [])],
+        "keeper": ([{"name": master, "role": "master"}] if master else []) + (
+            [{"name": cos, "role": "cos"}] if cos else []),
+        "bench": [{"name": a["name"], "state": a.get("state", "")}
+                  for a in (agents or []) if a.get("name")],
+    }
+
+
+def _empty_promise_hero():
+    return {
+        "median_turns": None, "n_turns": 0, "n_unmeasured_turns": 0,
+        "yield_per_usd": None, "done_with_cost": 0, "cost_usd": None,
+        "n_unmeasured_cost": 0,
+    }
+
+
 def board_snapshot(board, messages=40):
     """Everything the UI shows, as plain data. Read-only."""
     tickets = load_all(board)
@@ -6806,12 +7075,14 @@ def board_snapshot(board, messages=40):
     rows, burn = utilization(board, tickets, hours=24)
     agents = {r["owner"]: r for r in load_agents(board)}
     wf = load_workforce(board)
+    roles = load_roles(board)
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
         out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
-                           "watcher": bool(_watcher_pid(board, r["agent"]))})
+                           "watcher": bool(_watcher_pid(board, r["agent"])),
+                           "roles": roles.get(r["agent"]) or []})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
     try:
@@ -6830,21 +7101,29 @@ def board_snapshot(board, messages=40):
     if obj:
         goals = "OBJECTIVE%s\n%s\n\n%s" % (" (met)" if obj.get("done") else "", obj.get("text", ""), goals)
     util_rows = [r for r in rows if r["state"] != "DOWN"]
+    in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
+                  "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
+                  "waiting": [d for d in t.get("deps", []) if d not in done]}
+                 for t in tickets if t["status"] == "claimed"]
+    review = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
+               "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", "")}
+              for t in tickets if t["status"] == "review"]
+    open_rows = [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2),
+                  "title": t["title"], "role": t.get("role", ""), "owner": t.get("owner", ""),
+                  "waiting": [d for d in t.get("deps", []) if d not in done]}
+                 for t in tickets if t["status"] in ("open", "blocked")]
+    turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
+    events = _safe(lambda: _turns_mod()[1](board), [])
+    usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
+    promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
         "goals": goals,
         "util": sorted(util_rows, key=lambda r: (-r["done"], r["agent"])),
-        "in_flight": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
-                       "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
-                       "waiting": [d for d in t.get("deps", []) if d not in done]}
-                      for t in tickets if t["status"] == "claimed"],
-        "review": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
-                    "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", "")}
-                   for t in tickets if t["status"] == "review"],
-        "open": [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2), "title": t["title"],
-                  "role": t.get("role", ""), "waiting": [d for d in t.get("deps", []) if d not in done]}
-                 for t in tickets if t["status"] in ("open", "blocked")],
+        "in_flight": in_flight,
+        "review": review,
+        "open": open_rows,
         "agents": out_agents,
         "health": [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12],
         # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
@@ -6856,6 +7135,11 @@ def board_snapshot(board, messages=40):
         "onboarding": _onboarding_checklist(board, tickets),
         "next_step": _next_step_hint(board, tickets, done),
         "empty_board": counts["total"] == 0,
+        "turns": turns,
+        "usage": usage,
+        "promise": promise,
+        "coverage": _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
+                                       open_rows, in_flight, review, out_agents),
     }
 
 
