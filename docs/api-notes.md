@@ -316,6 +316,23 @@ number is the highest existing plus one.
 - **Acknowledging an attention item is not possible.** `AttentionItem.acknowledged_by`
   is always `null`: there is no route in the frozen contract to set it, so the
   field is carried rather than invented.
+- **`POST /invitations` refuses a replay of its own `request_id` instead of
+  reissuing the code (T-286).** The code is a bearer secret; only its hash is
+  kept (`credentials`), so the store's generic idempotency record — which
+  holds the full JSON response for every other route — has nothing honest to
+  echo back for this one. Before this fix, a replay returned a well-formed but
+  never-registered placeholder that 422'd on redemption, silently stranding a
+  client that retried a dropped response. The route now raises
+  `InvitationReplayRefused`, borrowing `request_id_reused` under
+  `ErrorCode` (the same trade `InvitationCodeInvalid` makes for
+  `enrollment_code_invalid` above) rather than inventing a new enum member.
+  Recorded for T-224's amendment list. The alternative — passing the API's
+  minted code into `store.create_invitation` so replay could echo it — was
+  rejected because it would put a live bearer secret in plaintext in the
+  replay log, the exact thing the hashing in `credentials` exists to avoid.
+  A client that needs to retry `POST /invitations` after a dropped response
+  gets a defined 409 and should issue a fresh invitation, not assume the
+  first one succeeded.
 
 ## Evidence worth reproducing
 

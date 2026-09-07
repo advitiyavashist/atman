@@ -149,6 +149,34 @@ class InvitationCodeExpired(EnrollmentCodeExpired):
         BoardError.__init__(self, _INVITATION_MESSAGE, details)
 
 
+class InvitationReplayRefused(RequestIdReused):
+    """A replay of `POST /invitations` that cannot be re-answered honestly.
+
+    `ErrorCode` has no member for "this one-time secret was already issued
+    and cannot be reissued", so the code is borrowed the same way
+    `InvitationCodeInvalid` borrows `enrollment_code_invalid` -- widening the
+    enum is a contract amendment, not a route-layer decision. Recorded for
+    T-224's amendment list; see docs/api-notes.md.
+
+    T-286: `store.create_invitation`'s idempotency record cannot hold the real
+    code (only its hash is kept, in `credentials`), so a byte-identical replay
+    of `request_id` has nothing honest to return -- the stored placeholder
+    was never registered and 422s if redeemed. Refusing the replay outright
+    keeps the invite code a write-once bearer secret that is never persisted
+    in plaintext in the replay log; the alternative (passing the API's minted
+    code into the store so replay could echo it) was rejected for exactly
+    that reason in T-284's review of this defect.
+    """
+
+    def __init__(self, request_id):
+        BoardError.__init__(
+            self,
+            "This request_id already issued a one-time invitation code; it "
+            "cannot be replayed. Issue a new invitation instead.",
+            {"request_id": request_id},
+        )
+
+
 class RateLimited(BoardError):
     code = "rate_limited"
     status = 429

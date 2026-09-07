@@ -216,13 +216,46 @@ def test_a_plain_member_cannot_issue_an_invitation(server, operator, project):
     assert response.json()["error"]["code"] == "forbidden_scope"
 
 
-def test_replaying_an_invitation_does_not_mint_a_second_code(operator):
-    """A retry returns the stored invitation, not a second live credential."""
+def test_replaying_an_invitation_is_refused_not_reissued(server, operator, project):
+    """A retry cannot honestly reissue the code, so it is refused (T-286).
+
+    `store.create_invitation`'s idempotency record cannot hold the real code
+    -- only its hash lives in `credentials` -- so before this fix a replay
+    served a placeholder that was never registered: 201, well-formed, and a
+    guaranteed 422 if anyone tried to redeem it. This drives the repro all
+    the way to redemption, not just the response shape, because a schema
+    check alone cannot tell a real code from a dud one.
+    """
     key = rid()
     first = operator.post("/invitations", {"request_id": key, "role": "member"})
-    second = operator.post("/invitations", {"request_id": key, "role": "member"})
-    assert first.status == second.status == 201
-    assert first.json()["invitation"]["id"] == second.json()["invitation"]["id"]
+    assert first.status == 201, first.json()
+    check("CreateInvitationResponse", first.json(), label="POST /invitations")
+    real_code = first.json()["code"]
+
+    replay = operator.post("/invitations", {"request_id": key, "role": "member"})
+    assert replay.status == 409, replay.json()
+    check("ErrorResponse", replay.json(), label="POST /invitations (replay)")
+    assert replay.json()["error"]["code"] == "request_id_reused"
+    # The refusal must not itself mint or register anything the real code's
+    # redemption could collide with.
+    assert "code" not in replay.json()
+
+    # The ORIGINAL code is unaffected by the refused replay and still redeems.
+    anonymous = Client(server, project_id=project["id"])
+    joined = anonymous.post("/invitations/exchange", {
+        "request_id": rid(), "code": real_code, "display_name": "Dana"})
+    assert joined.status == 201, joined.json()
+    assert joined.json()["display_name"] == "Dana"
+
+
+def test_a_third_identical_invitation_request_is_also_refused(operator):
+    """The refusal is stable across repeats, not a one-shot fluke."""
+    key = rid()
+    operator.post("/invitations", {"request_id": key, "role": "member"})
+    for _ in range(2):
+        replay = operator.post("/invitations", {"request_id": key, "role": "member"})
+        assert replay.status == 409, replay.json()
+        assert replay.json()["error"]["code"] == "request_id_reused"
 
 
 # ----------------------------------------------------------------- channels

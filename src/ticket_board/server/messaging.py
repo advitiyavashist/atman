@@ -33,7 +33,12 @@ from ..storage.errors import (
 )
 from . import validate
 from .auth import in_seconds, mint_secret
-from .errors import ForbiddenScope, MalformedRequest, NotFound
+from .errors import (
+    ForbiddenScope,
+    InvitationReplayRefused,
+    MalformedRequest,
+    NotFound,
+)
 from .wire import Response
 
 DEFAULT_INVITATION_TTL_SECONDS = 86400
@@ -179,20 +184,24 @@ class MessagingRoutes:
         member_id = self._require_member_id(ctx.principal, ctx.project_id)
         self._require_admin(ctx, member_id, "issue an invitation")
 
-        code = mint_secret(24)
         created = self.store.create_invitation(
             ctx.project_id, role, in_seconds(ttl),
             created_by=ctx.principal.actor, request_id=request_id,
         )
-        # A replayed request_id returns the stored invitation, and its code was
-        # already remembered on the first call. Registering it twice would put
-        # a second live code on one invitation.
-        if not self._invitation_code_exists(created["invitation"]["id"]):
-            self.credentials.remember_invitation_code(
-                ctx.project_id, created["invitation"]["id"], code)
-            created = dict(created, code=code)
-        return Response(201, {"invitation": created["invitation"],
-                              "code": created["code"]})
+        # A replayed request_id lands here after the first call already
+        # minted, registered and returned a real code -- the store's own
+        # idempotency record cannot hold it (only `credentials` keeps a
+        # hash of it), so `store.create_invitation`'s replayed response
+        # carries a placeholder that was never registered and 422s if
+        # redeemed. Registering a second code would put two live codes on
+        # one invitation, so the only honest answer left is to refuse the
+        # replay (T-286; see `InvitationReplayRefused`).
+        if self._invitation_code_exists(created["invitation"]["id"]):
+            raise InvitationReplayRefused(request_id)
+        code = mint_secret(24)
+        self.credentials.remember_invitation_code(
+            ctx.project_id, created["invitation"]["id"], code)
+        return Response(201, {"invitation": created["invitation"], "code": code})
 
     def _invitation_code_exists(self, invitation_id):
         return self.store.conn.execute(
