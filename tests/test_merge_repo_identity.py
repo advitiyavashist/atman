@@ -546,3 +546,61 @@ def test_leaked_git_env_does_not_change_the_pin_at_all(board):
     # And the shared answer is the real one, not a shared failure.
     assert pins["clean"][0] == "https://example.invalid/control_artifact_repo.git"
     assert pins["clean"][1].startswith("alice/control@")
+
+
+# ---------------------------------------------------------------------------
+# T-324: sha membership in the merged-pin set is not identity either. T-215
+# closed the cross-repo hole (a foreign repo's sha coincidentally reachable
+# from this repo's history); this is the same-repo sibling of that bug --
+# production incident T-223, whose `commit` field held "cos-opus@af27511", an
+# unrelated sync commit that happened to match this repo, resolve, be an
+# ancestor, AND be part of that pass's legitimately-merged pin set (because
+# SOME OTHER ticket's branch really did integrate that sha). T-223 closed
+# alongside it with its own real fix still unmerged.
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_does_not_close_on_a_coincidentally_matching_sha_from_another_branch(board):
+    """A ticket whose recorded `commit` sha matches something genuinely merged
+    this pass, but whose own recorded `branch` was NOT one of the branches
+    integrated, must not be closed by that coincidence -- reproduces T-223."""
+    repo = board.parent
+    trunk = _git(repo, "symbolic-ref", "--short", "HEAD")
+    _ignore_board(repo)
+    run(board, "master", "take", "--owner", "ceo")
+
+    # The real, legitimately merged ticket.
+    tid_real = _create(board, "Real work, really merged", role="backend")
+    run(board, "claim", tid_real, agent="alice")
+    _git(repo, "checkout", "-b", "alice/real-work")
+    (repo / "real.txt").write_text("real")
+    _git(repo, "add", "real.txt")
+    _git(repo, "commit", "-m", "real work")
+    real_sha = _git(repo, "rev-parse", "HEAD")
+    r = run(board, "review", tid_real, "--notes", "did the real thing", agent="alice", cwd=repo)
+    assert r.returncode == 0, r.stderr
+    _git(repo, "checkout", trunk)
+
+    # The impostor: a DIFFERENT ticket, never touching `alice/real-work`, whose
+    # `commit` field is corrupted (by whatever upstream bug T-223 hit) to hold
+    # that exact same sha, on a branch of its own that this merge never sees.
+    tid_impostor = _create(board, "Unrelated ticket with a corrupted pin", role="backend")
+    run(board, "claim", tid_impostor, agent="bob")
+    rec = _ticket(board, tid_impostor)
+    rec["status"] = "review"
+    rec["branch"] = "bob/still-open-elsewhere"
+    rec["commit"] = "bob/still-open-elsewhere@" + real_sha
+    rec["repo"] = _ticket(board, tid_real)["repo"]  # same repo -- not a cross-repo case
+    _write_ticket(board, tid_impostor, rec)
+
+    r = run(board, "merge", "alice/real-work", "--no-test", agent="ceo", cwd=repo)
+    assert r.returncode == 0, r.stderr
+
+    assert _status(board, tid_real) == "done", "the real ticket should close normally:\n%s" % r.stdout
+    assert _status(board, tid_impostor) == "review", (
+        "a ticket must not close just because its recorded sha matches a commit "
+        "some OTHER branch legitimately merged this pass:\n%s" % r.stdout
+    )
+    assert "sha coincidence" in r.stdout or "was not one of the branches merged" in r.stdout, (
+        "the refusal must be reported, not silent: %s" % r.stdout
+    )

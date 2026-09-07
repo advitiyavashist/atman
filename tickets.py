@@ -2073,6 +2073,21 @@ def cmd_merge(a, board):
             # Close only tickets whose recorded SHA was actually integrated (not merely same branch).
             if full not in pin_full:
                 continue
+            # T-324: sha membership in pin_full alone is not identity either --
+            # a ticket's `commit` field can be corrupted to hold a sha that
+            # some OTHER ticket's branch legitimately merged this pass (seen in
+            # production: T-223 was recorded with a sha ("cos-opus@af27511")
+            # that was really an unrelated sync commit, matched merge_repo,
+            # resolved, was ancestor, and happened to be in pin_full anyway --
+            # closing T-223 while its real fix stayed unmerged). Require that
+            # the ticket's OWN recorded branch was actually part of this pass;
+            # a coincidental sha match on some other branch is not evidence.
+            if t2.get("branch") not in merged_branches:
+                skipped.append((t2["id"],
+                    "recorded sha %s matches a commit integrated this pass, but ticket's own "
+                    "branch %r was not one of the branches merged -- refusing to close on a "
+                    "sha coincidence alone" % (pin, t2.get("branch"))))
+                continue
             t2["status"] = "done"
             t2["done_at"] = now()
             t2["notes"].append({"by": owner, "at": now(),
