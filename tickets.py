@@ -30,6 +30,7 @@ import json
 import os
 import shlex
 import sys
+import threading
 from datetime import datetime, timezone
 
 STATUSES = ("open", "claimed", "review", "blocked", "done")
@@ -1813,6 +1814,9 @@ def _run_file(board, owner):
     return os.path.join(agents_dir(board), owner + ".run")
 
 
+_RUN_BEAT_LOCK = threading.Lock()
+
+
 def _run_beat(board, owner, **fields):
     """Write the in-run heartbeat.
 
@@ -1826,13 +1830,18 @@ def _run_beat(board, owner, **fields):
     try:
         os.makedirs(agents_dir(board), exist_ok=True)
         path = _run_file(board, owner)
-        rec = _read_run(board, owner)
-        rec.update(fields)
-        rec["beat"] = now()
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(rec, f)
-        os.replace(tmp, path)
+        # The beat thread and the run-end write are both in this process and
+        # can overlap: the lock keeps a read-modify-write whole, and the tmp
+        # name is per-writer so two overlapping writers cannot truncate each
+        # other's scratch file and leave a spliced record on disk.
+        with _RUN_BEAT_LOCK:
+            rec = _read_run(board, owner)
+            rec.update(fields)
+            rec["beat"] = now()
+            tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+            with open(tmp, "w") as f:
+                json.dump(rec, f)
+            os.replace(tmp, path)
     except OSError:
         pass
 
@@ -4254,6 +4263,7 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
     pump_thread.start()
 
     beat_stop = threading.Event()
+    beat_thread = None
     if on_beat:
         interval = beat_secs or RUN_HEARTBEAT_SECS
 
@@ -4262,7 +4272,8 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
                 _safe(on_beat, None)
 
         _safe(on_beat, None)  # stamp the start of the run, do not wait a tick
-        threading.Thread(target=beat, daemon=True).start()
+        beat_thread = threading.Thread(target=beat, daemon=True)
+        beat_thread.start()
 
     try:
         rc = proc.wait(timeout=timeout_s)
@@ -4274,6 +4285,12 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
         timed_out = True
     finally:
         beat_stop.set()
+        # Join, do not just signal: a beat already inside its write would
+        # otherwise land AFTER the caller's run-end record and resurrect
+        # active=True on a finished run -- the exact class of lie this
+        # heartbeat exists to remove.
+        if beat_thread is not None:
+            beat_thread.join(timeout=10)
     pump_thread.join(timeout=5)
     return rc, timed_out
 

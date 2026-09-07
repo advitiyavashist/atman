@@ -356,3 +356,135 @@ def test_a_derived_limit_stops_counting_the_agent_as_live_capacity(board):
     m = re.search(r"UTILIZATION 24h  \((\d+) live agents, (\d+) down\)", r.stdout)
     assert m, r.stdout
     assert int(m.group(2)) >= 1, "a derived limit still counted as live capacity:\n%s" % r.stdout
+
+
+def test_run_end_is_never_torn_or_resurrected_by_an_in_flight_beat(board):
+    """Regression, found by the full suite under load rather than by design.
+
+    The beat thread and the run-end write are two writers in one process. The
+    watch loop signalled the thread to stop but did not join it, so a beat
+    already inside its write raced _run_end: both wrote the same scratch file,
+    leaving a spliced record that no reader can parse ('Extra data'), and a
+    beat that landed last put active=True back on a finished run. A corrupt or
+    resurrected run record is exactly the false liveness signal this ticket
+    exists to remove, so it is asserted through the reader, repeatedly, with a
+    beat interval short enough that a beat is nearly always in flight at exit.
+    """
+    run(board, "join", "doc", "--roles", "docs")
+    for i in range(12):
+        r = run(board, "watch", "--agent", "doc", "--once", "--beat-every", "1",
+                "--exec", "sleep 1")
+        assert r.returncode == 0, r.stderr
+        raw = (board / "agents" / "doc.run").read_text()
+        rec = json.loads(raw)  # torn write -> JSONDecodeError here
+        assert rec["active"] is False, "iteration %d: a late beat resurrected a finished run: %s" % (i, rec)
+        assert rec["rc"] == 0, rec
+        assert not list((board / "agents").glob("doc.run*.tmp")), \
+            "iteration %d: scratch files left behind: %s" % (i, list((board / "agents").glob("*.tmp")))
+
+
+def _tickets_module():
+    """Load tickets.py in-process. Used ONLY by the two concurrency tests
+    below: a race between two threads inside one watcher process has no
+    deterministic expression through the CLI, and a flaky reproduction of a
+    corruption bug is worse than none. Everything else in this file stays at
+    reader level."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tickets_under_test", str(TOOL))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_watch_run_waits_for_the_beat_thread_before_returning(board):
+    """The defect the loop above only found under load, pinned deterministically.
+
+    _watch_run_capped signalled the beat thread to stop but did not join it, so
+    it could return while a beat was still mid-write. The caller's very next
+    act is _run_end, so that beat lands AFTER the terminal record and puts
+    active=True back on a finished run -- a dead session reading as live, which
+    is half of what this ticket exists to fix.
+
+    Made deterministic by holding a beat open on an event instead of hoping to
+    catch the window: the beat blocks, the child exits underneath it, and the
+    question is simply whether _watch_run_capped returns while that beat is
+    still executing.
+    """
+    import threading as _t
+    tk = _tickets_module()
+    (board / "agents").mkdir(exist_ok=True)
+
+    beat_started, release = _t.Event(), _t.Event()
+    calls = []
+
+    def blocking_beat():
+        calls.append(1)
+        if len(calls) == 1:
+            return          # the synchronous start-of-run stamp, not the thread
+        beat_started.set()
+        release.wait(15)
+
+    done = _t.Event()
+
+    def worker():
+        tk._watch_run_capped("sleep 2", str(board.parent), dict(os.environ),
+                             str(board / "watch.log"), None, 1 << 20,
+                             on_beat=blocking_beat, beat_secs=1)
+        done.set()
+
+    w = _t.Thread(target=worker, daemon=True)
+    w.start()
+    try:
+        assert beat_started.wait(10), "the beat thread never fired; test proves nothing"
+        # The child exits ~1s from here. If the run is not joined to its beat,
+        # _watch_run_capped returns immediately and the caller writes run-end
+        # while this beat is still pending.
+        returned_early = done.wait(5)
+        assert not returned_early, \
+            "_watch_run_capped returned while a beat was still in flight -- that beat " \
+            "will land after the run-end record and resurrect active=True"
+    finally:
+        release.set()
+    assert done.wait(15), "the run never finished once the beat was released"
+
+
+def test_concurrent_beats_never_leave_an_unparseable_run_record(board):
+    """The other half of the same defect: every writer used the SAME scratch
+    filename (<record>.tmp), so two overlapping writers truncated each other's
+    scratch file and os.replace published a spliced record. A reader then gets
+    'Extra data' and, because _read_run swallows ValueError, the agent silently
+    reads as unknown -- a corrupt file presenting as a confident state.
+    """
+    tk = _tickets_module()
+    (board / "agents").mkdir(exist_ok=True)
+    import threading as _t
+    stop = _t.Event()
+    errors = []
+
+    def hammer(n):
+        while not stop.is_set():
+            tk._run_beat(str(board), "doc", run=n, cwd="x" * (40 * n), active=True)
+
+    threads = [_t.Thread(target=hammer, args=(i,), daemon=True) for i in range(1, 7)]
+    for t in threads:
+        t.start()
+    deadline = time.time() + 3
+    reads = 0
+    while time.time() < deadline:
+        try:
+            raw = (board / "agents" / "doc.run").read_text()
+            if raw:
+                json.loads(raw)
+                reads += 1
+        except FileNotFoundError:
+            pass
+        except ValueError as exc:
+            errors.append("%s -- %r" % (exc, raw[:120]))
+            break
+    stop.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert reads > 0, "never observed the record at all"
+    assert not errors, "run record was torn by concurrent writers: %s" % errors[0]
+    assert not list((board / "agents").glob("doc.run*.tmp")), "scratch files left behind"
