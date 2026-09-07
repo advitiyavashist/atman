@@ -3,7 +3,8 @@
 **Ticket:** T-281 · **Authors:** opus-backend-2 (first pass), composer (refresh)
 **First pass:** 2026-09-07T03:58Z (tickets main `07cd74c`)
 **opus-backend-2 refresh:** 2026-09-07T08:2xZ — tickets `origin/main` = `5200f9d`, steer = `564557b`
-**composer refresh:** 2026-09-07T18:24Z — **atman `origin/main` = `ed5eb624ecd9ac3940a06ba2c1fd857328ec54cb`**, steer `origin/main` = `822d0490660af659ab08ae293e991ba3b3cb2bfc`
+**composer refresh:** 2026-09-07T18:24Z — atman `origin/main` = `ed5eb624ecd9ac3940a06ba2c1fd857328ec54cb`, steer `origin/main` = `822d0490660af659ab08ae293e991ba3b3cb2bfc`
+**composer delta (T-388 recycle):** 2026-09-07T18:40Z — **atman `origin/main` = `a401ac3429f5bf4fe87104caa5d45d3e4b0d5d5a`**, steer `origin/main` = `2fd11b9299779082fe83395aa0c6a5832c63c119`
 
 > **Repo rename note:** `advitiyavashist/tickets` is now `advitiyavashist/atman` (same
 > codebase). This map uses "atman" for the product repo and "steer" for the coordination
@@ -20,6 +21,18 @@ review` was re-run to "fix" a pin — re-pinning from the wrong cwd is the defec
 > — see [T-221 is superseded by T-276](#t-221-is-superseded-by-t-276-prior-recommendation-retracted).
 > And `merge-base --is-ancestor` **alone is not sufficient**: it returns a false
 > NO on work that landed by rebase. Use all three checks in [Method](#method--three-questions-per-row-not-one).
+
+## Composer delta — +3 rows since 18:24Z (2026-09-07T18:40Z, post T-388 recycle)
+
+| change | detail |
+|---|---|
+| Queue size | **46 → 49** rows (+T-394, T-395, T-397) |
+| atman main | `ed5eb62` → `a401ac3` (+T-322 PR#22, T-372 PR#34, T-380 PR#35) |
+| steer main | `822d049` → `2fd11b9` (+T-383/T-397 cite-badge PR#125, T-378 PR#126) |
+| Now on main | **T-322** (`3cc821d`), **T-397** verify-only (`c07f5ac` on steer main) |
+| New atman row | **T-394** `grok-worker/t394-silent-reopen@1cb130e` — pin correct, 1 origin ref |
+| New ati row | **T-395** verification — real work in `advitiyavashist/ati`, steer pin is artefact |
+| T-388 CLI | Release `21ca63c` live fleet-wide; T-377/T-392 bindings now measured post-recycle |
 
 ## Composer refresh — 46 live review-queue rows (2026-09-07T18:24Z)
 
@@ -73,7 +86,7 @@ Provenance: ambient `GIT_*` unset; atman commands from
 | T-308 | steer | `sonnet-tickets@564557b` | `sonnet-tickets` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
 | T-310 | steer | `sonnet-console@564557b` | `sonnet-console` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
 | T-321 | steer | `sonnet-qa-t221-ui-mentions@94d2c26` | `sonnet-qa-t221-ui-mentions` | `94d2c26` | NO | n/a | 0 refs | verification artefact |
-| T-322 | atman | `opus-console/t322-quickstart@3cc821d` | `opus-console/t322-quickstart` | `3cc821d` | NO | 1 | 2 ref(s) | YES |
+| T-322 | atman | `opus-console/t322-quickstart@3cc821d` | `opus-console/t322-quickstart` | `3cc821d` | YES | 0 | 2 ref(s) | YES — landed PR#22 |
 | T-324 | atman | `sonnet-sdk/t324-ancestry-pin-guard@8dc234c` | `sonnet-sdk/t324-ancestry-pin-guard` | `8dc234c` | NO | 1 | 1 ref(s) | YES |
 | T-326 | atman | `opus-verify/t326-t187-acceptance@b7a7e98` | `opus-verify/t326-t187-acceptance` | `b7a7e98` | NO | 2 | 1 ref(s) | YES |
 | T-327 | atman | `grok-worker/t327-join-inbox@0f0e54a` | `grok-worker/t327-join-inbox` | `0f0e54a` | NO | 3 | 1 ref(s) | YES |
@@ -91,6 +104,9 @@ Provenance: ambient `GIT_*` unset; atman commands from
 | T-384 | ati | `cursor-modal/t384-bc-smoke@8ca7cec` | `cursor-modal/t384-bc-smoke` | `8ca7cec` | NO | n/a | 0 refs | YES (ati repo) |
 | T-390 | ati | `cursor-modal/t390-protocol@d3ec51e` | `cursor-modal/t390-protocol` | `d3ec51e` | NO | n/a | 0 refs | YES (ati repo) |
 | T-392 | steer | `composer@d7da471` | `composer/t377-env-isolate` | `a27765f` | YES | 0 | 3 ref(s) | YES — work ON MAIN |
+| T-394 | atman | `grok-worker/t394-silent-reopen@1cb130e` | `grok-worker/t394-silent-reopen` | `1cb130e` | NO | 1 | 1 ref(s) | YES |
+| T-395 | steer | `composer@d7da471` | *(ati verification)* | — | n/a | n/a | n/a | verification — ati repo; steer pin is artefact |
+| T-397 | steer | `composer@d7da471` | `cursor/t-383-cite-badge-quiet-0908` | `c07f5ac` | YES | 0 | 1 ref(s) | YES — verify-only, ON MAIN (PR#125) |
 
 ### Findings that change the merge plan (composer pass)
 
