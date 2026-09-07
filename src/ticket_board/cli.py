@@ -2537,7 +2537,7 @@ def _visible_after_join(msgs, owner, joined):
     """
     if not joined:
         return msgs  # every pre-existing agent: unchanged, by construction
-    return [m for m in msgs if m.get("to") == owner or m.get("at", "") > joined]
+    return [m for m in msgs if m.get("to") == owner or m.get("at", "") >= joined]
 
 
 def unread(board, owner):

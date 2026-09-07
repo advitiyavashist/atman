@@ -4254,13 +4254,14 @@ def _visible_after_join(msgs, owner, joined):
         re-stamp its watermark and wipe everything pending -- including the
         master's answer to that agent's own `stuck:` message.
     So scope the suppression to what the ticket actually names, "mail addressed
-    to nobody": drop only broadcasts at or before `joined`. Anything addressed
-    to this agent by name is delivered no matter how old it is. Nothing is
-    deleted either -- `tickets inbox --all` still shows the full history.
+    to nobody": drop only broadcasts strictly before `joined`. Same-second
+    posts after join (the wakeup suite does not sleep) must still count.
+    Anything addressed to this agent by name is delivered no matter how old
+    it is. Nothing is deleted -- `tickets inbox --all` still shows history.
     """
     if not joined:
         return msgs  # every pre-existing agent: unchanged, by construction
-    return [m for m in msgs if m.get("to") == owner or m.get("at", "") > joined]
+    return [m for m in msgs if m.get("to") == owner or m.get("at", "") >= joined]
 
 
 def unread(board, owner):
