@@ -192,12 +192,14 @@ def test_idle_review_run_id_does_not_increment_turns():
 
 def test_broadcast_msg_without_re_does_not_count():
     evs = [
+        {"kind": "review", "ticket": "T-001", "agent": "alice",
+         "at": "2026-09-08T00:00:00Z"},
         {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r1",
-         "run_no": 1},
+         "run_no": 1, "at": "2026-09-08T00:01:00Z"},
         {"kind": "msg", "agent": "alice", "run_id": "r1", "to": "everyone",
-         "text_len": 20},
+         "text_len": 20, "at": "2026-09-08T00:01:01Z"},
         {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r1",
-         "run_no": 1, "exit": 0},
+         "run_no": 1, "exit": 0, "at": "2026-09-08T00:01:02Z"},
     ]
     report = build_turns_report(evs)
     by = {r["ticket"]: r for r in report["tickets"]}
@@ -244,6 +246,8 @@ def test_nonzero_exit_without_limit_counts():
 
 def test_other_seat_write_same_minute_does_not_credit():
     evs = [
+        {"kind": "review", "ticket": "T-001", "agent": "alice",
+         "at": "2026-09-08T00:00:00Z"},
         {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r-alice",
          "run_no": 1, "at": "2026-09-08T00:00:00Z"},
         {"kind": "update", "ticket": "T-001", "agent": "bob", "run_id": "r-bob",

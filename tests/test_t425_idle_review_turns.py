@@ -61,8 +61,8 @@ def test_idle_review_watch_once_pairs_turns_stay_at_claim(board, tmp_path, monke
     assert after["aggregates"]["n"] == n_before
     assert after["aggregates"]["median"] == median_before
     assert after["v"] == 1
-    assert set(after["tickets"][0]) == {
-        "ticket", "owner", "model", "turns", "wall_clock_s", "reopens", "stuck", "outcome"}
+    from ticket_board.turns import ROW_KEYS
+    assert tuple(after["tickets"][0].keys()) == ROW_KEYS
     ends = events(board, kind="run_end", ticket=tid)
     assert len(ends) == 3
     assert ends[0].get("bound_write") is True

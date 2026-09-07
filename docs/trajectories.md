@@ -89,18 +89,62 @@ future third claim path cannot be added without the event coming with it.
 
 ### Harness usage (`run_end`)
 
-`claude -p --output-format json` ends a run with one JSON object carrying
-`usage`, `total_cost_usd`, `num_turns` and `duration_ms`. When the operator has
-asked for that format, those become `tokens_in`, `tokens_out`,
-`tokens_cache_read`, `tokens_cache_write`, `cost_usd`, `turns` and
-`harness_duration_ms`. When they have not — which is the default watch command —
-none of those fields appear at all.
+Two sources, tried in that order (T-396). Both write the same fields:
+`tokens_in`, `tokens_out`, `tokens_cache_read`, `tokens_cache_write`,
+`cost_usd`, `cost_source`, `turns`, `harness_duration_ms`. Every one of them is
+omitted when unknown — there is no zero fallback.
+
+**1. The run's own stdout**, when the operator asked for a JSON output format.
+`claude -p --output-format json` ends a run with one result object carrying
+`usage`, `total_cost_usd`, `num_turns` and `duration_ms`; `codex exec --json`
+streams `token_count` events. This is the **only** source that carries a cost
+the harness itself computed, so it is the only one that sets
+`cost_source: "harness"`.
 
 The parse reads only **this run's own slice** of `agents/<name>.watch.log`,
 between the log size taken before the run and the size after. If the log shrank
 mid-run (rotation, or an operator truncating it) the slice is discarded rather
 than re-read from zero, because a previous run's result object would otherwise
 have its tokens billed to this one.
+
+**2. The harness's own session store**, when stdout carried nothing. The
+default watch commands (`_worker_cmd`) do not ask for a JSON output format, so
+before T-396 every run on the live board went out with no usage at all —
+measured 2026-09-08: 105 `run_end` records, 0 with `tokens_in`. Rather than
+change how the harness is invoked (which would turn the watch log into JSON and
+break the text greps `_looks_limited` and the T-230 liveness read depend on),
+the counts are read afterwards from the store the harness writes for itself,
+restricted to this run's `started_at`..`ended_at` window:
+
+| harness | store | field | note |
+|---|---|---|---|
+| `claude` | `~/.claude/projects/<cwd-slug>/*.jsonl` | `message.usage` | per-message counts, summed |
+| `codex` | `~/.codex/sessions/**/*.jsonl` | `payload.token_count.info.total_token_usage` | **cumulative** — the last one in the window, never summed |
+| `cursor` | — | — | reports usage nowhere (see below) |
+
+The cwd is what attributes a session to an agent: a transcript directory is
+keyed by the worktree, and a codex rollout that names a different `cwd` (or
+names none) is not billed here. Two agents share this box; guessing would bill
+one for the other's tokens.
+
+Neither store records a cost. **Tokens become real, cost stays `null`** on this
+path — no price table is invented, because a made-up cost is indistinguishable
+from a measured one once it is on disk.
+
+`cursor` was checked on 2026-09-08 and reports usage nowhere: `agent -p` emits
+none in `text` or `json` output format, and its transcripts
+(`~/.cursor/projects/*/agent-transcripts/**/*.jsonl`) carry only
+`role` / `message` / `status` / `type`. Absent, not zero, until it does.
+
+### `usage_error`: reported something unreadable
+
+A harness that reported **nothing** and a harness that reported something the
+parser could **not read** are different facts, and collapsing them would file a
+real, billed run as unmeasured forever. So a malformed usage blob (a
+`total_cost_usd` that is not a number, a `usage` that is not an object, a
+boolean where a count belongs) sets `usage_error` on the `run_end`, leaves every
+usage field absent, and is logged to the watch log. Nothing reported sets no
+`usage_error` at all.
 
 `harness` (what the agent registered) and `harness_cmd` (what the watch command
 line actually invoked) are separate fields on purpose. They disagree exactly

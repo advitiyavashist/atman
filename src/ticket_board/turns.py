@@ -34,7 +34,7 @@ class TrajectoryParseError(Exception):
         super().__init__("%s:%d: %s" % (path, line_no, detail))
 
 ROW_KEYS = ("ticket", "owner", "model", "turns", "wall_clock_s", "reopens",
-            "stuck", "outcome")
+            "stuck", "outcome", "cost_usd", "tokens_in", "tokens_out")
 
 
 def trajectories_path(board):
@@ -175,12 +175,21 @@ def _is_bound_write(e, ticket):
     return kind in _BOUND_WRITE_KINDS or kind == "msg"
 
 
-def _run_is_productive(end, writes_by_rid):
+def _first_review_at(evs):
+    ats = [e.get("at") for e in evs if e.get("kind") == "review" and e.get("at")]
+    return min(ats) if ats else None
+
+
+def _run_is_productive(end, writes_by_rid, first_review_at):
     """T-425 FLAG: bound-ticket write on this run_id, else non-limit fail.
 
-    No content grep. Broadcasts without --re never increment. Session-limit
-    fail (`outcome=limit`) is idle even when exit != 0.
+    Claim-bind (no review yet, or run_end.at before first review) still
+    counts every completed run. Session-limit fail (`outcome=limit`) is idle
+    even when exit != 0. No content grep. Broadcasts without --re never
+    increment.
     """
+    if end.get("outcome") == "limit":
+        return False
     if end.get("bound_write"):
         return True
     rid = end.get("run_id")
@@ -189,23 +198,27 @@ def _run_is_productive(end, writes_by_rid):
     tid = end.get("ticket")
     if any(_is_bound_write(w, tid) for w in writes_by_rid.get(rid) or []):
         return True
-    if end.get("outcome") == "limit":
-        return False
     if end.get("timed_out"):
         return True
     exit_code = end.get("exit")
-    return exit_code not in (0, None)
+    if exit_code not in (0, None):
+        return True
+    if first_review_at is None:
+        return True
+    at = end.get("at")
+    return bool(at and at < first_review_at)
 
 
 def _measured_turns(evs):
     """Count productive completed watch runs. Unknown -> None, never 0.
 
-    Idle `run_end` rows stay in jsonl. If none of a ticket's runs are
-    productive, `turns` stays null so n_measured does not rise.
+    Idle IN-REVIEW `run_end` rows stay in jsonl. If none of a ticket's runs
+    are productive, `turns` stays null so n_measured does not rise.
     """
     writes_by_rid = {}
     saw_run = False
     n = 0
+    first_review = _first_review_at(evs)
     for e in evs:
         rid = e.get("run_id")
         if rid and _is_bound_write(e, e.get("ticket")):
@@ -214,11 +227,43 @@ def _measured_turns(evs):
         if e.get("kind") != "run_end":
             continue
         saw_run = True
-        if _run_is_productive(e, writes_by_rid):
+        if _run_is_productive(e, writes_by_rid, first_review):
             n += 1
     if not saw_run or n == 0:
         return None
     return n
+
+
+def _measured_cost(evs):
+    """Total harness-reported cost for a ticket. Unknown -> None, never 0.
+
+    A ticket whose runs reported no cost is UNMEASURED, not free: on this
+    board that is the normal case, because the default watch commands do not
+    ask the harness for a JSON output format (T-396). Rendering it as $0.00
+    would make the cheapest-looking agent the one we know least about.
+    """
+    total, known = 0.0, False
+    for e in evs:
+        if e.get("kind") != "run_end":
+            continue
+        c = e.get("cost_usd")
+        if isinstance(c, (int, float)) and not isinstance(c, bool):
+            total += float(c)
+            known = True
+    return round(total, 6) if known else None
+
+
+def _measured_tokens(evs, field):
+    """Summed token count for a ticket, or None when no run reported one."""
+    total, known = 0, False
+    for e in evs:
+        if e.get("kind") != "run_end":
+            continue
+        n = e.get(field)
+        if isinstance(n, int) and not isinstance(n, bool):
+            total += n
+            known = True
+    return total if known else None
 
 
 def _wall_clock_s(evs):
@@ -269,6 +314,9 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "reopens": sum(1 for e in evs if e.get("kind") == "reopen"),
             "stuck": _stuck_count(messages, tid),
             "outcome": _outcome(evs, t),
+            "cost_usd": _measured_cost(evs),
+            "tokens_in": _measured_tokens(evs, "tokens_in"),
+            "tokens_out": _measured_tokens(evs, "tokens_out"),
         }
         # Extra fields used only for aggregates; stripped from --json rows.
         row["_role"] = t.get("role") or None
@@ -278,6 +326,10 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
     measured = [r["turns"] for r in rows if r["turns"] is not None]
     overall = _agg(measured)
     overall["n_unmeasured"] = sum(1 for r in rows if r["turns"] is None)
+    costed = [r["cost_usd"] for r in rows if r["cost_usd"] is not None]
+    cost_agg = _agg(costed)
+    cost_agg["total"] = round(sum(costed), 6) if costed else None
+    cost_agg["n_unmeasured"] = sum(1 for r in rows if r["cost_usd"] is None)
 
     def group_agg(keyfn, label):
         buckets = {}
@@ -295,6 +347,25 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
+    def cost_group(keyfn, label):
+        """Same shape as group_agg, over cost instead of turns. Kept separate
+        because a row can be measured for one and unmeasured for the other."""
+        buckets = {}
+        for r in rows:
+            if r["cost_usd"] is None:
+                continue
+            k = keyfn(r)
+            if k is None or k == "":
+                continue
+            buckets.setdefault(k, []).append(r["cost_usd"])
+        out = []
+        for k in sorted(buckets, key=lambda x: (str(type(x)), str(x))):
+            rec = _agg(buckets[k])
+            rec["total"] = round(sum(buckets[k]), 6)
+            rec[label] = k
+            out.append(rec)
+        return out
+
     public_rows = [{k: r[k] for k in ROW_KEYS} for r in rows]
     return {
         "v": TURNS_JSON_V,
@@ -308,6 +379,9 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "by_model": group_agg(lambda r: r.get("model"), "model"),
             "by_role": group_agg(lambda r: r.get("_role"), "role"),
             "by_priority": group_agg(lambda r: r.get("_priority"), "priority"),
+            "cost": cost_agg,
+            "cost_by_agent": cost_group(lambda r: r.get("owner"), "agent"),
+            "cost_by_model": cost_group(lambda r: r.get("model"), "model"),
         },
     }
 
@@ -323,18 +397,37 @@ def _fmt_wall(seconds):
     return "%.1fd" % (h / 24.0)
 
 
+def _fmt_cost(usd):
+    """'-' means UNMEASURED, and it is not $0.00. See _measured_cost."""
+    return "-" if usd is None else ("$%.4f" % usd)
+
+
+def _fmt_tokens(n):
+    if n is None:
+        return "-"
+    if n >= 1000000:
+        return "%.1fM" % (n / 1000000.0)
+    if n >= 1000:
+        return "%.1fk" % (n / 1000.0)
+    return str(n)
+
+
 def render_turns_table(report):
     lines = []
-    lines.append("%-8s %-16s %-12s %5s %8s %7s %5s  %s" % (
-        "ticket", "owner", "model", "turns", "wall", "reopens", "stuck", "outcome"))
+    lines.append("%-8s %-16s %-12s %5s %8s %10s %8s %8s %7s %5s  %s" % (
+        "ticket", "owner", "model", "turns", "wall", "cost", "tok in",
+        "tok out", "reopens", "stuck", "outcome"))
     for r in report.get("tickets") or []:
         turns = r.get("turns")
-        lines.append("%-8s %-16s %-12s %5s %8s %7d %5d  %s" % (
+        lines.append("%-8s %-16s %-12s %5s %8s %10s %8s %8s %7d %5d  %s" % (
             r.get("ticket") or "-",
             (r.get("owner") or "-")[:16],
             (r.get("model") or "-")[:12],
             "-" if turns is None else str(turns),
             _fmt_wall(r.get("wall_clock_s")),
+            _fmt_cost(r.get("cost_usd")),
+            _fmt_tokens(r.get("tokens_in")),
+            _fmt_tokens(r.get("tokens_out")),
             int(r.get("reopens") or 0),
             int(r.get("stuck") or 0),
             r.get("outcome") or "-",
@@ -362,6 +455,27 @@ def render_turns_table(report):
     dump("per model", agg.get("by_model"), "model")
     dump("per role", agg.get("by_role"), "role")
     dump("per priority", agg.get("by_priority"), "priority")
+
+    cost = agg.get("cost") or {}
+    lines.append("")
+    lines.append("cost   measured %d ticket(s); unmeasured %d  total %s  mean %s  median %s" % (
+        cost.get("n") or 0, cost.get("n_unmeasured") or 0,
+        _fmt_cost(cost.get("total")), _fmt_cost(cost.get("mean")),
+        _fmt_cost(cost.get("median"))))
+    lines.append("'-' is UNMEASURED, not $0.00: a harness reports a cost only when it was "
+                 "asked for a JSON output format, and no cost is ever estimated.")
+
+    def dump_cost(title, rows, key):
+        if not rows:
+            return
+        lines.append("%s:" % title)
+        for rec in rows:
+            lines.append("  %-16s n=%d  total %s  mean %s" % (
+                str(rec.get(key) or "-")[:16], rec.get("n") or 0,
+                _fmt_cost(rec.get("total")), _fmt_cost(rec.get("mean"))))
+
+    dump_cost("cost per agent", agg.get("cost_by_agent"), "agent")
+    dump_cost("cost per model", agg.get("cost_by_model"), "model")
     return "\n".join(lines)
 
 

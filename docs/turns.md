@@ -13,12 +13,14 @@ do not count.
 T-425: a `run_start`/`run_end` pair increments `turns` only when THAT
 `run_id` also recorded a bound-ticket write (claim, update, review, done,
 block, reopen, or `msg --re` that ticket) or a non-limit harness
-failure/timeout. Idle pulses (`watch --every N` with no ticket write) and
-session-limit fails (`run_end.outcome=limit`) stay in jsonl but do not
-increment. Broadcasts without `--re` never increment. The FLAG is
-`bound_write` on `run_end` (and matching `run_id` on the write events), not a
-grep of message text for `idle:`. Pre-T-425 events with no `run_id` still
-count every completed run. No backfill of existing jsonl.
+failure/timeout. Idle pulses on an IN-REVIEW ticket (`watch --every N` with
+no ticket write) and session-limit fails (`run_end.outcome=limit`) stay in
+jsonl but do not increment. Broadcasts without `--re` never increment. The
+FLAG is `bound_write` on `run_end` (and matching `run_id` on the write
+events), not a grep of message text for `idle:`. Claim-bind is unchanged:
+completed runs before the ticket's first `review` event still count.
+Pre-T-425 events with no `run_id` still count every completed run. No
+backfill of existing jsonl.
 
 A **ticket's turns** are those productive runs from the first `claim` to the
 final `done` (or `merge`). A `reopen` does not reset the counter: later runs
@@ -46,7 +48,8 @@ tickets turns --agent grok-worker --model grok --epic E-011 --since 2026-09-01
 tickets turns --json
 ```
 
-Table columns: ticket, owner, model, turns, wall-clock, reopens, stuck, outcome.
+Table columns: ticket, owner, model, turns, wall-clock, cost, tok in, tok out,
+reopens, stuck, outcome.
 
 - **owner** — ticket owner, else the last claim/run agent
 - **model** — last model on the ticket's events, else `tickets join --model`
@@ -55,6 +58,21 @@ Table columns: ticket, owner, model, turns, wall-clock, reopens, stuck, outcome.
 - **reopens** — `reopen` events
 - **stuck** — messages whose text starts with `stuck` and `--re` that ticket
 - **outcome** — last of done / merge / review / block / reopen, else ticket status
+- **cost** — summed `cost_usd` over the ticket's `run_end` events, or `-` / `null`
+  if no run reported one (T-396)
+- **tok in / tok out** — summed `tokens_in` / `tokens_out`, same rule
+
+### Cost is measured separately from turns
+
+A ticket can have measured **turns** and unmeasured **cost** at the same time,
+and today that is the normal state of the whole board: a turn is a `run_end`,
+which the watcher always writes, while a cost exists only when the harness
+reported one. So `aggregates.cost` carries its own `n` / `n_unmeasured` rather
+than reusing the turns counts.
+
+`-` in the cost column means **unmeasured, not $0.00**. Rendering an unreported
+cost as zero would make the agent we know least about look like the cheapest
+one — which is exactly the decision `tickets route` is being built to make.
 
 ## Frozen `--json`
 
@@ -70,7 +88,10 @@ Table columns: ticket, owner, model, turns, wall-clock, reopens, stuck, outcome.
       "wall_clock_s": 3600.0,
       "reopens": 1,
       "stuck": 0,
-      "outcome": "done"
+      "outcome": "done",
+      "cost_usd": 0.25,
+      "tokens_in": 11,
+      "tokens_out": 22
     }
   ],
   "aggregates": {
@@ -81,15 +102,24 @@ Table columns: ticket, owner, model, turns, wall-clock, reopens, stuck, outcome.
     "by_agent": [{"agent": "alice", "n": 1, "mean": 3.0, "median": 3.0}],
     "by_model": [{"model": "opus", "n": 1, "mean": 3.0, "median": 3.0}],
     "by_role": [{"role": "backend", "n": 1, "mean": 3.0, "median": 3.0}],
-    "by_priority": [{"priority": 2, "n": 1, "mean": 3.0, "median": 3.0}]
+    "by_priority": [{"priority": 2, "n": 1, "mean": 3.0, "median": 3.0}],
+    "cost": {"n": 1, "mean": 0.25, "median": 0.25, "total": 0.25, "n_unmeasured": 0},
+    "cost_by_agent": [{"agent": "alice", "n": 1, "mean": 0.25, "median": 0.25, "total": 0.25}],
+    "cost_by_model": [{"model": "opus", "n": 1, "mean": 0.25, "median": 0.25, "total": 0.25}]
   }
 }
 ```
 
 Row keys are exactly: `ticket`, `owner`, `model`, `turns`, `wall_clock_s`,
-`reopens`, `stuck`, `outcome`. `turns` / `model` / `owner` / `wall_clock_s` /
-`outcome` may be JSON `null` when unknown. Aggregates omit unmeasured tickets
-from mean/median; `n_unmeasured` counts them.
+`reopens`, `stuck`, `outcome`, `cost_usd`, `tokens_in`, `tokens_out`. `turns` /
+`model` / `owner` / `wall_clock_s` / `outcome` / `cost_usd` / `tokens_in` /
+`tokens_out` may be JSON `null` when unknown. Aggregates omit unmeasured
+tickets from mean/median; `n_unmeasured` counts them.
+
+T-396 added `cost_usd`, `tokens_in`, `tokens_out` and the three `cost*`
+aggregates. The addition is **additive**: `v` stays `1`, no existing key was
+renamed, removed or reordered, and the pre-existing keys above are still
+present on every row.
 
 Console (T-372): home hero reads `aggregates.median`; the turns-efficiency
 panel shows worst-10 + per-agent medians from this same object. Do not
