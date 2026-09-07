@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ticket Board service API
-  version: 1.0.0-rc.1
+  version: 1.0.0-rc.2
   summary: Connect your agents. Give them work. See what needs you.
   description: |
     Frozen V1 contract for the Ticket Board service (epic E-010), derived from
@@ -63,6 +63,25 @@ components:
         header to match the session's CSRF value and an `Origin`/`Referer` that
         matches an allowed origin. Operator sessions may create enrollments,
         accept reviews and take master authority.
+
+        V1 has no session-mint route: the operator session is bootstrapped
+        out of band (a one-time `?token=` on the UI root, written to
+        `operator-session.json`), which is honest only when the server binds
+        loopback. A `POST /session` (or equivalent) mint route is a known,
+        deliberately deferred future amendment for a non-loopback deployment
+        -- it is not solved by anything in this contract today. Do not infer
+        a sign-in flow from this scheme's presence. (T-224 ruling, planner
+        18:05Z, superseding T-211 §7's "deferred" framing with an explicit
+        decision: named and out of scope for V1, not silently assumed.)
+
+        No third, master-specific credential exists in V1: master authority is
+        gated by this same `operatorSession` scheme, the same as enrollment
+        and review acceptance. This is a deliberate divergence from the
+        existing `tickets master take` CLI command, which today is open to
+        any agent -- the API does not reproduce that. Revisit only if T-182's
+        assignment loop produces a concrete case for a narrower master
+        credential; it is its own ticket, not a default this contract assumes.
+        (T-224 ruling, planner 22:45Z.)
     agentToken:
       type: http
       scheme: bearer
@@ -164,7 +183,14 @@ components:
       examples: ['DEMO-13']
     AgentId:
       type: string
-      pattern: '^agt_[0-9a-z]{8,32}$'
+      pattern: '^(agt_[0-9a-z]{8,32}|[a-z][a-z0-9-]{1,31})$'
+      description: |
+        Accepts a server-minted `agt_*` token or the board's real free-form
+        lowercase name (`claude-fable`, `sonnet-sdk`, ...). Widened 2026-09
+        (T-224) rather than rename ~35 live identities and every brief, hook
+        config and `tickets msg --to` that names one at cutover -- the
+        human-readable name IS the V1 identity, and the `agt_` form stays
+        legal so a server-minted id remains valid later.
     SessionId:
       type: string
       description: Runtime session identity, distinct from the durable agent id.
@@ -379,8 +405,18 @@ components:
         Pinned evidence. A changing branch tip cannot replace reviewed evidence:
         the review stores `sha` and the server compares, it does not re-resolve
         the branch name at accept time.
+
+        `repository` is required (T-224, folding in T-215's fix at this layer):
+        an unqualified `sha` with no repository identity is how an unrelated
+        merge in a different repo can appear to "contain" this evidence and
+        close the wrong ticket. This does not relax `sha`'s 40-hex shape --
+        legacy CLI evidence (`branch@shortsha`, no repo tag) is never fabricated
+        into a real SHA to satisfy this schema; it is archived verbatim and
+        reported as a contract mismatch instead (T-213's settled call, upheld
+        independently by two reviewers). Producing a real `repository` + 40-hex
+        `sha` pair is T-215's CLI-side work, not a contract relaxation.
       additionalProperties: false
-      required: [branch, sha]
+      required: [repository, branch, sha]
       properties:
         repository: { type: string, maxLength: 200 }
         branch: { type: string, maxLength: 200 }
@@ -420,6 +456,22 @@ components:
         state: { $ref: '#/components/schemas/TicketState' }
         version: { $ref: '#/components/schemas/Version' }
         role: { type: string, maxLength: 40 }
+        priority:
+          anyOf: [{ type: integer, minimum: 1, maximum: 3 }, { type: 'null' }]
+          description: |
+            1 = highest. Optional (T-224): a ticket with no priority is
+            routine, matching the CLI's default. Never required.
+        epic:
+          anyOf: [{ type: string, maxLength: 100 }, { type: 'null' }]
+        sprint:
+          anyOf: [{ type: string, maxLength: 50 }, { type: 'null' }]
+        needs:
+          type: array
+          items: { type: string, enum: [docker, own-machine, network, browser] }
+          default: []
+          description: |
+            Machine capabilities this ticket's work requires. Optional (T-224);
+            an empty list is the common case.
         owner:
           anyOf: [{ $ref: '#/components/schemas/AgentId' }, { type: 'null' }]
         owner_session:
@@ -478,7 +530,7 @@ components:
     Review:
       type: object
       additionalProperties: false
-      required: [id, ticket_id, state, submitted_by, submitted_at, evidence]
+      required: [id, ticket_id, state, submitted_by, submitted_at]
       properties:
         id: { type: string, pattern: '^rev_[0-9a-z]{8,32}$' }
         ticket_id: { $ref: '#/components/schemas/TicketId' }
@@ -491,7 +543,17 @@ components:
             cannot approve its own implementation (403 `forbidden_scope`).
         submitted_by: { $ref: '#/components/schemas/Actor' }
         submitted_at: { $ref: '#/components/schemas/Timestamp' }
-        evidence: { $ref: '#/components/schemas/GitEvidence' }
+        evidence:
+          anyOf: [{ $ref: '#/components/schemas/GitEvidence' }, { type: 'null' }]
+          description: |
+            Null only for reviews imported from the legacy board (T-213/T-224
+            planner ruling, 2026-09-06): the legacy board had no repository
+            concept, so a review that genuinely happened there cannot be given
+            real, repository-qualified evidence without fabricating it. This is
+            a resource-side relaxation only -- `CreateReviewRequest.evidence`
+            stays required, so every review minted through this API still
+            carries real evidence. A null here means "imported, no repository
+            identity", never "the going-forward guarantee was skipped".
         notes: { type: string, maxLength: 4000 }
         decided_by:
           anyOf: [{ $ref: '#/components/schemas/Actor' }, { type: 'null' }]
@@ -502,7 +564,48 @@ components:
 
     AgentState:
       type: string
-      enum: [connected, idle, working, awaiting-input, offline, revoked]
+      enum: [connected, idle, working, awaiting-input, offline, revoked, limited]
+      description: |
+        `limited` (T-224, promoted from a T-229 gap finding): the agent hit a
+        usage/rate limit and cannot spawn a session, distinct from `offline`
+        (no known reason) and from a live-but-idle `connected`/`idle` agent.
+        Load-bearing for T-185's recovery verification -- without this value a
+        dashboard renders an agent hard-limited for weeks as merely idle, which
+        is the confident-wrong-answer failure mode the board already suffers.
+
+    AgentLimitDetail:
+      type: object
+      additionalProperties: false
+      required: [source]
+      description: |
+        Set only when `Agent.state` is `limited`. A structured replacement for
+        a single free-text reason (T-224, corrected during review): T-230's
+        liveness-truth spec found that today's `limited` signal is
+        self-reported only, and a flat string cannot say whether a given
+        report is confirmed or guessed. `source` carries that distinction so
+        a dashboard never renders a heuristic guess with the same confidence
+        as a derived, evidenced one.
+      properties:
+        source:
+          type: string
+          enum: [manual, derived, heuristic]
+          description: |
+            `manual`: an operator or the agent itself explicitly reported the
+            limit (e.g. the CLI's `tickets limit`). `derived`: computed from a
+            concrete signal the board can point to (a watcher run's exit
+            code, a provider-reported reset time). `heuristic`: inferred from
+            an absence pattern (sustained silence, an overdue heartbeat) with
+            no confirmed cause -- lowest confidence, and must be rendered
+            distinguishably from `derived`, never collapsed into it.
+        since:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: When the limit was first observed or reported. Null if unknown.
+        until:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: Known reset time, when the source reports one. Null if unknown.
+        note:
+          anyOf: [{ type: string, maxLength: 200 }, { type: 'null' }]
+          description: Free text (e.g. "usage limit, resets 2026-10-05").
 
     HookHealth:
       type: object
@@ -584,6 +687,12 @@ components:
             active_tickets: { type: integer, minimum: 0 }
         current_ticket:
           anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+        limit:
+          anyOf: [{ $ref: '#/components/schemas/AgentLimitDetail' }, { type: 'null' }]
+          description: |
+            Set only when `state` is `limited`; null otherwise. See
+            `AgentLimitDetail` -- deliberately not a single free-text reason,
+            so a dashboard can tell a confirmed limit from a heuristic guess.
         session:
           anyOf: [{ $ref: '#/components/schemas/SessionLease' }, { type: 'null' }]
         worktree:
@@ -672,7 +781,13 @@ components:
             `stop` means "Turn finished". It never implies ticket completion.
             `probe` is the synthetic connection test and never sets
             `hook_health.session_adopted`.
-        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        occurred_at:
+          allOf: [{ $ref: '#/components/schemas/Timestamp' }]
+          description: |
+            Adapter receipt time, not agent-reported (T-224, item 13; T-214
+            ground-truthed this against real Claude Code hook payloads, which
+            carry no timestamp of their own). This is the only honest source
+            -- do not read this field as when the agent's action happened.
         cwd:
           anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
         note:
@@ -1326,19 +1441,26 @@ components:
         - $ref: '#/components/schemas/MutationEnvelope'
         - type: object
           additionalProperties: false
-          required: [request_id, title, outcome, acceptance]
+          required: [request_id, title]
           properties:
             request_id: { $ref: '#/components/schemas/RequestId' }
             title: { type: string, minLength: 1, maxLength: 200 }
             outcome:
               type: string
-              minLength: 1
               maxLength: 4000
-              description: Required. A ticket without an outcome is 422 `missing_acceptance_criteria`.
+              default: ""
+              description: |
+                Optional (T-224, forced by the objective: T-213's legacy
+                import must be lossless, and 141 real tickets on the live
+                board have no outcome field at all -- requiring one 422s our
+                own board's import). Defaults to "" when omitted.
             acceptance:
               type: array
-              minItems: 1
-              description: At least one checkable criterion is required.
+              default: []
+              description: |
+                Optional (T-224, same forcing reason as `outcome`). Defaults
+                to an empty list when omitted -- ticket quality is enforced by
+                the master in routing, not by a schema minimum.
               items:
                 type: object
                 additionalProperties: false
@@ -1438,6 +1560,17 @@ components:
               type: string
               maxLength: 1000
               description: Required when `blocked` is true.
+
+    ReopenTicketRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, reason]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            reason: { type: string, maxLength: 500 }
 
     CreateEnrollmentRequest:
       allOf:
@@ -2077,6 +2210,42 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /tickets/{ticket_id}/reopen:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tickets]
+      operationId: reopenTicket
+      summary: Release a claim -- timeout/stuck recovery, distinct from a review decision.
+      description: |
+        T-224: recovery from a silent or timed-out claim (`MASTER.md`'s
+        HANDOVER step 2, and the mechanism T-182's assignment loop and T-185's
+        recovery verification both depend on) has no relationship to a review
+        decision -- a rejected review returns to `claimed` with the same
+        owner via `decideReview`; this route returns an *any-state* claimed
+        ticket to `open` with `owner` and `owner_session` cleared, for any
+        reason short of a review disposition. Operator-gated: this is a
+        recovery action taken *about* an agent, not something a stuck agent
+        calls on itself (a truly stuck agent may not be able to call anything).
+      security: [{ operatorSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReopenTicketRequest' }
+      responses:
+        '200':
+          description: Reopened. Returns the ticket at its new version -- state open, owner and owner_session null.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /agents:
     get:

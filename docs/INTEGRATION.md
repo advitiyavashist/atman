@@ -4,6 +4,9 @@ Written 2026-09-06 by cos-opus after the first six-lane integration, at the
 planner's request, so the next master does not rediscover any of it.
 Audience: whoever is Chief of Staff / master and holds the merge button.
 
+CLI delivery is a separate step after a CLI merge: see [LIVE_CLI.md](LIVE_CLI.md)
+for pinned snapshots, live-only patch review, activation and behavioral probes.
+
 ## The one-paragraph version
 
 Every E-010 lane lands on **`main` of the `tickets` repo**

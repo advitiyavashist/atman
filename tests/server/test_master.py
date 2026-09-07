@@ -161,3 +161,36 @@ def test_master_mutations_replay_rather_than_double_apply(operator):
     assert first.json() == second.json()
     # A second real takeover would have reached epoch 2.
     assert operator.get("/master").json()["lease"]["epoch"] == 1
+
+
+def test_pause_replays_rather_than_double_applying(server, operator):
+    """T-255: `/master/pause` had a replay guard but no test exercising it."""
+    lease = take(operator).json()
+    key = rid()
+    body = {"request_id": key, "lease_epoch": lease["epoch"], "paused": True}
+    first = operator.post("/master/pause", body)
+    second = operator.post("/master/pause", body)
+    assert first.status == second.status == 200
+    assert first.json() == second.json()
+    count = server.store.conn.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE action = 'master.paused'"
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_assignment_replays_rather_than_double_applying(server, operator, ticket,
+                                                         enrolled):
+    """T-255: `/assignments` had a replay guard but no test exercising it."""
+    lease = take(operator).json()
+    key = rid()
+    body = {"request_id": key, "ticket_id": ticket["id"],
+            "agent_id": enrolled["agent_id"], "reason": "r",
+            "lease_epoch": lease["epoch"], "expected_version": ticket["version"]}
+    first = operator.post("/assignments", body)
+    second = operator.post("/assignments", body)
+    assert first.status == second.status == 201
+    assert first.json() == second.json()
+    count = server.store.conn.execute(
+        "SELECT COUNT(*) FROM assignments WHERE ticket_id = ?", (ticket["id"],)
+    ).fetchone()[0]
+    assert count == 1

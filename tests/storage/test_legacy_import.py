@@ -153,6 +153,13 @@ def test_an_oversized_document_is_truncated_and_reported(store, sample, monkeypa
     (b"a" * 99 + "é".encode(), "a" * 99, True),
     (b"\xff" * 101, "\ufffd" * 33, True),
     (("é" * 51).encode(), "é" * 50, True),
+    # Under the cap but not valid UTF-8. `path.read_text()` used to decode
+    # these strictly and raise UnicodeDecodeError, which `except OSError`
+    # does not catch, aborting the whole board import over one bad byte --
+    # the same bytes over the cap (the row above) already imported cleanly.
+    (b"\xff" * 99, "\ufffd" * 33, True),  # replacement chars push it back over
+    (b"\xff" * 10, "\ufffd" * 10, False),
+    (b"hello \xff world", "hello \ufffd world", False),
 ])
 def test_document_cap_bounds_stored_utf8_bytes(store, sample, monkeypatch,
                                               raw, expected, truncated):
@@ -489,31 +496,61 @@ def test_review_evidence_is_not_forced_into_a_shape_it_does_not_fit(
     `GitEvidence` produces records that fail the published schema the moment
     T-180 serves them, and inventing a sha would be worse. So they are archived
     verbatim and the mismatch is reported with counts, for T-211.
+
+    T-224 promoted `GitEvidence.repository` from optional to required (the
+    T-215 fix at the contract layer). The legacy record has no repository
+    concept at all, so this importer cannot legally populate `GitEvidence` for
+    ANY ticket today -- not even the one below whose commit happens to already
+    be a real 40-hex sha. Inventing a repository would be the same mistake as
+    inventing a sha. This is `_evidence()`'s existing "never fabricate, report
+    the mismatch instead" rule extended to the new required field, not new
+    policy.
     """
     assert store.get_ticket(imported.project_id, "LEG-1")["evidence"] is None
     assert legacy_fields(store, imported.project_id, "LEG-1")["commit"] == \
         "agent-alpha/schema@a1b2c3d"
     assert imported.contract_mismatches["commit is not a 40-hex Sha"] == 2
 
-    # The one ticket whose commit *is* a full sha gets real evidence and a real
-    # review row -- so this is a data mismatch, not a missing code path.
+    # This commit *is* a full sha -- previously enough for real evidence and a
+    # real review row -- but a sha with no repository is exactly T-215's bug
+    # one layer up, so it is still withheld and counted, not promoted.
     conforming = store.get_ticket(imported.project_id, "LEG-2")
-    assert conforming["evidence"]["sha"] == \
-        "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
-    assert conforming["evidence"]["branch"] == "agent-bravo/contract"
-    assert conforming["evidence"]["pr_url"].startswith("https://")
-    assert imported.imported_reviews == 1
+    assert conforming["evidence"] is None
+    assert legacy_fields(store, imported.project_id, "LEG-2")["commit"] == \
+        "agent-bravo/contract@0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+    assert imported.contract_mismatches["no repository identity"] == 1
+    # T-224 planner ruling: a review that genuinely happened imports even
+    # without evidence (null, not fabricated) -- withholding it would lose
+    # real history, and the mismatch above already tells T-211 why it has no
+    # evidence. All 20 sample tickets have a usable review_at/updated.
+    assert imported.imported_reviews == 20
 
 
 def test_a_sha_resolver_turns_a_short_commit_into_real_evidence(store, sample):
-    """The escape hatch for an operator who has the repository to hand."""
+    """The sha-resolver escape hatch still cannot manufacture a repository.
+
+    Resolving `a1b2c3d` to a real 40-hex sha clears the *sha* mismatch, but
+    T-224's `repository`-required change means evidence still is not written
+    without repository identity, which no resolver here supplies. The
+    "no repository identity" count, not "commit is not a 40-hex Sha", is what
+    proves the resolver ran and only the repository gap remains.
+    """
     def resolver(short, branch):
         return "a1b2c3d" + "0" * 33 if short == "a1b2c3d" else None
 
     report = import_legacy_board(store, sample, sha_resolver=resolver)
     evidence = store.get_ticket(report.project_id, "LEG-1")["evidence"]
-    assert evidence["sha"] == "a1b2c3d" + "0" * 33
-    assert report.imported_reviews == 2
+    assert evidence is None
+    # LEG-1 (resolved) and LEG-2 (already a full sha) both clear the sha
+    # check and are withheld only on the repository gap; the one ticket the
+    # resolver does not match still fails on sha shape, unaffected.
+    assert report.contract_mismatches["no repository identity"] == 2
+    assert report.contract_mismatches["commit is not a 40-hex Sha"] == 1
+    # T-224 planner ruling: the resolver clearing the sha shape does not
+    # change whether a review imports, only what its evidence looks like --
+    # every one of the 20 sample tickets with a usable review_at/updated
+    # still gets a (null-evidence) review row.
+    assert report.imported_reviews == 20
 
 
 def test_values_over_a_contract_limit_are_truncated_and_the_original_kept(

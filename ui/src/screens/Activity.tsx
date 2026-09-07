@@ -1,44 +1,53 @@
-import { useState } from "react";
-import { activityScenarios } from "../fixtures";
-import { ScenarioPicker } from "../components/ScenarioPicker";
-import { StreamBanner } from "../components/StreamBanner";
+import { useBoard } from "../state/BoardProvider";
+import { useResource } from "../state/useResource";
+import { ConnectionBanner } from "../components/ConnectionBanner";
+import { ErrorNotice } from "../components/ErrorNotice";
 import { EmptyStateView } from "../components/EmptyStateView";
 import { formatDateTime } from "../copy";
+import type { ActivityResponse } from "../types";
 
 export function Activity() {
-  const [scenarioKey, setScenarioKey] = useState(activityScenarios[0].key);
-  const feed = activityScenarios.find((s) => s.key === scenarioKey)!.data;
+  const { connection } = useBoard();
+  const feed = useResource<ActivityResponse>((client) => client.listActivity(), []);
+  const data = feed.data;
 
   return (
     <>
       <div className="heading">
         <div>
-          <span className="tag">PROJECT / EXAMPLE APP</span>
+          <span className="tag">ACTIVITY</span>
           <h1>Activity</h1>
         </div>
         <span className="spacer" />
-        <ScenarioPicker scenarios={activityScenarios} value={scenarioKey} onChange={setScenarioKey} />
+        <button onClick={feed.refetch} data-testid="activity-refresh">
+          Refresh
+        </button>
       </div>
-      <StreamBanner stream={feed.stream} />
+      <ConnectionBanner stream={data?.stream ?? null} connection={connection} fetchedAt={feed.fetchedAt} />
+      {feed.error && <ErrorNotice error={feed.error} onRetry={feed.refetch} onReload={feed.refetch} />}
+      {feed.loading && !data && <p data-testid="activity-loading">Reading the trail…</p>}
 
-      {feed.empty_state && feed.items.length === 0 ? (
-        <EmptyStateView empty={feed.empty_state} />
+      {data && data.empty_state && data.items.length === 0 ? (
+        <EmptyStateView empty={data.empty_state} />
       ) : (
-        <section className="card">
-          {feed.items.map((event) => (
-            <div className="row" key={event.id}>
-              <div>
-                {/* summary is server-authoritative copy — render it, do not re-derive from action codes */}
-                <strong>{event.summary}</strong>
-                <small>
-                  {event.actor.display_name} · {formatDateTime(event.occurred_at)}
-                </small>
+        data && (
+          <section className="card">
+            {data.items.map((event) => (
+              <div className="row" key={event.id} data-testid={`activity-${event.id}`}>
+                <div>
+                  {/* summary is server-authoritative copy — render it, do not
+                      re-derive it from the action code. */}
+                  <strong>{event.summary}</strong>
+                  <small>
+                    {event.actor.display_name} · {formatDateTime(event.occurred_at)}
+                  </small>
+                </div>
+                <span className="spacer" />
+                <span className="tag">{event.action}</span>
               </div>
-              <span className="spacer" />
-              <span className="tag">{event.action}</span>
-            </div>
-          ))}
-        </section>
+            ))}
+          </section>
+        )
       )}
     </>
   );

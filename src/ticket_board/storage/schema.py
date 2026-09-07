@@ -128,7 +128,13 @@ CREATE TABLE IF NOT EXISTS reviews (
                    CHECK (state IN ('requested', 'accepted', 'rejected')),
     submitted_by   TEXT NOT NULL,
     submitted_at   TEXT NOT NULL,
-    evidence       TEXT NOT NULL,
+    -- Null only for a review imported from the legacy board, which had no
+    -- repository concept (T-224 planner ruling): a review that genuinely
+    -- happened is real history even without contract-valid GitEvidence, and
+    -- dropping it would lose that history rather than merely omit a field.
+    -- CreateReviewRequest.evidence stays required, so every review minted
+    -- through the API still has real evidence.
+    evidence       TEXT,
     notes          TEXT,
     decided_by     TEXT,
     decided_at     TEXT,

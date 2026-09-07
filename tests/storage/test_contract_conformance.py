@@ -97,15 +97,18 @@ def test_ticket_update_matches_the_contract(store, project, agent, schemas):
     _validate(schemas, "TicketUpdate", update)
 
 
-def test_review_matches_the_contract(store, project, schemas):
-    store.create_ticket(project["id"], "CONF-4", "Reviewable",
-                        acceptance=[{"text": "a", "checked": False,
-                                     "checked_by": None, "checked_at": None}])
+def test_review_matches_the_contract(store, project, agent, schemas):
+    created = store.create_ticket(project["id"], "CONF-4", "Reviewable",
+                                  acceptance=[{"text": "a", "checked": False,
+                                               "checked_by": None, "checked_at": None}])
+    ticket = store.claim_ticket(project["id"], "CONF-4", agent["id"],
+                                expected_version=created["version"])
     review = store.submit_review(
         project["id"], "CONF-4",
         {"type": "agent", "id": "agt_backend1", "display_name": "backend-1"},
         {"repository": "demo", "branch": "feature", "sha": SHA,
          "checks": [{"name": "pytest", "status": "passed"}]},
+        expected_version=ticket["version"],
     )
     _validate(schemas, "Review", review)
 
@@ -285,9 +288,25 @@ def test_every_imported_record_matches_the_contract(store, schemas, tmp_path):
     reviews = store.conn.execute(
         "SELECT id FROM reviews WHERE project_id = ?", (report.project_id,)
     ).fetchall()
+    # T-224 planner ruling (2026-09-06): GitEvidence.repository is required,
+    # and this legacy fixture (like the real board) has no repository
+    # identity for any commit -- but a review that genuinely happened is real
+    # history even without it, so it still imports, with a null `evidence`
+    # rather than one fabricated to satisfy the schema. Every ticket this
+    # fixture can build a review for (a valid `review_at`/`updated` timestamp)
+    # does; `_validate` below is what proves a null-evidence Review still
+    # serves as the published schema says (nullable, not just absent).
     assert len(reviews) == report.imported_reviews > 0
     for row in reviews:
-        _validate(schemas, "Review", store.get_review(report.project_id, row["id"]))
+        review = store.get_review(report.project_id, row["id"])
+        _validate(schemas, "Review", review)
+        assert review["evidence"] is None
+    # Not every review's ticket even attempted a commit (`_evidence` bumps
+    # "no repository identity" only when a real 40-hex sha exists with
+    # nothing to name a repository), so this is a floor, not an equality --
+    # but at least one of this fixture's real shas must have hit it, or the
+    # mismatch this test exists to prove is not actually being exercised.
+    assert report.contract_mismatches["no repository identity"] >= 1
 
     for event in store.audit_trail(report.project_id, limit=10000):
         _validate(schemas, "AuditEvent", event)

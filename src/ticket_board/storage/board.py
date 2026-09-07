@@ -872,20 +872,35 @@ class BoardStore(MessagingMixin):
     # --------------------------------------------------------------- reviews
 
     def submit_review(self, project_id, ticket_id, submitted_by, evidence, *,
-                      notes=None, request_id=None):
-        """Submit work for review, pinning the evidence SHA."""
+                      expected_version, notes=None, request_id=None):
+        """Submit work for review, pinning the evidence SHA.
+
+        `expected_version` and the "claimed" state check used to live in the
+        route handler, read before this method was ever called. That put them
+        ahead of `_replay`: submitting bumps the ticket's version, so a
+        byte-identical retry read the *new* version in the handler and died as
+        a conflict before it ever reached the replay guard here (T-255 -- same
+        shape as T-235, a stale precondition instead of a premature write).
+        Checked here, after replay, they see the request that actually applies.
+        """
         if not isinstance(evidence, dict) or "sha" not in evidence or \
                 "branch" not in evidence:
             raise InvalidReviewEvidence(
                 "Review evidence needs a branch and a sha.",
                 {"ticket_id": ticket_id},
             )
-        body = {"ticket_id": ticket_id, "evidence": evidence, "notes": notes}
+        body = {"ticket_id": ticket_id, "expected_version": expected_version,
+                "evidence": evidence, "notes": notes}
         with write_txn(self.conn) as conn:
             replay = self._replay(conn, project_id, request_id, "submit_review", body)
             if replay is not None:
                 return replay
             row = self._ticket_row(conn, project_id, ticket_id)
+            if row["version"] != expected_version:
+                raise TicketVersionConflict(ticket_id, expected_version,
+                                            row["version"])
+            if row["state"] != "claimed":
+                raise InvalidStateTransition(ticket_id, row["state"], "review")
             if not json.loads(row["acceptance"]):
                 raise MissingAcceptanceCriteria(ticket_id)
             rid = ids.review_id()
@@ -931,7 +946,8 @@ class BoardStore(MessagingMixin):
             "id": row["id"], "ticket_id": row["ticket_id"], "state": row["state"],
             "submitted_by": json.loads(row["submitted_by"]),
             "submitted_at": row["submitted_at"],
-            "evidence": json.loads(row["evidence"]), "notes": row["notes"],
+            "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+            "notes": row["notes"],
             "decided_by": json.loads(row["decided_by"]) if row["decided_by"] else None,
             "decided_at": row["decided_at"],
             "decision_notes": row["decision_notes"],
@@ -943,7 +959,7 @@ class BoardStore(MessagingMixin):
             return self.__review(conn, project_id, review_id)
 
     def decide_review(self, project_id, review_id, decision, decided_by, *,
-                      evidence_sha, notes=None, request_id=None):
+                      evidence_sha, expected_version, notes=None, request_id=None):
         """Accept or reject a review against the exact submitted artifact.
 
         `evidence_sha` must equal the SHA pinned at submission. This is the
@@ -951,12 +967,21 @@ class BoardStore(MessagingMixin):
         would let the tip move between submission and acceptance, which makes
         "done requires acceptance of the reviewed artifact" unenforceable.
         Acceptance additionally refuses if any recorded check failed.
+
+        `expected_version` guards the ticket, not the review, against having
+        changed since it was read for the decision. It used to be checked in
+        the route handler, ahead of `_replay`: deciding bumps the ticket's
+        version, so a byte-identical retry read the *new* version there and
+        died as a conflict before replay ever ran (T-255, same shape as
+        T-235). Checked here, after replay and before any write, it sees the
+        version the retry actually expects.
         """
         if decision not in ("accepted", "rejected"):
             raise MalformedRequest("decision must be accepted or rejected.",
                                    {"decision": decision})
         body = {"review_id": review_id, "decision": decision,
-                "evidence_sha": evidence_sha, "notes": notes}
+                "evidence_sha": evidence_sha, "expected_version": expected_version,
+                "notes": notes}
         with write_txn(self.conn) as conn:
             replay = self._replay(conn, project_id, request_id, "decide_review", body)
             if replay is not None:
@@ -965,7 +990,13 @@ class BoardStore(MessagingMixin):
             if review["state"] != "requested":
                 raise InvalidStateTransition(review["ticket_id"],
                                              review["state"], decision)
-            pinned = review["evidence"].get("sha")
+            # `evidence` is None for a review imported from the legacy board
+            # with no repository identity (T-224 planner ruling); `evidence_sha`
+            # is required on every decision request and so can never itself be
+            # None, so this falls through to the same "does not match" refusal
+            # rather than a crash on `.get` -- correct, since there is no real
+            # sha to accept a decision against.
+            pinned = review["evidence"].get("sha") if review["evidence"] else None
             if evidence_sha != pinned:
                 raise InvalidReviewEvidence(
                     "Evidence SHA does not match the submitted review.",
@@ -983,13 +1014,16 @@ class BoardStore(MessagingMixin):
                         "Cannot accept a review with failing checks.",
                         {"review_id": review_id, "failed_checks": failed},
                     )
+            ticket = self._ticket_row(conn, project_id, review["ticket_id"])
+            if ticket["version"] != expected_version:
+                raise TicketVersionConflict(review["ticket_id"], expected_version,
+                                            ticket["version"])
             now = ids.now()
             conn.execute(
                 "UPDATE reviews SET state = ?, decided_by = ?, decided_at = ?,"
                 " decision_notes = ? WHERE id = ? AND project_id = ?",
                 (decision, _json(decided_by), now, notes, review_id, project_id),
             )
-            ticket = self._ticket_row(conn, project_id, review["ticket_id"])
             new_state = "done" if decision == "accepted" else "claimed"
             conn.execute(
                 "UPDATE tickets SET state = ?, updated_at = ?, version = version + 1,"

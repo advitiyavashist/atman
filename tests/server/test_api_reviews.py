@@ -36,6 +36,33 @@ def test_submitting_moves_the_ticket_to_review(operator, submitted, ticket):
     assert submitted["review"]["evidence"]["sha"] == SHA
 
 
+def test_submitting_a_review_replays_rather_than_double_applying(
+        server, enrolled, ticket):
+    """T-255: submitting bumps the ticket's version, so a byte-identical retry
+    must be caught by submit_review's own replay guard -- checking
+    `expected_version` in the route, ahead of that guard, made the retry see
+    the *new* version and die as a conflict instead of replaying.
+    """
+    claimed = enrolled["client"].post("/tickets/{}/claim".format(ticket["id"]), {
+        "request_id": rid(), "expected_version": ticket["version"],
+        "session_id": enrolled["session_id"]}).json()
+    key = rid()
+    body = {"request_id": key, "expected_version": claimed["version"],
+            "evidence": evidence(), "notes": "Covered by tests."}
+    path = "/tickets/{}/reviews".format(ticket["id"])
+    first = enrolled["client"].post(path, body)
+    second = enrolled["client"].post(path, body)
+    assert first.status == 201 and second.status == 201
+    assert first.json() == second.json()
+    # No sibling review row for the retry, and the ticket version moved once.
+    count = server.store.conn.execute(
+        "SELECT COUNT(*) FROM reviews WHERE ticket_id = ?", (ticket["id"],)
+    ).fetchone()[0]
+    assert count == 1
+    detail = enrolled["client"].get("/tickets/" + ticket["id"]).json()["ticket"]
+    assert detail["version"] == claimed["version"] + 1
+
+
 def test_only_the_owner_may_submit(server, operator, project, enrolled, ticket):
     claimed = enrolled["client"].post("/tickets/{}/claim".format(ticket["id"]), {
         "request_id": rid(), "expected_version": ticket["version"],
@@ -85,6 +112,33 @@ def test_accepting_pins_the_sha(operator, submitted, ticket):
     assert accepted.status == 200
     assert accepted.json()["state"] == "accepted"
     assert operator.get("/tickets/" + ticket["id"]).json()["ticket"]["state"] == "done"
+
+
+def test_deciding_a_review_replays_rather_than_double_applying(
+        server, operator, submitted, ticket):
+    """T-255: deciding bumps the ticket's version, so a byte-identical retry
+    must be caught by decide_review's own replay guard -- checking
+    `expected_version` in the route, ahead of that guard, made the retry see
+    the *new* version and die as a conflict instead of replaying.
+    """
+    key = rid()
+    body = {"request_id": key, "expected_version": submitted["ticket"]["version"],
+            "decision": "accept", "evidence_sha": SHA}
+    path = "/tickets/{}/reviews/{}/decision".format(
+        ticket["id"], submitted["review"]["id"])
+    first = operator.post(path, body)
+    second = operator.post(path, body)
+    assert first.status == 200 and second.status == 200
+    assert first.json() == second.json()
+    detail = operator.get("/tickets/" + ticket["id"]).json()["ticket"]
+    assert detail["state"] == "done"
+    # Applied once: a second real decision would have bumped the version again.
+    assert detail["version"] == submitted["ticket"]["version"] + 1
+    count = server.store.conn.execute(
+        "SELECT COUNT(*) FROM reviews WHERE id = ? AND state = 'accepted'",
+        (submitted["review"]["id"],),
+    ).fetchone()[0]
+    assert count == 1
 
 
 def test_a_different_sha_is_refused(operator, submitted, ticket):
@@ -222,7 +276,9 @@ def test_a_stale_ticket_version_on_the_decision_is_409(operator, submitted,
     """The reviewer read the ticket, then something moved it.
 
     The decision carries `expected_version` for the same reason every other
-    mutation does; the store does not check it, so the route must.
+    mutation does; `BoardStore.decide_review` checks it itself, after its
+    replay guard (T-255) -- not the route, which would see the ticket's
+    already-advanced version on a retry and never let a replay through.
     """
     response = operator.post("/tickets/{}/reviews/{}/decision".format(
         ticket["id"], submitted["review"]["id"]), {

@@ -27,15 +27,34 @@ export interface EmptyState {
 export interface GitEvidenceCheck {
   name: string;
   status: "passed" | "failed" | "pending" | "skipped";
-  details_url: string | null;
+  /**
+   * Optional in the contract (`GitEvidence.checks[].required` is `[name,
+   * status]`), and the board really does omit it. Typing it as required made
+   * every consumer believe a property that may not be there.
+   */
+  details_url?: string | null;
 }
 
+/**
+ * `GitEvidence.required` is exactly `[branch, sha]`. Every other member is
+ * optional, and the board omits the ones it has no value for rather than
+ * sending nulls — so this interface marks optional what the contract marks
+ * optional, no more and no less.
+ */
 export interface GitEvidence {
   repository?: string;
   branch: string;
   sha: string;
-  pr_url: string | null;
-  checks: GitEvidenceCheck[];
+  pr_url?: string | null;
+  /**
+   * Optional: `GitEvidence.required` is `[branch, sha]`, so a review may be
+   * submitted with no checks at all and the board echoes the evidence back
+   * with no `checks` key. Typed as required until T-184, which meant
+   * `evidence.checks.map(...)` — in both the ticket-evidence block and the
+   * review-decision panel — threw on a contract-legal review. Verified against
+   * a live board, not inferred from the schema.
+   */
+  checks?: GitEvidenceCheck[];
 }
 
 export type TicketState = "open" | "claimed" | "review" | "done" | "blocked";
