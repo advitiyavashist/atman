@@ -143,6 +143,20 @@ def test_join_then_dm_still_wakes_the_agent(board):
     assert "please look at this" in " ".join(p["messages_to_me"])
 
 
+def test_pending_counts_post_join_broadcast_without_sleep(board):
+    """CI: test_wakeup::test_pending_direct_message_and_broadcast_only.
+
+    Join then immediately broadcast -- same ISO second as joined_at. Strict `>`
+    hid that post-join line. Only broadcasts strictly before joined_at are
+    history.
+    """
+    run(board, "join", "bob", "--roles", "backend", agent="bob")
+    run(board, "msg", "hello everyone", agent="master")
+    r = run(board, "pending", "--agent", "bob", "--json")
+    p = json.loads(r.stdout)
+    assert p.get("broadcasts") == 1, r.stdout
+
+
 @pytest.mark.parametrize("entry", ["root", "pkg"])
 def test_broadcasts_after_join_are_delivered(board, entry):
     """Suppression is scoped to history: ordinary broadcasts must still arrive."""
