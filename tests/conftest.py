@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
+from tmp_path_reaper import pytest_sessionfinish  # noqa: E402,F401
 from watch_reaper import SESSION_ROOTS, reap_watchers_under  # noqa: E402
 
 
