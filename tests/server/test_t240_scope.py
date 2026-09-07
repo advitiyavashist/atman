@@ -67,7 +67,7 @@ def test_decide_review_cannot_mutate_a_different_projects_review_via_a_colliding
     review = agent_b["client"].post(
         "/tickets/{}/reviews".format(ticket_b["id"]),
         {"request_id": rid(), "expected_version": claimed.json()["version"],
-         "evidence": {"sha": "a" * 40, "branch": "main"}})
+         "evidence": {"repository": "acme/b", "sha": "a" * 40, "branch": "main"}})
     assert review.status == 201, review.json()
     review_id = review.json()["id"]
     sha = review.json()["evidence"]["sha"]

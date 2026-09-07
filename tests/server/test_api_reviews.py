@@ -99,7 +99,7 @@ def test_a_malformed_sha_never_reaches_the_store(enrolled, ticket):
         "session_id": enrolled["session_id"]})
     response = enrolled["client"].post("/tickets/{}/reviews".format(ticket["id"]), {
         "request_id": rid(), "expected_version": ticket["version"] + 1,
-        "evidence": {"branch": "b", "sha": "not-a-sha"}})
+        "evidence": {"repository": "acme/repo", "branch": "b", "sha": "not-a-sha"}})
     assert response.status == 400
     assert response.json()["error"]["details"]["rejected_fields"] == ["evidence.sha"]
 

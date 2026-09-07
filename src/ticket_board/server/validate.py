@@ -135,10 +135,21 @@ def string_list(body, key, *, max_length=300, default=None):
 
 
 def acceptance(body):
-    """`[{text: ...}]`, at least one item -- the contract's minItems: 1."""
-    items = body.get("acceptance")
-    if not isinstance(items, list) or not items:
-        raise MalformedRequest("acceptance must have at least one item.",
+    """`[{text: ...}]`, optional since T-224 -- absent means `[]`.
+
+    The amendment dropped the old `minItems: 1` deliberately: T-213's legacy
+    import must be lossless and the live board carries tickets with no
+    acceptance list at all, so requiring one 422s our own board's import.
+    Ticket quality is enforced by the master in routing, not by a schema
+    minimum. An acceptance list that IS supplied is still checked item by item,
+    and `store.transition` still refuses to move a ticket to `review` with an
+    empty one -- optional at creation is not optional at review (T-288).
+    """
+    if body.get("acceptance") is None:
+        return []
+    items = body["acceptance"]
+    if not isinstance(items, list):
+        raise MalformedRequest("acceptance must be a list.",
                                {"rejected_fields": ["acceptance"]})
     out = []
     for item in items:
@@ -184,6 +195,15 @@ def git_evidence(body, key="evidence"):
     if not isinstance(branch, str) or not branch or len(branch) > 200:
         raise MalformedRequest("evidence.branch is required.",
                                {"rejected_fields": ["evidence.branch"]})
+    # T-224 folded T-215's fix in at this layer and `GitEvidence.required`
+    # lists it, but nothing here ever read it (T-288). An unqualified sha with
+    # no repository identity is precisely how an unrelated merge in a DIFFERENT
+    # repo appears to "contain" this evidence and closes the wrong ticket --
+    # the same defect class as T-272, one layer up.
+    repository = value.get("repository")
+    if not isinstance(repository, str) or not repository or len(repository) > 200:
+        raise MalformedRequest("evidence.repository is required.",
+                               {"rejected_fields": ["evidence.repository"]})
     checks = value.get("checks")
     if checks is not None:
         if not isinstance(checks, list):
