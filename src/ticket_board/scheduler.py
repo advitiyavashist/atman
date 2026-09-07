@@ -25,6 +25,7 @@ from ticket_board.turns import (
 )
 
 MIN_SUPPORT = 5
+MIN_COMPARE = 3
 APPLY_MSG = "tickets route --apply is unimplemented (T-315: shadow only; nothing is assigned)"
 
 DOCS_TEST_ROLES = ("docs", "documentation", "qa", "verification", "acceptance",
@@ -403,6 +404,185 @@ def render_report(rep):
     return "\n".join(lines)
 
 
+def _events_before(events, at):
+    """Strictly before `at` — post-claim records must not leak into the pick."""
+    if not at:
+        return list(events or [])
+    return [e for e in (events or []) if (e.get("at") or "") < at]
+
+
+def _first_claim_at(evs):
+    claims = [e.get("at") for e in evs if e.get("kind") == "claim" and e.get("at")]
+    return min(claims) if claims else None
+
+
+def _has_bound_run_start(evs):
+    return any(e.get("kind") == "run_start" and e.get("ticket") for e in evs)
+
+
+def _historical_claimed_load(events, before_at):
+    load_ = {}
+    for tid, evs in _group_events(events).items():
+        claimed = False
+        owner = None
+        done_before = False
+        for e in evs:
+            at = e.get("at") or ""
+            if at >= before_at:
+                continue
+            if e.get("kind") == "claim":
+                claimed = True
+                owner = e.get("agent") or owner
+            if e.get("kind") in ("done", "merge"):
+                done_before = True
+        if claimed and not done_before and owner:
+            load_[owner] = load_.get(owner, 0) + 1
+    return load_
+
+
+def _comparable_turns(events, tickets, workforce, agent, role, band, before_at):
+    """Measured turns for `agent` on finished (role, band) tickets before cutoff."""
+    idx = _ticket_index(tickets)
+    nums = []
+    for tid, evs in _group_events(_events_before(events, before_at)).items():
+        t = idx.get(tid) or {}
+        if _role(t) != role or priority_band(t) != band:
+            continue
+        if not _finished(evs, t):
+            continue
+        owner = _owner(evs, t)
+        if owner != agent:
+            continue
+        turns = _measured_turns(evs)
+        if turns is None:
+            continue
+        nums.append(turns)
+    return nums
+
+
+def _median_or_null(nums):
+    if len(nums) < MIN_COMPARE:
+        return None, len(nums)
+    return median(nums), len(nums)
+
+
+def shadow_pick_at_claim(board, ticket, events, before_at, names, workforce, roles,
+                         score_agent, tickets):
+    """Shadow learned/prior pick using only records strictly before claim."""
+    pre = _events_before(events, before_at)
+    estimates = build_estimates(pre, tickets=tickets, workforce=workforce)
+    load_ = _historical_claimed_load(pre, before_at)
+    d = decide_ticket(board, ticket, estimates, names, workforce, roles,
+                      score_agent, load_)
+    return d.get("learned_agent"), d
+
+
+def score_shadow(events, tickets, workforce, roles, board, score_agent, names=None,
+                 agents=None):
+    """Retrospective shadow-vs-actual scorecard (T-416). Observational only."""
+    tickets = tickets or []
+    workforce = workforce or {}
+    roles = roles or {}
+    agents = agents or {}
+    names = names or _agent_names(workforce, roles, agents=agents)
+    idx = _ticket_index(tickets)
+    grouped = _group_events(events)
+    rows = []
+    for tid, evs in sorted(grouped.items(), key=lambda kv: (_first_claim_at(kv[1]) or "", kv[0])):
+        t = idx.get(tid) or {}
+        if not _finished(evs, t):
+            continue
+        if not _has_bound_run_start(evs):
+            continue
+        claim_at = _first_claim_at(evs)
+        if not claim_at:
+            continue
+        actual = _owner(evs, t)
+        shadow, decision = shadow_pick_at_claim(
+            board, t, events, claim_at, names, workforce, roles, score_agent, tickets)
+        agree = bool(actual and shadow and actual == shadow)
+        role, band = _role(t), priority_band(t)
+        pre = _events_before(events, claim_at)
+        actual_nums = _comparable_turns(pre, tickets, workforce, actual, role, band, claim_at)
+        shadow_nums = _comparable_turns(pre, tickets, workforce, shadow, role, band, claim_at)
+        actual_med, actual_n = _median_or_null(actual_nums)
+        shadow_med, shadow_n = _median_or_null(shadow_nums)
+        realized = _measured_turns(evs)
+        rows.append({
+            "ticket": tid,
+            "role": role,
+            "band": band,
+            "claim_at": claim_at,
+            "actual": actual,
+            "shadow": shadow,
+            "source": decision.get("source"),
+            "agree": agree,
+            "realized_turns": realized,
+            "actual_median": actual_med,
+            "actual_n": actual_n,
+            "shadow_median": shadow_med,
+            "shadow_n": shadow_n,
+        })
+    compared = len(rows)
+    agree_n = sum(1 for r in rows if r["agree"])
+    rate = (agree_n / compared) if compared else None
+    return {
+        "rows": rows,
+        "n": compared,
+        "agreement_rate": rate,
+        "n_agree": agree_n,
+    }
+
+
+def render_score_table(rep):
+    lines = ["shadow-vs-actual scorecard (observational; not a counterfactual)"]
+    rate = rep.get("agreement_rate")
+    lines.append("agreement rate: %s (%d/%d)" % (
+        "-" if rate is None else ("%.2f" % rate),
+        rep.get("n_agree") or 0, rep.get("n") or 0))
+    lines.append("%-8s %-8s %-14s %-14s %-5s %5s %12s %12s %5s" % (
+        "ticket", "role", "actual", "shadow", "agree", "turns",
+        "actual_med", "shadow_med", "src"))
+    for r in rep.get("rows") or []:
+        am = r.get("actual_median")
+        sm = r.get("shadow_median")
+        lines.append("%-8s %-8s %-14s %-14s %-5s %5s %12s %12s %5s" % (
+            r.get("ticket") or "-",
+            (r.get("role") or "-")[:8],
+            (r.get("actual") or "-")[:14],
+            (r.get("shadow") or "-")[:14],
+            "yes" if r.get("agree") else "no",
+            "-" if r.get("realized_turns") is None else str(r.get("realized_turns")),
+            "-" if am is None else ("%.1f(n=%d)" % (am, r.get("actual_n") or 0)),
+            "-" if sm is None else ("%.1f(n=%d)" % (sm, r.get("shadow_n") or 0)),
+            (r.get("source") or "-")[:5],
+        ))
+    return "\n".join(lines)
+
+
+def render_scorecard_doc(rep, generated_at):
+    """Markdown scorecard with dated header (T-281 / T-416)."""
+    lines = [
+        "# Shadow-vs-actual turns scorecard",
+        "",
+        "**Generated:** %s" % generated_at,
+        "",
+        "Observational evidence only — not a counterfactual claim about what would",
+        "have happened if the shadow pick had been assigned.",
+        "",
+        render_score_table(rep),
+        "",
+        "## Limits",
+        "",
+        "Survivorship: only tickets that reached `done` with a bound `run_start`",
+        "(post T-352/T-388 recut) enter the table. Small *n* on disagreement",
+        "medians is reported as `-` when either side has fewer than %d comparable" % MIN_COMPARE,
+        "finished tickets. No cost axis until T-403 lands.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def cmd_route_shadow(a, board, load_all, load_workforce, load_roles, load_agents,
                      score_agent, traj_event):
     """Print-only shadow route. `--apply` exits non-zero."""
@@ -418,6 +598,20 @@ def cmd_route_shadow(a, board, load_all, load_workforce, load_roles, load_agents
     roles = load_roles(board)
     agents = dict((r["owner"], r) for r in load_agents(board))
     names = _agent_names(workforce, roles, only=getattr(a, "only", None), agents=agents)
+    if getattr(a, "score", False):
+        rep = score_shadow(events, tickets, workforce, roles, board, score_agent,
+                           names=names, agents=agents)
+        text = render_score_table(rep)
+        print(text)
+        doc_path = getattr(a, "write_scorecard", None)
+        if doc_path is not None:
+            a.scorecard_doc = doc_path
+            from datetime import datetime, timezone
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with open(doc_path, "w") as f:
+                f.write(render_scorecard_doc(rep, stamp))
+            print("wrote %s" % doc_path)
+        return
     estimates = build_estimates(events, tickets=tickets, workforce=workforce)
     if getattr(a, "report", False):
         print(render_report(report_shadow(events, tickets=tickets, workforce=workforce)))

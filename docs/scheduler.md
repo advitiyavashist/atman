@@ -12,8 +12,17 @@ unlock only when the trajectory log can actually support them.
 ```sh
 tickets route --shadow            # print rule pick vs learned/prior; write shadow_decision
 tickets route --shadow --report   # agreement rate + realized turns where observed
+tickets route --shadow --score    # retrospective shadow-vs-actual scorecard (read-only)
 tickets route --apply             # unimplemented; exits non-zero
 ```
+
+`--score` replays `trajectories.jsonl` and, for each finished ticket with a
+bound `run_start` (post T-352/T-388), compares the shadow pick at claim time to
+the actual owner. Estimates use only records **strictly before** that claim (no
+leakage). Disagreement medians need n≥3 comparable finished tickets per side or
+report `-`. Observational only — not a counterfactual. Optional
+`--write-scorecard [PATH]` writes `docs/turns-scorecard.md` (see
+`docs/turns-scorecard.md`).
 
 `--shadow` does **not** assign, note, or message. The only write is one
 `shadow_decision` event per currently ready ticket (deps met, status open)
