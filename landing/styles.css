@@ -132,6 +132,7 @@ h1 {
   font-weight: 560;
   line-height: 1.06;
   letter-spacing: -0.038em;
+  text-wrap: balance;
 }
 
 .lede {
