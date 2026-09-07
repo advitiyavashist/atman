@@ -2,7 +2,7 @@
   "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
   "expected_version": 4,
   "evidence": {
-    "repository": "advitiyavashist/tickets",
+    "repository": "demo-org/demo-repo",
     "branch": "feature/demo-13",
     "sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
     "pr_url": null,

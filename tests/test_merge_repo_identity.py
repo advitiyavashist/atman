@@ -440,3 +440,109 @@ def test_merge_refuses_a_repo_parked_off_trunk_instead_of_closing_nothing(board)
     out = r.stdout + r.stderr
     assert "not main" in out and "checkout" in out, out
     assert _status(board, tid) == "review"
+
+
+# ---------------------------------------------------------------------------
+# T-287: --artifact targeting and the T-243 env scrub must be true AT THE SAME
+# TIME. Neither branch could carry this test, because each predates the other's
+# feature: T-272 threaded cwd= through git() but passed no env=, and an
+# inherited GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE overrides cwd-based discovery
+# inside git ITSELF. So under a leaked env `tickets review --artifact <dir>`
+# pinned whatever repo the leak named and exited 0 -- the exact defect the
+# --artifact flag exists to fix, reappearing on the command that fixes it.
+#
+# The leak is not hypothetical on this board: agents run `tickets` from steer
+# worktrees while the deliverable lives in advitiyavashist/tickets, and
+# sonnet-qa reproduced this against T-272's branch by exporting those three
+# variables at a steer worktree.
+# ---------------------------------------------------------------------------
+
+
+def _leak_env(repo):
+    """The three variables git consults BEFORE cwd-based discovery."""
+    return {
+        "GIT_DIR": str(repo / ".git"),
+        "GIT_COMMON_DIR": str(repo / ".git"),
+        "GIT_WORK_TREE": str(repo),
+    }
+
+
+def test_artifact_pin_survives_a_leaked_git_env(board):
+    """Acceptance (2). Same setup as the test above, plus a leaked git env
+    aimed at repo A. The pin must still name repo B.
+
+    Asserted on the recorded pin rather than on stderr: the failure mode is
+    silent and exit 0, so 'it did not crash' is not evidence."""
+    repo_a = board.parent
+    _ignore_board(repo_a)
+    run(board, "master", "take", "--owner", "ceo")
+    # Repo A must NOT be on main. If it is, the never-work-on-main guard
+    # rejects the review first and the defect never gets to show itself -- the
+    # test would go red for the wrong reason and, worse, would go green against
+    # a fix that only made the guard fire. The reported harm is a WRONG PIN
+    # WRITTEN WITH EXIT 0, so repo A is put on a feature branch to let the
+    # command run all the way to the write.
+    _git(repo_a, "checkout", "-q", "-b", "alice/cwd-side-branch")
+
+    repo_b = _artifact_repo(board.parent.parent, "leak_artifact_repo", board)
+
+    tid = _create(board, "Artifact in repo B, reviewed under a leaked env", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo_b, "checkout", "-q", "-b", "alice/leak-proof")
+    (repo_b / "deliverable.txt").write_text("the actual work")
+    _git(repo_b, "add", "deliverable.txt")
+    _git(repo_b, "commit", "-m", "the actual work")
+
+    r = run(board, "review", tid, "--notes", "artifact is in repo B",
+            "--artifact", str(repo_b), agent="alice", cwd=repo_a,
+            env=_leak_env(repo_a))
+    assert r.returncode == 0, r.stderr
+
+    rec = _ticket(board, tid)
+    assert rec["repo"] == "https://example.invalid/leak_artifact_repo.git", (
+        "a leaked GIT_DIR/GIT_WORK_TREE re-pinned the review to the cwd repo. "
+        "cwd= alone does not stop git's own env-first discovery; git() must "
+        "also scrub the environment (T-243/T-287). got repo=%r" % rec["repo"]
+    )
+    assert rec["commit"] == "alice/leak-proof@" + _git(repo_b, "rev-parse", "--short", "HEAD"), (
+        "branch and sha must come from the ARTIFACT tree under a leaked env too "
+        "-- a correct repo field carrying the cwd repo's branch/sha is still an "
+        "unmergeable pin: %r" % rec["commit"]
+    )
+    assert rec["repo_source"] == "artifact"
+
+
+def test_leaked_git_env_does_not_change_the_pin_at_all(board):
+    """The A/B control. The leak must be a NO-OP, not merely survivable: the
+    pin recorded under a leaked env must equal the pin recorded without one.
+
+    Without this, a fix that happened to fail closed -- refusing, or writing
+    "?@?" -- would satisfy the assertions above while still not resolving the
+    artifact tree. T-259 defect 2 is exactly that failure dressed as a pass."""
+    repo_a = board.parent
+    _ignore_board(repo_a)
+    run(board, "master", "take", "--owner", "ceo")
+    _git(repo_a, "checkout", "-q", "-b", "alice/cwd-side-branch")
+
+    repo_b = _artifact_repo(board.parent.parent, "control_artifact_repo", board)
+    _git(repo_b, "checkout", "-q", "-b", "alice/control")
+    (repo_b / "deliverable.txt").write_text("the actual work")
+    _git(repo_b, "add", "deliverable.txt")
+    _git(repo_b, "commit", "-m", "the actual work")
+
+    pins = {}
+    for label, extra in (("clean", None), ("leaked", _leak_env(repo_a))):
+        tid = _create(board, "control %s" % label, role="backend")
+        run(board, "claim", tid, agent="alice")
+        r = run(board, "review", tid, "--notes", "n", "--artifact", str(repo_b),
+                agent="alice", cwd=repo_a, env=extra)
+        assert r.returncode == 0, r.stderr
+        rec = _ticket(board, tid)
+        pins[label] = (rec["repo"], rec["commit"], rec.get("repo_source"))
+
+    assert pins["leaked"] == pins["clean"], (
+        "the git env leak changed the recorded pin: clean=%r leaked=%r"
+        % (pins["clean"], pins["leaked"]))
+    # And the shared answer is the real one, not a shared failure.
+    assert pins["clean"][0] == "https://example.invalid/control_artifact_repo.git"
+    assert pins["clean"][1].startswith("alice/control@")
