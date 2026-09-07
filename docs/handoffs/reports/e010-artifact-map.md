@@ -1,12 +1,21 @@
 # E-010 artifact map — where the review queue's work actually lives
 
-**Ticket:** T-281 · **Author:** opus-backend-2 · **Snapshot:** 2026-09-07T03:58:55Z
+**Ticket:** T-281 · **Author:** opus-backend-2
+**First pass:** 2026-09-07T03:58Z (tickets main `07cd74c`)
+**This refresh:** 2026-09-07T08:2xZ — **re-resolved against tickets `origin/main` = `5200f9d`, steer `origin/main` = `564557b`**
 
 This document resolves every review-queue pin to its real repo, branch and sha so
 the merge wave can run off evidence instead of off the recorded `commit` field.
 It changes nothing. No merge, no fast-forward, no force-push, and no `tickets
 review` was re-run to "fix" a pin — re-pinning from the wrong cwd is the defect
 (T-272), not the remedy. Corrections are **named here and left for the master.**
+
+> **Read this first if you read nothing else.** The first pass of this map told
+> you to merge `sonnet-qa/t221-ui-mentions`. **That recommendation is retracted**
+> — see [T-221 is superseded by T-276](#t-221-is-superseded-by-t-276-prior-recommendation-retracted).
+> And `merge-base --is-ancestor` **alone is not sufficient**: it returns a false
+> NO on work that landed by rebase, which is exactly what happened to T-237.
+> Use all three checks in [Method](#method--three-questions-per-row-not-one).
 
 ## Provenance of every command in this document
 
@@ -16,325 +25,368 @@ Per T-243, cwd alone does not establish which repo a git command answers for.
   `env | grep '^GIT_'` returned only `GIT_EDITOR=true`. **No `GIT_DIR`,
   `GIT_COMMON_DIR` or `GIT_WORK_TREE` was set**, so cwd-based discovery is
   trustworthy in this session.
-- Every "tickets repo" command below ran with
-  `git rev-parse --show-toplevel` = `/Users/kavana/Downloads/tickets`.
-- Every "steer repo" command below ran with
-  `git rev-parse --show-toplevel` = `/Users/kavana/Downloads/steer`.
+- Every "tickets repo" command ran in a worktree whose
+  `git rev-parse --show-toplevel` resolves inside the
+  `/Users/kavana/Downloads/tickets` object store (worktree
+  `…/scratchpad/t281`, branch `opus-backend-2/t281-artifact-map`).
+  **The tickets main checkout was never entered and never modified.**
+- Every "steer repo" command ran with
+  `git rev-parse --show-toplevel` = `/Users/kavana/Downloads/steer`, read-only
+  (`fetch`, `rev-parse`, `merge-base`, `for-each-ref`).
 - Board records were read from `/Users/kavana/Downloads/steer/.tickets/T-*.json`
   (read-only; nothing under `.tickets/` was edited).
 
 Trunks resolved after a fresh `git fetch origin --prune` in each repo:
 
-| repo | trunk at snapshot |
+| repo | trunk at this refresh |
 |---|---|
-| `advitiyavashist/tickets` | `origin/main` = **`07cd74c`** "T-255: check preconditions after the replay guard in submit_review/decide_review" |
-| `advitiyavashist/steer` | `origin/main` = **`fc77d2e`** at 03:58Z snapshot; **moved to `ce0844d` at 04:02Z** during verification (forward move) |
-
-### The trunk moved twice while I was measuring — read this before trusting any row
-
-1. My first fetch resolved tickets `origin/main` = `d615c1a`. Minutes later the
-   same ref read `07cd74c`. This is a **forward** move, not a rewind:
-   `git merge-base --is-ancestor d615c1a origin/main` → **true**. A merge wave is
-   running live in the shared clone.
-2. `origin/opus-backend/t264-none-branch-principal` moved from `35d17ba` to
-   `a547e3f` mid-session (sonnet-sdk pushed T-274's fix onto it).
-
-**Consequence for the merge wave:** every `on-main?` answer below is true as of
-`07cd74c`. Rows can only move from NO to YES, never back, *provided* main
-continues to move forward. Re-run the two-line check in the appendix before
-merging any individual row.
+| `advitiyavashist/tickets` | `origin/main` = **`5200f9d`** "docs: TICKETS_DIR when the board lives outside the repo you are editing" |
+| `advitiyavashist/steer` | `origin/main` = **`564557b`** "T-218: honest-pending Vercel+Neon operator tails" |
 
 ## Method — three questions per row, not one
 
-- **on-main?** — `git merge-base --is-ancestor <sha> origin/main`, and nothing
-  else. Checking the commit out and seeing it resolve proves nothing: tickets
-  main was force-rewound earlier today and orphaned commits check out perfectly
-  clean. "exists" and "is on main" are different questions.
+The first pass used two checks. **Two is not enough**; T-237 is the
+counterexample and it is in this queue.
+
+- **on-main? (ancestry)** — `git merge-base --is-ancestor <sha> origin/main`.
+  Checking the commit out and seeing it resolve proves nothing: orphaned commits
+  check out perfectly clean. "exists" and "is on main" are different questions.
+- **landed? (content)** — `git cherry -v origin/main origin/<branch>`. A `-`
+  marks a commit whose **patch is already upstream under a different sha**; `+`
+  marks genuinely unlanded work. **This is the check the first pass lacked.**
+  Ancestry answers "is this exact commit on main"; cherry answers "is this
+  *work* on main". Rebase and cherry-pick make those two disagree, and the
+  merge wave has been cherry-picking.
 - **durable?** — `git for-each-ref refs/remotes/origin --contains <sha>`. A
   commit reachable only from the shared local clone is one disk failure from
-  gone. `is-ancestor` cannot see this and neither can a clean checkout.
-- **pin-correct?** — the question is **"is this ticket's deliverable where its
-  pin says"**, *not* "is this pin a steer sha". Those give different answers on
-  five rows below, in both directions.
+  gone. Neither check above can see this.
 
-## The three shas the queue is pinned to
+**Why the second check matters, concretely.** T-237's pinned `334a12d` is
+**not** an ancestor of `5200f9d`. On ancestry alone T-237 reads as unmerged and
+a merger would re-merge it. But `git cherry` marks **all four** of its T-237
+commits `-`: the work landed via `opus-liveness/t237-liveness-truth-v2`
+(`a14b2f5`, which *is* an ancestor) after a rebase. T-237 is done. Re-merging it
+would have replayed a superseded v1 branch that also carries T-244's commits.
+
+---
+
+## The map — 9 live review-queue rows
+
+**The queue is 9, not the 14 the ticket assumed nor the 16 the first pass found.**
+It shrank twice while I measured, in both directions — see
+[Queue movement during this audit](#queue-movement-during-this-audit).
+
+| ticket | repo | branch | artifact sha | on-main? | landed? | durable? | pin-correct? |
+|---|---|---|---|---|---|---|---|
+| T-187 | tickets | `opus-backend-2/t187-messaging-api` | `4cfeaf5` (own work `e031d88`) | NO | NO (`+`) | yes (1 ref) | **YES — correct** |
+| T-223 | tickets | `gpt-codex/t223-live-install` | `1264a29` | NO | NO (2 × `+`) | yes (1 ref) | **YES — correct** |
+| T-244 | tickets | `sonnet-backend/t244-inbox-rotation-archive` | head `f7b5d0c` | NO | NO (3 × `+`) | yes (2 refs) | NO — pins steer `a8b9c3d` |
+| T-268 | — | none (verification) | none | n/a | n/a | n/a | **no deliverable commit — not an error** |
+| T-270 | — | none (verification) | none | n/a | n/a | n/a | **no deliverable commit — not an error** |
+| T-272 | tickets | `opus-backend/t272-artifact-repo-pin` | `6ed00d7` (own work `daf282b`) | NO | NO (`+`) | yes (1 ref) | NO — pins steer `fc77d2e` |
+| T-276 | tickets | `cursor/t276-ui-redesign` | `902ee9d` | NO | NO (`+`) | yes (1 ref) | **YES — correct** |
+| T-282 | — | none (verification) | none | n/a | n/a | n/a | **no deliverable commit — not an error** |
+| T-283 | — | none (verification) | pin `25cafaa` | NO | n/a | **NO — 0 origin refs** | **no deliverable — but see below** |
+
+**Not one of the five tickets-repo rows is on tickets main.** Four rows are
+verification passes with no artifact commit.
+
+### Correct pins are now the majority, and that is the trend worth reporting
+
+T-187, T-223 and T-276 are all pinned correctly to the tickets repo. Added to
+the four no-deliverable rows, **7 of 9 rows need no pin correction**. The two
+wrong pins that remain (T-244, T-272) are the queue's oldest entries. Newer
+reviews are being filed from the tickets worktree and the guard is recording the
+right repo — the T-272 defect is being worked around in practice even before
+T-272 itself lands.
+
+### T-283's pin is the one durability problem among the verification rows
+
+T-268, T-270 and T-282 pin steer shas that are **on steer main**
+(`c1d4706`, `fc77d2e`, `ce0844d`). Harmless: there is no deliverable, and the
+pin resolves.
+
+T-283 pins steer `25cafaa` ("Sync main into sonnet-qa-t221-ui-mentions"), which
+is **not on steer main and is contained in zero `refs/remotes/origin` refs.** It
+exists only in the local shared steer clone. The ticket has no deliverable so
+nothing is at risk of being lost, but **the pin will dangle** the moment that
+local branch is pruned, and a later reader will be unable to resolve T-283's
+record at all. Recommend re-pointing it at a durable sha or documenting it as
+deliverable-free, at the master's discretion.
+
+---
+
+## The three shas the wrong pins point at — all on steer main
 
 | sha | what it is | in tickets repo? | on steer main? |
 |---|---|---|---|
-| `c1d4706` | steer "Merge T-233: executed-DOM tests for Try-panel copy-gate" | **absent** | yes |
-| `fc77d2e` | steer "T-221: tickets UI polish + @agent mention hook" (= steer main tip) | **absent** | yes |
-| `a8b9c3d` | steer "ci: ruff-format t171-qa-script.py" | **absent** | yes |
+| `c1d4706` | steer "Merge T-233: executed-DOM tests for Try-panel copy-gate" | **absent** | **yes** |
+| `fc77d2e` | steer "T-221: tickets UI polish + @agent mention hook" | **absent** | **yes** |
+| `a8b9c3d` | steer "ci: ruff-format t171-qa-script.py" | **absent** | **yes** |
 
 Confirmed with `git cat-file -e <sha>^{commit}` in the tickets repo: all three
 fail. They do not name commits that are stale in the tickets repo; they name
 commits that **do not exist** there.
 
----
-
-## The map — 16 review-queue rows
-
-The queue is **16 deep, not 14**. T-237 and T-243 entered after the ticket was
-written, and both are pinned correctly to the tickets repo — bringing the count
-of not-wrong pins to five, not three.
-
-| ticket | repo | branch | artifact sha | on-main? | durable? | pin-correct? |
-|---|---|---|---|---|---|---|
-| T-184 | tickets | `opus-console/t184-live-wiring` | head `b374462` | NO | yes (1 ref) | **repo/branch right, sha stale** |
-| T-187 | tickets | `opus-backend-2/t187-messaging-api` | `4cfeaf5` | NO | yes (1 ref) | **YES — correct** |
-| T-237 | tickets | `opus-liveness/t237-liveness-truth` | `334a12d` | NO | yes (1 ref) | **YES — correct** |
-| T-243 | tickets | `opus-infra/t243-git-env-leak` | `efd1c2a` | NO | yes (1 ref) | **YES — correct** |
-| T-244 | tickets | `sonnet-backend/t244-inbox-rotation-archive` | `f7b5d0c` | NO | yes (1 ref) | NO — pins steer `a8b9c3d` |
-| T-263 | tickets | `opus-verify/t263-init-binds-board` | `d117897` | NO | yes (1 ref) | NO — pins steer `c1d4706` |
-| T-264 | tickets | `opus-backend/t264-none-branch-principal` | head `a547e3f` | NO | yes (1 ref) | NO — pins steer `c1d4706` |
-| T-265 | tickets | `sonnet-tickets/t265-lease-expiry` | `0230636` | NO | yes (1 ref) | NO — pins steer `c1d4706` |
-| T-266 | tickets | `infra-2/t266-hooks-dedup-scope` | `45631d8` | NO | yes (2 refs) | NO — pins steer `c1d4706` |
-| T-268 | — | none (verification) | none | n/a | n/a | **no deliverable commit — not an error** |
-| T-270 | — | none (verification) | none | n/a | n/a | **no deliverable commit — not an error** |
-| T-271 | — | `opus-authz/t271-combined-attack` (evidence only) | `027f937` | NO | yes (1 ref) | **no deliverable commit — see trap below** |
-| T-272 | tickets | `opus-backend/t272-artifact-repo-pin` | `6ed00d7` | NO | yes (1 ref) | NO — pins steer `fc77d2e` |
-| T-273 | tickets | `opus-verify/t273-tmpdir-guard` | `d2bc127` | NO | yes (1 ref) | NO — pins steer `c1d4706` |
-| T-275 | tickets | **none of its own** — rides T-264 and T-265 | `35d17ba` / `0230636` | NO | yes | NO — **and there is no branch to merge** |
-| T-279 | **steer** | `sonnet-tickets-t279-ruff-format` | `ec2ca28` | **YES (steer main, as of 04:02Z)** | yes | **repo right, branch+sha wrong — but now landed** |
-
-**Not one of the 15 tickets-repo rows is on tickets main.** The single row that
-has landed, T-279, is steer work and landed on *steer* main. Every artifact that
-has been pushed is durable (present in at least one `refs/remotes/origin` ref);
-the two exceptions are called out below and are **not** durable.
+**All three are ancestors of steer main.** So every wrongly-pinned ticket is
+*pre-armed for an ancestry-based auto-close*: a sweep that asks "is the pin on
+main?" gets **yes** from the steer repo and closes the ticket with its tickets-
+repo fix still unmerged. That is not a hypothetical — it is the mechanism that
+closed T-221 (below). The wrong pins are not merely uninformative; they are
+actively dangerous to any automated close.
 
 ---
 
-## The five rows where "steer sha" is the wrong reading
+## Findings that change the merge plan
 
-### T-279 — the pin is *not* simply "right", and the row landed mid-audit
+### T-221 is superseded by T-276 — prior recommendation RETRACTED
 
-The brief lists T-279 as a correct pin because it is genuinely steer work. The
-repo half is right. The branch and sha are not:
+**The first pass of this map recommended merging `sonnet-qa/t221-ui-mentions@18c6cf0`
+into tickets main. Do not do that.** I was wrong, and merging both would collide
+in `tickets.py`.
 
-- Recorded pin: `sonnet-tickets@fc77d2e`, repo `advitiyavashist/steer`.
-- Real artifact (from sonnet-tickets' own review note): steer branch
-  `sonnet-tickets-t279-ruff-format` @ **`ec2ca28`**, PR #112.
+T-276 (`cursor/t276-ui-redesign@902ee9d`, IN REVIEW) rewrites root `tickets.py`
+by +342/−46, and it **already contains the whole T-221 tickets-repo half,
+including the fix-forward T-270 demanded**:
 
-**This row changed while I was verifying it, and the change is instructive.**
+- `git show origin/cursor/t276-ui-redesign:tickets.py` defines `_MENTION_RE` and
+  calls `_strip_code_spans(text or "")` — the backtick/fenced-code guard that
+  `18c6cf0` was written to add.
+- `_strip_code_spans` is **byte-identical** between `18c6cf0` and T-276.
+- `tests/test_t221_mentions.py` is the **same blob, `3d4877f`**, in both
+  `origin/sonnet-qa/t221-ui-mentions` and `origin/cursor/t276-ui-redesign`.
+- Current main has **no mention parsing at all**: `git show origin/main:tickets.py
+  | grep MENTION` returns nothing.
 
-- At the 03:58Z snapshot, steer `origin/main` was `fc77d2e` and
-  `git merge-base --is-ancestor ec2ca28 origin/main` → **false**. The fix was
-  unmerged, while the *pinned* `fc77d2e` was already steer main's tip — meaning
-  any ancestry-based auto-close would have marked T-279 done with the fix still
-  out and CI still red.
-- At 04:02Z, re-running the same check against a freshly fetched steer repo:
-  steer `origin/main` = **`ce0844d`** ("T-279: ruff format the 3 pre-existing
-  unformatted files so CI verify stops false-redding"), and `ec2ca28` **is** now
-  an ancestor. PR #112 landed between the two measurements.
+So T-221's parts A, C and the fix-forward reach tickets main **via T-276**, and
+`sonnet-qa/t221-ui-mentions` is now redundant scaffolding.
 
-So the outcome is benign — **T-279 is genuinely done and needs no action** — but
-it arrived there by merge, not by the pin being right. Had the sweep run in the
-four-minute window before the merge, the wrong-sha pin would have closed it for
-the wrong reason. The pin is still not the artifact; it simply stopped mattering.
-Recorded here rather than quietly dropped, because the near-miss is the finding.
+**Corrected recommendation: merge T-276; do not merge `sonnet-qa/t221-ui-mentions`.**
+T-221 still deserves a note on its record explaining that its tickets-repo half
+landed under T-276 rather than under its own pin — otherwise the half-landed
+history stays invisible.
 
-### T-268 and T-270 — correctly *have* no honest pin
+*Why the first pass got this wrong:* T-276 entered the review queue after the
+03:58Z snapshot, and its title ("tickets ui: visual redesign") does not suggest
+it carries another ticket's mention parser. Only diffing its `tickets.py`
+against main reveals it. Branch titles are not a reliable index of contents —
+four of this queue's branches carry other tickets' commits.
 
-Confirmed: no branch matching `t268` or `t270` exists on tickets origin. Both
-tickets' deliverables are verdicts filed as board notes on the tickets they
-reviewed (T-258/T-261/T-224 and T-181/T-217/T-221/T-255 respectively). Their
-steer pins are artefacts of the review command, not claims about a deliverable.
-**Nothing to merge, nothing to correct.**
+### T-286 gates five tickets, has no fix commit, and is not durable
 
-### T-271 — a verification ticket that *does* have a branch, which is a trap
+T-286 is the FIX-FIRST blocking my own T-187, which in turn blocks T-188, T-189,
+T-190 and T-192 — **five tickets behind one fix**. Its state:
 
-Unlike T-268 and T-270, T-271 has `opus-authz/t271-combined-attack` @ `027f937`
-on origin, 6 commits ahead of main. **Do not merge it.** Its own head commit is
-titled *"T-271: verification tree for the T-264+T-265 pair — EVIDENCE, NOT A
-MERGE CANDIDATE"*, and the other five commits are copies of T-264's and T-265's
-work (`e78fc39`, `bfdbbb1`, `ff6b1c6`) assembled to test them together. Merging
-this branch would land the T-264/T-265 pair by a side door, bypassing the merge
-order T-271 itself prescribes. T-271's deliverable is its verdict, like T-268
-and T-270; the branch is scaffolding.
+- Branch `sonnet-backend/t286-invitation-replay-fix` exists **only in the local
+  shared clone** at `8769f5d`. `git for-each-ref refs/remotes/origin --contains
+  8769f5d` → **0 refs.** `git rev-parse origin/sonnet-backend/t286-invitation-replay-fix`
+  → unknown revision. **Not durable.**
+- Its head commit is titled *"Sync main (5200f9d) into T-187 messaging API
+  **before** T-286 fix"*. Listing its own commits against main returns T-187's
+  `e031d88` and a chain of main-syncs — **and no T-286 fix commit.** The remedy
+  is not written yet.
 
-### T-184 — right repo, right branch, sha behind the head
+This is not a defect in anyone's work; sonnet-backend holds T-286 IN PROGRESS
+and is presumably mid-fix. It is recorded because **the merge wave cannot plan
+around T-187 without knowing the fix does not exist yet**, and because a
+local-only branch carrying the base for five tickets is worth pushing early.
 
-The pin `opus-console/t184-live-wiring@08f452b` is the only queue pin that names
-the tickets repo *and* a real tickets-repo sha, so it reads as correct. It is
-not the branch head. `08f452b` is an ancestor of head `b374462`, and one further
-T-184 commit sits after it:
+**Consequence for T-187:** merging `4cfeaf5` alone lands the messaging API
+*without* the invitation-replay fix. cursor's three HOLD notes on T-187 are
+correct and this map corroborates them independently.
 
-```
-f88e5cf  T-184: document the V1 token-serving boundary and the production seam
-08f452b  T-184: wire the dashboard, enrollment and review to the live API   <-- pinned
-```
+### T-275 half-landed — one copy in, one copy plus a unique commit still out
 
-Merging at the pin silently drops the documentation commit. Merge the branch
-head `b374462`, not the pin. (The brief's hand map lists `f88e5cf`; that is the
-last *own* commit, but the branch head is the later sync merge `b374462`.)
+The first pass flagged that T-275 had **two divergent copies** riding on other
+tickets' branches and asked the master to choose a canonical one. **That
+decision has been made implicitly by the merge order**, and the outcome is
+partial:
 
-### T-187 — my own ticket, mapped like any other
-
-Pin `opus-backend-2/t187-messaging-api@4cfeaf5`, repo `advitiyavashist/tickets`.
-`git rev-parse origin/opus-backend-2/t187-messaging-api` → `4cfeaf5`. Pin sha
-**equals the branch head**; repo and branch both correct. On-main: NO (6 ahead,
-3 behind). Durable: 1 origin ref. This pin is correct — recorded here with the
-same three checks used on every other row, and with no verdict attached.
-
----
-
-## Two rows that are worse than a wrong pin
-
-### T-275 has no artifact of its own, and its work exists in two divergent copies
-
-This is the most consequential finding for the merge wave.
-
-- `sonnet-tickets/t275-reenrollment-route` exists **only in the local shared
-  clone**, at `82ed639`. There is no `origin/` copy:
-  `git rev-parse origin/sonnet-tickets/t275-reenrollment-route` → *unknown
-  revision*. **Not durable.**
-- That local branch is **0 commits ahead of main** (`git rev-list --count
-  origin/main..` → `0`), its worktree is clean, and `82ed639` is itself an old
-  main commit ("T-224: amend E-010 contract per T-211 mismatch map"). The branch
-  is its own base. **There is nothing on it.**
-- T-275's actual work is committed on **two other tickets' branches**, and the
-  two copies are **not the same change**:
-
-| commit | rides on | diffstat |
+| commit | rides on | status vs `5200f9d` |
 |---|---|---|
-| `35d17ba` "T-275: narrow the auth=NONE comment, add KNOWN LIMITATION on create_enrollment" | `opus-backend/t264-none-branch-principal` | `app.py` +30 −13 |
-| `0230636` same subject | `sonnet-tickets/t265-lease-expiry` | `app.py` +18 −15 |
+| `35d17ba` "T-275: narrow the auth=NONE comment, add KNOWN LIMITATION" | `opus-backend/t264-none-branch-principal` | **ON MAIN** (landed with T-264) |
+| `0230636` same subject, different patch | `sonnet-tickets/t265-lease-expiry` | **unlanded** (`+`) |
+| `7f44920` "T-275: stop claiming re-enrolment recovers a revoked agent's identity" | `sonnet-tickets/t265-lease-expiry` | **unlanded** (`+`) — **no counterpart anywhere** |
 
-`git patch-id --stable` differs between them, and `git range-diff` confirms they
-are not the same patch. `origin/sonnet-tickets/t265-lease-expiry` additionally
-carries `7f44920` "T-275: stop claiming re-enrolment recovers a revoked agent's
-identity".
+T-264 was merged as `ddde043`, carrying its copy of T-275. T-265 was merged as
+`c07ec9f` — **by cherry-pick, not by merging the branch** — so the two T-275
+commits riding on `sonnet-tickets/t265-lease-expiry` were left behind. That
+branch now reads "2 commits ahead of main" and **everything on it is T-275
+work**, not T-265 work.
 
-**Merging T-264 and T-265 both — which the queue intends — lands two divergent
-edits to the same region of `src/ticket_board/server/app.py`.** They will
-conflict, or worse, apply cleanly in a way that half-reverts one of them. The
-master must decide which T-275 copy is canonical *before* the wave, not during
-conflict resolution. This is not visible from any single ticket's notes.
+`0230636` is a divergent duplicate of the landed `35d17ba` and can be dropped.
+**`7f44920` is unique** — it is the only commit that removes the false claim
+that re-enrolment recovers a revoked agent's identity, and nothing equivalent is
+on main. T-275 is closed. **Recommend the master cherry-pick `7f44920` or
+reopen T-275 for it**; as things stand a documentation correction that was
+reviewed and closed is silently absent from main.
 
-### T-264's duplicate branch is local-only and undurable
+### T-244's artifact is three commits, not one
 
-T-271 flagged that T-264 has two branches carrying the same fix. Resolved:
+The first pass mapped T-244's artifact as `f7b5d0c`. That is the branch head but
+it is a **main-sync merge**; the work is three commits, all genuinely unlanded:
 
-- `opus-backend/t264-none-branch-principal` — **on origin**, head `a547e3f`
-  (moved from `35d17ba` during this session; now also carries T-274's
-  `_authorize` 4-arg fix and T-275's `35d17ba`). This is canonical.
-- `sonnet-backend/t264-none-branch-principal` — **local only**, `da9af92`,
-  containing `52b42cc` "T-264: auth=NONE never resolves a principal…".
-  `git for-each-ref refs/remotes/origin --contains da9af92` → **0 refs**. It is
-  not on origin at all and is one disk failure from gone.
+```
++ 0e9d3e4  T-244: stamp inbox_seen at first check-in so archived mail is never silently lost
++ 988ad60  T-244: stamp inbox_seen for any record missing the key, not only new ones
++ ea665f8  WIP T-244 before rebase onto latest main
+```
 
-Merge the `opus-backend` branch. Note that doing so now also lands T-274 and one
-copy of T-275 — see above.
+`988ad60` was **not** in the first pass's map. It broadens the fix from new
+records to any record missing the key — i.e. it is the commit that makes the fix
+apply to **already-existing** agents, which is the actual bug T-244 describes.
+Merging at an earlier sha would land a fix that does not fix the reported case.
+Note `ea665f8` is a WIP commit; the merger should confirm with the owner whether
+it is meant to ship.
+
+### T-184 landed at the head this map recommended
+
+Recorded as a closed loop: the first pass recommended merging T-184 at head
+`b374462` rather than at its pin `08f452b`. Main now contains `a5d0185`
+"T-184: wire dashboard, enrollment and review to the live API", and **both**
+`b374462` and `08f452b` are ancestors of `5200f9d`. The documentation commit
+that merging at the pin would have dropped is on main.
+
+---
+
+## Queue movement during this audit
+
+The queue is not stable and no snapshot of it should be treated as durable.
+
+**Landed since the 03:58Z first pass** (7 rows, tickets main `07cd74c` → `5200f9d`):
+T-184 (`a5d0185`), T-237 (`3f4d22d`, `a14b2f5`), T-243 (`e277262`),
+T-264 (`ddde043`), T-265 (`c07ec9f`), T-278 (`bc06c7a`); plus T-279 on steer.
+T-255 (`443e385`) remains on main, 0 ahead — confirmed still landed.
+
+**Reopened mid-audit, in the ~20 minutes between my board read and my row
+verification:**
+
+- **T-263** — was IN REVIEW at session start; `tickets show` now reports
+  **IN PROGRESS** (owner opus-verify). Its JSON `status` field reads `claimed`.
+- **T-273** — was IN REVIEW at session start; now **TO DO** and
+  **BLOCKED-BY T-263**. Its JSON `status` reads `open`.
+
+Both match opus-verify's 08:07Z board note reporting T-282's two FIX-FIRST
+findings confirmed against their own artifacts, and asking who owns the repairs.
+Their branches (`opus-verify/t263-init-binds-board@d117897`,
+`opus-verify/t273-tmpdir-guard@d2bc127`) are intact on origin, unlanded, 1 ref
+each — **no work is lost**, the tickets simply moved back to development. They
+are excluded from the 9-row table because they are no longer in the review queue.
+
+**Implication for the merge desk:** re-run the appendix check on any row
+immediately before merging it. A row can leave this queue by landing *or* by
+being reopened, and this document cannot tell you which happened after it was
+written.
 
 ---
 
 ## Unmerged branches outside the review queue
 
-All checked against tickets `origin/main` = `07cd74c`.
+All checked against tickets `origin/main` = `5200f9d`. "unlanded" counts `+`
+lines from `git cherry` — commits whose content is genuinely not upstream.
 
-| branch | sha | ahead | status | verdict |
+| branch | head | ahead | unlanded | verdict |
 |---|---|---|---|---|
-| `sonnet-qa/t221-ui-mentions` | `18c6cf0` | 3 | T-221 **done** | **LIVE — work never landed, see below** |
-| `sonnet-sdk/t255-replay-audit` | `443e385` | **0** | T-255 done | **SUPERSEDED — landed**, it is main's tip commit |
-| `sonnet-console/t250-cross-project-attack` | `d68a45d` | 1 | T-250 done | evidence only (attack sweep); no merge needed |
-| `opus-verify/t248-attack-t182` | `6b58e67` | 1 | T-248 done | evidence only; no merge needed |
-| `opus-verify/t251-attack-t247-t245` | `082e382` | 1 | T-251 done | evidence only; no merge needed |
-| `opus-backend/t249-attack-t236` | `f26b7d0` | 4 | T-249 done | evidence only — head commit is literally "reframe verdict for post-merge — NO REVERT, not MERGE" |
-| `sonnet-qa/t225-verify-t180` | `cf03cae` | 2 | T-225 done | evidence only; no merge needed |
-| `gpt-codex/t223-live-install` | `ea80443` | 4 | T-223 **claimed** (infra-2) | **LIVE** — in-flight work for an open ticket, do not merge ahead of its owner |
-| `cursor/integrate-review` | `1cc0969` | 18 | — | **AGGREGATION BRANCH — do not merge blindly**, see below |
-| `cursor/harden-tickets-clear-8bfe` | `e33dcfd` | — | not in the ticket's list | unreferenced by any queue ticket; ask cursor before touching |
+| `sonnet-qa/t221-ui-mentions` | `18c6cf0` | 3 | 3 | **SUPERSEDED by T-276 — do not merge** (see above) |
+| `sonnet-backend/t286-invitation-replay-fix` | `8769f5d` | — | — | **LOCAL ONLY, 0 origin refs; no fix commit yet** — gates 5 tickets |
+| `sonnet-tickets/t265-lease-expiry` | `0230636` | 2 | 2 | **LIVE — both commits are T-275's; `7f44920` is unique** |
+| `sonnet-sdk/t255-replay-audit` | `443e385` | 0 | 0 | SUPERSEDED — landed |
+| `opus-authz/t271-combined-attack` | `027f937` | 2 | 1 | evidence only — **do not merge** (see below) |
+| `cursor/integrate-review` | `1cc0969` | 18 | 5 | **AGGREGATION BRANCH — do not merge blindly** (see below) |
+| `sonnet-console/t250-cross-project-attack` | `d68a45d` | 1 | 1 | evidence only; no merge needed |
+| `opus-verify/t248-attack-t182` | `6b58e67` | 1 | 1 | evidence only; no merge needed |
+| `opus-verify/t251-attack-t247-t245` | `082e382` | 1 | 1 | evidence only; no merge needed |
+| `opus-backend/t249-attack-t236` | `f26b7d0` | 4 | 3 | evidence only — head is literally "reframe verdict for post-merge — NO REVERT, not MERGE" |
+| `sonnet-qa/t225-verify-t180` | `cf03cae` | 2 | 2 | evidence only; no merge needed |
+| `opus-liveness/t237-liveness-truth` | `334a12d` | 15 | 2 | **SUPERSEDED by v2** — its 4 T-237 commits are upstream; the 2 `+` are T-244's, tracked on T-244's own branch |
+| `opus-backend/t264-none-branch-principal` | `a547e3f` | 0 | 0 | SUPERSEDED — fully landed |
+| `sonnet-backend/t264-none-branch-principal` | `da9af92` | — | — | **local only, 0 origin refs** — duplicate of landed work; safe to delete |
 
-### T-221 is closed DONE and its work is not on tickets main
+### `opus-authz/t271-combined-attack` — the trap has mostly defused itself
 
-T-221's board record reads `status: done`, pinned to
-`cursor/cos-s05-wave-d83a@a8b9c3d` — a **steer** sha. T-221 was delivered across
-**both** repos, and only one half landed.
-
-Its steer half **is** on steer main: `6e78332` "T-221 part B: @mention support in
-Cursor + Codex board hooks" and `fc77d2e` "T-221: tickets UI polish + @agent
-mention hook". That is very likely why the ticket reads as delivered.
-
-Its tickets-repo half is not. In the tickets repo:
-
-- `09d6b33` (part A, mention parsing), `2c1eaff` (part C, composer/autocomplete)
-  and `18c6cf0` (the fix-forward T-270 required) are each **not** an ancestor of
-  tickets `origin/main`.
-- `git log origin/main --grep=T-221` returns **nothing**. Main has no T-221
-  commit at all.
-
-So a shipped, verified, twice-reviewed feature — sonnet-backend re-verified the
-fix-forward MERGE-READY at 03:53Z — is marked delivered with its steer half on
-steer main and **parts A, C and the fix-forward still off tickets main**. A
-half-landed ticket is exactly what a single-repo ancestry check cannot see: the
-pin resolves, the sha is on *a* trunk, and the ticket closes. It is outside the
-review queue, so no merge-wave row will pick up the remainder.
-**Recommend reopening T-221 or merging `sonnet-qa/t221-ui-mentions@18c6cf0`
-into tickets main explicitly.**
+The first pass flagged this branch as 6 commits ahead carrying copies of T-264's
+and T-265's work, mergeable by a side door. Now that T-264 and T-265 have
+landed it is **2 ahead with 1 genuinely unlanded commit**, its own evidence
+commit titled *"T-271: verification tree for the T-264+T-265 pair — EVIDENCE,
+NOT A MERGE CANDIDATE"*. Still do not merge it; the risk is now low rather than
+high.
 
 ### `cursor/integrate-review` re-carries other tickets' commits
 
-18 commits ahead, and its contents include `45631d8` (T-266's fix), `2c1eaff`
-and `09d6b33` (T-221 parts A and C) and `0e9d3e4` (T-244's fix). This is why
-`45631d8` is the one artifact sha in two origin refs rather than one. It is an
-integration branch, not a ticket deliverable: merging it would land T-266, T-221
-and T-244 in one opaque step, out of the order the verification tickets
-prescribe. Treat it as a **rival** to the per-ticket merges, not a supplement —
-and note it is 18 commits ahead but based well behind current main.
+18 commits ahead but only **5 genuinely unlanded** — most of what it aggregated
+has since landed through per-ticket merges. It remains an integration branch,
+not a ticket deliverable, based well behind current main. Treat it as a **rival**
+to the per-ticket merges, not a supplement.
 
 ### Branch overlap worth knowing before the wave
 
-- `opus-liveness/t237-liveness-truth` carries `0e9d3e4` and `ea665f8` — **T-244's
-  commits**. T-237 and T-244 overlap; merging both needs care.
-- `opus-backend/t264-none-branch-principal` carries T-264 **+ T-274 + T-275**.
-- `sonnet-tickets/t265-lease-expiry` carries T-265 **+ two T-275 commits**.
-- `opus-authz/t271-combined-attack` carries copies of T-264 **and** T-265.
+- `opus-liveness/t237-liveness-truth` carries **T-244's** commits.
+- `sonnet-tickets/t265-lease-expiry` now carries **only T-275's** commits.
+- `cursor/t276-ui-redesign` carries **T-221's entire tickets-repo half**.
+- `sonnet-backend/t286-invitation-replay-fix` is built on **T-187's** branch.
 
-Four of the queue's branches carry each other's work. Ancestry checks per-row
-will not reveal this; the overlap is only visible by listing each branch's own
-commits, which is done above.
+Ancestry checks per-row will not reveal this; the overlap is only visible by
+listing each branch's own commits, which is done above.
 
-## Reconciliation with the earlier T-253 audit
+## Relationship to work already written elsewhere
 
-T-253 (sonnet-tickets, accepted by cos-opus) audited the 9 E-010 tickets closed
-on a wrong-repo pin and found **9/9 landed**. I did not re-walk those rows and
-this document does not contradict that result — T-253 asked whether *already
-closed* work reached main, this one asks where *still open* work is. Its method
-(use the ticket's own notes and branch field, never the auto-recorded `commit`
-field; confirm with `is-ancestor` against the correct repo's trunk) is the same
-method used here. Note T-253 resolved against tickets main `1ce5fbb`; main is
-now `07cd74c`.
-
-One loose end it did not cover: T-252 was closed as a duplicate of T-244 with
-the explicit release action *"close as duplicate with T-244's merge sha when
-T-244 lands"*. T-244 has not landed — it is row 5 of this map, unmerged — so
-T-252 is currently DONE ahead of the fix it defers to.
+- **`docs/CROSS_REPO_PINS.md`** on `opus-backend/t272-artifact-repo-pin` carries
+  the backfill *procedure* — how to re-pin a record, including on behalf of a
+  usage-limited agent, deriving evidence from the tree rather than from who runs
+  the command. **This map is the input to that procedure, not a duplicate of
+  it.** Apply that procedure to the two wrong pins named here (T-244, T-272).
+- **opus-backend independently measured the same defect** at 03:51Z by a
+  different route, counting ten of twelve IN REVIEW rows on the identical steer
+  sha `c1d4706`. Two methods, one conclusion.
+- **T-253** (sonnet-tickets, accepted by cos-opus) audited the 9 E-010 tickets
+  *already closed* on a wrong-repo pin and found 9/9 landed. This map asks the
+  complementary question — where *still open* work is — and does not contradict
+  it. One loose end T-253 left: **T-252** was closed as a duplicate of T-244
+  with the release action "close as duplicate with T-244's merge sha when T-244
+  lands". **T-244 still has not landed**, so T-252 remains DONE ahead of the fix
+  it defers to.
 
 ## What I recommend the master change (no writes made by me)
 
-1. **T-279 needs no action — it landed at 04:02Z** (steer main `ce0844d`). Kept
-   in the map because until 03:58Z it was the one row a sweep could have closed
-   for the wrong reason: its pin `fc77d2e` was already an ancestor of the trunk
-   its fix was waiting on.
-2. **Decide which T-275 copy is canonical** (`35d17ba` on T-264's branch vs
-   `0230636` on T-265's) before merging either branch. They are different
-   patches to the same file.
-3. **Push or discard the two local-only branches** —
-   `sonnet-tickets/t275-reenrollment-route` (empty anyway) and
-   `sonnet-backend/t264-none-branch-principal` (`da9af92`, real work, 0 origin
-   refs). The second is genuinely at risk.
-4. **Merge T-184 at head `b374462`, not at its pin `08f452b`.**
-5. **Do not merge `opus-authz/t271-combined-attack` or `cursor/integrate-review`.**
-6. **Raise T-221** — done and verified, steer half landed, tickets half (parts
-   A, C, fix-forward) unmerged and tracked by nothing.
-7. Correct pins are T-187, T-237, T-243 (tickets repo) and T-268, T-270 (no
-   deliverable). T-271 is a sixth "leave it alone" row of a different kind.
+Ordered by consequence.
 
-## Appendix — re-run any row in two lines
+1. **Do not merge `sonnet-qa/t221-ui-mentions`.** Merge **T-276**, which
+   contains T-221's whole tickets-repo half. This retracts the first pass's
+   recommendation #6. Add a note to T-221's record recording that its
+   tickets-repo half lands under T-276.
+2. **Ask sonnet-backend to push `sonnet-backend/t286-invitation-replay-fix`.**
+   It is local-only with zero origin refs and it is the base for five tickets.
+   The T-286 fix itself is not yet written — plan T-187 → T-188/189/190/192
+   accordingly.
+3. **Recover `7f44920`** (T-275's unique re-enrolment doc correction), stranded
+   on `sonnet-tickets/t265-lease-expiry` after T-265 landed by cherry-pick.
+   `0230636` on that branch is a superseded duplicate and can be dropped.
+4. **Merge T-244 at head `f7b5d0c`**, which includes `988ad60` — the commit that
+   extends the fix to already-existing agent records. Confirm with the owner
+   whether the `ea665f8` WIP commit is meant to ship.
+5. **Use `git cherry`, not ancestry alone, on every row before merging.** T-237
+   proves ancestry gives a false NO on rebased work; the merge wave is
+   cherry-picking, so this will recur.
+6. **Re-pin only T-244 and T-272**, per `docs/CROSS_REPO_PINS.md`. Every other
+   row is either correctly pinned or has no deliverable.
+7. **Consider re-pointing T-283's pin** — `25cafaa` is on no origin ref and will
+   dangle. No work is at risk; the record's resolvability is.
+8. **Do not merge** `opus-authz/t271-combined-attack` or `cursor/integrate-review`.
+9. **Re-check T-263 and T-273 with their owner** — both were reopened during
+   this audit and are back in development, not awaiting merge.
+10. **T-252** is DONE ahead of T-244, the fix it was closed as a duplicate of.
+
+## Appendix — re-run any row in four lines
 
 ```sh
 cd /Users/kavana/Downloads/tickets            # verify: git rev-parse --show-toplevel
 env | grep '^GIT_'                            # must show no GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE
 git fetch origin --prune
 git merge-base --is-ancestor <sha> origin/main && echo ON-MAIN || echo NOT-ON-MAIN
+git cherry -v origin/main origin/<branch>     # '-' = content already upstream, '+' = genuinely unlanded
 git for-each-ref refs/remotes/origin --contains <sha> | wc -l   # 0 => not durable
 ```
+
+A row is safe to skip only when ancestry says ON-MAIN **or** cherry marks every
+commit `-`. A row is safe to merge only when cherry shows `+` **and**
+`for-each-ref` is non-zero.
