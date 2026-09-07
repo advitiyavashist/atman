@@ -47,9 +47,15 @@ def board(tmp_path):
     return b
 
 
-def test_spawn_child_does_not_survive_fixture_reaper(board, tmp_path):
-    run(board, "join", "qwen", "--roles", "docs")
-    r = run(board, "spawn", "qwen", "--exec", "true", "--every", "3600", agent="master")
+def _spawn_qwen_watch(board, tmp_path, *spawn_args):
+    """Start a detached spawn without registering pids (simulates interrupt)."""
+    e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="",
+             HOME=str(board.parent.parent / "home"))
+    e.pop("TICKETS_STOP_HOOK", None)
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "spawn", "qwen", *spawn_args],
+        capture_output=True, text=True, env=e, cwd=str(board.parent),
+    )
     assert r.returncode == 0, r.stderr + r.stdout
     pid_file = board / "agents" / "qwen.watch.pid"
     pid = None
@@ -63,16 +69,62 @@ def test_spawn_child_does_not_survive_fixture_reaper(board, tmp_path):
                 break
         time.sleep(0.1)
     assert pid and pid_alive(pid), "spawn did not leave a live watcher to reap"
+    # Stale/missing pid file is how T-475 leaks survived T-409: ps scan must
+    # still find PPID-1 watchers whose --cwd lives under this fixture root.
+    pid_file.unlink(missing_ok=True)
     assert watch_pids_under(tmp_path), "ps should see the --agent qwen loop under the fixture root"
+    return pid
+
+
+def _assert_reaper_clears_qwen(board, tmp_path, pid):
     leftover = reap_watchers_under(tmp_path)
     assert leftover == set()
     assert not pid_alive(pid)
     assert watch_pids_under(tmp_path) == set()
-    root = str(Path(tmp_path).resolve())
+    tokens = {str(tmp_path), str(Path(tmp_path).resolve()), str(Path(tmp_path).resolve())[len("/private") :]
+              if str(Path(tmp_path).resolve()).startswith("/private/") else str(tmp_path)}
     assert not any(
-        "--agent qwen" in cmd and root in cmd
+        "--agent qwen" in cmd and any(t in cmd for t in tokens)
         for cmd in _ps_commands()
     )
+
+
+def test_spawn_child_does_not_survive_fixture_reaper(board, tmp_path):
+    run(board, "join", "qwen", "--roles", "docs")
+    pid = _spawn_qwen_watch(board, tmp_path, "--exec", "true", "--every", "3600")
+    _assert_reaper_clears_qwen(board, tmp_path, pid)
+
+
+def test_byoa_spawn_stored_harness_reaped_without_pid_file(board, tmp_path):
+    script = _stub(tmp_path)
+    run(board, "join", "qwen", "--roles", "docs", "--harness",
+        "custom:%s {prompt_file}" % script)
+    pid = _spawn_qwen_watch(board, tmp_path, "--every", "3600")
+    _assert_reaper_clears_qwen(board, tmp_path, pid)
+
+
+def test_byoa_spawn_tool_flag_reaped_without_pid_file(board, tmp_path):
+    script = _stub(tmp_path)
+    run(board, "join", "qwen", "--roles", "docs", "--harness",
+        "custom:%s {prompt_file}" % script)
+    pid = _spawn_qwen_watch(board, tmp_path, "--tool", "codex", "--every", "3600")
+    _assert_reaper_clears_qwen(board, tmp_path, pid)
+
+
+def test_byoa_spawn_custom_cmd_reaped_without_pid_file(board, tmp_path):
+    script = _stub(tmp_path)
+    pid = _spawn_qwen_watch(
+        board, tmp_path, "--harness", "custom", "--cmd",
+        "%s {prompt_file}" % script, "--roles", "docs", "--every", "3600",
+    )
+    _assert_reaper_clears_qwen(board, tmp_path, pid)
+
+
+def _stub(tmp_path):
+    script = tmp_path / "stub.sh"
+    script.write_text("#!/bin/sh\necho OK\n")
+    script.chmod(0o755)
+    return script
 
 
 def _ps_commands():
@@ -83,3 +135,17 @@ def _ps_commands():
     except OSError:
         return []
     return out.stdout.splitlines()
+
+
+def test_fixture_root_tokens_cover_var_private_aliases():
+    from watch_reaper import _cmd_mentions_fixture_root, _fixture_root_tokens
+
+    root = Path("/var/folders/qr/test-fixture")
+    tokens = _fixture_root_tokens(root)
+    cmd = (
+        "python tickets.py watch --agent qwen --every 3600 "
+        "--cwd /var/folders/qr/test-fixture/repo/.worktrees/qwen --exec true"
+    )
+    assert _cmd_mentions_fixture_root(cmd, tokens)
+    if str(root.resolve()).startswith("/private/"):
+        assert str(root.resolve()) not in cmd

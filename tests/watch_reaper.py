@@ -81,9 +81,32 @@ def kill_pid_tree(pid, wait_s=1.0):
         pass
 
 
+def _fixture_root_tokens(root: Path) -> set[str]:
+    """Path spellings that may appear in ps output for the same fixture root.
+
+    macOS often shows /var/folders/... in argv while Path.resolve() yields
+    /private/var/folders/...; spawn --cwd uses abspath without realpath.
+    """
+    tokens: set[str] = set()
+    for candidate in (root, Path(root).resolve(), Path(os.path.realpath(root))):
+        s = str(candidate)
+        if not s:
+            continue
+        tokens.add(s)
+        if s.startswith("/private/"):
+            tokens.add(s[len("/private") :])
+        elif s.startswith("/var/"):
+            tokens.add("/private" + s)
+    return tokens
+
+
+def _cmd_mentions_fixture_root(cmd: str, root_tokens: set[str]) -> bool:
+    return any(token in cmd for token in root_tokens)
+
+
 def watch_pids_under(root: Path):
     """Watch-loop pids whose command line mentions this fixture root."""
-    root_s = str(Path(root).resolve())
+    root_tokens = _fixture_root_tokens(root)
     found = set()
     try:
         out = subprocess.run(
@@ -104,7 +127,7 @@ def watch_pids_under(root: Path):
         except ValueError:
             continue
         cmd = parts[1]
-        if root_s not in cmd:
+        if not _cmd_mentions_fixture_root(cmd, root_tokens):
             continue
         if "watch" in cmd and "--agent" in cmd:
             found.add(pid)
