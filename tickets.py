@@ -2085,7 +2085,25 @@ def cmd_merge(a, board):
             sys.exit(3)
         sha = git("rev-parse", "--short", trunk, cwd=root)
         full_trunk = sh("git", "rev-parse", trunk).stdout.strip()
-        print("%s -> %s   (push when ready: git push origin %s)" % (trunk, sha, trunk))
+        if getattr(a, "push", False):
+            pr = sh("git", "push", "origin", trunk)
+            if pr.returncode != 0:
+                why = (pr.stderr or pr.stdout).strip()
+                print("PUSH FAILED: could not push %s to origin/%s\n%s" % (trunk, trunk, why))
+                _master_log(board, "tickets merge: integrated %s@%s locally but PUSH FAILED (%s)" % (
+                    trunk, sha, why.splitlines()[0] if why else "?"), by=owner)
+                sys.exit(4)
+            remote = sh("git", "ls-remote", "--heads", "origin", trunk).stdout.strip().split()
+            remote_sha = remote[0] if remote else ""
+            if remote_sha != full_trunk:
+                print("PUSH FAILED: origin/%s is %s, expected %s" % (
+                    trunk, remote_sha[:12] if remote_sha else "?", sha))
+                _master_log(board, "tickets merge: push reported success but origin/%s != local %s" % (
+                    trunk, sha), by=owner)
+                sys.exit(4)
+            print("%s -> %s   (pushed to origin/%s)" % (trunk, sha, trunk))
+        else:
+            print("%s -> %s   (push when ready: git push origin %s)" % (trunk, sha, trunk))
 
         # Resolve merged pin set to full SHAs for ancestry checks.
         pin_full = set()
