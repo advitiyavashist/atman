@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>atman — finish more work at least cost</title>
+  <meta name="description" content="Atman is a self-hosted team runtime for agents you already bring. Finish more work at least cost — in the fewest turns. Open repository. Not a SaaS cloud.">
+  <meta name="theme-color" content="#0c0e12">
+  <link rel="icon" href="mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top">
+    <a class="lockup" href="#main" aria-label="atman home">
+      <img class="mark" src="mark.svg" width="28" height="28" alt="">
+      <span class="wordmark">atman</span>
+    </a>
+    <nav class="nav" aria-label="Page">
+      <a href="https://github.com/advitiyavashist/atman" rel="noopener">Repository</a>
+      <a href="#run">How it runs</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="kicker">Open repo · self-hosted · not a cloud</p>
+        <h1>Finish more work at least cost — in the fewest turns.</h1>
+        <p class="lede">
+          A team runtime for agents you already bring. Clone the repository.
+          Run it on your machine. There is no Atman SaaS.
+        </p>
+        <p class="actions">
+          <a class="btn" href="https://github.com/advitiyavashist/atman" rel="noopener">Open the repository</a>
+          <a class="text-link" href="#run">How it runs</a>
+        </p>
+      </div>
+      <img class="hero-mark" src="mark.svg" width="200" height="200" alt="" aria-hidden="true">
+    </section>
+
+    <section class="pillars" aria-label="How Atman works">
+      <article>
+        <h2>BYOA</h2>
+        <p>
+          Bring your own agent harness — Claude, Codex, Cursor, a local model,
+          a shell one-liner. We do not install a model. The runtime makes them
+          one team: objective, seats, handoffs, review.
+        </p>
+      </article>
+      <article>
+        <h2>Usage-aware</h2>
+        <p>
+          Turns and cost count when the harness reports them. Unknown is not
+          zero. The point is yield: more work finished, fewer turns, least
+          spend.
+        </p>
+      </article>
+      <article>
+        <h2>Total Football</h2>
+        <p>
+          Positions are coverage, not identity. Any seat can take any lane —
+          including master. Empty seats are uncovered work. The operator
+          intervenes; the product does not silently auto-promote.
+        </p>
+      </article>
+    </section>
+
+    <section class="position" id="position">
+      <h2>Open first. You host it.</h2>
+      <p>
+        Atman is who works and how the team finishes. The CLI is how it runs
+        today. The product is the team runtime — not a hosted dashboard you
+        subscribe to.
+      </p>
+      <ul>
+        <li>Open repository. MIT licensed. You clone it.</li>
+        <li>Self-hosted on your machine or your filesystem. No Atman cloud.</li>
+        <li>Not Steer. Steer is a separate policy product. Atman does not enforce what an agent may see or say.</li>
+      </ul>
+    </section>
+
+    <section class="run" id="run">
+      <h2>How it runs</h2>
+      <p>
+        Clone the repo. Join the harnesses you already use. Set an objective.
+        Watch seats cover lanes. Details live in the repository README.
+      </p>
+      <pre><code>git clone https://github.com/advitiyavashist/atman.git
+cd atman
+# tickets init  →  join harnesses  →  set an objective</code></pre>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="foot-row">
+      <span class="wordmark">atman</span>
+      <span class="mute">MIT · <a href="https://github.com/advitiyavashist/atman" rel="noopener">github.com/advitiyavashist/atman</a></span>
+    </div>
+    <p class="honest">
+      No custom domain is registered. Optional host: GitHub Pages (or any
+      static server) pointed at this <code>landing/</code> folder. A
+      <code>*.github.io</code> URL exists only if Pages is enabled — it is
+      not claimed here.
+    </p>
+  </footer>
+</body>
+</html>
