@@ -306,3 +306,30 @@ def test_a_paused_run_is_not_reaped_as_an_orphan(server, project, agent, client)
                   reason="Operator declined.")
     assert [j["id"] for j in client.jobs("rnr_aaaa1111", wait_seconds=0)["items"]] \
         == [later["id"]]
+
+
+def test_an_expired_own_lease_says_renew_not_already_active(server, project,
+                                                            agent, client):
+    """The store's refusal is right; its sentence is not.
+
+    `run_already_active` reads "A runner is already active for that agent",
+    which is the wrong thing to tell a supervisor whose own lease simply ran
+    out and whom nobody has replaced. The recovery is the same as never having
+    registered, so the route says that instead.
+    """
+    client.register("rnr_aaaa1111", agent["agent_id"], "/tmp/wt")
+    server.store.conn.execute(
+        "UPDATE runner_leases SET expires_at = '2000-01-01T00:00:00Z'"
+        " WHERE agent_id = ?", (agent["agent_id"],))
+
+    with pytest.raises(ApiError) as caught:
+        client.jobs("rnr_aaaa1111", wait_seconds=0)
+    assert caught.value.status == 403
+    assert "expired" in caught.value.message
+    assert "register" in caught.value.message
+
+    # And re-registering at the epoch it holds gets it working again.
+    lease = client.register("rnr_aaaa1111", agent["agent_id"], "/tmp/wt",
+                            expected_epoch=1)
+    assert lease["runner_id"] == "rnr_aaaa1111"
+    assert client.jobs("rnr_aaaa1111", wait_seconds=0)["items"] == []

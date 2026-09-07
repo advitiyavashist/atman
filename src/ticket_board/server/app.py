@@ -1069,6 +1069,15 @@ class BoardServer:
                 "This runner holds no lease; POST /runners/register first.")
         if lease["runner_id"] != runner_id:
             raise RunAlreadyActive(agent_id, lease["runner_id"], lease["epoch"])
+        if lease["expires_at"] <= ids.now():
+            # This runner's own lease, lapsed. The store would refuse it too,
+            # but as `run_already_active` -- "A runner is already active for
+            # that agent" is exactly the wrong sentence to hand somebody whose
+            # lease has simply run out and whom nobody has replaced. The
+            # recovery is the same as never having registered, so say that.
+            raise ForbiddenScope(
+                "This runner's lease expired at {}; POST /runners/register to "
+                "renew it before asking for work.".format(lease["expires_at"]))
         return self.store.lease_wake_jobs(project_id, agent_id, runner_id,
                                           epoch=lease["epoch"])
 
