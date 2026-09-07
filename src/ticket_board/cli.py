@@ -3171,6 +3171,51 @@ def cmd_join(a, board):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
 
 
+def _agent_holds_claimed_ticket(board, owner):
+    return any(
+        t.get("status") == "claimed" and t.get("owner") == owner
+        for t in load_all(board)
+    )
+
+
+def cmd_retire(a, board):
+    """Remove a seat from the board (inverse of join). Refused while it holds a ticket."""
+    owner = (a.name or whoami()).strip()
+    if not owner:
+        sys.exit("usage: tickets retire <name>")
+    if owner.startswith("agent-"):
+        sys.exit("give a real agent name")
+    agent_path = os.path.join(agents_dir(board), owner + ".json")
+    wf = load_workforce(board)
+    roles_path = os.path.join(board, "roles.json")
+    roles = {}
+    if os.path.isfile(roles_path):
+        try:
+            with open(roles_path) as f:
+                roles = json.load(f)
+        except (IOError, ValueError):
+            roles = {}
+    if not (os.path.isfile(agent_path) or owner in wf or owner in roles):
+        sys.exit("no seat %r on this board" % owner)
+    if _agent_holds_claimed_ticket(board, owner):
+        sys.exit("refusing: %s holds a claimed ticket; reopen or finish it first" % owner)
+    if os.path.isfile(agent_path):
+        os.remove(agent_path)
+    if owner in wf:
+        del wf[owner]
+        save_workforce(board, wf)
+    if owner in roles:
+        del roles[owner]
+        os.makedirs(board, exist_ok=True)
+        tmp = roles_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(roles, f, indent=2)
+        os.replace(tmp, roles_path)
+    retirer = whoami(getattr(a, "owner", None))
+    post_message(board, retirer, "retired seat %s from the board" % owner)
+    print("retired %s" % owner)
+
+
 def cmd_connect(a, board):
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
@@ -3432,6 +3477,11 @@ def main():
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
     c.set_defaults(fn=cmd_join)
+
+    c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
+    c.add_argument("name", nargs="?", default="")
+    c.add_argument("--owner", "-o", default="", help="who is performing the retire (default: TICKET_AGENT)")
+    c.set_defaults(fn=cmd_retire)
 
     c = sub.add_parser("route", help="master: suggest an owner for every open ticket by model/roles/capabilities/cost")
     c.add_argument("--claim", action="store_true", help="hard-assign the ready ones (claims on their behalf)")
