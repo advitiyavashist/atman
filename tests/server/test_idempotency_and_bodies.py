@@ -167,16 +167,38 @@ def test_an_unknown_field_is_rejected(operator):
 
 
 def test_missing_required_fields_are_named(operator):
-    response = operator.post("/tickets", {"request_id": rid(), "title": "t"})
+    """Retargeted for T-224/T-288: `outcome` and `acceptance` are OPTIONAL now,
+    so the old body (request_id + title) is a valid create. The behaviour under
+    test -- that a 400 names what is missing rather than saying "bad request" --
+    is unchanged; only the field that is genuinely required moved."""
+    response = operator.post("/tickets", {"request_id": rid()})
     assert response.status == 400
-    assert response.json()["error"]["details"]["missing_fields"] == \
-        ["acceptance", "outcome"]
+    assert response.json()["error"]["details"]["missing_fields"] == ["title"]
 
 
-def test_a_ticket_needs_at_least_one_acceptance_criterion(operator):
-    response = operator.post("/tickets", {
+def test_a_ticket_without_acceptance_criteria_cannot_reach_review(operator, enrolled):
+    """T-224 dropped `minItems: 1` from CreateTicketRequest.acceptance, so this
+    is no longer a 400 at CREATE -- T-213's legacy import must be lossless and
+    the live board has tickets with no acceptance list at all.
+
+    The guarantee the old create-time assertion was really protecting is NOT
+    dropped, it moved to where it still holds: a ticket cannot be moved to
+    `review` with an empty acceptance list. Asserted here so removing the
+    create-time check cannot silently remove the guarantee too (T-288)."""
+    created = operator.post("/tickets", {
         "request_id": rid(), "title": "t", "outcome": "o", "acceptance": []})
-    assert response.status == 400
+    assert created.status == 201, created.json()
+    assert created.json()["acceptance"] == []
+
+    ticket = created.json()
+    claimed = enrolled["client"].post("/tickets/%s/claim" % ticket["id"], {
+        "request_id": rid(), "expected_version": ticket["version"],
+        "session_id": enrolled["session_id"]})
+    assert claimed.status == 200, claimed.json()
+    review = enrolled["client"].post("/tickets/%s/reviews" % ticket["id"], {
+        "request_id": rid(), "expected_version": claimed.json()["version"],
+        "evidence": {"repository": "acme/repo", "branch": "b", "sha": "a" * 40}})
+    assert review.status == 422, review.json()
 
 
 def test_a_boolean_is_not_an_integer_version(operator, ticket):

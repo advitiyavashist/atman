@@ -58,7 +58,7 @@ def test_a_ticket_awaiting_review_raises_an_attention_item(operator, enrolled,
         "session_id": enrolled["session_id"]}).json()
     enrolled["client"].post("/tickets/{}/reviews".format(ticket["id"]), {
         "request_id": rid(), "expected_version": claimed["version"],
-        "evidence": {"branch": "b", "sha": SHA}})
+        "evidence": {"repository": "acme/repo", "branch": "b", "sha": SHA}})
     attention = operator.get("/overview").json()["attention"]
     item = next(i for i in attention if i["kind"] == "awaiting_review")
     assert item["subject_type"] == "ticket" and item["subject_id"] == ticket["id"]
@@ -161,7 +161,7 @@ def test_recent_accepted_shows_the_decided_review(operator, enrolled, ticket,
         "session_id": enrolled["session_id"]}).json()
     review = enrolled["client"].post("/tickets/{}/reviews".format(ticket["id"]), {
         "request_id": rid(), "expected_version": claimed["version"],
-        "evidence": {"branch": "b", "sha": SHA}}).json()
+        "evidence": {"repository": "acme/repo", "branch": "b", "sha": SHA}}).json()
     version = operator.get("/tickets/" + ticket["id"]).json()["ticket"]["version"]
     operator.post("/tickets/{}/reviews/{}/decision".format(ticket["id"],
                                                            review["id"]),

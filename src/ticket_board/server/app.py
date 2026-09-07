@@ -46,6 +46,7 @@ from .errors import (
     AssignmentExpired,
     BoardError,
     ForbiddenScope,
+    InvalidStateTransition,
     MalformedRequest,
     NotFound,
     SessionLeaseExpired,
@@ -59,7 +60,12 @@ from .wire import Response
 PROJECT_ID_RE = re.compile(r"^prj_[0-9a-z]{8,32}$")
 SESSION_ID_RE = re.compile(r"^ses_[0-9a-z]{8,32}$")
 REVIEW_ID_RE = re.compile(r"^rev_[0-9a-z]{8,32}$")
-AGENT_ID_RE = re.compile(r"^agt_[0-9a-z]{8,32}$")
+# Mirrors the contract's `AgentId` (T-224): a server-minted `agt_*` token OR
+# the board's real free-form lowercase name (`claude-fable`, `sonnet-sdk`).
+# The widening was deliberate -- the human-readable name IS the V1 identity,
+# and hardcoding the agt_-only form here made revoke_session_lease fail CLOSED
+# on ~35 legitimate live ids (T-288).
+AGENT_ID_RE = re.compile(r"^(agt_[0-9a-z]{8,32}|[a-z][a-z0-9-]{1,31})$")
 ASSIGNMENT_ID_RE = re.compile(r"^asg_[0-9a-z]{8,32}$")
 RUNNER_ID_RE = re.compile(r"^rnr_[0-9a-z]{8,32}$")
 RUN_ID_RE = re.compile(r"^run_[0-9a-z]{8,32}$")
@@ -361,8 +367,12 @@ class BoardServer:
     def create_ticket(self, ctx):
         body = validate.check_body(
             ctx.body(),
-            required=("request_id", "title", "outcome", "acceptance"),
-            allowed=("role", "dependencies", "files"),
+            # T-224 made `outcome` and `acceptance` optional with documented
+            # defaults "" and []; requiring them 400s a conforming client and
+            # 422s T-213's legacy import of a board where 141 tickets carry no
+            # outcome at all (T-288).
+            required=("request_id", "title"),
+            allowed=("outcome", "acceptance", "role", "dependencies", "files"),
         )
         request_id = validate.request_id(body)
         ticket = self.store.create_ticket(
@@ -370,7 +380,8 @@ class BoardServer:
             lambda conn: self._next_ticket_id(ctx.project_id, conn),
             validate.text(body, "title", max_length=200),
             role=validate.text(body, "role", max_length=40, required=False),
-            outcome=validate.text(body, "outcome", max_length=4000),
+            outcome=validate.text(body, "outcome", max_length=4000,
+                                  required=False, default="", min_length=0),
             acceptance=validate.acceptance(body),
             dependencies=validate.string_list(body, "dependencies", max_length=22),
             files=validate.string_list(body, "files"),
@@ -670,6 +681,46 @@ class BoardServer:
             reason=reason, request_id=request_id,
         )
         return Response(200, result)
+
+    def reopen_ticket(self, ctx):
+        """Release a claim -- timeout/stuck recovery, NOT a review decision.
+
+        The contract is explicit that these are different things (T-224):
+        a rejected review returns a ticket to `claimed` with the SAME owner via
+        decideReview, whereas this returns an any-state claimed ticket to `open`
+        with `owner` and `owner_session` cleared, for any reason short of a
+        review disposition. It is MASTER.md's HANDOVER step 2, and the mechanism
+        T-182's assignment loop and T-185's recovery verification both rely on.
+
+        Operator-gated by the route table, and that is the point rather than an
+        oversight: this is a recovery action taken *about* an agent, not one a
+        stuck agent calls on itself -- a truly stuck agent may not be able to
+        call anything. Existed only in the CLI until T-288, so an API-only
+        client (which is what E-010 is for) could not recover a claim at all.
+        """
+        body = validate.check_body(
+            ctx.body(), required=("request_id", "expected_version", "reason"),
+        )
+        request_id = validate.request_id(body)
+        ticket_id = validate.ticket_id(ctx.params["ticket_id"])
+        expected_version = validate.integer(body, "expected_version", minimum=0)
+        reason = validate.text(body, "reason", max_length=500)
+        # `transition` owns the state table and clears owner/owner_session on
+        # the way to `open`, so a done ticket is refused there as an invalid
+        # transition rather than by a second copy of the rule here.
+        #
+        # T-402 planner ruling: reopenTicket's frozen responses omit 422, so
+        # InvalidStateTransition (class status 422) is remapped to 409 here
+        # only. ErrorCode and details stay the same. Other routes keep 422.
+        try:
+            return Response(200, self.store.transition(
+                ctx.project_id, ticket_id, "open",
+                expected_version=expected_version, actor=ctx.principal.actor,
+                reason=reason, request_id=request_id,
+            ))
+        except InvalidStateTransition as err:
+            err.status = 409
+            raise
 
     # --------------------------------------------------------------- agents
 
@@ -1302,6 +1353,8 @@ _ROUTE_TABLE = [
      "decide_review", OPERATOR, True),
     ("POST",   r"^/tickets/(?P<ticket_id>[^/]+)/blocked$",
      "set_ticket_blocked", ANY, True),
+    ("POST",   r"^/tickets/(?P<ticket_id>[^/]+)/reopen$",
+     "reopen_ticket", OPERATOR, True),
     ("GET",    r"^/agents$", "list_agents", ANY, True),
     ("DELETE", r"^/agents/(?P<agent_id>[^/]+)/session-lease$",
      "revoke_session_lease", OPERATOR, True),

@@ -288,7 +288,7 @@ def test_a_displaced_owner_is_refused_on_reviews_and_blocked_too(
     review = enrolled["client"].post(
         "/tickets/{}/reviews".format(ticket["id"]),
         {"request_id": rid(), "expected_version": current["version"],
-         "evidence": {"branch": "b", "sha": "a" * 40}})
+         "evidence": {"repository": "acme/repo", "branch": "b", "sha": "a" * 40}})
     assert review.status == 403
     assert review.json()["error"]["code"] == "forbidden_scope"
 
