@@ -55,6 +55,13 @@ def test_idle_review_watch_once_pairs_turns_stay_at_claim(board, tmp_path, monke
                 "--cwd", str(repo), agent="alice", cwd=repo)
         assert r.returncode == 0, r.stdout + r.stderr
 
+    fail_dir = tmp_path / "failh"
+    fail_dir.mkdir()
+    fail = _fake_harness(fail_dir, "exit 1\n")
+    run(board, "msg", "wake-fail", "--to", "alice", agent="boss", cwd=repo)
+    run(board, "watch", "--agent", "alice", "--once", "--exec", str(fail),
+        "--cwd", str(repo), agent="alice", cwd=repo)
+
     after = json.loads(run(board, "turns", "--json", cwd=repo).stdout)
     by = {row["ticket"]: row for row in after["tickets"]}
     assert by[tid]["turns"] == 1
@@ -64,8 +71,8 @@ def test_idle_review_watch_once_pairs_turns_stay_at_claim(board, tmp_path, monke
     from ticket_board.turns import ROW_KEYS
     assert tuple(after["tickets"][0].keys()) == ROW_KEYS
     ends = events(board, kind="run_end", ticket=tid)
-    assert len(ends) == 3
+    assert len(ends) == 4
     assert ends[0].get("bound_write") is True
     assert "bound_write" not in ends[1]
-    assert "bound_write" not in ends[2]
+    assert ends[-1].get("exit") == 1
     assert ends[0].get("run_id") and ends[1].get("run_id") != ends[0].get("run_id")

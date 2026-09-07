@@ -1,12 +1,12 @@
 """T-312: turns-to-done aggregator.
 
-A TURN is one completed watch run (`run_start` -> `run_end`) that is not an
-idle pulse. T-425: a run increments `turns` only when THAT `run_id` also
+A TURN is one completed watch run (`run_start` -> `run_end`) that wrote
+the bound ticket. T-425: a run increments `turns` only when THAT `run_id`
 recorded a bound-ticket write (claim, update, review, done, block, reopen,
-or msg --re that ticket) or a non-limit harness failure/timeout. Session-limit
-fails (`outcome=limit`) and pure idle wakes stay in jsonl but do not count.
-Events with no `run_id` (pre-T-425) still count every `run_end`. Backfill
-never recorded runs, so `turns` is JSON null — never 0.
+or msg --re that ticket). Fail-exit, timeout, and session-limit with no
+write stay in jsonl but do not count. Events with no `run_id` (pre-T-425)
+still count every `run_end`. Backfill never recorded runs, so `turns` is
+JSON null — never 0.
 
 `--json` shape is frozen here and in docs/turns.md. The optimizer (T-313)
 reads it; do not rename keys.
@@ -175,50 +175,31 @@ def _is_bound_write(e, ticket):
     return kind in _BOUND_WRITE_KINDS or kind == "msg"
 
 
-def _first_review_at(evs):
-    ats = [e.get("at") for e in evs if e.get("kind") == "review" and e.get("at")]
-    return min(ats) if ats else None
+def _run_is_productive(end, writes_by_rid):
+    """T-425 FLAG: increment iff THAT run_id wrote the bound ticket.
 
-
-def _run_is_productive(end, writes_by_rid, first_review_at):
-    """T-425 FLAG: bound-ticket write on this run_id, else non-limit fail.
-
-    Claim-bind (no review yet, or run_end.at before first review) still
-    counts every completed run. Session-limit fail (`outcome=limit`) is idle
-    even when exit != 0. No content grep. Broadcasts without --re never
-    increment.
+    Exit=1 / timed_out / session-limit with zero writes is idle (HB87/HB88).
+    No content grep. Broadcasts without --re never increment.
     """
-    if end.get("outcome") == "limit":
-        return False
     if end.get("bound_write"):
         return True
     rid = end.get("run_id")
     if not rid:
         return True  # pre-T-425 jsonl: every completed run counted
     tid = end.get("ticket")
-    if any(_is_bound_write(w, tid) for w in writes_by_rid.get(rid) or []):
-        return True
-    if end.get("timed_out"):
-        return True
-    exit_code = end.get("exit")
-    if exit_code not in (0, None):
-        return True
-    if first_review_at is None:
-        return True
-    at = end.get("at")
-    return bool(at and at < first_review_at)
+    return any(_is_bound_write(w, tid) for w in writes_by_rid.get(rid) or [])
 
 
 def _measured_turns(evs):
     """Count productive completed watch runs. Unknown -> None, never 0.
 
-    Idle IN-REVIEW `run_end` rows stay in jsonl. If none of a ticket's runs
-    are productive, `turns` stays null so n_measured does not rise.
+    Idle and fail-exit `run_end` rows stay in jsonl. If none of a ticket's
+    runs wrote the bound ticket, `turns` stays null so n_measured does not
+    rise.
     """
     writes_by_rid = {}
     saw_run = False
     n = 0
-    first_review = _first_review_at(evs)
     for e in evs:
         rid = e.get("run_id")
         if rid and _is_bound_write(e, e.get("ticket")):
@@ -227,7 +208,7 @@ def _measured_turns(evs):
         if e.get("kind") != "run_end":
             continue
         saw_run = True
-        if _run_is_productive(e, writes_by_rid, first_review):
+        if _run_is_productive(e, writes_by_rid):
             n += 1
     if not saw_run or n == 0:
         return None

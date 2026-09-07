@@ -11,16 +11,14 @@ is a `run_start` followed by its `run_end`. Incomplete starts (no `run_end`)
 do not count.
 
 T-425: a `run_start`/`run_end` pair increments `turns` only when THAT
-`run_id` also recorded a bound-ticket write (claim, update, review, done,
-block, reopen, or `msg --re` that ticket) or a non-limit harness
-failure/timeout. Idle pulses on an IN-REVIEW ticket (`watch --every N` with
-no ticket write) and session-limit fails (`run_end.outcome=limit`) stay in
-jsonl but do not increment. Broadcasts without `--re` never increment. The
-FLAG is `bound_write` on `run_end` (and matching `run_id` on the write
-events), not a grep of message text for `idle:`. Claim-bind is unchanged:
-completed runs before the ticket's first `review` event still count.
-Pre-T-425 events with no `run_id` still count every completed run. No
-backfill of existing jsonl.
+`run_id` recorded a bound-ticket write (claim, update, review, done, block,
+reopen, or `msg --re` that ticket). Idle pulses, session-limit fails, and
+generic `exit=1`/`timed_out` with no ticket write stay in jsonl but do not
+increment (HB87/HB88: no OR-nonzero). Broadcasts without `--re` never
+increment. The FLAG is `bound_write` on `run_end` (and matching `run_id` on
+the write events), not a grep of message text for `idle:`. Pre-T-425 events
+with no `run_id` still count every completed run. No backfill of existing
+jsonl.
 
 A **ticket's turns** are those productive runs from the first `claim` to the
 final `done` (or `merge`). A `reopen` does not reset the counter: later runs

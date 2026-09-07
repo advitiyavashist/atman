@@ -232,7 +232,8 @@ def test_session_limit_fail_is_idle():
     assert by["T-001"]["turns"] is None
 
 
-def test_nonzero_exit_without_limit_counts():
+def test_nonzero_exit_without_write_is_idle():
+    """HB87/88: generic exit=1 with no bound-ticket write must not increment."""
     evs = [
         {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r1",
          "run_no": 1},
@@ -241,7 +242,7 @@ def test_nonzero_exit_without_limit_counts():
     ]
     report = build_turns_report(evs)
     by = {r["ticket"]: r for r in report["tickets"]}
-    assert by["T-001"]["turns"] == 1
+    assert by["T-001"]["turns"] is None
 
 
 def test_other_seat_write_same_minute_does_not_credit():
