@@ -340,6 +340,26 @@ def format_truncation_notice(dropped_line_count: int, truncated_line_count: int,
     )
 
 
+def _escape_embedded_newlines(line: str) -> str:
+    """Collapse one context.lines element to exactly one printed line.
+
+    context.lines is contractually one line per element, but nothing enforces
+    that on the wire: an element containing '\\n' (or '\\r') prints as more
+    than one visual line through the single `print(line)` call in hook.py --
+    it is effectively multiple lines wearing one element's clothing. That
+    matters because _sanitize_notice_lookalike's startswith check only looks
+    at the start of the *element*; a line like 'hello\\n[ticket board: ...]'
+    does not start with NOTICE_RESERVED_PREFIX, but its second printed line
+    does, and that second line reaches the agent's screen as a forged
+    framework notice regardless (T-295 attack 3 / T-289 reopen). Escaping
+    every embedded newline BEFORE that check runs means one element can
+    never produce more than one printed line, so it can never smuggle
+    content past a check that only ever sees where the element itself
+    starts.
+    """
+    return line.replace("\r\n", "\\r\\n").replace("\n", "\\n").replace("\r", "\\r")
+
+
 def _sanitize_notice_lookalike(line: str) -> str:
     """Neutralize any inbound line that could be mistaken for a framework notice.
 
@@ -351,6 +371,11 @@ def _sanitize_notice_lookalike(line: str) -> str:
     tell "the framework said this" from "the board said this", so the only
     sound fix is at this boundary: board content is never allowed to start
     with NOTICE_RESERVED_PREFIX, whether or not truncation actually occurs.
+
+    Embedded newlines are escaped by the caller before this runs (see
+    _escape_embedded_newlines) so this startswith check, which only sees the
+    start of one element, is also seeing the start of the only printed line
+    that element can ever produce.
     """
     if line.startswith(NOTICE_RESERVED_PREFIX):
         return "[ticket board content, not a framework notice:" + line[len(NOTICE_RESERVED_PREFIX):]
@@ -380,6 +405,7 @@ def bound_context_lines(lines: List[str], config: AdapterConfig) -> Tuple[List[s
         if len(line) > config.max_context_line_chars:
             truncated_line_count += 1
             line = line[: config.max_context_line_chars]
+        line = _escape_embedded_newlines(line)
         bounded.append(_sanitize_notice_lookalike(line))
 
     return bounded, dropped_line_count, truncated_line_count
