@@ -2130,6 +2130,32 @@ def _cwd_sharers(board, owner, cwd, peers=None):
                   and (r.get("cwd") or r.get("worktree") or "") == cwd)
 
 
+def _dedup(paths):
+    """Non-empty, order-preserving, no repeats."""
+    out = []
+    for p in paths:
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def _transcript_over_cwds(cwds):
+    """First cwd with a real Claude transcript wins; otherwise report against
+    the first candidate so the 'nothing found' message names the directory a
+    reader should actually go and look in.
+
+    Returns (state, age, detail, cwd_used).
+    """
+    first = None
+    for c in cwds:
+        st, age, detail = _safe(lambda: _claude_transcript_state(c), ("unknown", None, "transcript unreadable"))
+        if first is None:
+            first = (st, age, detail, c)
+        if st != "unknown":
+            return st, age, detail, c
+    return first or ("unknown", None, "transcript unreadable", "")
+
+
 def agent_liveness(board, rec, peers=None):
     """One per-agent state, derived from ground truth rather than from the
     watcher's own `seen` field.
@@ -2141,9 +2167,19 @@ def agent_liveness(board, rec, peers=None):
     instead of dressing it up as a fact.
     """
     owner = (rec or {}).get("owner") or ""
-    cwd = (rec or {}).get("cwd") or (rec or {}).get("worktree") or ""
     pid = _watcher_pid(board, owner)
     run = _read_run(board, owner)
+    # Where does this agent's session actually live? The agent RECORD's cwd is
+    # whatever directory the last `tickets` command was typed in, and for this
+    # epic that is routinely a second repo -- every E-010 agent runs `tickets
+    # review` from advitiyavashist/tickets while its session runs in a steer
+    # worktree. The WATCHER's cwd, recorded in the run file, is the session's
+    # own directory and does not move when a command is run elsewhere, so it
+    # is tried first. Both are kept: an agent running by hand has no run file.
+    cwds = _dedup([run.get("cwd") or "",
+                   (rec or {}).get("cwd") or "",
+                   (rec or {}).get("worktree") or ""])
+    cwd = cwds[0] if cwds else ""
     beat_age = _age_secs(run.get("beat"))
     out = {"state": "unknown", "detail": "", "source": "none", "heuristic": True,
            "watcher": bool(pid and _pid_alive(pid)),
@@ -2172,7 +2208,7 @@ def agent_liveness(board, rec, peers=None):
         out.update(state="limited", source="watchlog", heuristic=True, detail=wdetail)
         return out
 
-    tstate, tage, tdetail = _safe(lambda: _claude_transcript_state(cwd), ("unknown", None, "transcript unreadable"))
+    tstate, tage, tdetail, cwd = _transcript_over_cwds(cwds)
     tsource = "claude"
     if tstate == "unknown":
         cstate, cage, cdetail = _safe(lambda: _codex_transcript_state(cwd), ("unknown", None, "rollout unreadable"))

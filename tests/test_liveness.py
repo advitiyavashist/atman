@@ -488,3 +488,30 @@ def test_concurrent_beats_never_leave_an_unparseable_run_record(board):
     assert reads > 0, "never observed the record at all"
     assert not errors, "run record was torn by concurrent writers: %s" % errors[0]
     assert not list((board / "agents").glob("doc.run*.tmp")), "scratch files left behind"
+
+
+def test_a_command_run_from_a_second_repo_does_not_blind_the_transcript_lookup(board):
+    """Found on the live board with this ticket's own agent as the specimen.
+
+    checkin() stamps the agent record's cwd from wherever a `tickets` command
+    was typed. Every E-010 agent types `tickets review` in the artifact repo
+    (advitiyavashist/tickets) while its session runs in a steer worktree, so
+    the record's cwd walks away from the session and the transcript lookup
+    finds nothing -- the agent drops to `unknown` mid-work. The watcher's own
+    cwd, recorded in the run file when it launches a child, does not move.
+    """
+    run(board, "join", "doc", "--roles", "docs")
+    session_dir = board.parent                      # where the session really runs
+    elsewhere = board.parent.parent / "other-repo"  # where a command got typed
+    elsewhere.mkdir()
+    claude_transcript(board, session_dir, secs_ago=5)
+
+    # the record points at the second repo; the watcher's run file at the session
+    write_agent(board, "doc", cwd=str(elsewhere), worktree=str(elsewhere), seen=stamp(3000))
+    (board / "agents" / "doc.run").write_text(json.dumps(
+        {"cwd": str(session_dir), "active": True, "run": 3, "beat": stamp(1), "rc": None}))
+
+    out = who(board)
+    assert state_of(out, "doc") == "working", \
+        "an agent that ran one command in another repo must not read as unknown: %s" % out
+    assert "transcript active" in out
