@@ -291,13 +291,18 @@ def read_legacy_documents(legacy_dir, *, report=None):
     board-level `*.json`/`*.md` files. Returned as `(kind, name, content)` with
     the content verbatim, because the point of the archive is that an operator
     can read the original, not our re-rendering of it -- *below*
-    `LEGACY_DOCUMENT_MAX_BYTES`. A file over that cap is truncated at the byte
-    boundary (decoded with `errors="replace"` so a split multi-byte character
-    at the cut does not raise) rather than imported whole or dropped: an
-    archive that refuses the whole board because one brief grew too large is
-    worse than an archive with one clipped document, and truncating still
-    names the loss in `report.truncated_fields` instead of hiding it the way
-    a silently-oversized row would.
+    `LEGACY_DOCUMENT_MAX_BYTES`. Every file is decoded with `errors="replace"`,
+    not just ones over the cap: a legacy board is the realistic place to meet
+    stray bytes (a hand-edited brief, latin-1 pasted into a note, a truncated
+    write from a crashed agent), and refusing the whole board because one
+    under-cap file has one bad byte is worse than importing it with the byte
+    replaced. A file over the cap, or one whose replacement characters expand
+    past the cap, is truncated at the byte boundary (re-decoded so a split
+    multi-byte character at the cut does not raise) rather than imported whole
+    or dropped: an archive that refuses the whole board because one brief grew
+    too large is worse than an archive with one clipped document, and
+    truncating still names the loss in `report.truncated_fields` instead of
+    hiding it the way a silently-oversized row would.
     """
     directory = Path(legacy_dir)
     documents = []
@@ -305,14 +310,21 @@ def read_legacy_documents(legacy_dir, *, report=None):
     def _add(kind, path):
         try:
             size = path.stat().st_size
-            if size <= LEGACY_DOCUMENT_MAX_BYTES:
-                content = path.read_text()
-            else:
-                with path.open("rb") as fh:
-                    raw = fh.read(LEGACY_DOCUMENT_MAX_BYTES)
-                content = raw.decode("utf-8", errors="replace")
-                # Replacement characters can expand the stored UTF-8 size.
-                # Drop only a partial trailing code point after clipping.
+            with path.open("rb") as fh:
+                raw = fh.read(min(size, LEGACY_DOCUMENT_MAX_BYTES))
+            # Always decode tolerantly, whether the file is over the cap or
+            # not: an under-cap file can still hold invalid UTF-8 (a
+            # hand-edited brief, latin-1 pasted into a note), and a strict
+            # decode there used to raise UnicodeDecodeError -- a ValueError
+            # the surrounding `except OSError` does not catch -- aborting the
+            # whole board import over one bad byte.
+            content = raw.decode("utf-8", errors="replace")
+            if (size > LEGACY_DOCUMENT_MAX_BYTES
+                    or len(content.encode("utf-8")) > LEGACY_DOCUMENT_MAX_BYTES):
+                # Either the source file itself was over the cap, or
+                # replacement characters expanded an under-cap file's decoded
+                # form past it. Either way, re-clip and say so: drop only a
+                # partial trailing code point after clipping.
                 content = content.encode("utf-8")[:LEGACY_DOCUMENT_MAX_BYTES].decode(
                     "utf-8", errors="ignore")
                 if report is not None:
