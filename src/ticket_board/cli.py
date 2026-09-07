@@ -663,7 +663,10 @@ def _clear_agent_ticket(board, agent, tid):
 
 
 def _drop_unowned_agent_ticket(board, owner):
-    """T-439: drop ticket= when the live owner of that id is not me. Keep cwd/branch/sha."""
+    """T-439: drop ticket= when the live owner of that id is not me. Keep cwd/branch/sha.
+
+    Also drop a leftover review bind when I already hold a different claimed ticket.
+    """
     if not owner:
         return
     path = os.path.join(agents_dir(board), owner + ".json")
@@ -676,6 +679,11 @@ def _drop_unowned_agent_ticket(board, owner):
         return
     tid = rec.get("ticket") or ""
     if not tid:
+        return
+    claimed = [t["id"] for t in load_all(board)
+               if t.get("status") == "claimed" and t.get("owner") == owner]
+    if claimed and tid not in claimed:
+        _clear_agent_ticket(board, owner, tid)
         return
     t = None
     try:

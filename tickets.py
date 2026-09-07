@@ -991,6 +991,8 @@ def _clear_agent_ticket(board, agent, tid):
 def _drop_unowned_agent_ticket(board, owner):
     """T-439: drop agents/<me>.json ticket= when the live owner of that id is not me.
 
+    Also drop a leftover review bind when I already hold a different claimed
+    ticket (assign-not-claim: json still has T-438 after planner assigned T-415).
     Keeps cwd/branch/sha. Missing ticket files count as unowned. Call at
     watch/spawn start so a STOPPED seat's leftover bind cannot reach run_start.
     """
@@ -999,6 +1001,11 @@ def _drop_unowned_agent_ticket(board, owner):
     rec = _agent_rec(board, owner) or {}
     tid = rec.get("ticket") or ""
     if not tid:
+        return
+    claimed = [t["id"] for t in load_all(board)
+               if t.get("status") == "claimed" and t.get("owner") == owner]
+    if claimed and tid not in claimed:
+        _clear_agent_ticket(board, owner, tid)
         return
     t = None
     try:
