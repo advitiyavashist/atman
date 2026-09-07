@@ -1,10 +1,10 @@
 # ticket-board (tickets CLI)
 
-Standalone multi-agent ticket board CLI, extracted from [steer](https://github.com/advitiyavashist/steer).
+Standalone multi-agent ticket board CLI for coordinating agent teams on one codebase.
 
-## Why this repo exists
+## Why safe clear exists
 
-**Incident 2026-09-06:** `tickets clear` deleted every `T-*.json` on the live Steer board.
+An early `tickets clear` implementation could wipe every `T-*.json` on a live board.
 This package hardens that command and adds backup/restore.
 
 ## Safe clear
@@ -32,7 +32,7 @@ Live backups need `--i-understand-live` (note text is still redacted). Prefer fi
 ## Install
 
 ```bash
-# into the historic flat layout used by Steer agents
+# into the historic flat layout used by agent fleets
 python3 scripts/install.py
 # or: python3 scripts/install.py ~/.claude/tools/tickets.py
 
@@ -46,7 +46,7 @@ pip install -e .
 
 ```bash
 pytest -q tests/
-# Always use fixture boards — never TICKETS_DIR=~/Downloads/steer/.tickets for clear tests
+# Always use fixture boards — never point TICKETS_DIR at a live shared board for clear tests
 ```
 
 ## Commands added/changed (T-108)

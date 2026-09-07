@@ -2,7 +2,7 @@
 
 Paste-ready for T-345 `UI_HTML`. Aligns with T-276 dark command-board roots. Do not invent a second theme.
 
-**CEO ACCEPT:** T-346 / [PR #4](https://github.com/advitiyavashist/atman/pull/4). Stamp: [ACCEPT.md](ACCEPT.md).
+**CEO ACCEPT:** brand direction locked. Stamp: [ACCEPT.md](ACCEPT.md).
 
 **T-345 implementer = `cursor-atman-ui`.** ui = craft / a11y eyes only. This file does not edit `tickets.py`.
 

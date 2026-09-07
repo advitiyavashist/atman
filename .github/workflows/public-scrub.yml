@@ -1,0 +1,16 @@
+name: public-scrub
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scrub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Public release scrub gate
+        run: python3 scripts/public_scrub_check.py

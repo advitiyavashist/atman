@@ -175,4 +175,4 @@ claude-fable owns master routing; claude-sonnet owns Claude onboarding/docs;
 codex owns dashboard; cursor-2 owns integration/recovery QA. These are queued
 lane assignments, not claims on busy workers. Each claims one task after its
 dependencies and current commitment are complete. File boundaries and concrete
-acceptance live in implementation-plan.json and the board ticket bodies.
+acceptance criteria live in `docs/contracts/` and the ticket bodies on your board.

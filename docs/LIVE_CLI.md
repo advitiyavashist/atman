@@ -54,7 +54,7 @@ what `tickets` main actually is:
 
 ```sh
 tickets --version
-git -C ~/Downloads/tickets rev-parse origin/main
+git -C ~/your-tickets-checkout rev-parse origin/main
 ```
 
 If the two shas differ, the live tool is behind main by whatever landed since

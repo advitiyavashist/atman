@@ -5,10 +5,10 @@ Run: `python3 scripts/make_sample_legacy_board.py` (writes tests/data/legacy_boa
 
 Why this is synthesised rather than scrubbed from the real board:
 
-The import tests used to `skipif` on `/Users/kavana/Downloads/steer/.tickets`
-existing, so on every other machine the only real-board assertion silently
-vanished and the suite still reported green. The fix needs a board that is
-*committed*. Deriving one by scrubbing the live board would put a scrubber
+The import tests used to `skipif` on a live operator board under
+`~/.tickets` (or similar), so on every other machine the only real-board
+assertion silently vanished and the suite still reported green. The fix needs a
+board that is *committed*. Deriving one by scrubbing the live board would put a scrubber
 between the fixture and the reviewer -- and a scrubber that misses one handle
 leaks it into git history permanently. Synthesising instead means the fixture
 provably contains no real name, handle or absolute path, because none was ever

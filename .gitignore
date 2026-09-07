@@ -1,8 +1,12 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-*/
 dist/
 *.egg-info/
 node_modules/
 ui/dist/
 *.tsbuildinfo
+.pytest_cache/
+.worktrees/
+.tickets/

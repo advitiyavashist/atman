@@ -479,8 +479,8 @@ def _protected_roots() -> Tuple[Path, ...]:
     """Checkouts that must never be enrolled, from configuration -- never hardcoded.
 
     ``TICKET_BOARD_FORBIDDEN_ROOTS`` is an os.pathsep-separated list and wins when
-    set. The fallback is this host's two board checkouts, derived from the real
-    home directory so the paths are not literals from one laptop.
+    set. When unset, no checkouts are protected implicitly — operators must
+    configure forbidden roots for live fleet checkouts.
 
     An empty string is NOT treated as "protect nothing": a shell produces an
     empty value by accident (``VAR="$UNSET_VAR"``) far more often than an
@@ -513,11 +513,10 @@ def _protected_roots() -> Tuple[Path, ...]:
             roots.append(root)
         return tuple(roots)
 
-    home = _real_home_dir()
-    return (
-        (home / "Downloads" / "steer").resolve(strict=False),
-        (home / "Downloads" / "tickets").resolve(strict=False),
-    )
+    # Public installs have no implicit protected checkouts. Operators set
+    # TICKET_BOARD_FORBIDDEN_ROOTS to the absolute paths that must never be
+    # enrolled (live fleet checkouts, shared boards, etc.).
+    return ()
 
 
 def _git_common_dir(path: Path) -> Optional[Path]:
