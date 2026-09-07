@@ -393,8 +393,30 @@ def test_protected_roots_come_from_configuration(tmp_path, monkeypatch):
         (tmp_path / "two").resolve(strict=False),
     )
 
+    # An empty value is what a shell produces by accident (VAR="$UNSET_VAR"),
+    # not a deliberate opt-out, so it must fail loudly like any other
+    # malformed entry rather than silently disabling the guard.
     monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, "")
+    with pytest.raises(ClaudeHookError, match=adapter_module.FORBIDDEN_ROOTS_ENV):
+        adapter_module._protected_roots()
+
+    # Deliberate opt-out requires the sentinel, which no accidental
+    # expansion of an unset variable can produce.
+    monkeypatch.setenv(
+        adapter_module.FORBIDDEN_ROOTS_ENV,
+        adapter_module.FORBIDDEN_ROOTS_DISABLE_SENTINEL,
+    )
     assert adapter_module._protected_roots() == ()
+
+
+def test_empty_forbidden_roots_from_unset_variable_does_not_disable_guard(monkeypatch):
+    """The accidental path: VAR="$SOME_UNSET_VAR" expands to '', not a chosen opt-out."""
+    monkeypatch.delenv("SOME_UNSET_VAR_T261", raising=False)
+    accidental_empty = os.environ.get("SOME_UNSET_VAR_T261", "")
+    assert accidental_empty == ""
+    monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, accidental_empty)
+    with pytest.raises(ClaudeHookError, match=adapter_module.FORBIDDEN_ROOTS_ENV):
+        adapter_module._protected_roots()
 
 
 @pytest.mark.parametrize("index", [0, 1], ids=["steer", "tickets"])
@@ -585,7 +607,7 @@ def test_guard_ignores_inherited_git_location(board_layout, monkeypatch, variabl
         adapter_module._ensure_safe_project_dir(board_layout["off_tree"])
 
 
-@pytest.mark.parametrize("kind", ["missing", "file", "relative", "blank", "mixed"])
+@pytest.mark.parametrize("kind", ["missing", "file", "relative", "blank", "mixed", "empty"])
 def test_invalid_forbidden_roots_refuses_before_writes(tmp_path, monkeypatch,
                                                        enrollment, config, kind):
     project = tmp_path / "project"
@@ -594,7 +616,8 @@ def test_invalid_forbidden_roots_refuses_before_writes(tmp_path, monkeypatch,
     file.write_text("not a directory")
     values = {"missing": str(tmp_path / "absent"), "file": str(file),
               "relative": "relative-root", "blank": os.pathsep,
-              "mixed": str(tmp_path) + os.pathsep + str(tmp_path / "absent")}
+              "mixed": str(tmp_path) + os.pathsep + str(tmp_path / "absent"),
+              "empty": ""}
     monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, values[kind])
     with pytest.raises(ClaudeHookError, match="TICKET_BOARD_FORBIDDEN_ROOTS"):
         install_hooks(project, enrollment, config)
