@@ -46,6 +46,25 @@ flag is a concurrency/drift check, not a substitute for reviewing live-only
 changes. `--live /absolute/path/tickets.py` permits isolated installations.
 No acknowledgement is needed when creating a previously absent entrypoint.
 
+## Drift check
+
+Answer "is the fleet running the latest merged fix?" without grepping for
+private symbols -- one line, comparing what the live launcher reports against
+what `tickets` main actually is:
+
+```sh
+tickets --version
+git -C ~/Downloads/tickets rev-parse origin/main
+```
+
+If the two shas differ, the live tool is behind main by whatever landed since
+the pinned commit was staged -- run the stage/review/activate steps above with
+the new tip. Equal shas (or the pinned commit being main plus only its own
+still-unmerged install commit, as immediately after this ticket's own release)
+means the fleet is current. `tickets --version` failing to report a commit at
+all (`uninstalled checkout`, `INVALID`, `DRIFTED`) means something other than
+a stale pin -- see Provenance below.
+
 ## Process safety, provenance and recovery
 
 The live Python launcher names an immutable release script by absolute path.
