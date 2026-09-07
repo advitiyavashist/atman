@@ -40,6 +40,7 @@ from .errors import (
     AssignmentExpired,
     BoardError,
     ForbiddenScope,
+    InvalidStateTransition,
     MalformedRequest,
     NotFound,
     SessionLeaseExpired,
@@ -687,11 +688,19 @@ class BoardServer:
         # `transition` owns the state table and clears owner/owner_session on
         # the way to `open`, so a done ticket is refused there as an invalid
         # transition rather than by a second copy of the rule here.
-        return Response(200, self.store.transition(
-            ctx.project_id, ticket_id, "open",
-            expected_version=expected_version, actor=ctx.principal.actor,
-            reason=reason, request_id=request_id,
-        ))
+        #
+        # T-402 planner ruling: reopenTicket's frozen responses omit 422, so
+        # InvalidStateTransition (class status 422) is remapped to 409 here
+        # only. ErrorCode and details stay the same. Other routes keep 422.
+        try:
+            return Response(200, self.store.transition(
+                ctx.project_id, ticket_id, "open",
+                expected_version=expected_version, actor=ctx.principal.actor,
+                reason=reason, request_id=request_id,
+            ))
+        except InvalidStateTransition as err:
+            err.status = 409
+            raise
 
     # --------------------------------------------------------------- agents
 
