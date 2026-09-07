@@ -191,6 +191,110 @@ def _repo_root():
     return os.path.dirname(common)
 
 
+def _init_cwd_worktree_root(start=None):
+    """Root of the worktree cwd is LITERALLY in -- deliberately NOT _repo_root().
+
+    _repo_root() resolves `--git-common-dir` and therefore returns the MAIN
+    worktree: correct for board_dir(), because every linked worktree of a
+    project is meant to share one board.  For `init` that is the defect
+    (T-263/T-282).  It made init's "where am I about to write" answer
+    identical BY CONSTRUCTION to the ambient "where will this resolve later"
+    answer, so the refuse-on-disagreement check could never fire inside a
+    linked worktree -- the only configuration this fleet actually runs in.
+    A guard whose two operands come out of the same resolver is not a guard.
+
+    So this function shares no code path with _repo_root().  The filesystem
+    walk is the answer: the first ancestor holding a `.git` entry, which no
+    environment variable can redirect.  git's own `--show-toplevel` is asked
+    only as a cross-check, and on disagreement the filesystem wins (T-243).
+    Returns None when cwd is not inside a git worktree at all.
+    """
+    import subprocess
+    here = os.path.realpath(start if start is not None else os.getcwd())
+    fs_root = None
+    d = here
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            fs_root = d
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    git_root = None
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5,
+                             cwd=here, env=env)
+        if out.returncode == 0 and out.stdout.strip():
+            git_root = os.path.realpath(out.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if fs_root is not None and git_root is not None and fs_root != git_root:
+        sys.stderr.write(
+            "tickets: git says cwd %s is in worktree %s but the filesystem says %s "
+            "-- trusting the filesystem (T-243)\n" % (here, git_root, fs_root))
+    if fs_root is not None:
+        return fs_root
+    return git_root
+
+
+def _same_board(a, b):
+    if a is None or b is None:
+        return False
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _init_resolve_board(a):
+    """(target, why): where `init` will write, decided from cwd alone."""
+    explicit = getattr(a, "board", None)
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit)), "an explicit --board"
+    root = _init_cwd_worktree_root()
+    if root is None:
+        return (os.path.join(os.path.realpath(os.getcwd()), ".tickets"),
+                "the current directory (not inside a git worktree)")
+    return os.path.join(root, ".tickets"), "the git worktree cwd is in (%s)" % root
+
+
+def _init_disagreement_cause(ambient):
+    """Plain-language reason the ambient board is not the cwd board."""
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return ("TICKETS_DIR is set to %r, and board resolution honours it "
+                "before anything on disk." % env)
+    here = _init_cwd_worktree_root()
+    main = _repo_root()
+    if here and main and os.path.realpath(here) != os.path.realpath(main):
+        return ("%s is a LINKED WORKTREE whose main worktree is %s, and every "
+                "linked worktree deliberately shares the main worktree's "
+                "board -- that sharing is the design, not a bug, so init "
+                "must not quietly fork a second board here." % (here, main))
+    return ("an ancestor directory already holds a board (%s) and the "
+            "upward search finds it before this one." % os.path.dirname(ambient))
+
+
+def _init_refusal(target, ambient):
+    return (
+        "REFUSING TO INIT: nothing was written.\n"
+        "  would write to: %s\n"
+        "  but `tickets` run from %s resolves to: %s\n"
+        "  because %s\n"
+        "\n"
+        "Writing anyway is the T-263 defect: init would report success, install "
+        "the protocol files into a DIFFERENT project, and leave every later "
+        "command on the other board (that is how T-256 minted a ticket on a "
+        "live board). Pick one:\n"
+        "  * bind this directory:      export TICKETS_DIR=%s\n"
+        "  * install into the board\n"
+        "    that is actually in effect: tickets init --board %s\n"
+        "  * run init in %s instead\n"
+        % (target, os.getcwd(), ambient, _init_disagreement_cause(ambient),
+           target, ambient, os.path.dirname(ambient))
+    )
+
+
 def _refuse_board_outside_pytest_tmp(path):
     """T-256: a test suite created a real ticket on the LIVE steer board.
     Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and every
@@ -579,10 +683,22 @@ def hours_since(stamp):
 # --------------------------------------------------------------------------
 
 def git(*args, cwd=None):
+    """Run git and return stdout, or None if it failed.
+
+    `cwd=` picks the tree to ask. It matters: T-272 -- every caller used to
+    inherit os.getcwd(), so `tickets review` pinned whichever repo the agent
+    happened to be standing in rather than the repo the deliverable is in.
+
+    cwd is necessary and NOT sufficient (T-287). An inherited GIT_DIR,
+    GIT_COMMON_DIR or GIT_WORK_TREE overrides cwd-based discovery inside git
+    itself, so under a leaked env `tickets review --artifact <dir>` pinned the
+    wrong repo and reported success -- the defect T-272 exists to fix,
+    reappearing on the command that fixes it. The scrub and the targeting are
+    one mechanism; neither works alone, so they are applied together here at
+    the single choke point every caller goes through.
+    """
     import subprocess
     try:
-        # cwd + scrubbed env (T-243): cwd alone does NOT stop an inherited
-        # GIT_DIR/GIT_COMMON_DIR from overriding repo discovery.
         out = subprocess.run(["git"] + list(args), capture_output=True, text=True, timeout=10,
                              cwd=cwd or os.getcwd(), env=_clean_git_env())
     except (OSError, subprocess.TimeoutExpired):
@@ -628,10 +744,18 @@ def repo_identity(cwd):
     return None
 
 
-def _git_state_raw():
+def _git_state_raw(cwd=None):
     """(state, mismatch). See git_state() -- this keeps the mismatch signal
-    that git_state() deliberately throws away, for callers that record it."""
-    here = os.getcwd()
+    that git_state() deliberately throws away, for callers that record it.
+
+    `cwd` is the tree to describe, default the process cwd (T-272). All four
+    parts of the answer -- branch, sha, repo identity and dirty count -- are
+    asked of that ONE tree, so the pin they form is internally consistent.
+    The containment refusal below is applied to that tree too, not to the
+    process cwd: with --artifact those are deliberately different directories,
+    and checking the wrong one would refuse every correct cross-repo pin.
+    """
+    here = cwd or os.getcwd()
     top = git("rev-parse", "--show-toplevel", cwd=here)
     if not top:
         return None, False
@@ -660,8 +784,10 @@ def _git_state_raw():
     }, False
 
 
-def git_state():
+def git_state(cwd=None):
     """Branch, short sha, dirty-file count, and whether cwd is the main worktree.
+
+    `cwd` selects the tree to describe (T-272); it defaults to the process cwd.
 
     Returns None -- never a partly-filled dict -- when resolution disagrees
     with cwd. Every caller guards with `g = git_state()` / `if not g`, and the
@@ -673,8 +799,61 @@ def git_state():
     disabled, and `tickets review` would pin an unmergeable "?@?" (T-259
     defect 2). Unresolved must mean None.
     """
-    state, _mismatch = _git_state_raw()
+    state, _mismatch = _git_state_raw(cwd)
     return state
+
+
+def artifact_tree(a):
+    """Resolve `--artifact` to a real git working tree, or None meaning "use cwd".
+
+    T-272. `tickets review` used to derive branch, sha and repo from whatever
+    directory the agent ran it in. On this board that is systematically the
+    wrong tree: every E-010 agent drives the CLI from its steer worktree while
+    the deliverable lives in a different clone entirely, so the pin named a
+    repo that never built the work.
+
+    The agent supplies a LOCATION, not an assertion. Everything recorded is
+    still derived by running git inside that tree, so a pin no real tree can
+    produce cannot be recorded -- this is deliberately not a `--repo/--commit`
+    pair taken on trust, because a hand-typed sha is exactly how fiction gets
+    into the close record.
+    """
+    path = getattr(a, "artifact", "") or ""
+    if not path:
+        return None
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        sys.exit("--artifact %s is not a directory" % path)
+    if git("rev-parse", "--show-toplevel", cwd=path) is None:
+        sys.exit("--artifact %s is not inside a git working tree; point it at the "
+                 "checkout the deliverable actually lives in" % path)
+    return path
+
+
+def _record_pin(t, g, art):
+    """Write the (repo, branch, sha) evidence triple onto a ticket.
+
+    All three come from ONE tree (T-272). `repo` stays the field the merge
+    guard compares, so no existing record needs a field rename; `repo_source`
+    lets a reader tell a pin the agent aimed from one the tool merely
+    inherited, and the cwd provenance is kept alongside rather than thrown
+    away.
+    """
+    t["commit"] = "%s@%s" % (g["branch"], g["sha"])
+    t["branch"] = g["branch"]
+    t["repo"] = g["repo"]
+    t["repo_source"] = "artifact" if art else "cwd"
+    if art:
+        t["artifact_dir"] = art
+        cg = git_state()
+        if cg:
+            t["cwd_repo"] = cg["repo"]
+            t["cwd_commit"] = "%s@%s" % (cg["branch"], cg["sha"])
+    else:
+        t.pop("artifact_dir", None)
+        t.pop("cwd_repo", None)
+        t.pop("cwd_commit", None)
+    return t["commit"]
 
 
 def agents_dir(board):
@@ -1470,14 +1649,18 @@ def cmd_review(a, board):
         sys.exit("%s is %s; only in-progress work can be submitted" % (a.id, LABEL[t["status"]]))
     if not a.notes:
         sys.exit('review needs --notes "what to look at: paths, tests run, decisions"')
-    g = git_state()
+    # T-272: every probe below asks the tree the DELIVERABLE is in, which is
+    # not the tree the command was run from whenever --artifact is passed.
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
     if g and g["branch"] in ("main", "master") and not a.force:
         sys.exit("RULE: submit from your own worktree branch, not %r (or --force)" % g["branch"])
     if g and g["dirty"] and not a.force:
-        sys.exit("RULE: %d uncommitted files -- commit before submitting for review (or --force)" % g["dirty"])
+        sys.exit("RULE: %d uncommitted files in %s -- commit before submitting for review "
+                 "(or --force)" % (g["dirty"], g["top"]))
     if g and not a.force:
-        trunk = _trunk()
-        if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
+        trunk = _trunk(cwd=art)
+        if git("merge-base", "--is-ancestor", trunk, "HEAD", cwd=art) is None:
             sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
     # `owner` decides who the ticket is filed under (unchanged: claim it via
@@ -1493,14 +1676,11 @@ def cmd_review(a, board):
     t["review_at"] = now()
     text = a.notes
     if g:
-        stamp = "%s@%s" % (g["branch"], g["sha"])
+        # T-215 records WHICH repo the pin belongs to so `tickets merge` can
+        # refuse a cross-repo ancestry close. T-272 fixes what that repo is:
+        # the artifact's, not the caller's cwd.
+        stamp = _record_pin(t, g, art)
         text = "%s -- %s" % (stamp, text)
-        t["commit"] = stamp
-        t["branch"] = g["branch"]
-        # T-215: record which repo this pin belongs to, so `tickets merge`
-        # can refuse to close it from an unrelated repo's ancestry. Stable
-        # across worktrees -- see repo_identity().
-        t["repo"] = g["repo"]
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
@@ -1511,40 +1691,55 @@ def cmd_review(a, board):
     post_message(board, author, "%s ready for review: %s" % (t["id"], text),
                  to=(m["owner"] if m else ""), re=t["id"])
     tm = timing(t)
+    if t.get("commit"):
+        print("pinned %s in %s (%s)" % (
+            t["commit"], t.get("repo") or "?",
+            "artifact tree %s" % t["artifact_dir"] if t.get("repo_source") == "artifact"
+            else "this checkout -- pass --artifact <dir> if the deliverable is in another repo"))
     print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
         t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
 
 
-def _trunk():
+def _trunk(cwd=None):
     for b in ("main", "master"):
-        if git("rev-parse", "--verify", "-q", b) is not None:
+        if git("rev-parse", "--verify", "-q", b, cwd=cwd) is not None:
             return b
     return "main"
 
 
 def cmd_sync(a, board):
-    """Agent side: bring main into my branch now, so the master's merge is trivial."""
-    g = git_state()
+    """Agent side: bring main into my branch now, so the master's merge is trivial.
+
+    T-272: `--artifact` syncs the tree the deliverable is in. `tickets review`
+    checks the artifact branch against ITS trunk, so the sync that clears that
+    check has to happen in the same tree -- otherwise the workflow instruction
+    "sync before review" quietly syncs a repo the review never looks at.
+    """
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
     if not g:
         sys.exit("not in a git repo")
-    trunk = _trunk()
+    trunk = _trunk(cwd=art)
     if g["branch"] in ("main", "master"):
         sys.exit("you are on %s; sync is for your own worktree branch" % g["branch"])
     if g["dirty"] and not a.force:
         sys.exit("%d uncommitted files; commit first (sync merges %s into your branch)" % (g["dirty"], trunk))
-    if git("merge-base", "--is-ancestor", trunk, "HEAD") is not None:
+    if git("merge-base", "--is-ancestor", trunk, "HEAD", cwd=art) is not None:
         print("%s already contains %s; nothing to do" % (g["branch"], trunk))
         return
     import subprocess
-    # T-243: `tickets sync` runs from the agent's own worktree cwd with no -C,
-    # so it is exactly as exposed to an ambient GIT_DIR as git_state() was.
+    # cwd=art AND the scrub (T-287). Both, or this merge is wrong in one of two
+    # ways: os.getcwd() merges the repo the agent is standing in rather than the
+    # artifact repo every other call in this function targets, and without the
+    # env scrub an ambient GIT_DIR re-points it anyway. Note this is a real
+    # merge -- getting the tree wrong here writes commits into another repo.
     r = subprocess.run(["git", "merge", "--no-edit", "-m", "Sync %s into %s" % (trunk, g["branch"]), trunk],
-                       cwd=os.getcwd(), env=_clean_git_env(), capture_output=True, text=True)
+                       cwd=art, env=_clean_git_env(), capture_output=True, text=True)
     if r.returncode == 0:
-        print("merged %s into %s -> %s" % (trunk, g["branch"], git("rev-parse", "--short", "HEAD")))
+        print("merged %s into %s -> %s" % (trunk, g["branch"], git("rev-parse", "--short", "HEAD", cwd=art)))
         checkin(board, whoami(), None, "synced with %s" % trunk)
         return
-    conflicted = (git("diff", "--name-only", "--diff-filter=U") or "").splitlines()
+    conflicted = (git("diff", "--name-only", "--diff-filter=U", cwd=art) or "").splitlines()
     print("CONFLICTS merging %s into %s -- these files need you:" % (trunk, g["branch"]))
     for f in conflicted:
         print("  " + f)
@@ -1667,9 +1862,13 @@ def cmd_merge(a, board):
         trivially "contain" a foreign sha that was never built on it
     """
     import subprocess
-    root = os.path.dirname(board)
+    # T-272: the board lives in one repo, the deliverable may live in another.
+    # Integration must be able to happen where the artifact is, or a correctly
+    # pinned cross-repo ticket could never be closed by a merge at all --
+    # `root` used to be the board's own parent unconditionally.
+    root = artifact_tree(a) or os.path.dirname(board)
     cfg = merge_config(board)
-    trunk = _trunk()
+    trunk = _trunk(cwd=root)
     owner = whoami(a.owner)
     require_integrator(board, owner, force_master=getattr(a, "force_master", False))
     merge_repo = repo_identity(root)
@@ -1691,6 +1890,19 @@ def cmd_merge(a, board):
         dirty = sh("git", "status", "--porcelain", "--untracked-files=no").stdout.strip()
         if dirty:
             sys.exit("main checkout has uncommitted tracked changes; commit or move them first:\n" + dirty)
+        # T-272: the final step fast-forwards the CURRENT branch, and the close
+        # loop then tests ancestry against `trunk`. If the repo is parked on
+        # anything else those are two different commits, so every ticket is
+        # skipped with no reason printed -- indistinguishable from the repo
+        # guard rejecting them. Never silent: this is the merger's own repo and
+        # they need to know which.
+        head_branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=root)
+        if head_branch and head_branch != trunk:
+            sys.exit("%s is checked out on %r, not %s. `tickets merge` fast-forwards the "
+                     "branch that is checked out, so merging from here would leave %s "
+                     "untouched and close nothing, without saying why. "
+                     "`git -C %s checkout %s` first." % (
+                         root, head_branch, trunk, trunk, root, trunk))
 
         idir = os.path.join(root, cfg["integration_dir"])
         if os.path.isdir(idir):
@@ -1703,7 +1915,8 @@ def cmd_merge(a, board):
             r = sh("git", "worktree", "add", "-q", idir, "-b", "integration", trunk)
             if r.returncode != 0:
                 sys.exit("could not create integration worktree: " + (r.stderr or r.stdout).strip())
-        print("integration: %s (from %s@%s)" % (idir, trunk, git("rev-parse", "--short", trunk)))
+        print("integration: %s (from %s@%s in %s)" % (
+            idir, trunk, git("rev-parse", "--short", trunk, cwd=root), merge_repo or root))
         stray = os.path.join(idir, ".tickets")
         if os.path.islink(stray):
             os.unlink(stray)
@@ -1814,7 +2027,7 @@ def cmd_merge(a, board):
             print("could not fast-forward %s. Usually an untracked file in the main checkout that a "
                   "branch now tracks; move it aside and rerun:\n%s" % (trunk, (r.stderr or r.stdout).strip()))
             sys.exit(3)
-        sha = git("rev-parse", "--short", trunk)
+        sha = git("rev-parse", "--short", trunk, cwd=root)
         full_trunk = sh("git", "rev-parse", trunk).stdout.strip()
         print("%s -> %s   (push when ready: git push origin %s)" % (trunk, sha, trunk))
 
@@ -2708,6 +2921,47 @@ def cmd_status(a, board):
         return
 
 
+def cmd_repin(a, board):
+    """Correct a review pin so it names the repo the artifact is really in (T-272).
+
+    Backfill. Every pin recorded before `review` learned --artifact was taken
+    from the caller's cwd, which on this board is systematically the wrong
+    clone. Re-running `tickets review` would also fix it, but it resets
+    review_at and re-notifies the master once per ticket, which for a queue
+    this deep is worse than the problem -- so correcting evidence gets its own
+    verb, and leaves an explicit REPIN note rather than silently rewriting
+    history.
+
+    The new pin is the artifact tree's CURRENT HEAD, derived by running git
+    there. Check that tree out at the commit that was actually reviewed first.
+    """
+    t = load(board, a.id)
+    if t["status"] != "review":
+        sys.exit("%s is %s; repin corrects the pin on work that is IN REVIEW "
+                 "(a closed ticket's record is history -- do not rewrite it)" % (
+                     a.id, LABEL[t["status"]]))
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
+    if not g:
+        sys.exit("--artifact %s is not a git working tree" % art)
+    if g["dirty"] and not a.force:
+        sys.exit("RULE: %d uncommitted files in %s -- the pin must name a committed "
+                 "state; commit or check out the reviewed sha first (or --force)" % (
+                     g["dirty"], g["top"]))
+    was_commit, was_repo = t.get("commit"), t.get("repo")
+    stamp = _record_pin(t, g, art)
+    author = whoami(a.owner)
+    t["notes"].append({"by": author, "at": now(), "text": "REPIN: %s in %s (was %s in %s)%s" % (
+        stamp, t.get("repo") or "?", was_commit or "-", was_repo or "-",
+        (" -- " + a.notes) if a.notes else "")})
+    save(board, t)
+    checkin(board, author, None, "repinned %s" % a.id)
+    print("%s repinned" % a.id)
+    print("  was %s in %s" % (was_commit or "-", was_repo or "-"))
+    print("  now %s in %s  (from %s)" % (stamp, t.get("repo") or "?", art))
+    print("  verify this is the sha you submitted; repin records that tree's HEAD.")
+
+
 def cmd_done(a, board):
     t = load(board, a.id)
     if not a.notes and not a.no_notes:
@@ -2715,18 +2969,25 @@ def cmd_done(a, board):
             'done needs --notes "paths, names, decisions the next agent must match" '
             "(or --no-notes if there is truly nothing to hand off)"
         )
-    g = git_state()
+    # T-272: `done` must be aimable at the artifact tree too. Without this,
+    # re-aiming `review` would leave every correctly-pinned cross-repo ticket
+    # permanently unclosable -- T-254's guard below hard-exits on a repo
+    # mismatch and explicitly refuses --force as an override.
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
     # A branch/SHA match is not proof of repository identity (T-254).
     # Check before mutating the ticket; --force only bypasses worktree rules.
     recorded_repo = t.get("repo")
     current_repo = g.get("repo") if g else None
     if (g or recorded_repo) and not current_repo:
         sys.exit("RULE: %s cannot be closed without a verifiable repository; "
-                 "run done from the deliverable's checkout." % a.id)
+                 "run done from the deliverable's checkout, or pass "
+                 "--artifact <dir> pointing at it." % a.id)
     if recorded_repo and recorded_repo != current_repo:
-        sys.exit("RULE: %s recorded repository %r does not match current repository %r; "
-                 "run done from the recorded repository. --force cannot override "
-                 "repository evidence." % (a.id, recorded_repo, current_repo))
+        sys.exit("RULE: %s recorded repository %r does not match %r; close it from the "
+                 "recorded repository, or pass --artifact <dir> pointing at that "
+                 "checkout. --force cannot override repository evidence." % (
+                     a.id, recorded_repo, current_repo))
     if t["status"] == "review":
         # the master closes reviewed work from main after merging; the agent's
         # branch@sha is already on the ticket, so the branch/clean rules do not apply
@@ -2755,8 +3016,7 @@ def cmd_done(a, board):
             print("WARNING: %s previous pin has no recorded repository; its provenance "
                   "cannot be verified. Recording only the current completion repository."
                   % a.id, file=sys.stderr)
-        t["commit"] = stamp
-        t["repo"] = current_repo
+        _record_pin(t, g, art)
     if text:
         # by=whoami(), not t["owner"]: the note records who wrote it, which is
         # not always who the ticket is filed under (T-238 -- see cmd_note).
@@ -5307,6 +5567,26 @@ def cmd_mine(a, board):
 
 
 def cmd_init(a, board):
+    # `board` is the AMBIENT resolution (board_dir()): where every later
+    # `tickets` command from this cwd will go.  `target` is resolved
+    # independently, from cwd alone.  T-263: they used to be the same value by
+    # construction, so init could report success and write somewhere else.
+    target, why = _init_resolve_board(a)
+    explicit = bool(getattr(a, "board", None))
+
+    # Acceptance 3 -- "which board am I about to write to" is answered BEFORE
+    # the first write, never after it.
+    print("board: %s" % target)
+    print("  resolved from %s" % why)
+    if not _same_board(target, board):
+        print("  ambient:      %s" % board)
+
+    # Acceptance 1 -- create AND bind, or fail loudly. Never success-then-
+    # resolve-elsewhere.
+    if not explicit and not _same_board(target, board):
+        sys.exit(_init_refusal(target, board))
+
+    board = target
     root = os.path.dirname(board)
     os.makedirs(board, exist_ok=True)
     written = []
@@ -5352,9 +5632,24 @@ def cmd_init(a, board):
             f.write(MASTER_TEMPLATE)
         written.append(master_path(board))
 
-    print("board: %s" % board)
     for w in written:
         print("wrote: %s" % w)
+
+    # Acceptance 1 again, after the fact: VERIFY the bind with the real
+    # resolver rather than asserting it. An init that wrote files but did not
+    # bind is exactly the failure this ticket exists to stop.
+    bound = board_dir(discover_children=True)
+    if _same_board(bound, board):
+        print("bound: `tickets` run from %s resolves to this board." % os.getcwd())
+    elif explicit:
+        print("\nNOT BOUND: you asked for --board %s, but `tickets` run from %s "
+              "still resolves to %s.\n  To use the board you just wrote:  "
+              "export TICKETS_DIR=%s" % (board, os.getcwd(), bound, board))
+    else:
+        sys.exit(
+            "INIT WROTE THE BOARD BUT IT IS NOT BOUND: wrote %s, yet `tickets` "
+            "from %s still resolves to %s. Refusing to report success (T-263)."
+            % (board, os.getcwd(), bound))
     print("\nClaude Code picks this up from its global SessionStart hook.")
     print("Codex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.")
 
@@ -5739,15 +6034,21 @@ def main():
     c.add_argument("--notes", "-n", default="", help="what to look at: paths, tests run, decisions")
     c.add_argument("--pr", default="", help="PR number or URL if you opened one")
     c.add_argument("--owner", "-o")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_review)
 
     c = sub.add_parser("sync", help="agent: merge main into my branch now (do this before review)")
+    c.add_argument("--artifact", default="", metavar="DIR",
+                   help="tree the deliverable is in, when it is not this checkout")
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_sync)
 
     c = sub.add_parser("merge", help="master: integrate pinned review SHAs -> test -> FF main -> close by ancestry")
     c.add_argument("branches", nargs="*", help="branches to merge; default = branches in the review queue")
+    c.add_argument("--artifact", default="", metavar="DIR",
+                   help="repo to integrate in, when the deliverable does not live in the "
+                        "board's own repo; only tickets pinned to THAT repo are eligible")
     c.add_argument("--push", action="store_true", help="push main to origin after fast-forward")
     c.add_argument("--no-test", action="store_true", help="merge even if tests fail (not recommended)")
     c.add_argument("--ours", action="append", default=[], metavar="BRANCH",
@@ -5780,6 +6081,7 @@ def main():
     c.add_argument("--notes", "-n", default="")
     c.add_argument("--owner", "-o")
     c.add_argument("--pr", default="")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_status)
 
@@ -5837,8 +6139,18 @@ def main():
     c.add_argument("id")
     c.add_argument("--notes", "-n", default="", help="handoff text for dependent tickets")
     c.add_argument("--no-notes", action="store_true", help="allow empty handoff")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
     c.add_argument("--force", action="store_true", help="skip the branch/clean-tree rule")
     c.set_defaults(fn=cmd_done)
+
+    c = sub.add_parser("repin", help="correct a review pin to name the repo the artifact is in")
+    c.add_argument("id")
+    c.add_argument("--artifact", required=True, metavar="DIR",
+                   help="checkout the deliverable is in; its CURRENT HEAD becomes the pin")
+    c.add_argument("--notes", "-n", default="", help="why the pin was wrong")
+    c.add_argument("--owner", "-o")
+    c.add_argument("--force", action="store_true", help="allow a dirty artifact tree")
+    c.set_defaults(fn=cmd_repin)
 
     c = sub.add_parser("block", help="mark a ticket blocked")
     c.add_argument("id")
@@ -5906,6 +6218,9 @@ def main():
 
     c = sub.add_parser("init", help="install the board protocol into this project")
     c.add_argument("--track", action="store_true", help="commit the board to git instead of gitignoring it")
+    c.add_argument("--board", metavar="DIR", help="write the board HERE instead of the "
+                   "directory init resolves from cwd -- the explicit escape hatch for "
+                   "the case init would otherwise refuse (T-263)")
     c.set_defaults(fn=cmd_init)
 
     # Optional extension (identity / role / handover / pulse) installed beside
