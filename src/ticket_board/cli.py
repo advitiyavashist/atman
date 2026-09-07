@@ -26,6 +26,7 @@ Default roles for those names can be overridden by .tickets/roles.json.
 import argparse
 import errno
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -227,9 +228,56 @@ def _refuse_board_outside_pytest_tmp(path):
     )
 
 
+def _cwd_belongs_to_board(board_path):
+    """True when cwd is this board's checkout (in-tree dir or linked worktree).
+
+    T-409 / zed class: a cwd with no board of its own must not silently write
+    a live board discovered as a unique child (Downloads -> project) or via
+    any other unbound resolution. Out-of-tree `git worktree add` still belongs
+    because `_repo_root()` is the main checkout that owns the board (T-243).
+    """
+    board = os.path.realpath(board_path)
+    board_root = os.path.dirname(board)
+    cwd = os.path.realpath(os.getcwd())
+    if cwd == board_root or cwd.startswith(board_root + os.sep):
+        return True
+    root = _repo_root()
+    if root and os.path.realpath(root) == board_root:
+        return True
+    here = _init_cwd_worktree_root()
+    if here and os.path.realpath(os.path.join(here, ".tickets")) == board:
+        return True
+    return False
+
+
+def _refuse_unbound_live_board(path):
+    """Refuse a live board cwd does not belong to, unless TICKETS_DIR binds it.
+
+    T-409: a mktemp / parent-folder cwd with no explicit TICKETS_DIR resolved
+    the shared live board (zed / T-331). Fail closed. An empty local
+    cwd/.tickets is not live, so init/join in a fresh dir still works.
+    """
+    if os.environ.get("TICKETS_DIR"):
+        return
+    if not _live_board(path):
+        return
+    if _cwd_belongs_to_board(path):
+        return
+    real = os.path.realpath(path)
+    sys.exit(
+        "REFUSING TO USE BOARD %r: cwd %r is not inside a board checkout "
+        "and TICKETS_DIR is unset. Binding a live board from an unbound "
+        "directory is the zed/T-331 class (a sandbox writing the shared "
+        "board). Export TICKETS_DIR to the board you mean, or run from "
+        "that project's checkout."
+        % (real, os.path.realpath(os.getcwd()))
+    )
+
+
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
     _refuse_board_outside_pytest_tmp(result)
+    _refuse_unbound_live_board(result)
     return result
 
 
@@ -594,6 +642,44 @@ def checkin(board, owner, ticket=None, note=""):
     return rec
 
 
+def _clear_agent_ticket(board, agent, tid):
+    """T-437: drop a stale ticket= bind on a previous owner's agent record."""
+    if not agent or not tid:
+        return
+    path = os.path.join(agents_dir(board), agent + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        return
+    if not isinstance(rec, dict) or rec.get("ticket") != tid:
+        return
+    rec["ticket"] = ""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _bind_agent_ticket(board, agent, tid):
+    if not agent or not tid:
+        return
+    path = os.path.join(agents_dir(board), agent + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        rec = None
+    if isinstance(rec, dict):
+        rec["ticket"] = tid
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+        os.replace(tmp, path)
+        return
+    checkin(board, agent, tid)
+
+
 def _current_ticket(board, owner):
     for t in load_all(board):
         if t["status"] == "claimed" and t.get("owner") == owner:
@@ -686,6 +772,7 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
     t["claimed_at"] = now()
@@ -696,6 +783,8 @@ def try_claim(board, tid, owner):
     # silently produces no trajectory.
     traj_event(board, "claim", agent=owner, ticket=got,
                state_before="open", state_after="claimed", **_traj_git())
+    if prev_owner and prev_owner != owner:
+        _clear_agent_ticket(board, prev_owner, tid)
     return got
 
 
@@ -1997,15 +2086,21 @@ def cmd_assign(a, board):
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
     if a.owner is not None:
         # hard assignment by the master: takes the lock on their behalf
+        prev_owner = t.get("owner") or ""
         if t["status"] == "open" and a.owner:
             got = try_claim(board, t["id"], a.owner)
             if not got:
                 sys.exit("%s was claimed by someone else while assigning" % t["id"])
             t = got
             changed.append("claimed for %s" % a.owner)
-        elif t["status"] == "claimed":
+            _bind_agent_ticket(board, a.owner, t["id"])
+        elif t["status"] in ("claimed", "review"):
             t["owner"] = a.owner
             changed.append("owner=%s" % a.owner)
+            if prev_owner and prev_owner != a.owner:
+                _clear_agent_ticket(board, prev_owner, t["id"])
+            if a.owner:
+                _bind_agent_ticket(board, a.owner, t["id"])
     if not changed:
         sys.exit("nothing to change; see tickets assign --help")
     t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
@@ -2611,11 +2706,17 @@ def _agent_rec(board, owner):
         return {}
 
 
-def _mark_inbox_read(board, owner):
+def _mark_inbox_read(board, owner, scan=None):
     rec = _agent_rec(board, owner)
     if not rec:
         rec = checkin(board, owner)
-    rec["inbox_seen"] = now()
+    if scan is None:
+        scan = _inbox_scan(board, owner)
+    rec["inbox_seen"] = scan[1]
+    if scan[2]:
+        rec["inbox_seen_ids"] = scan[2]
+    else:
+        rec.pop("inbox_seen_ids", None)
     os.makedirs(agents_dir(board), exist_ok=True)
     path = os.path.join(agents_dir(board), owner + ".json")
     tmp = path + ".tmp"
@@ -2637,15 +2738,74 @@ def _visible_after_join(msgs, owner, joined):
     return [m for m in msgs if m.get("to") == owner or m.get("at", "") >= joined]
 
 
-def unread(board, owner):
+def _msg_id(m):
+    """Stable, content-derived identity for a message (see T-228 in the root
+    tickets.py, which carries the full rationale). Derived rather than stored
+    so nothing already written to disk has to be migrated."""
+    raw = json.dumps([m.get("at", ""), m.get("from", ""), m.get("to", ""),
+                      m.get("re", ""), m.get("text", "")], sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _seen_counts(seen_ids):
+    counts = {}
+    for k in seen_ids or []:
+        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def _is_unread(m, since, remaining):
+    """T-228: `inbox_seen` and `at` are both whole-second stamps, so a strict
+    `at > since` permanently drops anything posted during the very second an
+    agent read its inbox. `>=` alone would redeliver the boundary message on
+    every poll (a wake storm), so the boundary second is disambiguated by
+    identity, consumed as a multiset so identical messages both arrive."""
+    at = m.get("at", "")
+    if at > since:
+        return True
+    if since and at == since:
+        k = _msg_id(m)
+        if remaining.get(k):
+            remaining[k] -= 1
+            return False
+        return True
+    return False
+
+
+def _inbox_scan(board, owner):
+    """(unread, watermark, boundary_ids). The watermark is the newest `at`
+    actually observed, never now(): stamping wall-clock time reopens this
+    same hole one second later for anything posted between read and stamp."""
     rec = _agent_rec(board, owner)
     since = rec.get("inbox_seen", "")
+    # T-327's pre-join broadcast suppression is applied inside the scan, not
+    # over its result, so the boundary-identity set below is drawn from the
+    # same list the agent is actually shown. Kept in step with the root
+    # tickets.py copy: the two delivery paths drifting apart is how T-228
+    # shipped a half-ported fix in the first place.
     joined = rec.get("joined_at", "")
+    seen_ids = rec.get("inbox_seen_ids") or []
     msgs = load_messages(board)
-    return _visible_after_join([m for m in msgs
-                                if m.get("from") != owner
-                                and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
-                                and m.get("at", "") > since], owner, joined)
+    remaining = _seen_counts(seen_ids)
+    visible = _visible_after_join(
+        [m for m in msgs
+         if m.get("from") != owner
+         and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")],
+        owner, joined)
+    out = [m for m in visible if _is_unread(m, since, remaining)]
+    watermark = max([m.get("at", "") for m in msgs] or [""])
+    if watermark < since:
+        watermark = since
+    if not watermark:
+        watermark = now()
+    boundary = [_msg_id(m) for m in out if m.get("at", "") == watermark]
+    if watermark == since:
+        boundary = list(seen_ids) + boundary
+    return out, watermark, boundary
+
+
+def unread(board, owner):
+    return _inbox_scan(board, owner)[0]
 
 
 def fmt_msg(m):
@@ -2664,6 +2824,7 @@ def cmd_msg(a, board):
 
 def cmd_inbox(a, board):
     owner = whoami(a.owner)
+    scan = None
     if a.all:
         msgs = load_messages(board)[-a.limit:]
         if not msgs:
@@ -2672,7 +2833,8 @@ def cmd_inbox(a, board):
         for m in msgs:
             print(fmt_msg(m))
     else:
-        msgs = unread(board, owner)
+        scan = _inbox_scan(board, owner)
+        msgs = scan[0]
         if not msgs:
             print("inbox empty for %s (tickets inbox --all for history)" % owner)
         else:
@@ -2680,7 +2842,7 @@ def cmd_inbox(a, board):
             for m in msgs:
                 print("  " + fmt_msg(m))
     if not a.keep:
-        _mark_inbox_read(board, owner)
+        _mark_inbox_read(board, owner, scan)
 
 
 def _traj_filter(events, ticket="", agent="", kind="", since="", until=""):
@@ -2708,7 +2870,8 @@ def _traj_line(e):
     bits.append("%-7s" % (e.get("ticket") or "-"))
     extra = []
     for k in ("run_no", "exit", "duration_s", "turns", "tokens_in", "tokens_out",
-              "cost_usd", "outcome", "state_before", "state_after", "trigger",
+              "tokens_cache_read", "tokens_cache_write", "cost_usd", "cost_source",
+              "usage_error", "outcome", "state_before", "state_after", "trigger",
               "notes_len", "text_len", "to", "pin", "merged_as", "active_hours",
               "wait_hours", "harness", "harness_cmd", "model", "effort",
               "timed_out", "src"):
@@ -2791,12 +2954,19 @@ def cmd_trajectories(a, board):
                                    " (showing the last %d)" % limit if limit and len(sel) > limit else ""))
     if getattr(a, "summary", False):
         print("")
-        print("%-8s %5s %8s %5s %5s %8s  %s" % (
-            "ticket", "runs", "turns", "upd", "msgs", "reopens", "agents / outcome"))
+        # cost is appended, never inserted: the existing columns are a
+        # positional contract that tests and operators already read.
+        print("%-8s %5s %8s %5s %5s %8s %10s  %s" % (
+            "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
+            "agents / outcome"))
         for tid, s in sorted(_traj_summary(sel).items()):
-            print("%-8s %5d %8s %5d %5d %8d  %s %s" % (
+            # '-' is not $0.00: no harness on this board reports a cost unless
+            # the operator asked for a JSON output format, and a zero would
+            # read as a free ticket (T-396 null-not-zero).
+            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
                 tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
-                s["reopens"], ",".join(sorted(s["agents"])) or "-",
+                s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",
                 ("-> " + s["outcome"]) if s["outcome"] else ""))
         print("")
         print("runs = watch runs that reached run_end (the board's own turn count).  "

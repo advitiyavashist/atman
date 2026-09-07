@@ -4,7 +4,7 @@
 // (post T-178 freeze, post T-183/T-179 merge). No live wire traffic happens in
 // this package — see README.md for what "fixture-replay tested" means here.
 
-import type { Agent, GitEvidence, MasterLease, SessionLease } from "../types";
+import type { Agent, Delivery, GitEvidence, MasterLease, Message, SessionLease, Ticket } from "../types";
 
 // ------------------------------------------------------------------ scalars
 
@@ -200,6 +200,72 @@ export interface ListActivityParams {
   cursor?: string;
   limit?: number;
   subject_type?: string;
+}
+
+// --------------------------------------------------------------- messages
+
+export interface CreateChannelRequest extends MutationEnvelope {
+  name: string;
+  visibility: "public" | "private";
+  topic?: string;
+}
+
+export interface AddChannelMemberRequest extends MutationEnvelope {
+  member_id: string;
+  subscribed?: boolean;
+}
+
+export interface ListMessagesParams {
+  [key: string]: string | number | boolean | undefined;
+  channel_id: string;
+  thread_id?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+/**
+ * `intent` is deliberately `"message" | "reply"` here, not the full
+ * `MessageIntent` union — a task is created through `POST
+ * /messages/{id}/task` (see `SendTaskRequest` below), so that its required
+ * fields are validated in one place rather than being optional on this body.
+ */
+export interface SendMessageRequest extends MutationEnvelope {
+  channel_id: string;
+  body: string;
+  intent: "message" | "reply";
+  thread_id?: string | null;
+  mentions?: string[];
+  ticket_id?: string | null;
+  causation_id?: string | null;
+}
+
+export interface SendMessageResponse {
+  message: Message;
+  /** Written in the same transaction as the message — a message persisted without its outbox rows is the bug this shape prevents. */
+  deliveries: Delivery[];
+}
+
+export interface SendTaskRouting {
+  mode: "direct" | "via_master";
+  /** Required when mode is `direct`. This is an AgentId (`Member.agent_id`), not a MemberId. */
+  agent_id?: string | null;
+}
+
+export type SendTaskTicketLink = { existing_ticket_id: string } | { new_ticket: { title: string; role?: string } };
+
+/** "Send task" requires an outcome, an assignee or explicit routing, and a linked or new ticket. */
+export interface SendTaskRequest extends MutationEnvelope {
+  outcome: string;
+  routing: SendTaskRouting;
+  ticket?: SendTaskTicketLink;
+}
+
+export interface SendTaskResponse {
+  message: Message;
+  ticket: Ticket;
+  deliveries: Delivery[];
+  /** Null when the recipient is hook-only or the project is paused. */
+  wake_job?: unknown | null;
 }
 
 // ------------------------------------------------------------------- SSE

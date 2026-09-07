@@ -52,9 +52,9 @@ export const CREATED_ROUTES = [
   "/invitations",
   "/invitations/exchange",
   "/channels",
-  "/members",
   "/messages",
   "/task",
+  "/members",
 ];
 
 /**

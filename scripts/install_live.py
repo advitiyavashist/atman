@@ -48,7 +48,8 @@ def smoke(script, sha):
 def install(repo, ref, live, activate=False, expected=None):
     sha = git(repo, "rev-parse", "--verify", ref + "^{commit}").decode().strip()
     payload = {name: git(repo, "show", sha + ":" + name) for name in FILES}
-    manifest = {"commit": sha, "files": {name: digest(data) for name, data in payload.items()}}
+    manifest = {"commit": sha, "files": {name: {"sha256": digest(data), "size": len(data)}
+                                          for name, data in payload.items()}}
     releases = live.parent / "tickets-releases"
     releases.mkdir(parents=True, exist_ok=True)
     with (releases / ".install.lock").open("a") as lock:

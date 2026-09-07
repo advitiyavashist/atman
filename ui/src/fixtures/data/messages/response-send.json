@@ -1,0 +1,42 @@
+{
+  "message": {
+    "id": "msg_00000004",
+    "project_id": "prj_demo0001",
+    "channel_id": "chn_work0001",
+    "thread_id": null,
+    "author": {
+      "type": "human",
+      "id": "mem_operator1",
+      "display_name": "Operator",
+      "session_id": null
+    },
+    "body": "Did the paging fix land?",
+    "intent": "message",
+    "ticket_id": "DEMO-14",
+    "mentions": [
+      "mem_backend01"
+    ],
+    "causation_id": null,
+    "conversation_id": null,
+    "supersedes_message_id": null,
+    "version": 1,
+    "created_at": "2026-09-06T14:32:00Z"
+  },
+  "deliveries": [
+    {
+      "id": "dlv_00000002",
+      "message_id": "msg_00000004",
+      "recipient_agent_id": "agt_backend01",
+      "state": "queued",
+      "reason": null,
+      "reason_detail": null,
+      "run_id": null,
+      "blocking_ticket_id": null,
+      "attempts": 1,
+      "next_attempt_at": null,
+      "created_at": "2026-09-06T14:32:00Z",
+      "updated_at": "2026-09-06T14:35:00Z",
+      "version": 2
+    }
+  ]
+}

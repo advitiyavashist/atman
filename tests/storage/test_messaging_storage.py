@@ -242,18 +242,28 @@ def test_wake_jobs_dedupe_by_message_and_recipient(store, messaging_setup):
 def test_run_events_require_started_session_and_preserve_visible_pauses(
     store, project, agent
 ):
+    """The reporter's session is now separate from the run's own (T-188).
+
+    `reporter_session_id` is the supervisor's, bound from its credential at the
+    route; `session_id` is the child session the run executes in. This test
+    supplies both -- the unattributed and superseded paths have their own
+    coverage in tests/runners/test_run_event_attribution.py.
+    """
+    supervisor = store.open_session(agent["id"], "2099-01-01T00:00:00Z")
     run = store.create_run(project["id"], agent["id"])
 
     with pytest.raises(InvalidStateTransition):
         store.record_run_event(
             project["id"], run["id"], "started",
             expected_version=run["version"],
+            reporter_session_id=supervisor["session_id"],
         )
 
     started = store.record_run_event(
         project["id"], run["id"], "started",
-        expected_version=run["version"], session_id="ses_a1b2c3d4",
-        ticket_claim="DEMO-14",
+        expected_version=run["version"],
+        reporter_session_id=supervisor["session_id"],
+        session_id="ses_a1b2c3d4", ticket_claim="DEMO-14",
     )
     assert started["state"] == "running"
     assert started["started_at"] is not None
@@ -261,6 +271,7 @@ def test_run_events_require_started_session_and_preserve_visible_pauses(
     paused = store.record_run_event(
         project["id"], run["id"], "needs_approval",
         expected_version=started["version"],
+        reporter_session_id=supervisor["session_id"],
         reason="Permission request needs approval.",
     )
     assert paused["state"] == "paused"
