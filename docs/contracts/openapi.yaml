@@ -185,10 +185,12 @@ components:
       type: string
       pattern: '^(agt_[0-9a-z]{8,32}|[a-z][a-z0-9-]{1,31})$'
       description: |
-        Accepts a server-minted `agt_*` token or a free-form lowercase
-        agent name (`alice`, `codex`, ...). The human-readable name is the
-        V1 identity; the `agt_` form stays legal so a server-minted id
-        remains valid later.
+        Accepts a server-minted `agt_*` token or the board's real free-form
+        lowercase name (`claude-fable`, `sonnet-sdk`, ...). Widened 2026-09
+        (T-224) rather than rename ~35 live identities and every brief, hook
+        config and `tickets msg --to` that names one at cutover -- the
+        human-readable name IS the V1 identity, and the `agt_` form stays
+        legal so a server-minted id remains valid later.
     SessionId:
       type: string
       description: Runtime session identity, distinct from the durable agent id.
