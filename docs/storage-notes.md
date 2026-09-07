@@ -258,3 +258,49 @@ task routing, wake execution and runner process management are still T-187/T-188
 Nothing here has been served over a network or measured under load. The
 concurrency claims above are from the tests in this repo on one machine, and
 they are claims about correctness, not throughput.
+
+## The pytest board guard's trust boundary (T-257 / T-273)
+
+While `PYTEST_CURRENT_TEST` is set, `_refuse_board_outside_pytest_tmp()` refuses
+any board resolving outside a temp root. It is the backstop for T-256, where a
+test suite minted a real ticket on the live steer board.
+
+**The boundary is computed from the platform, never from the environment.**
+`_trusted_tmp_roots()` uses `os.confstr(65537)` (`_CS_DARWIN_USER_TEMP_DIR`,
+read from the kernel) plus the fixed POSIX roots `/tmp`, `/private/tmp`,
+`/var/tmp`, `/private/var/tmp`, `/usr/tmp`. It does **not** call
+`tempfile.gettempdir()` on POSIX, because that honours `$TMPDIR` and made the
+guard's own safety boundary settable by the caller it polices: with
+`TMPDIR=/Users/<operator>/Downloads` the live board resolved as "inside tmp" and the
+guard went quiet (T-273).
+
+Two things that look like fixes and are not:
+
+- **Stripping `TMPDIR` and calling `gettempdir()`.** On macOS pytest's
+  `tmp_path` lives under the per-user `/var/folders/<…>/T` that `TMPDIR` points
+  at, while `gettempdir()` without `TMPDIR` returns `/private/tmp`. This would
+  refuse every legitimate run in this suite.
+- **Trusting a `pytest-of-*` path component.** pytest creates that name rather
+  than reading it from the environment, which is true and irrelevant: any
+  process can `mkdir pytest-of-evil` anywhere and silently disable the guard for
+  everything beneath it. An opt-out spelled as a filename is still an opt-out.
+  There is no name-based escape valve, and `tests/test_t273_tmpdir_guard.py`
+  keeps the A/B (two boards under one untrusted parent, differing only by that
+  component) to stop it coming back.
+
+There is deliberately **no opt-out environment variable** (T-261's failure
+mode).
+
+**Behavioural consequence, know this before you debug it.** The boundary is now
+strict, so a pytest run whose `tmp_path` lands outside those roots — `TMPDIR`
+pointed at a workspace directory, or `--basetemp` outside the system temp dir —
+will be refused **loudly, for every test**, where it used to be silently
+allowed. That is the intended direction (fail closed, and say so), but it is a
+real change for any CI that relocates `TMPDIR`. The fix there is to let pytest
+use the system temp dir, not to widen the guard.
+
+Still true, and still only a scope gap: the `server` and `storage` packages are
+not covered by this guard at all. Every `db_path` call site takes an explicit
+path, there is no cwd probe and no default, and the only `os.environ` read in
+either package is `TICKET_BOARD_LEGACY_DOCUMENT_MAX_BYTES` (a byte cap). Adding
+any ambient default for `db_path` would reopen this bug class there.

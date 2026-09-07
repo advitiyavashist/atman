@@ -239,6 +239,69 @@ def _refuse_join_tickets_dir_shadow(board):
         "then re-run join\n"
         % (cwd_board, env, board, cwd_board)
     )
+# <unistd.h>. os.confstr_names carries no name for it on CPython, so the
+# integer is the only way to ask; guarded by try/except for every non-Darwin
+# platform, where it simply does not exist.
+_CS_DARWIN_USER_TEMP_DIR = 65537
+
+
+def _trusted_tmp_roots():
+    """Temp roots resolved from the PLATFORM, never from the environment.
+
+    T-273: this guard used to compare against tempfile.gettempdir(), which
+    honours $TMPDIR -- so the guard's own safety boundary was settable by the
+    very caller it exists to police. Reproduced read-only against the real
+    board before any of this was written:
+
+        cd <steer> && env -i PATH=... HOME=... \
+            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=/Users/<operator>/Downloads \
+            python3 tickets.py board --quiet
+
+    printed the full live 200+-ticket board, exit 0, no refusal; the identical
+    call without the TMPDIR override refused correctly. Had the subcommand
+    been `create`, that is T-256 happening again.
+
+    The non-obvious part, and the reason the ticket's own first suggested fix
+    (strip TMPDIR, call gettempdir()) is WRONG: on macOS pytest's tmp_path
+    lives under the per-user /var/folders/<...>/T that TMPDIR normally points
+    at, while gettempdir() with TMPDIR stripped returns /private/tmp.
+    Requiring /private/tmp would refuse every legitimate run in this suite.
+    confstr(_CS_DARWIN_USER_TEMP_DIR) yields that same /var/folders root and
+    reads it from the kernel, not from the environment.
+
+    There is deliberately NO name-based escape valve here. An earlier draft
+    trusted any path containing a `pytest-of-*` component on the reasoning
+    that pytest creates that name rather than reading it from the env. True of
+    pytest, and irrelevant: any process can mkdir that name anywhere, so
+    `mkdir pytest-of-evil` silently disabled the guard for everything beneath
+    it. That is the same failure this ticket is about -- a guard certifying an
+    untrusted path as safe -- merely relocated from an env var to a directory
+    name. An opt-out spelled as a filename is still an opt-out (T-261).
+    """
+    roots = []
+    try:
+        darwin_tmp = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
+    except (ValueError, OSError, AttributeError):
+        darwin_tmp = None
+    if darwin_tmp:
+        roots.append(darwin_tmp)
+    roots.extend(("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/usr/tmp"))
+    out = []
+    for r in roots:
+        try:
+            real = os.path.realpath(r)
+        except OSError:
+            continue
+        if os.path.isdir(real) and real not in out:
+            out.append(real)
+    if not out:
+        # Non-POSIX (Windows): none of the fixed roots exist and there is no
+        # confstr. Fall back to gettempdir() rather than refusing every board
+        # and breaking the suite outright -- a weaker boundary there is better
+        # than a guard that makes the tool unusable.
+        import tempfile
+        out.append(os.path.realpath(tempfile.gettempdir()))
+    return out
 
 
 def _refuse_board_outside_pytest_tmp(path):
@@ -253,19 +316,22 @@ def _refuse_board_outside_pytest_tmp(path):
     here is indistinguishable from a real board write after the fact."""
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         return
-    import tempfile
-    tmp_root = os.path.realpath(tempfile.gettempdir())
     real = os.path.realpath(path)
-    if real == tmp_root or real.startswith(tmp_root + os.sep):
-        return
+    roots = _trusted_tmp_roots()
+    for root in roots:
+        if real == root or real.startswith(root + os.sep):
+            return
     sys.exit(
         "REFUSING TO USE BOARD %r: running under pytest (PYTEST_CURRENT_TEST "
-        "is set) but this board resolved outside the system temp dir (%r). "
-        "This looks like a test about to read or write a real board instead "
-        "of an isolated tmp_path fixture -- see T-257. Make sure TICKETS_DIR "
-        "points at a tmp_path (and that any subprocess.run() call passes "
-        "env= explicitly rather than inheriting the ambient environment)."
-        % (real, tmp_root)
+        "is set) but this board resolved outside every trusted temp root "
+        "(%s). This looks like a test about to read or write a real board "
+        "instead of an isolated tmp_path fixture -- see T-257. Make sure "
+        "TICKETS_DIR points at a tmp_path (and that any subprocess.run() call "
+        "passes env= explicitly rather than inheriting the ambient "
+        "environment). Those roots come from the platform, not from $TMPDIR: "
+        "exporting TMPDIR cannot widen them, and a directory merely NAMED "
+        "'pytest-of-*' outside them is not trusted either (T-273)."
+        % (real, ", ".join(roots))
     )
 
 
