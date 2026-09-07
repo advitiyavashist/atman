@@ -41,6 +41,7 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     for marker in (
         "promiseHero", 'aria-label="Fewest turns. Max output at least cost."',
         "heroEyebrow", "heroMedian", "heroYield", "Yield@cost", "Median turns",
+        "promiseStrip", "promiseChips", "objectivePromise", "hdrMedian", "hdrYield",
         "Fewest turns. Max output at least cost.",
         "Lower is better · unknown is not zero",
         "turnsPanel", "Turns efficiency", "turnsWorst", "turnsAgents",
@@ -55,6 +56,35 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     assert "DAG" not in ui
     assert "graph editor" not in ui.lower()
     assert 'data-tab-btn="board"' in ui
+
+
+def test_home_hero_is_v1_must_not_t344_deferral():
+    """CEO ACCEPT: median turns + yield@cost on home (Board pane) is V1 MUST."""
+    ui = _ui_html()
+    board = ui[ui.index('id="pane-board"'):ui.index('id="pane-agents"')]
+    assert 'id="promiseHero"' in board
+    assert "Median turns" in board
+    assert "Yield@cost" in board
+    assert board.index("promiseHero") < board.index("turnsPanel")
+    # T-344 worst-10 is NICE and collapsed; it must not be the only turns surface.
+    assert "<details" in board and "Turns efficiency" in board
+
+
+def test_promise_chips_strip_on_home_objective():
+    """PM: hero + chips + Objective strip on home now; T-345 folds later."""
+    ui = _ui_html()
+    assert 'id="promiseStrip"' in ui
+    assert 'data-fold="objective"' in ui
+    assert 'id="objectivePromise"' in ui
+    assert 'id="promiseChips"' in ui
+    assert ">Objective<" in ui
+    assert "median turns" in ui
+    assert "yield@cost" in ui
+    assert "fmtMedian" in ui and "fmtYield" in ui
+    assert "hdrMedianVal" in ui
+    assert "stripMedianVal" not in ui
+    # Craft bar: numbers once on home (hero); chips hide on Board.
+    assert "body[data-tab=board] .promise-chips{display:none}" in ui
 
 
 def test_promise_hero_copy_nits():

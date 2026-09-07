@@ -3,110 +3,108 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>atman — finish more work at least cost</title>
-  <meta name="description" content="Atman is a self-hosted team runtime for agents you already bring. Finish more work at least cost — in the fewest turns. Open repository. Not a SaaS cloud.">
-  <meta name="theme-color" content="#0c0e12">
+  <title>atman</title>
+  <meta name="description" content="Open repo, self-hosted team runtime. Finish more work at least cost — in the fewest turns. Not a SaaS cloud.">
+  <meta name="theme-color" content="#f4f1ea">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
 
-  <header class="top">
-    <a class="lockup" href="#main" aria-label="atman home">
-      <img class="mark" src="mark.svg" width="28" height="28" alt="">
+  <header class="bar">
+    <a class="lockup" href="#main">
+      <svg class="mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
+        <circle cx="10" cy="7.8" r="3.35"/>
+        <circle cx="22.4" cy="8.8" r="3.35"/>
+        <circle cx="6.6" cy="17.6" r="3.35"/>
+        <circle cx="25.4" cy="18.2" r="3.35"/>
+        <circle cx="16" cy="24.6" r="3.35"/>
+      </svg>
       <span class="wordmark">atman</span>
     </a>
-    <nav class="nav" aria-label="Page">
-      <a href="https://github.com/advitiyavashist/atman" rel="noopener">Repository</a>
-      <a href="#run">How it runs</a>
+    <nav aria-label="Page">
+      <a href="https://github.com/advitiyavashist/atman" rel="noopener">Clone the repo</a>
+      <a href="#start">Run it locally</a>
     </nav>
   </header>
 
   <main id="main">
     <section class="hero">
-      <div class="hero-copy">
-        <p class="kicker">Open repo · self-hosted · not a cloud</p>
-        <h1>
-          Finish more work<br>
-          at least cost —<br>
-          in the fewest turns.
-        </h1>
-        <p class="lede">
-          A team runtime for agents you already bring. Clone the repository.
-          Run it on your machine. There is no Atman SaaS.
-        </p>
-        <p class="actions">
-          <a class="btn" href="https://github.com/advitiyavashist/atman" rel="noopener">Open the repository</a>
-          <a class="text-link" href="#run">How it runs</a>
-        </p>
-      </div>
-      <img class="hero-mark" src="mark.svg" width="200" height="200" alt="" aria-hidden="true">
-    </section>
-
-    <section class="pillars" aria-label="How Atman works">
-      <article>
-        <h2>BYOA</h2>
-        <p>
-          Bring your own agent harness — Claude, Codex, Cursor, a local model,
-          a shell one-liner. We do not install a model. The runtime makes them
-          one team: objective, seats, handoffs, review.
-        </p>
-      </article>
-      <article>
-        <h2>Usage-aware</h2>
-        <p>
-          Turns and cost count when the harness reports them. Unknown is not
-          zero. The point is yield: more work finished, fewer turns, least
-          spend.
-        </p>
-      </article>
-      <article>
-        <h2>Total Football</h2>
-        <p>
-          Positions are coverage, not identity. Any seat can take any lane —
-          including master. Empty seats are uncovered work. The operator
-          intervenes; the product does not silently auto-promote.
-        </p>
-      </article>
-    </section>
-
-    <section class="position" id="position">
-      <h2>Open first. You host it.</h2>
-      <p>
-        Atman is who works and how the team finishes. The CLI is how it runs
-        today. The product is the team runtime — not a hosted dashboard you
-        subscribe to.
+      <p class="kicker">open repo · self-hosted</p>
+      <h1>Finish more work at least cost — in the fewest turns.</h1>
+      <p class="lede">Bring Claude, Codex, Cursor, or your own harness. Atman makes them one team and shows the efficiency score.</p>
+      <p class="ctas">
+        <a class="btn" href="https://github.com/advitiyavashist/atman" rel="noopener">Clone the repo</a>
+        <a class="ghost" href="#start">Run it locally</a>
       </p>
+      <svg class="hero-mark" viewBox="0 0 32 32" width="160" height="160" aria-hidden="true">
+        <circle cx="10" cy="7.8" r="3.35"/>
+        <circle cx="22.4" cy="8.8" r="3.35"/>
+        <circle cx="6.6" cy="17.6" r="3.35"/>
+        <circle cx="25.4" cy="18.2" r="3.35"/>
+        <circle cx="16" cy="24.6" r="3.35"/>
+      </svg>
+    </section>
+
+    <section id="what">
+      <h2>What it is</h2>
+      <p class="lead">A team runtime. Not a framework.</p>
       <ul>
-        <li>Open repository. MIT licensed. You clone it.</li>
-        <li>Self-hosted on your machine or your filesystem. No Atman cloud.</li>
-        <li>Not Steer. Steer is a separate policy product. Atman does not enforce what an agent may see or say.</li>
+        <li>Bring the agents you already use. We make them one team.</li>
+        <li>Objective → allocate → concurrent → handoffs → review → replan.</li>
+        <li>Not a multi-agent framework, a model router, or a shared-memory product.</li>
       </ul>
     </section>
 
-    <section class="run" id="run">
-      <h2>How it runs</h2>
-      <p>
-        Clone the repo. Join the harnesses you already use. Set an objective.
-        Watch seats cover lanes. Details live in the repository README.
-      </p>
+    <section id="how">
+      <h2>How</h2>
+      <div class="steps">
+        <article>
+          <h3>Objective</h3>
+          <p>Standing mission. Met, not met, or evidence. No invented bars.</p>
+        </article>
+        <article>
+          <h3>Team</h3>
+          <p>Seats and coverage. Empty seats are uncovered work.</p>
+        </article>
+        <article>
+          <h3>Work</h3>
+          <p>Teammates, lanes, next step, handoff. Blocked · Ready · In flight · Review.</p>
+        </article>
+        <article>
+          <h3>Intervene</h3>
+          <p>Route, unblock, reassign, nudge, msg. No silent auto-promote.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="metrics">
+      <h2>Metrics</h2>
+      <p class="score">efficiency score · <b>unmeasured</b></p>
+      <p>Not measured until real. The score is turns to done. Unknown is not zero. No sample numbers.</p>
+    </section>
+
+    <section id="start">
+      <h2>Start</h2>
+      <p class="lead">Clone the repo. Run it locally.</p>
       <pre><code>git clone https://github.com/advitiyavashist/atman.git
 cd atman
-# tickets init  →  join harnesses  →  set an objective</code></pre>
+# tickets init — then join harnesses and set an objective</code></pre>
+    </section>
+
+    <section id="close">
+      <h2>Close</h2>
+      <p class="lead">Open repo. Self-hosted. You run it on your machine.</p>
+      <p>Atman ≠ SteerMD. Atman is who works and how the team finishes.</p>
     </section>
   </main>
 
-  <footer class="foot">
-    <div class="foot-row">
-      <span class="wordmark">atman</span>
-      <span class="mute">MIT · <a href="https://github.com/advitiyavashist/atman" rel="noopener">github.com/advitiyavashist/atman</a></span>
-    </div>
-    <p class="honest">
-      No custom domain is registered. Optional host: GitHub Pages (or any
-      static server) pointed at this <code>landing/</code> folder. A
-      <code>*.github.io</code> URL exists only if Pages is enabled — it is
-      not claimed here.
+  <footer>
+    <span class="wordmark">atman</span>
+    <p>
+      MIT · <a href="https://github.com/advitiyavashist/atman" rel="noopener">github.com/advitiyavashist/atman</a>
+      · No custom domain is registered.
     </p>
   </footer>
 </body>
