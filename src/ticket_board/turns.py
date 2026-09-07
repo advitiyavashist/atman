@@ -1,8 +1,12 @@
 """T-312: turns-to-done aggregator.
 
-A TURN is one completed watch run (`run_start` -> `run_end`). A ticket's
-turns are those runs from the first claim to the final done; reopens add
-their runs. Backfill never recorded runs, so `turns` is JSON null — never 0.
+A TURN is one completed watch run (`run_start` -> `run_end`) that wrote
+the bound ticket. T-425: a run increments `turns` only when THAT `run_id`
+recorded a bound-ticket write (claim, update, review, done, block, reopen,
+or msg --re that ticket). Fail-exit, timeout, and session-limit with no
+write stay in jsonl but do not count. Events with no `run_id` (pre-T-425)
+still count every `run_end`. Backfill never recorded runs, so `turns` is
+JSON null — never 0.
 
 `--json` shape is frozen here and in docs/turns.md. The optimizer (T-313)
 reads it; do not rename keys.
@@ -159,15 +163,54 @@ def _model(evs, owner, workforce):
     return None
 
 
+# Bound-ticket writes credited to a run_id. Broadcast msg (no ticket) is not.
+_BOUND_WRITE_KINDS = frozenset(
+    ("claim", "update", "review", "done", "block", "reopen"))
+
+
+def _is_bound_write(e, ticket):
+    if not ticket or e.get("ticket") != ticket:
+        return False
+    kind = e.get("kind")
+    return kind in _BOUND_WRITE_KINDS or kind == "msg"
+
+
+def _run_is_productive(end, writes_by_rid):
+    """T-425 FLAG: increment iff THAT run_id wrote the bound ticket.
+
+    Exit=1 / timed_out / session-limit with zero writes is idle (HB87/HB88).
+    No content grep. Broadcasts without --re never increment.
+    """
+    if end.get("bound_write"):
+        return True
+    rid = end.get("run_id")
+    if not rid:
+        return True  # pre-T-425 jsonl: every completed run counted
+    tid = end.get("ticket")
+    return any(_is_bound_write(w, tid) for w in writes_by_rid.get(rid) or [])
+
+
 def _measured_turns(evs):
-    """Count completed watch runs. Unknown (no run_end) -> None, never 0."""
-    n = 0
+    """Count productive completed watch runs. Unknown -> None, never 0.
+
+    Idle and fail-exit `run_end` rows stay in jsonl. If none of a ticket's
+    runs wrote the bound ticket, `turns` stays null so n_measured does not
+    rise.
+    """
+    writes_by_rid = {}
     saw_run = False
+    n = 0
     for e in evs:
-        if e.get("kind") == "run_end":
-            saw_run = True
+        rid = e.get("run_id")
+        if rid and _is_bound_write(e, e.get("ticket")):
+            writes_by_rid.setdefault(rid, []).append(e)
+    for e in evs:
+        if e.get("kind") != "run_end":
+            continue
+        saw_run = True
+        if _run_is_productive(e, writes_by_rid):
             n += 1
-    if not saw_run:
+    if not saw_run or n == 0:
         return None
     return n
 

@@ -69,6 +69,11 @@ def test_run_start_omits_ticket_when_idle(board, tmp_path):
 
 
 def test_turns_n_increases_for_review_owned_watch_pair(board, tmp_path, monkeypatch):
+    """T-425: idle review-owned echo (no bound-ticket write) is not a turn.
+
+    Binding the run_start.ticket still happens (tests above); n_measured must
+    not rise from the idle pulse.
+    """
     for var in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"):
         monkeypatch.delenv(var, raising=False)
     b, repo = _worked(board)
@@ -84,5 +89,5 @@ def test_turns_n_increases_for_review_owned_watch_pair(board, tmp_path, monkeypa
         agent="alice", cwd=repo)
     after = json.loads(run(b, "turns", "--json", cwd=repo).stdout)
     by = {r["ticket"]: r for r in after["tickets"]}
-    assert by[tid]["turns"] == 1
-    assert after["aggregates"]["n"] == n_before + 1
+    assert by[tid]["turns"] is None
+    assert after["aggregates"]["n"] == n_before
