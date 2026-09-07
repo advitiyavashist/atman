@@ -41,6 +41,7 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     for marker in (
         "promiseHero", 'aria-label="Fewest turns. Max output at least cost."',
         "heroEyebrow", "heroMedian", "heroYield", "Yield@cost", "Median turns",
+        "promiseStrip", "promiseChips", "objectivePromise", "hdrMedian", "hdrYield",
         "Fewest turns. Max output at least cost.",
         "Lower is better · unknown is not zero",
         "turnsPanel", "Turns efficiency", "turnsWorst", "turnsAgents",
@@ -55,6 +56,20 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     assert "DAG" not in ui
     assert "graph editor" not in ui.lower()
     assert 'data-tab-btn="board"' in ui
+
+
+def test_promise_chips_strip_on_home_objective():
+    """PM: hero + chips + Objective strip on home now; T-345 folds later."""
+    ui = _ui_html()
+    assert 'id="promiseStrip"' in ui
+    assert 'data-fold="objective"' in ui
+    assert 'id="objectivePromise"' in ui
+    assert 'id="promiseChips"' in ui
+    assert ">Objective<" in ui
+    assert "median turns" in ui
+    assert "yield@cost" in ui
+    assert "fmtMedian" in ui and "fmtYield" in ui
+    assert "hdrMedianVal" in ui and "stripMedianVal" in ui
 
 
 def test_promise_hero_copy_nits():
