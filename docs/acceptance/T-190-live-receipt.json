@@ -1,0 +1,45 @@
+{
+  "ticket": {
+    "id": "T190-1",
+    "state": "claimed",
+    "owner": "agt_5klejmgk"
+  },
+  "recorded_at": "2026-09-07T19:14:35Z",
+  "claude": "2.1.263 (Claude Code)",
+  "binary": "/opt/homebrew/bin/claude",
+  "argv_shape": [
+    "claude",
+    "-p",
+    "--session-id",
+    "<uuid>"
+  ],
+  "session_uuid": "26ef0f48-b43a-4e4a-b2ba-75bc919a9f50",
+  "board_session_id": "ses_26ef0f48b43a4e4ab2ba75bc919a9f50",
+  "nonce": "PROOF-aedfcd83",
+  "nonce_in_child_stdout": true,
+  "child_stdout": "PROOF-aedfcd83\n",
+  "spawn_seconds": 0.004382874999999897,
+  "wall_seconds": 4.92,
+  "run": {
+    "id": "run_fe9hsp50",
+    "state": "responded",
+    "wake_job_id": "wjb_fe9hsp50",
+    "ticket_claim": "T190-1",
+    "started_at": "2026-09-07T19:14:30Z",
+    "ended_at": "2026-09-07T19:14:35Z",
+    "budget": {
+      "hops_used": 0,
+      "max_hops": 3,
+      "max_seconds": 900,
+      "max_turns": 10,
+      "seconds_used": 4,
+      "turns_used": 0
+    }
+  },
+  "delivery_state": "delivered",
+  "reply_posted_to_board": false,
+  "dm_message_intents": [
+    "message",
+    "task"
+  ]
+}

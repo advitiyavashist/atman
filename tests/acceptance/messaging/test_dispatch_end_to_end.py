@@ -167,6 +167,22 @@ def test_via_master_wakes_the_designated_master_once_and_nobody_else(board):
 # --------------------------------------------------------------- findings
 
 @pytest.mark.xfail(strict=True, reason=(
+    "F-13: the child is never told the task. The wake job carries ids only and "
+    "`default_prompt` says 'Read the ticket ... report back on the board' to a "
+    "process that has no board credential, no `tickets` CLI pointed at this "
+    "board, and no copy of the message or the ticket outcome. Live, the model "
+    "spent 266 s searching an empty worktree and exited 0: a run marked "
+    "`responded` that never saw what it was asked to do."))
+def test_the_default_prompt_carries_the_task(board):
+    agent = board.enroll("claude-a")
+    outcome = "Rename the README heading to 'Ticket Board'."
+    _, _, task = _dm_task(board, agent, outcome=outcome)
+    launcher = FakeLauncher()
+    board.supervisor(agent, launcher=launcher).run_forever(wait_seconds=1, max_polls=1)
+    assert outcome in launcher.specs[0].prompt, launcher.specs[0].prompt
+
+
+@pytest.mark.xfail(strict=True, reason=(
     "F-1: receipts stop at 'delivered'. Nothing in T-187 or T-188 transitions "
     "the delivery to started/responded or links run_id, so the receipt chain "
     "the design and the T-189 UI show (Sent -> Queued -> Delivered -> Agent "

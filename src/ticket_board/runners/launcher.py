@@ -225,6 +225,12 @@ class ClaudeLauncher:
             process.stdin.close()
         except (BrokenPipeError, OSError):
             pass
+        finally:
+            # communicate() flushes any stdin the Popen still holds; on a
+            # closed pipe that is `ValueError: I/O operation on closed file`,
+            # and it crashed every real run at wait() (T-190 F-12). Dropping
+            # the reference tells communicate() there is no stdin to manage.
+            process.stdin = None
         return LaunchHandle(process, spec)
 
     def launch(self, spec: LaunchSpec) -> LaunchResult:

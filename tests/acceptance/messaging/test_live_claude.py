@@ -78,8 +78,22 @@ def test_a_real_disposable_claude_is_woken_by_a_dm_task_claims_and_runs(board, t
     worktree = tmp_path / "disposable-worktree"
     worktree.mkdir()
     launcher = RecordingLauncher()
+    client = board.runner_client(agent)
+
+    def prompt_with_the_task(job):
+        # F-13: `default_prompt` names ids only ("Read the ticket ... report
+        # back on the board") and the child has no board access, so with the
+        # default the model never learns what it was asked. The first live
+        # run here spent 266 s and exited 0 without seeing the task at all.
+        # An operator-supplied builder that fetches the ticket through the
+        # runner's own client is the shipped way to hand the task over.
+        ticket = client.get_ticket(job["ticket_id"])["ticket"]
+        return ("You have been woken by the Ticket Board for one task.\n"
+                "Task: {}\n".format(ticket.get("outcome") or ticket["title"]))
+
     sup = board.supervisor(agent, launcher=launcher, worktree=worktree,
-                           budget={"max_seconds": 180})
+                           budget={"max_seconds": 180},
+                           prompt_builder=prompt_with_the_task)
     began = time.monotonic()
     outcomes = sup.run_forever(wait_seconds=2, max_polls=1)
     elapsed = time.monotonic() - began
@@ -95,7 +109,6 @@ def test_a_real_disposable_claude_is_woken_by_a_dm_task_claims_and_runs(board, t
     assert spec.resume is False
     uuid.UUID(spec.session_id)
     assert "TICKET_AGENT" not in launcher.env
-    assert "Wake job {}".format(task["wake_job"]["id"]) in spec.prompt
     assert nonce in spec.prompt
 
     # A model turn happened: the token came back on the child's own stdout.
