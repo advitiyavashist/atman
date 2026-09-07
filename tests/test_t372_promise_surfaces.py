@@ -39,7 +39,8 @@ def _costed_fixture(dest):
 def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     ui = _ui_html()
     for marker in (
-        "promiseHero", "heroEyebrow", "heroMedian", "heroYield", "Yield@cost", "Median turns",
+        "promiseHero", 'aria-label="Fewest turns. Max output at least cost."',
+        "heroEyebrow", "heroMedian", "heroYield", "Yield@cost", "Median turns",
         "Fewest turns. Max output at least cost.",
         "Lower is better · unknown is not zero",
         "turnsPanel", "Turns efficiency", "turnsWorst", "turnsAgents",
@@ -57,11 +58,12 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
 
 
 def test_promise_hero_copy_nits():
-    """T-372 follow-up: eyebrow + median hint + Total Football casing. CLI flag stays out of the hero."""
+    """T-372 follow-up: eyebrow + median hint + Total Football + soft a11y on #promiseHero."""
     ui = _ui_html()
     assert "Fewest turns. Max output at least cost." in ui
     assert "Lower is better · unknown is not zero" in ui
     assert "Total Football." in ui
+    assert 'id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."' in ui
     assert "tickets turns --json" not in ui
     assert "Total football." not in ui
     # Median hint is static copy; do not overwrite it with CLI/measured text.

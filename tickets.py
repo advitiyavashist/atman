@@ -6530,7 +6530,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   <div id="emptyBoard" class="empty-board" hidden></div>
   <div>
     <p class="hero-eyebrow" id="heroEyebrow">Fewest turns. Max output at least cost.</p>
-    <div class="promise-hero" id="promiseHero">
+    <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost.">
       <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Lower is better · unknown is not zero</div></article>
       <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
     </div>
