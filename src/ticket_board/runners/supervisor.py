@@ -64,7 +64,11 @@ class RunOutcome:
     run_id: Optional[str]
     state: str                      # responded | failed | paused | skipped
     reason: Optional[str] = None
-    started_after_seconds: Optional[float] = None
+    # How long `start()` took, NOT the wake-to-start latency an operator cares
+    # about -- that interval begins when the message is committed, before this
+    # supervisor has seen anything. tests/runners/test_idle_start_latency.py
+    # measures the real one from outside. Named for what it holds.
+    spawn_seconds: Optional[float] = None
 
 
 class Supervisor:
@@ -257,7 +261,7 @@ class Supervisor:
         self.state.in_flight.spawned = True
         self._save()
 
-        started_after = self.clock() - began
+        spawn_seconds = self.clock() - began
         try:
             run = self.client.run_event(
                 run_id, "started", expected_version=run["version"],
@@ -279,17 +283,22 @@ class Supervisor:
         if result.returncode is None:
             # The time budget, not a crash. Pause with a visible reason; the
             # design doc says an operator resumes from here.
+            # `keep_unfinished` leaves this out of the local ledger on
+            # purpose: the run is paused on the board, which both holds the
+            # agent and excludes it from the orphan sweep, so the board is the
+            # guard against a re-run and a local "already done" entry would be
+            # a second, quieter claim about a run nobody has finished.
             outcome = self._terminal(job, run_id, "budget_reached",
                                      result.reason or "Run budget reached.",
                                      run["version"], keep_unfinished=True,
                                      budget=spent)
-            outcome.started_after_seconds = started_after
+            outcome.spawn_seconds = spawn_seconds
             return outcome
 
         event = "responded" if result.returncode == 0 else "failed"
         outcome = self._terminal(job, run_id, event, result.reason,
                                  run["version"], budget=spent)
-        outcome.started_after_seconds = started_after
+        outcome.spawn_seconds = spawn_seconds
         return outcome
 
     # ---------------------------------------------------------------- pieces
