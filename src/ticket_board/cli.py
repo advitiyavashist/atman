@@ -2416,6 +2416,8 @@ def health(board, tickets):
 
 def cmd_reopen(a, board):
     t = load(board, a.id)
+    if getattr(a, "notes", ""):
+        t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": a.notes})
     before = t["status"]
     prev_owner = t.get("owner", "")
     t["status"] = "open"
@@ -3501,6 +3503,8 @@ def main():
 
     c = sub.add_parser("reopen", help="release a claimed ticket back to open")
     c.add_argument("id")
+    c.add_argument("--notes", "-n", default="", help="why it's being reopened (recorded as a note)")
+    c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
     c.set_defaults(fn=cmd_reopen)
 
     c = sub.add_parser(
@@ -3556,7 +3560,13 @@ def main():
                    "the case init would otherwise refuse (T-263)")
     c.set_defaults(fn=cmd_init)
 
-    from ticket_coordination import register
+    try:
+        from .ticket_coordination import register
+    except ImportError:
+        # `python src/ticket_board/cli.py` puts this directory on sys.path[0],
+        # so the same module is importable as a top-level name. pip-install
+        # (`ticket_board.cli:main`) takes the relative branch above.
+        from ticket_coordination import register
     register(sub, globals())
 
     a = p.parse_args()
