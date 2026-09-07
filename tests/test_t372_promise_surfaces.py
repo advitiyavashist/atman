@@ -39,11 +39,13 @@ def _costed_fixture(dest):
 def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     ui = _ui_html()
     for marker in (
-        "promiseHero", "heroMedian", "heroYield", "Yield@cost", "Median turns",
+        "promiseHero", "heroEyebrow", "heroMedian", "heroYield", "Yield@cost", "Median turns",
+        "Fewest turns. Max output at least cost.",
+        "Lower is better · unknown is not zero",
         "turnsPanel", "Turns efficiency", "turnsWorst", "turnsAgents",
         "renderTurns", "turns-grid", "Worst tickets", "Per-agent median",
         "usagePanel", "Usage / cost", "usageHonesty", "Not reported by harness",
-        "renderUsage", "coverageLede", "Total football", "band-keep", "band-attack",
+        "renderUsage", "coverageLede", "Total Football.", "band-keep", "band-attack",
         "renderPitch", "uncovered", "emptyBoard", "nextStep", "obSteps",
         'data-tab-btn="board"', 'data-tab-btn="agents"', 'data-tab-btn="messages"',
         "fetch('/msg'", "mentionBar",
@@ -52,6 +54,19 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     assert "DAG" not in ui
     assert "graph editor" not in ui.lower()
     assert 'data-tab-btn="board"' in ui
+
+
+def test_promise_hero_copy_nits():
+    """T-372 follow-up: eyebrow + median hint + Total Football casing. CLI flag stays out of the hero."""
+    ui = _ui_html()
+    assert "Fewest turns. Max output at least cost." in ui
+    assert "Lower is better · unknown is not zero" in ui
+    assert "Total Football." in ui
+    assert "tickets turns --json" not in ui
+    assert "Total football." not in ui
+    # Median hint is static copy; do not overwrite it with CLI/measured text.
+    assert "heroMedianHint').textContent" not in ui
+    assert 'heroMedianHint").textContent' not in ui
 
 
 def test_board_snapshot_turns_matches_cli_json(board):
