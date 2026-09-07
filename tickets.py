@@ -74,20 +74,120 @@ def child_boards(cwd):
     return found
 
 
+# Git's *location* environment: the variables that override repo discovery and
+# make git answer for a repository other than the one cwd is standing in. This
+# is deliberately NOT "every GIT_* key" -- see _clean_git_env below.
+GIT_LOCATION_VARS = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+)
+
+
+def _clean_git_env(environ=None):
+    """Copy an environment without inherited Git *location* overrides (T-243).
+
+    GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE and friends take priority over cwd
+    during git's repo discovery, so a subprocess that inherits them silently
+    answers for whatever repo they name instead of the caller's own cwd. Once
+    such a value is forwarded into a spawned/exec'd child it cascades to every
+    agent the watcher launches, which is why the wrong repo tracked "whichever
+    worktree was most recently active globally" rather than any one agent.
+
+    Scope, deliberately narrow (T-259 defect 3 / cos-opus's ruling): only the
+    location family is removed. GIT_AUTHOR_*/GIT_COMMITTER_* must survive --
+    this env is also handed to `cmd_watch`/`cmd_spawn` as the FLEET-LAUNCH
+    environment, and stripping identity there is the same class of attribution
+    loss as T-238. GIT_SSH_COMMAND/GIT_ASKPASS/GIT_TERMINAL_PROMPT likewise
+    survive so credential helpers keep working. None of those can redirect
+    which repository git resolves, so none of them is this bug's mechanism.
+
+    Always pair with an explicit cwd.
+    """
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items() if k not in GIT_LOCATION_VARS}
+
+
+def _fs_repo_link(start):
+    """Resolve (worktree_root, shared .git dir) for `start` from the FILESYSTEM.
+
+    No environment variable can redirect this, which is exactly the point: it
+    is ground truth to cross-check git's own answer against. Handles both a
+    normal checkout (.git is a directory) and a linked worktree (.git is a
+    file containing "gitdir: <common>/worktrees/<name>"), including a worktree
+    that lives OUTSIDE the main repo tree -- a supported layout that a naive
+    "the root must contain cwd" test wrongly rejects (T-259 defect 1).
+    Returns (None, None) when cwd is not inside a work tree at all.
+    """
+    d = os.path.realpath(start)
+    while True:
+        cand = os.path.join(d, ".git")
+        if os.path.isdir(cand):
+            return d, os.path.realpath(cand)
+        if os.path.isfile(cand):
+            try:
+                with open(cand, encoding="utf-8", errors="replace") as fh:
+                    line = fh.read().strip()
+            except OSError:
+                return None, None
+            if not line.startswith("gitdir:"):
+                return None, None
+            gitdir = os.path.realpath(os.path.join(d, line.split(":", 1)[1].strip()))
+            parent = os.path.dirname(gitdir)
+            if os.path.basename(parent) == "worktrees":
+                return d, os.path.realpath(os.path.dirname(parent))
+            return d, gitdir
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None, None
+        d = parent
+
+
 def _repo_root():
-    """Root of the MAIN worktree, so every linked worktree shares one board."""
+    """Root of the MAIN worktree, so every linked worktree shares one board.
+
+    Explicit cwd + a scrubbed env (T-243): without them an ambient GIT_DIR or
+    GIT_COMMON_DIR silently reroutes board discovery to a DIFFERENT project's
+    board -- strictly worse than the misreported location this ticket was
+    filed for, because it means reading and writing another repo's tickets.
+
+    The result is then cross-checked against the filesystem. On disagreement
+    the FILESYSTEM WINS: it cannot be redirected by the environment, so it
+    recovers the correct shared board instead of refusing and letting
+    board_dir() fall through to a brand-new empty one (T-259 defect 1).
+    """
     import subprocess
+    here = os.getcwd()
+    fs_root, fs_common = _fs_repo_link(here)
     try:
         out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5,
+                             cwd=here, env=_clean_git_env())
     except (OSError, subprocess.TimeoutExpired):
+        out = None
+    common = None
+    if out is not None and out.returncode == 0:
+        common = os.path.realpath(os.path.join(here, out.stdout.strip()))
+
+    if fs_common is not None and common is not None and fs_common != common:
+        sys.stderr.write(
+            "tickets: git resolved its common dir to %s but the filesystem says cwd %s "
+            "belongs to %s -- trusting the filesystem (T-243)\n" % (common, here, fs_common))
+        common = fs_common
+    elif common is None:
+        common = fs_common
+    if common is None:
         return None
-    if out.returncode != 0:
-        return None
-    common = os.path.abspath(out.stdout.strip())
-    if os.path.basename(common) == ".git":
-        return os.path.dirname(common)
-    return None  # bare repo or unusual layout
+    if os.path.basename(common) != ".git":
+        return None  # bare repo or unusual layout
+    return os.path.dirname(common)
 
 
 def _refuse_board_outside_pytest_tmp(path):
@@ -477,10 +577,13 @@ def hours_since(stamp):
 # git awareness (agents must work on their own tree and commit)
 # --------------------------------------------------------------------------
 
-def git(*args):
+def git(*args, cwd=None):
     import subprocess
     try:
-        out = subprocess.run(["git"] + list(args), capture_output=True, text=True, timeout=10)
+        # cwd + scrubbed env (T-243): cwd alone does NOT stop an inherited
+        # GIT_DIR/GIT_COMMON_DIR from overriding repo discovery.
+        out = subprocess.run(["git"] + list(args), capture_output=True, text=True, timeout=10,
+                             cwd=cwd or os.getcwd(), env=_clean_git_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if out.returncode != 0:
@@ -504,8 +607,13 @@ def repo_identity(cwd):
 
     def _git(*args):
         try:
+            # T-243: cwd= alone is not enough -- an inherited GIT_DIR outranks
+            # it during discovery, so without the scrub this returns the
+            # identity of whatever repo the pollution names. That is precisely
+            # the cross-repo mis-pin T-215 exists to prevent, reached through
+            # T-243's mechanism instead of through the caller's cwd.
             out = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True,
-                                 text=True, timeout=10)
+                                 text=True, timeout=10, env=_clean_git_env())
         except (OSError, subprocess.TimeoutExpired):
             return None
         return out.stdout.strip() if out.returncode == 0 else None
@@ -519,16 +627,27 @@ def repo_identity(cwd):
     return None
 
 
-def git_state():
-    """Branch, short sha, dirty-file count, and whether cwd is the main worktree."""
-    top = git("rev-parse", "--show-toplevel")
+def _git_state_raw():
+    """(state, mismatch). See git_state() -- this keeps the mismatch signal
+    that git_state() deliberately throws away, for callers that record it."""
+    here = os.getcwd()
+    top = git("rev-parse", "--show-toplevel", cwd=here)
     if not top:
-        return None
-    branch = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
-    sha = git("rev-parse", "--short", "HEAD") or "?"
-    dirty = git("status", "--porcelain")
-    common = git("rev-parse", "--git-common-dir") or ""
-    gitdir = git("rev-parse", "--git-dir") or ""
+        return None, False
+    real_top = os.path.realpath(top)
+    real_here = os.path.realpath(here)
+    if os.path.commonpath([real_top, real_here]) != real_top:
+        # git resolved a work tree that does not contain where we are standing
+        # (e.g. a stale core.worktree). Refuse it rather than answer wrongly.
+        sys.stderr.write(
+            "tickets: git resolved toplevel %s which does not contain cwd %s -- "
+            "treating as unresolved rather than trusting it (T-243)\n" % (real_top, real_here))
+        return None, True
+    branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=here) or "?"
+    sha = git("rev-parse", "--short", "HEAD", cwd=here) or "?"
+    dirty = git("status", "--porcelain", cwd=here)
+    common = git("rev-parse", "--git-common-dir", cwd=here) or ""
+    gitdir = git("rev-parse", "--git-dir", cwd=here) or ""
     is_main_tree = os.path.abspath(os.path.join(top, common)) == os.path.abspath(os.path.join(top, gitdir))
     return {
         "top": top,
@@ -537,7 +656,24 @@ def git_state():
         "dirty": len(dirty.splitlines()) if dirty else 0,
         "main_tree": is_main_tree,
         "repo": repo_identity(top),
-    }
+    }, False
+
+
+def git_state():
+    """Branch, short sha, dirty-file count, and whether cwd is the main worktree.
+
+    Returns None -- never a partly-filled dict -- when resolution disagrees
+    with cwd. Every caller guards with `g = git_state()` / `if not g`, and the
+    on-main and dirty guards downstream read `branch` and `dirty`. A truthy
+    placeholder such as {"branch": "?", "dirty": 0} therefore does not fail
+    safe, it fails OPEN: it satisfies `not g`, passes the never-work-on-main
+    check ("?" is not main) and passes the clean-tree check (0 is not dirty),
+    so `tickets sync` would go on to run a real merge with all three guards
+    disabled, and `tickets review` would pin an unmergeable "?@?" (T-259
+    defect 2). Unresolved must mean None.
+    """
+    state, _mismatch = _git_state_raw()
+    return state
 
 
 def agents_dir(board):
@@ -546,7 +682,8 @@ def agents_dir(board):
 
 def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
-    g = git_state() or {}
+    _state, _mismatch = _git_state_raw()
+    g = _state or {}
     os.makedirs(agents_dir(board), exist_ok=True)
     path = os.path.join(agents_dir(board), owner + ".json")
     # Other commands keep their own state in this record (inbox_seen, limit,
@@ -559,6 +696,9 @@ def checkin(board, owner, ticket=None, note=""):
         "branch": g.get("branch", ""),
         "sha": g.get("sha", ""),
         "dirty": g.get("dirty", 0),
+        # T-243: cwd above is recorded straight from os.getcwd() with no git
+        # resolution in its path, so it stays trustworthy even here.
+        "git_mismatch": bool(_mismatch),
         "ticket": ticket if ticket is not None else _current_ticket(board, owner),
         "note": note,
         "seen": now(),
@@ -1334,8 +1474,10 @@ def cmd_sync(a, board):
         print("%s already contains %s; nothing to do" % (g["branch"], trunk))
         return
     import subprocess
+    # T-243: `tickets sync` runs from the agent's own worktree cwd with no -C,
+    # so it is exactly as exposed to an ambient GIT_DIR as git_state() was.
     r = subprocess.run(["git", "merge", "--no-edit", "-m", "Sync %s into %s" % (trunk, g["branch"]), trunk],
-                       capture_output=True, text=True)
+                       cwd=os.getcwd(), env=_clean_git_env(), capture_output=True, text=True)
     if r.returncode == 0:
         print("merged %s into %s -> %s" % (trunk, g["branch"], git("rev-parse", "--short", "HEAD")))
         checkin(board, whoami(), None, "synced with %s" % trunk)
@@ -1471,7 +1613,12 @@ def cmd_merge(a, board):
     merge_repo = repo_identity(root)
 
     def sh(*args, cwd=root):
-        return subprocess.run(list(args), cwd=cwd, capture_output=True, text=True)
+        # cwd= alone does not stop a leaked GIT_DIR/GIT_COMMON_DIR from
+        # overriding repo discovery (T-243) -- the env must be scrubbed too.
+        # _clean_git_env keeps GIT_AUTHOR_*/GIT_COMMITTER_*, which this
+        # function's `git commit` depends on for correct authorship.
+        return subprocess.run(list(args), cwd=cwd, capture_output=True, text=True,
+                              env=_clean_git_env())
 
     with IntegrationLock(board):
         tickets = load_all(board)
@@ -2592,12 +2739,18 @@ def cmd_who(a, board):
         b = "%s@%s" % (r.get("branch") or "?", r.get("sha") or "?")
         if r.get("dirty"):
             b += " +%d" % r["dirty"]
-        wt = r.get("worktree") or r.get("cwd") or ""
+        # cwd is recorded straight from os.getcwd() with no git resolution in
+        # its path, so it is ground truth even when the git-derived "worktree"
+        # field was resolved against a polluted environment (T-243).
+        wt = r.get("cwd") or r.get("worktree") or ""
         home = os.path.expanduser("~")
         if wt.startswith(home):
             wt = "~" + wt[len(home):]
         print("%-14s %-8s %-34s %-22s %s" % (
             r["owner"][:14], fmt_hours(hours_since(r.get("seen"))) + " ago", b[:34], tdesc[:22], wt))
+        if r.get("git_mismatch"):
+            print("%-14s !! git resolved a repo that does not contain this agent's cwd at its last "
+                  "check-in -- branch/sha above are unreliable; cwd is ground truth (T-243)" % "")
         if r.get("limit"):
             lim = r["limit"]
             print("%-14s !! USAGE LIMIT hit %s ago%s" % ("", fmt_hours(hours_since(lim["at"])),
@@ -2607,7 +2760,9 @@ def cmd_who(a, board):
     # collisions
     by_branch = {}
     for r in agents:
-        if r.get("branch") and r["branch"] not in ("main", "master"):
+        # "?" is the unresolved placeholder, not a real branch: agents sharing
+        # it are not sharing a worktree, so it must not raise a clobber warning.
+        if r.get("branch") and r["branch"] not in ("main", "master", "?"):
             by_branch.setdefault(r["branch"], []).append(r["owner"])
     for b, os_ in by_branch.items():
         if len(set(os_)) > 1:
@@ -3650,7 +3805,13 @@ def cmd_watch(a, board):
             sys.exit("another watcher for %s is already running (see %s)" % (
                 owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
-    env = dict(os.environ, TICKET_AGENT=owner, TICKETS_DIR=board,
+    # T-243: strip Git's LOCATION vars before handing the parent's environment
+    # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
+    # cascades into every agent this launches. _clean_git_env is deliberately
+    # narrow: GIT_AUTHOR_*/GIT_COMMITTER_* survive, because this is the
+    # fleet-launch env and stripping identity here would be a T-238-class
+    # attribution loss (T-259 defect 3).
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     stop = {"now": False}
 
@@ -4033,7 +4194,13 @@ def cmd_spawn(a, board):
     argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
-    env = dict(os.environ, TICKET_AGENT=owner, TICKETS_DIR=board,
+    # T-243: strip Git's LOCATION vars before handing the parent's environment
+    # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
+    # cascades into every agent this launches. _clean_git_env is deliberately
+    # narrow: GIT_AUTHOR_*/GIT_COMMITTER_* survive, because this is the
+    # fleet-launch env and stripping identity here would be a T-238-class
+    # attribution loss (T-259 defect 3).
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     with open(log_path, "a") as lf:
