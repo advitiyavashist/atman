@@ -31,6 +31,12 @@ import os
 import sys
 from datetime import datetime, timezone
 
+try:
+    from . import trajectories as _traj
+except ImportError:  # run as a plain script path, not as a package module
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import trajectories as _traj
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -619,6 +625,54 @@ def worktree_warning(owner):
     return None
 
 
+# --------------------------------------------------------------------------
+# trajectory instrumentation (T-311)
+#
+# The writers live in trajectories.py so this entry point and the root
+# tickets.py agree on the event shape; see that module's docstring for why the
+# root script cannot simply import it, and
+# tests/test_trajectories_entrypoints.py for what fails when the two drift.
+# --------------------------------------------------------------------------
+
+def _traj_safe(fn):
+    """Instrumentation must never fail the command it observes. Every call
+    site below sits on a command's success path, so a raised exception would
+    abort work that has already happened and been saved."""
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _traj_git():
+    """worktree/branch/sha for an event, or {} when git cannot answer.
+
+    This entry point's git_state() fills branch and sha with "?" placeholders
+    where the root script returns None instead (T-259). A "?" written into the
+    log reads back as a real branch name, so it is dropped rather than
+    recorded -- a field the writer does not know is omitted, never defaulted.
+    """
+    g = _traj_safe(git_state)
+    if not g:
+        return {}
+    out = {}
+    for dst, src in (("worktree", "top"), ("branch", "branch"), ("sha", "sha")):
+        v = g.get(src) or ""
+        if v and v != "?":
+            out[dst] = v
+    return out
+
+
+def traj_event(board, kind, agent="", ticket=None, **fields):
+    """Append one trajectory event, best-effort."""
+    return _traj_safe(
+        lambda: _traj.event(board, kind, agent=agent, ticket=ticket, **fields))
+
+
+def _traj_round3(x):
+    return None if x is None else round(x, 3)
+
+
 def try_claim(board, tid, owner):
     """Atomically take a ticket. Returns the ticket, or None if someone beat us."""
     lock = os.path.join(board, tid + ".lock")
@@ -638,7 +692,13 @@ def try_claim(board, tid, owner):
     t["owner"] = owner
     t["claimed_at"] = now()
     t["done_at"] = ""
-    return save(board, t)
+    got = save(board, t)
+    # Written here, not in cmd_next/cmd_claim: this is the single point where a
+    # claim actually succeeds, so no future caller can add a claim path that
+    # silently produces no trajectory.
+    traj_event(board, "claim", agent=owner, ticket=got,
+               state_before="open", state_after="claimed", **_traj_git())
+    return got
 
 
 def fmt_hours(h):
@@ -1314,6 +1374,12 @@ def cmd_review(a, board):
     t["notes"].append({"by": owner, "at": now(), "text": "REVIEW: " + text})
     save(board, t)
     checkin(board, owner, t["id"], "submitted %s for review" % t["id"])
+    _tmr = timing(t)
+    traj_event(board, "review", agent=owner, ticket=t,
+               state_before="claimed", state_after="review",
+               outcome="review", notes_len=len(a.notes or ""),
+               active_hours=_traj_round3(_tmr.get("active")),
+               pin=t.get("commit", ""), **_traj_git())
     m = current_master(board)
     post_message(board, owner, "%s ready for review: %s" % (t["id"], text),
                  to=(m["owner"] if m else ""), re=t["id"])
@@ -1641,6 +1707,12 @@ def cmd_merge(a, board):
                                     trunk, sha, pin)})
             save(board, t2)
             closed.append(t2["id"])
+            _tm2 = timing(t2)
+            traj_event(board, "merge", agent=owner, ticket=t2,
+                       state_before="review", state_after="done", outcome="done",
+                       pin=pin, merged_as=sha, trunk=trunk,
+                       prev_owner=t2.get("owner", ""),
+                       active_hours=_traj_round3(_tm2.get("active")))
             post_message(board, owner, "%s merged into %s as %s" % (t2["id"], trunk, sha),
                          to=t2.get("owner", ""), re=t2["id"])
         if closed:
@@ -1845,6 +1917,13 @@ def cmd_done(a, board):
     if t.get("owner"):
         checkin(board, t["owner"], "", "finished %s" % a.id)
     tm = timing(t)
+    traj_event(board, "done", agent=whoami(), ticket=t,
+               state_before="review" if t.get("review_at") else "claimed",
+               state_after="done", outcome="done",
+               notes_len=len(a.notes or ""),
+               active_hours=_traj_round3(tm.get("active")),
+               wait_hours=_traj_round3(tm.get("wait")),
+               pin=t.get("commit", ""), **_traj_git())
     print("%s done in %s (waited %s before claim)" % (
         a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
     if g:
@@ -1857,9 +1936,13 @@ def cmd_done(a, board):
 
 def cmd_block(a, board):
     t = load(board, a.id)
+    before = t["status"]
     t["status"] = "blocked"
     t["notes"].append({"by": t.get("owner") or "agent", "at": now(), "text": a.reason})
     save(board, t)
+    traj_event(board, "block", agent=whoami(), ticket=t,
+               state_before=before, state_after="blocked",
+               outcome="blocked", notes_len=len(a.reason or ""), **_traj_git())
     print("%s blocked: %s" % (a.id, a.reason))
 
 
@@ -1868,6 +1951,10 @@ def cmd_note(a, board):
     t["notes"].append({"by": a.by or t.get("owner") or "agent", "at": now(), "text": a.text})
     save(board, t)
     who = a.by or t.get("owner")
+    # notes_len only -- the note body is the agent's own prose and never enters
+    # the trajectory log.
+    traj_event(board, "update", agent=who or whoami(), ticket=t,
+               notes_len=len(a.text or ""), state_after=t["status"], **_traj_git())
     if who and t["status"] == "claimed":
         checkin(board, who, t["id"], a.text[:80])
     tm = timing(t)
@@ -2329,9 +2416,15 @@ def health(board, tickets):
 
 def cmd_reopen(a, board):
     t = load(board, a.id)
+    before = t["status"]
+    prev_owner = t.get("owner", "")
     t["status"] = "open"
     t["owner"] = ""
     save(board, t)
+    traj_event(board, "reopen", agent=whoami(getattr(a, "by", "")), ticket=t,
+               state_before=before, state_after="open", outcome="reopened",
+               prev_owner=prev_owner,
+               notes_len=len(getattr(a, "notes", "") or ""), **_traj_git())
     lock = os.path.join(board, a.id + ".lock")
     if os.path.exists(lock):
         os.unlink(lock)
@@ -2485,6 +2578,10 @@ def post_message(board, sender, text, to="", re=""):
         os.write(fd, line_.encode())
     finally:
         os.close(fd)
+    # ids and a length, never the body (T-311 privacy rule). Best-effort: a
+    # message that reached the board must not be undone by instrumentation.
+    traj_event(board, "msg", agent=sender, ticket=re or None,
+               to=to or "", text_len=len(text or ""))
     return rec
 
 

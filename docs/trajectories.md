@@ -172,6 +172,42 @@ Rotates to `trajectories.<YYYY-MM-DD>.jsonl` at 50 MB
 includes archives by default: these readers are analytical, and a silently
 truncated history corrupts an answer rather than merely delaying a message.
 
+## Two entry points, one log
+
+This tool ships along two paths and both write here:
+
+| path | file | how it runs |
+|---|---|---|
+| the live shim, `install.sh`, `tickets watch` | `tickets.py` (repo root) | shipped as a lone file, no package beside it |
+| `pip install` → the `tickets` console script | `src/ticket_board/cli.py` | `[project.scripts] tickets = "ticket_board.cli:main"` |
+
+Instrumenting only the root script would not leave the packaged CLI merely
+uninstrumented — it would leave **this log wrong**. A board driven by both (a
+watcher on the root script, an operator on the installed console script) yields
+a file with silent holes, and a metric cannot tell a hole from a real zero. An
+absent log is honest; a partial one is not. So the packaged path writes the
+same events, with two consequences worth knowing:
+
+- **`run_start` / `run_end` come only from the root script.** `cmd_watch` does
+  not exist in `cli.py`, so runs are counted by the watcher alone. This is a
+  real absence, not a hole: nothing else spawns a run.
+- **`branch` / `sha` are omitted more often on the packaged path.** Its
+  `git_state()` fills those with `"?"` where the root script returns `None`
+  (T-259). A `"?"` on disk reads back as a real branch name, so the packaged
+  writer drops the field instead — the omit-never-default rule, applied to a
+  placeholder that would otherwise have looked like a measurement.
+
+The writers themselves live in `src/ticket_board/trajectories.py`, which
+`cli.py` imports. The root `tickets.py` **cannot** import it — it ships as a
+single file with no package to import from — so it carries its own copy of the
+same logic. That duplication is only safe while something goes red when it
+drifts, which is what `tests/test_trajectories_entrypoints.py` is for: it
+compares the two writers' version, kinds, rotation ceiling, derived
+`objective_id`, harness lookup and full emitted record, field by field rather
+than against a hand-written list of expected keys. A field added to one copy
+and forgotten in the other fails there without anyone remembering to update the
+test.
+
 ## Failure policy
 
 All writes are best-effort and swallow their errors. Every writer sits on a
