@@ -52,10 +52,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def _dispatch(self):
         split = urlsplit(self.path)
-        length = self._declared_body_length()
-        if length > MAX_REQUEST_BODY_BYTES:
-            self._reject_oversized_body(length)
-            return
+        length = self._resolve_body_length()
+        if length is None:
+            return  # already refused, with the connection closed
         body = self.rfile.read(length) if length else b""
         request = Request(
             self.command, split.path, query=split.query,
@@ -71,25 +70,90 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     do_GET = do_POST = do_DELETE = do_PUT = do_PATCH = _dispatch
 
-    def _declared_body_length(self):
-        """Parse Content-Length defensively, before the cap check ever runs.
+    def _resolve_body_length(self):
+        """How many bytes of body to read, or None if the request was refused.
 
-        T-308: `int(header or 0)` let a negative value straight through --
-        `-1 > MAX_REQUEST_BODY_BYTES` is false, so the cap check passed it,
-        and `rfile.read(-1)` then means read-until-EOF, i.e. unbounded. A
-        non-integer header raised ValueError unhandled. Neither a negative
-        nor a garbage declaration describes a real body length, so both are
-        treated the same as a missing header: zero bytes to read, not a
-        length to hand to the socket.
+        T-308 found the original cap trusted `int(Content-Length)` directly, so
+        the check `length > MAX_REQUEST_BODY_BYTES` never fired for a length
+        that was not a plain positive integer. The cap is only as good as the
+        parse in front of it, so framing is resolved in ONE place here rather
+        than bolting a second check onto the read:
+
+        * `Content-Length: -1` -- -1 is not > the cap, and `rfile.read(-1)`
+          means "read until EOF", i.e. precisely the unbounded read this cap
+          exists to prevent. Measured pre-fix: 4 MiB streamed in and the
+          handler was still blocked reading, with no response sent.
+        * A non-numeric length ("abc", "1e10") raised an uncaught ValueError
+          out of _dispatch: the connection thread died with a traceback and
+          the client got a dropped socket instead of an error response.
+        * Duplicate Content-Length headers are first-wins here, so
+          "Content-Length: 10, Content-Length: 99999999" passed the cap on the
+          10. Any intermediary that honours the LAST value instead disagrees
+          with this server about where the body ends -- the classic smuggling
+          shape -- so a conflicting pair is refused rather than resolved.
+        * Transfer-Encoding: chunked has no Content-Length, so the old code
+          read 0 bytes, dispatched an EMPTY body, and left the chunked octets
+          in the socket buffer, where the next keep-alive request parsed them
+          as a request line. Chunked decoding is not implemented, so it is
+          refused explicitly instead of silently corrupting the connection.
+
+        Everything except the over-cap case is refused as 400, which the
+        contract's closed ErrorResponse.status enum DOES declare -- so this
+        adds no new conformance departure. Only the pre-existing 413 (see
+        _reject_oversized_body) sits outside the enum.
         """
-        raw = self.headers.get("Content-Length")
-        if raw is None:
+        # Chunked framing first: it legitimately carries no Content-Length, so
+        # checking length before framing would read it as a bodyless request.
+        encoding = (self.headers.get("Transfer-Encoding") or "").strip().lower()
+        if encoding and encoding != "identity":
+            self._refuse(400, "unsupported_transfer_encoding",
+                         "Transfer-Encoding %r is not supported; send a "
+                         "Content-Length-framed body." % encoding)
+            return None
+
+        declared = self.headers.get_all("Content-Length") or []
+        if len({v.strip() for v in declared}) > 1:
+            self._refuse(400, "malformed_request",
+                         "Conflicting Content-Length headers: %s."
+                         % ", ".join(sorted({v.strip() for v in declared})))
+            return None
+        if not declared:
             return 0
-        try:
-            length = int(raw)
-        except ValueError:
-            return 0
-        return length if length >= 0 else 0
+
+        raw = declared[0].strip()
+        # RFC 9110: Content-Length is 1*DIGIT. No sign, no exponent, no
+        # whitespace -- int() accepts "+5" and " 5 ", which is how a lenient
+        # parse and a strict intermediary come to disagree.
+        if not raw.isdigit():
+            self._refuse(400, "malformed_request",
+                         "Content-Length %r is not a non-negative integer."
+                         % declared[0])
+            return None
+
+        length = int(raw)
+        if length > MAX_REQUEST_BODY_BYTES:
+            self._reject_oversized_body(length)
+            return None
+        return length
+
+    def _refuse(self, status, code, message):
+        """Send a contract-shaped error and close, without reading the body.
+
+        The connection is closed for the same reason _reject_oversized_body
+        closes it: the body this request declared is still arriving (or, for
+        chunked, is unparseable to us), so there is no way to find the next
+        request boundary without performing the read being refused.
+        """
+        self.close_connection = True
+        payload = json.dumps({"error": {
+            "code": code, "status": status, "message": message,
+        }}).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _reject_oversized_body(self, declared_length):
         """Refuse a request body over the cap without ever reading it.
