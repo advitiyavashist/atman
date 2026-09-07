@@ -58,6 +58,18 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     assert 'data-tab-btn="board"' in ui
 
 
+def test_home_hero_is_v1_must_not_t344_deferral():
+    """CEO ACCEPT: median turns + yield@cost on home (Board pane) is V1 MUST."""
+    ui = _ui_html()
+    board = ui[ui.index('id="pane-board"'):ui.index('id="pane-agents"')]
+    assert 'id="promiseHero"' in board
+    assert "Median turns" in board
+    assert "Yield@cost" in board
+    assert board.index("promiseHero") < board.index("turnsPanel")
+    # T-344 worst-10 is NICE and collapsed; it must not be the only turns surface.
+    assert "<details" in board and "Turns efficiency" in board
+
+
 def test_promise_chips_strip_on_home_objective():
     """PM: hero + chips + Objective strip on home now; T-345 folds later."""
     ui = _ui_html()
