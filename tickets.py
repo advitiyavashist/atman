@@ -950,10 +950,22 @@ def checkin(board, owner, ticket=None, note=""):
 
 
 def _current_ticket(board, owner):
-    for t in load_all(board):
-        if t["status"] == "claimed" and t.get("owner") == owner:
-            return t["id"]
-    return ""
+    """Return the ticket this agent is working on: claimed first, else review."""
+    mine = [t for t in load_all(board) if t.get("owner") == owner]
+    claimed = [t for t in mine if t.get("status") == "claimed"]
+    if claimed:
+        return claimed[0]["id"]
+    review = [t for t in mine if t.get("status") == "review"]
+    if not review:
+        return ""
+
+    def _last_touch(t):
+        stamps = [t.get("review_at")] + [n.get("at") for n in t.get("notes", []) if n.get("at")]
+        stamps = [s for s in stamps if s]
+        return max(stamps) if stamps else ""
+
+    review.sort(key=_last_touch, reverse=True)
+    return review[0]["id"]
 
 
 def load_agents(board):
@@ -5696,7 +5708,7 @@ def cmd_watch(a, board):
                 # are message text and ticket titles, and neither belongs in
                 # the trajectory log (T-311 privacy rule).
                 run_started = now()
-                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or None
+                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or None
                 _safe(lambda: traj_event(board, "run_start", agent=owner,
                                          ticket=held_ticket, run_no=runs,
                                          trigger=sorted(p), harness_cmd=harness,
