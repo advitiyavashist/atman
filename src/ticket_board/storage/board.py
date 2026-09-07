@@ -931,7 +931,8 @@ class BoardStore(MessagingMixin):
             "id": row["id"], "ticket_id": row["ticket_id"], "state": row["state"],
             "submitted_by": json.loads(row["submitted_by"]),
             "submitted_at": row["submitted_at"],
-            "evidence": json.loads(row["evidence"]), "notes": row["notes"],
+            "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+            "notes": row["notes"],
             "decided_by": json.loads(row["decided_by"]) if row["decided_by"] else None,
             "decided_at": row["decided_at"],
             "decision_notes": row["decision_notes"],
@@ -965,7 +966,13 @@ class BoardStore(MessagingMixin):
             if review["state"] != "requested":
                 raise InvalidStateTransition(review["ticket_id"],
                                              review["state"], decision)
-            pinned = review["evidence"].get("sha")
+            # `evidence` is None for a review imported from the legacy board
+            # with no repository identity (T-224 planner ruling); `evidence_sha`
+            # is required on every decision request and so can never itself be
+            # None, so this falls through to the same "does not match" refusal
+            # rather than a crash on `.get` -- correct, since there is no real
+            # sha to accept a decision against.
+            pinned = review["evidence"].get("sha") if review["evidence"] else None
             if evidence_sha != pinned:
                 raise InvalidReviewEvidence(
                     "Evidence SHA does not match the submitted review.",

@@ -52,8 +52,14 @@ fail the published schema the moment T-180 serves them, and inventing a 40-hex
 sha would be worse. So evidence is archived verbatim, the mismatch is reported
 in `report.contract_mismatches` with counts, and `evidence`/`reviews` rows are
 written only for values that genuinely satisfy the contract. Pass a
-`sha_resolver` if you can expand short shas against a real repository; the code
-path is the same, it just gets contract-valid input.
+`sha_resolver` if you can expand short shas against a real repository.
+
+T-224 promoted `GitEvidence.repository` from optional to required. The legacy
+record has no repository concept at all -- not even a real 40-hex `commit`
+carries one -- so today `_evidence()` withholds evidence unconditionally,
+`sha_resolver` included, and counts a `"no repository identity"` mismatch
+instead. A `sha_resolver` alone no longer produces contract-valid evidence;
+supplying real repository identity is T-215's work.
 """
 
 import datetime as _dt
@@ -590,19 +596,17 @@ def _evidence(item, report, sha_resolver):
                          "commit is not a 40-hex Sha")
         return None
 
-    # `commit` on this board is `branch@sha`; that branch is more specific than
-    # the ticket's own `branch` field, so it wins when both are present.
-    from_commit = commit.rsplit("@", 1)[0].strip() if "@" in commit else ""
-    fallback = branch if isinstance(branch, str) else ""
-    evidence = {"branch": from_commit or fallback or "unknown", "sha": sha}
-
-    pr = item.get("pr")
-    if isinstance(pr, str) and pr:
-        if re.match(r"^https?://", pr):
-            evidence["pr_url"] = pr
-        else:
-            report._bump(report.contract_mismatches, "pr is not a URI")
-    return evidence
+    # T-224: GitEvidence.repository is now required (the T-215 fix at the
+    # contract layer). The legacy record has no repository concept at all --
+    # `commit` is `branch@sha` with no remote or repo root attached, which is
+    # the exact ambiguity T-215 exists to close. Inventing a repository value
+    # would be the same mistake as inventing a sha: a real sha with a fake
+    # repository is not honest evidence. So a genuinely 40-hex commit -- direct
+    # or via `sha_resolver` -- still cannot become `GitEvidence` on this
+    # importer until a caller can supply real repository identity; reported
+    # the same way a bad sha is, so T-211/T-215 see the count.
+    report._bump(report.contract_mismatches, "no repository identity")
+    return None
 
 
 def _archive_field(conn, project_id, key, field, value):
@@ -828,9 +832,8 @@ def _import_ticket(conn, store, project_id, key, item, agent_ids, report,
          created, updated, claimed_at),
     )
 
-    if evidence is not None:
-        _import_review(conn, store, project_id, key, item, evidence, owner_name,
-                       state, report)
+    _import_review(conn, store, project_id, key, item, evidence, owner_name,
+                   state, report)
 
     # Archive: every key with no contract home, plus the originals of anything
     # a contract limit forced us to truncate, plus any key this importer has
@@ -865,12 +868,17 @@ def _import_ticket(conn, store, project_id, key, item, agent_ids, report,
 
 def _import_review(conn, store, project_id, key, item, evidence, owner_name,
                    state, report):
-    """A `reviews` row, but only when the evidence is contract-valid.
+    """A `reviews` row -- `evidence` may be `None` (T-224 planner ruling,
+    2026-09-06).
 
-    `reviews.evidence` is served as `GitEvidence`; a row built from a short sha
-    would fail the published schema the first time the review is read. So this
-    runs only on the `sha_resolver` path or on a board whose commits are full
-    shas -- and `review_at` is archived either way.
+    A review that genuinely happened on the legacy board is real history even
+    when it cannot be given contract-valid `GitEvidence`: `Review.evidence` is
+    nullable precisely so this importer is not forced to choose between
+    fabricating evidence and dropping the review entirely. `evidence` is
+    `None` whenever `_evidence()` could not produce a real, repository-
+    qualified sha (bad sha, or a real sha with no repository identity --
+    either way `report.contract_mismatches` already counted it). `review_at`
+    is archived either way, regardless of whether a row is written here.
     """
     submitted_at = item.get("review_at") or item.get("updated")
     if not isinstance(submitted_at, str) or not TIMESTAMP_RE.match(submitted_at):
@@ -882,7 +890,7 @@ def _import_review(conn, store, project_id, key, item, evidence, owner_name,
         (rid, project_id, key, "accepted" if state == "done" else "requested",
          _json({"type": "agent", "id": owner_name or "legacy",
                 "display_name": owner_name or "legacy"}),
-         submitted_at, _json(evidence),
+         submitted_at, _json(evidence) if evidence else None,
          "Imported from the legacy board."),
     )
     report.imported_reviews += 1
