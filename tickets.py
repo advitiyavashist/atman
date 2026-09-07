@@ -4288,8 +4288,35 @@ def _addressed_to(msg, owner):
     return to == target or target in mentions
 
 
+def _visible_after_join(msgs, owner, joined):
+    """Hide BROADCAST history from before this agent existed -- never directed mail.
+
+    A brand-new agent has no inbox_seen, so every message ever posted comes back
+    unread (measured: 1392 broadcasts on a real seat's first wake). It then
+    spends its first turn reading other people's mail, which is a direct hit on
+    the fewest-turns objective.
+
+    The tempting fix -- stamp inbox_seen = now() at join -- is wrong in two ways
+    this board would feel, and both are silent mail loss:
+      * a brief posted with `--to <name>` BEFORE the seat joins is destroyed,
+        and posting the brief first is exactly how seats get briefed here;
+      * `tickets spawn` calls cmd_join, so RESPAWNING an existing seat would
+        re-stamp its watermark and wipe everything pending -- including the
+        master's answer to that agent's own `stuck:` message.
+    So scope the suppression to what the ticket actually names, "mail addressed
+    to nobody": drop only broadcasts at or before `joined`. Anything addressed
+    to this agent by name is delivered no matter how old it is. Nothing is
+    deleted either -- `tickets inbox --all` still shows the full history.
+    """
+    if not joined:
+        return msgs  # every pre-existing agent: unchanged, by construction
+    return [m for m in msgs if m.get("to") == owner or m.get("at", "") > joined]
+
+
 def unread(board, owner):
-    since = _agent_rec(board, owner).get("inbox_seen", "")
+    rec = _agent_rec(board, owner)
+    since = rec.get("inbox_seen", "")
+    joined = rec.get("joined_at", "")
     msgs = load_messages(board)
     # An agent that slept through a rotation has its unread mail sitting in an
     # archive the fast path never reads, so its inbox would come back silently
@@ -4298,10 +4325,10 @@ def unread(board, owner):
     if since and (not msgs or since < msgs[0].get("at", "")):
         if glob.glob(os.path.join(board, "messages.*.jsonl")):
             msgs = load_messages(board, include_archives=True)
-    return [m for m in msgs
-            if m.get("from") != owner
-            and _addressed_to(m, owner)
-            and m.get("at", "") > since]
+    return _visible_after_join([m for m in msgs
+                                if m.get("from") != owner
+                                and _addressed_to(m, owner)
+                                and m.get("at", "") > since], owner, joined)
 
 
 def fmt_local(iso):
@@ -4767,6 +4794,10 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    # Read this BEFORE checkin(), which creates the record. Only a genuinely new
+    # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
+    # calls straight through here) must leave delivery completely alone.
+    first_join = not _agent_rec(board, owner)
     roles_path = os.path.join(board, "roles.json")
     roles = {}
     if os.path.isfile(roles_path):
@@ -4824,6 +4855,10 @@ def cmd_join(a, board):
     wf[owner] = entry
     save_workforce(board, wf)
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
+    if first_join:
+        # setdefault, not update: if two joins race, the earlier stamp wins and
+        # neither can move the watermark forward over unread mail.
+        _agent_update(board, owner, lambda r: r.setdefault("joined_at", now()))
     post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
@@ -4929,7 +4964,8 @@ def pending_work(board, owner):
             out["review_queue"] = rq[:6]
         # A stuck message wakes both seats whoever it was addressed to.
         since = rec.get("inbox_seen", "")
-        stuck = [fmt_msg(x) for x in _safe(lambda: load_messages(board), [])
+        stuck = [fmt_msg(x) for x in _visible_after_join(
+                     _safe(lambda: load_messages(board), []), owner, rec.get("joined_at", ""))
                  if x.get("from") != owner and x.get("at", "") > since
                  and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
         if stuck:
