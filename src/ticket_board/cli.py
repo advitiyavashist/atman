@@ -89,6 +89,110 @@ def _repo_root():
     return None  # bare repo or unusual layout
 
 
+def _init_cwd_worktree_root(start=None):
+    """Root of the worktree cwd is LITERALLY in -- deliberately NOT _repo_root().
+
+    _repo_root() resolves `--git-common-dir` and therefore returns the MAIN
+    worktree: correct for board_dir(), because every linked worktree of a
+    project is meant to share one board.  For `init` that is the defect
+    (T-263/T-282).  It made init's "where am I about to write" answer
+    identical BY CONSTRUCTION to the ambient "where will this resolve later"
+    answer, so the refuse-on-disagreement check could never fire inside a
+    linked worktree -- the only configuration this fleet actually runs in.
+    A guard whose two operands come out of the same resolver is not a guard.
+
+    So this function shares no code path with _repo_root().  The filesystem
+    walk is the answer: the first ancestor holding a `.git` entry, which no
+    environment variable can redirect.  git's own `--show-toplevel` is asked
+    only as a cross-check, and on disagreement the filesystem wins (T-243).
+    Returns None when cwd is not inside a git worktree at all.
+    """
+    import subprocess
+    here = os.path.realpath(start if start is not None else os.getcwd())
+    fs_root = None
+    d = here
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            fs_root = d
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    git_root = None
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5,
+                             cwd=here, env=env)
+        if out.returncode == 0 and out.stdout.strip():
+            git_root = os.path.realpath(out.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if fs_root is not None and git_root is not None and fs_root != git_root:
+        sys.stderr.write(
+            "tickets: git says cwd %s is in worktree %s but the filesystem says %s "
+            "-- trusting the filesystem (T-243)\n" % (here, git_root, fs_root))
+    if fs_root is not None:
+        return fs_root
+    return git_root
+
+
+def _same_board(a, b):
+    if a is None or b is None:
+        return False
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _init_resolve_board(a):
+    """(target, why): where `init` will write, decided from cwd alone."""
+    explicit = getattr(a, "board", None)
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit)), "an explicit --board"
+    root = _init_cwd_worktree_root()
+    if root is None:
+        return (os.path.join(os.path.realpath(os.getcwd()), ".tickets"),
+                "the current directory (not inside a git worktree)")
+    return os.path.join(root, ".tickets"), "the git worktree cwd is in (%s)" % root
+
+
+def _init_disagreement_cause(ambient):
+    """Plain-language reason the ambient board is not the cwd board."""
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return ("TICKETS_DIR is set to %r, and board resolution honours it "
+                "before anything on disk." % env)
+    here = _init_cwd_worktree_root()
+    main = _repo_root()
+    if here and main and os.path.realpath(here) != os.path.realpath(main):
+        return ("%s is a LINKED WORKTREE whose main worktree is %s, and every "
+                "linked worktree deliberately shares the main worktree's "
+                "board -- that sharing is the design, not a bug, so init "
+                "must not quietly fork a second board here." % (here, main))
+    return ("an ancestor directory already holds a board (%s) and the "
+            "upward search finds it before this one." % os.path.dirname(ambient))
+
+
+def _init_refusal(target, ambient):
+    return (
+        "REFUSING TO INIT: nothing was written.\n"
+        "  would write to: %s\n"
+        "  but `tickets` run from %s resolves to: %s\n"
+        "  because %s\n"
+        "\n"
+        "Writing anyway is the T-263 defect: init would report success, install "
+        "the protocol files into a DIFFERENT project, and leave every later "
+        "command on the other board (that is how T-256 minted a ticket on a "
+        "live board). Pick one:\n"
+        "  * bind this directory:      export TICKETS_DIR=%s\n"
+        "  * install into the board\n"
+        "    that is actually in effect: tickets init --board %s\n"
+        "  * run init in %s instead\n"
+        % (target, os.getcwd(), ambient, _init_disagreement_cause(ambient),
+           target, ambient, os.path.dirname(ambient))
+    )
+
+
 def _refuse_board_outside_pytest_tmp(path):
     """T-256: a test suite created a real ticket on the LIVE steer board.
     Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and every
@@ -2669,6 +2773,26 @@ def cmd_mine(a, board):
 
 
 def cmd_init(a, board):
+    # `board` is the AMBIENT resolution (board_dir()): where every later
+    # `tickets` command from this cwd will go.  `target` is resolved
+    # independently, from cwd alone.  T-263: they used to be the same value by
+    # construction, so init could report success and write somewhere else.
+    target, why = _init_resolve_board(a)
+    explicit = bool(getattr(a, "board", None))
+
+    # Acceptance 3 -- "which board am I about to write to" is answered BEFORE
+    # the first write, never after it.
+    print("board: %s" % target)
+    print("  resolved from %s" % why)
+    if not _same_board(target, board):
+        print("  ambient:      %s" % board)
+
+    # Acceptance 1 -- create AND bind, or fail loudly. Never success-then-
+    # resolve-elsewhere.
+    if not explicit and not _same_board(target, board):
+        sys.exit(_init_refusal(target, board))
+
+    board = target
     root = os.path.dirname(board)
     os.makedirs(board, exist_ok=True)
     written = []
@@ -2714,9 +2838,24 @@ def cmd_init(a, board):
             f.write(MASTER_TEMPLATE)
         written.append(master_path(board))
 
-    print("board: %s" % board)
     for w in written:
         print("wrote: %s" % w)
+
+    # Acceptance 1 again, after the fact: VERIFY the bind with the real
+    # resolver rather than asserting it. An init that wrote files but did not
+    # bind is exactly the failure this ticket exists to stop.
+    bound = board_dir(discover_children=True)
+    if _same_board(bound, board):
+        print("bound: `tickets` run from %s resolves to this board." % os.getcwd())
+    elif explicit:
+        print("\nNOT BOUND: you asked for --board %s, but `tickets` run from %s "
+              "still resolves to %s.\n  To use the board you just wrote:  "
+              "export TICKETS_DIR=%s" % (board, os.getcwd(), bound, board))
+    else:
+        sys.exit(
+            "INIT WROTE THE BOARD BUT IT IS NOT BOUND: wrote %s, yet `tickets` "
+            "from %s still resolves to %s. Refusing to report success (T-263)."
+            % (board, os.getcwd(), bound))
     print("\nClaude Code picks this up from its global SessionStart hook.")
     print("Codex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.")
 
@@ -3077,6 +3216,9 @@ def main():
 
     c = sub.add_parser("init", help="install the board protocol into this project")
     c.add_argument("--track", action="store_true", help="commit the board to git instead of gitignoring it")
+    c.add_argument("--board", metavar="DIR", help="write the board HERE instead of the "
+                   "directory init resolves from cwd -- the explicit escape hatch for "
+                   "the case init would otherwise refuse (T-263)")
     c.set_defaults(fn=cmd_init)
 
     from ticket_coordination import register
