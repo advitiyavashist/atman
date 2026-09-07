@@ -13,10 +13,21 @@ from __future__ import annotations
 import glob
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from statistics import mean, median
 
 TURNS_JSON_V = 1
+
+
+class TrajectoryParseError(Exception):
+    """Malformed trajectories.jsonl line — must not be silently skipped."""
+
+    def __init__(self, path, line_no, detail="invalid JSON"):
+        self.path = path
+        self.line_no = line_no
+        self.detail = detail
+        super().__init__("%s:%d: %s" % (path, line_no, detail))
 
 ROW_KEYS = ("ticket", "owner", "model", "turns", "wall_clock_s", "reopens",
             "stuck", "outcome")
@@ -35,14 +46,14 @@ def load_trajectory_events(board, include_archives=True):
     for p in paths:
         try:
             with open(p) as f:
-                for ln in f:
+                for line_no, ln in enumerate(f, 1):
                     ln = ln.strip()
                     if not ln:
                         continue
                     try:
                         rec = json.loads(ln)
-                    except ValueError:
-                        continue
+                    except ValueError as exc:
+                        raise TrajectoryParseError(p, line_no, str(exc) or "invalid JSON") from exc
                     if isinstance(rec, dict):
                         out.append(rec)
         except IOError:
@@ -306,7 +317,10 @@ def render_turns_table(report):
 
 
 def cmd_turns(a, board, load_all, load_workforce, load_messages):
-    events = load_trajectory_events(board)
+    try:
+        events = load_trajectory_events(board)
+    except TrajectoryParseError as exc:
+        sys.exit(str(exc))
     report = build_turns_report(
         events,
         tickets=load_all(board),
