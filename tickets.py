@@ -297,6 +297,47 @@ def _init_refusal(target, ambient):
     )
 
 
+def _join_cwd_board():
+    """Board `join` would write to if TICKETS_DIR were not set (mirrors T-263's
+    _init_resolve_board, minus the --board override join has no equivalent of)."""
+    root = _init_cwd_worktree_root()
+    base = root if root is not None else os.path.realpath(os.getcwd())
+    return os.path.join(base, ".tickets")
+
+
+def _refuse_join_tickets_dir_shadow(board):
+    """Refuse a join whose cwd has its own .tickets that $TICKETS_DIR is shadowing.
+
+    board_dir() honours $TICKETS_DIR unconditionally (T-424): an agent that
+    mkdir's an isolated .tickets/ to probe the tool and then runs `join` from
+    there registers a real seat on whatever board TICKETS_DIR names instead,
+    with nothing in the join output to say so -- that is how opus-authz's
+    probe seat 'zed' ended up on the live production board. `init` already
+    refuses this shape (T-263); join gets the same treatment rather than a
+    second, different resolution rule for the same tool.
+    """
+    env = os.environ.get("TICKETS_DIR")
+    if not env:
+        return
+    cwd_board = _join_cwd_board()
+    if not os.path.isdir(cwd_board) or _same_board(cwd_board, board):
+        return
+    sys.exit(
+        "REFUSING TO JOIN: nothing was written.\n"
+        "  this directory's own board: %s\n"
+        "  TICKETS_DIR=%r makes `tickets` resolve to:  %s\n"
+        "\n"
+        "join would register a real seat on the SECOND path, not the board "
+        "sitting in this directory -- that is the T-424 defect (two agents hit "
+        "it inside half an hour). Pick one:\n"
+        "  * join the board TICKETS_DIR names (most agents want this): "
+        "remove or ignore the stray %s\n"
+        "  * join the board in this directory instead: unset TICKETS_DIR, "
+        "then re-run join\n"
+        % (cwd_board, env, board, cwd_board)
+    )
+
+
 def _refuse_board_outside_pytest_tmp(path):
     """Refuse a board path that escapes the pytest temp dir.
 
@@ -5004,6 +5045,7 @@ A session cannot be woken by a hook once its turn has ended, so use both:
 
 
 def cmd_join(a, board):
+    _refuse_join_tickets_dir_shadow(board)
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
