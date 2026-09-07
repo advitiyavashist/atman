@@ -89,7 +89,43 @@ def _repo_root():
     return None  # bare repo or unusual layout
 
 
+def _refuse_board_outside_pytest_tmp(path):
+    """T-256: a test suite created a real ticket on the LIVE steer board.
+    Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and every
+    real agent session exports TICKETS_DIR pointing at its live board so
+    plain `tickets ...` just works; a subprocess a test forgets to sandbox
+    (test_wakeup.py's shell=True call for the injection regression, e.g.)
+    inherits that ambient value straight through. pytest sets
+    PYTEST_CURRENT_TEST for the life of every test, and pytest's own
+    tmp_path/tmpdir fixtures always live under the system temp dir, so that
+    combination is a reliable signal a board resolution is about to escape
+    its sandbox. Fail loud instead of writing -- a silently-wrong resolution
+    here is indistinguishable from a real board write after the fact."""
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    import tempfile
+    tmp_root = os.path.realpath(tempfile.gettempdir())
+    real = os.path.realpath(path)
+    if real == tmp_root or real.startswith(tmp_root + os.sep):
+        return
+    sys.exit(
+        "REFUSING TO USE BOARD %r: running under pytest (PYTEST_CURRENT_TEST "
+        "is set) but this board resolved outside the system temp dir (%r). "
+        "This looks like a test about to read or write a real board instead "
+        "of an isolated tmp_path fixture -- see T-257. Make sure TICKETS_DIR "
+        "points at a tmp_path (and that any subprocess.run() call passes "
+        "env= explicitly rather than inheriting the ambient environment)."
+        % (real, tmp_root)
+    )
+
+
 def board_dir(discover_children=True):
+    result = _board_dir_uncached(discover_children)
+    _refuse_board_outside_pytest_tmp(result)
+    return result
+
+
+def _board_dir_uncached(discover_children=True):
     env = os.environ.get("TICKETS_DIR")
     if env:
         return os.path.abspath(os.path.expanduser(env))
