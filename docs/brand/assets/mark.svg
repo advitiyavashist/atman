@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" color="#e8e6e1" fill="currentColor" role="img" aria-label="Atman">
+  <title>Atman</title>
+  <!-- Week-1 mark A: 5-dot 3-2 Total Football constellation. No edges, no hub. -->
+  <circle cx="5.1" cy="6.8" r="2.15"/>
+  <circle cx="11.4" cy="5.6" r="2.15"/>
+  <circle cx="18.8" cy="7.4" r="2.15"/>
+  <circle cx="7.2" cy="17.6" r="2.15"/>
+  <circle cx="17.0" cy="16.6" r="2.15"/>
+</svg>
