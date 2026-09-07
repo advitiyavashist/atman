@@ -117,6 +117,8 @@ every claim that agent makes.
 
 MIT licensed.
 
+Before publishing this repository, see [docs/PUBLIC_PREP.md](docs/PUBLIC_PREP.md).
+
 ## Making agents start on their own
 
 A session cannot be woken by a hook after its turn ends, so there are two parts:

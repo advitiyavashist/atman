@@ -215,10 +215,9 @@ so nothing is misreported; widening the enum would be a contract amendment.
 
 ## The displaced owner: which path each case takes
 
-Asked for by the planner at 12:30Z after a live incident on the Steer board —
-T-202 was reassigned twice inside 60 seconds and the displaced owner kept
-working for ten minutes because nothing ever refused it. There are two cases
-here that look alike and must not be collapsed, so both are named.
+Reassignment without a refusal path lets a displaced owner keep writing.
+There are two cases that look alike and must not be collapsed, so both are
+named.
 
 | What happened | Route behaviour | Why |
 | --- | --- | --- |

@@ -9,7 +9,7 @@ description = "File-based multi-agent ticket board CLI (safe clear + board backu
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Steer contributors" }]
+authors = [{ name = "Atman contributors" }]
 
 [project.optional-dependencies]
 # Needed only to run tests/test_contracts.py, which validates the T-178
