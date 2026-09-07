@@ -4125,7 +4125,29 @@ def traj_event(board, kind, agent="", ticket=None, **fields):
         if v == "" or v == [] or v == {}:
             continue
         rec[k] = v
+    # T-425: stamp the watch run so writes attribute to THAT run_id, not a
+    # time window. Omitted when the process is not inside a watch child.
+    if "run_id" not in rec:
+        rid = (os.environ.get("TICKETS_RUN_ID") or "").strip()
+        if rid:
+            rec["run_id"] = rid
     return traj_write(board, rec)
+
+
+_BOUND_WRITE_KINDS = ("claim", "update", "review", "done", "block", "reopen")
+
+
+def _run_had_bound_write(board, run_id, ticket):
+    """True when THIS run_id wrote a bound-ticket event (no idle: grep)."""
+    if not run_id or not ticket:
+        return False
+    for e in _safe(lambda: load_trajectories(board), []) or []:
+        if e.get("run_id") != run_id or e.get("ticket") != ticket:
+            continue
+        kind = e.get("kind")
+        if kind in _BOUND_WRITE_KINDS or kind == "msg":
+            return True
+    return False
 
 
 def _traj_git(cwd=None):
@@ -6372,23 +6394,32 @@ def cmd_watch(a, board):
                 # are message text and ticket titles, and neither belongs in
                 # the trajectory log (T-311 privacy rule).
                 run_started = now()
-                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or (
-                    _agent_rec(board, owner) or {}).get("ticket") or None
-                _safe(lambda: traj_event(board, "run_start", agent=owner,
-                                         ticket=held_ticket, run_no=runs,
-                                         trigger=sorted(p), harness_cmd=harness,
-                                         worktree=cwd), None)
+                # After T-439 drop, bind claimed|review via _current_ticket — do
+                # not fall back to raw agent.json ticket= (that rebinds stale ids).
+                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or None
+                # T-425 FLAG: writes in the child stamp this id; aggregator
+                # credits THAT run_id, not a time window (two seats, one ticket).
+                run_id = "r-%s-%d-%s" % (
+                    owner, runs,
+                    hashlib.sha1(("%s:%d:%s" % (owner, runs, run_started)).encode()).hexdigest()[:12])
+                env["TICKETS_RUN_ID"] = run_id
+                _safe(lambda rid=run_id, ht=held_ticket: traj_event(
+                    board, "run_start", agent=owner, ticket=ht, run_no=runs,
+                    run_id=rid, trigger=sorted(p), harness_cmd=harness,
+                    worktree=cwd), None)
                 if a.dry_run:
                     print("  dry-run; would execute: %s" % run_cmd)
                     if cleanup:
                         cleanup()
                     rc = 0
-                    _safe(lambda: traj_event(board, "run_end", agent=owner,
-                                             ticket=held_ticket, run_no=runs,
-                                             trigger=sorted(p), harness_cmd=harness,
-                                             worktree=cwd, started_at=run_started,
-                                             ended_at=now(), exit=0, dry_run=True,
-                                             duration_s=_iso_span_secs(run_started, now())), None)
+                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
+                        board, "run_end", agent=owner, ticket=ht, run_no=runs,
+                        run_id=rid, trigger=sorted(p), harness_cmd=harness,
+                        worktree=cwd, started_at=run_started, ended_at=now(),
+                        exit=0, dry_run=True,
+                        bound_write=True if bw else None,
+                        duration_s=_iso_span_secs(run_started, now())), None)
                 else:
                     # The whole point of T-237: something must record that this
                     # agent is alive WHILE the child runs. checkin() cannot --
@@ -6420,11 +6451,14 @@ def cmd_watch(a, board):
                         run_started, ended)
                     if usage_error:
                         log("%s run %d usage not recorded: %s" % (now(), runs, usage_error))
-                    _safe(lambda: traj_event(
-                        board, "run_end", agent=owner, ticket=held_ticket,
-                        run_no=runs, trigger=sorted(p), harness_cmd=harness,
-                        worktree=cwd, started_at=run_started, ended_at=ended,
+                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
+                        board, "run_end", agent=owner, ticket=ht,
+                        run_no=runs, run_id=rid, trigger=sorted(p),
+                        harness_cmd=harness, worktree=cwd,
+                        started_at=run_started, ended_at=ended,
                         exit=rc, timed_out=bool(timed_out),
+                        bound_write=True if bw else None,
                         duration_s=_iso_span_secs(run_started, ended),
                         outcome=("limit" if _looks_limited(
                             _read_run_slice(log_path, log_before)) else None),

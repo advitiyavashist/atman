@@ -186,6 +186,12 @@ def build(board, kind, agent="", ticket=None, **fields):
         if v == "" or v == [] or v == {}:
             continue
         rec[k] = v
+    # T-425: stamp the watch run so writes attribute to THAT run_id, not a
+    # time window. Omitted when the process is not inside a watch child.
+    if "run_id" not in rec:
+        rid = (os.environ.get("TICKETS_RUN_ID") or "").strip()
+        if rid:
+            rec["run_id"] = rid
     return rec
 
 

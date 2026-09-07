@@ -306,9 +306,8 @@ def test_a_ticket_whose_runs_reported_no_cost_reads_as_unknown_not_free(worked, 
     assert row["cost_usd"] != 0 and row["tokens_in"] != 0
     assert j["aggregates"]["cost"]["total"] is None
     assert j["aggregates"]["cost"]["n_unmeasured"] >= 1
-    # and the row still counts as a measured TURN: turns and cost are
-    # independently measurable, which is exactly today's board state.
-    assert row["turns"] == 1
+    # T-425: a no-write watch is not a turn; cost and turns are independent.
+    assert row["turns"] is None
 
     r = run(b, "turns", agent="alice", cwd=repo)
     # Only the DATA rows: the footer legend quotes "$0.00" to explain what
