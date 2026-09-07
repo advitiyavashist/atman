@@ -7,7 +7,6 @@ import {
   createdRouteSuffix,
   expectedCreatedRouteSuffixes,
   loadPost201PathTemplates,
-  MOCK_SCOPED_POST_201_SUFFIXES,
 } from "./support/openapi-post-201";
 
 describe("render-live CREATED_ROUTES stays aligned with openapi.yaml POST+201 routes", () => {
@@ -15,13 +14,10 @@ describe("render-live CREATED_ROUTES stays aligned with openapi.yaml POST+201 ro
     assertOpenapiSpecReadable();
   });
 
-  it("covers every mock-scoped contract POST+201 path", () => {
+  it("covers every contract POST+201 path", () => {
     const post201 = loadPost201PathTemplates();
     for (const template of post201) {
       const suffix = createdRouteSuffix(template);
-      if (!MOCK_SCOPED_POST_201_SUFFIXES.includes(suffix as (typeof MOCK_SCOPED_POST_201_SUFFIXES)[number])) {
-        continue;
-      }
       expect(CREATED_ROUTES.some((entry) => template.endsWith(entry) || suffix === entry)).toBe(true);
     }
   });

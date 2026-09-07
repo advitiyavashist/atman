@@ -36,18 +36,6 @@ export function expectedCreatedRouteSuffixes(): string[] {
   return [...new Set(suffixes)].sort();
 }
 
-/** Paths the live screen mock covers today (not every contract POST+201 route yet). */
-export const MOCK_SCOPED_POST_201_SUFFIXES = [
-  "/assignments",
-  "/enrollments",
-  "/invitations",
-  "/invitations/exchange",
-  "/reviews",
-  "/sessions",
-  "/tickets",
-  "/updates",
-] as const;
-
 export function assertOpenapiSpecReadable(): void {
   readFileSync(specPath, "utf-8");
 }
