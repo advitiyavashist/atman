@@ -215,8 +215,13 @@ def test_t244_never_read_inbox_is_a_sentinel_bug_not_a_race(board):
     finding that T-278's lock does not fix T-244 either."""
     run(board, "join", "alice", agent="alice")
     run(board, "join", "carol", agent="carol")
-    assert "inbox_seen" not in json.loads(
-        (Path(board) / "agents" / "carol.json").read_text()), "precondition: never read"
+    if "inbox_seen" in json.loads((Path(board) / "agents" / "carol.json").read_text()):
+        # T-244's fix stamps inbox_seen at first check-in, so the empty-sentinel
+        # state this test diagnoses no longer exists. Skip rather than fail:
+        # this test documents a finding about the UNFIXED code, and once T-244
+        # lands it has served its purpose and must not become a false alarm on
+        # somebody else's merge.
+        pytest.skip("T-244's fix is present: no never-read agent to diagnose")
     with open(Path(board) / "messages.2026-01-01.jsonl", "w") as f:
         f.write(json.dumps({"at": "2026-01-01T00:00:00Z", "from": "alice", "to": "carol",
                             "re": "", "text": "ARCHIVED-FOR-CAROL"}) + "\n")
