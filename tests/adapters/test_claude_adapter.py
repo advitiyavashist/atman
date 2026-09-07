@@ -195,11 +195,11 @@ def test_install_refuses_symlink_to_user_home(tmp_path, enrollment, config, monk
 
 @pytest.fixture
 def board_layout(tmp_path, monkeypatch):
-    """A miniature of this host's board layout with no operator home path in it.
+    """A miniature two-repo board layout with no operator home path in it.
 
-    Two protected checkouts (the equivalents of steer and tickets), an in-tree
-    agent worktree, an out-of-tree agent worktree registered against the same
-    repository, and an ordinary user project that has nothing to do with either.
+    Two protected checkouts, an in-tree agent worktree, an out-of-tree agent
+    worktree registered against the same repository, and an ordinary user
+    project that has nothing to do with either.
     """
     root = tmp_path / "portable-layout"
     steer = init_git_repo(root / "boards" / "steer")
@@ -382,10 +382,7 @@ def test_protected_roots_come_from_configuration(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     monkeypatch.setattr(adapter_module, "_real_home_dir", lambda: fake_home.resolve(strict=False))
     defaults = adapter_module._protected_roots()
-    assert defaults == (
-        (fake_home / "Downloads" / "steer").resolve(strict=False),
-        (fake_home / "Downloads" / "tickets").resolve(strict=False),
-    )
+    assert defaults == ()
 
     (fake_home / "one").mkdir(parents=True)
     (tmp_path / "two").mkdir()
@@ -423,21 +420,10 @@ def test_empty_forbidden_roots_from_unset_variable_does_not_disable_guard(monkey
         adapter_module._protected_roots()
 
 
-@pytest.mark.parametrize("index", [0, 1], ids=["steer", "tickets"])
-def test_project_dir_guard_refuses_this_hosts_main_checkouts(index, monkeypatch):
-    """The two checkouts named in the ticket, refused under the shipped defaults.
-
-    The checkouts are read back from `_protected_roots()` rather than written
-    out, so this test names no operator and states the same requirement on any
-    host: whatever the shipped defaults protect must be refused. Skips only
-    where that checkout is genuinely absent; the portable-layout tests above
-    carry the requirement everywhere else, so nothing goes untested.
-    """
-    monkeypatch.delenv(adapter_module.FORBIDDEN_ROOTS_ENV, raising=False)
-    checkout = adapter_module._protected_roots()[index]
-    if not (checkout / ".git").exists():
-        pytest.skip("%s is not a board checkout on this host" % checkout)
-
+def test_project_dir_guard_refuses_configured_protected_roots(tmp_path, monkeypatch):
+    """Configured forbidden roots are refused; unset means none."""
+    checkout = init_git_repo(tmp_path / "protected-board")
+    monkeypatch.setenv(adapter_module.FORBIDDEN_ROOTS_ENV, str(checkout))
     with pytest.raises(ClaudeHookError, match="live agent worktree"):
         adapter_module._ensure_safe_project_dir(checkout)
 

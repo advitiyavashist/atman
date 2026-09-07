@@ -133,7 +133,7 @@ def state_of(text, name):
 # ---- direction 1: a long real session must not read as stale ------------
 
 def test_working_agent_with_stale_loop_seen_reads_working(board):
-    """The cos-opus case, which nearly got a live agent's tickets reopened:
+    """The case which nearly got a live agent's tickets reopened:
     `seen` is 50 minutes old because the watcher is still blocked on a child
     that has not returned, while the session is writing a turn right now."""
     run(board, "join", "doc", "--roles", "docs")
@@ -219,10 +219,10 @@ def test_fast_failing_agent_does_not_read_as_healthy(board):
 
 
 def test_a_slow_failure_does_not_break_the_failing_streak(board):
-    """Found on the live board against my own first cut: gpt-cursor had been
-    hard-limited until October with 37 consecutive failures, and gating the
-    streak on run DURATION dropped it the moment one failure took 97s instead
-    of 7. The evidence is the CLI's error text, not the clock."""
+    """A hard-limited agent can fail many times in a row, and gating the
+    streak on run DURATION dropped it the moment one failure took much
+    longer than the others. The evidence is the CLI's error text, not the
+    clock."""
     run(board, "join", "doc", "--roles", "docs")
     err = "ActionRequiredError: You've hit your usage limit. Resets 10/5/2026."
     watch_log(board, "doc", [(600, 6, 1, err), (500, 7, 1, err), (400, 6, 1, err), (300, 97, 1, err)])
@@ -344,9 +344,8 @@ def test_dash_separates_a_human_assertion_from_a_derived_one(board):
 
 
 def test_a_derived_limit_stops_counting_the_agent_as_live_capacity(board):
-    """gpt-cursor was listed as live capacity with pending work while hard
-    limited until October, because DOWN was reachable only through a
-    hand-typed record."""
+    """A hard-limited agent was listed as live capacity with pending work,
+    because DOWN was reachable only through a hand-typed record."""
     run(board, "join", "doc", "--roles", "docs")
     err = "ActionRequiredError: You've hit your usage limit."
     watch_log(board, "doc", [(400, 5, 1, err), (300, 5, 1, err), (200, 5, 1, err)])

@@ -489,18 +489,18 @@ def test_operator_home_guard_catches_a_planted_literal(tmp_path):
     planted = tmp_path / "planted.py"
     handle = "somebody"
 
-    planted.write_text('BOARD = "/Users/%s/Downloads/steer"\nCWD = "/home/agent/p"\n'
+    planted.write_text('BOARD = "/Users/%s/Downloads/example-board"\nCWD = "/home/agent/p"\n'
                        % "<operator>")
     assert _operator_path_violations([planted], tmp_path) == []
 
-    planted.write_text('BOARD = "/Users/%s/Downloads/steer/.tickets"\n' % handle)
+    planted.write_text('BOARD = "/Users/%s/Downloads/example-board/.tickets"\n' % handle)
     assert _operator_path_violations([planted], tmp_path) == [
-        ("planted.py", "/Users/%s/Downloads/steer/.tickets" % handle)
+        ("planted.py", "/Users/%s/Downloads/example-board/.tickets" % handle)
     ]
 
     # A debt is keyed to one exact path, so a different literal in the same
     # file is still caught rather than waved through.
-    planted.write_text('OTHER = "/Users/%s/Downloads/tickets"\n' % handle)
+    planted.write_text('OTHER = "/Users/%s/Downloads/other-board"\n' % handle)
     assert _operator_path_violations([planted], tmp_path) == [
-        ("planted.py", "/Users/%s/Downloads/tickets" % handle)
+        ("planted.py", "/Users/%s/Downloads/other-board" % handle)
     ]

@@ -1,8 +1,6 @@
 # Connect Claude Code to Ticket Board V1
 
-Operator guide for the Claude Code hook adapter. Every command below was run
-against a real board server and a real Claude Code session (2.1.263) before
-being written down; none of it is illustrative.
+Operator guide for the Claude Code hook adapter.
 
 The adapter has two halves. `hook.py` runs *inside* Claude Code, hundreds of
 times a session, and never fails loudly -- a hook that raises would stop the
@@ -20,23 +18,18 @@ fails *quietly* -- its errors are printed and its exit codes mean something.
   (`git rev-parse --git-common-dir`) rather than by comparing paths. Use scratch
   project directories for tests.
 - Protected checkouts come from `TICKET_BOARD_FORBIDDEN_ROOTS`, an
-  `os.pathsep`-separated list of directories. Setting it replaces the defaults
-  (setting it empty protects nothing); leaving it unset falls back to
-  `~/Downloads/steer` and `~/Downloads/tickets` relative to the invoking user's
-  real home directory, not to `$HOME`. Nonempty overrides must contain existing,
-  readable, absolute directories (tilde expansion is supported). Empty list
-  components, relative paths, missing paths and files fail with a configuration
-  error before hooks are written; a bad entry never silently drops protection.
-  Ordinary git projects are *not* protected
-  -- enrolling one is the adapter's normal use.
+  `os.pathsep`-separated list of absolute directories. Unset means no extra
+  protected roots. The literal `NONE` disables the guard on purpose; an empty
+  string is an error (shells expand unset variables to empty by accident).
+  Nonempty overrides must contain existing, readable, absolute directories
+  (tilde expansion is supported). Empty list components, relative paths,
+  missing paths and files fail with a configuration error before hooks are
+  written; a bad entry never silently drops protection. Ordinary git projects
+  are *not* protected -- enrolling one is the adapter's normal use. Add any
+  extra clones you also need protected to the same list.
 - Local repository probes use `ticket_board.git_env.clean_git_env()` to remove
   inherited `GIT_*` overrides and address the requested directory explicitly.
   Worker launchers can reuse this helper; it does not fix a wrongly supplied cwd.
-- The T-205 host review found no exposed live agent lane, but did find one
-  unprotected non-lane clone at `~/Documents/tickets` (its own `.git`, outside
-  the default roots). Clones are separate repositories, so add their paths to
-  the configured roots if they must also be protected. The review did not
-  enumerate every clone; it does not establish zero exposure.
 - Repository identity needs `git`. If `git` cannot run, the guard falls back to
   path containment alone, which still refuses a protected checkout and anything
   under it, but cannot see a worktree registered outside it.
@@ -47,8 +40,7 @@ fails *quietly* -- its errors are printed and its exit codes mean something.
 > **If you run a nested Claude session for testing, unset `TICKET_AGENT` first.**
 > Claude Code merges user-level hooks with project ones, so a machine-global
 > `Stop` hook that knows the shared ticket board will fire inside your test
-> session and post to the board under your name. This has happened twice
-> (T-214 during fixture capture; guarded against during T-181's live runs).
+> session and post to the board under your name.
 
 ## 1. Mint an enrollment code (operator)
 
@@ -112,8 +104,8 @@ doctor shows green for a connection that will never deliver anything:
 command names an interpreter that does not exist is fully installed and will
 never run, and nothing else in this report can tell those two apart -- the
 command dies in the shell before any adapter code executes, and `hook.py` exits
-0 on every error by design. That is exactly the state T-181 found the adapter
-in: the command was spelled `python -m ...`, and the machine had only `python3`.
+0 on every error by design. A common instance: the command is spelled
+`python -m ...` on a machine that only has `python3`.
 
 `hook_executed` and `session_adopted` are separate for the same reason in the
 other direction: a synthetic probe proves the board is reachable, never that a
@@ -175,7 +167,7 @@ outcome line that `doctor` reads back. Receipts carry outcome metadata only
 (event id, kind, session id, status code, spooled flag, redacted error text);
 passing a sensitive field is refused, not dropped.
 
-## Envelope rendered by T-184
+## Envelope rendered on hook delivery
 
 ```json
 {
@@ -192,9 +184,9 @@ passing a sensitive field is refused, not dropped.
 }
 ```
 
-There is no `actor` field; actor identity is bound from the credential (frozen
-T-178). Tool and notification events map to `probe` because the frozen contract
-has no tool-specific kind, and their `note` carries bounded status text only.
+There is no `actor` field; actor identity is bound from the credential. Tool
+and notification events map to `probe` because the contract has no
+tool-specific kind, and their `note` carries bounded status text only.
 
 Two things worth knowing about `event.session_id` and `event_id`:
 
@@ -212,7 +204,7 @@ Two things worth knowing about `event.session_id` and `event_id`:
 
 ## Ground truth about the wire
 
-From real captured payloads (`tests/adapters/fixtures/`, T-214):
+From captured payloads (`tests/adapters/fixtures/`):
 
 - There is **no** `hook_schema_version` field. Not `"1"`, not
   `"claude-code-hooks-v1"` -- absent entirely.
@@ -226,9 +218,7 @@ carry.
 `Notification` fires for a permission request Claude Code cannot resolve, or an
 idle-input timeout. Neither is reachable from a scripted, non-interactive
 session, which is the only kind that can be driven end to end without a human at
-a TTY. T-214 reported this; T-181 re-tested it twice, including a run where a
-permission request was genuinely refused, and no `Notification` hook fired
-either time.
+a TTY. Interactive permission-request runs have also failed to fire it.
 
 The adapter handles the event (it maps to `probe`), but that path is covered by
 a hand-written fixture, not ground truth. Whoever next has a real interactive

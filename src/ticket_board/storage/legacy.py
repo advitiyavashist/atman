@@ -46,7 +46,7 @@ contract-amendment map; this lane does not amend a frozen contract.
 
 The contract's `Sha` is `^[0-9a-f]{40}$` and `GitEvidence.pr_url` is a URI. On
 the board this was written against, **none** of the 106 `commit` values match --
-they are `branch@shortsha` (`cos-opus@af27511`) -- and `pr` is a bare number
+they are `branch@shortsha` (`alice@af27511`) -- and `pr` is a bare number
 (`"104"`). Writing those into `tickets.evidence` would produce records that
 fail the published schema the moment T-180 serves them, and inventing a 40-hex
 sha would be worse. So evidence is archived verbatim, the mismatch is reported

@@ -11,8 +11,7 @@ is T-263.
 They are computed independently on purpose. `init` compares them and refuses
 when they disagree; if both came from `_repo_root()` the comparison would be
 `x == x` and the refusal would be unreachable. That was the first fix's defect
-(T-282), and it was unreachable in the one configuration this fleet actually
-runs in — linked worktrees.
+(T-282), and it was unreachable in the common linked-worktree configuration.
 
 ## Ambient precedence (`_board_dir_uncached`)
 
