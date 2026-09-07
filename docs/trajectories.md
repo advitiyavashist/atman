@@ -81,6 +81,7 @@ than filled with placeholders (T-259: unresolved must mean absent, not `"?"`).
 | `reopen` | `tickets reopen` | `outcome: reopened`, `prev_owner` |
 | `merge` | `tickets merge` | `pin`, `merged_as`, `trunk`, `prev_owner` |
 | `msg` | `post_message` | `to`, `text_len` |
+| `shadow_decision` | `tickets route --shadow` | print-only route: `source` (`prior`/`learned`), `rule_agent`, `learned_agent`, `n`, `n_unmeasured`; `expected_turns` omitted when unknown. Never an assign. See `docs/scheduler.md`. |
 
 `claim` is written inside `try_claim()` rather than in `cmd_next`/`cmd_claim`,
 because that function is the single point where a claim actually succeeds — a

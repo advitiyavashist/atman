@@ -3817,7 +3817,7 @@ def cmd_who(a, board):
 TRAJ_VERSION = 1
 TRAJ_MAX_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_MAX_BYTES", 50 * 1024 * 1024))
 TRAJ_KINDS = ("run_start", "run_end", "claim", "update", "review", "done",
-              "reopen", "block", "msg", "merge")
+              "reopen", "block", "msg", "merge", "shadow_decision")
 
 
 def trajectories_path(board):
@@ -4602,6 +4602,18 @@ def cmd_turns(a, board):
         lambda b: load_messages(b, include_archives=True))
 
 
+def _scheduler_cmd():
+    try:
+        from ticket_board.scheduler import cmd_route_shadow as impl
+        return impl
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.scheduler import cmd_route_shadow as impl
+        return impl
+
+
 # ---- routing: which agent should take which open ticket -----------------
 
 def score_agent(board, name, entry, roles, ticket):
@@ -4633,7 +4645,15 @@ def score_agent(board, name, entry, roles, ticket):
 def cmd_route(a, board):
     """Suggest an owner for every unassigned open ticket, by model, roles,
     capabilities and cost. Writes `suggested`; `tickets next` honours it.
-    Agents still pull -- this is a hint, not a lock -- unless --claim."""
+    Agents still pull -- this is a hint, not a lock -- unless --claim.
+
+    `--shadow` (T-315) is print-only plus one `shadow_decision` event per
+    ready ticket. `--apply` is unimplemented.
+    """
+    if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False):
+        return _scheduler_cmd()(
+            a, board, load_all, load_workforce, load_roles, load_agents,
+            score_agent, traj_event)
     tickets = load_all(board)
     wf = load_workforce(board)
     roles = load_roles(board)
@@ -7366,6 +7386,12 @@ def main():
     c.add_argument("--claim", action="store_true", help="hard-assign the ready ones (claims on their behalf)")
     c.add_argument("--redo", action="store_true", help="recompute tickets that already have a suggestion")
     c.add_argument("--only", nargs="*", help="restrict to these agents")
+    c.add_argument("--shadow", action="store_true",
+                   help="T-315: print rule vs learned/prior pick; do not assign")
+    c.add_argument("--report", action="store_true",
+                   help="with --shadow: agreement rate and realized turns")
+    c.add_argument("--apply", action="store_true",
+                   help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)
 
     c = sub.add_parser("connect", help="print how any agent connects to this board")

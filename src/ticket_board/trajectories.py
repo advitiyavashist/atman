@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 TRAJ_VERSION = 1
 TRAJ_MAX_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_MAX_BYTES", 50 * 1024 * 1024))
 TRAJ_KINDS = ("run_start", "run_end", "claim", "update", "review", "done",
-              "reopen", "block", "msg", "merge")
+              "reopen", "block", "msg", "merge", "shadow_decision")
 
 
 def _now():
