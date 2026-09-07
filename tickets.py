@@ -28,6 +28,7 @@ import errno
 import glob
 import json
 import os
+import re
 import shlex
 import sys
 import threading
@@ -4172,9 +4173,48 @@ def _rotate_messages_if_big(board):
             pass
 
 
+# @cursor, @cursor-2, @claude-fable, @everyone -- not emails, not @@foo.
+# Inline so the installed single-file copy stays self-contained (T-221).
+_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_@])@([A-Za-z][A-Za-z0-9_-]{0,47})")
+_MENTION_BROADCAST = frozenset({"everyone", "all"})
+_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+
+
+def _strip_code_spans(text):
+    return _CODE_SPAN_RE.sub(" ", text)
+
+
+def parse_mentions(text):
+    """Unique @handles in first-seen order (no @). Skip `code` / ```fences```."""
+    out, seen = [], set()
+    for match in _MENTION_RE.finditer(_strip_code_spans(text or "")):
+        handle = match.group(1)
+        key = handle.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(handle)
+    return out
+
+
+def resolve_to_and_mentions(text, to=""):
+    """Empty --to + exactly one named mention becomes that recipient."""
+    mentions = parse_mentions(text)
+    to = (to or "").strip()
+    if to:
+        return to, mentions
+    named = [h for h in mentions if h.lower() not in _MENTION_BROADCAST]
+    if len(named) == 1 and len(named) == len(mentions):
+        return named[0], mentions
+    return to, mentions
+
+
 def post_message(board, sender, text, to="", re=""):
     _rotate_messages_if_big(board)
+    to, mentions = resolve_to_and_mentions(text, to)
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    if mentions:
+        rec["mentions"] = mentions
     line_ = json.dumps(rec) + "\n"
     # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
     fd = os.open(messages_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
@@ -4238,6 +4278,18 @@ def _mark_inbox_read(board, owner):
     _agent_update(board, owner, lambda rec: rec.update({"inbox_seen": stamp}))
 
 
+def _addressed_to(msg, owner):
+    """True if *owner* should see *msg*: broadcast, explicit --to, or @mention."""
+    to = (msg.get("to") or "").strip().lower()
+    mentions = {h.lower() for h in (msg.get("mentions") or [])}
+    target = owner.lower()
+    if not to and not mentions:
+        return True
+    if to in _MENTION_BROADCAST or mentions & _MENTION_BROADCAST:
+        return True
+    return to == target or target in mentions
+
+
 def unread(board, owner):
     since = _agent_rec(board, owner).get("inbox_seen", "")
     msgs = load_messages(board)
@@ -4250,7 +4302,7 @@ def unread(board, owner):
             msgs = load_messages(board, include_archives=True)
     return [m for m in msgs
             if m.get("from") != owner
-            and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
+            and _addressed_to(m, owner)
             and m.get("at", "") > since]
 
 
@@ -4802,7 +4854,7 @@ def pending_work(board, owner):
         out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
         return out
     msgs = _safe(lambda: unread(board, owner), [])
-    direct = [m for m in msgs if m.get("to") == owner]
+    direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
     if direct:
         out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
     elif msgs:
@@ -5925,30 +5977,117 @@ def cmd_spawn(a, board):
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Ticket board</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{--bg:#f7f7f5;--fg:#1c1c1a;--mute:#6b6b66;--line:#e2e2dd;--card:#fff;--ok:#2f8f4e;--warn:#c27a00;--bad:#c23b2b;--acc:#2b5fd9}
-@media(prefers-color-scheme:dark){:root{--bg:#141413;--fg:#ececea;--mute:#9a9a94;--line:#2c2c2a;--card:#1d1d1b;--ok:#5ec27f;--warn:#e0a53d;--bad:#e5645a;--acc:#7aa2ff}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif}
-header{display:flex;gap:16px;align-items:baseline;padding:14px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
-h1{font-size:16px;margin:0}small{color:var(--mute)}main{padding:16px 20px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
-section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
-section h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin:0 0 8px}
-table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:4px 6px;border-top:1px solid var(--line);vertical-align:top;font-size:13px}th{color:var(--mute);font-weight:500;border-top:0}
-.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--acc)}
-.tag{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid var(--line);color:var(--mute)}
-.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
-.msgs div{padding:4px 0;border-top:1px solid var(--line);font-size:13px}.wide{grid-column:1/-1}.num{text-align:right}
-</style></head><body>
-<header><h1 id="title">Ticket board</h1><small id="meta"></small><small id="clock" style="margin-left:auto"></small></header>
+:root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
+header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:linear-gradient(180deg,#12151c 0%,#0c0e12 100%);border-bottom:1px solid var(--line)}
+.brand{display:flex;flex-direction:column;gap:1px;min-width:140px}
+.brand .prod{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.brand h1{font-size:16px;margin:0;font-weight:650}
+.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;background:var(--chip);border:1px solid var(--line);font-size:12px}
+.chip b{font-weight:650}
+.chip.master{border-color:color-mix(in srgb,var(--acc) 45%,var(--line))}
+.chip.cos{border-color:color-mix(in srgb,var(--review) 45%,var(--line))}
+.sprint{display:flex;flex-direction:column;gap:3px;min-width:180px;flex:1}
+.sprint .row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--mute)}
+.bar{height:6px;background:#1b1f28;border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--acc)}
+.pulse{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:650}
+.pulse i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.pulse.warn i{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 25%,transparent)}
+.pulse.bad i{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 25%,transparent)}
+#clock{margin-left:auto;font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
+.mission{margin:0 16px;border-bottom:1px solid var(--line)}
+.mission summary{cursor:pointer;list-style:none;padding:8px 0;color:var(--mute);font-size:12px;display:flex;gap:8px;align-items:baseline}
+.mission summary::-webkit-details-marker{display:none}
+.mission summary .k{letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--fg)}
+.mission summary .one{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
+.mission pre{margin:0 0 10px;white-space:pre-wrap;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--mute)}
+nav.tabs{display:flex;gap:4px;padding:8px 16px 0;border-bottom:1px solid var(--line)}
+nav.tabs button{appearance:none;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--mute);padding:8px 12px;font:13px/1 inherit;font-weight:650;cursor:pointer}
+nav.tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
+main{flex:1;min-height:0;padding:14px 16px 18px;overflow:auto}
+.pane{display:none;height:100%}
+body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-tab=messages] #pane-messages{display:flex;flex-direction:column;gap:12px}
+.kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
+@media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
+.col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
+.col h2{margin:0;padding:10px 12px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
+.col h2 .n{font-variant-numeric:tabular-nums;color:var(--mute)}
+.col.blocked h2{color:var(--blocked)}.col.ready h2{color:var(--ready)}.col.flight h2{color:var(--flight)}.col.review h2{color:var(--review)}
+.col .list{padding:0 8px 10px;display:flex;flex-direction:column;gap:8px}
+.card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.card.stale-warn{border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+.card.stale-bad{border-color:color-mix(in srgb,var(--bad) 70%,var(--line));background:color-mix(in srgb,var(--bad) 8%,#10141b)}
+.card-top{display:flex;gap:8px;align-items:center;font:11px/1 ui-monospace,Menlo,monospace}
+.card-top .id{font-weight:700;color:var(--acc)}
+.pri{color:var(--mute)}.card-title{font-weight:600;font-size:13px}
+.card-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--mute);font-size:12px}
+.wait{font-size:11px;color:var(--warn)}
+.empty{color:var(--mute);font-size:12px;padding:8px}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.mute{color:var(--mute)}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.who{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.av{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--acc);color:#fff;font-size:9px;font-weight:700;flex:none}
+.agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.agent{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.agent.head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.agent .st{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px;color:var(--mute)}
+.stats b{display:block;color:var(--fg);font-size:14px}
+.mention{color:var(--acc);font-weight:600;background:var(--chip);border-radius:4px;padding:0 3px}
+.msgs{display:flex;flex-direction:column;gap:8px;padding-bottom:8px}
+.m{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
+.m .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-bottom:4px}
+.tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;border:1px solid var(--line);color:var(--mute)}
+#composer{position:sticky;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px;padding:10px}
+#composer textarea{width:100%;resize:vertical;min-height:56px;font:13px/1.4 inherit;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+#composer select,#composer button,#composer input{font:13px inherit;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+#composer button{background:var(--acc);color:#fff;border-color:var(--acc);cursor:pointer;font-weight:600}
+#composer button:disabled{opacity:.5;cursor:default}
+#composerRow{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+#mentionBar{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;min-height:22px}
+.mchip{cursor:pointer;border:1px solid var(--line);background:var(--chip);border-radius:99px;padding:1px 9px;font-size:12px}
+.mchip:hover{border-color:var(--acc)}
+#composerMsg{font-size:12px;margin-top:4px;min-height:14px}
+</style></head><body data-tab="board">
+<header class="cmd">
+  <div class="brand"><span class="prod">tickets</span><h1 id="title">Ticket board</h1></div>
+  <div class="chips" id="chips"></div>
+  <div class="sprint" id="sprint"></div>
+  <div class="pulse" id="pulse"><i></i><span>clean</span></div>
+  <div id="clock"></div>
+</header>
+<details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
+<nav class="tabs">
+  <button type="button" data-tab-btn="board" class="on">Board</button>
+  <button type="button" data-tab-btn="agents">Agents</button>
+  <button type="button" data-tab-btn="messages">Messages</button>
+</nav>
 <main>
-<section class="wide"><h2>Goals</h2><div id="goals" style="white-space:pre-wrap;font-size:13px"></div></section>
-<section class="wide"><h2>Sprint</h2><div id="sprint"></div></section>
-<section class="wide"><h2>Utilization (24h)</h2><table id="util"></table></section>
-<section><h2>In flight</h2><table id="flight"></table></section>
-<section><h2>Review queue</h2><table id="review"></table></section>
-<section><h2>Agents</h2><table id="agents"></table></section>
-<section><h2>Health</h2><table id="health"></table></section>
-<section class="wide"><h2>Open tickets</h2><table id="open"></table></section>
-<section class="wide"><h2>Messages</h2><div class="msgs" id="msgs"></div></section>
+<div class="pane" id="pane-board">
+  <div class="kanban">
+    <section class="col blocked"><h2>Blocked <span class="n" id="n-blocked">0</span></h2><div class="list" id="col-blocked"></div></section>
+    <section class="col ready"><h2>Ready <span class="n" id="n-ready">0</span></h2><div class="list" id="col-ready"></div></section>
+    <section class="col flight"><h2>In flight <span class="n" id="n-flight">0</span></h2><div class="list" id="col-flight"></div></section>
+    <section class="col review"><h2>Review <span class="n" id="n-review">0</span></h2><div class="list" id="col-review"></div></section>
+  </div>
+</div>
+<div class="pane" id="pane-agents"><div class="agents" id="agents"></div></div>
+<div class="pane" id="pane-messages">
+  <div class="msgs" id="msgs"></div>
+  <section id="composer">
+    <div id="composerRow">
+      <label class="who"><small>from</small> <select id="cFrom"></select></label>
+      <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
+      <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+    </div>
+    <textarea id="cText" placeholder="Message the board. Type @ to tag an agent (e.g. @cursor) -- mentions reach that agent even if 'to' is someone else."></textarea>
+    <div id="mentionBar"></div>
+    <div id="composerRow" style="margin-top:8px"><button id="cSend">Post</button><small id="composerMsg"></small></div>
+  </section>
+</div>
 </main>
 <script>
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
@@ -5956,21 +6095,147 @@ const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).to
 // Server sends timestamps as raw ISO-8601 UTC; render in whatever timezone
 // this browser is actually in, not the server's.
 const fmtLocal=iso=>{if(!iso)return '-';const d=new Date(iso);return isNaN(d)?String(iso):d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
-function row(cells,cls){return '<tr class="'+(cls||'')+'">'+cells.map(c=>'<td>'+c+'</td>').join('')+'</tr>'}
-async function load(){const r=await fetch('/board.json?'+Date.now());const d=await r.json();
-document.getElementById('title').textContent='Ticket board · '+d.project;
-document.getElementById('meta').textContent='master '+(d.master||'nobody')+(d.cos?' · cos '+d.cos:'')+' · '+d.counts.done+' done / '+d.counts.total+' tickets';
-document.getElementById('clock').textContent='updated '+new Date().toLocaleTimeString();
-const s=d.sprint;document.getElementById('sprint').innerHTML=s?('<b>'+esc(s.id)+'</b> '+esc(s.goal)+'<div class="bar" style="margin:6px 0"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div><small>'+s.done+'/'+s.total+' done · '+s.in_flight+' in flight · '+s.blocked+' blocked · '+s.review+' in review'+(d.burn&&d.burn.done_per_day?' · '+d.burn.done_per_day.toFixed(1)+'/day, ETA '+(d.burn.eta_days?d.burn.eta_days.toFixed(1)+'d':'-'):'')+'</small>'):'no active sprint';
-document.getElementById('goals').innerHTML=esc(d.goals||'(no MASTER.md yet -- tickets master init)');
-document.getElementById('util').innerHTML='<tr><th>agent</th><th>state</th><th class="num">done</th><th>avg cycle</th><th>active</th><th>util</th><th class="num">wip</th><th class="num">review</th></tr>'+d.util.map(u=>row([esc(u.agent),'<span class="'+(u.state=='DOWN'?'bad':u.state=='busy'?'ok':'')+'">'+u.state+'</span>','<span class="num">'+u.done+'</span>',h(u.avg_cycle_h),h(u.active_h),'<div class="bar" style="width:120px;display:inline-block;vertical-align:middle"><i style="width:'+u.util_pct+'%"></i></div> '+Math.round(u.util_pct)+'%','<span class="num">'+u.in_flight+'</span>','<span class="num">'+u.in_review+'</span>'])).join('');
-document.getElementById('flight').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>last update</th></tr>'+d.in_flight.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>'])).join('')||row(['—','','',''] );
-document.getElementById('review').innerHTML='<tr><th>id</th><th>owner</th><th>title</th><th>branch</th></tr>'+d.review.map(t=>row([t.id,esc(t.owner),esc(t.title),'<span class="mono">'+esc(t.commit)+'</span>'+(t.pr?' PR '+esc(t.pr):'')])).join('')||row(['empty','','','']);
-document.getElementById('agents').innerHTML='<tr><th>agent</th><th>state</th><th>model</th><th class="num">done 24h</th><th>seen</th><th>ticket</th></tr>'+d.agents.map(a=>row([esc(a.name),'<span class="'+(a.state=='DOWN'?'bad':a.state=='busy'?'ok':'')+'">'+a.state+(a.watcher?' ●':'')+'</span>',esc(a.model||'-'),'<span class="num">'+a.done+'</span>',h(a.seen_h)+' ago',esc(a.ticket||'')])).join('');
-document.getElementById('health').innerHTML=d.health.length?d.health.map(x=>row(['<span class="'+(x.sev=='CRIT'?'bad':x.sev=='WARN'?'warn':'')+'">'+x.sev+'</span>',esc(x.msg)])).join(''):row(['<span class="ok">clean</span>','']);
-document.getElementById('open').innerHTML='<tr><th>id</th><th>status</th><th>pri</th><th>title</th><th>role</th><th>waits on</th></tr>'+d.open.map(t=>row([t.id,'<span class="tag">'+t.status+'</span>',t.priority,esc(t.title),esc(t.role),esc((t.waiting||[]).join(','))])).join('');
-document.getElementById('msgs').innerHTML=d.messages.map(m=>'<div><small>'+esc(fmtLocal(m.at))+'</small> <b>'+esc(m.from)+'</b>'+(m.to?' → '+esc(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+' '+esc(m.text)+'</div>').join('');}
-load();setInterval(load,5000);
+function initials(name){const s=String(name||'?').split(/[-_ ]/).filter(Boolean);
+  return ((s[0]||'?')[0]+(s.length>1?s[1][0]:(s[0]||'?')[1]||'')).toUpperCase()}
+function who(name){if(!name)return '';return '<span class="who"><span class="av">'+esc(initials(name))+'</span>'+esc(name)+'</span>'}
+function mentionText(text){
+  return esc(text).split(/(```[\s\S]*?```|`[^`]*`)/g).map((part,i)=>i%2
+    ?part
+    :part.replace(/(^|[^\w@])@([A-Za-z][A-Za-z0-9_-]{0,47})/g,
+      (m,pre,handle)=>pre+'<span class="mention">@'+handle+'</span>')
+  ).join('')
+}
+function missionLine(goals){
+  const raw=String(goals||'').trim();
+  if(!raw)return '(no MASTER.md yet -- tickets master init)';
+  const lines=raw.split(/\n/).map(l=>l.trim()).filter(Boolean);
+  const first=lines.find(l=>!/^(OBJECTIVE|MISSION|CEO MEMO|SPRINT PLAN)\b/i.test(l))||lines[0];
+  return first.replace(/^[#>*\-]+\s*/,'').slice(0,180);
+}
+function staleClass(t){
+  if(t.since_update==null)return '';
+  if(t.since_update>1.5)return 'stale-bad';
+  if(t.since_update>0.75)return 'stale-warn';
+  return '';
+}
+function card(t,extra){
+  const waiting=(t.waiting||[]).length?'<div class="wait">waiting on '+esc((t.waiting||[]).join(', '))+'</div>':'';
+  const owner=t.owner?who(t.owner):'<span class="mute">unassigned</span>';
+  const pri=t.priority!=null?'<span class="pri">P'+esc(t.priority)+'</span>':'';
+  const age=t.since_update!=null?'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>':'';
+  return '<article class="card '+staleClass(t)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+(extra||'')+'</article>';
+}
+function fillCol(id,items,html){
+  document.getElementById('n-'+id).textContent=items.length;
+  document.getElementById('col-'+id).innerHTML=items.length?html:('<div class="empty">none</div>');
+}
+function setTab(name){
+  document.body.dataset.tab=name;
+  try{localStorage.setItem('tickets-ui-tab',name)}catch(e){}
+  document.querySelectorAll('[data-tab-btn]').forEach(b=>b.classList.toggle('on',b.dataset.tabBtn===name));
+}
+document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
+try{const saved=localStorage.getItem('tickets-ui-tab');if(saved)setTab(saved)}catch(e){}
+let AGENTS=[];
+function loadAgentPickers(){
+  const from=document.getElementById('cFrom'),to=document.getElementById('cTo');
+  const savedFrom=localStorage.getItem('tickets-ui-from')||'';
+  const prevFrom=from.value||savedFrom, prevTo=to.value;
+  from.innerHTML='<option value="">(pick agent)</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  to.innerHTML='<option value="">everyone</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  if(AGENTS.includes(prevFrom))from.value=prevFrom;
+  if(AGENTS.includes(prevTo))to.value=prevTo;
+}
+function mentionQueryAt(text,caret){
+  const upto=text.slice(0,caret);const m=upto.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
+  return m?m[1]:null;
+}
+function renderMentionBar(){
+  const ta=document.getElementById('cText'),bar=document.getElementById('mentionBar');
+  const q=mentionQueryAt(ta.value,ta.selectionStart||0);
+  if(q===null){bar.innerHTML='';return}
+  const ql=q.toLowerCase();
+  const matches=AGENTS.filter(a=>a.toLowerCase().startsWith(ql)).slice(0,8);
+  bar.innerHTML=(matches.length?matches:AGENTS.slice(0,8)).map(a=>'<span class="mchip" data-agent="'+esc(a)+'">@'+esc(a)+'</span>').join('')
+    || '<small class="mute">no known agents yet</small>';
+}
+function insertMention(agent){
+  const ta=document.getElementById('cText');const caret=ta.selectionStart||0;
+  const before=ta.value.slice(0,caret),after=ta.value.slice(caret);
+  const m=before.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
+  const start=m?caret-m[1].length:caret;
+  ta.value=ta.value.slice(0,start)+agent+' '+after;
+  const pos=start+agent.length+1;ta.focus();ta.setSelectionRange(pos,pos);
+  renderMentionBar();
+}
+document.getElementById('mentionBar').addEventListener('click',e=>{
+  const el=e.target.closest('.mchip');if(el)insertMention(el.dataset.agent);
+});
+document.getElementById('cText').addEventListener('input',renderMentionBar);
+document.getElementById('cText').addEventListener('click',renderMentionBar);
+document.getElementById('cText').addEventListener('keyup',e=>{if(e.key!=='Enter')renderMentionBar()});
+document.getElementById('cSend').addEventListener('click',async()=>{
+  const from=document.getElementById('cFrom').value.trim();
+  const text=document.getElementById('cText').value.trim();
+  const to=document.getElementById('cTo').value.trim();
+  const re=document.getElementById('cRe').value.trim();
+  const btn=document.getElementById('cSend'),msg=document.getElementById('composerMsg');
+  if(!from){msg.className='bad';msg.textContent='pick who you are posting as';return}
+  if(!text){msg.className='bad';msg.textContent='message is empty';return}
+  localStorage.setItem('tickets-ui-from',from);
+  btn.disabled=true;msg.className='';msg.textContent='posting…';
+  try{
+    const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({from,text,to,re})});
+    const out=await r.json();
+    if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
+      document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';load()}
+    else{msg.className='bad';msg.textContent='error: '+(out.error||r.status)}
+  }catch(e){msg.className='bad';msg.textContent='error: '+e}
+  finally{btn.disabled=false}
+});
+function tickClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}
+async function load(){
+  const r=await fetch('/board.json?'+Date.now());const d=await r.json();
+  document.getElementById('title').textContent=d.project||'Ticket board';
+  document.getElementById('chips').innerHTML=
+    '<span class="chip master"><b>master</b> '+esc(d.master||'nobody')+'</span>'+
+    '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
+    '<span class="chip"><b>'+esc(d.counts.done)+'</b>/'+esc(d.counts.total)+' done</span>';
+  const s=d.sprint;
+  document.getElementById('sprint').innerHTML=s
+    ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
+    :'<div class="row"><span>no active sprint</span></div><div class="bar"><i style="width:0"></i></div>';
+  const crit=(d.health||[]).filter(x=>x.sev==='CRIT').length;
+  const warn=(d.health||[]).filter(x=>x.sev==='WARN').length;
+  const pulse=document.getElementById('pulse');
+  pulse.className='pulse'+(crit?' bad':warn?' warn':'');
+  pulse.innerHTML='<i></i><span>'+(crit?'CRIT '+crit:warn?'WARN '+warn:'clean')+'</span>';
+  tickClock();
+  const goals=d.goals||'(no MASTER.md yet -- tickets master init)';
+  document.getElementById('goals').textContent=goals;
+  document.getElementById('missionOne').textContent=missionLine(goals);
+  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length);
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  fillCol('blocked',blocked,blocked.map(t=>card(t)).join(''));
+  fillCol('ready',ready,ready.map(t=>card(t)).join(''));
+  fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
+  fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
+  AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
+  const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
+  document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
+    const u=utilBy[a.name]||{};
+    const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
+      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
+      '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
+      '<div class="stats"><div><b>'+esc(a.done)+'</b>done 24h</div><div><b>'+h(a.seen_h)+'</b>last seen</div><div><b>'+Math.round(u.util_pct||0)+'%</b>util</div></div></article>';
+  }).join('')||'<div class="empty">no agents checked in</div>';
+  const thread=(d.messages||[]).slice().reverse();
+  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtLocal(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
+    ||'<div class="empty">no messages yet</div>';
+}
+load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
 
 
@@ -6019,9 +6284,12 @@ def board_snapshot(board, messages=40):
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
         "goals": goals,
         "util": sorted(util_rows, key=lambda r: (-r["done"], r["agent"])),
-        "in_flight": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"], "since_update": timing(t)["since_update"]}
+        "in_flight": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
+                       "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
+                       "waiting": [d for d in t.get("deps", []) if d not in done]}
                       for t in tickets if t["status"] == "claimed"],
-        "review": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"], "commit": t.get("commit", ""), "pr": t.get("pr", "")}
+        "review": [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
+                    "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", "")}
                    for t in tickets if t["status"] == "review"],
         "open": [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2), "title": t["title"],
                   "role": t.get("role", ""), "waiting": [d for d in t.get("deps", []) if d not in done]}
@@ -6032,12 +6300,15 @@ def board_snapshot(board, messages=40):
         # so the UI can render it in whatever timezone the viewer's browser is
         # actually in -- truncating/reformatting it here would bake in UTC.
         "messages": [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
-                      "re": x.get("re", ""), "text": x.get("text", "")} for x in load_messages(board)[-messages:]][::-1],
+                      "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or []}
+                     for x in load_messages(board)[-messages:]][::-1],
     }
 
 
 def cmd_ui(a, board):
-    """Local status UI: serves an auto-refreshing page and /board.json (read-only)."""
+    """Local status UI: serves an auto-refreshing page, /board.json, and a
+    composer POST at /msg that posts through post_message() -- same board,
+    same messages.jsonl, no second store."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     if a.json:
@@ -6059,11 +6330,36 @@ def cmd_ui(a, board):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self):
+            if not self.path.startswith("/msg"):
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                sender = str(payload.get("from") or "").strip()
+                text = str(payload.get("text") or "").strip()
+                to = str(payload.get("to") or "").strip()
+                re_ = str(payload.get("re") or "").strip()
+                if not sender or not text:
+                    raise ValueError("from and text are required")
+                rec = post_message(board, sender, text, to, re_)
+                status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
+            except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
+                status, out = 400, {"ok": False, "error": str(e)}
+            body = json.dumps(out).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *args):
             pass
 
     srv = HTTPServer((a.host, a.port), H)
-    print("board UI: http://%s:%d  (Ctrl-C to stop; read-only)" % (a.host, a.port))
+    print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via tickets msg)" % (a.host, a.port))
     if a.open:
         import subprocess
         subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
@@ -6647,7 +6943,7 @@ def main():
     c.add_argument("--list", action="store_true")
     c.set_defaults(fn=cmd_spawn)
 
-    c = sub.add_parser("ui", help="local status page: http://localhost:8765 (read-only, auto-refresh)")
+    c = sub.add_parser("ui", help="local command board: http://localhost:8765 (auto-refresh + composer)")
     c.add_argument("--port", type=int, default=8765)
     c.add_argument("--host", default="127.0.0.1")
     c.add_argument("--open", action="store_true", help="open it in the browser")
