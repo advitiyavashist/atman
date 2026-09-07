@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="t d">
+  <title id="t">Formation dots (parked)</title>
+  <desc id="d">Week-1 production mark A, plated for this shortlist. Parked until a new ACCEPT. Do not treat as a new option.</desc>
+  <rect width="32" height="32" rx="7" fill="#0c0e12"/>
+  <circle cx="10.0" cy="7.8"  r="3.35" fill="#e8e6e1"/>
+  <circle cx="22.4" cy="8.8"  r="3.35" fill="#e8e6e1"/>
+  <circle cx="6.6"  cy="17.6" r="3.35" fill="#e8e6e1"/>
+  <circle cx="25.4" cy="18.2" r="3.35" fill="#e8e6e1"/>
+  <circle cx="16.0" cy="24.6" r="3.35" fill="#e8e6e1"/>
+</svg>

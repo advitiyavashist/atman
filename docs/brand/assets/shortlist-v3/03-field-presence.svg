@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="t d">
+  <title id="t">Field and presence</title>
+  <desc id="d">Five quiet seats on a pitch plus one live presence. Irregular. No orbit. No edges.</desc>
+  <rect width="32" height="32" rx="7" fill="#0c0e12"/>
+  <circle cx="8.0" cy="9.0" r="1.4" fill="#8a8d96"/>
+  <circle cx="20.4" cy="7.4" r="1.4" fill="#8a8d96"/>
+  <circle cx="25.2" cy="15.6" r="1.4" fill="#8a8d96"/>
+  <circle cx="7.2" cy="20.8" r="1.4" fill="#8a8d96"/>
+  <circle cx="21.6" cy="24.6" r="1.4" fill="#8a8d96"/>
+  <circle cx="14.8" cy="15.2" r="2.55" fill="#3ee8c5"/>
+</svg>

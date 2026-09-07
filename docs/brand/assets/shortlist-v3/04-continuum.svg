@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="t d">
+  <title id="t">Continuum</title>
+  <desc id="d">One unbroken field. A heavier arc is the seat: same stroke, same being, different intensity.</desc>
+  <rect width="32" height="32" rx="7" fill="#0c0e12"/>
+  <circle cx="16" cy="16" r="10.1" fill="none" stroke="#8a8d96" stroke-width="1.55"/>
+  <path d="M16 5.9 A10.1 10.1 0 0 1 25.7 20.6" fill="none" stroke="#e8e6e1" stroke-width="2.55" stroke-linecap="butt"/>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="t d">
+  <title id="t">Open ring</title>
+  <desc id="d">Circular field with a gate on the right; a bone seat sits in the opening. Not a spinner, not a C.</desc>
+  <rect width="32" height="32" rx="7" fill="#0c0e12"/>
+  <path d="M23.8 8.2 A10.15 10.15 0 1 1 23.8 23.8" fill="none" stroke="#e8e6e1" stroke-width="2.15" stroke-linecap="butt"/>
+  <circle cx="25.35" cy="16" r="2.05" fill="#e8e6e1"/>
+</svg>
