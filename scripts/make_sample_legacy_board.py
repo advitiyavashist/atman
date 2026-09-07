@@ -5,18 +5,18 @@ Run: `python3 scripts/make_sample_legacy_board.py` (writes tests/data/legacy_boa
 
 Why this is synthesised rather than scrubbed from the real board:
 
-The import tests used to `skipif` on `/Users/kavana/Downloads/steer/.tickets`
-existing, so on every other machine the only real-board assertion silently
-vanished and the suite still reported green. The fix needs a board that is
-*committed*. Deriving one by scrubbing the live board would put a scrubber
-between the fixture and the reviewer -- and a scrubber that misses one handle
-leaks it into git history permanently. Synthesising instead means the fixture
-provably contains no real name, handle or absolute path, because none was ever
-read.
+The import tests used to skip unless a machine-local live board existed, so
+on every other machine the only real-board assertion silently vanished and
+the suite still reported green. The fix needs a board that is *committed*.
+Deriving one by scrubbing a live board would put a scrubber between the
+fixture and the reviewer -- and a scrubber that misses one handle leaks it
+into git history permanently. Synthesising instead means the fixture
+provably contains no real name, handle or absolute path, because none was
+ever read.
 
-What it must keep is the real board's *shape*, including the awkward parts,
-since those are what the importer gets wrong. Every edge case below was
-observed on the real 133-ticket board or is a limit the frozen T-178 contract
+What it must keep is a realistic board *shape*, including the awkward
+parts, since those are what the importer gets wrong. Every edge case below
+was observed on a large legacy board or is a limit the frozen contract
 imposes:
 
 - 22 legacy keys, and one key (`squad`) the importer has never heard of

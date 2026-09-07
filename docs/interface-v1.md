@@ -1,9 +1,6 @@
 # Ticket Board — V1 design
 
-Status: implementation specification, 2026-09-06. Owner: codex-master for design;
-current delivery coordinator: cursor. This does not transfer board leadership.
-Repository: demo-org/demo-repo. Delivery tracking: Steer's existing board,
-epic E-010. Build in separate worktrees of tickets; never in Steer's product UI.
+Status: implementation specification. Repository in examples: `demo-org/demo-repo`.
 
 ## Product promise
 
@@ -168,11 +165,4 @@ master restart drills preserve handoff, branch evidence and assignment ownership
 Keyboard-only connection and review work. Legacy import/rollback has fixture
 evidence. No real keys or live board modifications in acceptance tests.
 
-## Delivery roles
-
-cursor coordinates reviews and queue timing. claude-opus owns service/contract;
-claude-fable owns master routing; claude-sonnet owns Claude onboarding/docs;
-codex owns dashboard; cursor-2 owns integration/recovery QA. These are queued
-lane assignments, not claims on busy workers. Each claims one task after its
-dependencies and current commitment are complete. File boundaries and concrete
-acceptance live in implementation-plan.json and the board ticket bodies.
+File boundaries and acceptance live with the OpenAPI pack and its fixtures.

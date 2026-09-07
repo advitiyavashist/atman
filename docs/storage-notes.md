@@ -91,10 +91,10 @@ else, preserve that property.
 
 `import_legacy_board(store, path)` imports a whole legacy board — tickets,
 notes, dependencies, agents, epics, sprints, briefs, coordination state and
-`messages.jsonl` — and returns an `ImportReport`. Measured on the real Steer
-board (T-213): 133/133 tickets, 56/56 edges, 1062/1062 notes each keeping its
-own timestamp, 2134 messages, 33 agents, 93 documents, nothing skipped, no
-unmapped states, and **zero field differences** on a full round-trip.
+`messages.jsonl` — and returns an `ImportReport`. The importer is measured
+against the committed sample board under `tests/data/legacy_board/`: every
+ticket, edge, and note keeps its timestamp; nothing is skipped; unmapped
+states are counted rather than guessed.
 
 - **The whole import is one `BEGIN IMMEDIATE` transaction.** A cycle, a
   duplicate id or a disk error leaves the database exactly as it was. It used
@@ -117,7 +117,7 @@ unmapped states, and **zero field differences** on a full round-trip.
   you surface these to operators who cite "T-179", say so in the UI.
 - **Owners become real agent rows**, in state `offline` — they have never
   connected to this server. Without this, `tickets.owner` (a foreign key to
-  `agents(id)`) stays null and the dashboard renders ~110 tickets in progress
+  `agents(id)`) stays null and the dashboard renders in-progress tickets
   with nobody on them.
 - **A dependency on a ticket not in the source board is reported**, in
   `report.dropped_dependencies`, never silently dropped. Same for a cycle
@@ -138,8 +138,8 @@ archived in `legacy_ticket_fields` and listed with counts in
 lane does not amend a frozen contract.**
 
 The sharpest case is review evidence. `Sha` is `^[0-9a-f]{40}$` and
-`GitEvidence.pr_url` is a URI, but **all 106** `commit` values on the real board
-are `branch@shortsha` and `pr` is a bare number. Writing those into
+`GitEvidence.pr_url` is a URI, but many legacy `commit` values are
+`branch@shortsha` and `pr` is a bare number. Writing those into
 `tickets.evidence` produces rows that fail the published schema the moment a
 route serves them, so the import writes `evidence` and a `reviews` row only for
 values that genuinely conform, counts the rest in
