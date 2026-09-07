@@ -1,10 +1,6 @@
-# Atman tokens (T-347)
+# Atman tokens
 
-Paste-ready for T-345 `UI_HTML`. Aligns with T-276 dark command-board roots. Do not invent a second theme.
-
-**CEO ACCEPT:** T-346 / [PR #4](https://github.com/advitiyavashist/atman/pull/4). Stamp: [ACCEPT.md](ACCEPT.md).
-
-**T-345 implementer = `cursor-atman-ui`.** ui = craft / a11y eyes only. This file does not edit `tickets.py`.
+Paste-ready CSS for the command-board UI. One dark theme.
 
 Chrome wordmark is lowercase `atman` with tracking — never `ATMAN`.
 
@@ -43,7 +39,7 @@ Chrome wordmark is lowercase `atman` with tracking — never `ATMAN`.
 }
 ```
 
-T-276 already ships the dark roots, `--chip`, `--review`, and lane aliases (`--blocked` / `--ready` / `--flight`). T-347 adds `--intervene` and `--live`. `--acc` stays the everyday action blue.
+`--acc` is the everyday action blue. `--intervene` and `--live` are distinct signals.
 
 ---
 
@@ -53,13 +49,11 @@ T-276 already ships the dark roots, `--chip`, `--review`, and lane aliases (`--b
 |---|---|---|---|
 | `--intervene` | `#e0a53d` (warn amber) | Intervene CTAs: route, unblock, reassign, nudge, msg. Operator is about to act. | Do not replace this amber with mint. Do not use mint on primary Intervene buttons. |
 | `--warn` | `#e0a53d` | Attention, aging updates, In-flight lane. Same hex as `--intervene`. | |
-| `--live` | `#3ee8c5` electric mint | Pulse / live-seat indicator only. “Someone is on the pitch.” One 8px dot, or a 1-item chip. | Page wash, glow field, neon spam, Intervene CTA fill, Steer pale lime. |
+| `--live` | `#3ee8c5` electric mint | Pulse / live-seat indicator only. “Someone is on the pitch.” One 8px dot, or a 1-item chip. | Page wash, glow field, neon spam, Intervene CTA fill. |
 
 `--live` is a signal, not a theme. If a control fires an intervene, it is amber. If a seat is live, it may pulse mint.
 
-**T-345:** Intervene buttons should use `:focus-visible { outline: 2px solid var(--live); outline-offset: 2px }` (or `var(--acc)`) so keyboard matches visual honesty.
-
-Reject `--live` only if a reviewer reads it as Steer lime. Then keep `--intervene` / `--warn` as the warm signal — do not invent a third accent.
+Intervene buttons should use `:focus-visible { outline: 2px solid var(--live); outline-offset: 2px }` (or `var(--acc)`) so keyboard matches visual honesty.
 
 ---
 
@@ -87,11 +81,11 @@ Mint on `#0c0e12` clears AA for icons (and for text). Still use it sparsely.
 - File: [assets/mark.svg](assets/mark.svg) — five `#e8e6e1` dots, no strokes between them.
 - Lockup: [assets/lockup.svg](assets/lockup.svg) — mark + `atman` (`.22em` tracking). Runtime chrome uses CSS `.wordmark` (already above); the SVG is a static reference.
 - Preview: [assets/preview.png](assets/preview.png) — 16 / 22 / 32 / 64 on `--bg`.
-- At 16px it must read as a **team constellation**, not a flowchart. If it ever needs edges to be legible, A has failed — then C, not a DAG.
-- Inline SVG / data-URI when T-345 needs it. No CDN, no build step, no external font file.
+- At 16px it must read as a **team constellation**, not a flowchart. If it ever needs edges to be legible, formation-dots has failed — then linked seats, not a DAG.
+- Inline SVG / data-URI when the UI needs it. No CDN, no build step, no external font file.
 
 ---
 
 ## Reject
 
-Steer `^`, pale lime, lock / shield, robot, neon glow spam, node–edge DAG icons, invented Atman URLs, editing `UI_HTML` in this ticket.
+Locks / shields, robot marks, neon glow spam, node–edge DAG icons, invented product URLs.

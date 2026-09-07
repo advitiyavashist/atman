@@ -5,14 +5,14 @@ AMBIENT resolution -- and rooted the protocol files at its dirname. So in a
 fresh repo with TICKETS_DIR exported (every agent session has one), or nested
 under a project that already has a board, init reported success while writing
 four files into a DIFFERENT project and leaving every later command on the
-other board. That is how T-256 minted a ticket on the live steer board.
+other board. That is how a test can mint a ticket on a live board.
 
 The first fix was itself defective, and this file exists mostly because of
 that: it compared init's target against the ambient board, but computed BOTH
 through _repo_root(), whose docstring reads "Root of the MAIN worktree, so
 every linked worktree shares one board". Inside a linked worktree the two
 operands were therefore equal by construction and the refusal branch was dead
-code -- in the only configuration this fleet actually runs in. A guard whose
+code -- in the common linked-worktree configuration. A guard whose
 operands come from one resolver is not a guard, so test_the_two_resolvers_
 disagree_inside_a_linked_worktree below pins the independence directly, not
 just its consequences.

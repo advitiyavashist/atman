@@ -13,17 +13,17 @@ from test_wakeup import board, run  # noqa: F401
 def test_reopen_with_notes_succeeds_and_records_attributed_note(board):
     run(board, "claim", "T-001", "--owner", "alice", agent="alice")
     r = run(board, "reopen", "T-001", "--notes", "reopening: found a real defect",
-            "--by", "cos-opus", agent="cos-opus")
+            "--by", "reviewer", agent="reviewer")
     assert r.returncode == 0, r.stderr
     assert "reopened" in r.stdout
 
-    show = run(board, "show", "T-001", "--json", agent="cos-opus")
+    show = run(board, "show", "T-001", "--json", agent="reviewer")
     t = json.loads(show.stdout)
     assert t["status"] == "open"
     assert t["owner"] == ""
     notes = [n for n in t["notes"] if n["text"] == "reopening: found a real defect"]
     assert notes, t["notes"]
-    assert notes[-1]["by"] == "cos-opus", (
+    assert notes[-1]["by"] == "reviewer", (
         "the note must be attributed to the agent doing the reopening, not the "
         "outgoing owner (alice) -- same misattribution class as T-238"
     )
