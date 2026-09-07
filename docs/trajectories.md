@@ -190,7 +190,9 @@ same events, with two consequences worth knowing:
 
 - **`run_start` / `run_end` come only from the root script.** `cmd_watch` does
   not exist in `cli.py`, so runs are counted by the watcher alone. This is a
-  real absence, not a hole: nothing else spawns a run.
+  real absence, not a hole: nothing else spawns a run. The packaged CLI still
+  serves `tickets trajectories` (list / export / backfill) against the same
+  file.
 - **`branch` / `sha` are omitted more often on the packaged path.** Its
   `git_state()` fills those with `"?"` where the root script returns `None`
   (T-259). A `"?"` on disk reads back as a real branch name, so the packaged

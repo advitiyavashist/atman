@@ -2668,6 +2668,198 @@ def cmd_inbox(a, board):
         _mark_inbox_read(board, owner)
 
 
+def _traj_filter(events, ticket="", agent="", kind="", since="", until=""):
+    out = []
+    kinds = [k.strip() for k in (kind or "").split(",") if k.strip()]
+    for e in events:
+        if ticket and e.get("ticket") != ticket:
+            continue
+        if agent and e.get("agent") != agent:
+            continue
+        if kinds and e.get("kind") not in kinds:
+            continue
+        at = e.get("at", "")
+        if since and at < since:
+            continue
+        if until and at > until:
+            continue
+        out.append(e)
+    return out
+
+
+def _traj_line(e):
+    bits = ["%s %-9s" % (e.get("at", "?"), e.get("kind", "?"))]
+    bits.append("%-16s" % (e.get("agent") or "-"))
+    bits.append("%-7s" % (e.get("ticket") or "-"))
+    extra = []
+    for k in ("run_no", "exit", "duration_s", "turns", "tokens_in", "tokens_out",
+              "cost_usd", "outcome", "state_before", "state_after", "trigger",
+              "notes_len", "text_len", "to", "pin", "merged_as", "active_hours",
+              "wait_hours", "harness", "harness_cmd", "model", "effort",
+              "timed_out", "src"):
+        if k in e:
+            v = e[k]
+            extra.append("%s=%s" % (k, ",".join(v) if isinstance(v, list) else v))
+    return " ".join(bits) + ("  " + " ".join(extra) if extra else "")
+
+
+def _traj_summary(events):
+    """The numbers this log exists for: turns-to-done per ticket."""
+    by_ticket = {}
+    for e in events:
+        tid = e.get("ticket")
+        if not tid:
+            continue
+        s = by_ticket.setdefault(tid, {"runs": 0, "updates": 0, "msgs": 0,
+                                       "reopens": 0, "agents": set(), "outcome": "",
+                                       "turns": 0, "cost_usd": 0.0, "cost_known": False})
+        k = e.get("kind")
+        if k == "run_end":
+            s["runs"] += 1
+            if isinstance(e.get("turns"), int):
+                s["turns"] += e["turns"]
+            if isinstance(e.get("cost_usd"), (int, float)):
+                s["cost_usd"] += e["cost_usd"]
+                s["cost_known"] = True
+        elif k == "update":
+            s["updates"] += 1
+        elif k == "msg":
+            s["msgs"] += 1
+        elif k == "reopen":
+            s["reopens"] += 1
+        if k in ("done", "merge", "review", "block"):
+            s["outcome"] = e.get("outcome") or k
+        if e.get("agent"):
+            s["agents"].add(e["agent"])
+    return by_ticket
+
+
+def cmd_trajectories(a, board):
+    """Read, export or backfill the trajectory log (packaged CLI)."""
+    sub = getattr(a, "traj_cmd", "list") or "list"
+    if sub == "backfill":
+        return _traj_backfill(a, board)
+    events = _traj_safe(lambda: _traj.load(board)) or []
+    sel = _traj_filter(events, ticket=getattr(a, "ticket", "") or "",
+                       agent=getattr(a, "agent", "") or "",
+                       kind=getattr(a, "kind", "") or "",
+                       since=getattr(a, "since", "") or "",
+                       until=getattr(a, "until", "") or "")
+    if sub == "export":
+        out = getattr(a, "out", "") or ""
+        if not out:
+            sys.exit("export needs --out <file.jsonl>")
+        tmp = out + ".tmp"
+        with open(tmp, "w") as f:
+            for e in sel:
+                f.write(json.dumps(e) + "\n")
+        os.replace(tmp, out)
+        print("exported %d event(s) of %d to %s" % (len(sel), len(events), out))
+        return
+    limit = int(getattr(a, "limit", 0) or 0)
+    shown = sel[-limit:] if limit else sel
+    if getattr(a, "json", False):
+        print(json.dumps(shown, indent=2))
+        return
+    if not events:
+        print("no trajectory events yet (%s)" % _traj.trajectories_path(board))
+        print("the log fills as agents claim, update, review and run; "
+              "`tickets trajectories backfill` synthesises the history already on the board")
+        return
+    if not shown:
+        print("no events match (%d in the log)" % len(events))
+        return
+    for e in shown:
+        print(_traj_line(e))
+    print("")
+    print("%d of %d event(s)%s" % (len(shown), len(events),
+                                   " (showing the last %d)" % limit if limit and len(sel) > limit else ""))
+    if getattr(a, "summary", False):
+        print("")
+        print("%-8s %5s %8s %5s %5s %8s  %s" % (
+            "ticket", "runs", "turns", "upd", "msgs", "reopens", "agents / outcome"))
+        for tid, s in sorted(_traj_summary(sel).items()):
+            print("%-8s %5d %8s %5d %5d %8d  %s %s" % (
+                tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
+                s["reopens"], ",".join(sorted(s["agents"])) or "-",
+                ("-> " + s["outcome"]) if s["outcome"] else ""))
+        print("")
+        print("runs = watch runs that reached run_end (the board's own turn count).  "
+              "turns = turns the harness itself reported, '-' when it reported none "
+              "-- an unreported count is never estimated from the run.")
+
+
+def _traj_backfill(a, board):
+    """Same synthesis rules as tickets.py -- packaged CLI must not skip this."""
+    ONCE_PER_TICKET = ("claim", "review", "done")
+    existing = _traj_safe(lambda: _traj.load(board)) or []
+    have_keys = set()
+    live_floor = {}
+    live_kinds = set()
+    for e in existing:
+        if e.get("bf_key"):
+            have_keys.add(e["bf_key"])
+        tid = e.get("ticket")
+        if tid and e.get("src") != "backfill":
+            live_kinds.add((tid, e.get("kind")))
+            at = e.get("at", "")
+            if at and (tid not in live_floor or at < live_floor[tid]):
+                live_floor[tid] = at
+    planned = []
+
+    def plan(t, kind, at, agent, **fields):
+        if not at:
+            return
+        if kind in ONCE_PER_TICKET and (t["id"], kind) in live_kinds:
+            return
+        floor = live_floor.get(t["id"])
+        if floor and at >= floor:
+            return
+        key = "%s:%s:%s" % (t["id"], kind, at)
+        if key in have_keys:
+            return
+        have_keys.add(key)
+        planned.append((t, kind, at, agent, fields))
+
+    for t in load_all(board):
+        owner = t.get("owner") or ""
+        plan(t, "claim", t.get("claimed_at", ""), owner,
+             state_before="open", state_after="claimed")
+        for n in t.get("notes", []):
+            text = str(n.get("text", ""))
+            if text.startswith("REVIEW: "):
+                continue
+            plan(t, "update", n.get("at", ""), n.get("by", "") or owner,
+                 notes_len=len(text))
+        plan(t, "review", t.get("review_at", ""), owner,
+             state_before="claimed", state_after="review", outcome="review",
+             pin=t.get("commit", ""))
+        if t.get("done_at"):
+            plan(t, "done", t["done_at"], owner,
+                 state_before="review" if t.get("review_at") else "claimed",
+                 state_after="done", outcome="done", pin=t.get("commit", ""))
+    planned.sort(key=lambda x: (x[2], x[0]["id"]))
+    if getattr(a, "dry_run", False):
+        print("would write %d event(s):" % len(planned))
+        for t, kind, at, agent, fields in planned[:40]:
+            print("  %s %-7s %-8s %s" % (at, kind, t["id"], agent or "-"))
+        if len(planned) > 40:
+            print("  ... and %d more" % (len(planned) - 40))
+        return
+    written = 0
+    ran_at = now()
+    for t, kind, at, agent, fields in planned:
+        rec = traj_event(board, kind, agent=agent, ticket=t, at=at,
+                         src="backfill", backfilled_at=ran_at,
+                         bf_key="%s:%s:%s" % (t["id"], kind, at), **fields)
+        if rec:
+            written += 1
+    print("backfill wrote %d event(s) into %s" % (written, _traj.trajectories_path(board)))
+    if not planned:
+        print("nothing to synthesise: every claim/update/review/done on this board "
+              "is already in the log")
+
+
 def _turns_cmd():
     try:
         from ticket_board.turns import cmd_turns as impl
@@ -3160,6 +3352,26 @@ def main():
     c.add_argument("--keep", action="store_true", help="do not mark as read")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_inbox)
+
+    c = sub.add_parser("trajectories", aliases=["traj"],
+                       help="the team trajectory log: query | export | backfill")
+    c.add_argument("--ticket", "-t", default="", help="only this ticket")
+    c.add_argument("--agent", "-a", default="", help="only this agent")
+    c.add_argument("--kind", "-k", default="",
+                   help="run_start,run_end,claim,update,review,done,reopen,block,msg,merge")
+    c.add_argument("--since", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--until", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--limit", type=int, default=200, help="show the last N; 0 = all")
+    c.add_argument("--summary", action="store_true",
+                   help="per-ticket runs/turns/updates/messages/reopens")
+    c.add_argument("--json", action="store_true")
+    ts = c.add_subparsers(dest="traj_cmd")
+    x = ts.add_parser("export", help="write the filtered events to a file")
+    x.add_argument("--out", required=True, help="destination .jsonl")
+    x = ts.add_parser("backfill",
+                      help="synthesise claim/update/review/done from tickets already on the board")
+    x.add_argument("--dry-run", action="store_true", dest="dry_run")
+    c.set_defaults(fn=cmd_trajectories, traj_cmd="list", out="", dry_run=False)
 
     c = sub.add_parser("turns",
                        help="watch-run turns per ticket (T-312); --json is frozen for the optimizer")

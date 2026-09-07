@@ -111,6 +111,16 @@ def test_packaged_cli_records_claim_update_and_block(board):
     assert blocked["state_before"] == "claimed" and blocked["outcome"] == "blocked"
 
 
+def test_packaged_cli_trajectories_reader_lists_claim(board):
+    """Writer two-copy is not enough: pip-install `tickets trajectories` must work."""
+    run_tool(PKG_TOOL, board, "join", "alice", "--roles", "docs", agent="alice")
+    run_tool(PKG_TOOL, board, "next", agent="alice")
+    r = run_tool(PKG_TOOL, board, "trajectories", "--json", "--limit", "0", agent="alice")
+    assert r.returncode == 0, r.stderr
+    data = json.loads(r.stdout)
+    assert any(e.get("kind") == "claim" and e.get("ticket") == "T-001" for e in data)
+
+
 def test_packaged_cli_records_msg_with_ids_only(board):
     run_tool(PKG_TOOL, board, "join", "alice", "--roles", "docs", agent="alice")
     run_tool(PKG_TOOL, board, "msg", "the body of this message", "--to", "bob",
