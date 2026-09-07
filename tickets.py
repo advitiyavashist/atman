@@ -3884,10 +3884,28 @@ def unread(board, owner):
             and m.get("at", "") > since]
 
 
+def fmt_local(iso):
+    """Render a stored UTC ISO timestamp in the reader's LOCAL time.
+
+    Stored values stay UTC; only the display converts. Falls back to the old
+    UTC substring on anything unparseable -- a bad timestamp must never break
+    `tickets msg` or `inbox`, and a wrong-looking time is a smaller failure
+    than a traceback.
+    """
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%m-%d %H:%M")
+    except (ValueError, TypeError, AttributeError):
+        return str(iso)[5:16].replace("T", " ")
+
+
 def fmt_msg(m):
     to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
     re_ = (" [%s]" % m["re"]) if m.get("re") else ""
-    return "%s  %s%s%s: %s" % (m["at"][5:16].replace("T", " "), m.get("from", "?"), to, re_, m.get("text", ""))
+    return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
 
 
 def cmd_msg(a, board):
