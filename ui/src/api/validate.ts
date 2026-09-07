@@ -116,6 +116,56 @@ export function assertStreamEnvelope(value: unknown): void {
   assertShape(value, [["event_id", "string"], ["type", "string"], ["snapshot_version", "number"], ["occurred_at", "string"]], "StreamEnvelope");
 }
 
+// --------------------------------------------------------------- messages
+
+export function assertMemberListResponse(value: unknown): void {
+  assertShape(value, [["items", "array"]], "MemberListResponse");
+}
+
+export function assertMember(value: unknown): void {
+  assertShape(value, [["id", "string"], ["kind", "string"], ["state", "string"], ["availability", "string"]], "Member");
+}
+
+export function assertChannelListResponse(value: unknown): void {
+  assertShape(value, [["items", "array"], ["stream", "object"]], "ChannelListResponse");
+  assertStreamStatus((value as { stream: unknown }).stream, "ChannelListResponse");
+}
+
+export function assertChannel(value: unknown): void {
+  assertShape(value, [["id", "string"], ["name", "string"], ["kind", "string"], ["visibility", "string"]], "Channel");
+}
+
+export function assertChannelMember(value: unknown): void {
+  assertShape(value, [["channel_id", "string"], ["member_id", "string"], ["subscribed", "boolean"]], "ChannelMember");
+}
+
+export function assertMessageListResponse(value: unknown): void {
+  assertShape(value, [["items", "array"], ["stream", "object"]], "MessageListResponse");
+  assertStreamStatus((value as { stream: unknown }).stream, "MessageListResponse");
+}
+
+export function assertMessage(value: unknown): void {
+  assertShape(value, [["id", "string"], ["channel_id", "string"], ["author", "object"], ["body", "string"], ["intent", "string"]], "Message");
+}
+
+export function assertDelivery(value: unknown): void {
+  assertShape(value, [["id", "string"], ["message_id", "string"], ["recipient_agent_id", "string"], ["state", "string"]], "Delivery");
+}
+
+export function assertDeliveryListResponse(value: unknown): void {
+  assertShape(value, [["items", "array"]], "DeliveryListResponse");
+}
+
+export function assertSendMessageResponse(value: unknown): void {
+  assertShape(value, [["message", "object"], ["deliveries", "array"]], "SendMessageResponse");
+  assertMessage((value as { message: unknown }).message);
+}
+
+export function assertSendTaskResponse(value: unknown): void {
+  assertShape(value, [["message", "object"], ["ticket", "object"], ["deliveries", "array"]], "SendTaskResponse");
+  assertMessage((value as { message: unknown }).message);
+}
+
 /**
  * Boundary check on values this client is about to serialize onto the wire.
  * The TypeScript types already forbid an `actor` field and a string
