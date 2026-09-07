@@ -70,3 +70,26 @@ concluded the tool had failed silently with no reason given. Run bare:
 The reason is right there on the line above. **Never pipe this CLI through
 `tail`, `head` or `grep`** — you will throw away the half you need and, on a
 free-text argument, be actively misled.
+
+## Running from a linked git worktree: set `TICKETS_DIR`
+
+`_repo_root()` deliberately resolves to the **main** git worktree, so every
+linked worktree of a repo shares one board. That is the right default.
+
+But it breaks when the board is not inside the repo you are working in. An agent
+editing `~/source/...` from `~/worktrees/foo` while the board lives at
+`~/mep-week/.tickets` gets a bare "no board" from `tickets review`, because the
+CLI resolved to `~/source` and looked there.
+
+    # from a worktree whose board lives elsewhere
+    TICKETS_DIR=/path/to/board/.tickets tickets review T-0NN
+
+Git-state detection (branch, sha, dirty) still comes from the current working
+directory and is correct — it is only board *discovery* that follows the repo
+root. So `done`'s branch@sha evidence and its refusal to close from `main`
+behave normally; you just have to tell it which board.
+
+Worth knowing alongside the guard that `done` refuses when the recorded
+repository does not match the current one. Those two together mean a
+cross-repo board needs `TICKETS_DIR` on the way in and the right repo on the
+way out.
