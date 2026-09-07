@@ -182,6 +182,21 @@ def test_existing_agents_are_not_stamped_and_keep_their_backlog(board):
     assert "later broadcast" in run(board, "inbox", agent="old").stdout
 
 
+def test_existing_peer_inbox_seen_untouched_when_newbie_joins(board):
+    """Ticket: existing agents' inbox_seen must stay put when someone else joins."""
+    run(board, "join", "old", "--roles", "backend", agent="old")
+    run(board, "inbox", agent="old")
+    rec = json.loads((board / "agents" / "old.json").read_text())
+    seen = rec.get("inbox_seen")
+    joined = rec.get("joined_at")
+    assert seen
+    time.sleep(1.1)
+    run(board, "join", "newbie", "--roles", "backend", agent="newbie")
+    rec2 = json.loads((board / "agents" / "old.json").read_text())
+    assert rec2.get("inbox_seen") == seen
+    assert rec2.get("joined_at") == joined
+
+
 def test_agent_predating_the_fix_has_no_joined_at_and_sees_everything(board):
     """Upgrade path: a record written before this fix has no joined_at at all.
 
