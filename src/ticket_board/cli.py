@@ -2571,6 +2571,20 @@ def cmd_inbox(a, board):
         _mark_inbox_read(board, owner)
 
 
+def _turns_cmd():
+    try:
+        from ticket_board.turns import cmd_turns as impl
+        return impl
+    except ImportError:
+        from turns import cmd_turns as impl
+        return impl
+
+
+def cmd_turns(a, board):
+    """T-312: table / --json of watch-run turns per ticket. See docs/turns.md."""
+    return _turns_cmd()(a, board, load_all, load_workforce, load_messages)
+
+
 # ---- routing: which agent should take which open ticket -----------------
 
 def score_agent(board, name, entry, roles, ticket):
@@ -3049,6 +3063,18 @@ def main():
     c.add_argument("--keep", action="store_true", help="do not mark as read")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_inbox)
+
+    c = sub.add_parser("turns",
+                       help="watch-run turns per ticket (T-312); --json is frozen for the optimizer")
+    c.add_argument("--ticket", "-t", default="", help="only this ticket")
+    c.add_argument("--agent", "-a", default="", help="only events from this agent")
+    c.add_argument("--model", default="", help="only this model")
+    c.add_argument("--epic", default="", help="only this epic")
+    c.add_argument("--since", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--until", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--json", action="store_true", dest="json",
+                   help="frozen shape: tickets[] + aggregates mean/median")
+    c.set_defaults(fn=cmd_turns)
 
     c = sub.add_parser("review", help="submit finished work for the master to review + merge")
     c.add_argument("id")

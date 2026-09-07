@@ -4533,6 +4533,25 @@ def _traj_backfill(a, board):
               "is already in the log")
 
 
+def _turns_cmd():
+    try:
+        from ticket_board.turns import cmd_turns as impl
+        return impl
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.turns import cmd_turns as impl
+        return impl
+
+
+def cmd_turns(a, board):
+    """T-312: table / --json of watch-run turns per ticket. See docs/turns.md."""
+    return _turns_cmd()(
+        a, board, load_all, load_workforce,
+        lambda b: load_messages(b, include_archives=True))
+
+
 # ---- routing: which agent should take which open ticket -----------------
 
 def score_agent(board, name, entry, roles, ticket):
@@ -6711,6 +6730,18 @@ def main():
                       help="synthesise claim/update/review/done from tickets already on the board")
     x.add_argument("--dry-run", action="store_true", dest="dry_run")
     c.set_defaults(fn=cmd_trajectories, traj_cmd="list", out="", dry_run=False)
+
+    c = sub.add_parser("turns",
+                       help="watch-run turns per ticket (T-312); --json is frozen for the optimizer")
+    c.add_argument("--ticket", "-t", default="", help="only this ticket")
+    c.add_argument("--agent", "-a", default="", help="only events from this agent")
+    c.add_argument("--model", default="", help="only this model")
+    c.add_argument("--epic", default="", help="only this epic")
+    c.add_argument("--since", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--until", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--json", action="store_true", dest="json",
+                   help="frozen shape: tickets[] + aggregates mean/median")
+    c.set_defaults(fn=cmd_turns)
 
     c = sub.add_parser("review", help="submit finished work for the master to review + merge")
     c.add_argument("id")
