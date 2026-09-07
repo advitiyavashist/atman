@@ -19,7 +19,8 @@
       letter-spacing:.22em; text-transform:lowercase; color:var(--mute);
     }
     h1{font-size:22px; font-weight:620; letter-spacing:-.02em; margin:10px 0 8px}
-    .lede{color:var(--mute); max-width:40rem; margin:0 0 18px}
+    h2{font-size:12px; font-weight:650; letter-spacing:.12em; text-transform:uppercase; color:var(--mute); margin:0 0 12px}
+    .lede{color:var(--mute); max-width:42rem; margin:0 0 18px}
     .rules{
       display:flex; flex-wrap:wrap; gap:8px; margin:0 0 28px;
     }
@@ -28,7 +29,7 @@
       border-radius:999px; padding:4px 10px; font-size:11px; letter-spacing:.04em;
     }
     .grid{
-      display:grid; grid-template-columns:repeat(auto-fit, minmax(168px, 1fr));
+      display:grid; grid-template-columns:repeat(auto-fit, minmax(148px, 1fr));
       gap:14px; margin-bottom:36px;
     }
     figure{
@@ -36,65 +37,93 @@
       border-radius:14px; padding:18px 14px 14px; text-align:center;
     }
     figure.lean{outline:1px solid var(--live); outline-offset:2px}
-    figure.parked{opacity:.62}
+    figure.baseline{opacity:.78}
+    figure.parked{opacity:.5}
     figure img{width:72px; height:72px; display:block; margin:0 auto}
     figcaption{margin-top:12px; font-size:12px; color:var(--fg)}
     figcaption small{display:block; color:var(--mute); font-size:11px; margin-top:3px; letter-spacing:.02em}
-    h2{font-size:12px; font-weight:650; letter-spacing:.12em; text-transform:uppercase; color:var(--mute); margin:0 0 12px}
     .sizes{display:flex; gap:28px; align-items:end; flex-wrap:wrap; margin-bottom:36px}
     .sizes .col{text-align:center; color:var(--mute); font-size:11px; letter-spacing:.06em}
     .sizes img{display:block; margin:0 auto 8px; background:var(--card); border-radius:8px; border:1px solid var(--line)}
     .note{color:var(--mute); max-width:42rem; font-size:13px}
     a{color:var(--fg)}
+    section{margin-bottom:40px}
   </style>
 </head>
 <body>
   <div class="wordmark">atman</div>
-  <h1>Atman ↔ Brahman</h1>
-  <p class="lede">Shortlist v3 — sharper / cooler. Eyes only. Production formation-dots stays until ACCEPT. Supersedes closed PR #17 (kraft-paper slop).</p>
+  <h1>Formation-dots refinements</h1>
+  <p class="lede">v3.1 — CEO ACCEPT: stick to formation-dots. Sharper/cooler refinements for Advitiya eyes. Production mark stays until ACCEPT. Supersedes closed PR #17.</p>
   <div class="rules">
+    <span>formation-dots only</span>
     <span>no Om / mandala / lotus</span>
     <span>no Steer ^ / lime</span>
     <span>no kraft paper</span>
-    <span>no HUD / neon field</span>
     <span>live mint = one seat, sparse</span>
   </div>
 
-  <div class="grid">
-    <figure>
-      <img src="01-aperture.svg" alt="Aperture: opening into the whole, live center">
-      <figcaption>1 Aperture<small>opening into the field</small></figcaption>
-    </figure>
-    <figure class="lean">
-      <img src="02-nested.svg" alt="Nested same-form, lean recommendation">
-      <figcaption>2 Nested same-form<small>lean — self is the whole, smaller</small></figcaption>
-    </figure>
-    <figure>
-      <img src="03-field-presence.svg" alt="Field of quiet seats with one live presence">
-      <figcaption>3 Field + presence<small>one live seat in the field</small></figcaption>
-    </figure>
-    <figure>
-      <img src="04-continuum.svg" alt="Continuum ring with a heavier arc">
-      <figcaption>4 Continuum<small>one stroke, brighter at the seat</small></figcaption>
-    </figure>
-    <figure>
-      <img src="05-open-ring.svg" alt="Open stadium-gate ring">
-      <figcaption>5 Open ring<small>gate + seat, not a spinner</small></figcaption>
-    </figure>
-    <figure class="parked">
-      <img src="06-formation-dots.svg" alt="Week-1 formation dots, parked">
-      <figcaption>6 Formation-dots A<small>parked — on main today</small></figcaption>
-    </figure>
-  </div>
+  <section>
+    <h2>Pick — formation-dots A–E</h2>
+    <div class="grid">
+      <figure class="baseline">
+        <img src="06-formation-dots.svg" alt="Formation dots A baseline — production on main">
+        <figcaption>A Baseline<small>production on main today</small></figcaption>
+      </figure>
+      <figure>
+        <img src="07-formation-dots-b-tight.svg" alt="Formation dots B tight — smaller radii">
+        <figcaption>B Tight<small>more negative space</small></figcaption>
+      </figure>
+      <figure class="lean">
+        <img src="08-formation-dots-c-live-seat.svg" alt="Formation dots C live seat — lean">
+        <figcaption>C Live seat<small>lean — mute field + mint pivot</small></figcaption>
+      </figure>
+      <figure>
+        <img src="09-formation-dots-d-crisp.svg" alt="Formation dots D crisp — hairline separation">
+        <figcaption>D Crisp<small>five seats stay distinct at 16px</small></figcaption>
+      </figure>
+      <figure>
+        <img src="10-formation-dots-e-cool-field.svg" alt="Formation dots E cool field — bone pivot">
+        <figcaption>E Cool field<small>mute field + bone pivot</small></figcaption>
+      </figure>
+    </div>
+  </section>
 
-  <h2>Size — nested (lean)</h2>
-  <div class="sizes">
-    <div class="col"><img src="02-nested.svg" width="16" height="16" alt="">16</div>
-    <div class="col"><img src="02-nested.svg" width="24" height="24" alt="">24</div>
-    <div class="col"><img src="02-nested.svg" width="32" height="32" alt="">32</div>
-    <div class="col"><img src="02-nested.svg" width="64" height="64" alt="">64</div>
-  </div>
+  <section>
+    <h2>Size — live seat (lean)</h2>
+    <div class="sizes">
+      <div class="col"><img src="08-formation-dots-c-live-seat.svg" width="16" height="16" alt="">16</div>
+      <div class="col"><img src="08-formation-dots-c-live-seat.svg" width="24" height="24" alt="">24</div>
+      <div class="col"><img src="08-formation-dots-c-live-seat.svg" width="32" height="32" alt="">32</div>
+      <div class="col"><img src="08-formation-dots-c-live-seat.svg" width="64" height="64" alt="">64</div>
+    </div>
+  </section>
 
-  <p class="note">Pick primary (+ optional alt). Do not swap <code>docs/brand/assets/mark.svg</code> from this PR. Sample plates are the product board color so the marks read on GitHub’s white file view.</p>
+  <section>
+    <h2>Parked — explored geometry (not in scope)</h2>
+    <div class="grid">
+      <figure class="parked">
+        <img src="01-aperture.svg" alt="Aperture">
+        <figcaption>1 Aperture<small>parked</small></figcaption>
+      </figure>
+      <figure class="parked">
+        <img src="02-nested.svg" alt="Nested same-form">
+        <figcaption>2 Nested<small>parked</small></figcaption>
+      </figure>
+      <figure class="parked">
+        <img src="03-field-presence.svg" alt="Field + presence">
+        <figcaption>3 Field + presence<small>parked</small></figcaption>
+      </figure>
+      <figure class="parked">
+        <img src="04-continuum.svg" alt="Continuum">
+        <figcaption>4 Continuum<small>parked</small></figcaption>
+      </figure>
+      <figure class="parked">
+        <img src="05-open-ring.svg" alt="Open ring">
+        <figcaption>5 Open ring<small>parked</small></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <p class="note">Pick a formation-dots refinement (A–E). Do not swap <code>docs/brand/assets/mark.svg</code> from this PR. Sample plates are the product board color so the marks read on GitHub’s white file view.</p>
 </body>
 </html>
