@@ -1828,6 +1828,17 @@ def cmd_done(a, board):
             "(or --no-notes if there is truly nothing to hand off)"
         )
     g = git_state()
+    # A branch/SHA match is not proof of repository identity (T-254).
+    # Check before mutating the ticket; --force only bypasses worktree rules.
+    recorded_repo = t.get("repo")
+    current_repo = g.get("repo") if g else None
+    if (g or recorded_repo) and not current_repo:
+        sys.exit("RULE: %s cannot be closed without a verifiable repository; "
+                 "run done from the deliverable's checkout." % a.id)
+    if recorded_repo and recorded_repo != current_repo:
+        sys.exit("RULE: %s recorded repository %r does not match current repository %r; "
+                 "run done from the recorded repository. --force cannot override "
+                 "repository evidence." % (a.id, recorded_repo, current_repo))
     if t["status"] == "review":
         # the master closes reviewed work from main after merging; the agent's
         # branch@sha is already on the ticket, so the branch/clean rules do not apply
@@ -1852,7 +1863,12 @@ def cmd_done(a, board):
         stamp = "%s@%s" % (g["branch"], g["sha"])
         if stamp not in text:
             text = ("%s -- %s" % (stamp, text)) if text else stamp
+        if t.get("commit") and not recorded_repo:
+            print("WARNING: %s previous pin has no recorded repository; its provenance "
+                  "cannot be verified. Recording only the current completion repository."
+                  % a.id, file=sys.stderr)
         t["commit"] = stamp
+        t["repo"] = current_repo
     if text:
         # by=whoami(), not t["owner"]: the note records who wrote it, which is
         # not always who the ticket is filed under (T-238 -- see cmd_note).
