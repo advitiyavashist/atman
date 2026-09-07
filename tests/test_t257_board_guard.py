@@ -1,9 +1,8 @@
-"""T-257: a test suite created a real ticket ('probe ticket') on the LIVE
-steer board. Root cause: board_dir() prefers $TICKETS_DIR unconditionally,
-and every real agent session exports TICKETS_DIR pointing at its live board
-so plain `tickets ...` just works -- a subprocess a test forgets to sandbox
-inherits that ambient value straight through, and board_dir()'s cwd/git-based
-discovery never gets a say.
+"""Guard: a test suite must not write tickets to a live board.
+
+Root cause: board_dir() prefers $TICKETS_DIR unconditionally, and a
+subprocess a test forgets to sandbox inherits that ambient value straight
+through, and board_dir()'s cwd/git-based discovery never gets a say.
 
 The guard: while PYTEST_CURRENT_TEST is set (pytest sets it for the life of
 every test) a resolved board outside the system temp dir is refused loudly,
@@ -29,7 +28,7 @@ def run(env_overrides, cwd, *args):
 
 def test_refuses_a_board_outside_tmp_while_under_pytest(tmp_path):
     # A "real" board that is NOT under the system temp dir -- standing in for
-    # the live steer board an ambient TICKETS_DIR would otherwise point at.
+    # a live board an ambient TICKETS_DIR would otherwise point at.
     # (tmp_path itself, and anything under it, IS inside the system temp
     # dir -- that's the whole point of the guard -- so this must live
     # somewhere else entirely, e.g. next to the repo checkout.)

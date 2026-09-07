@@ -64,6 +64,11 @@ def test_pending_ready_in_lane(board):
 
 def test_pending_direct_message_and_broadcast_only(board):
     run(board, "join", "bob", "--roles", "backend")
+    # T-244 stamps bob's inbox_seen the moment its record is created above.
+    # Without a real gap, alice's broadcast below can land in the SAME
+    # wall-clock second, which the pre-existing, separately-filed T-228 hole
+    # (strict `>` on second-resolution timestamps) would then hide.
+    time.sleep(1.1)
     run(board, "msg", "hello everyone", agent="alice")
     rc, p = pending(board, "bob")
     assert rc == 1 and p.get("broadcasts") == 1 and p["pending"] is False
@@ -504,11 +509,17 @@ def test_master_heartbeat_drives_only_the_master_seat(board):
     assert "DRIVE THE OBJECTIVE" in out and "Ship V1" in out
     rc, p = pending(board, "boss")
     assert "drive" not in p
-    # a worker with the same heartbeat setting is never driven
+    # a plain worker is never driven; a seat spawned with --heartbeat is (standing seat)
     run(board, "join", "bob", "--roles", "backend")
-    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob")
     rc, p = pending(board, "bob")
     assert "drive" not in p
+    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob")
+    rc, p = pending(board, "bob")
+    assert "drive" in p
+    out = run(board, "prompt", agent="bob").stdout
+    assert "HEARTBEAT" in out and "Ship V1" in out
+    rc, p = pending(board, "bob")
+    assert "drive" not in p                                   # prompt stamped drive_at
     # a met objective stops the heartbeat
     run(board, "objective", "--done", "shipped", agent="boss")
     rec = json.loads((board / "agents" / "boss.json").read_text())
@@ -587,6 +598,144 @@ def test_messages_rotate_past_cap_and_load_messages_defaults_to_live_file(board)
     assert "message number 0 " not in live
     out = run(board, "inbox", "--all", "--limit", "100", agent="alice").stdout
     assert "message number 0 " in out and "message number 19" in out
+
+
+def test_never_checked_in_agent_still_gets_mail_sent_after_it_joined(board):
+    """T-244 (root cause per sonnet-qa's T-241 repro): checkin()/join() used
+    to never initialize inbox_seen, so an agent's guaranteed first state was
+    since="" -- and unread()'s `if since and (...)` treats that falsy since
+    as "skip the archive check", backwards for the agent with the LEAST
+    history to fall back on. A DM addressed to a freshly-joined agent and
+    then rotated away before that agent's first `tickets inbox` call was
+    silently and permanently lost.
+
+    Fix: checkin() now stamps inbox_seen to "now" the moment an agent's
+    record is created (join, or any command that checks a new name in for
+    the first time), so since is never "" for a real agent again -- mail
+    sent after it joined is found via the ordinary T-212 archive-catchup
+    path (since predates the live file's oldest survivor) even once it has
+    rotated out of the live file.
+    """
+    run(board, "join", "dave", "--roles", "backend")  # dave never runs `tickets inbox`
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    r = run(board, "msg", "IMPORTANT-FOR-DAVE", "--to", "dave", agent="alice", env=env)
+    assert r.returncode == 0, r.stderr
+    for i in range(20):
+        r = run(board, "msg", "filler %d filler filler filler" % i, agent="alice", env=env)
+        assert r.returncode == 0, r.stderr
+    assert sorted(board.glob("messages.*.jsonl")), "expected rotation to have fired"
+
+    out = run(board, "inbox", "--limit", "500", agent="dave").stdout
+    assert "IMPORTANT-FOR-DAVE" in out, (
+        "dave's very first ever inbox check must not silently drop a DM sent "
+        "after he joined just because it was archived before he first checked -- "
+        "got: %r" % out
+    )
+
+
+def test_new_agent_does_not_see_history_from_before_it_joined(board):
+    """The flood question the ticket asked to be decided and written down:
+    a brand-new agent's inbox_seen is stamped to its join time, so mail
+    already on the board before it existed is deliberately NOT unread mail
+    for it -- it is history, visible only via `tickets inbox --all`.
+
+    T-228 note: the sleep below is load-bearing, not padding. `at` and
+    `inbox_seen` are both whole-second stamps, so without a real clock gap
+    the last filler message can share carol's join second, and "before she
+    joined" then stops being a question this data can answer. That tie is
+    decided deliberately in the other direction -- see
+    test_message_in_the_same_second_as_a_join_is_delivered_not_dropped --
+    so pin the flood policy on mail that is unambiguously older.
+    """
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    for i in range(20):
+        r = run(board, "msg", "before-carol message %d filler filler" % i, agent="alice", env=env)
+        assert r.returncode == 0, r.stderr
+    time.sleep(1.1)  # make "before" mean an earlier second, not the same one
+    run(board, "join", "carol", "--roles", "backend")  # joins after all prior mail
+
+    out = run(board, "inbox", agent="carol").stdout
+    assert "before-carol" not in out
+    assert "inbox empty" in out
+
+    full = run(board, "inbox", "--all", "--limit", "100", agent="carol").stdout
+    assert "before-carol message 19" in full  # still on the board, just not "unread"
+
+
+def test_message_in_the_same_second_as_a_join_is_delivered_not_dropped(board):
+    """T-228, and the deliberate tie-break against T-244's flood policy.
+
+    Second-resolution stamps cannot distinguish "posted just before this
+    agent joined" from "posted just after", and the two policies collide on
+    exactly that tie. It is resolved in favour of delivery, because the two
+    ways of being wrong are not symmetric: showing one extra message that
+    slightly predates the join is a cosmetic wart, while dropping it loses a
+    DM forever -- and "welcome, take T-123" sent the instant a new agent
+    appears is a real and common shape on this board, not a hypothetical.
+    A new agent still never sees the *flood*; only the boundary second.
+    """
+    run(board, "join", "dave", "--roles", "backend")
+    # T-327 composition: the join second is read from joined_at, which is now
+    # the field that means "when this agent appeared". It used to be read from
+    # inbox_seen, because T-244 stamped that at first check-in -- a stamp this
+    # branch removes, since overloading a delivery receipt as a join clock is
+    # what destroyed pre-join directed mail (see checkin()).
+    joined = json.loads((board / "agents" / "dave.json").read_text())["joined_at"]
+    # post with the message's own stamp forced onto dave's exact join second
+    (board / "messages.jsonl").write_text(
+        json.dumps({"at": joined, "from": "alice", "to": "dave",
+                    "re": "", "text": "WELCOME-DAVE-TAKE-T123"}) + "\n")
+    out = run(board, "inbox", agent="dave").stdout
+    assert "WELCOME-DAVE-TAKE-T123" in out, (
+        "a DM landing in the very second an agent joined must not be "
+        "silently dropped -- got: %r" % out)
+
+
+def test_legacy_agent_record_missing_inbox_seen_key_still_gets_archived_mail(board):
+    """Reviewer-found gap (sonnet-deploy, T-244 review), re-pinned on the
+    BEHAVIOUR rather than on the stamp that used to deliver it.
+
+    The gap is real and this test still guards it: an agent record written
+    before inbox_seen existed as a field is present on disk but has no
+    inbox_seen key, and unread()'s old `if since and (...)` treated that
+    empty since as "skip the archive check" -- so that one class of agent
+    silently lost archived mail.
+
+    T-244 closed it by making since never empty (checkin() stamped
+    inbox_seen = now()). That stamp is gone on this branch: it also swallowed
+    every message addressed to a seat before the seat joined, which is how
+    briefs are delivered here and which T-327 measured and rejected. The
+    defect is now fixed at its own site instead -- since="" reads the
+    archives -- so the assertion moved from "the key came back" to "the mail
+    arrived", which is what the reviewer was actually protecting. Asserting
+    the stamp would only pin the mechanism, and the mechanism is what changed.
+    """
+    run(board, "join", "erin", "--roles", "backend")
+    rec_path = board / "agents" / "erin.json"
+    rec = json.loads(rec_path.read_text())
+    rec.pop("inbox_seen", None)  # simulate a record written before the field existed
+    rec_path.write_text(json.dumps(rec))
+
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    run(board, "here", agent="erin")  # any ordinary check-in, not a join
+    assert "inbox_seen" not in json.loads(rec_path.read_text()), (
+        "a check-in must not stamp a delivery watermark it never earned -- "
+        "that stamp is what destroyed pre-join directed mail"
+    )
+    time.sleep(1.1)  # now() is second-precision (T-228); force a real clock gap
+
+    r = run(board, "msg", "IMPORTANT-FOR-ERIN", "--to", "erin", agent="alice", env=env)
+    assert r.returncode == 0, r.stderr
+    for i in range(20):
+        r = run(board, "msg", "filler %d filler filler filler" % i, agent="alice", env=env)
+        assert r.returncode == 0, r.stderr
+    assert sorted(board.glob("messages.*.jsonl")), "expected rotation to have fired"
+
+    out = run(board, "inbox", "--limit", "500", agent="erin").stdout
+    assert "IMPORTANT-FOR-ERIN" in out, (
+        "a record with no inbox_seen key at all must still find mail sent to "
+        "it, even once that mail has rotated into an archive -- got: %r" % out
+    )
 
 
 def test_master_decision_log_trims_past_cap_and_archives(board):

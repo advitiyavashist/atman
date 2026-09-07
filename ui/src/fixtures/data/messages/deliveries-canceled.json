@@ -1,0 +1,43 @@
+{
+  "items": [
+    {
+      "id": "dlv_00000011",
+      "message_id": "msg_00000001",
+      "recipient_agent_id": "agt_backend01",
+      "state": "canceled",
+      "reason": "canceled_by_operator",
+      "reason_detail": "Operator canceled before the run started.",
+      "run_id": null,
+      "blocking_ticket_id": null,
+      "attempts": 1,
+      "next_attempt_at": null,
+      "created_at": "2026-09-06T14:32:00Z",
+      "updated_at": "2026-09-06T14:35:00Z",
+      "version": 2
+    }
+  ],
+  "runs": [
+    {
+      "id": "run_00000003",
+      "recipient_agent_id": "agt_backend01",
+      "session_id": null,
+      "wake_job_id": "wjb_00000001",
+      "ticket_claim": null,
+      "state": "canceled",
+      "terminal_reason": "Canceled by operator; artifacts retained.",
+      "budget": {
+        "max_hops": 3,
+        "max_turns": 10,
+        "max_seconds": 900,
+        "hops_used": 1,
+        "turns_used": 2,
+        "seconds_used": 45
+      },
+      "needs_approval": false,
+      "started_at": null,
+      "ended_at": "2026-09-06T14:40:00Z",
+      "created_at": "2026-09-06T14:32:00Z",
+      "version": 3
+    }
+  ]
+}

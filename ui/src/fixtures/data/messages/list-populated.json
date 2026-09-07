@@ -1,0 +1,103 @@
+{
+  "items": [
+    {
+      "id": "msg_00000001",
+      "project_id": "prj_demo0001",
+      "channel_id": "chn_work0001",
+      "thread_id": null,
+      "author": {
+        "type": "human",
+        "id": "mem_operator1",
+        "display_name": "Operator",
+        "session_id": null
+      },
+      "body": "Can you take the paging bug on DEMO-14?",
+      "intent": "message",
+      "ticket_id": null,
+      "mentions": [
+        "mem_backend01"
+      ],
+      "causation_id": null,
+      "conversation_id": null,
+      "supersedes_message_id": null,
+      "version": 1,
+      "created_at": "2026-09-06T14:32:00Z"
+    },
+    {
+      "id": "msg_00000002",
+      "project_id": "prj_demo0001",
+      "channel_id": "chn_work0001",
+      "thread_id": "thr_00000001",
+      "author": {
+        "type": "agent",
+        "id": "agt_backend01",
+        "display_name": "backend-1",
+        "session_id": "ses_a1b2c3d4"
+      },
+      "body": "Picking it up now.",
+      "intent": "reply",
+      "ticket_id": null,
+      "mentions": [],
+      "causation_id": "msg_00000001",
+      "conversation_id": null,
+      "supersedes_message_id": null,
+      "version": 1,
+      "created_at": "2026-09-06T14:32:00Z"
+    },
+    {
+      "id": "msg_00000003",
+      "project_id": "prj_demo0001",
+      "channel_id": "chn_work0001",
+      "thread_id": "thr_00000001",
+      "author": {
+        "type": "system",
+        "id": "system",
+        "display_name": "Ticket Board",
+        "session_id": null
+      },
+      "body": "Delivered to backend-1; run started at 14:35.",
+      "intent": "receipt",
+      "ticket_id": null,
+      "mentions": [],
+      "causation_id": "msg_00000001",
+      "conversation_id": null,
+      "supersedes_message_id": null,
+      "version": 1,
+      "created_at": "2026-09-06T14:32:00Z"
+    }
+  ],
+  "threads": [
+    {
+      "id": "thr_00000001",
+      "channel_id": "chn_work0001",
+      "root_message_id": "msg_00000001",
+      "ticket_id": "DEMO-14",
+      "reply_count": 2,
+      "updated_at": "2026-09-06T14:35:00Z"
+    }
+  ],
+  "deliveries": [
+    {
+      "id": "dlv_00000001",
+      "message_id": "msg_00000001",
+      "recipient_agent_id": "agt_backend01",
+      "state": "started",
+      "reason": null,
+      "reason_detail": null,
+      "run_id": "run_00000001",
+      "blocking_ticket_id": null,
+      "attempts": 1,
+      "next_attempt_at": null,
+      "created_at": "2026-09-06T14:32:00Z",
+      "updated_at": "2026-09-06T14:35:00Z",
+      "version": 2
+    }
+  ],
+  "next_cursor": null,
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}

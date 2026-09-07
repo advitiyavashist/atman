@@ -1,9 +1,8 @@
 """T-248: cross-agent attack on T-182's master lease and assignment loop.
 
-Written by opus-verify, who is not the author. The four things asserted here are
-the four limits opus-backend declared in their own review notes; the point of
-this file is that a declared limit is a place nobody has executed yet, not a
-place that has been cleared.
+The four things asserted here are declared limits from the master-loop
+review notes; the point of this file is that a declared limit is a place
+nobody has executed yet, not a place that has been cleared.
 
 Three of the four hold up under attack and are pinned here so they stay held.
 The fourth held, but only for the property it was stated about -- a fifth gate,

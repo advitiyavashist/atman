@@ -32,11 +32,11 @@ def _set_inbox_seen(board, agent, ts):
 
 
 def test_unread_spans_every_dated_archive_not_just_the_latest(board):
-    """Adversarial case cos-opus's own test doesn't cover: TWO separate
-    dated archives (a real cross-day rotation, not one file folded twice
-    in a single run) plus a live file, with the message an agent needs
-    buried in the OLDEST archive. If a fix only consulted glob's last
-    match, or only the newest archive, this would still fail."""
+    """Adversarial case: TWO separate dated archives (a real cross-day
+    rotation, not one file folded twice in a single run) plus a live file,
+    with the message an agent needs buried in the OLDEST archive. If a fix
+    only consulted glob's last match, or only the newest archive, this
+    would still fail."""
     run(board, "join", "alice", agent="alice")
     run(board, "join", "bob", agent="bob")
     run(board, "join", "carol", agent="carol")

@@ -1,8 +1,28 @@
-import type { Agent, AgentListResponse, Assignment, ActivityResponse, MasterPanelResponse, OverviewResponse, Review, Ticket, TicketDetailResponse, TicketListResponse, TicketUpdate } from "../types";
+import type {
+  Agent,
+  AgentListResponse,
+  Assignment,
+  ActivityResponse,
+  Channel,
+  ChannelListResponse,
+  ChannelMember,
+  DeliveryListResponse,
+  MasterPanelResponse,
+  MemberListResponse,
+  MessageListResponse,
+  OverviewResponse,
+  Review,
+  Ticket,
+  TicketDetailResponse,
+  TicketListResponse,
+  TicketUpdate,
+} from "../types";
 import { boardRequest, type BoardClientConfig } from "./http";
 import type {
+  AddChannelMemberRequest,
   ClaimTicketRequest,
   CreateAssignmentRequest,
+  CreateChannelRequest,
   CreateEnrollmentRequest,
   CreateEnrollmentResponse,
   CreateReviewRequest,
@@ -10,12 +30,17 @@ import type {
   CreateUpdateRequest,
   ExchangeEnrollmentRequest,
   ListActivityParams,
+  ListMessagesParams,
   ListTicketsParams,
   MasterLease,
   MasterLeaseRequest,
   MasterPauseRequest,
   ReviewDecisionRequest,
   RevokeSessionLeaseRequest,
+  SendMessageRequest,
+  SendMessageResponse,
+  SendTaskRequest,
+  SendTaskResponse,
   SessionCredentialResponse,
   SetTicketBlockedRequest,
 } from "./types";
@@ -24,12 +49,20 @@ import {
   assertAgent,
   assertAgentListResponse,
   assertAssignment,
+  assertChannel,
+  assertChannelListResponse,
+  assertChannelMember,
   assertCreateEnrollmentResponse,
+  assertDeliveryListResponse,
   assertMasterLease,
   assertMasterPanelResponse,
+  assertMemberListResponse,
+  assertMessageListResponse,
   assertMutationRequest,
   assertOverviewResponse,
   assertReview,
+  assertSendMessageResponse,
+  assertSendTaskResponse,
   assertSessionCredentialResponse,
   assertTicket,
   assertTicketDetailResponse,
@@ -286,6 +319,122 @@ export class BoardClient {
       requestId,
     });
     assertActivityResponse(body);
+    return body;
+  }
+
+  // --------------------------------------------------------------- messages
+
+  async listMembers(requestId?: string): Promise<MemberListResponse> {
+    const body = await boardRequest<MemberListResponse>(this.config, {
+      method: "GET",
+      path: "members",
+      expectedStatus: 200,
+      requestId,
+    });
+    assertMemberListResponse(body);
+    return body;
+  }
+
+  async listChannels(requestId?: string): Promise<ChannelListResponse> {
+    const body = await boardRequest<ChannelListResponse>(this.config, {
+      method: "GET",
+      path: "channels",
+      expectedStatus: 200,
+      requestId,
+    });
+    assertChannelListResponse(body);
+    return body;
+  }
+
+  async createChannel(request: CreateChannelRequest): Promise<Channel> {
+    assertMutationRequest(request as unknown as Record<string, unknown>, [], "CreateChannelRequest");
+    const body = await boardRequest<Channel>(this.config, {
+      method: "POST",
+      path: "channels",
+      body: request,
+      expectedStatus: 201,
+      requestId: request.request_id,
+    });
+    assertChannel(body);
+    return body;
+  }
+
+  /** Owner/admin only for private channels (docs/contracts/openapi.yaml). */
+  async addChannelMember(channelId: string, request: AddChannelMemberRequest): Promise<ChannelMember> {
+    assertMutationRequest(request as unknown as Record<string, unknown>, [], "AddChannelMemberRequest");
+    const body = await boardRequest<ChannelMember>(this.config, {
+      method: "POST",
+      path: `channels/${encodeURIComponent(channelId)}/members`,
+      body: request,
+      expectedStatus: 201,
+      requestId: request.request_id,
+    });
+    assertChannelMember(body);
+    return body;
+  }
+
+  /** ACL-filtered: a private channel the caller does not belong to is 403 `not_channel_member`; a revoked member is 403 `membership_revoked`. */
+  async listMessages(params: ListMessagesParams, requestId?: string): Promise<MessageListResponse> {
+    const body = await boardRequest<MessageListResponse>(this.config, {
+      method: "GET",
+      path: "messages",
+      query: params,
+      expectedStatus: 200,
+      requestId,
+    });
+    assertMessageListResponse(body);
+    return body;
+  }
+
+  /**
+   * The author is taken from the credential; there is deliberately no
+   * `author` field on `SendMessageRequest` (./types.ts) for a caller to set.
+   * `intent` is `"message" | "reply"` only — a task goes through `sendTask`
+   * below, against the message id this call returns.
+   */
+  async sendMessage(request: SendMessageRequest): Promise<SendMessageResponse> {
+    assertMutationRequest(request as unknown as Record<string, unknown>, [], "SendMessageRequest");
+    const body = await boardRequest<SendMessageResponse>(this.config, {
+      method: "POST",
+      path: "messages",
+      body: request,
+      expectedStatus: 201,
+      requestId: request.request_id,
+    });
+    assertSendMessageResponse(body);
+    return body;
+  }
+
+  /**
+   * Turns an existing message into a task. Two-step by contract: the
+   * composer's "Send task" action calls `sendMessage` first, then this with
+   * the id it returned (docs/contracts/openapi.yaml `/messages/{id}/task`
+   * acts on an existing message, not a fresh body). A hook-only recipient
+   * comes back `queued` / `manual_resume_required` with no `wake_job`; a
+   * paused project comes back `queued` / `project_paused` — both are 201s,
+   * not errors, so the caller reads `deliveries` rather than a thrown status.
+   */
+  async sendTask(messageId: string, request: SendTaskRequest): Promise<SendTaskResponse> {
+    assertMutationRequest(request as unknown as Record<string, unknown>, [], "SendTaskRequest");
+    const body = await boardRequest<SendTaskResponse>(this.config, {
+      method: "POST",
+      path: `messages/${encodeURIComponent(messageId)}/task`,
+      body: request,
+      expectedStatus: 201,
+      requestId: request.request_id,
+    });
+    assertSendTaskResponse(body);
+    return body;
+  }
+
+  async listDeliveries(messageId: string, requestId?: string): Promise<DeliveryListResponse> {
+    const body = await boardRequest<DeliveryListResponse>(this.config, {
+      method: "GET",
+      path: `messages/${encodeURIComponent(messageId)}/deliveries`,
+      expectedStatus: 200,
+      requestId,
+    });
+    assertDeliveryListResponse(body);
     return body;
   }
 }

@@ -221,12 +221,9 @@ def test_a_session_id_already_in_use_is_refused_before_the_code_is_spent(
 
 # ------------------------------------------------------- the displaced owner
 #
-# From the 12:30Z planner note, which came from a live incident on the Steer
-# board: T-202 was reassigned twice inside 60s and the displaced owner kept
-# working for ten minutes because nothing ever refused it. "Reassignment" has
-# no route in this lane -- the master loop that performs it is T-182 -- so
-# these tests reassign through the store, the way that loop will, and then
-# exercise the API surface that has to refuse.
+# Reassignment without a refusal path lets a displaced owner keep writing.
+# These tests reassign through the store and then exercise the API surface
+# that has to refuse.
 
 
 def _enroll(server, operator, project, name):

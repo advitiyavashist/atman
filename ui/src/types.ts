@@ -340,3 +340,173 @@ export interface HookEvent {
   cwd: string | null;
   note: string | null;
 }
+
+// ---------------------------------------------------------------- messages
+//
+// T-187's read shapes (docs/contracts/openapi.yaml, "Scope amendment,
+// docs/messages-and-runners.md"). Built for T-189 against the frozen
+// contract — no route here has ever been called against a live messaging
+// server; wiring one up is a later ticket.
+
+export type ProjectRole = "owner" | "admin" | "member" | "viewer";
+
+export type MemberKind = "human" | "agent" | "master";
+
+export type MemberState = "active" | "revoked";
+
+export type MemberAvailability = "available" | "busy" | "offline" | "unknown";
+
+export interface Member {
+  id: string;
+  project_id: string;
+  kind: MemberKind;
+  display_name: string;
+  role: ProjectRole;
+  /** Revocation cancels pending unauthorized deliveries; it does not delete artifacts already produced. */
+  state: MemberState;
+  /** Set when `kind` is agent or master. */
+  agent_id: string | null;
+  availability: MemberAvailability;
+  version: number;
+  created_at: string;
+}
+
+export type ChannelKind = "channel" | "dm";
+
+export type ChannelVisibility = "public" | "private";
+
+export interface Channel {
+  id: string;
+  project_id: string;
+  name: string;
+  kind: ChannelKind;
+  /** Private channels and DMs require explicit membership. */
+  visibility: ChannelVisibility;
+  topic: string | null;
+  /** Unaddressed task posts here wake this master to decide the owner, rather than waking every subscribed agent. */
+  designated_master: string | null;
+  unread_count: number;
+  version: number;
+  created_at: string;
+}
+
+export interface ChannelMember {
+  channel_id: string;
+  member_id: string;
+  /** Controls ordinary conversation delivery only; a mention or an addressed task is what wakes an agent. */
+  subscribed: boolean;
+  joined_at: string;
+}
+
+export interface Thread {
+  id: string;
+  channel_id: string;
+  root_message_id: string;
+  ticket_id: string | null;
+  reply_count: number;
+  updated_at: string;
+}
+
+/**
+ * `task` is created through `POST /messages/{id}/task`, never sent directly
+ * as `intent: "task"` in `SendMessageRequest` (see `SendTaskRequest` in
+ * ./api/types.ts). `receipt` messages are system-authored and never wake
+ * their author or generate another auto-reply.
+ */
+export type MessageIntent = "message" | "task" | "reply" | "receipt";
+
+export interface Message {
+  id: string;
+  project_id: string;
+  channel_id: string;
+  thread_id: string | null;
+  /** Derived from the credential. A body that tries to set an author is rejected 403 `sender_identity_rejected`. */
+  author: Actor;
+  body: string;
+  intent: MessageIntent;
+  ticket_id: string | null;
+  mentions: string[];
+  causation_id: string | null;
+  conversation_id: string | null;
+  supersedes_message_id: string | null;
+  version: number;
+  created_at: string;
+}
+
+/**
+ * Receipt chain: sent -> queued -> delivered -> started -> responded, with
+ * blocked / awaiting_approval / canceled / failed as visible alternatives.
+ * `started` requires runtime session initialization AND, for an execution
+ * request, a valid task claim — delivery is not acknowledgement and a process
+ * spawn is not proof of execution. No screen may render "started" unless
+ * `state` is literally `"started"`.
+ */
+export type DeliveryState =
+  | "sent"
+  | "queued"
+  | "delivered"
+  | "started"
+  | "responded"
+  | "blocked"
+  | "awaiting_approval"
+  | "canceled"
+  | "failed";
+
+/** Displayed verbatim as the reason a delivery is not progressing (see ./copy.ts `deliveryReasonLabel`). */
+export type DeliveryReason =
+  | "runner_offline"
+  | "manual_resume_required"
+  | "agent_busy"
+  | "dependency_unmet"
+  | "permission_required"
+  | "budget_exceeded"
+  | "project_paused"
+  | "canceled_by_operator"
+  | "dispatch_failed";
+
+export interface Delivery {
+  id: string;
+  message_id: string;
+  recipient_agent_id: string;
+  state: DeliveryState;
+  reason: DeliveryReason | null;
+  reason_detail: string | null;
+  run_id: string | null;
+  blocking_ticket_id: string | null;
+  attempts: number;
+  next_attempt_at: string | null;
+  created_at: string;
+  updated_at?: string;
+  version: number;
+}
+
+export interface MemberListResponse {
+  items: Member[];
+}
+
+export interface ChannelListResponse {
+  items: Channel[];
+  stream: StreamStatus;
+  empty_state?: EmptyState;
+}
+
+export interface MessageListResponse {
+  items: Message[];
+  /** Present so the pane can show reply-count and ticket chips in the same read as the messages. */
+  threads?: Thread[];
+  /** Receipts for the returned messages, so the pane renders in one read. */
+  deliveries?: Delivery[];
+  next_cursor: string | null;
+  stream: StreamStatus;
+  empty_state?: EmptyState;
+}
+
+export interface DeliveryListResponse {
+  items: Delivery[];
+  /**
+   * Runs each delivery started. Untyped here (`Run` is out of this ticket's
+   * acceptance line — see docs/contracts/openapi.yaml `Run` if a later ticket
+   * needs to render it); the screen never reads into this array's shape.
+   */
+  runs?: unknown[];
+}

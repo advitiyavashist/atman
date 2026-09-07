@@ -156,6 +156,25 @@ adapter that configures the header once and reuses it would otherwise be the one
 client that can never come back. The relaxation is scoped to routes declared
 `auth=NONE` and to nothing else.
 
+## A third contract gap: the runner cannot learn its run id
+
+`GET /runners/jobs` returns a `WakeJobListResponse`, which is
+`additionalProperties: false` over `[items, poll_after_seconds]`. So the
+response that hands a runner its work has nowhere to carry the `Run` that work
+belongs to -- and there is no `GET /runs/{id}` or `POST /runs` either. A runner
+must nonetheless post to `POST /runs/{run_id}/events` immediately afterwards.
+
+Closed without amending anything: leasing a wake job mints its run with a
+**derived** id. `wjb_abcd1234` mints `run_abcd1234`. Both `WakeJobId` and
+`RunId` are `_[0-9a-z]{8,32}`, so the derived value is a valid `RunId`, the
+mapping is total and 1:1, and the runner computes it locally with no round
+trip. Re-leasing the same job finds the same run rather than minting a second.
+
+The residual worth naming: a run created by some *other* path with a randomly
+generated id could in principle collide with a derived one. `runs.id` is a
+primary key, so such a collision fails the insert loudly rather than merging
+two runs -- but the right fix is a response field, which is an amendment.
+
 ## Two contract gaps, raised rather than fixed
 
 Both were posted to the planner on 2026-09-06 and are implemented in the strict
@@ -215,10 +234,9 @@ so nothing is misreported; widening the enum would be a contract amendment.
 
 ## The displaced owner: which path each case takes
 
-Asked for by the planner at 12:30Z after a live incident on the Steer board —
-T-202 was reassigned twice inside 60 seconds and the displaced owner kept
-working for ten minutes because nothing ever refused it. There are two cases
-here that look alike and must not be collapsed, so both are named.
+Reassignment without a refusal path lets a displaced owner keep writing.
+There are two cases that look alike and must not be collapsed, so both are
+named.
 
 | What happened | Route behaviour | Why |
 | --- | --- | --- |
