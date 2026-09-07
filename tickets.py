@@ -484,7 +484,6 @@ def checkin(board, owner, ticket=None, note=""):
     # Other commands keep their own state in this record (inbox_seen, limit,
     # stop_blocks); a check-in must not erase it or every watch poll re-wakes the agent.
     rec = _agent_rec(board, owner) or {}
-    is_new_agent = not rec
     rec.update({
         "owner": owner,
         "cwd": os.getcwd(),
@@ -496,7 +495,7 @@ def checkin(board, owner, ticket=None, note=""):
         "note": note,
         "seen": now(),
     })
-    if is_new_agent:
+    if "inbox_seen" not in rec:
         # T-244: an agent's record starts existing right here, at its first
         # ever check-in (join, boot, or any command that checks in a name
         # nobody has used before) -- so this is also where inbox_seen must
@@ -508,6 +507,12 @@ def checkin(board, owner, ticket=None, note=""):
         # starts clean, not flooded with the whole board's history) while
         # mail from this moment on is found normally, including through a
         # later rotation, because `since` is no longer empty.
+        #
+        # Guard on the key's absence, not on is_new_agent: a pre-T-244
+        # on-disk record (rec truthy, inbox_seen key never written) is not
+        # "new" but still has since="" on its next check-in, reopening the
+        # exact hole this ticket exists to close (found by sonnet-deploy's
+        # T-244 review).
         rec["inbox_seen"] = now()
     tmp = path + ".tmp"
     with open(tmp, "w") as f:

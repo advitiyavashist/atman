@@ -639,6 +639,47 @@ def test_new_agent_does_not_see_history_from_before_it_joined(board):
     assert "before-carol message 19" in full  # still on the board, just not "unread"
 
 
+def test_legacy_agent_record_missing_inbox_seen_key_gets_stamped_on_next_checkin(board):
+    """Reviewer-found gap (sonnet-deploy, T-244 review): the original fix
+    only stamped inbox_seen when is_new_agent (rec was falsy). An agent
+    record that predates this patch -- present on disk, but written before
+    inbox_seen existed as a field at all -- is not "new", so the guard never
+    fired for it and since="" reopened on its very next check-in, silently
+    dropping archived mail all over again for that one class of agent.
+
+    Fix: checkin() now stamps on `"inbox_seen" not in rec`, not on
+    is_new_agent, so any record missing the key -- freshly created or
+    legacy -- gets stamped.
+    """
+    run(board, "join", "erin", "--roles", "backend")
+    rec_path = board / "agents" / "erin.json"
+    rec = json.loads(rec_path.read_text())
+    assert "inbox_seen" in rec  # join already stamped it; simulate a pre-T-244 record
+    del rec["inbox_seen"]
+    rec_path.write_text(json.dumps(rec))
+
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    run(board, "here", agent="erin")  # any ordinary check-in, not a join
+    assert "inbox_seen" in json.loads(rec_path.read_text()), (
+        "checkin() must stamp inbox_seen for ANY record missing the key, "
+        "not only ones it just created"
+    )
+    time.sleep(1.1)  # now() is second-precision (T-228); force a real clock gap
+
+    r = run(board, "msg", "IMPORTANT-FOR-ERIN", "--to", "erin", agent="alice", env=env)
+    assert r.returncode == 0, r.stderr
+    for i in range(20):
+        r = run(board, "msg", "filler %d filler filler filler" % i, agent="alice", env=env)
+        assert r.returncode == 0, r.stderr
+    assert sorted(board.glob("messages.*.jsonl")), "expected rotation to have fired"
+
+    out = run(board, "inbox", "--limit", "500", agent="erin").stdout
+    assert "IMPORTANT-FOR-ERIN" in out, (
+        "a legacy record that regained inbox_seen at its next check-in must "
+        "still find mail sent afterward, even through rotation -- got: %r" % out
+    )
+
+
 def test_master_decision_log_trims_past_cap_and_archives(board):
     run(board, "master", "init", agent="boss")
     env = {"TICKETS_MASTER_LOG_MAX_BYTES": "300", "TICKETS_MASTER_LOG_KEEP_ENTRIES": "3"}
