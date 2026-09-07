@@ -73,7 +73,41 @@ def test_retire_refuses_when_holding_ticket(board, entry):
     assert run(board, "next", agent="worker", entry=entry).returncode == 0
     r = run(board, "retire", "worker", agent="master", entry=entry)
     assert r.returncode != 0
-    assert "holds a claimed ticket" in r.stderr + r.stdout
+    assert "holds a ticket" in r.stderr + r.stdout
     assert (board / "agents" / "worker.json").is_file()
     wf = json.loads((board / "workforce.json").read_text())
     assert "worker" in wf
+
+
+@pytest.mark.parametrize("entry", ["root", "pkg"])
+def test_retire_refuses_when_holding_ticket_in_review(board, entry):
+    repo = board.parent
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "worker-branch"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "worker branch"],
+        check=True,
+        env=dict(
+            os.environ,
+            GIT_AUTHOR_NAME="t",
+            GIT_AUTHOR_EMAIL="t@t",
+            GIT_COMMITTER_NAME="t",
+            GIT_COMMITTER_EMAIL="t@t",
+        ),
+    )
+    run(board, "join", "worker", "--roles", "backend", agent="worker", entry=entry)
+    assert run(board, "next", agent="worker", entry=entry, cwd=repo).returncode == 0
+    assert run(
+        board,
+        "review",
+        "T-001",
+        "--notes",
+        "paths touched",
+        "--force",
+        agent="worker",
+        entry=entry,
+        cwd=repo,
+    ).returncode == 0
+    r = run(board, "retire", "worker", agent="master", entry=entry)
+    assert r.returncode != 0
+    assert "holds a ticket" in r.stderr + r.stdout
+    assert (board / "agents" / "worker.json").is_file()

@@ -3171,9 +3171,9 @@ def cmd_join(a, board):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
 
 
-def _agent_holds_claimed_ticket(board, owner):
+def _agent_holds_ticket(board, owner):
     return any(
-        t.get("status") == "claimed" and t.get("owner") == owner
+        t.get("owner") == owner and t.get("status") in ("claimed", "review", "blocked")
         for t in load_all(board)
     )
 
@@ -3197,8 +3197,8 @@ def cmd_retire(a, board):
             roles = {}
     if not (os.path.isfile(agent_path) or owner in wf or owner in roles):
         sys.exit("no seat %r on this board" % owner)
-    if _agent_holds_claimed_ticket(board, owner):
-        sys.exit("refusing: %s holds a claimed ticket; reopen or finish it first" % owner)
+    if _agent_holds_ticket(board, owner):
+        sys.exit("refusing: %s holds a ticket; reopen or finish it first" % owner)
     if os.path.isfile(agent_path):
         os.remove(agent_path)
     if owner in wf:
