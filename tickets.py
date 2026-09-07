@@ -971,6 +971,36 @@ def _agent_update(board, owner, mutate):
     return rec
 
 
+def _clear_agent_ticket(board, agent, tid):
+    """T-437: drop a stale ticket= bind on a previous owner's agent record.
+
+    Keeps cwd/branch/sha. Abort (no write) if the record is missing or names
+    a different ticket.
+    """
+    if not agent or not tid:
+        return
+
+    def mutate(rec):
+        if rec.get("ticket") != tid:
+            return False
+        rec["ticket"] = ""
+
+    _agent_update(board, agent, mutate)
+
+
+def _bind_agent_ticket(board, agent, tid):
+    """Set ticket= on the new owner's existing record without clobbering cwd."""
+    if not agent or not tid:
+        return
+    rec = _agent_rec(board, agent)
+    if rec:
+        def mutate(r):
+            r["ticket"] = tid
+        _agent_update(board, agent, mutate)
+    else:
+        checkin(board, agent, tid)
+
+
 def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
     _state, _mismatch = _git_state_raw()
@@ -1084,6 +1114,7 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
     t["claimed_at"] = now()
@@ -1095,6 +1126,8 @@ def try_claim(board, tid, owner):
     _safe(lambda: traj_event(board, "claim", agent=owner, ticket=got,
                              state_before="open", state_after="claimed",
                              **_traj_git()), None)
+    if prev_owner and prev_owner != owner:
+        _safe(lambda: _clear_agent_ticket(board, prev_owner, tid), None)
     return got
 
 
@@ -3239,15 +3272,21 @@ def cmd_assign(a, board):
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
     if a.owner is not None:
         # hard assignment by the master: takes the lock on their behalf
+        prev_owner = t.get("owner") or ""
         if t["status"] == "open" and a.owner:
             got = try_claim(board, t["id"], a.owner)
             if not got:
                 sys.exit("%s was claimed by someone else while assigning" % t["id"])
             t = got
             changed.append("claimed for %s" % a.owner)
-        elif t["status"] == "claimed":
+            _safe(lambda: _bind_agent_ticket(board, a.owner, t["id"]), None)
+        elif t["status"] in ("claimed", "review"):
             t["owner"] = a.owner
             changed.append("owner=%s" % a.owner)
+            if prev_owner and prev_owner != a.owner:
+                _safe(lambda: _clear_agent_ticket(board, prev_owner, t["id"]), None)
+            if a.owner:
+                _safe(lambda: _bind_agent_ticket(board, a.owner, t["id"]), None)
     if not changed:
         sys.exit("nothing to change; see tickets assign --help")
     note_text = "assign: " + ", ".join(changed)

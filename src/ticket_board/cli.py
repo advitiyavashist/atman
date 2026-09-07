@@ -642,6 +642,44 @@ def checkin(board, owner, ticket=None, note=""):
     return rec
 
 
+def _clear_agent_ticket(board, agent, tid):
+    """T-437: drop a stale ticket= bind on a previous owner's agent record."""
+    if not agent or not tid:
+        return
+    path = os.path.join(agents_dir(board), agent + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        return
+    if not isinstance(rec, dict) or rec.get("ticket") != tid:
+        return
+    rec["ticket"] = ""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _bind_agent_ticket(board, agent, tid):
+    if not agent or not tid:
+        return
+    path = os.path.join(agents_dir(board), agent + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        rec = None
+    if isinstance(rec, dict):
+        rec["ticket"] = tid
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+        os.replace(tmp, path)
+        return
+    checkin(board, agent, tid)
+
+
 def _current_ticket(board, owner):
     for t in load_all(board):
         if t["status"] == "claimed" and t.get("owner") == owner:
@@ -734,6 +772,7 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
     t["claimed_at"] = now()
@@ -744,6 +783,8 @@ def try_claim(board, tid, owner):
     # silently produces no trajectory.
     traj_event(board, "claim", agent=owner, ticket=got,
                state_before="open", state_after="claimed", **_traj_git())
+    if prev_owner and prev_owner != owner:
+        _clear_agent_ticket(board, prev_owner, tid)
     return got
 
 
@@ -2045,15 +2086,21 @@ def cmd_assign(a, board):
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
     if a.owner is not None:
         # hard assignment by the master: takes the lock on their behalf
+        prev_owner = t.get("owner") or ""
         if t["status"] == "open" and a.owner:
             got = try_claim(board, t["id"], a.owner)
             if not got:
                 sys.exit("%s was claimed by someone else while assigning" % t["id"])
             t = got
             changed.append("claimed for %s" % a.owner)
-        elif t["status"] == "claimed":
+            _bind_agent_ticket(board, a.owner, t["id"])
+        elif t["status"] in ("claimed", "review"):
             t["owner"] = a.owner
             changed.append("owner=%s" % a.owner)
+            if prev_owner and prev_owner != a.owner:
+                _clear_agent_ticket(board, prev_owner, t["id"])
+            if a.owner:
+                _bind_agent_ticket(board, a.owner, t["id"])
     if not changed:
         sys.exit("nothing to change; see tickets assign --help")
     t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
