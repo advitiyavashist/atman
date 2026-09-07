@@ -26,6 +26,7 @@ from .adapter import (
     bound_context_lines,
     build_hook_envelope,
     deliver_hook_event,
+    format_truncation_notice,
     load_enrollment,
     parse_claude_hook_event,
     utc_now,
@@ -120,17 +121,10 @@ def main(argv: list[str] | None = None) -> int:
     if dropped_line_count or truncated_line_count:
         # Printed to stdout, not stderr: this reaches the same place the
         # context lines above do, because a truncation notice the agent
-        # never sees is as good as no notice at all.
-        print(
-            "[ticket board: inbound context truncated -- %d line(s) dropped "
-            "beyond the %d-line cap, %d line(s) cut to %d chars]"
-            % (
-                dropped_line_count,
-                config.max_context_lines,
-                truncated_line_count,
-                config.max_context_line_chars,
-            )
-        )
+        # never sees is as good as no notice at all. Trustworthy because
+        # bound_context_lines() already sanitized every line above so none
+        # of them can forge this notice's reserved prefix.
+        print(format_truncation_notice(dropped_line_count, truncated_line_count, config))
     return 0
 
 

@@ -317,6 +317,46 @@ def parse_claude_hook_event(
     }
 
 
+# Reserved for hook.py's own truncation notice (see format_truncation_notice
+# below). bound_context_lines() sanitizes every inbound line so board content
+# can never start with this exact prefix -- that is what makes a line an
+# agent sees starting with it trustworthy as "the framework said this",
+# rather than forgeable board content sharing the same stdout stream.
+NOTICE_RESERVED_PREFIX = "[ticket board:"
+
+
+def format_truncation_notice(dropped_line_count: int, truncated_line_count: int, config: AdapterConfig) -> str:
+    """Build the one line allowed to start with NOTICE_RESERVED_PREFIX unescaped."""
+    return (
+        "%s inbound context truncated -- %d line(s) dropped beyond the %d-line "
+        "cap, %d line(s) cut to %d chars]"
+        % (
+            NOTICE_RESERVED_PREFIX,
+            dropped_line_count,
+            config.max_context_lines,
+            truncated_line_count,
+            config.max_context_line_chars,
+        )
+    )
+
+
+def _sanitize_notice_lookalike(line: str) -> str:
+    """Neutralize any inbound line that could be mistaken for a framework notice.
+
+    Without this, a hostile or merely unlucky board response can plant a
+    content line that is byte-identical to format_truncation_notice()'s
+    output -- either fabricating a truncation report when none happened, or
+    burying the real one under a forged "0 dropped" claim printed first. An
+    agent reading top-down over one shared stdout stream has no other way to
+    tell "the framework said this" from "the board said this", so the only
+    sound fix is at this boundary: board content is never allowed to start
+    with NOTICE_RESERVED_PREFIX, whether or not truncation actually occurs.
+    """
+    if line.startswith(NOTICE_RESERVED_PREFIX):
+        return "[ticket board content, not a framework notice:" + line[len(NOTICE_RESERVED_PREFIX):]
+    return line
+
+
 def bound_context_lines(lines: List[str], config: AdapterConfig) -> Tuple[List[str], int, int]:
     """Cap inbound board context the same way outbound events are bounded.
 
@@ -325,7 +365,11 @@ def bound_context_lines(lines: List[str], config: AdapterConfig) -> Tuple[List[s
     line longer than `config.max_context_line_chars` is cut to that length.
     Both counts are returned so the caller can say plainly how much was lost
     -- a silent truncation is its own defect, because the agent then acts on
-    a partial instruction believing it is whole.
+    a partial instruction believing it is whole. Every surviving line is also
+    sanitized against forging the truncation notice itself (see
+    _sanitize_notice_lookalike) -- this runs whether or not truncation
+    happens, since a false "nothing was truncated" claim is exactly as
+    dangerous as a false "something was truncated" one.
     """
     kept = lines[: config.max_context_lines]
     dropped_line_count = len(lines) - len(kept)
@@ -335,9 +379,8 @@ def bound_context_lines(lines: List[str], config: AdapterConfig) -> Tuple[List[s
     for line in kept:
         if len(line) > config.max_context_line_chars:
             truncated_line_count += 1
-            bounded.append(line[: config.max_context_line_chars])
-        else:
-            bounded.append(line)
+            line = line[: config.max_context_line_chars]
+        bounded.append(_sanitize_notice_lookalike(line))
 
     return bounded, dropped_line_count, truncated_line_count
 
