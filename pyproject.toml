@@ -21,3 +21,10 @@ tickets = "ticket_board.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Each full suite run leaves 150-350MB of git-repo fixtures under the
+# session basetemp; default retention (3 newest per basetemp per process)
+# multiplies that across parallel lanes until the volume fills (T-413/T-414).
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1

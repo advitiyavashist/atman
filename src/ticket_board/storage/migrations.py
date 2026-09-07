@@ -1,6 +1,6 @@
 """Additive storage migrations layered on top of the T-179 base schema."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MESSAGING_DDL = """
 CREATE TABLE IF NOT EXISTS members (
@@ -187,6 +187,89 @@ END;
 """
 
 
+def _hook_events_keyed_on_event_id_alone(conn):
+    """True for a board created before T-266, whose PK was `event_id` only.
+
+    `CREATE TABLE IF NOT EXISTS` in schema.py no-ops against an existing
+    table regardless of its shape, so an old board never picks up the T-266
+    `(project_id, event_id)` key on its own -- this has to check and fix it.
+    """
+    columns = conn.execute("PRAGMA table_info(hook_events)").fetchall()
+    pk_columns = [row[1] for row in columns if row[5]]
+    return pk_columns == ["event_id"]
+
+
+def _migrate_hook_events_pk(conn):
+    """Rebuild `hook_events` keyed `(project_id, event_id)` (T-266).
+
+    Existing rows cannot collide on the new key: the old single-column PK
+    already forced every `event_id` to be globally unique, so this is a
+    straight rebuild-and-copy, never a conflict to resolve. Without it, a
+    board that predates T-266 keeps the old-shape table forever -- the
+    dedup query is scoped by project, but a genuine cross-project
+    `event_id` collision then hits the table's own PK and raises
+    `IntegrityError` instead of the pre-T-266 silent drop it was meant to
+    replace.
+
+    Wrapped in a single transaction (T-328): the connection is opened with
+    `isolation_level=None` (autocommit), so each statement in the rebuild
+    used to commit on its own -- a crash between the RENAME and the final
+    CREATE INDEX left `hook_events` either missing or half-populated, and
+    since `apply_schema`'s `CREATE TABLE IF NOT EXISTS` silently recreates
+    an empty table with the new PK on the next boot, the old rows (still
+    sitting under `hook_events_pre_t266`) become permanently unreachable
+    with no error raised anywhere. SQLite DDL is transactional, so a literal
+    BEGIN/COMMIT around the script makes the rebuild atomic: either the full
+    new table is in place, or a crash rolls back to the untouched original
+    and the migration retries from scratch on the next successful open. This
+    must stay a literal BEGIN/COMMIT inside the script text, not a Python-level
+    `conn.execute("BEGIN")` before it -- `executescript()` issues an implicit
+    COMMIT of any pending transaction before it runs, which would otherwise
+    close the transaction before the DDL even starts. This migration never
+    toggles `PRAGMA foreign_keys` (that pragma is a no-op inside a
+    transaction), so nothing needs to sequence outside the BEGIN/COMMIT.
+    """
+    if not _hook_events_keyed_on_event_id_alone(conn):
+        return
+    try:
+        conn.executescript("""
+            BEGIN;
+
+            ALTER TABLE hook_events RENAME TO hook_events_pre_t266;
+
+            CREATE TABLE hook_events (
+                event_id    TEXT NOT NULL,
+                project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                agent_id    TEXT NOT NULL,
+                session_id  TEXT NOT NULL,
+                kind        TEXT NOT NULL
+                            CHECK (kind IN ('session_start', 'user_prompt_submit',
+                                            'stop', 'probe')),
+                occurred_at TEXT NOT NULL,
+                cwd         TEXT,
+                note        TEXT,
+                PRIMARY KEY (project_id, event_id)
+            );
+
+            INSERT INTO hook_events (event_id, project_id, agent_id, session_id,
+                                      kind, occurred_at, cwd, note)
+                SELECT event_id, project_id, agent_id, session_id,
+                       kind, occurred_at, cwd, note
+                FROM hook_events_pre_t266;
+
+            DROP TABLE hook_events_pre_t266;
+
+            CREATE INDEX IF NOT EXISTS idx_hook_events_agent
+                ON hook_events(agent_id, occurred_at);
+
+            COMMIT;
+        """)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def apply_migrations(conn):
-    """Apply additive migrations after the base schema exists."""
+    """Apply migrations after the base schema exists."""
     conn.executescript(MESSAGING_DDL)
+    _migrate_hook_events_pk(conn)

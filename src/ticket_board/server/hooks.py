@@ -2,9 +2,14 @@
 
 The rules this route exists to keep, all from the freeze:
 
-* **Deduplicate on `event_id`.** A retried event produces exactly one audit
-  record and still gets a response, because the adapter retries on a timeout it
-  cannot distinguish from a failure.
+* **Deduplicate on `event_id`, scoped to the project.** A retried event
+  produces exactly one audit record and still gets a response, because the
+  adapter retries on a timeout it cannot distinguish from a failure.
+  `hook_events` is keyed `(project_id, event_id)`, not `event_id` alone: two
+  unrelated projects choosing the same `event_id` string is not a replay, and
+  `event_id` is caller-supplied and never checked against the sha256 it is
+  documented to derive from (T-266) -- see the note on `record()` for why that
+  is safe to leave unverified.
 * **A probe never sets `session_adopted`.** The synthetic connection test proves
   the server is reachable, not that a real Claude session adopted the hook.
   Conflating them is how a doctor shows green for a connection that will never
@@ -100,7 +105,19 @@ def validate_event(event):
 
 def record(store, project_id, principal, event, *, request_id=None,
            lease_seconds=SESSION_LEASE_SECONDS):
-    """Store one hook event. Returns `(deduplicated, agent)`."""
+    """Store one hook event. Returns `(deduplicated, agent)`.
+
+    `event_id` is not verified against the sha256 of its own fields, and that
+    is deliberate rather than an oversight: `post_hook_event` already refuses
+    an `event.agent_id` that is not the caller's own, so forcing a chosen
+    collision against another agent's event needs that agent's `session_id`
+    too -- a one-time value returned only in the `POST /sessions` response,
+    never disclosed to any other principal in the project. Recomputing and
+    checking the hash server-side would not close a gap that value's secrecy
+    does not already close, and it would couple this route to one adapter's
+    hashing scheme. What *is* a gap -- `hook_events` keyed on `event_id` alone,
+    with no `project_id` in the key -- is fixed below.
+    """
     with write_txn(store.conn) as conn:
         agent = conn.execute(
             "SELECT * FROM agents WHERE id = ? AND project_id = ?",
@@ -111,7 +128,8 @@ def record(store, project_id, principal, event, *, request_id=None,
                            {"agent_id": event["agent_id"]})
 
         existing = conn.execute(
-            "SELECT 1 FROM hook_events WHERE event_id = ?", (event["event_id"],)
+            "SELECT 1 FROM hook_events WHERE project_id = ? AND event_id = ?",
+            (project_id, event["event_id"]),
         ).fetchone()
         if existing is not None:
             # Exactly one audit record for a retried event: return without

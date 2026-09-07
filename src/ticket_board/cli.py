@@ -269,9 +269,56 @@ def _refuse_board_outside_pytest_tmp(path):
     )
 
 
+def _cwd_belongs_to_board(board_path):
+    """True when cwd is this board's checkout (in-tree dir or linked worktree).
+
+    T-409 / zed class: a cwd with no board of its own must not silently write
+    a live board discovered as a unique child (Downloads -> project) or via
+    any other unbound resolution. Out-of-tree `git worktree add` still belongs
+    because `_repo_root()` is the main checkout that owns the board (T-243).
+    """
+    board = os.path.realpath(board_path)
+    board_root = os.path.dirname(board)
+    cwd = os.path.realpath(os.getcwd())
+    if cwd == board_root or cwd.startswith(board_root + os.sep):
+        return True
+    root = _repo_root()
+    if root and os.path.realpath(root) == board_root:
+        return True
+    here = _init_cwd_worktree_root()
+    if here and os.path.realpath(os.path.join(here, ".tickets")) == board:
+        return True
+    return False
+
+
+def _refuse_unbound_live_board(path):
+    """Refuse a live board cwd does not belong to, unless TICKETS_DIR binds it.
+
+    T-409: a mktemp / parent-folder cwd with no explicit TICKETS_DIR resolved
+    the shared live board (zed / T-331). Fail closed. An empty local
+    cwd/.tickets is not live, so init/join in a fresh dir still works.
+    """
+    if os.environ.get("TICKETS_DIR"):
+        return
+    if not _live_board(path):
+        return
+    if _cwd_belongs_to_board(path):
+        return
+    real = os.path.realpath(path)
+    sys.exit(
+        "REFUSING TO USE BOARD %r: cwd %r is not inside a board checkout "
+        "and TICKETS_DIR is unset. Binding a live board from an unbound "
+        "directory is the zed/T-331 class (a sandbox writing the shared "
+        "board). Export TICKETS_DIR to the board you mean, or run from "
+        "that project's checkout."
+        % (real, os.path.realpath(os.getcwd()))
+    )
+
+
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
     _refuse_board_outside_pytest_tmp(result)
+    _refuse_unbound_live_board(result)
     return result
 
 
@@ -615,8 +662,9 @@ def agents_dir(board):
 
 def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
+    _drop_unowned_agent_ticket(board, owner)
     g = git_state() or {}
-    rec = {
+    fields = {
         "owner": owner,
         "cwd": os.getcwd(),
         "worktree": g.get("top", ""),
@@ -627,6 +675,10 @@ def checkin(board, owner, ticket=None, note=""):
         "note": note,
         "seen": now(),
     }
+    # inbox_seen, joined_at, limit, stop_blocks and future fields live here;
+    # merge into the existing record instead of rebuilding it (T-418 / root 9c5c606).
+    rec = _agent_rec(board, owner) or {}
+    rec.update(fields)
     os.makedirs(agents_dir(board), exist_ok=True)
     path = os.path.join(agents_dir(board), owner + ".json")
     tmp = path + ".tmp"
@@ -634,6 +686,78 @@ def checkin(board, owner, ticket=None, note=""):
         json.dump(rec, f, indent=2)
     os.replace(tmp, path)
     return rec
+
+
+def _clear_agent_ticket(board, agent, tid):
+    """T-437: drop a stale ticket= bind on a previous owner's agent record."""
+    if not agent or not tid:
+        return
+    path = os.path.join(agents_dir(board), agent + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        return
+    if not isinstance(rec, dict) or rec.get("ticket") != tid:
+        return
+    rec["ticket"] = ""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _drop_unowned_agent_ticket(board, owner):
+    """T-439: drop ticket= when the live owner of that id is not me. Keep cwd/branch/sha.
+
+    Also drop a leftover review bind when I already hold a different claimed ticket.
+    """
+    if not owner:
+        return
+    path = os.path.join(agents_dir(board), owner + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        return
+    if not isinstance(rec, dict):
+        return
+    tid = rec.get("ticket") or ""
+    if not tid:
+        return
+    claimed = [t["id"] for t in load_all(board)
+               if t.get("status") == "claimed" and t.get("owner") == owner]
+    if claimed and tid not in claimed:
+        _clear_agent_ticket(board, owner, tid)
+        return
+    t = None
+    try:
+        with open(ticket_path(board, tid)) as f:
+            t = json.load(f)
+    except (IOError, ValueError):
+        t = None
+    if isinstance(t, dict) and t.get("owner") == owner:
+        return
+    _clear_agent_ticket(board, owner, tid)
+
+
+def _bind_agent_ticket(board, agent, tid):
+    if not agent or not tid:
+        return
+    path = os.path.join(agents_dir(board), agent + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        rec = None
+    if isinstance(rec, dict):
+        rec["ticket"] = tid
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+        os.replace(tmp, path)
+        return
+    checkin(board, agent, tid)
 
 
 def _current_ticket(board, owner):
@@ -728,6 +852,7 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
     t["claimed_at"] = now()
@@ -738,6 +863,8 @@ def try_claim(board, tid, owner):
     # silently produces no trajectory.
     traj_event(board, "claim", agent=owner, ticket=got,
                state_before="open", state_after="claimed", **_traj_git())
+    if prev_owner and prev_owner != owner:
+        _clear_agent_ticket(board, prev_owner, tid)
     return got
 
 
@@ -1436,7 +1563,18 @@ def _trunk():
 
 
 def cmd_sync(a, board):
-    """Agent side: bring main into my branch now, so the master's merge is trivial."""
+    """Agent side: bring main into my branch now, so the master's merge is trivial.
+
+    T-423: the local `main`/`master` ref is not the source of truth for "am I
+    behind" -- nothing here moves it, so a plain `git fetch` (which only
+    updates `origin/<trunk>`) leaves it stale indefinitely. Comparing against
+    it made sync answer "already contains main; nothing to do" for a branch
+    that was genuinely behind origin. Fetch origin's trunk and compare/merge
+    against `origin/<trunk>` instead, which the fetch just made fresh. If the
+    fetch cannot be done at all (no origin remote, or it is unreachable),
+    refuse rather than silently falling back to the stale local ref -- that
+    fallback is exactly the bug.
+    """
     g = git_state()
     if not g:
         sys.exit("not in a git repo")
@@ -1445,18 +1583,26 @@ def cmd_sync(a, board):
         sys.exit("you are on %s; sync is for your own worktree branch" % g["branch"])
     if g["dirty"] and not a.force:
         sys.exit("%d uncommitted files; commit first (sync merges %s into your branch)" % (g["dirty"], trunk))
-    if git("merge-base", "--is-ancestor", trunk, "HEAD") is not None:
-        print("%s already contains %s; nothing to do" % (g["branch"], trunk))
+    if git("remote", "get-url", "origin") is None:
+        sys.exit("no 'origin' remote configured; cannot confirm %s is not stale without one "
+                  "(comparing against the local %s ref is the bug this refusal exists to avoid)"
+                  % (trunk, trunk))
+    if git("fetch", "origin", trunk) is None:
+        sys.exit("could not fetch origin/%s -- refusing to sync against a possibly-stale local "
+                  "ref; retry once the remote is reachable" % trunk)
+    remote_trunk = "origin/" + trunk
+    if git("merge-base", "--is-ancestor", remote_trunk, "HEAD") is not None:
+        print("%s already contains %s; nothing to do" % (g["branch"], remote_trunk))
         return
     import subprocess
-    r = subprocess.run(["git", "merge", "--no-edit", "-m", "Sync %s into %s" % (trunk, g["branch"]), trunk],
+    r = subprocess.run(["git", "merge", "--no-edit", "-m", "Sync %s into %s" % (remote_trunk, g["branch"]), remote_trunk],
                        capture_output=True, text=True)
     if r.returncode == 0:
-        print("merged %s into %s -> %s" % (trunk, g["branch"], git("rev-parse", "--short", "HEAD")))
-        checkin(board, whoami(), None, "synced with %s" % trunk)
+        print("merged %s into %s -> %s" % (remote_trunk, g["branch"], git("rev-parse", "--short", "HEAD")))
+        checkin(board, whoami(), None, "synced with %s" % remote_trunk)
         return
     conflicted = (git("diff", "--name-only", "--diff-filter=U") or "").splitlines()
-    print("CONFLICTS merging %s into %s -- these files need you:" % (trunk, g["branch"]))
+    print("CONFLICTS merging %s into %s -- these files need you:" % (remote_trunk, g["branch"]))
     for f in conflicted:
         print("  " + f)
     print("Resolve, `git add` them, `git commit`, then `tickets review` again. "
@@ -2039,15 +2185,21 @@ def cmd_assign(a, board):
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
     if a.owner is not None:
         # hard assignment by the master: takes the lock on their behalf
+        prev_owner = t.get("owner") or ""
         if t["status"] == "open" and a.owner:
             got = try_claim(board, t["id"], a.owner)
             if not got:
                 sys.exit("%s was claimed by someone else while assigning" % t["id"])
             t = got
             changed.append("claimed for %s" % a.owner)
-        elif t["status"] == "claimed":
+            _bind_agent_ticket(board, a.owner, t["id"])
+        elif t["status"] in ("claimed", "review"):
             t["owner"] = a.owner
             changed.append("owner=%s" % a.owner)
+            if prev_owner and prev_owner != a.owner:
+                _clear_agent_ticket(board, prev_owner, t["id"])
+            if a.owner:
+                _bind_agent_ticket(board, a.owner, t["id"])
     if not changed:
         sys.exit("nothing to change; see tickets assign --help")
     t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
@@ -2817,7 +2969,8 @@ def _traj_line(e):
     bits.append("%-7s" % (e.get("ticket") or "-"))
     extra = []
     for k in ("run_no", "exit", "duration_s", "turns", "tokens_in", "tokens_out",
-              "cost_usd", "outcome", "state_before", "state_after", "trigger",
+              "tokens_cache_read", "tokens_cache_write", "cost_usd", "cost_source",
+              "usage_error", "outcome", "state_before", "state_after", "trigger",
               "notes_len", "text_len", "to", "pin", "merged_as", "active_hours",
               "wait_hours", "harness", "harness_cmd", "model", "effort",
               "timed_out", "src"):
@@ -2900,12 +3053,19 @@ def cmd_trajectories(a, board):
                                    " (showing the last %d)" % limit if limit and len(sel) > limit else ""))
     if getattr(a, "summary", False):
         print("")
-        print("%-8s %5s %8s %5s %5s %8s  %s" % (
-            "ticket", "runs", "turns", "upd", "msgs", "reopens", "agents / outcome"))
+        # cost is appended, never inserted: the existing columns are a
+        # positional contract that tests and operators already read.
+        print("%-8s %5s %8s %5s %5s %8s %10s  %s" % (
+            "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
+            "agents / outcome"))
         for tid, s in sorted(_traj_summary(sel).items()):
-            print("%-8s %5d %8s %5d %5d %8d  %s %s" % (
+            # '-' is not $0.00: no harness on this board reports a cost unless
+            # the operator asked for a JSON output format, and a zero would
+            # read as a free ticket (T-396 null-not-zero).
+            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
                 tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
-                s["reopens"], ",".join(sorted(s["agents"])) or "-",
+                s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",
                 ("-> " + s["outcome"]) if s["outcome"] else ""))
         print("")
         print("runs = watch runs that reached run_end (the board's own turn count).  "
@@ -3043,7 +3203,7 @@ def cmd_route(a, board):
     `--shadow` (T-315) is print-only plus one `shadow_decision` event per
     ready ticket. `--apply` is unimplemented.
     """
-    if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False):
+    if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False) or getattr(a, "score", False):
         return _scheduler_cmd()(
             a, board, load_all, load_workforce, load_roles, load_agents,
             score_agent, traj_event)
@@ -3211,6 +3371,51 @@ def cmd_join(a, board):
     print("Full instructions: tickets connect")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
+
+
+def _agent_holds_ticket(board, owner):
+    return any(
+        t.get("owner") == owner and t.get("status") in ("claimed", "review", "blocked")
+        for t in load_all(board)
+    )
+
+
+def cmd_retire(a, board):
+    """Remove a seat from the board (inverse of join). Refused while it holds a ticket."""
+    owner = (a.name or whoami()).strip()
+    if not owner:
+        sys.exit("usage: tickets retire <name>")
+    if owner.startswith("agent-"):
+        sys.exit("give a real agent name")
+    agent_path = os.path.join(agents_dir(board), owner + ".json")
+    wf = load_workforce(board)
+    roles_path = os.path.join(board, "roles.json")
+    roles = {}
+    if os.path.isfile(roles_path):
+        try:
+            with open(roles_path) as f:
+                roles = json.load(f)
+        except (IOError, ValueError):
+            roles = {}
+    if not (os.path.isfile(agent_path) or owner in wf or owner in roles):
+        sys.exit("no seat %r on this board" % owner)
+    if _agent_holds_ticket(board, owner):
+        sys.exit("refusing: %s holds a ticket; reopen or finish it first" % owner)
+    if os.path.isfile(agent_path):
+        os.remove(agent_path)
+    if owner in wf:
+        del wf[owner]
+        save_workforce(board, wf)
+    if owner in roles:
+        del roles[owner]
+        os.makedirs(board, exist_ok=True)
+        tmp = roles_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(roles, f, indent=2)
+        os.replace(tmp, roles_path)
+    retirer = whoami(getattr(a, "owner", None))
+    post_message(board, retirer, "retired seat %s from the board" % owner)
+    print("retired %s" % owner)
 
 
 def cmd_connect(a, board):
@@ -3475,6 +3680,11 @@ def main():
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
     c.set_defaults(fn=cmd_join)
 
+    c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
+    c.add_argument("name", nargs="?", default="")
+    c.add_argument("--owner", "-o", default="", help="who is performing the retire (default: TICKET_AGENT)")
+    c.set_defaults(fn=cmd_retire)
+
     c = sub.add_parser("route", help="master: suggest an owner for every open ticket by model/roles/capabilities/cost")
     c.add_argument("--claim", action="store_true", help="hard-assign the ready ones (claims on their behalf)")
     c.add_argument("--redo", action="store_true", help="recompute tickets that already have a suggestion")
@@ -3483,6 +3693,15 @@ def main():
                    help="T-315: print rule vs learned/prior pick; do not assign")
     c.add_argument("--report", action="store_true",
                    help="with --shadow: agreement rate and realized turns")
+    c.add_argument("--by", choices=["turns", "cost"], default="turns",
+                   help="with --shadow: rank learned pick by turns then cost (default) or cost then turns")
+    c.add_argument("--json", action="store_true",
+                   help="with --shadow: print additive JSON (T-315/T-415 shape)")
+    c.add_argument("--score", action="store_true",
+                   help="with --shadow: retrospective shadow-vs-actual scorecard (read-only)")
+    c.add_argument("--write-scorecard", nargs="?", const="docs/turns-scorecard.md",
+                   metavar="PATH",
+                   help="with --shadow --score: also write markdown scorecard (default docs/turns-scorecard.md)")
     c.add_argument("--apply", action="store_true",
                    help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)
