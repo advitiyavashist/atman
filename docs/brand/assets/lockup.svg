@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40" width="220" height="40" role="img" aria-labelledby="title desc">
+  <title id="title">atman</title>
+  <desc id="desc">Formation-dots mark with lowercase atman wordmark. Chrome uses tracking; never ATMAN.</desc>
+  <g transform="translate(4 4)">
+    <circle cx="10.0" cy="7.8"  r="3.35" fill="#e8e6e1"/>
+    <circle cx="22.4" cy="8.8"  r="3.35" fill="#e8e6e1"/>
+    <circle cx="6.6"  cy="17.6" r="3.35" fill="#e8e6e1"/>
+    <circle cx="25.4" cy="18.2" r="3.35" fill="#e8e6e1"/>
+    <circle cx="16.0" cy="24.6" r="3.35" fill="#e8e6e1"/>
+  </g>
+  <!-- lowercase + tracking. text-transform none. Do not set ATMAN. -->
+  <text x="44" y="26"
+        fill="#e8e6e1"
+        font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="20"
+        font-weight="650"
+        letter-spacing="0.22em">atman</text>
+</svg>
