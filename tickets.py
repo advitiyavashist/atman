@@ -6368,6 +6368,59 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .mchip{cursor:pointer;border:1px solid var(--line);background:var(--chip);border-radius:99px;padding:1px 9px;font-size:12px}
 .mchip:hover{border-color:var(--acc)}
 #composerMsg{font-size:12px;margin-top:4px;min-height:14px}
+.pitch-lede{color:var(--mute);font-size:12px;max-width:720px}
+.pitch-lede b{color:var(--fg)}
+.next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+.next-step .lbl{font-weight:700;color:var(--acc);white-space:nowrap}
+.next-step .msg{flex:1;min-width:160px}
+.next-step .cmd{font:12px/1.35 ui-monospace,Menlo,monospace;color:var(--mute);white-space:nowrap}
+.next-step.unreachable{background:color-mix(in srgb,var(--bad) 14%,var(--card));border-bottom-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
+.next-step.unreachable .lbl{color:var(--bad)}
+.onboard{margin:0 16px;padding:10px 0 12px;border-bottom:1px solid var(--line)}
+.onboard summary{cursor:pointer;list-style:none;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700;display:flex;gap:8px;align-items:center}
+.onboard summary::-webkit-details-marker{display:none}
+.onboard .ob-body{margin-top:8px}
+.ob-steps{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:12px}
+.ob-step{display:inline-flex;align-items:center;gap:5px;color:var(--mute);flex-wrap:wrap}
+.ob-step.done{color:var(--fg)}
+.ob-step i{width:14px;height:14px;border-radius:3px;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-style:normal;flex:none}
+.ob-step.done i{background:var(--ok);border-color:var(--ok);color:#fff}
+.empty-board{background:var(--card);border:1px dashed var(--line);border-radius:14px;padding:20px 18px;max-width:720px;margin-bottom:12px}
+.empty-board p{margin:0 0 10px;color:var(--mute);font-size:13px;line-height:1.55}
+.empty-board b{color:var(--fg)}
+.empty-board .cta{margin-top:14px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
+.col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
+.stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
+.pitch{background:radial-gradient(1200px 400px at 50% 0%,#2a7a4c 0%,#14532d 55%,#0f3d24 100%);
+  border:2px solid #0a2a18;border-radius:18px;min-height:460px;display:flex;flex-direction:column;
+  position:relative;overflow:hidden;box-shadow:inset 0 0 0 2px rgba(255,255,255,.06)}
+.pitch:before{content:"";position:absolute;left:50%;top:50%;width:88px;height:88px;margin:-44px 0 0 -44px;
+  border:2px solid rgba(255,255,255,.18);border-radius:50%;pointer-events:none}
+.band{flex:1;display:flex;flex-direction:column;justify-content:center;padding:10px 14px;border-top:1px dashed rgba(255,255,255,.16);min-height:88px}
+.band:first-child{border-top:0}
+.band .lbl{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.55);font-weight:700;margin-bottom:8px}
+.band .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center}
+.player{width:72px;display:flex;flex-direction:column;align-items:center;gap:4px;color:#f4f7f2}
+.player .av{width:36px;height:36px;font-size:12px;background:#f4f7f2;color:#14532d}
+.player.keeper .av{background:var(--warn);color:#1a1204}
+.player.cover .av{background:var(--acc)}
+.player.ghost{opacity:.7}
+.player.ghost .av{background:transparent;border:2px dashed rgba(255,255,255,.55);color:#fff}
+.player .nm{font-size:11px;font-weight:650;text-align:center;max-width:80px;overflow:hidden;text-overflow:ellipsis}
+.player .cov{font-size:10px;color:rgba(255,255,255,.7);text-align:center}
+.bench{display:flex;gap:10px;flex-wrap:wrap;padding:8px 2px}
+.bench .player .av{background:#2a3344;color:#d5dbe6}
+@media(max-width:700px){.pitch{min-height:560px}.player{width:64px}}
+@media(max-width:600px){
+  header.cmd{flex-direction:column;align-items:stretch}
+  #clock{margin-left:0}
+  .next-step{flex-direction:column}
+  .ob-steps{flex-direction:column;align-items:flex-start}
+  .kanban{grid-template-columns:1fr}
+  nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  .agents{grid-template-columns:1fr}
+  .sprint{min-width:0}
+}
 </style></head><body data-tab="board">
 <header class="cmd">
   <div class="brand"><span class="prod">tickets</span><h1 id="title">Ticket board</h1></div>
@@ -6377,6 +6430,9 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   <div id="clock"></div>
 </header>
 <details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
+<div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
+<details class="onboard" id="onboardBox" open><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
+  <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
   <button type="button" data-tab-btn="board" class="on">Board</button>
   <button type="button" data-tab-btn="agents">Agents</button>
@@ -6384,11 +6440,12 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 </nav>
 <main>
 <div class="pane" id="pane-board">
+  <div id="emptyBoard" class="empty-board" hidden></div>
   <div class="kanban">
-    <section class="col blocked"><h2>Blocked <span class="n" id="n-blocked">0</span></h2><div class="list" id="col-blocked"></div></section>
-    <section class="col ready"><h2>Ready <span class="n" id="n-ready">0</span></h2><div class="list" id="col-ready"></div></section>
-    <section class="col flight"><h2>In flight <span class="n" id="n-flight">0</span></h2><div class="list" id="col-flight"></div></section>
-    <section class="col review"><h2>Review <span class="n" id="n-review">0</span></h2><div class="list" id="col-review"></div></section>
+    <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
+    <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
+    <section class="col flight"><h2 title="Tickets actively being worked right now">In flight <span class="n" id="n-flight">0</span><span class="hint">claimed and in progress</span></h2><div class="list" id="col-flight"></div></section>
+    <section class="col review"><h2 title="Finished work waiting for master to merge to main">Review <span class="n" id="n-review">0</span><span class="hint">submitted, awaiting merge</span></h2><div class="list" id="col-review"></div></section>
   </div>
 </div>
 <div class="pane" id="pane-agents"><div class="agents" id="agents"></div></div>
@@ -6512,13 +6569,37 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   finally{btn.disabled=false}
 });
 function tickClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}
+let snapshotFails=0;
+function unreachableNextStep(msg,cmd){
+  return{kind:'unreachable',label:'Board unavailable',message:msg,cmd:cmd||''};
+}
 async function load(){
-  const r=await fetch('/board.json?'+Date.now());const d=await r.json();
-  document.getElementById('title').textContent=d.project||'Ticket board';
+  let d;
+  try{
+    const r=await fetch('/board.json?'+Date.now());
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    d=await r.json();
+  }catch(e){
+    snapshotFails++;
+    renderNextStep(unreachableNextStep(
+      snapshotFails>2?'Cannot reach the board server — is `tickets ui` still running? ('+e+')'
+        :'Board unreachable — retrying… ('+e+')',
+      'tickets ui'));
+    return;
+  }
+  if(d.error){
+    snapshotFails++;
+    renderNextStep(d.next_step||unreachableNextStep(
+      'Board snapshot failed — '+d.error+(snapshotFails>2?' (still failing; check TICKETS_DIR and board files)':''),
+      'tickets ui --json'));
+    d.counts=d.counts||{total:0,done:0};
+  }else snapshotFails=0;
+  document.getElementById('title').textContent=d.project||'Atman';
+  const counts=d.counts||{total:0,done:0};
   document.getElementById('chips').innerHTML=
     '<span class="chip master"><b>master</b> '+esc(d.master||'nobody')+'</span>'+
     '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
-    '<span class="chip"><b>'+esc(d.counts.done)+'</b>/'+esc(d.counts.total)+' done</span>';
+    '<span class="chip"><b>'+esc(counts.done)+'</b>/'+esc(counts.total)+' done</span>';
   const s=d.sprint;
   document.getElementById('sprint').innerHTML=s
     ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
@@ -6538,6 +6619,9 @@ async function load(){
   fillCol('ready',ready,ready.map(t=>card(t)).join(''));
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
   fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
+  renderEmptyBoard(d);
+  if(!d.error)renderNextStep(d.next_step);
+  renderOnboarding(d.onboarding);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
@@ -6546,14 +6630,107 @@ async function load(){
     return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
       '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
-      '<div class="stats"><div><b>'+esc(a.done)+'</b>done 24h</div><div><b>'+h(a.seen_h)+'</b>last seen</div><div><b>'+Math.round(u.util_pct||0)+'%</b>util</div></div></article>';
+      '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — a proxy for productive turns">Turns</span></div>'+
+      '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
+      '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div></article>';
   }).join('')||'<div class="empty">no agents checked in</div>';
   const thread=(d.messages||[]).slice().reverse();
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtLocal(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
     ||'<div class="empty">no messages yet</div>';
 }
+function renderOnboarding(ob){
+  // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
+  const steps=[
+    ['initialized','Board ready','tickets quickstart --agent <you>'],
+    ['first_ticket','Work on the board','tickets quickstart'],
+    ['first_agent','You registered','tickets quickstart --agent <you>'],
+    ['first_review','First review submitted','tickets review <id> --notes "..."'],
+    ['first_merge','First merge','tickets done <id> --notes "..."'],
+    ['objective_set','Objective set','tickets objective "..."']
+  ];
+  const done=steps.filter(s=>ob&&ob[s[0]]).length;
+  document.getElementById('obProgress').textContent=done+'/'+steps.length;
+  document.getElementById('obSteps').innerHTML=steps.map(s=>{
+    const ok=ob&&ob[s[0]];
+    return '<span class="ob-step'+(ok?' done':'')+'"><i>'+(ok?'✓':'')+'</i><span>'+esc(s[1])+'</span><span class="mute mono">'+esc(s[2])+'</span></span>';
+  }).join('');
+}
+function renderNextStep(ns){
+  const el=document.getElementById('nextStep');
+  if(!ns||!ns.message){el.hidden=true;el.className='next-step';return}
+  el.hidden=false;
+  el.className='next-step'+(ns.kind==='unreachable'?' unreachable':'');
+  el.innerHTML='<span class="lbl">'+esc(ns.label||'Next')+'</span><span class="msg">'+esc(ns.message)+'</span>'+
+    (ns.cmd?'<span class="cmd">'+esc(ns.cmd)+'</span>':'');
+}
+function renderEmptyBoard(d){
+  const el=document.getElementById('emptyBoard');
+  const empty=d.empty_board||!(d.counts&&d.counts.total);
+  el.hidden=!empty;
+  if(!empty)return;
+  el.innerHTML='<p><b>Welcome to Atman.</b> This board coordinates a team of agents on shared work.</p>'+
+    '<p>Tickets are the unit of work — agents claim one at a time, post updates, and submit for review.</p>'+
+    '<p>The master merges finished work; dependencies keep agents from starting too early.</p>'+
+    '<p>Everyone reads the same board state — messages, tickets, and agents live here.</p>'+
+    '<p>New here? Seed a sample board and claim your first ticket in one command.</p>'+
+    '<div class="cta">tickets quickstart --agent &lt;you&gt; &nbsp;·&nbsp; tickets guide &nbsp;·&nbsp; README.md</div>';
+}
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
+
+
+def _onboarding_checklist(board, tickets):
+    """First-run checklist ticks for the UI.
+
+    Display labels/cmds in UI_HTML match T-322 quickstart + README
+    (opus-console/t322-quickstart); keys here are the board-state probes.
+    """
+    initialized = os.path.isfile(master_path(board)) or os.path.isfile(os.path.join(board, "roles.json"))
+    agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
+    workforce = load_workforce(board)
+    return {
+        "initialized": initialized,
+        "first_ticket": len(tickets) > 0,
+        "first_agent": bool(agents or workforce),
+        "first_review": any(t.get("status") in ("review", "done") for t in tickets),
+        "first_merge": any(t.get("status") == "done" for t in tickets),
+        "objective_set": bool((load_objective(board) or {}).get("text")),
+    }
+
+
+def _next_step_hint(board, tickets, done_ids):
+    """One-line guidance for the persistent next-step strip."""
+    if not tickets:
+        return {"kind": "start", "label": "Get started",
+                "message": "Board is empty — run quickstart to seed your first tickets.",
+                "cmd": "tickets quickstart --agent <you>"}
+    blocked = [t for t in tickets if t.get("status") == "blocked"]
+    if blocked:
+        t = blocked[0]
+        return {"kind": "unblock", "label": "Unblock",
+                "message": "%s is blocked — read why and clear the blocker." % t["id"],
+                "cmd": "tickets show %s" % t["id"]}
+    review = [t for t in tickets if t.get("status") == "review"]
+    if review:
+        return {"kind": "merge", "label": "Review queue",
+                "message": "%d ticket(s) waiting for master to merge." % len(review),
+                "cmd": "tickets done %s --notes \"...\"" % review[0]["id"]}
+    agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
+    workforce = load_workforce(board)
+    if not (agents or workforce):
+        return {"kind": "spawn", "label": "Spawn an agent",
+                "message": "No agents on the board yet — register one to claim work.",
+                "cmd": "tickets join <name> --roles backend"}
+    ready = [t for t in tickets if t.get("status") == "open"
+             and all(d in done_ids for d in t.get("deps", []))]
+    unowned = [t for t in ready if not t.get("owner")]
+    if unowned:
+        return {"kind": "route", "label": "Route work",
+                "message": "Ready tickets are unowned — claim or assign them.",
+                "cmd": "tickets next"}
+    return {"kind": "ok", "label": "On track",
+            "message": "Workers are moving — post updates every 45 minutes.",
+            "cmd": "tickets update <id> \"...\""}
 
 
 def board_snapshot(board, messages=40):
@@ -6619,6 +6796,9 @@ def board_snapshot(board, messages=40):
         "messages": [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                       "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or []}
                      for x in load_messages(board)[-messages:]][::-1],
+        "onboarding": _onboarding_checklist(board, tickets),
+        "next_step": _next_step_hint(board, tickets, done),
+        "empty_board": counts["total"] == 0,
     }
 
 
@@ -6635,7 +6815,13 @@ def cmd_ui(a, board):
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.startswith("/board.json"):
-                body = json.dumps(_safe(lambda: board_snapshot(board), {"error": "snapshot failed"})).encode()
+                body = json.dumps(_safe(lambda: board_snapshot(board), {
+                    "error": "snapshot failed",
+                    "counts": {"total": 0, "done": 0},
+                    "next_step": {"kind": "unreachable", "label": "Snapshot failed",
+                                  "message": "Could not read the board — check TICKETS_DIR and board files.",
+                                  "cmd": "tickets ui --json"},
+                })).encode()
                 ctype = "application/json"
             else:
                 body = UI_HTML.encode()
