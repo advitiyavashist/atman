@@ -109,7 +109,7 @@ def test_subagent_stop_note_and_no_notification_fixture_exists(enrollment: Enrol
 
 
 def test_no_operator_paths_or_real_identifiers_leaked():
-    banned = ("kavana", "/Users/", "/private/tmp")
+    banned = ("/Users/", "/private/tmp")
     for path in FIXTURE_FILES:
         text = path.read_text()
         for needle in banned:

@@ -77,9 +77,9 @@ free-text argument, be actively misled.
 linked worktree of a repo shares one board. That is the right default.
 
 But it breaks when the board is not inside the repo you are working in. An agent
-editing `~/source/...` from `~/worktrees/foo` while the board lives at
-`~/mep-week/.tickets` gets a bare "no board" from `tickets review`, because the
-CLI resolved to `~/source` and looked there.
+editing `/src/...` from a linked worktree while the board lives at
+`/boards/project/.tickets` gets a bare "no board" from `tickets review`, because
+the CLI resolved to the main worktree and looked there.
 
     # from a worktree whose board lives elsewhere
     TICKETS_DIR=/path/to/board/.tickets tickets review T-0NN

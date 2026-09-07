@@ -6,3 +6,20 @@ dist/
 node_modules/
 ui/dist/
 *.tsbuildinfo
+
+# Secrets and local credentials — never commit real values
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+modal.toml
+credentials.json
+*-credentials.json
+*service-account*.json
+.secrets/
+secrets/
+operator-session.json
+enrollment.json

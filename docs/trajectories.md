@@ -111,7 +111,7 @@ disagreement is a finding, not noise.
 ```sh
 tickets trajectories                       # last 200 events
 tickets trajectories --ticket T-213 --summary
-tickets trajectories --agent opus-backend-2 --kind run_end --since 2026-09-01
+tickets trajectories --agent alice --kind run_end --since 2026-09-01
 tickets trajectories --json --limit 0      # everything, machine-readable
 tickets trajectories export --out /tmp/traj.jsonl   # same filters apply
 ```

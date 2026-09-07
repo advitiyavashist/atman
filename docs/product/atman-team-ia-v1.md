@@ -1,25 +1,21 @@
 # Atman TEAM IA v1
 
-Status: **lock for V1.** Surface is a TEAM view, not a DAG editor. UI implementation is T-345 (`UI_HTML`); this doc does not change that file.
+Surface is a TEAM view, not a DAG editor.
 
-Atman **is** a runtime for teams of agents you already bring. One-liner: *Bring the agents you already use. We make them one team.*
-
-**PMM lock (keep)**
+Atman is a runtime for teams of agents you already bring. One-liner: *Bring the agents you already use. We make them one team.*
 
 | | |
 |---|---|
 | **IS** | Runtime for teams of agents you already bring. Feels like TEAM: objective → allocate → concurrent → handoffs → review → replan. North star = task completion in fewest turns. BYOA = bring-your-own-agent *harness*, not install our model. |
 | **NOT** | Multi-agent framework. Shared-memory product. One API for Claude/Codex. Model router alone. DAG toy. |
-| **Contrast** | Atman = who works / how the team finishes. Steer = what the agent may see/say. |
 | **Language** | teammates, lanes, next step, handoff — not nodes / edges / SDK. |
-| **Steer (keep separate)** | "Runtime policy checks for AI agents." Advisory allow / block / escalate + evidence. DLP = GTM wedge. Cite only GO-WITH-DEBT / ACCEPT-with-limits — never mix into Atman claims. Do not rebrand Steer. |
-| **Don't** | Promise learned router / shadow optimizer as V1 brand (T-313 / T-315 = NICE). No compliance / shield / enforce chrome. Don't collapse Atman into tickets-CLI marketing — product is the team runtime; CLI is how it runs today. |
+| **Don't** | Promise a learned router or shadow optimizer as V1 brand. No compliance / shield / enforce chrome. Don't collapse Atman into tickets-CLI marketing — the product is the team runtime; the CLI is how it runs today. |
 
-Steer **Path B decided** (CEO): SteerMD / `steermd.com`. PMM's "HOLD T-138 / don't lock domain" is **superseded** — T-138 is not an open HOLD (registration residual only). Do not reopen A/B/C. Dual-track: Steer launch is P0 parallel with Atman. Soft-hold T-341 landing hero **this Atman direction turn only** — not "Steer waits forever."
+Atman can sit next to a separate policy product. Keep the jobs distinct: Atman is who works and how the team finishes. Do not mix policy-enforcement claims into Atman.
 
-Total Football: seats cover lanes; identity is fluid.
+Roles are fluid: seats cover lanes; identity is not a permanent persona.
 
-Related: [brand direction v1](../brand/atman-brand-direction-v1.md) (T-346). Tickets: T-345, T-276, T-323, T-346, T-347, T-348.
+Related: [brand direction v1](../brand/atman-brand-direction-v1.md).
 
 ---
 
@@ -39,9 +35,7 @@ Seats / cards, not a workforce table-as-identity.
 
 Each seat shows: status, quota / limit, utilization (real numbers only), lane / coverage.
 
-Empty seats = **uncovered work**. That is the point of the view. Roles flex (Total Football); do not pin a seat to a permanent persona.
-
-T-276's agents pane is the seed. Rename and reframe to Team in T-345.
+Empty seats = **uncovered work**. That is the point of the view. Roles flex; do not pin a seat to a permanent persona.
 
 ### 3. Work
 
@@ -49,7 +43,7 @@ Kanban: **Blocked | Ready | In flight | Review**.
 
 Language: teammates, lanes, next step, handoff — not nodes / edges / SDK. This is the work surface, not a dependency-graph editor. Deps may appear as waiting-on chips on a card. Operators do not draw nodes or edges.
 
-T-276 already ships this four-column board. Keep it. Do not replace it with a DAG.
+Keep the four-column board. Do not replace it with a DAG.
 
 ### 4. Intervene
 
@@ -72,9 +66,9 @@ Confirm destructive actions. **No silent auto-promote.** Where the product is ad
 | Surface | Notes |
 |---|---|
 | Messages | Thread from `board_snapshot.messages`. Keep; do not make it the home. |
-| Turns / efficiency | After T-312. Fewest-turns objective; no fake telemetry wall. |
-| Onboarding | Empty / next / checklist from T-323. First-run path, not a fifth primary pane. |
-| Pitch / formation | If T-276 still has a formation / pitch reading, it is a view of Team, not a separate product. |
+| Turns / efficiency | Fewest-turns objective; no fake telemetry wall. |
+| Onboarding | Empty / next / checklist. First-run path, not a fifth primary pane. |
+| Pitch / formation | A view of Team, not a separate product. |
 
 ---
 
@@ -88,17 +82,3 @@ Confirm destructive actions. **No silent auto-promote.** Where the product is ad
 6. One merge
 
 If a step needs a write the UI does not have yet, stop and show the honesty strip. Do not fake the click.
-
----
-
-## Ownership
-
-| Lane | Owns | Tickets |
-|---|---|---|
-| brand | Direction, mark, tokens | T-346 (this family), T-347 (SVG after CEO ACCEPT) |
-| ui | Panes in `UI_HTML` | T-345, after T-276 / T-323 |
-| pm | Copy and journey | T-336 |
-
-T-348 is this IA lock. T-345 implements it. T-347 does not start until brand shortlist ACCEPT.
-
-**Steer (do not reopen):** Path B decided — SteerMD / `steermd.com`. T-138 is not an open HOLD (Advitiya registration residual only). T-341 hero copy is soft-held **this turn only**; Steer launch stays P0 parallel. No Atman URL decision in this doc.

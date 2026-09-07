@@ -103,11 +103,11 @@ def _clean_git_env(environ=None):
     agent the watcher launches, which is why the wrong repo tracked "whichever
     worktree was most recently active globally" rather than any one agent.
 
-    Scope, deliberately narrow (T-259 defect 3 / cos-opus's ruling): only the
+    Scope, deliberately narrow: only the
     location family is removed. GIT_AUTHOR_*/GIT_COMMITTER_* must survive --
-    this env is also handed to `cmd_watch`/`cmd_spawn` as the FLEET-LAUNCH
+    this env is also handed to `cmd_watch`/`cmd_spawn` as the launch
     environment, and stripping identity there is the same class of attribution
-    loss as T-238. GIT_SSH_COMMAND/GIT_ASKPASS/GIT_TERMINAL_PROMPT likewise
+    loss. GIT_SSH_COMMAND/GIT_ASKPASS/GIT_TERMINAL_PROMPT likewise
     survive so credential helpers keep working. None of those can redirect
     which repository git resolves, so none of them is this bug's mechanism.
 
@@ -201,7 +201,7 @@ def _init_cwd_worktree_root(start=None):
     (T-263/T-282).  It made init's "where am I about to write" answer
     identical BY CONSTRUCTION to the ambient "where will this resolve later"
     answer, so the refuse-on-disagreement check could never fire inside a
-    linked worktree -- the only configuration this fleet actually runs in.
+    linked worktree -- a common configuration for parallel agents.
     A guard whose two operands come out of the same resolver is not a guard.
 
     So this function shares no code path with _repo_root().  The filesystem
@@ -297,13 +297,11 @@ def _init_refusal(target, ambient):
 
 
 def _refuse_board_outside_pytest_tmp(path):
-    """T-256: a test suite created a real ticket on the LIVE steer board.
-    Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and every
-    real agent session exports TICKETS_DIR pointing at its live board so
-    plain `tickets ...` just works; a subprocess a test forgets to sandbox
-    (test_wakeup.py's shell=True call for the injection regression, e.g.)
-    inherits that ambient value straight through. pytest sets
-    PYTEST_CURRENT_TEST for the life of every test, and pytest's own
+    """Refuse a board path that escapes the pytest temp dir.
+
+    Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and a
+    subprocess a test forgets to sandbox inherits that ambient value. pytest
+    sets PYTEST_CURRENT_TEST for the life of every test, and pytest's own
     tmp_path/tmpdir fixtures always live under the system temp dir, so that
     combination is a reliable signal a board resolution is about to escape
     its sandbox. Fail loud instead of writing -- a silently-wrong resolution
@@ -807,11 +805,10 @@ def git_state(cwd=None):
 def artifact_tree(a):
     """Resolve `--artifact` to a real git working tree, or None meaning "use cwd".
 
-    T-272. `tickets review` used to derive branch, sha and repo from whatever
-    directory the agent ran it in. On this board that is systematically the
-    wrong tree: every E-010 agent drives the CLI from its steer worktree while
-    the deliverable lives in a different clone entirely, so the pin named a
-    repo that never built the work.
+    `tickets review` used to derive branch, sha and repo from whatever
+    directory the agent ran it in. That is systematically the wrong tree when
+    the CLI is driven from a different clone than the deliverable, so the pin
+    named a repo that never built the work.
 
     The agent supplies a LOCATION, not an assertion. Everything recorded is
     still derived by running git inside that tree, so a pin no real tree can
@@ -2506,9 +2503,9 @@ def _watch_log_state(board, owner):
     # log slices -- watch.log holds the CLI's human-readable stderr, never a
     # transcript's per-turn telemetry, which is what made the old raw scan
     # useless. Run duration is corroboration reported in the detail, NOT a
-    # gate: gpt-cursor sat hard-limited until October with 37 failures in a
-    # row, and gating on speed dropped it the moment one of those failures
-    # happened to take 97 seconds instead of 7.
+    # gate: a hard-limited agent can fail many times in a row, and gating on
+    # speed dropped it the moment one of those failures happened to take
+    # longer than the usual few seconds.
     streak = []
     for r in reversed(runs):
         if r["exit_at"] is None or r["rc"] in ("0", None):
@@ -2561,9 +2558,9 @@ def _cwd_sharers(board, owner, cwd, peers=None):
 
     A Claude transcript is keyed by directory and carries no agent name, so if
     two agents' records point at one directory the transcript cannot say whose
-    activity it is. That is not hypothetical: three records on this board
-    (claude-fable, cursor, cursor-2) point at one worktree, and reading the
-    transcript naively reports all three as working when at most one is.
+    activity it is. That is not hypothetical: several records can point at
+    one worktree, and reading the transcript naively reports all of them as
+    working when at most one is.
     """
     if not cwd:
         return []
@@ -2614,9 +2611,9 @@ def agent_liveness(board, rec, peers=None):
     run = _read_run(board, owner)
     # Where does this agent's session actually live? The agent RECORD's cwd is
     # whatever directory the last `tickets` command was typed in, and for this
-    # epic that is routinely a second repo -- every E-010 agent runs `tickets
-    # review` from advitiyavashist/tickets while its session runs in a steer
-    # worktree. The WATCHER's cwd, recorded in the run file, is the session's
+    # epic that is routinely a second repo -- `tickets review` may run in the
+    # deliverable clone while the session lives in another worktree. The
+    # WATCHER's cwd, recorded in the run file, is the session's
     # own directory and does not move when a command is run elsewhere, so it
     # is tried first. Both are kept: an agent running by hand has no run file.
     cwds = _dedup([run.get("cwd") or "",
@@ -2631,8 +2628,8 @@ def agent_liveness(board, rec, peers=None):
 
     # 1. A human asserting a state always wins: `tickets limit` is a person
     #    saying "I read the log". Keep it, but it is no longer the ONLY path
-    #    to a limited render -- that is how gpt-cursor sat on this board for a
-    #    day looking healthy while hard-limited until October.
+    #    to a limited render -- that is how an agent can look healthy while
+    #    hard-limited for a long window.
     lim = (rec or {}).get("limit")
     if lim:
         out.update(state="limited", source="manual", heuristic=False,
@@ -3650,11 +3647,11 @@ def is_fixture_board(board):
 
 
 def cmd_clear(a, board):
-    """Delete ticket files — FIXTURE BOARDS ONLY (incident 2026-09-06)."""
+    """Delete ticket files — FIXTURE BOARDS ONLY."""
     if not is_fixture_board(board):
         sys.exit(
             "REFUSED: tickets clear will not wipe a live board (missing .fixture-board).\n"
-            "Incident 2026-09-06: clear deleted all T-*.json on the Steer board.\n"
+            "This command only deletes tickets on disposable fixture boards.\n"
             "Use a disposable fixture board for tests, or:\n"
             "  tickets board-backup --out /tmp/board.tgz\n"
             "  tickets board-restore --archive /tmp/board.tgz --dest /tmp/fixture\n"
@@ -4998,7 +4995,7 @@ def cmd_objective(a, board):
 
 def cmd_drive(a, board):
     """Set the objective and spawn the master seat with a heartbeat, in one go:
-    `tickets drive "<objective>" --as claude-fable --tool cursor+claude --heartbeat 30`."""
+    `tickets drive "<objective>" --as boss --tool cursor+claude --heartbeat 30`."""
     owner = whoami(a.by)
     if a.text:
         ns = argparse.Namespace(text=a.text, done=None, by=owner)

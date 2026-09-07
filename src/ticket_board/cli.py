@@ -104,7 +104,7 @@ def _init_cwd_worktree_root(start=None):
     (T-263/T-282).  It made init's "where am I about to write" answer
     identical BY CONSTRUCTION to the ambient "where will this resolve later"
     answer, so the refuse-on-disagreement check could never fire inside a
-    linked worktree -- the only configuration this fleet actually runs in.
+    linked worktree -- a common configuration for parallel agents.
     A guard whose two operands come out of the same resolver is not a guard.
 
     So this function shares no code path with _repo_root().  The filesystem
@@ -200,13 +200,11 @@ def _init_refusal(target, ambient):
 
 
 def _refuse_board_outside_pytest_tmp(path):
-    """T-256: a test suite created a real ticket on the LIVE steer board.
-    Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and every
-    real agent session exports TICKETS_DIR pointing at its live board so
-    plain `tickets ...` just works; a subprocess a test forgets to sandbox
-    (test_wakeup.py's shell=True call for the injection regression, e.g.)
-    inherits that ambient value straight through. pytest sets
-    PYTEST_CURRENT_TEST for the life of every test, and pytest's own
+    """Refuse a board path that escapes the pytest temp dir.
+
+    Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and a
+    subprocess a test forgets to sandbox inherits that ambient value. pytest
+    sets PYTEST_CURRENT_TEST for the life of every test, and pytest's own
     tmp_path/tmpdir fixtures always live under the system temp dir, so that
     combination is a reliable signal a board resolution is about to escape
     its sandbox. Fail loud instead of writing -- a silently-wrong resolution
@@ -2439,11 +2437,11 @@ def is_fixture_board(board):
 
 
 def cmd_clear(a, board):
-    """Delete ticket files — FIXTURE BOARDS ONLY (incident 2026-09-06)."""
+    """Delete ticket files — FIXTURE BOARDS ONLY."""
     if not is_fixture_board(board):
         sys.exit(
             "REFUSED: tickets clear will not wipe a live board (missing .fixture-board).\n"
-            "Incident 2026-09-06: clear deleted all T-*.json on the Steer board.\n"
+            "This command only deletes tickets on disposable fixture boards.\n"
             "Use a disposable fixture board for tests, or:\n"
             "  tickets board-backup --out /tmp/board.tgz\n"
             "  tickets board-restore --archive /tmp/board.tgz --dest /tmp/fixture\n"
