@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS master_lease (
 );
 
 CREATE TABLE IF NOT EXISTS hook_events (
-    event_id    TEXT PRIMARY KEY,
+    event_id    TEXT NOT NULL,
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     agent_id    TEXT NOT NULL,
     session_id  TEXT NOT NULL,
@@ -183,7 +183,8 @@ CREATE TABLE IF NOT EXISTS hook_events (
                 CHECK (kind IN ('session_start', 'user_prompt_submit', 'stop', 'probe')),
     occurred_at TEXT NOT NULL,
     cwd         TEXT,
-    note        TEXT
+    note        TEXT,
+    PRIMARY KEY (project_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_hook_events_agent ON hook_events(agent_id, occurred_at);
 

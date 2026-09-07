@@ -228,9 +228,56 @@ def _refuse_board_outside_pytest_tmp(path):
     )
 
 
+def _cwd_belongs_to_board(board_path):
+    """True when cwd is this board's checkout (in-tree dir or linked worktree).
+
+    T-409 / zed class: a cwd with no board of its own must not silently write
+    a live board discovered as a unique child (Downloads -> project) or via
+    any other unbound resolution. Out-of-tree `git worktree add` still belongs
+    because `_repo_root()` is the main checkout that owns the board (T-243).
+    """
+    board = os.path.realpath(board_path)
+    board_root = os.path.dirname(board)
+    cwd = os.path.realpath(os.getcwd())
+    if cwd == board_root or cwd.startswith(board_root + os.sep):
+        return True
+    root = _repo_root()
+    if root and os.path.realpath(root) == board_root:
+        return True
+    here = _init_cwd_worktree_root()
+    if here and os.path.realpath(os.path.join(here, ".tickets")) == board:
+        return True
+    return False
+
+
+def _refuse_unbound_live_board(path):
+    """Refuse a live board cwd does not belong to, unless TICKETS_DIR binds it.
+
+    T-409: a mktemp / parent-folder cwd with no explicit TICKETS_DIR resolved
+    the shared live board (zed / T-331). Fail closed. An empty local
+    cwd/.tickets is not live, so init/join in a fresh dir still works.
+    """
+    if os.environ.get("TICKETS_DIR"):
+        return
+    if not _live_board(path):
+        return
+    if _cwd_belongs_to_board(path):
+        return
+    real = os.path.realpath(path)
+    sys.exit(
+        "REFUSING TO USE BOARD %r: cwd %r is not inside a board checkout "
+        "and TICKETS_DIR is unset. Binding a live board from an unbound "
+        "directory is the zed/T-331 class (a sandbox writing the shared "
+        "board). Export TICKETS_DIR to the board you mean, or run from "
+        "that project's checkout."
+        % (real, os.path.realpath(os.getcwd()))
+    )
+
+
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
     _refuse_board_outside_pytest_tmp(result)
+    _refuse_unbound_live_board(result)
     return result
 
 
@@ -595,6 +642,44 @@ def checkin(board, owner, ticket=None, note=""):
     return rec
 
 
+def _clear_agent_ticket(board, agent, tid):
+    """T-437: drop a stale ticket= bind on a previous owner's agent record."""
+    if not agent or not tid:
+        return
+    path = os.path.join(agents_dir(board), agent + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        return
+    if not isinstance(rec, dict) or rec.get("ticket") != tid:
+        return
+    rec["ticket"] = ""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _bind_agent_ticket(board, agent, tid):
+    if not agent or not tid:
+        return
+    path = os.path.join(agents_dir(board), agent + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (IOError, ValueError):
+        rec = None
+    if isinstance(rec, dict):
+        rec["ticket"] = tid
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+        os.replace(tmp, path)
+        return
+    checkin(board, agent, tid)
+
+
 def _current_ticket(board, owner):
     for t in load_all(board):
         if t["status"] == "claimed" and t.get("owner") == owner:
@@ -687,6 +772,7 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
     t["claimed_at"] = now()
@@ -697,6 +783,8 @@ def try_claim(board, tid, owner):
     # silently produces no trajectory.
     traj_event(board, "claim", agent=owner, ticket=got,
                state_before="open", state_after="claimed", **_traj_git())
+    if prev_owner and prev_owner != owner:
+        _clear_agent_ticket(board, prev_owner, tid)
     return got
 
 
@@ -1998,15 +2086,21 @@ def cmd_assign(a, board):
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
     if a.owner is not None:
         # hard assignment by the master: takes the lock on their behalf
+        prev_owner = t.get("owner") or ""
         if t["status"] == "open" and a.owner:
             got = try_claim(board, t["id"], a.owner)
             if not got:
                 sys.exit("%s was claimed by someone else while assigning" % t["id"])
             t = got
             changed.append("claimed for %s" % a.owner)
-        elif t["status"] == "claimed":
+            _bind_agent_ticket(board, a.owner, t["id"])
+        elif t["status"] in ("claimed", "review"):
             t["owner"] = a.owner
             changed.append("owner=%s" % a.owner)
+            if prev_owner and prev_owner != a.owner:
+                _clear_agent_ticket(board, prev_owner, t["id"])
+            if a.owner:
+                _bind_agent_ticket(board, a.owner, t["id"])
     if not changed:
         sys.exit("nothing to change; see tickets assign --help")
     t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
@@ -2776,7 +2870,8 @@ def _traj_line(e):
     bits.append("%-7s" % (e.get("ticket") or "-"))
     extra = []
     for k in ("run_no", "exit", "duration_s", "turns", "tokens_in", "tokens_out",
-              "cost_usd", "outcome", "state_before", "state_after", "trigger",
+              "tokens_cache_read", "tokens_cache_write", "cost_usd", "cost_source",
+              "usage_error", "outcome", "state_before", "state_after", "trigger",
               "notes_len", "text_len", "to", "pin", "merged_as", "active_hours",
               "wait_hours", "harness", "harness_cmd", "model", "effort",
               "timed_out", "src"):
@@ -2859,12 +2954,19 @@ def cmd_trajectories(a, board):
                                    " (showing the last %d)" % limit if limit and len(sel) > limit else ""))
     if getattr(a, "summary", False):
         print("")
-        print("%-8s %5s %8s %5s %5s %8s  %s" % (
-            "ticket", "runs", "turns", "upd", "msgs", "reopens", "agents / outcome"))
+        # cost is appended, never inserted: the existing columns are a
+        # positional contract that tests and operators already read.
+        print("%-8s %5s %8s %5s %5s %8s %10s  %s" % (
+            "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
+            "agents / outcome"))
         for tid, s in sorted(_traj_summary(sel).items()):
-            print("%-8s %5d %8s %5d %5d %8d  %s %s" % (
+            # '-' is not $0.00: no harness on this board reports a cost unless
+            # the operator asked for a JSON output format, and a zero would
+            # read as a free ticket (T-396 null-not-zero).
+            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
                 tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
-                s["reopens"], ",".join(sorted(s["agents"])) or "-",
+                s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",
                 ("-> " + s["outcome"]) if s["outcome"] else ""))
         print("")
         print("runs = watch runs that reached run_end (the board's own turn count).  "

@@ -325,9 +325,56 @@ def _refuse_board_outside_pytest_tmp(path):
     )
 
 
+def _cwd_belongs_to_board(board_path):
+    """True when cwd is this board's checkout (in-tree dir or linked worktree).
+
+    T-409 / zed class: a cwd with no board of its own must not silently write
+    a live board discovered as a unique child (Downloads -> project) or via
+    any other unbound resolution. Out-of-tree `git worktree add` still belongs
+    because `_repo_root()` is the main checkout that owns the board (T-243).
+    """
+    board = os.path.realpath(board_path)
+    board_root = os.path.dirname(board)
+    cwd = os.path.realpath(os.getcwd())
+    if cwd == board_root or cwd.startswith(board_root + os.sep):
+        return True
+    root = _repo_root()
+    if root and os.path.realpath(root) == board_root:
+        return True
+    here = _init_cwd_worktree_root()
+    if here and os.path.realpath(os.path.join(here, ".tickets")) == board:
+        return True
+    return False
+
+
+def _refuse_unbound_live_board(path):
+    """Refuse a live board cwd does not belong to, unless TICKETS_DIR binds it.
+
+    T-409: a mktemp / parent-folder cwd with no explicit TICKETS_DIR resolved
+    the shared live board (zed / T-331). Fail closed. An empty local
+    cwd/.tickets is not live, so init/join in a fresh dir still works.
+    """
+    if os.environ.get("TICKETS_DIR"):
+        return
+    if not _live_board(path):
+        return
+    if _cwd_belongs_to_board(path):
+        return
+    real = os.path.realpath(path)
+    sys.exit(
+        "REFUSING TO USE BOARD %r: cwd %r is not inside a board checkout "
+        "and TICKETS_DIR is unset. Binding a live board from an unbound "
+        "directory is the zed/T-331 class (a sandbox writing the shared "
+        "board). Export TICKETS_DIR to the board you mean, or run from "
+        "that project's checkout."
+        % (real, os.path.realpath(os.getcwd()))
+    )
+
+
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
     _refuse_board_outside_pytest_tmp(result)
+    _refuse_unbound_live_board(result)
     return result
 
 
@@ -924,6 +971,36 @@ def _agent_update(board, owner, mutate):
     return rec
 
 
+def _clear_agent_ticket(board, agent, tid):
+    """T-437: drop a stale ticket= bind on a previous owner's agent record.
+
+    Keeps cwd/branch/sha. Abort (no write) if the record is missing or names
+    a different ticket.
+    """
+    if not agent or not tid:
+        return
+
+    def mutate(rec):
+        if rec.get("ticket") != tid:
+            return False
+        rec["ticket"] = ""
+
+    _agent_update(board, agent, mutate)
+
+
+def _bind_agent_ticket(board, agent, tid):
+    """Set ticket= on the new owner's existing record without clobbering cwd."""
+    if not agent or not tid:
+        return
+    rec = _agent_rec(board, agent)
+    if rec:
+        def mutate(r):
+            r["ticket"] = tid
+        _agent_update(board, agent, mutate)
+    else:
+        checkin(board, agent, tid)
+
+
 def checkin(board, owner, ticket=None, note=""):
     """Record where this agent is working: cwd, worktree root, branch, sha."""
     _state, _mismatch = _git_state_raw()
@@ -1037,6 +1114,7 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
     t["claimed_at"] = now()
@@ -1048,6 +1126,8 @@ def try_claim(board, tid, owner):
     _safe(lambda: traj_event(board, "claim", agent=owner, ticket=got,
                              state_before="open", state_after="claimed",
                              **_traj_git()), None)
+    if prev_owner and prev_owner != owner:
+        _safe(lambda: _clear_agent_ticket(board, prev_owner, tid), None)
     return got
 
 
@@ -3192,15 +3272,21 @@ def cmd_assign(a, board):
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
     if a.owner is not None:
         # hard assignment by the master: takes the lock on their behalf
+        prev_owner = t.get("owner") or ""
         if t["status"] == "open" and a.owner:
             got = try_claim(board, t["id"], a.owner)
             if not got:
                 sys.exit("%s was claimed by someone else while assigning" % t["id"])
             t = got
             changed.append("claimed for %s" % a.owner)
-        elif t["status"] == "claimed":
+            _safe(lambda: _bind_agent_ticket(board, a.owner, t["id"]), None)
+        elif t["status"] in ("claimed", "review"):
             t["owner"] = a.owner
             changed.append("owner=%s" % a.owner)
+            if prev_owner and prev_owner != a.owner:
+                _safe(lambda: _clear_agent_ticket(board, prev_owner, t["id"]), None)
+            if a.owner:
+                _safe(lambda: _bind_agent_ticket(board, a.owner, t["id"]), None)
     if not changed:
         sys.exit("nothing to change; see tickets assign --help")
     note_text = "assign: " + ", ".join(changed)
@@ -4009,7 +4095,29 @@ def traj_event(board, kind, agent="", ticket=None, **fields):
         if v == "" or v == [] or v == {}:
             continue
         rec[k] = v
+    # T-425: stamp the watch run so writes attribute to THAT run_id, not a
+    # time window. Omitted when the process is not inside a watch child.
+    if "run_id" not in rec:
+        rid = (os.environ.get("TICKETS_RUN_ID") or "").strip()
+        if rid:
+            rec["run_id"] = rid
     return traj_write(board, rec)
+
+
+_BOUND_WRITE_KINDS = ("claim", "update", "review", "done", "block", "reopen")
+
+
+def _run_had_bound_write(board, run_id, ticket):
+    """True when THIS run_id wrote a bound-ticket event (no idle: grep)."""
+    if not run_id or not ticket:
+        return False
+    for e in _safe(lambda: load_trajectories(board), []) or []:
+        if e.get("run_id") != run_id or e.get("ticket") != ticket:
+            continue
+        kind = e.get("kind")
+        if kind in _BOUND_WRITE_KINDS or kind == "msg":
+            return True
+    return False
 
 
 def _traj_git(cwd=None):
@@ -4055,61 +4163,393 @@ def load_trajectories(board, include_archives=True):
 
 # ---- harness usage: parse it when the harness reports it, never estimate --
 
+class HarnessUsageError(Exception):
+    """The harness reported usage that could not be read.
+
+    Deliberately NOT the same outcome as "reported nothing". An absent count
+    means UNMEASURED, which the cost-learning layer is entitled to treat as
+    unknown; but a parser that silently swallowed a malformed blob would file
+    a real, billed run as unmeasured forever, and nothing downstream could
+    tell that from a genuinely quiet harness. T-396 keeps the two apart:
+    reported nothing -> {}, reported something unreadable -> this.
+    """
+
+
+def _num(v):
+    """A JSON number that is not a bool.
+
+    `True` is an `int` in Python, so without this a `"input_tokens": true`
+    would land in the trajectory log as a token count of 1.
+    """
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+# claude's names for the four counts -> the board's landed field names. The
+# board's names are the ones T-311 shipped and the dashboard and the T-372
+# promise surfaces already read; they are not renamed here (T-396 note).
+CLAUDE_USAGE_FIELDS = (("input_tokens", "tokens_in"),
+                       ("output_tokens", "tokens_out"),
+                       ("cache_read_input_tokens", "tokens_cache_read"),
+                       ("cache_creation_input_tokens", "tokens_cache_write"))
+
+# codex's names for the same four counts, in `exec --json` and in its rollout
+# files. Same meanings, different spellings -- the mapping is the whole reason
+# a second parser exists.
+CODEX_USAGE_FIELDS = (("input_tokens", "tokens_in"),
+                      ("output_tokens", "tokens_out"),
+                      ("cached_input_tokens", "tokens_cache_read"),
+                      ("cache_write_input_tokens", "tokens_cache_write"))
+
+
+def _usage_from_claude_result(rec):
+    """The final result object of `claude -p --output-format json`.
+
+    This is the only source on the board that carries a cost the harness
+    itself computed, so it is the only one that sets cost_source='harness'.
+    """
+    if "usage" not in rec and "total_cost_usd" not in rec:
+        return None
+    usage = rec.get("usage")
+    # Checked BEFORE the "is this even a usage record" shortcut: a record that
+    # carries a `usage` key at all IS reporting usage, so an unreadable one is
+    # an error even when no cost accompanies it. Testing for a dict first let
+    # exactly that case fall through as "reported nothing".
+    if "usage" in rec and not isinstance(usage, dict):
+        raise HarnessUsageError(
+            "claude result 'usage' is %s, not an object" % type(usage).__name__)
+    usage = usage if isinstance(usage, dict) else {}
+    out = {}
+    for src, dst in CLAUDE_USAGE_FIELDS:
+        if src in usage:
+            n = _num(usage[src])
+            if n is None:
+                raise HarnessUsageError(
+                    "claude usage.%s is not a number: %r" % (src, usage[src]))
+            out[dst] = int(n)
+    if "total_cost_usd" in rec:
+        n = _num(rec["total_cost_usd"])
+        if n is None:
+            raise HarnessUsageError(
+                "claude total_cost_usd is not a number: %r" % rec["total_cost_usd"])
+        out["cost_usd"] = n
+        out["cost_source"] = "harness"
+    for src, dst in (("num_turns", "turns"), ("duration_ms", "harness_duration_ms")):
+        if src in rec:
+            n = _num(rec[src])
+            if n is None:
+                raise HarnessUsageError("claude %s is not a number: %r" % (src, rec[src]))
+            out[dst] = int(n)
+    return out or None
+
+
+def _codex_total_usage(info):
+    """`total_token_usage` off one codex token_count event.
+
+    It is CUMULATIVE for the session, so callers take the last one seen and
+    never sum: summing a cumulative counter multiplies the bill.
+    """
+    if not isinstance(info, dict):
+        raise HarnessUsageError(
+            "codex token_count info is %s, not an object" % type(info).__name__)
+    tot = info.get("total_token_usage")
+    if not isinstance(tot, dict):
+        raise HarnessUsageError("codex token_count carries no total_token_usage object")
+    out = {}
+    for src, dst in CODEX_USAGE_FIELDS:
+        if src in tot:
+            n = _num(tot[src])
+            if n is None:
+                raise HarnessUsageError(
+                    "codex total_token_usage.%s is not a number: %r" % (src, tot[src]))
+            out[dst] = int(n)
+    # No cost field: codex reports tokens only. The ticket forbids inventing a
+    # price table, and a made-up cost is worse than an absent one because
+    # nothing downstream could tell it from a measured one.
+    return out or None
+
+
+def _usage_from_codex_event(rec):
+    """One line of `codex exec --json`, or one line of a rollout file."""
+    p = rec.get("payload") if isinstance(rec.get("payload"), dict) else rec
+    if not isinstance(p, dict) or p.get("type") != "token_count":
+        return None
+    if p.get("info") is None:
+        # A real event that carried no usage -- this is what every
+        # usage-limited codex run writes. Reported nothing, not unreadable.
+        return None
+    return _codex_total_usage(p["info"])
+
+
+def _json_candidates(text):
+    """Every JSON object a run's output might end with, newest first."""
+    blobs = []
+    stripped = (text or "").strip()
+    if not stripped:
+        return blobs
+    if stripped.startswith("{"):
+        blobs.append(stripped)
+    lines = stripped.splitlines()
+    for i in range(len(lines) - 1, max(-1, len(lines) - 400) - 1, -1):
+        ln = lines[i].strip()
+        if not ln.startswith("{"):
+            continue
+        # A complete object on its own line: this is the shape of every event
+        # in a `codex exec --json` stream, and of a compact claude result.
+        if ln.endswith("}"):
+            blobs.append(ln)
+        # A pretty-printed object runs to the end of the output, so the tail
+        # from this line is the candidate. Both are tried: a stream line at
+        # column 0 is complete on its own AND starts a (bad) tail, and only
+        # trying the tail would miss every codex event but the last.
+        if lines[i].startswith("{"):
+            blobs.append("\n".join(lines[i:]))
+    return blobs
+
+
 def parse_harness_usage(text):
     """Pull token/cost/turn counts out of a run's own stdout.
 
     `claude -p --output-format json` ends a run with one JSON object carrying
-    usage, total_cost_usd, num_turns and duration_ms. When the operator has
-    NOT asked for that format -- which is the default watch command -- there
-    is nothing to parse and this returns {}. It never estimates from output
-    length: a made-up token count is worse than no token count, because the
-    cost-learning layer this data feeds cannot tell the two apart.
+    usage, total_cost_usd, num_turns and duration_ms; `codex exec --json`
+    streams token_count events. When the operator has NOT asked for either
+    format -- which is the case for the default watch commands -- there is
+    nothing here to parse and this returns {}; `_session_store_usage` is the
+    fallback that reads the harness's own session store instead.
+
+    It never estimates from output length: a made-up token count is worse than
+    no token count, because the cost-learning layer this data feeds cannot
+    tell the two apart.
 
     Returns a dict with any of: tokens_in, tokens_out, tokens_cache_read,
-    tokens_cache_write, cost_usd, turns, harness_duration_ms.
+    tokens_cache_write, cost_usd, cost_source, turns, harness_duration_ms.
+    Raises HarnessUsageError if a blob IS a usage report but cannot be read.
     """
     if not text:
         return {}
-    blobs = []
-    stripped = text.strip()
-    if stripped.startswith("{"):
-        blobs.append(stripped)
-    # A JSON result may be pretty-printed across many lines, so also try the
-    # tail from each '{' that starts a line, newest first.
-    lines = stripped.splitlines()
-    for i in range(len(lines) - 1, max(-1, len(lines) - 400) - 1, -1):
-        ln = lines[i]
-        if ln.startswith("{"):
-            blobs.append("\n".join(lines[i:]))
-        elif ln.strip().startswith("{") and ln.strip().endswith("}"):
-            blobs.append(ln.strip())
-    for blob in blobs:
+    for blob in _json_candidates(text):
         try:
             rec = json.loads(blob)
         except ValueError:
             continue
         if not isinstance(rec, dict):
             continue
-        usage = rec.get("usage")
-        if not isinstance(usage, dict) and "total_cost_usd" not in rec:
-            continue
-        usage = usage if isinstance(usage, dict) else {}
-        out = {}
-        for src, dst in (("input_tokens", "tokens_in"),
-                         ("output_tokens", "tokens_out"),
-                         ("cache_read_input_tokens", "tokens_cache_read"),
-                         ("cache_creation_input_tokens", "tokens_cache_write")):
-            if isinstance(usage.get(src), int):
-                out[dst] = usage[src]
-        if isinstance(rec.get("total_cost_usd"), (int, float)):
-            out["cost_usd"] = rec["total_cost_usd"]
-        if isinstance(rec.get("num_turns"), int):
-            out["turns"] = rec["num_turns"]
-        if isinstance(rec.get("duration_ms"), int):
-            out["harness_duration_ms"] = rec["duration_ms"]
+        out = _usage_from_claude_result(rec)
+        if out:
+            return out
+        out = _usage_from_codex_event(rec)
         if out:
             return out
     return {}
+
+
+# ---- harness usage, second source: the harness's own session store --------
+#
+# The default watch commands (_worker_cmd) are `claude -p ...` and
+# `codex exec ...` with no JSON output format, so parse_harness_usage sees
+# only prose and every run_end on the live board went out with no tokens at
+# all -- measured 09-08: 105 run_end records, 0 with tokens_in. Rather than
+# change how the harness is invoked (which would turn the watch log into JSON
+# and break the text greps that _looks_limited and the T-230 liveness read
+# depend on), the counts are read afterwards from the store the harness
+# writes for itself, attributed to this run by its own time window.
+#
+# Tokens only. Neither store records a cost, so cost_usd stays absent and
+# cost_source stays null on this path.
+
+CLAUDE_PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
+
+
+def _epoch(stamp):
+    """An ISO stamp -> epoch seconds, or None. Naive stamps are read as UTC,
+    which is what every writer here emits."""
+    try:
+        dt = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+# A session transcript grows to tens of megabytes over a long day, and this
+# runs at the end of EVERY watch run. Only the tail can hold events from the
+# run that just finished, so only the tail is read (T-230: mtime-first, no
+# full-file scans).
+SESSION_TAIL_BYTES = int(os.environ.get("TICKETS_SESSION_TAIL_BYTES", 4 * 1024 * 1024))
+
+
+def _iter_jsonl(path, cap=None):
+    """Every readable JSON object in the tail of a .jsonl.
+
+    A torn line -- the first one when the tail starts mid-record, or the last
+    one while the harness is still writing -- is skipped, not fatal.
+    """
+    cap = SESSION_TAIL_BYTES if cap is None else cap
+    try:
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            if size > cap:
+                f.seek(size - cap)
+                f.readline()  # discard the partial record the seek landed in
+            for raw in f:
+                ln = raw.decode("utf-8", "replace").strip()
+                if not ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    yield rec
+    except OSError:
+        return
+
+
+def _claude_transcript_dir(cwd):
+    """~/.claude/projects/<slug>, where the CLI's slug is the absolute path
+    with every non-alphanumeric character replaced by '-'."""
+    path = os.path.abspath(cwd or os.getcwd())
+    return os.path.join(CLAUDE_PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", path))
+
+
+def _session_usage_claude(cwd, t0, t1):
+    """Sum the per-message usage Claude Code wrote for this worktree during
+    the run window.
+
+    Per-message counts ARE additive (unlike codex's cumulative totals): each
+    assistant message reports the usage of its own request.
+    """
+    tot, seen = {}, False
+    for p in glob.glob(os.path.join(_claude_transcript_dir(cwd), "*.jsonl")):
+        # mtime first: a transcript last written before this run started
+        # cannot hold any of its messages, and this avoids reading megabytes
+        # of other sessions on every run.
+        try:
+            if os.path.getmtime(p) < t0 - 1:
+                continue
+        except OSError:
+            continue
+        for rec in _iter_jsonl(p):
+            ts = _epoch(rec.get("timestamp"))
+            if ts is None or ts < t0 or ts > t1:
+                continue
+            m = rec.get("message")
+            u = m.get("usage") if isinstance(m, dict) else None
+            if not isinstance(u, dict):
+                continue
+            for src, dst in CLAUDE_USAGE_FIELDS:
+                n = _num(u.get(src))
+                if n is not None:
+                    tot[dst] = tot.get(dst, 0) + int(n)
+                    seen = True
+    return tot if seen else {}
+
+
+def _rollout_cwd(path):
+    """The cwd a codex rollout announces in its session_meta header.
+
+    Read from the HEAD of the file: the header is the first record, and the
+    tail-bounded read below would miss it on any long session -- which would
+    silently un-attribute exactly the busiest runs.
+    """
+    try:
+        with open(path, "rb") as f:
+            for _ in range(5):          # the header is the first record
+                raw = f.readline()
+                if not raw:
+                    break
+                try:
+                    rec = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                pay = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+                if isinstance(pay.get("cwd"), str):
+                    return os.path.abspath(pay["cwd"])
+    except OSError:
+        return None
+    return None
+
+
+def _session_usage_codex(cwd, t0, t1):
+    """The last cumulative total_token_usage a codex rollout for this worktree
+    wrote during the run window.
+
+    Cumulative, so the LAST one in the window is the answer; summing them
+    would multiply-count the same tokens once per turn.
+    """
+    want = os.path.abspath(cwd or os.getcwd())
+    best, best_at = None, None
+    for p in glob.glob(os.path.join(CODEX_SESSIONS_DIR, "**", "*.jsonl"), recursive=True):
+        try:
+            if os.path.getmtime(p) < t0 - 1:
+                continue
+        except OSError:
+            continue
+        rollout_cwd, last, last_at = _rollout_cwd(p), None, None
+        for rec in _iter_jsonl(p):
+            pay = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+            if isinstance(pay.get("cwd"), str):
+                rollout_cwd = os.path.abspath(pay["cwd"])
+            ts = _epoch(rec.get("timestamp"))
+            if ts is None or ts < t0 or ts > t1:
+                continue
+            u = _usage_from_codex_event(rec)
+            if u:
+                last, last_at = u, ts
+        # A rollout that never named a cwd is not attributed to this agent:
+        # two agents run codex on this box and guessing would bill one for the
+        # other's tokens.
+        if not last or rollout_cwd != want:
+            continue
+        # If an older session for this same worktree was merely touched inside
+        # the window, glob order would decide the bill. The newest matching
+        # event wins instead.
+        if best_at is None or last_at > best_at:
+            best, best_at = last, last_at
+    return best or {}
+
+
+def _session_store_usage(harness, cwd, started_at, ended_at):
+    """Token counts for one run, from the harness's own session store.
+
+    `harness` is the name off the watch command line, so a custom or unknown
+    harness reads nothing rather than being guessed at.
+    """
+    t0, t1 = _epoch(started_at), _epoch(ended_at)
+    if t0 is None or t1 is None or t1 < t0:
+        return {}
+    if harness == "claude":
+        return _session_usage_claude(cwd, t0, t1)
+    if harness == "codex":
+        return _session_usage_codex(cwd, t0, t1)
+    # cursor: verified 09-08 to report usage nowhere -- `agent -p` emits none
+    # in text or json output format, and its transcripts
+    # (~/.cursor/projects/*/agent-transcripts/**/*.jsonl) carry only
+    # role/message/status/type. Absent, not zero, until it does.
+    return {}
+
+
+def _run_usage(log_path, log_before, harness, cwd, started_at, ended_at):
+    """(usage, error) for one finished run: stdout first, session store as the
+    fallback. Never raises -- the watch loop must not die over accounting."""
+    err = None
+    try:
+        usage = parse_harness_usage(_read_run_slice(log_path, log_before)) or {}
+    except HarnessUsageError as e:
+        usage, err = {}, str(e)
+    except Exception as e:                                    # noqa: BLE001
+        usage, err = {}, "stdout usage parse failed: %s" % e
+    if usage:
+        return usage, err
+    try:
+        return _session_store_usage(harness, cwd, started_at, ended_at) or {}, err
+    except HarnessUsageError as e:
+        return {}, err or str(e)
+    except Exception as e:                                    # noqa: BLE001
+        return {}, err or ("session store usage read failed: %s" % e)
 
 
 TRAJ_USAGE_SCAN_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_SCAN_BYTES", 256 * 1024))
@@ -4624,7 +5064,8 @@ def _traj_line(e):
     bits.append("%-7s" % (e.get("ticket") or "-"))
     extra = []
     for k in ("run_no", "exit", "duration_s", "turns", "tokens_in", "tokens_out",
-              "cost_usd", "outcome", "state_before", "state_after", "trigger",
+              "tokens_cache_read", "tokens_cache_write", "cost_usd", "cost_source",
+              "usage_error", "outcome", "state_before", "state_after", "trigger",
               "notes_len", "text_len", "to", "pin", "merged_as", "active_hours",
               "wait_hours", "harness", "harness_cmd", "model", "effort",
               "timed_out", "src"):
@@ -4707,12 +5148,19 @@ def cmd_trajectories(a, board):
                                    " (showing the last %d)" % limit if limit and len(sel) > limit else ""))
     if getattr(a, "summary", False):
         print("")
-        print("%-8s %5s %8s %5s %5s %8s  %s" % (
-            "ticket", "runs", "turns", "upd", "msgs", "reopens", "agents / outcome"))
+        # cost is appended, never inserted: the existing columns are a
+        # positional contract that tests and operators already read.
+        print("%-8s %5s %8s %5s %5s %8s %10s  %s" % (
+            "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
+            "agents / outcome"))
         for tid, s in sorted(_traj_summary(sel).items()):
-            print("%-8s %5d %8s %5d %5d %8d  %s %s" % (
+            # '-' is not $0.00: no harness on this board reports a cost unless
+            # the operator asked for a JSON output format, and a zero would
+            # read as a free ticket (T-396 null-not-zero).
+            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
                 tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
-                s["reopens"], ",".join(sorted(s["agents"])) or "-",
+                s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",
                 ("-> " + s["outcome"]) if s["outcome"] else ""))
         print("")
         print("runs = watch runs that reached run_end (the board's own turn count).  "
@@ -5961,21 +6409,29 @@ def cmd_watch(a, board):
                 # the trajectory log (T-311 privacy rule).
                 run_started = now()
                 held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or None
-                _safe(lambda: traj_event(board, "run_start", agent=owner,
-                                         ticket=held_ticket, run_no=runs,
-                                         trigger=sorted(p), harness_cmd=harness,
-                                         worktree=cwd), None)
+                # T-425 FLAG: writes in the child stamp this id; aggregator
+                # credits THAT run_id, not a time window (two seats, one ticket).
+                run_id = "r-%s-%d-%s" % (
+                    owner, runs,
+                    hashlib.sha1(("%s:%d:%s" % (owner, runs, run_started)).encode()).hexdigest()[:12])
+                env["TICKETS_RUN_ID"] = run_id
+                _safe(lambda rid=run_id, ht=held_ticket: traj_event(
+                    board, "run_start", agent=owner, ticket=ht, run_no=runs,
+                    run_id=rid, trigger=sorted(p), harness_cmd=harness,
+                    worktree=cwd), None)
                 if a.dry_run:
                     print("  dry-run; would execute: %s" % run_cmd)
                     if cleanup:
                         cleanup()
                     rc = 0
-                    _safe(lambda: traj_event(board, "run_end", agent=owner,
-                                             ticket=held_ticket, run_no=runs,
-                                             trigger=sorted(p), harness_cmd=harness,
-                                             worktree=cwd, started_at=run_started,
-                                             ended_at=now(), exit=0, dry_run=True,
-                                             duration_s=_iso_span_secs(run_started, now())), None)
+                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
+                        board, "run_end", agent=owner, ticket=ht, run_no=runs,
+                        run_id=rid, trigger=sorted(p), harness_cmd=harness,
+                        worktree=cwd, started_at=run_started, ended_at=now(),
+                        exit=0, dry_run=True,
+                        bound_write=True if bw else None,
+                        duration_s=_iso_span_secs(run_started, now())), None)
                 else:
                     # The whole point of T-237: something must record that this
                     # agent is alive WHILE the child runs. checkin() cannot --
@@ -5998,17 +6454,27 @@ def cmd_watch(a, board):
                     if cleanup:
                         cleanup()
                     ended = now()
-                    usage = _safe(lambda: parse_harness_usage(
-                        _read_run_slice(log_path, log_before)), {}) or {}
-                    _safe(lambda: traj_event(
-                        board, "run_end", agent=owner, ticket=held_ticket,
-                        run_no=runs, trigger=sorted(p), harness_cmd=harness,
-                        worktree=cwd, started_at=run_started, ended_at=ended,
+                    # Tokens/cost for THIS run: the harness's own stdout when
+                    # it was asked for a JSON format, else its session store.
+                    # usage_error records "reported something unreadable",
+                    # which must never be confused with "reported nothing".
+                    usage, usage_error = _run_usage(
+                        log_path, log_before, _harness_of_cmd(run_cmd), cwd,
+                        run_started, ended)
+                    if usage_error:
+                        log("%s run %d usage not recorded: %s" % (now(), runs, usage_error))
+                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
+                        board, "run_end", agent=owner, ticket=ht,
+                        run_no=runs, run_id=rid, trigger=sorted(p),
+                        harness_cmd=harness, worktree=cwd,
+                        started_at=run_started, ended_at=ended,
                         exit=rc, timed_out=bool(timed_out),
+                        bound_write=True if bw else None,
                         duration_s=_iso_span_secs(run_started, ended),
                         outcome=("limit" if _looks_limited(
                             _read_run_slice(log_path, log_before)) else None),
-                        **usage), None)
+                        usage_error=usage_error, **usage), None)
                     if timed_out:
                         with open(log_path, "a") as lf:
                             lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from watch_reaper import collect_watch_pids_from_board
+
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 
 
@@ -24,8 +26,11 @@ def run(board, *args, agent="", stdin="", env=None, cwd=None):
     if env:
         e.update(env)
     where = cwd or (board.parent if board.parent.is_dir() else Path("/"))
-    return subprocess.run([sys.executable, str(TOOL), *args], input=stdin, capture_output=True, text=True,
-                          env=e, cwd=where)
+    r = subprocess.run([sys.executable, str(TOOL), *args], input=stdin, capture_output=True, text=True,
+                       env=e, cwd=where)
+    if args and args[0] == "spawn" and "--stop" not in args and "--list" not in args:
+        collect_watch_pids_from_board(board)
+    return r
 
 
 @pytest.fixture
