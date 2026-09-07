@@ -6624,7 +6624,7 @@ function renderPromise(p){
   med.textContent=p.median_turns==null?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0);
   mh.textContent='measured '+(p.n_turns||0)+' ticket(s); unmeasured '+(p.n_unmeasured_turns||0)+' (no run_end — typically backfill)';
   if(p.yield_per_usd==null){yv.textContent='—';yh.textContent=(p.n_unmeasured_cost||0)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';}
-  else{yv.textContent=Number(p.yield_per_usd).toFixed(2)+'/ $';yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';}
+  else{yv.textContent=Number(p.yield_per_usd).toFixed(2)+' per $';yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';}
 }
 function renderTurns(t){
   const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
