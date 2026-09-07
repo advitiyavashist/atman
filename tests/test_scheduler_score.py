@@ -7,9 +7,11 @@ from pathlib import Path
 from ticket_board.scheduler import (
     ERA_POST,
     ERA_PRE,
+    ERA_UNKNOWN,
     FLAG_PIN,
     MIN_COMPARE,
     format_agreement_line,
+    row_era,
     score_shadow,
     shadow_pick_at_claim,
 )
@@ -43,10 +45,12 @@ def _event(kind, ticket, agent, model, at, **extra):
     return rec
 
 
-def _finish_with_turns(tid, agent, model, n_turns, day, sha=None):
+def _finish_with_turns(tid, agent, model, n_turns, day, sha=None, release_sha=None):
     extra = {}
     if sha:
         extra["sha"] = sha
+    if release_sha:
+        extra["release_sha"] = release_sha
     evs = [_event("claim", tid, agent, model, "%sT10:00:00Z" % day, **extra)]
     for i in range(n_turns):
         evs.append(_event("run_start", tid, agent, model,
@@ -122,7 +126,7 @@ def test_score_command_read_only(board):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "shadow-vs-actual scorecard" in r.stdout
     assert "T-001" in r.stdout
-    assert "agreement n/a (n=1)" in r.stdout
+    assert "agreement unknown: n/a (n=1, excluded from pct)" in r.stdout
     assert "0.00" not in r.stdout.split("agreement")[1].split("\n")[0]
     after = (board / "trajectories.jsonl").read_text()
     assert after == before
@@ -209,23 +213,24 @@ def test_agreement_na_n0_n1_n2(board):
     _join(board, "alice", "backend", "opus", "high")
     r0 = run(board, "route", "--shadow", "--score", cwd=board.parent)
     assert r0.returncode == 0, r0.stderr
-    assert "agreement n/a (n=0)" in r0.stdout
+    assert "agreement pre-T-425 (idle review wakes counted): n/a (n=0)" in r0.stdout
     assert "agreement rate:" not in r0.stdout
-    events = _finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", sha="8f513fe")
+    events = _finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", release_sha="8f513fe")
     _stamp(board, "T-001", "alice", "backend", 1)
     _write_jsonl(board, events)
     r1 = run(board, "route", "--shadow", "--score", cwd=board.parent)
     assert r1.returncode == 0, r1.stderr
-    assert "agreement n/a (n=1)" in r1.stdout
-    agree_ln = [ln for ln in r1.stdout.splitlines() if ln.startswith("agreement")][0]
+    assert "agreement pre-T-425 (idle review wakes counted): n/a (n=1)" in r1.stdout
+    agree_ln = [ln for ln in r1.stdout.splitlines()
+                if ln.startswith("agreement pre-T-425")][0]
     assert "%" not in agree_ln
     assert "0.00" not in agree_ln
     _stamp(board, "T-002", "alice", "backend", 1)
-    events.extend(_finish_with_turns("T-002", "alice", "opus", 2, "2026-05-02", sha="8f513fe"))
+    events.extend(_finish_with_turns("T-002", "alice", "opus", 2, "2026-05-02", release_sha="8f513fe"))
     _write_jsonl(board, events)
     r2 = run(board, "route", "--shadow", "--score", cwd=board.parent)
     assert r2.returncode == 0, r2.stderr
-    assert "agreement n/a" not in r2.stdout
+    assert "agreement pre-T-425 (idle review wakes counted): n/a" not in r2.stdout
     assert "agreement rate:" in r2.stdout
     assert "(2/2)" in r2.stdout or "(1/2)" in r2.stdout or "(0/2)" in r2.stdout
 
@@ -235,9 +240,9 @@ def test_pre_flag_and_post_flag_labels_not_mixed_pct(board):
     _join(board, "alice", "backend", "opus", "high")
     events = []
     _stamp(board, "T-001", "alice", "backend", 1)
-    events.extend(_finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", sha="21ca63c"))
+    events.extend(_finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", release_sha="21ca63c"))
     _stamp(board, "T-002", "alice", "backend", 1)
-    events.extend(_finish_with_turns("T-002", "alice", "opus", 2, "2026-09-08", sha=FLAG_PIN))
+    events.extend(_finish_with_turns("T-002", "alice", "opus", 2, "2026-09-08", release_sha=FLAG_PIN))
     _write_jsonl(board, events)
     tickets = [json.loads(p.read_text()) for p in board.glob("T-*.json")]
     workforce = json.loads((board / "workforce.json").read_text())
@@ -254,9 +259,10 @@ def test_pre_flag_and_post_flag_labels_not_mixed_pct(board):
     assert r.returncode == 0, r.stderr
     assert ERA_PRE in r.stdout
     assert ERA_POST in r.stdout
+    assert ERA_UNKNOWN in r.stdout
     assert "pre-T-425" in r.stdout
     assert "post-FLAG" in r.stdout
-    assert "not mixed into one pct" in r.stdout
+    assert "unknown never mixed into pct" in r.stdout
     rate_lines = [ln for ln in r.stdout.splitlines() if ln.startswith("agreement rate:")]
     assert rate_lines == []
     assert "n/a (n=1)" in r.stdout

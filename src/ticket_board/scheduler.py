@@ -37,6 +37,7 @@ FLAG_FEATURE_PIN = "705dd05"
 FLAG_AT = "2026-09-07T20:37:13Z"
 ERA_PRE = "pre-T-425 (idle review wakes counted)"
 ERA_POST = "post-FLAG"
+ERA_UNKNOWN = "unknown"
 _PRE_FLAG_PIN_PREFIXES = ("8f513fe", "1c8335b", "21ca63c")
 _POST_FLAG_PIN_PREFIXES = (FLAG_PIN, FLAG_FEATURE_PIN)
 
@@ -535,6 +536,13 @@ def _run_start_sha(ev):
     return pin
 
 
+def _run_start_release_sha(ev):
+    """Resolved release commit stamped on run_start (T-483)."""
+    if not ev:
+        return ""
+    return str(ev.get("release_sha") or "").strip()
+
+
 def _sha_is_post_flag(sha):
     """True/False when the pin is in the known live-release history; else None."""
     s = (sha or "").lower().strip()
@@ -547,22 +555,40 @@ def _sha_is_post_flag(sha):
     return None
 
 
-def row_era(evs):
-    """Label a scored row pre-T-425 vs post-FLAG from run_start sha, then time."""
+def row_era(evs, era_by_time=False):
+    """Label a scored row from bound run_start release_sha (T-483).
+
+    Without release_sha the era is unknown — wall-clock fallback is opt-in
+    via era_by_time (prints a warning in the scorecard header).
+    """
     ev = _first_bound_run_start(evs)
-    known = _sha_is_post_flag(_run_start_sha(ev))
+    sha = _run_start_release_sha(ev)
+    if not sha:
+        if era_by_time:
+            at = (ev or {}).get("at") or ""
+            if at >= FLAG_AT:
+                return ERA_POST
+            return ERA_PRE
+        return ERA_UNKNOWN
+    known = _sha_is_post_flag(sha)
     if known is True:
         return ERA_POST
     if known is False:
         return ERA_PRE
-    at = (ev or {}).get("at") or ""
-    if at >= FLAG_AT:
-        return ERA_POST
-    return ERA_PRE
+    if era_by_time:
+        at = (ev or {}).get("at") or ""
+        if at >= FLAG_AT:
+            return ERA_POST
+        return ERA_PRE
+    return ERA_UNKNOWN
 
 
 def _era_short(era):
-    return "post-FLAG" if era == ERA_POST else "pre-T-425"
+    if era == ERA_POST:
+        return "post-FLAG"
+    if era == ERA_UNKNOWN:
+        return "unknown"
+    return "pre-T-425"
 
 
 def format_agreement_line(n_agree, n, label=None):
@@ -636,7 +662,7 @@ def shadow_pick_at_claim(board, ticket, events, before_at, names, workforce, rol
 
 
 def score_shadow(events, tickets, workforce, roles, board, score_agent, names=None,
-                 agents=None):
+                 agents=None, era_by_time=False):
     """Retrospective shadow-vs-actual scorecard (T-416). Observational only."""
     tickets = tickets or []
     workforce = workforce or {}
@@ -666,7 +692,7 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
         actual_med, actual_n = _median_or_null(actual_nums)
         shadow_med, shadow_n = _median_or_null(shadow_nums)
         realized = _measured_turns(evs)
-        era = row_era(evs)
+        era = row_era(evs, era_by_time=era_by_time)
         rows.append({
             "ticket": tid,
             "role": role,
@@ -687,8 +713,10 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
     agree_n = sum(1 for r in rows if r["agree"])
     n_pre = sum(1 for r in rows if r["era"] == ERA_PRE)
     n_post = sum(1 for r in rows if r["era"] == ERA_POST)
-    mixed = n_pre > 0 and n_post > 0
-    rate = None if (compared < 2 or mixed) else (agree_n / compared)
+    n_unknown = sum(1 for r in rows if r["era"] == ERA_UNKNOWN)
+    scored_eras = {r["era"] for r in rows} - {ERA_UNKNOWN}
+    mixed = len(scored_eras) > 1
+    rate = None if (compared < 2 or mixed or n_unknown > 0) else (agree_n / compared)
     return {
         "rows": rows,
         "n": compared,
@@ -696,36 +724,37 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
         "n_agree": agree_n,
         "n_pre": n_pre,
         "n_post": n_post,
+        "n_unknown": n_unknown,
         "mixed_eras": mixed,
+        "era_by_time": era_by_time,
     }
 
 
 def render_score_table(rep):
     lines = ["shadow-vs-actual scorecard (observational; not a counterfactual)"]
+    if rep.get("era_by_time"):
+        lines.append(
+            "WARNING: --era-by-time fallback active; rows without release_sha use wall-clock, not CLI pin.")
     n = int(rep.get("n") or 0)
     n_agree = int(rep.get("n_agree") or 0)
     n_pre = int(rep.get("n_pre") or 0)
     n_post = int(rep.get("n_post") or 0)
+    n_unknown = int(rep.get("n_unknown") or 0)
     mixed = bool(rep.get("mixed_eras"))
-    if mixed:
-        by = {ERA_PRE: [], ERA_POST: []}
-        for r in rep.get("rows") or []:
-            by.setdefault(r.get("era") or ERA_PRE, []).append(r)
-        for era in (ERA_PRE, ERA_POST):
-            subset = by.get(era) or []
-            if not subset:
-                continue
-            agree = sum(1 for r in subset if r.get("agree"))
-            lines.append(format_agreement_line(agree, len(subset), label=era))
-        lines.append("era counts: %s=%d  %s=%d (not mixed into one pct)" % (
-            ERA_PRE, n_pre, ERA_POST, n_post))
-    else:
-        lines.append(format_agreement_line(n_agree, n))
-        if n:
-            era = ((rep.get("rows") or [{}])[0].get("era") or ERA_PRE)
-            lines.append("era: %s (n=%d)" % (era, n))
+    by = {ERA_PRE: [], ERA_POST: [], ERA_UNKNOWN: []}
+    for r in rep.get("rows") or []:
+        by.setdefault(r.get("era") or ERA_UNKNOWN, []).append(r)
+    for era in (ERA_PRE, ERA_POST, ERA_UNKNOWN):
+        subset = by.get(era) or []
+        agree = sum(1 for r in subset if r.get("agree"))
+        if era == ERA_UNKNOWN:
+            lines.append("agreement %s: n/a (n=%d, excluded from pct)" % (era, len(subset)))
         else:
-            lines.append("era counts: %s=0  %s=0" % (ERA_PRE, ERA_POST))
+            lines.append(format_agreement_line(agree, len(subset), label=era))
+    lines.append("era counts: %s=%d  %s=%d  %s=%d (unknown never mixed into pct)" % (
+        ERA_PRE, n_pre, ERA_POST, n_post, ERA_UNKNOWN, n_unknown))
+    if not mixed and n_unknown == 0 and n:
+        lines.append(format_agreement_line(n_agree, n))
     lines.append("%-8s %-8s %-14s %-14s %-5s %5s %12s %12s %5s %-9s" % (
         "ticket", "role", "actual", "shadow", "agree", "turns",
         "actual_med", "shadow_med", "src", "flag"))
@@ -763,9 +792,11 @@ def render_scorecard_doc(rep, generated_at):
         "",
         "Survivorship: only tickets that reached `done` with a bound `run_start`",
         "(post T-352/T-388 recut) enter the table. Agreement with *n*<2 prints",
-        "`n/a` and no percentage. Rows are labelled %s vs %s from the" % (ERA_PRE, ERA_POST),
-        "bound `run_start` sha against live pin %s (else `at` vs %s); mixed" % (FLAG_PIN, FLAG_AT),
-        "eras are never one silent pct. Small *n* on disagreement medians is",
+        "`n/a` and no percentage. Rows are labelled %s / %s / %s from bound" % (
+            ERA_PRE, ERA_POST, ERA_UNKNOWN),
+        "`run_start` release_sha (T-483); without release_sha the era is unknown,",
+        "never wall-clock unless `--era-by-time` is passed. Mixed scored eras are",
+        "never one silent pct. Small *n* on disagreement medians is",
         "`-` when either side has fewer than %d comparable finished tickets." % MIN_COMPARE,
         "Turns come from the same `_measured_turns` / `tickets turns --json`",
         "source as T-416 (T-425 idle FLAG is not reimplemented here). No cost",
@@ -795,7 +826,8 @@ def cmd_route_shadow(a, board, load_all, load_workforce, load_roles, load_agents
         rank_by = "turns"
     if getattr(a, "score", False):
         rep = score_shadow(events, tickets, workforce, roles, board, score_agent,
-                           names=names, agents=agents)
+                           names=names, agents=agents,
+                           era_by_time=bool(getattr(a, "era_by_time", False)))
         text = render_score_table(rep)
         print(text)
         doc_path = getattr(a, "write_scorecard", None)
