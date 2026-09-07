@@ -325,9 +325,56 @@ def _refuse_board_outside_pytest_tmp(path):
     )
 
 
+def _cwd_belongs_to_board(board_path):
+    """True when cwd is this board's checkout (in-tree dir or linked worktree).
+
+    T-409 / zed class: a cwd with no board of its own must not silently write
+    a live board discovered as a unique child (Downloads -> project) or via
+    any other unbound resolution. Out-of-tree `git worktree add` still belongs
+    because `_repo_root()` is the main checkout that owns the board (T-243).
+    """
+    board = os.path.realpath(board_path)
+    board_root = os.path.dirname(board)
+    cwd = os.path.realpath(os.getcwd())
+    if cwd == board_root or cwd.startswith(board_root + os.sep):
+        return True
+    root = _repo_root()
+    if root and os.path.realpath(root) == board_root:
+        return True
+    here = _init_cwd_worktree_root()
+    if here and os.path.realpath(os.path.join(here, ".tickets")) == board:
+        return True
+    return False
+
+
+def _refuse_unbound_live_board(path):
+    """Refuse a live board cwd does not belong to, unless TICKETS_DIR binds it.
+
+    T-409: a mktemp / parent-folder cwd with no explicit TICKETS_DIR resolved
+    the shared live board (zed / T-331). Fail closed. An empty local
+    cwd/.tickets is not live, so init/join in a fresh dir still works.
+    """
+    if os.environ.get("TICKETS_DIR"):
+        return
+    if not _live_board(path):
+        return
+    if _cwd_belongs_to_board(path):
+        return
+    real = os.path.realpath(path)
+    sys.exit(
+        "REFUSING TO USE BOARD %r: cwd %r is not inside a board checkout "
+        "and TICKETS_DIR is unset. Binding a live board from an unbound "
+        "directory is the zed/T-331 class (a sandbox writing the shared "
+        "board). Export TICKETS_DIR to the board you mean, or run from "
+        "that project's checkout."
+        % (real, os.path.realpath(os.getcwd()))
+    )
+
+
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
     _refuse_board_outside_pytest_tmp(result)
+    _refuse_unbound_live_board(result)
     return result
 
 
