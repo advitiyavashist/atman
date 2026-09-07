@@ -39,11 +39,12 @@ def _costed_fixture(dest):
 def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     ui = _ui_html()
     for marker in (
-        "promiseHero", "heroMedian", "heroYield", "Yield@cost", "Median turns",
+        "promiseEyebrow", "Fewest turns", "promiseHero", "heroMedian", "heroYield",
+        "Yield@cost", "Median turns", "aria-label=\"Product promise",
         "turnsPanel", "Turns efficiency", "turnsWorst", "turnsAgents",
         "renderTurns", "turns-grid", "Worst tickets", "Per-agent median",
         "usagePanel", "Usage / cost", "usageHonesty", "Not reported by harness",
-        "renderUsage", "coverageLede", "Total football", "band-keep", "band-attack",
+        "renderUsage", "coverageLede", "Total Football", "band-keep", "band-attack",
         "renderPitch", "uncovered", "emptyBoard", "nextStep", "obSteps",
         'data-tab-btn="board"', 'data-tab-btn="agents"', 'data-tab-btn="messages"',
         "fetch('/msg'", "mentionBar",

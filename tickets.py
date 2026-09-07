@@ -6460,6 +6460,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .empty-board .cta{margin-top:14px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
+.promise-eyebrow{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute);font-weight:700;margin:0 0 6px}
 .promise-hero{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .promise-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
@@ -6527,9 +6528,10 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <main>
 <div class="pane" id="pane-board">
   <div id="emptyBoard" class="empty-board" hidden></div>
-  <div class="promise-hero" id="promiseHero">
-    <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">tickets turns --json · unknown is not zero</div></article>
-    <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
+  <p class="promise-eyebrow" id="promiseEyebrow">Fewest turns</p>
+  <div class="promise-hero" id="promiseHero" aria-label="Product promise: median turns and yield at cost">
+    <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Measured tickets only — blank means not measured yet, never zero</div></article>
+    <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">Done tickets per dollar of harness-reported cost</div></article>
   </div>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
@@ -6544,7 +6546,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   </section>
 </div>
 <div class="pane" id="pane-agents">
-  <p class="pitch-lede" id="coverageLede"><b>Total football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
+  <p class="pitch-lede" id="coverageLede"><b>Total Football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
   <div class="pitch" id="pitch">
     <div class="band" data-band="attack"><div class="lbl">Attack · ready / uncovered</div><div class="row" id="band-attack"></div></div>
     <div class="band" data-band="mid"><div class="lbl">Midfield · in flight</div><div class="row" id="band-mid"></div></div>
@@ -6622,8 +6624,8 @@ function renderPromise(p){
   const yv=document.getElementById('heroYieldVal'),yh=document.getElementById('heroYieldHint');
   if(!p){med.textContent='—';yv.textContent='—';return}
   med.textContent=p.median_turns==null?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0);
-  mh.textContent='measured '+(p.n_turns||0)+' ticket(s); unmeasured '+(p.n_unmeasured_turns||0)+' (no run_end — typically backfill)';
-  if(p.yield_per_usd==null){yv.textContent='—';yh.textContent=(p.n_unmeasured_cost||0)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';}
+  mh.textContent=(p.n_turns||0)+' measured · '+(p.n_unmeasured_turns||0)+' not measured yet';
+  if(p.yield_per_usd==null){yv.textContent='—';yh.textContent=(p.n_unmeasured_cost||0)?'Some done tickets have no cost data — yield unknown, not $0':'Done tickets per dollar of harness-reported cost';}
   else{yv.textContent=Number(p.yield_per_usd).toFixed(2)+'/ $';yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';}
 }
 function renderTurns(t){
