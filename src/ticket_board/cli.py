@@ -2708,7 +2708,8 @@ def _traj_line(e):
     bits.append("%-7s" % (e.get("ticket") or "-"))
     extra = []
     for k in ("run_no", "exit", "duration_s", "turns", "tokens_in", "tokens_out",
-              "cost_usd", "outcome", "state_before", "state_after", "trigger",
+              "tokens_cache_read", "tokens_cache_write", "cost_usd", "cost_source",
+              "usage_error", "outcome", "state_before", "state_after", "trigger",
               "notes_len", "text_len", "to", "pin", "merged_as", "active_hours",
               "wait_hours", "harness", "harness_cmd", "model", "effort",
               "timed_out", "src"):
@@ -2791,12 +2792,19 @@ def cmd_trajectories(a, board):
                                    " (showing the last %d)" % limit if limit and len(sel) > limit else ""))
     if getattr(a, "summary", False):
         print("")
-        print("%-8s %5s %8s %5s %5s %8s  %s" % (
-            "ticket", "runs", "turns", "upd", "msgs", "reopens", "agents / outcome"))
+        # cost is appended, never inserted: the existing columns are a
+        # positional contract that tests and operators already read.
+        print("%-8s %5s %8s %5s %5s %8s %10s  %s" % (
+            "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
+            "agents / outcome"))
         for tid, s in sorted(_traj_summary(sel).items()):
-            print("%-8s %5d %8s %5d %5d %8d  %s %s" % (
+            # '-' is not $0.00: no harness on this board reports a cost unless
+            # the operator asked for a JSON output format, and a zero would
+            # read as a free ticket (T-396 null-not-zero).
+            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
                 tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
-                s["reopens"], ",".join(sorted(s["agents"])) or "-",
+                s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",
                 ("-> " + s["outcome"]) if s["outcome"] else ""))
         print("")
         print("runs = watch runs that reached run_end (the board's own turn count).  "
