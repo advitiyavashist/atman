@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { vi } from "vitest";
 import { BoardProvider } from "../../../ui/src/state/BoardProvider";
 import type { BoardSession } from "../../../ui/src/session";
+import { matchPost201RequestSchema, validatePostRequestBody } from "./openapi-request-validate";
 
 /**
  * Mount a screen against a mocked board, not against fixtures on disk.
@@ -40,6 +41,15 @@ export interface LiveHarness {
   fetchMock: ReturnType<typeof vi.fn>;
   /** Every non-stream request the screen made, in order. */
   calls(): { method: string; path: string; body: unknown }[];
+}
+
+function malformedRequestResponse(message: string): Response {
+  return new Response(
+    JSON.stringify({
+      error: { code: "malformed_request", status: 400, message },
+    }),
+    { status: 400, headers: { "Content-Type": "application/json" } },
+  );
 }
 
 export const CREATED_ROUTES = [
@@ -97,9 +107,20 @@ export function boardFetch(routes: RouteMap, options: { streamStatus?: number } 
         { status: 404, headers: { "Content-Type": "application/json" } },
       );
     }
+    const post201Schema = method === "POST" ? matchPost201RequestSchema(path) : null;
+    if (post201Schema !== null) {
+      if (body === undefined) {
+        return malformedRequestResponse("Request body is required");
+      }
+      const schemaErrors = validatePostRequestBody(post201Schema, body);
+      if (schemaErrors.length > 0) {
+        return malformedRequestResponse(schemaErrors.join("; "));
+      }
+    }
+
     const resolved = typeof handler === "function" ? (handler as (r: unknown) => unknown)({ body, url }) : handler;
     if (resolved instanceof Response) return resolved;
-    const status = method === "POST" && CREATED_ROUTES.some((suffix) => path.endsWith(suffix)) ? 201 : 200;
+    const status = post201Schema !== null ? 201 : 200;
     return new Response(JSON.stringify(resolved), { status, headers: { "Content-Type": "application/json" } });
   });
 
