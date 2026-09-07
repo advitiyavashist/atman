@@ -28,6 +28,7 @@ from ..storage import BoardStore, ids
 from ..storage.db import write_txn
 from . import hooks, master, validate, views
 from .auth import (
+    SAFE_METHODS,
     SESSION_LEASE_SECONDS,
     CredentialStore,
     check_csrf,
@@ -119,7 +120,7 @@ class BoardServer:
         try:
             handler, params, auth, needs_project = self._match(request)
             project_id = self._project_id(request) if needs_project else None
-            principal = self._authorize(request, auth, project_id)
+            principal = self._authorize(request, handler, auth, project_id)
             ctx = Ctx(request, principal, project_id, params)
             response = handler(ctx)
         except BoardError as err:
@@ -172,7 +173,7 @@ class BoardServer:
                                    {"missing_fields": ["X-Project-Id"]})
         return value
 
-    def _authorize(self, request, auth, project_id):
+    def _authorize(self, request, handler, auth, project_id):
         """Pick the credential this route accepts, then check it.
 
         `security` in the contract is a list of alternatives, so a request that
@@ -219,7 +220,36 @@ class BoardServer:
             )
         principal = candidates[0]
         check_csrf(principal, request, allowed_origins=self.allowed_origins)
+        self._require_lease_if_unsafe(request, handler, principal)
         return principal
+
+    def _require_lease_if_unsafe(self, request, handler, principal):
+        """An agent's bearer token outlives its lease; an unsafe write must not.
+
+        `_agent_principal` only checks `agent_tokens.revoked_at` -- a lease that
+        has merely *expired* leaves the token itself perfectly valid, so every
+        route reached this far with nothing standing between an offline agent
+        and a write. That is the T-265 hole: GET /overview and POST /tickets
+        both answered for a session whose lease was dead on the clock.
+
+        The rule, decided before this was coded rather than inferred from what
+        `claim_ticket` happened to do: a read stays allowed on an expired lease
+        -- an agent that can no longer act should still be observable, and
+        refusing overview/ticket reads would hurt recovery, not help it. An
+        unsafe request (POST/PUT/PATCH/DELETE) from an agent credential needs a
+        session lease that is present, not revoked and not expired, checked
+        once here rather than re-derived per route.
+
+        `post_hook_event` is the one named exception: `hooks.record` already
+        deliberately revives a lapsed-but-not-revoked lease on every event --
+        that *is* the recovery path -- so gating it here would make a lapsed
+        agent unable to ever heal itself.
+        """
+        if not principal.is_agent or request.method in SAFE_METHODS:
+            return
+        if handler == self.post_hook_event:
+            return
+        self._require_live_lease(principal, principal.session_id)
 
     # ------------------------------------------------------------- overview
 
@@ -438,9 +468,13 @@ class BoardServer:
 
         `BoardStore._session_is_current` tests only that a lease was not
         revoked, which is the right question for "is this update superseded".
-        It is the wrong question for a claim: the contract's release bar is that
-        an agent whose adapter has stopped delivering events cannot claim
-        offline, and that agent's lease is expired, not revoked.
+        It is the wrong question here: the contract's release bar is that an
+        agent whose adapter has stopped delivering events cannot act offline,
+        and that agent's lease is expired, not revoked. Shared by `claim_ticket`
+        (which checks the session_id the caller names in the body, since a
+        claim can be challenged on a session that is not the caller's own) and
+        `_require_lease_if_unsafe` (which checks the caller's own token
+        session).
         """
         lease = self.store.conn.execute(
             "SELECT * FROM session_leases WHERE session_id = ?", (session_id,)
