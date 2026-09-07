@@ -97,15 +97,18 @@ def test_ticket_update_matches_the_contract(store, project, agent, schemas):
     _validate(schemas, "TicketUpdate", update)
 
 
-def test_review_matches_the_contract(store, project, schemas):
-    store.create_ticket(project["id"], "CONF-4", "Reviewable",
-                        acceptance=[{"text": "a", "checked": False,
-                                     "checked_by": None, "checked_at": None}])
+def test_review_matches_the_contract(store, project, agent, schemas):
+    created = store.create_ticket(project["id"], "CONF-4", "Reviewable",
+                                  acceptance=[{"text": "a", "checked": False,
+                                               "checked_by": None, "checked_at": None}])
+    ticket = store.claim_ticket(project["id"], "CONF-4", agent["id"],
+                                expected_version=created["version"])
     review = store.submit_review(
         project["id"], "CONF-4",
         {"type": "agent", "id": "agt_backend1", "display_name": "backend-1"},
         {"repository": "demo", "branch": "feature", "sha": SHA,
          "checks": [{"name": "pytest", "status": "passed"}]},
+        expected_version=ticket["version"],
     )
     _validate(schemas, "Review", review)
 
