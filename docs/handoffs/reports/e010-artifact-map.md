@@ -1,8 +1,13 @@
 # E-010 artifact map — where the review queue's work actually lives
 
-**Ticket:** T-281 · **Author:** opus-backend-2
+**Ticket:** T-281 · **Authors:** opus-backend-2 (first pass), composer (refresh)
 **First pass:** 2026-09-07T03:58Z (tickets main `07cd74c`)
-**This refresh:** 2026-09-07T08:2xZ — **re-resolved against tickets `origin/main` = `5200f9d`, steer `origin/main` = `564557b`**
+**opus-backend-2 refresh:** 2026-09-07T08:2xZ — tickets `origin/main` = `5200f9d`, steer = `564557b`
+**composer refresh:** 2026-09-07T18:24Z — **atman `origin/main` = `ed5eb624ecd9ac3940a06ba2c1fd857328ec54cb`**, steer `origin/main` = `822d0490660af659ab08ae293e991ba3b3cb2bfc`
+
+> **Repo rename note:** `advitiyavashist/tickets` is now `advitiyavashist/atman` (same
+> codebase). This map uses "atman" for the product repo and "steer" for the coordination
+> repo. The `/Users/kavana/Downloads/tickets` checkout shares the atman object store.
 
 This document resolves every review-queue pin to its real repo, branch and sha so
 the merge wave can run off evidence instead of off the recorded `commit` field.
@@ -10,12 +15,106 @@ It changes nothing. No merge, no fast-forward, no force-push, and no `tickets
 review` was re-run to "fix" a pin — re-pinning from the wrong cwd is the defect
 (T-272), not the remedy. Corrections are **named here and left for the master.**
 
-> **Read this first if you read nothing else.** The first pass of this map told
+> **Read this first if you read nothing else.** opus-backend-2's first pass told
 > you to merge `sonnet-qa/t221-ui-mentions`. **That recommendation is retracted**
 > — see [T-221 is superseded by T-276](#t-221-is-superseded-by-t-276-prior-recommendation-retracted).
 > And `merge-base --is-ancestor` **alone is not sufficient**: it returns a false
-> NO on work that landed by rebase, which is exactly what happened to T-237.
-> Use all three checks in [Method](#method--three-questions-per-row-not-one).
+> NO on work that landed by rebase. Use all three checks in [Method](#method--three-questions-per-row-not-one).
+
+## Composer refresh — 46 live review-queue rows (2026-09-07T18:24Z)
+
+Provenance: ambient `GIT_*` unset; atman commands from
+`/Users/kavana/Downloads/atman/.worktrees/composer-t281` (`git rev-parse
+--show-toplevel` = `/Users/kavana/Downloads/atman`); steer read-only from
+`/Users/kavana/Downloads/steer`. Board JSON read from `.tickets/` (not edited).
+
+### Summary since opus-backend-2's 9-row pass
+
+| change | detail |
+|---|---|
+| Queue size | **9 → 46** rows (E-010 + E-011 + verification wave) |
+| atman main | `5200f9d` → `ed5eb624ecd9` (+T-377 product, trajectories, scheduler, turns, BYOA, landing, …) |
+| steer main | `564557b` → `822d0490660a` |
+| Pin quality trend | **Most new reviews pin atman correctly.** Wrong-pin defect (T-272) largely worked around. |
+| Critical wrong pin | **T-244 pins T-228's branch** (`opus-authz/t228-same-second-inbox@8727c09`) — real artifact is `sonnet-backend/t244-inbox-rotation-archive@f7b5d0c` |
+| Durability gaps | **T-291, T-328, T-353** — claimed shas have **0 `refs/remotes/origin`** (local-only) |
+| Already on main | **T-377** (product+test via PR#26/#36), **T-392** residual test landed same |
+| External repos | **T-384, T-390** live in `advitiyavashist/ati` (not atman) |
+
+### The map — 46 rows
+
+| ticket | pin repo | recorded pin | real branch | real sha | on-main? | unlanded + | durable? | pin-correct? |
+|---|---|---|---|---|---|---|---|---|
+| T-187 | atman | `opus-backend-2/t187-messaging-api@4cfeaf5` | `opus-backend-2/t187-messaging-api` | `4cfeaf5` | NO | 1 | 3 ref(s) | YES |
+| T-188 | atman | `opus-infra/t188-managed-runner@1d11f50` | `opus-infra/t188-managed-runner` | `1d11f50` | NO | 5 | 1 ref(s) | YES |
+| T-189 | atman | `sonnet-console/t189-messages-ui@47a2f68` | `sonnet-console/t189-messages-ui` | `47a2f68` | NO | 1 | 1 ref(s) | YES |
+| T-228 | atman | `opus-authz/t228-same-second-inbox@8727c09` | `opus-authz/t228-same-second-inbox` | `8727c09` | NO | 5 | 2 ref(s) | YES |
+| T-244 | atman | `opus-authz/t228-same-second-inbox@8727c09` | `sonnet-backend/t244-inbox-rotation-archi` | `f7b5d0c` | NO | 3 | 3 ref(s) | NO — pins T-228 branch |
+| T-266 | atman | `infra-2/t266-hooks-dedup-scope@bc12b35` | `infra-2/t266-hooks-dedup-scope` | `bc12b35` | NO | 2 | 1 ref(s) | YES |
+| T-273 | atman | `opus-verify/t273-tmpdir-guard-v2@fd95689` | `opus-verify/t273-tmpdir-guard-v2` | `fd95689` | NO | 1 | 1 ref(s) | YES |
+| T-280 | atman | `opus-console/t280-bound-port@c7c4b6a` | `opus-console/t280-bound-port` | `c7c4b6a` | NO | 1 | 1 ref(s) | YES |
+| T-285 | steer | `sonnet-sdk@564557b` | `sonnet-sdk` | `564557b` | YES | n/a | 10 ref(s) | YES (steer work) |
+| T-286 | atman | `sonnet-backend/t286-invitation-replay-fi@d6e9027` | `sonnet-backend/t286-invitation-replay-fi` | `d6e9027` | NO | 3 | 1 ref(s) | YES |
+| T-288 | atman | `opus-backend/t288-contract-conformance@c0db243` | `opus-backend/t288-contract-conformance` | `c0db243` | NO | 1 | 1 ref(s) | YES |
+| T-290 | steer | `cursor/cos-s05-wave-d83a@a8b9c3d` | `cursor/cos-s05-wave-d83a` | `a8b9c3d` | YES | n/a | 19 ref(s) | verification — steer pin is artefact |
+| T-291 | atman | `infra-2/t291-release-drift-warning@d100fa1` | `infra-2/t291-release-drift-warning` | `d100fa1` | NO | n/a | 0 refs | repo OK, sha NOT DURABLE (0 origin refs) |
+| T-293 | steer | `sonnet-qa-t221-ui-mentions@94d2c26` | `sonnet-qa-t221-ui-mentions` | `94d2c26` | NO | n/a | 0 refs | verification artefact |
+| T-294 | steer | `opus-console@564557b` | `opus-console` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-296 | steer | `sonnet-sdk@564557b` | `sonnet-sdk` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-297 | atman | `opus-backend/t297-acceptance-write-path@8909356` | `opus-backend/t297-acceptance-write-path` | `8909356` | NO | 1 | 1 ref(s) | YES |
+| T-299 | steer | `sonnet-backend@564557b` | `sonnet-backend` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-300 | steer | `opus-verify@564557b` | `opus-verify` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-301 | atman | `sonnet-console/t301-bounded-read@0763c6d` | `sonnet-console/t301-bounded-read` | `0763c6d` | NO | 1 | 1 ref(s) | YES |
+| T-302 | steer | `opus-liveness@564557b` | `opus-liveness` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-303 | steer | `sonnet-sdk@564557b` | `sonnet-sdk` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-304 | steer | `opus-verify@564557b` | `opus-verify` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-305 | steer | `sonnet-qa-t221-ui-mentions@94d2c26` | `sonnet-qa-t221-ui-mentions` | `94d2c26` | NO | n/a | 0 refs | verification — steer pin is artefact |
+| T-306 | steer | `opus-authz@564557b` | `opus-authz` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-308 | steer | `sonnet-tickets@564557b` | `sonnet-tickets` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-310 | steer | `sonnet-console@564557b` | `sonnet-console` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-321 | steer | `sonnet-qa-t221-ui-mentions@94d2c26` | `sonnet-qa-t221-ui-mentions` | `94d2c26` | NO | n/a | 0 refs | verification artefact |
+| T-322 | atman | `opus-console/t322-quickstart@3cc821d` | `opus-console/t322-quickstart` | `3cc821d` | NO | 1 | 2 ref(s) | YES |
+| T-324 | atman | `sonnet-sdk/t324-ancestry-pin-guard@8dc234c` | `sonnet-sdk/t324-ancestry-pin-guard` | `8dc234c` | NO | 1 | 1 ref(s) | YES |
+| T-326 | atman | `opus-verify/t326-t187-acceptance@b7a7e98` | `opus-verify/t326-t187-acceptance` | `b7a7e98` | NO | 2 | 1 ref(s) | YES |
+| T-327 | atman | `grok-worker/t327-join-inbox@0f0e54a` | `grok-worker/t327-join-inbox` | `0f0e54a` | NO | 3 | 1 ref(s) | YES |
+| T-328 | atman | `infra-2/t328-migration-txn@98f18ed` | `infra-2/t328-migration-txn` | `98f18ed` | NO | n/a | 0 refs | repo OK, sha NOT DURABLE (0 origin refs) |
+| T-329 | atman | `opus-authz/t329-cli-inbox-clamp-port@91b7a05` | `opus-authz/t329-cli-inbox-clamp-port` | `91b7a05` | NO | 6 | 1 ref(s) | YES |
+| T-330 | steer | `sonnet-deploy@564557b` | `sonnet-deploy` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-331 | steer | `opus-liveness@564557b` | `opus-liveness` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-344 | steer | `composer@d7da471` | `composer` | `d7da471` | NO | n/a | 1 ref(s) | verification artefact |
+| T-345 | steer | `composer@d7da471` | `composer` | `d7da471` | NO | n/a | 1 ref(s) | verification artefact |
+| T-353 | atman | `composer/t353@b40a03e` | `composer/t353` | `b40a03e` | NO | n/a | 0 refs | repo OK, sha NOT DURABLE (0 origin refs) |
+| T-354 | steer | `cursor-fable@564557b` | `cursor-fable` | `564557b` | YES | n/a | 10 ref(s) | verification — steer pin is artefact |
+| T-367 | steer | `composer@d7da471` | `composer` | `d7da471` | NO | n/a | 1 ref(s) | verification artefact |
+| T-376 | steer | `cursor/t340-30s-demo@84e08ef` | `cursor/t340-30s-demo` | `84e08ef` | NO | n/a | 0 refs | verification artefact |
+| T-377 | atman | `composer/t377-env-isolate@a27765f` | `composer/t377-env-isolate` | `a27765f` | YES | 0 | 3 ref(s) | YES — work ON MAIN |
+| T-384 | ati | `cursor-modal/t384-bc-smoke@8ca7cec` | `cursor-modal/t384-bc-smoke` | `8ca7cec` | NO | n/a | 0 refs | YES (ati repo) |
+| T-390 | ati | `cursor-modal/t390-protocol@d3ec51e` | `cursor-modal/t390-protocol` | `d3ec51e` | NO | n/a | 0 refs | YES (ati repo) |
+| T-392 | steer | `composer@d7da471` | `composer/t377-env-isolate` | `a27765f` | YES | 0 | 3 ref(s) | YES — work ON MAIN |
+
+### Findings that change the merge plan (composer pass)
+
+1. **T-244 wrong pin is live and dangerous.** The board record copies T-228's
+   branch/sha. Real work is `sonnet-backend/t244-inbox-rotation-archive@f7b5d0c`
+   (3 unlanded commits per opus-backend-2's prior analysis). Merging at the
+   recorded pin would merge the wrong branch.
+
+2. **Three atman deliverables are not durable.** T-291 (`d100fa1`), T-328
+   (`98f18ed`), T-353 (`b40a03e`) have zero `refs/remotes/origin` containing
+   their shas. Authors must push before merge desk acts.
+
+3. **T-377 and T-392 are on main.** `a27765f` is an ancestor of `ed5eb62`
+   (PR#36). Desk can close both; steer pins on T-392 are review artefacts.
+
+4. **Verification rows (steer `564557b` pins)** — T-290, T-294, T-296, T-299,
+   T-300, T-302–T-306, T-308, T-310, T-330, T-331, T-354: no deliverable
+   commit; steer pin is on steer main (auto-close armed). Not errors.
+
+5. **T-276 likely landed** — check `git cherry` before merging; main now
+   contains `test_t221_mentions.py` and large `tickets.py` rewrite from the
+   atman main merge.
+
+---
 
 ## Provenance of every command in this document
 
@@ -40,8 +139,8 @@ Trunks resolved after a fresh `git fetch origin --prune` in each repo:
 
 | repo | trunk at this refresh |
 |---|---|
-| `advitiyavashist/tickets` | `origin/main` = **`5200f9d`** "docs: TICKETS_DIR when the board lives outside the repo you are editing" |
-| `advitiyavashist/steer` | `origin/main` = **`564557b`** "T-218: honest-pending Vercel+Neon operator tails" |
+| `advitiyavashist/atman` (was tickets) | `origin/main` = **`ed5eb624ecd9`** (composer refresh) |
+| `advitiyavashist/steer` | `origin/main` = **`822d0490660a`** (composer refresh) |
 
 ## Method — three questions per row, not one
 
@@ -69,6 +168,12 @@ commits `-`: the work landed via `opus-liveness/t237-liveness-truth-v2`
 would have replayed a superseded v1 branch that also carries T-244's commits.
 
 ---
+
+
+
+---
+
+## Historical snapshot — opus-backend-2's 9-row pass (2026-09-07)
 
 ## The map — 9 live review-queue rows
 
