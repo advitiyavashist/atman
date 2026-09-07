@@ -6471,13 +6471,20 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
 .hero-eyebrow{margin:0 0 6px;font-size:12px;color:var(--mute);font-weight:650}
-.promise-hero{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.promise-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
-.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
-.promise-card .v{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums;margin:4px 0;line-height:1.15}
-.promise-card .h{font-size:12px;color:var(--mute)}
+.promise-strip{display:flex;gap:10px 14px;align-items:baseline;padding:6px 16px;border-bottom:1px solid var(--line);font-size:13px}
+.promise-strip .lbl{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--mute)}
+.promise-strip .msg{color:var(--mute)}
+.chip.promise{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
+body[data-tab=board] .promise-chips{display:none}
+.promise-hero{display:flex;gap:32px;align-items:flex-end;padding:2px 0 12px;border-bottom:1px solid var(--line)}
+.promise-card{display:flex;flex-direction:column;gap:2px;min-width:132px;background:transparent;border:0;padding:0}
+.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
+.promise-card .v{font-size:32px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.05}
+.promise-card .h{font-size:11px;color:var(--mute)}
 .promise-panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .promise-panel h2{margin:0 0 4px;font-size:13px}
+.promise-panel summary{cursor:pointer;list-style:none;font-size:13px;font-weight:650}
+.promise-panel summary::-webkit-details-marker{display:none}
 .turns-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .subh{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:8px 0 4px}
 .promise-table{width:100%;border-collapse:collapse;font-size:13px}
@@ -6510,10 +6517,11 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
   #clock{margin-left:0}
-  .next-step{flex-direction:column}
+  .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
   .ob-steps{flex-direction:column;align-items:flex-start}
   .kanban{grid-template-columns:1fr}
-  .promise-hero,.turns-grid{grid-template-columns:1fr}
+  .promise-hero{flex-wrap:wrap;gap:16px}
+  .turns-grid{grid-template-columns:1fr}
   nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
   .agents{grid-template-columns:1fr}
   .sprint{min-width:0}
@@ -6522,13 +6530,18 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <header class="cmd">
   <div class="brand"><span class="prod">tickets</span><h1 id="title">Ticket board</h1></div>
   <div class="chips" id="chips"></div>
+  <div class="chips promise-chips" id="promiseChips">
+    <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
+    <span class="chip promise" id="hdrYield"><b>yield@cost</b> <span id="hdrYieldVal">—</span></span>
+  </div>
   <div class="sprint" id="sprint"></div>
   <div class="pulse" id="pulse"><i></i><span>clean</span></div>
   <div id="clock"></div>
 </header>
 <details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
-<details class="onboard" id="onboardBox" open><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
+<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
+<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
   <button type="button" data-tab-btn="board" class="on">Board</button>
@@ -6538,24 +6551,24 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <main>
 <div class="pane" id="pane-board">
   <div id="emptyBoard" class="empty-board" hidden></div>
-  <div>
-    <p class="hero-eyebrow" id="heroEyebrow">Fewest turns. Max output at least cost.</p>
-    <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost.">
+  <section id="objectivePromise" data-fold="objective">
+    <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
+    <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."><!-- V1 MUST: home median turns + yield@cost; T-344 worst-10 is NICE only -->
       <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Lower is better · unknown is not zero</div></article>
       <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
     </div>
-  </div>
+  </section>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
     <section class="col flight"><h2 title="Tickets actively being worked right now">In flight <span class="n" id="n-flight">0</span><span class="hint">claimed and in progress</span></h2><div class="list" id="col-flight"></div></section>
     <section class="col review"><h2 title="Finished work waiting for master to merge to main">Review <span class="n" id="n-review">0</span><span class="hint">submitted, awaiting merge</span></h2><div class="list" id="col-review"></div></section>
   </div>
-  <section class="promise-panel" id="turnsPanel">
-    <h2>Turns efficiency</h2>
+  <details class="promise-panel" id="turnsPanel">
+    <summary>Turns efficiency</summary>
     <small id="turnsSummary" class="mute"></small>
     <div class="turns-grid"><div><h3 class="subh">Worst tickets (watch runs)</h3><table class="promise-table" id="turnsWorst"></table></div><div><h3 class="subh">Per-agent median</h3><table class="promise-table" id="turnsAgents"></table></div></div>
-  </section>
+  </details>
 </div>
 <div class="pane" id="pane-agents">
   <p class="pitch-lede" id="coverageLede"><b>Total Football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
@@ -6631,13 +6644,17 @@ function fillCol(id,items,html){
 }
 const dash=x=>x==null?'—':String(x);
 function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(n).toFixed(4):Number(n).toFixed(2)))}
+function fmtMedian(p){return(!p||p.median_turns==null)?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0)}
+function fmtYield(p){return(!p||p.yield_per_usd==null)?'—':(Number(p.yield_per_usd).toFixed(2)+' per $')}
+function setTxt(id,v){const el=document.getElementById(id);if(el)el.textContent=v}
 function renderPromise(p){
-  const med=document.getElementById('heroMedianVal');
-  const yv=document.getElementById('heroYieldVal'),yh=document.getElementById('heroYieldHint');
-  if(!p){med.textContent='—';yv.textContent='—';return}
-  med.textContent=p.median_turns==null?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0);
-  if(p.yield_per_usd==null){yv.textContent='—';yh.textContent=(p.n_unmeasured_cost||0)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';}
-  else{yv.textContent=Number(p.yield_per_usd).toFixed(2)+'/ $';yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';}
+  const med=fmtMedian(p),yld=fmtYield(p);
+  setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);
+  setTxt('heroYieldVal',yld);setTxt('hdrYieldVal',yld);
+  const yh=document.getElementById('heroYieldHint');
+  if(!yh)return;
+  if(!p||p.yield_per_usd==null)yh.textContent=(p&&p.n_unmeasured_cost)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';
+  else yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
 }
 function renderTurns(t){
   const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
