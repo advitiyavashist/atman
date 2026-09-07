@@ -406,7 +406,13 @@ def test_f3_the_response_validates_against_the_frozen_contract(
         check("SendMessageResponse", response.json(),
               label="POST /messages 201 with an unvalidated ticket_id")
     else:
-        check("Error", response.json(),
+        # sendMessage declares exactly 201/400/403 (openapi.yaml), so a refusal
+        # on any OTHER status fixes this conformance break by committing a
+        # second one -- a 404 here would be T-309's shape exactly.
+        assert response.status in (400, 403), (
+            "refusal status %s is not declared by sendMessage (201/400/403)"
+            % response.status)
+        check("ErrorResponse", response.json(),
               label="POST /messages refusal of an unvalidated ticket_id")
 
 
