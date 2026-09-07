@@ -1,6 +1,12 @@
 #!/bin/sh
 # Install `tickets` on PATH and (optionally) the Claude Code SessionStart hook.
 set -e
+# Production delivery uses immutable snapshots; the legacy mode below is for development.
+if [ "${1:-}" = "--live-release" ]; then
+  shift
+  exec python3 "$(dirname "$0")/scripts/install_live.py" "$@"
+fi
+echo "Development install: use --live-release --ref <sha> for the shared live CLI."
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN="${HOME}/.local/bin"
 mkdir -p "$BIN"

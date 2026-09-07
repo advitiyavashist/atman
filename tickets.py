@@ -4484,8 +4484,30 @@ class _LoudArgumentParser(argparse.ArgumentParser):
         })
 
 
+def release_version():
+    """Report installed provenance without discovering or touching a board."""
+    import hashlib
+    root = os.path.dirname(os.path.realpath(__file__))
+    manifest = os.path.join(root, "release.json")
+    if not os.path.isfile(manifest):
+        return "tickets (uninstalled checkout; no pinned release)"
+    try:
+        with open(manifest) as source:
+            release = json.load(source)
+        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
+            with open(os.path.join(root, name), "rb") as source:
+                actual = hashlib.sha256(source.read()).hexdigest()
+            if actual != release["files"][name]:
+                return "tickets DRIFTED release %s (%s)" % (release["commit"], name)
+        return "tickets commit %s (verified release)" % release["commit"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return "tickets INVALID release provenance"
+
+
 def main():
-    p = _LoudArgumentParser(prog="tickets", description=__doc__.split("\n")[0])
+    p = _LoudArgumentParser(prog="tickets", description=__doc__.split("\n")[0],
+                           epilog=release_version())
+    p.add_argument("--version", action="version", version=release_version())
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
