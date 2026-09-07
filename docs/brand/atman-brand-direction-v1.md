@@ -2,19 +2,24 @@
 
 Status: **CEO / Advitiya review.** Soft-lock pending ACCEPT. No SVG assets in this PR (T-347 waits ACCEPT). Does not change `tickets.py` `UI_HTML` (T-345 owns UI).
 
-Atman **is** a **BYOA runtime** (bring-your-own-agent *harness* — you do not install our model). One-liner:
+Atman **is** a runtime for teams of agents you already bring. One-liner:
 
 > Bring the agents you already use. We make them one team.
 
-Feels like TEAM: **objective → allocate → concurrent → handoffs → review → replan.** North star: task completion in the **fewest turns**. Total Football: fluid roles, coverage over fixed identity.
+**PMM lock (keep)**
 
-**Atman is not:** a multi-agent framework / SDK; a shared-memory product; one API for Claude/Codex; a model router alone; a DAG toy. Do not promise a learned router or shadow optimizer as V1 brand (T-313 / T-315 = NICE). Do not collapse Atman into tickets-CLI marketing — the product is the team runtime; the CLI is how it runs today.
+| | |
+|---|---|
+| **IS** | Runtime for teams of agents you already bring. Feels like TEAM: objective → allocate → concurrent → handoffs → review → replan. North star = task completion in fewest turns. BYOA = bring-your-own-agent *harness*, not install our model. |
+| **NOT** | Multi-agent framework. Shared-memory product. One API for Claude/Codex. Model router alone. DAG toy. |
+| **Contrast** | Atman = who works / how the team finishes. Steer = what the agent may see/say. |
+| **Language** | teammates, lanes, next step, handoff — not nodes / edges / SDK. |
+| **Steer (keep separate)** | "Runtime policy checks for AI agents." Advisory allow / block / escalate + evidence. DLP = GTM wedge. Cite only GO-WITH-DEBT / ACCEPT-with-limits — never mix into Atman claims. Do not rebrand Steer. |
+| **Don't** | Promise learned router / shadow optimizer as V1 brand (T-313 / T-315 = NICE). No compliance / shield / enforce chrome. Don't collapse Atman into tickets-CLI marketing — product is the team runtime; CLI is how it runs today. |
 
-**Contrast (PM, keep):** Atman = *who works / how the team finishes*. SteerMD = *what the agent may see/say*. Launch hero: "Runtime policy checks for AI agents." Visual: light instrument panel, slight-pixel `^`, paper / ink / lime. Atman is a **different product-family member**, not a Steer reskin. Do not mix Steer claims into Atman.
+Steer **Path B decided** (CEO): product name SteerMD, domain `steermd.com`. PMM's "HOLD T-138 / don't lock domain" is **superseded** — T-138 is not an open HOLD; Advitiya registration residual only. Do not reopen A/B/C.
 
-Steer (keep separate): advisory allow / block / escalate + evidence. DLP = GTM wedge. Cite only GO-WITH-DEBT / ACCEPT-with-limits. **Path B decided** — product name SteerMD, domain `steermd.com`. Do not reopen A/B/C. T-138 is not an open HOLD; only Advitiya registration residual remains. Do not rebrand Steer.
-
-Steer launch is **P0, parallel** with Atman (dual-track). Soft-hold Steer landing hero **T-341** only for this Atman direction turn — not "Steer waits forever."
+Steer launch is **P0, parallel** with Atman (dual-track). Soft-hold Steer landing hero **T-341** only for this Atman direction turn — not "Steer waits forever." Visual: light instrument panel, slight-pixel `^`, paper / ink / lime. Atman is a **different product-family member**, not a Steer reskin. Total Football: fluid roles, coverage over fixed identity.
 
 ---
 
