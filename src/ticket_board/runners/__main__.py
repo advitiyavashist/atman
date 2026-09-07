@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ..adapters.claude import load_enrollment
 from .client import ApiError, BoardUnreachable, RunnerClient
-from .launcher import LaunchFailed, resolve_claude
+from .launcher import preflight
 from .state import RunnerStateCorrupt, load_state
 from .supervisor import Supervisor
 
@@ -90,6 +90,7 @@ def _status(args, enrollment, worktree, state_dir) -> int:
         "epoch": None,
         "in_flight": None,
         "claude_executable": None,
+        "claude_version": None,
         "board_reachable": None,
         "remediation": [],
     }
@@ -103,10 +104,13 @@ def _status(args, enrollment, worktree, state_dir) -> int:
         report["epoch"] = state.epoch
         report["in_flight"] = state.in_flight.run_id if state.in_flight else None
 
-    try:
-        report["claude_executable"] = resolve_claude()
-    except LaunchFailed as exc:
-        report["remediation"].append(str(exc))
+    # Not just "is there a binary": does THIS binary accept the flags this
+    # supervisor sends? A version that dropped one is a run that dies at exec.
+    flight = preflight()
+    report["claude_executable"] = flight["binary"] if not flight["error"] else None
+    report["claude_version"] = flight["version"]
+    if flight["error"]:
+        report["remediation"].append(flight["error"])
 
     try:
         _client(enrollment).jobs(state.runner_id if state else "rnr_00000000",

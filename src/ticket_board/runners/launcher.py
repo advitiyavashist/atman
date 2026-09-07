@@ -39,7 +39,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 # Inherited variables that would let a child session act as somebody else, or
 # resolve a different board than the one this run belongs to. Stripped rather
@@ -58,12 +58,14 @@ class LaunchFailed(RuntimeError):
 
 @dataclass(frozen=True)
 class LaunchSpec:
+    # A UUID: `--session-id` is documented and enforced as "must be a valid
+    # UUID". This is NOT the board's `ses_...` SessionId; see
+    # `state.board_session_id` for the conversion between the two id spaces.
     session_id: str
     worktree: Path
     prompt: str
     resume: bool = False
     permission_policy: str = "prompt"
-    max_turns: Optional[int] = None
     timeout_seconds: Optional[int] = None
 
 
@@ -104,14 +106,20 @@ def child_env(base: Optional[Mapping[str, str]] = None,
 
 # The permission policy the operator configured, expressed in the runtime's own
 # flags. Nothing here widens what the operator allowed: `prompt` deliberately
-# has no flag at all, so a permission request surfaces and pauses the run
-# rather than being auto-answered by the supervisor.
+# maps to no flag at all, so the runtime's default applies and a permission
+# request surfaces and pauses the run rather than being auto-answered by the
+# supervisor. Verified against the installed CLI's own `--permission-mode`
+# choices rather than taken from the docs -- `preflight()` re-checks it, because
+# a flag that a future version drops is a run that dies at exec with nothing to
+# read.
 _PERMISSION_FLAGS = {
     "prompt": (),
     "allowlist": ("--permission-mode", "acceptEdits"),
     "deny_all": ("--permission-mode", "plan"),
 }
 
+# The flags this supervisor actually emits, for `preflight()` to check.
+REQUIRED_FLAGS = ("-p", "--session-id", "--resume", "--permission-mode")
 
 def build_argv(binary: str, spec: LaunchSpec) -> List[str]:
     if spec.permission_policy not in _PERMISSION_FLAGS:
@@ -121,8 +129,12 @@ def build_argv(binary: str, spec: LaunchSpec) -> List[str]:
     argv.extend(["--resume", spec.session_id] if spec.resume
                 else ["--session-id", spec.session_id])
     argv.extend(_PERMISSION_FLAGS[spec.permission_policy])
-    if spec.max_turns is not None:
-        argv.extend(["--max-turns", str(spec.max_turns)])
+    # No `--max-turns`. Claude Code 2.1.263 has no such flag -- it was in an
+    # earlier draft of this module, taken from the shape of the API rather than
+    # from the installed binary, and it would have died at exec. The turn
+    # budget is therefore carried on `RunBudget` and reported, but NOT enforced
+    # here; only the time budget is, because only the time budget can be. Said
+    # plainly in docs/managed-runner.md rather than left to be discovered.
     return argv
 
 
@@ -240,3 +252,43 @@ def is_process_alive(pid: Optional[int]) -> bool:
     except (TypeError, ValueError, OSError):
         return False
     return True
+
+
+def preflight(binary: Optional[str] = None) -> Dict[str, Any]:
+    """Prove the installed `claude` accepts the flags this supervisor sends.
+
+    T-181's lesson was that *installed* and *runnable* are different facts and
+    only execution separates them. This is the next one along: runnable and
+    *compatible* are also different. `--max-turns` looked entirely reasonable
+    and does not exist; `--session-id` takes a UUID and not the board's own
+    session id. Both would have failed at spawn time, and a hook or a
+    supervisor that dies at exec leaves nothing to read.
+
+    So this asks the binary, not the documentation: `--version` for the record,
+    and `--help` for the flags. Cheap, and it starts no session.
+    """
+    report: Dict[str, Any] = {"binary": None, "version": None,
+                              "missing_flags": [], "error": None}
+    try:
+        report["binary"] = resolve_claude(binary)
+    except LaunchFailed as exc:
+        report["error"] = str(exc)
+        return report
+    try:
+        version = subprocess.run([report["binary"], "--version"],
+                                 capture_output=True, text=True, timeout=20,
+                                 check=False)
+        report["version"] = (version.stdout or "").strip() or None
+        helped = subprocess.run([report["binary"], "--help"],
+                                capture_output=True, text=True, timeout=20,
+                                check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        report["error"] = "Could not interrogate claude: {}".format(exc)
+        return report
+    text = (helped.stdout or "") + (helped.stderr or "")
+    report["missing_flags"] = [f for f in REQUIRED_FLAGS if f not in text]
+    if report["missing_flags"]:
+        report["error"] = (
+            "The installed claude does not advertise {}. This supervisor would "
+            "fail at spawn time.".format(", ".join(report["missing_flags"])))
+    return report

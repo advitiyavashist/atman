@@ -1343,8 +1343,13 @@ def _child_session_id(body):
     return value
 
 
-_BUDGET_FIELDS = ("max_hops", "max_turns", "max_seconds",
-                  "hops_used", "turns_used", "seconds_used")
+# `RunBudget` is `required: [max_hops, max_turns, max_seconds]` with minimums,
+# and `additionalProperties: false`. A partial budget is therefore not a
+# RunBudget at all -- accepting `{"turns_used": 1}` would let a client write a
+# body the published schema rejects, which is exactly the drift validate.py
+# exists to prevent. Found by tests/runners/test_route_conformance.py.
+_BUDGET_LIMITS = {"max_hops": 1, "max_turns": 1, "max_seconds": 30}
+_BUDGET_COUNTERS = ("hops_used", "turns_used", "seconds_used")
 
 
 def _run_budget(body):
@@ -1354,14 +1359,20 @@ def _run_budget(body):
     if not isinstance(value, dict):
         raise MalformedRequest("budget must be an object.",
                                {"rejected_fields": ["budget"]})
-    unexpected = sorted(set(value) - set(_BUDGET_FIELDS))
+    unexpected = sorted(set(value) - set(_BUDGET_LIMITS) - set(_BUDGET_COUNTERS))
     if unexpected:
         raise MalformedRequest("budget contained unexpected fields.",
                                {"rejected_fields": unexpected})
-    for key, raw in value.items():
-        if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
-            raise MalformedRequest("budget.{} must be a non-negative integer."
-                                   .format(key), {"rejected_fields": [key]})
+    missing = sorted(f for f in _BUDGET_LIMITS if f not in value)
+    if missing:
+        raise MalformedRequest(
+            "budget must carry max_hops, max_turns and max_seconds.",
+            {"missing_fields": missing})
+    for key, minimum in _BUDGET_LIMITS.items():
+        validate.integer(value, key, minimum=minimum)
+    for key in _BUDGET_COUNTERS:
+        if key in value and value[key] is not None:
+            validate.integer(value, key, minimum=0)
     return value
 
 

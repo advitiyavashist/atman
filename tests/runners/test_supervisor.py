@@ -55,7 +55,10 @@ def test_a_task_message_wakes_the_runner_and_the_run_reaches_responded(
     run = server.store.get_run(project["id"], "run_" + job["id"][4:])
     assert run["state"] == "responded"
     assert run["started_at"] is not None
-    assert run["session_id"] == supervisor.launcher.specs[0].session_id
+    # The board records the `ses_...` form; the child was given the UUID.
+    from ticket_board.runners import board_session_id
+    assert run["session_id"] == board_session_id(
+        supervisor.launcher.specs[0].session_id)
     # The receipt chain closed the job too, so it is not redelivered.
     states = {j["id"]: j["state"]
               for j in server.store.list_wake_jobs(project["id"])["items"]}
@@ -299,3 +302,61 @@ def test_state_survives_a_restart_and_a_corrupt_file_is_refused(tmp_path,
     from ticket_board.runners import RunnerStateCorrupt
     with pytest.raises(RunnerStateCorrupt):
         load_state(tmp_path / "state")
+
+
+def test_the_board_session_id_and_the_claude_session_id_are_not_the_same_thing(
+        server, project, agent, supervisor):
+    """Two id spaces, and passing one where the other belongs never starts.
+
+    `claude --session-id` is documented and enforced as "must be a valid
+    UUID"; the board's `SessionId` is `^ses_[0-9a-z]{8,32}$`. The first draft
+    of this module minted a `ses_...` and handed it straight to the CLI, which
+    would have been rejected at spawn. They are converted, not conflated, and
+    the conversion is reversible so either can be recovered from the other.
+    """
+    import re
+    import uuid
+
+    from ticket_board.runners import board_session_id, runtime_session_id
+
+    make_wake_job(server, project, agent["agent_id"])
+    supervisor.register()
+    supervisor.poll_once(wait_seconds=0)
+
+    runtime = supervisor.launcher.specs[0].session_id
+    uuid.UUID(runtime)                       # raises if it is not a real UUID
+    board = board_session_id(runtime)
+    assert re.match(r"^ses_[0-9a-z]{8,32}$", board), board
+    assert runtime_session_id(board) == runtime
+
+    stored = server.store.get_run(
+        project["id"], supervisor.state.completed and
+        "run_" + [j["id"] for j in
+                  server.store.list_wake_jobs(project["id"])["items"]][0][4:])
+    assert stored["session_id"] == board
+
+
+def test_a_board_session_id_that_is_not_uuid_shaped_is_refused_for_resume():
+    """An enrolled agent's own `ses_abcd1234` is 8 characters, not 32. Handing
+    it to `--resume` would be the same mistake in the other direction."""
+    from ticket_board.runners import runtime_session_id
+
+    with pytest.raises(ValueError, match="cannot be handed"):
+        runtime_session_id("ses_abcd1234")
+
+
+def test_the_installed_claude_accepts_every_flag_this_supervisor_sends():
+    """Asked of the binary, not of the documentation.
+
+    `--max-turns` was in an earlier draft of the launcher, taken from the
+    shape of the API rather than from the installed CLI, and does not exist in
+    Claude Code 2.1.263. It would have died at exec with nothing to read.
+    """
+    from ticket_board.runners import REQUIRED_FLAGS, preflight
+
+    report = preflight()
+    if report["binary"] is None:
+        pytest.skip("no claude on this machine: {}".format(report["error"]))
+    assert report["missing_flags"] == [], report["error"]
+    assert report["version"], "preflight must record which version it checked"
+    assert "--max-turns" not in REQUIRED_FLAGS

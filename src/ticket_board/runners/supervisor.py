@@ -46,9 +46,10 @@ from .launcher import ClaudeLauncher, LaunchFailed, LaunchSpec, is_process_alive
 from .state import (
     InFlight,
     RunnerState,
+    board_session_id,
     load_state,
     new_runner_id,
-    new_session_id,
+    new_runtime_session_id,
     save_state,
 )
 
@@ -169,7 +170,8 @@ class Supervisor:
             reason if problem is None else "{} ({})".format(reason, problem))
 
     def _post_terminal(self, run_id: str, event: str, reason: Optional[str],
-                       version: Optional[int] = None) -> Optional[str]:
+                       version: Optional[int] = None,
+                       budget: Optional[Dict[str, int]] = None) -> Optional[str]:
         """Post a terminal run event; return None on success, else why not.
 
         The version is discovered rather than assumed when we do not hold one.
@@ -183,7 +185,7 @@ class Supervisor:
         for _ in range(2):
             try:
                 self.client.run_event(run_id, event, expected_version=attempt,
-                                      reason=reason)
+                                      reason=reason, budget=budget)
                 return None
             except ApiError as exc:
                 actual = (exc.details or {}).get("actual_version")
@@ -213,12 +215,16 @@ class Supervisor:
             return RunOutcome(job["id"], run_id, "skipped",
                               "Already executed; duplicate delivery.")
 
-        session_id = new_session_id()
+        # Two forms of one session: the UUID the child process is given, and
+        # the `ses_...` the board records. Minted together so they cannot drift.
+        runtime_session = new_runtime_session_id()
+        session_id = board_session_id(runtime_session)
         # Written BEFORE anything external happens, and fsynced. If the process
         # dies on the next line, `reconcile()` finds this record on restart.
         self.state.in_flight = InFlight(
             run_id=run_id, wake_job_id=job["id"], dedupe_key=dedupe_key,
-            session_id=session_id, ticket_id=job.get("ticket_id"))
+            session_id=session_id, runtime_session_id=runtime_session,
+            ticket_id=job.get("ticket_id"))
         self._save()
 
         try:
@@ -237,11 +243,10 @@ class Supervisor:
 
         try:
             spec = LaunchSpec(
-                session_id=session_id, worktree=self.worktree,
+                session_id=runtime_session, worktree=self.worktree,
                 prompt=self.prompt_builder(job),
                 resume=False,
                 permission_policy=self.permission_policy,
-                max_turns=self.budget.get("max_turns"),
             )
             began = self.clock()
             handle = self._launcher().start(spec)
@@ -262,18 +267,28 @@ class Supervisor:
             return self._fail(job, run_id, "Started but unreportable: {}".format(exc))
 
         result = handle.wait(timeout=self.budget.get("max_seconds"))
+        # `seconds_used` is the one budget counter this supervisor can fill in
+        # honestly: it timed the process itself. `turns_used` is not enforced
+        # or counted -- the installed Claude Code has no `--max-turns` flag and
+        # a turn count would have to be parsed out of the child's transcript --
+        # and `hops_used` belongs to the messaging lane that creates the
+        # causation chain. Reporting a number nobody measured is worse than
+        # reporting none, so they are passed through unchanged.
+        spent = dict(self.budget,
+                     seconds_used=int(max(0.0, self.clock() - began)))
         if result.returncode is None:
             # The time budget, not a crash. Pause with a visible reason; the
             # design doc says an operator resumes from here.
             outcome = self._terminal(job, run_id, "budget_reached",
                                      result.reason or "Run budget reached.",
-                                     run["version"], keep_unfinished=True)
+                                     run["version"], keep_unfinished=True,
+                                     budget=spent)
             outcome.started_after_seconds = started_after
             return outcome
 
         event = "responded" if result.returncode == 0 else "failed"
         outcome = self._terminal(job, run_id, event, result.reason,
-                                 run["version"])
+                                 run["version"], budget=spent)
         outcome.started_after_seconds = started_after
         return outcome
 
@@ -320,9 +335,11 @@ class Supervisor:
 
     def _terminal(self, job: Dict[str, Any], run_id: str, event: str,
                   reason: Optional[str], version: Optional[int] = None,
-                  keep_unfinished: bool = False) -> RunOutcome:
+                  keep_unfinished: bool = False,
+                  budget: Optional[Dict[str, int]] = None) -> RunOutcome:
         outcome = RunOutcome(job["id"], run_id, event, reason)
-        problem = self._post_terminal(run_id, event, reason, version)
+        problem = self._post_terminal(run_id, event, reason, version,
+                                      budget=budget)
         if problem is not None:
             outcome.reason = "{} ({})".format(reason, problem)
 

@@ -55,7 +55,7 @@ session to a hook command spelled `python` on a machine that only has
 | `WAKE_LEASE_SECONDS` | 120 | Matches the runner lease: a job outliving its supervisor's lease would be reclaimed by a runner that no longer exists. |
 | `WAKE_MAX_ATTEMPTS` | 3 | At-least-once, bounded. After three the job enters the inspectable failed queue rather than retrying forever or being dropped. |
 | `LEDGER_CAP` | 500 | The local dedupe ledger is bounded so a long-lived runner's state file cannot grow without limit. |
-| Budget defaults | 3 hops / 10 turns / 15 min | The design doc's pilot defaults, carried unchanged. |
+| Budget defaults | 3 hops / 10 turns / 15 min | The design doc's pilot defaults, carried unchanged. Only `max_seconds` is enforced here; see below. |
 
 ## Measured, and not measured
 
@@ -136,6 +136,22 @@ is audited as `run.event.superseded`. An anonymous caller cannot paint a run
 green or close it. A supervisor that genuinely lost its session recovers
 through the lease — it expires and a supervisor registers at a new epoch — not
 by closing the run anonymously.
+
+## What the installed CLI actually accepts
+
+Checked against `claude --version` / `claude --help` on **Claude Code 2.1.263**,
+not against the documentation, because the two disagreed:
+
+| What | Reality |
+|---|---|
+| `--session-id` | Takes a **UUID** — "must be a valid UUID", enforced. The board's `SessionId` is `^ses_[0-9a-z]{8,32}$`. **Two different id spaces.** `state.board_session_id()` converts a UUID to the board form (`ses_` + 32 hex, which satisfies the pattern) and `runtime_session_id()` converts back. An earlier draft of this module minted a `ses_...` and handed it straight to the CLI; that run would never have started. |
+| `--max-turns` | **Does not exist.** It was in an earlier draft, taken from the shape of `RunBudget` rather than from the binary, and would have died at exec. The turn budget is carried and reported but **not enforced** by this supervisor — only the time budget is, because only the time budget can be. |
+| `--permission-mode` | Choices are `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`. `allowlist` maps to `acceptEdits`, `deny_all` to `plan`, and `prompt` to no flag at all. |
+
+`runners.launcher.preflight()` re-asks the binary these questions and
+`python -m ticket_board.runners status` reports the answer, because *runnable*
+and *compatible* are as different as *installed* and *runnable* — and a
+supervisor that dies at exec leaves nothing to read.
 
 ## What this lane does not decide
 

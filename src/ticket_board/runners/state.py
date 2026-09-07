@@ -29,6 +29,7 @@ import json
 import os
 import secrets
 import tempfile
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -45,14 +46,40 @@ def new_runner_id() -> str:
     return "rnr_" + "".join(secrets.choice(ALPHABET) for _ in range(8))
 
 
-def new_session_id() -> str:
-    """A child session id, minted locally and passed to `claude --session-id`.
+def new_runtime_session_id() -> str:
+    """The child session id, in the form `claude --session-id` accepts.
+
+    A UUID, because that flag is documented as "must be a valid UUID" and the
+    installed CLI enforces it. The board's own `SessionId` is `ses_[0-9a-z]{8,32}`
+    -- a different id space entirely, and passing one where the other belongs
+    is a run that never starts. `board_session_id` converts.
 
     Minted here rather than read back from Claude because it has to exist
     *before* the process does: it is retained on the run first, so a crash
     between the retain and the spawn leaves something to reconcile against.
     """
-    return "ses_" + "".join(secrets.choice(ALPHABET) for _ in range(8))
+    return str(uuid.uuid4())
+
+
+def board_session_id(runtime_session_id: str) -> str:
+    """`f81d4fae-...` -> `ses_f81d4fae...`, which is a valid contract SessionId.
+
+    Total and reversible: the hex of a UUID is 32 characters of `[0-9a-f]`,
+    which satisfies `^ses_[0-9a-z]{8,32}$`. So the board record and the running
+    process name the same session, and either can be recovered from the other
+    without a lookup table.
+    """
+    return "ses_" + runtime_session_id.replace("-", "")
+
+
+def runtime_session_id(board_session_id_value: str) -> str:
+    """The inverse, for resuming a session recorded on the board."""
+    hexed = board_session_id_value[4:]
+    if len(hexed) != 32:
+        raise ValueError(
+            "{!r} is not a board session id minted from a UUID; it cannot be "
+            "handed to `claude --resume`.".format(board_session_id_value))
+    return str(uuid.UUID(hexed))
 
 
 @dataclass
@@ -62,7 +89,8 @@ class InFlight:
     run_id: str
     wake_job_id: str
     dedupe_key: str
-    session_id: str
+    session_id: str            # the board's `ses_...` form, as recorded on the run
+    runtime_session_id: str = ""   # the UUID the child process was given
     ticket_id: Optional[str] = None
     pid: Optional[int] = None
     spawned: bool = False
