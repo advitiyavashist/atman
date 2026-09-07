@@ -6411,6 +6411,15 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .empty-board .cta{margin-top:14px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
+.turns-panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:12px}
+.turns-panel h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:0 0 8px}
+.turns-panel table{width:100%;border-collapse:collapse}
+.turns-panel td,.turns-panel th{text-align:left;padding:4px 6px;border-top:1px solid var(--line);vertical-align:top;font-size:13px}
+.turns-panel th{color:var(--mute);font-weight:500;border-top:0}
+.num{text-align:right}
+.turns-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.subh{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);margin:8px 0 4px}
+@media(max-width:600px){.turns-grid{grid-template-columns:1fr}}
 .pitch{background:radial-gradient(1200px 400px at 50% 0%,#2a7a4c 0%,#14532d 55%,#0f3d24 100%);
   border:2px solid #0a2a18;border-radius:18px;min-height:460px;display:flex;flex-direction:column;
   position:relative;overflow:hidden;box-shadow:inset 0 0 0 2px rgba(255,255,255,.06)}
@@ -6467,6 +6476,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
     <section class="col flight"><h2 title="Tickets actively being worked right now">In flight <span class="n" id="n-flight">0</span><span class="hint">claimed and in progress</span></h2><div class="list" id="col-flight"></div></section>
     <section class="col review"><h2 title="Finished work waiting for master to merge to main">Review <span class="n" id="n-review">0</span><span class="hint">submitted, awaiting merge</span></h2><div class="list" id="col-review"></div></section>
   </div>
+  <section class="turns-panel"><h2>Turns to done</h2><small id="turnsSummary" class="mute"></small><div class="turns-grid"><div><h3 class="subh">Worst tickets (watch runs)</h3><table id="turnsWorst"></table></div><div><h3 class="subh">Per-agent median</h3><table id="turnsAgents"></table></div></div></section>
 </div>
 <div class="pane" id="pane-agents"><div class="agents" id="agents"></div></div>
 <div class="pane" id="pane-messages">
@@ -6657,6 +6667,7 @@ async function load(){
   const thread=(d.messages||[]).slice().reverse();
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtLocal(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
     ||'<div class="empty">no messages yet</div>';
+  renderTurns(d.turns);
 }
 function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
@@ -6694,6 +6705,17 @@ function renderEmptyBoard(d){
     '<p>Everyone reads the same board state — messages, tickets, and agents live here.</p>'+
     '<p>New here? Seed a sample board and claim your first ticket in one command.</p>'+
     '<div class="cta">tickets quickstart --agent &lt;you&gt; &nbsp;·&nbsp; tickets guide &nbsp;·&nbsp; README.md</div>';
+}
+function row(cells,cls){return '<tr class="'+(cls||'')+'">'+cells.map(c=>'<td>'+c+'</td>').join('')+'</tr>'}
+const dash=x=>x==null?'—':String(x);
+function renderTurns(t){
+  const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
+  if(!t||t.v!==1){sum.textContent='';worst.innerHTML=row(['—','','','']);agents.innerHTML=row(['—','','','']);return;}
+  const agg=t.aggregates||{},measured=(t.tickets||[]).filter(r=>r.turns!=null).sort((a,b)=>b.turns-a.turns||(a.ticket>b.ticket?1:-1)).slice(0,10);
+  sum.textContent='measured '+((agg.n)||0)+' ticket(s); unmeasured '+((agg.n_unmeasured)||0)+' (no run_end — typically backfill)';
+  worst.innerHTML='<tr><th>ticket</th><th>owner</th><th class="num">turns</th><th>outcome</th></tr>'+(measured.length?measured.map(r=>row([r.ticket,esc(r.owner),'<span class="num">'+r.turns+'</span>',esc(r.outcome||'-')])).join(''):row(['—','','','']));
+  const by=agg.by_agent||[];
+  agents.innerHTML='<tr><th>agent</th><th class="num">n</th><th class="num">median</th><th class="num">mean</th></tr>'+(by.length?by.map(r=>row([esc(r.agent),'<span class="num">'+r.n+'</span>','<span class="num">'+dash(r.median)+'</span>','<span class="num">'+dash(r.mean)+'</span>'])).join(''):row(['—','','','']));
 }
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
@@ -6751,6 +6773,34 @@ def _next_step_hint(board, tickets, done_ids):
     return {"kind": "ok", "label": "On track",
             "message": "Workers are moving — post updates every 45 minutes.",
             "cmd": "tickets update <id> \"...\""}
+
+
+def _turns_snapshot(board, tickets):
+    """Frozen `tickets turns --json` for the UI panel (T-344)."""
+    try:
+        from ticket_board.turns import build_turns_report, load_trajectory_events
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.turns import build_turns_report, load_trajectory_events
+    return build_turns_report(
+        load_trajectory_events(board),
+        tickets=tickets,
+        workforce=load_workforce(board),
+        messages=load_messages(board, include_archives=True),
+    )
+
+
+def _empty_turns_snapshot():
+    return {
+        "v": 1,
+        "tickets": [],
+        "aggregates": {
+            "mean": None, "median": None, "n": 0, "n_unmeasured": 0,
+            "by_agent": [], "by_model": [], "by_role": [], "by_priority": [],
+        },
+    }
 
 
 def board_snapshot(board, messages=40):
@@ -6819,6 +6869,7 @@ def board_snapshot(board, messages=40):
         "onboarding": _onboarding_checklist(board, tickets),
         "next_step": _next_step_hint(board, tickets, done),
         "empty_board": counts["total"] == 0,
+        "turns": _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot()),
     }
 
 

@@ -427,7 +427,7 @@ def test_ui_snapshot_shape(board):
     r = run(board, "ui", "--json")
     assert r.returncode == 0, r.stderr
     d = json.loads(r.stdout)
-    for k in ("goals", "util", "sprint", "in_flight", "review", "open", "agents", "health", "messages", "master"):
+    for k in ("goals", "util", "sprint", "in_flight", "review", "open", "agents", "health", "messages", "master", "turns"):
         assert k in d
     assert d["master"] == "planner" and d["in_flight"][0]["id"] == "T-001"
     assert any(a["name"] == "doc" and a["state"] == "busy" for a in d["agents"])
