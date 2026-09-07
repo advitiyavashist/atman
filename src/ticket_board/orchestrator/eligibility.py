@@ -266,16 +266,28 @@ def _capability_reason(ticket, agent):
     return False, "does not cover role %s" % role
 
 
-def eligible_agents(snapshot, ticket):
+def eligible_agents(snapshot, ticket, plan_claimed_files=None,
+                     plan_claimed_worktrees=None):
     """Candidates for one ticket, best first, with per-agent rejection reasons.
 
     Ordered by least loaded then by id. Least-loaded spreads work; the id
     tie-break is what makes the result reproducible, which two competing masters
     depend on to reach the same answer.
+
+    `plan_claimed_files` / `plan_claimed_worktrees` are what an in-progress
+    `plan()` pass has already decided to hand out -- the snapshot alone cannot
+    see them, because they are not reservations yet. Without them, two open
+    tickets that touch the same file (or name the same worktree) are each
+    judged only against the snapshot and both come out eligible, the same
+    hazard `plan()` already guards against for capacity.
     """
     candidates, rejected = [], []
     occupied_files = snapshot.occupied_files(ticket["id"])
+    for path, holder in (plan_claimed_files or {}).items():
+        occupied_files.setdefault(path, holder)
     occupied_worktrees = snapshot.occupied_worktrees()
+    for worktree, holder in (plan_claimed_worktrees or {}).items():
+        occupied_worktrees.setdefault(worktree, holder)
     wanted_files = snapshot.files(ticket)
     wanted_worktree = ticket.get("worktree")
 
@@ -327,10 +339,15 @@ def plan(snapshot):
 
     Assignments are *planned*, not written, and capacity is decremented as the
     plan is built so that one sweep cannot hand two tickets to an agent whose
-    limit is one.
+    limit is one. Files and worktrees are claimed the same way: the snapshot
+    only knows about tickets already claimed/reserved, so two still-open
+    tickets touching the same file (or worktree) are invisible to each other
+    unless this pass tracks its own decisions as it goes.
     """
     decisions = []
     consumed = {}
+    claimed_files = {}
+    claimed_worktrees = {}
 
     for ticket, verdict in routable_tickets(snapshot):
         if verdict is None:
@@ -339,7 +356,8 @@ def plan(snapshot):
             decisions.append(verdict)
             continue
 
-        candidates, rejected = eligible_agents(snapshot, ticket)
+        candidates, rejected = eligible_agents(
+            snapshot, ticket, claimed_files, claimed_worktrees)
         candidates = [c for c in candidates
                       if c.active_tickets + consumed.get(c.agent_id, 0)
                       < (_limit(snapshot, c.agent_id))]
@@ -351,6 +369,10 @@ def plan(snapshot):
 
         chosen = candidates[0]
         consumed[chosen.agent_id] = consumed.get(chosen.agent_id, 0) + 1
+        for path in snapshot.files(ticket):
+            claimed_files.setdefault(path, ticket["id"])
+        if ticket.get("worktree"):
+            claimed_worktrees.setdefault(ticket["worktree"], chosen.agent_id)
         decisions.append(Decision(
             ticket["id"], "assigned",
             "%s, %d of %d slots used" % (
