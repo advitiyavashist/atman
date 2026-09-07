@@ -103,6 +103,15 @@ class AdapterConfig:
     server_url: str
     max_event_bytes: int = 64 * 1024
     max_status_chars: int = 180
+    # Mirrors the frozen contract's own inbound bound (server/hooks.py:
+    # MAX_CONTEXT_LINES=20, CONTEXT_LINE_LENGTH=300), so an honest board's
+    # response round-trips unchanged. The adapter must not take that bound on
+    # faith, though: the server is a separate, possibly-hostile process from
+    # the adapter's point of view, and this is content printed to an enrolled
+    # agent's own stdout -- a prompt-injection / resource-exhaustion channel
+    # if left uncapped.
+    max_context_lines: int = 20
+    max_context_line_chars: int = 300
     spool_cap: int = 25
     retries: int = 2
     backoff_seconds: float = 0.01
@@ -306,6 +315,31 @@ def parse_claude_hook_event(
         "cwd": cwd,
         "note": note,
     }
+
+
+def bound_context_lines(lines: List[str], config: AdapterConfig) -> Tuple[List[str], int, int]:
+    """Cap inbound board context the same way outbound events are bounded.
+
+    Returns `(bounded_lines, dropped_line_count, truncated_line_count)`: lines
+    beyond `config.max_context_lines` are dropped entirely, and any surviving
+    line longer than `config.max_context_line_chars` is cut to that length.
+    Both counts are returned so the caller can say plainly how much was lost
+    -- a silent truncation is its own defect, because the agent then acts on
+    a partial instruction believing it is whole.
+    """
+    kept = lines[: config.max_context_lines]
+    dropped_line_count = len(lines) - len(kept)
+
+    bounded: List[str] = []
+    truncated_line_count = 0
+    for line in kept:
+        if len(line) > config.max_context_line_chars:
+            truncated_line_count += 1
+            bounded.append(line[: config.max_context_line_chars])
+        else:
+            bounded.append(line)
+
+    return bounded, dropped_line_count, truncated_line_count
 
 
 def _status_note(payload: Mapping[str, Any], event_name: str, limit: int) -> Optional[str]:

@@ -23,6 +23,7 @@ from .adapter import (
     BoardClient,
     ClaudeHookError,
     append_receipt,
+    bound_context_lines,
     build_hook_envelope,
     deliver_hook_event,
     load_enrollment,
@@ -97,17 +98,39 @@ def main(argv: list[str] | None = None) -> int:
     receipt["error"] = result.error
 
     lines = []
+    dropped_line_count = 0
+    truncated_line_count = 0
     if result.response:
         receipt["deduplicated"] = bool(result.response.get("deduplicated"))
         context = result.response.get("context")
         if isinstance(context, dict):
-            lines = [line for line in context.get("lines", []) if isinstance(line, str)]
+            raw_lines = [line for line in context.get("lines", []) if isinstance(line, str)]
+            lines, dropped_line_count, truncated_line_count = bound_context_lines(raw_lines, config)
         receipt["context_lines"] = len(lines)
+        if dropped_line_count or truncated_line_count:
+            receipt["context_truncated"] = {
+                "dropped_lines": dropped_line_count,
+                "truncated_lines": truncated_line_count,
+            }
 
     _record(project_dir, receipt)
 
     for line in lines:
         print(line)
+    if dropped_line_count or truncated_line_count:
+        # Printed to stdout, not stderr: this reaches the same place the
+        # context lines above do, because a truncation notice the agent
+        # never sees is as good as no notice at all.
+        print(
+            "[ticket board: inbound context truncated -- %d line(s) dropped "
+            "beyond the %d-line cap, %d line(s) cut to %d chars]"
+            % (
+                dropped_line_count,
+                config.max_context_lines,
+                truncated_line_count,
+                config.max_context_line_chars,
+            )
+        )
     return 0
 
 

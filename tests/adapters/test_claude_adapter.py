@@ -15,6 +15,7 @@ from ticket_board.adapters.claude import (
     AdapterConfig,
     BoardClient,
     ClaudeHookError,
+    DeliveryResult,
     Enrollment,
     SpoolFull,
     build_hook_envelope,
@@ -564,6 +565,54 @@ def test_hook_command_refuses_server_url_mismatch_before_delivery(tmp_path, enro
 
     assert result == 0
     assert "identity does not match" in stderr.getvalue()
+
+
+def test_hook_bounds_oversized_inbound_context_and_truncates_visibly(
+    tmp_path, enrollment, config, monkeypatch, capsys
+):
+    """T-289: T-181's outbound side bounds event size and note length via
+    AdapterConfig, but the inbound side printed `response.context.lines`
+    straight to stdout with no cap at all. A hostile or merely broken board
+    can hand an enrolled agent an unbounded blob on its own stdout -- a
+    prompt-injection and resource-exhaustion channel into every session that
+    runs this hook. Reproduces sonnet-backend's 50k-line/200KB stub.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    save_enrollment(project, enrollment)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(fixture("session_start.json"))))
+
+    huge_lines = ["x" * 4] * 50_000  # 200,000 bytes across 50k lines
+    monkeypatch.setattr(
+        hook_module,
+        "deliver_hook_event",
+        lambda *args, **kwargs: DeliveryResult(
+            delivered=True,
+            spooled=False,
+            status_code=200,
+            response={"context": {"lines": huge_lines}},
+        ),
+    )
+
+    result = hook_module.main(
+        [
+            "--project-id",
+            enrollment.project_id,
+            "--server-url",
+            enrollment.server_url,
+            "--agent-id",
+            enrollment.agent_id,
+            "--project-dir",
+            str(project),
+        ]
+    )
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert len(out) < 10_000, "inbound context must be bounded, not printed verbatim"
+    assert len(out.splitlines()) <= config.max_context_lines + 1
+    assert "truncated" in out.lower(), "a silent drop is its own defect -- say how much was cut"
+    assert "49980" in out or "49,980" in out  # dropped-line count is visible, not just implied
 
 
 def test_board_client_uses_contract_project_header(monkeypatch):
