@@ -74,6 +74,19 @@ eligibility policy.
      validated but does not reach the store's audit row, because
      `BoardStore.revoke_session` takes no `request_id` — a small gap, named
      here rather than papered over.
+   - **`POST /tickets/{id}/claim` with `assignment_id` set is not safely
+     replayable** (found by the T-255 audit, not fixed there). `_check_assignment`
+     reads the reservation's state in the route, before `claim_ticket`'s own
+     replay guard runs; a successful first claim flips that reservation
+     `queued` → `claimed`, so a byte-identical retry sees the *new* state and
+     dies as `assignment_expired` instead of replaying. The natural fix mirrors
+     `submit_review`/`decide_review` above — move the check inside
+     `BoardStore.claim_ticket`, after `_replay` — but `AssignmentExpired` is a
+     server-layer error (`server/errors.py`) that the storage layer cannot
+     import without inverting that dependency, and `assignment_id` is
+     otherwise a `server/master.py` concept the store does not know about.
+     Named here rather than guessed at; whoever owns the assignments model
+     (T-182) is better placed to decide the right shape than a route-only fix.
 
 3. **Cursors are opaque but typed.** `views.encode_cursor(kind, value)` wraps the
    position with the listing it belongs to, so an activity cursor replayed
@@ -181,9 +194,14 @@ invisible until it is wrong.
 2. **`BoardStore.assign()` returns the raw row, including `project_id`.**
    `Assignment` is `additionalProperties: false` and has no such field, so the
    row cannot be returned as-is; `views.serialize_assignment` reshapes it.
-3. **`submit_review` and `decide_review` do not take an `expected_version`**, and
-   `decide_review` does not know who submitted. The version check, the
-   ownership check and reviewer-is-not-submitter are enforced in the routes.
+3. **`submit_review` and `decide_review` take `expected_version` and check it
+   themselves, after their `_replay` guard** (T-255). They used to leave that
+   check to the route, read before the store call -- but both mutations bump
+   the ticket's version, so a byte-identical retry saw the *new* version there
+   and died as a conflict before replay ever ran, the same shape as T-235's
+   bug on `POST /tickets`. `decide_review` still does not know who submitted;
+   the ownership check and reviewer-is-not-submitter check stay in the routes,
+   since neither reads state a successful call itself changes.
 4. **`get_agent` does not join the session lease** that `Agent.session` publishes.
    `views.serialize_agent` joins it and adds `hook_health.last_error`.
 

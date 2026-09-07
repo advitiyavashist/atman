@@ -39,7 +39,6 @@ from .errors import (
     AssignmentExpired,
     BoardError,
     ForbiddenScope,
-    InvalidStateTransition,
     MalformedRequest,
     NotFound,
     SessionLeaseExpired,
@@ -518,15 +517,18 @@ class BoardServer:
         expected_version = validate.integer(body, "expected_version", minimum=0)
         evidence = validate.git_evidence(body)
 
+        # `expected_version` and the "claimed" state are checked inside
+        # store.submit_review, after its replay guard (T-255): checking them
+        # here, before the store call, used the ticket's *current* version --
+        # which a first successful submission has already bumped, so a
+        # byte-identical retry died as a conflict before replay ever saw it.
         ticket = self.store.get_ticket(ctx.project_id, ticket_id)
-        _require_version(ticket_id, expected_version, ticket["version"])
-        if ticket["state"] != "claimed":
-            raise InvalidStateTransition(ticket_id, ticket["state"], "review")
         if ctx.principal.is_agent and ticket.get("owner") != ctx.principal.agent_id:
             raise ForbiddenScope("Only the ticket's owner can submit it for review.")
 
         review = self.store.submit_review(
             ctx.project_id, ticket_id, ctx.principal.actor, evidence,
+            expected_version=expected_version,
             notes=validate.text(body, "notes", max_length=4000, required=False),
             request_id=request_id,
         )
@@ -560,14 +562,18 @@ class BoardServer:
         # the author is not review, whatever role the author is wearing.
         if (review.get("submitted_by") or {}).get("id") == ctx.principal.id:
             raise ForbiddenScope("A review cannot be decided by its submitter.")
-        ticket = self.store.get_ticket(ctx.project_id, ticket_id)
-        _require_version(ticket_id, expected_version, ticket["version"])
 
+        # `expected_version` is checked inside store.decide_review, after its
+        # replay guard (T-255): a deciding call bumps the ticket's version, so
+        # checking it here first -- against the ticket's *current* version --
+        # used to make a byte-identical retry die as a conflict before replay
+        # ever saw it, the same shape as the request_review bug above.
         decided = self.store.decide_review(
             ctx.project_id, review_id,
             "accepted" if decision == "accept" else "rejected",
             ctx.principal.actor,
             evidence_sha=evidence_sha,
+            expected_version=expected_version,
             notes=validate.text(body, "notes", max_length=4000, required=False),
             request_id=request_id,
         )
@@ -995,11 +1001,6 @@ def _session_id_taken(session_id):
     return MalformedRequest(
         "session_id is already in use; start a new runtime session.",
         {"rejected_fields": ["session_id"]})
-
-
-def _require_version(subject_id, expected, actual):
-    if expected != actual:
-        raise TicketVersionConflict(subject_id, expected, actual)
 
 
 def _version_conflict(key, subject_id, expected, actual):
