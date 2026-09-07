@@ -509,11 +509,17 @@ def test_master_heartbeat_drives_only_the_master_seat(board):
     assert "DRIVE THE OBJECTIVE" in out and "Ship V1" in out
     rc, p = pending(board, "boss")
     assert "drive" not in p
-    # a worker with the same heartbeat setting is never driven
+    # a plain worker is never driven; a seat spawned with --heartbeat is (standing seat)
     run(board, "join", "bob", "--roles", "backend")
-    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob")
     rc, p = pending(board, "bob")
     assert "drive" not in p
+    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob")
+    rc, p = pending(board, "bob")
+    assert "drive" in p
+    out = run(board, "prompt", agent="bob").stdout
+    assert "HEARTBEAT" in out and "Ship V1" in out
+    rc, p = pending(board, "bob")
+    assert "drive" not in p                                   # prompt stamped drive_at
     # a met objective stops the heartbeat
     run(board, "objective", "--done", "shipped", agent="boss")
     rec = json.loads((board / "agents" / "boss.json").read_text())
@@ -669,10 +675,15 @@ def test_message_in_the_same_second_as_a_join_is_delivered_not_dropped(board):
     A new agent still never sees the *flood*; only the boundary second.
     """
     run(board, "join", "dave", "--roles", "backend")
-    seen = json.loads((board / "agents" / "dave.json").read_text())["inbox_seen"]
+    # T-327 composition: the join second is read from joined_at, which is now
+    # the field that means "when this agent appeared". It used to be read from
+    # inbox_seen, because T-244 stamped that at first check-in -- a stamp this
+    # branch removes, since overloading a delivery receipt as a join clock is
+    # what destroyed pre-join directed mail (see checkin()).
+    joined = json.loads((board / "agents" / "dave.json").read_text())["joined_at"]
     # post with the message's own stamp forced onto dave's exact join second
     (board / "messages.jsonl").write_text(
-        json.dumps({"at": seen, "from": "alice", "to": "dave",
+        json.dumps({"at": joined, "from": "alice", "to": "dave",
                     "re": "", "text": "WELCOME-DAVE-TAKE-T123"}) + "\n")
     out = run(board, "inbox", agent="dave").stdout
     assert "WELCOME-DAVE-TAKE-T123" in out, (
@@ -680,30 +691,36 @@ def test_message_in_the_same_second_as_a_join_is_delivered_not_dropped(board):
         "silently dropped -- got: %r" % out)
 
 
-def test_legacy_agent_record_missing_inbox_seen_key_gets_stamped_on_next_checkin(board):
-    """Reviewer-found gap (sonnet-deploy, T-244 review): the original fix
-    only stamped inbox_seen when is_new_agent (rec was falsy). An agent
-    record that predates this patch -- present on disk, but written before
-    inbox_seen existed as a field at all -- is not "new", so the guard never
-    fired for it and since="" reopened on its very next check-in, silently
-    dropping archived mail all over again for that one class of agent.
+def test_legacy_agent_record_missing_inbox_seen_key_still_gets_archived_mail(board):
+    """Reviewer-found gap (sonnet-deploy, T-244 review), re-pinned on the
+    BEHAVIOUR rather than on the stamp that used to deliver it.
 
-    Fix: checkin() now stamps on `"inbox_seen" not in rec`, not on
-    is_new_agent, so any record missing the key -- freshly created or
-    legacy -- gets stamped.
+    The gap is real and this test still guards it: an agent record written
+    before inbox_seen existed as a field is present on disk but has no
+    inbox_seen key, and unread()'s old `if since and (...)` treated that
+    empty since as "skip the archive check" -- so that one class of agent
+    silently lost archived mail.
+
+    T-244 closed it by making since never empty (checkin() stamped
+    inbox_seen = now()). That stamp is gone on this branch: it also swallowed
+    every message addressed to a seat before the seat joined, which is how
+    briefs are delivered here and which T-327 measured and rejected. The
+    defect is now fixed at its own site instead -- since="" reads the
+    archives -- so the assertion moved from "the key came back" to "the mail
+    arrived", which is what the reviewer was actually protecting. Asserting
+    the stamp would only pin the mechanism, and the mechanism is what changed.
     """
     run(board, "join", "erin", "--roles", "backend")
     rec_path = board / "agents" / "erin.json"
     rec = json.loads(rec_path.read_text())
-    assert "inbox_seen" in rec  # join already stamped it; simulate a pre-T-244 record
-    del rec["inbox_seen"]
+    rec.pop("inbox_seen", None)  # simulate a record written before the field existed
     rec_path.write_text(json.dumps(rec))
 
     env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
     run(board, "here", agent="erin")  # any ordinary check-in, not a join
-    assert "inbox_seen" in json.loads(rec_path.read_text()), (
-        "checkin() must stamp inbox_seen for ANY record missing the key, "
-        "not only ones it just created"
+    assert "inbox_seen" not in json.loads(rec_path.read_text()), (
+        "a check-in must not stamp a delivery watermark it never earned -- "
+        "that stamp is what destroyed pre-join directed mail"
     )
     time.sleep(1.1)  # now() is second-precision (T-228); force a real clock gap
 
@@ -716,8 +733,8 @@ def test_legacy_agent_record_missing_inbox_seen_key_gets_stamped_on_next_checkin
 
     out = run(board, "inbox", "--limit", "500", agent="erin").stdout
     assert "IMPORTANT-FOR-ERIN" in out, (
-        "a legacy record that regained inbox_seen at its next check-in must "
-        "still find mail sent afterward, even through rotation -- got: %r" % out
+        "a record with no inbox_seen key at all must still find mail sent to "
+        "it, even once that mail has rotated into an archive -- got: %r" % out
     )
 
 

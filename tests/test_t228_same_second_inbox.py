@@ -434,3 +434,70 @@ def test_master_stuck_wake_is_not_blinded_by_a_future_stamp(tmp_path):
     assert out.get("stuck_messages"), (
         "a 'stuck' posted after a future-stamped record must still wake the "
         "master, got %r" % (out,))
+
+
+# ---------------------------------------------------------------------------
+# T-228 x T-244 x T-327: the composition none of the three suites covers alone.
+#
+# Found by running this branch's tests against origin/main after T-327 landed,
+# not by reading the diff: T-327's own
+# test_join_does_not_destroy_a_brief_posted_before_the_seat_existed went red on
+# the [root] arm only. T-244's stamp (inbox_seen = now() at first check-in) made
+# every message older than the join invisible, which is exactly the regression
+# T-327 measured and rejected when it chose joined_at over that same stamp.
+#
+# The two tests below pin BOTH halves, because a fix for either one alone is
+# reachable and wrong: dropping the stamp without fixing the archive read
+# reopens T-244, and keeping the stamp reopens T-327.
+# ---------------------------------------------------------------------------
+
+def test_pre_join_directed_mail_survives_a_rotation(board):
+    """A brief posted `--to` a seat BEFORE it joins, then rotated into an
+    archive before the seat's first read. Neither ticket's suite covers this
+    point: T-327's brief case never rotates, and T-244's rotation cases all
+    post AFTER the join.
+
+    Both mechanisms are load-bearing here and they fail in opposite
+    directions. If checkin() stamps inbox_seen, the brief is older than the
+    watermark and is filtered out before rotation even matters. If the
+    since=="" branch still skips the archives, the brief is never loaded to
+    be filtered. It takes the pair to deliver it.
+    """
+    env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
+    run(board, "join", "alice", "--roles", "backend")
+    r = run(board, "msg", "your brief: work T-999", "--to", "newbie", agent="alice", env=env)
+    assert r.returncode == 0, r.stderr
+    for i in range(20):  # rotate the brief out of the live file, before newbie exists
+        r = run(board, "msg", "filler %d filler filler filler" % i, agent="alice", env=env)
+        assert r.returncode == 0, r.stderr
+    assert sorted(board.glob("messages.*.jsonl")), "precondition: expected rotation"
+
+    time.sleep(1.1)  # "before the join" must mean an earlier second, not a tie
+    run(board, "join", "newbie", "--roles", "backend")
+
+    out = run(board, "inbox", "--limit", "500", agent="newbie").stdout
+    assert "your brief: work T-999" in out, (
+        "a brief posted to a seat before it joined, and archived before its "
+        "first read, must still be delivered -- got: %r" % out)
+    # ...and it is delivered exactly once, not on every poll.
+    again = run(board, "inbox", "--limit", "500", agent="newbie").stdout
+    assert "your brief: work T-999" not in again, (
+        "delivered mail must not come back on the next poll -- got: %r" % again)
+
+
+def test_pre_join_broadcast_flood_is_still_suppressed_without_the_stamp(board):
+    """The other half: removing T-244's stamp must not hand a new seat the
+    1392-broadcast flood back. T-327's joined_at is what suppresses it, and
+    this test fails if the stamp was the thing doing the work.
+    """
+    for i in range(20):
+        r = run(board, "msg", "before-newbie broadcast %d" % i, agent="alice")
+        assert r.returncode == 0, r.stderr
+    time.sleep(1.1)
+    run(board, "join", "newbie2", "--roles", "backend")
+
+    out = run(board, "inbox", "--limit", "500", agent="newbie2").stdout
+    assert "before-newbie broadcast" not in out, (
+        "broadcasts predating the seat are history, not unread mail -- got: %r" % out)
+    full = run(board, "inbox", "--all", "--limit", "200", agent="newbie2").stdout
+    assert "before-newbie broadcast 19" in full, "nothing is deleted, only hidden"

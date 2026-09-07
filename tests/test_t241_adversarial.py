@@ -1,7 +1,6 @@
 """T-241: cross-agent attack on T-212's D1 fix (unread()'s archive-consulting
 branch in tickets.py, commit 131d27e) -- the one piece of the T-212 branch
-neither original author nor cos-opus's own review had a second pair of eyes on,
-since cos-opus wrote this patch itself.
+neither the original author nor a second reviewer had a second pair of eyes on.
 
 Cases attacked, one test each:
 
@@ -48,15 +47,15 @@ reader does not read their absence as an oversight:
     in the file being replaced). Rotation-time race, not a read-side (unread())
     defect, and explicitly flagged by the rotation author as known.
   - The three original T-212 deliverables (messages.jsonl rotation, watch-log
-    cap, MASTER.md trim) already survived cos-opus's own adversarial pass
-    (352 passed, contracts required) -- not re-verified here per the brief.
+    cap, MASTER.md trim) already survived an earlier adversarial pass -- not
+    re-verified here per the brief.
 
 Reproduction of the author's numbers: `/usr/bin/python3 -m pytest -q` on
-sonnet-tickets/t212-tickets-bounds@510c496 (this worktree) => 559 passed,
-matching the 559 claimed post-merge. Independently confirmed (not just
-re-read) that removing the 7-line D1 patch turns both of the author's own
-tests in test_rotation_unread.py red (stash-and-restore against
-131d27e^:tickets.py), rather than trusting the author's own claim of having
+the reviewed commit => 559 passed, matching the 559 claimed post-merge.
+Independently confirmed (not just re-read) that removing the 7-line D1
+patch turns both of the author's own tests in test_rotation_unread.py red
+(stash-and-restore against the parent of that commit), rather than trusting
+the author's own claim of having
 done so.
 """
 import importlib.util
