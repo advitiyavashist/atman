@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = [ROOT / "tickets.py", ROOT / "src" / "ticket_board" / "cli.py"]
 TOOL_IDS = ["tickets.py", "cli.py"]
