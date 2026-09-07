@@ -604,3 +604,56 @@ def test_ticket_does_not_close_on_a_coincidentally_matching_sha_from_another_bra
     assert "sha coincidence" in r.stdout or "was not one of the branches merged" in r.stdout, (
         "the refusal must be reported, not silent: %s" % r.stdout
     )
+
+
+# ---------------------------------------------------------------------------
+# T-389: T-324's branch-membership guard still lets a trunk-snapshot ticket on
+# a bare agent-name branch auto-close when a merge of that branch integrates
+# another ticket's real work -- cmd_merge's idempotency path folds the trunk
+# snapshot into merged_shas/pin_full without integrating that ticket's own pin.
+# ---------------------------------------------------------------------------
+
+
+def test_trunk_snapshot_on_bare_agent_branch_does_not_close_when_sibling_merges(board):
+    """A ticket pinned to the trunk snapshot on a bare agent branch must not
+    auto-close when the merge integrates a different ticket's real work on
+    that same branch name."""
+    repo = board.parent
+    trunk = _git(repo, "symbolic-ref", "--short", "HEAD")
+    _ignore_board(repo)
+    run(board, "master", "take", "--owner", "ceo")
+
+    agent_branch = "sonnet-sdk"
+
+    # Ticket A: reviewed at trunk tip on the bare agent branch (no unique work).
+    tid_snapshot = _create(board, "Trunk snapshot on bare agent branch", role="backend")
+    run(board, "claim", tid_snapshot, agent="sonnet-sdk")
+    _git(repo, "checkout", "-b", agent_branch)
+    r = run(board, "review", tid_snapshot, "--notes", "trunk snapshot only", agent="sonnet-sdk", cwd=repo)
+    assert r.returncode == 0, r.stderr
+
+    # Ticket B: real work on the same bare agent branch, on top of the snapshot.
+    tid_real = _create(board, "Real work on bare agent branch", role="backend")
+    run(board, "claim", tid_real, agent="sonnet-sdk")
+    (repo / "real.txt").write_text("real")
+    _git(repo, "add", "real.txt")
+    _git(repo, "commit", "-m", "real work")
+    r = run(board, "review", tid_real, "--notes", "real work", agent="sonnet-sdk", cwd=repo)
+    assert r.returncode == 0, r.stderr
+    _git(repo, "checkout", trunk)
+
+    rec_snapshot = _ticket(board, tid_snapshot)
+    assert rec_snapshot["branch"] == agent_branch
+    assert rec_snapshot["commit"].startswith("%s@" % agent_branch)
+
+    r = run(board, "merge", agent_branch, "--no-test", agent="ceo", cwd=repo)
+    assert r.returncode == 0, r.stderr
+
+    assert _status(board, tid_real) == "done", "the real ticket should close normally:\n%s" % r.stdout
+    assert _status(board, tid_snapshot) == "review", (
+        "a trunk-snapshot ticket must not close just because a sibling on the same "
+        "bare agent branch had real work integrated this pass:\n%s" % r.stdout
+    )
+    assert "contributed nothing" in r.stdout, (
+        "the refusal must be reported, not silent: %s" % r.stdout
+    )

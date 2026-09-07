@@ -1945,7 +1945,7 @@ def cmd_merge(a, board):
         if os.path.islink(stray):
             os.unlink(stray)
 
-        merged_branches, merged_shas, skipped, resolved_docs = [], [], [], []
+        merged_branches, merged_shas, actively_merged_shas, skipped, resolved_docs = [], [], [], [], []
         for b in branches:
             if sh("git", "rev-parse", "--verify", "-q", b).returncode != 0:
                 skipped.append((b, "no such branch"))
@@ -1985,6 +1985,7 @@ def cmd_merge(a, board):
                        pin, cwd=idir)
                 if r.returncode == 0:
                     merged_shas.append(pin)
+                    actively_merged_shas.append(pin)
                     if b not in merged_branches:
                         merged_branches.append(b)
                     print("  merged %s@%s%s" % (b, short, "  (-X ours)" if extra else ""))
@@ -2010,6 +2011,7 @@ def cmd_merge(a, board):
                         resolved_docs.append((f, os.path.relpath(alt, idir)))
                     sh("git", "commit", "-q", "--no-edit", cwd=idir)
                     merged_shas.append(pin)
+                    actively_merged_shas.append(pin)
                     if b not in merged_branches:
                         merged_branches.append(b)
                     print("  merged %s@%s (doc-only conflicts kept both copies: %s)" % (
@@ -2061,6 +2063,11 @@ def cmd_merge(a, board):
             got = sh("git", "rev-parse", pin).stdout.strip()
             if got:
                 pin_full.add(got)
+        actively_merged_full = set()
+        for pin in actively_merged_shas:
+            got = sh("git", "rev-parse", pin).stdout.strip()
+            if got:
+                actively_merged_full.add(got)
 
         closed = []
         for t2 in queue:
@@ -2112,6 +2119,32 @@ def cmd_merge(a, board):
                     "branch %r was not one of the branches merged -- refusing to close on a "
                     "sha coincidence alone" % (pin, t2.get("branch"))))
                 continue
+            # T-389: the idempotency path ("already present") folds trunk snapshots
+            # into pin_full when some OTHER ticket on the same bare agent branch had
+            # real work integrated this pass. Refuse to close a ticket whose pin was
+            # only already-on-trunk unless it was the sole work merged on that branch.
+            if full not in actively_merged_full:
+                branch = t2.get("branch")
+                sibling_active = False
+                if branch:
+                    for ot in queue:
+                        if ot["id"] == t2["id"] or ot.get("branch") != branch:
+                            continue
+                        op = parse_review_sha(ot.get("commit"))
+                        if not op:
+                            continue
+                        og = sh("git", "rev-parse", op)
+                        if og.returncode != 0:
+                            continue
+                        if og.stdout.strip() in actively_merged_full:
+                            sibling_active = True
+                            break
+                if sibling_active:
+                    skipped.append((t2["id"],
+                        "recorded sha %s is already on trunk but another ticket on branch %r "
+                        "was the work integrated this pass -- refusing to close a pin that "
+                        "contributed nothing this merge" % (pin, branch)))
+                    continue
             t2["status"] = "done"
             t2["done_at"] = now()
             t2["notes"].append({"by": owner, "at": now(),
