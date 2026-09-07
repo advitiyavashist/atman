@@ -3884,10 +3884,28 @@ def unread(board, owner):
             and m.get("at", "") > since]
 
 
+def fmt_local(iso):
+    """Render a stored UTC ISO timestamp in the reader's LOCAL time.
+
+    Stored values stay UTC; only the display converts. Falls back to the old
+    UTC substring on anything unparseable -- a bad timestamp must never break
+    `tickets msg` or `inbox`, and a wrong-looking time is a smaller failure
+    than a traceback.
+    """
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%m-%d %H:%M")
+    except (ValueError, TypeError, AttributeError):
+        return str(iso)[5:16].replace("T", " ")
+
+
 def fmt_msg(m):
     to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
     re_ = (" [%s]" % m["re"]) if m.get("re") else ""
-    return "%s  %s%s%s: %s" % (m["at"][5:16].replace("T", " "), m.get("from", "?"), to, re_, m.get("text", ""))
+    return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
 
 
 def cmd_msg(a, board):
@@ -5277,6 +5295,9 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:4px 6px;
 <script>
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
+// Server sends timestamps as raw ISO-8601 UTC; render in whatever timezone
+// this browser is actually in, not the server's.
+const fmtLocal=iso=>{if(!iso)return '-';const d=new Date(iso);return isNaN(d)?String(iso):d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
 function row(cells,cls){return '<tr class="'+(cls||'')+'">'+cells.map(c=>'<td>'+c+'</td>').join('')+'</tr>'}
 async function load(){const r=await fetch('/board.json?'+Date.now());const d=await r.json();
 document.getElementById('title').textContent='Ticket board · '+d.project;
@@ -5290,7 +5311,7 @@ document.getElementById('review').innerHTML='<tr><th>id</th><th>owner</th><th>ti
 document.getElementById('agents').innerHTML='<tr><th>agent</th><th>state</th><th>model</th><th class="num">done 24h</th><th>seen</th><th>ticket</th></tr>'+d.agents.map(a=>row([esc(a.name),'<span class="'+(a.state=='DOWN'?'bad':a.state=='busy'?'ok':'')+'">'+a.state+(a.watcher?' ●':'')+'</span>',esc(a.model||'-'),'<span class="num">'+a.done+'</span>',h(a.seen_h)+' ago',esc(a.ticket||'')])).join('');
 document.getElementById('health').innerHTML=d.health.length?d.health.map(x=>row(['<span class="'+(x.sev=='CRIT'?'bad':x.sev=='WARN'?'warn':'')+'">'+x.sev+'</span>',esc(x.msg)])).join(''):row(['<span class="ok">clean</span>','']);
 document.getElementById('open').innerHTML='<tr><th>id</th><th>status</th><th>pri</th><th>title</th><th>role</th><th>waits on</th></tr>'+d.open.map(t=>row([t.id,'<span class="tag">'+t.status+'</span>',t.priority,esc(t.title),esc(t.role),esc((t.waiting||[]).join(','))])).join('');
-document.getElementById('msgs').innerHTML=d.messages.map(m=>'<div><small>'+esc(m.at)+'</small> <b>'+esc(m.from)+'</b>'+(m.to?' → '+esc(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+' '+esc(m.text)+'</div>').join('');}
+document.getElementById('msgs').innerHTML=d.messages.map(m=>'<div><small>'+esc(fmtLocal(m.at))+'</small> <b>'+esc(m.from)+'</b>'+(m.to?' → '+esc(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+' '+esc(m.text)+'</div>').join('');}
 load();setInterval(load,5000);
 </script></body></html>"""
 
@@ -5349,7 +5370,10 @@ def board_snapshot(board, messages=40):
                  for t in tickets if t["status"] in ("open", "blocked")],
         "agents": out_agents,
         "health": [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12],
-        "messages": [{"at": x.get("at", "")[5:16].replace("T", " "), "from": x.get("from", ""), "to": x.get("to", ""),
+        # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
+        # so the UI can render it in whatever timezone the viewer's browser is
+        # actually in -- truncating/reformatting it here would bake in UTC.
+        "messages": [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                       "re": x.get("re", ""), "text": x.get("text", "")} for x in load_messages(board)[-messages:]][::-1],
     }
 

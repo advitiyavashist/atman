@@ -112,3 +112,42 @@ is the measurement."
 
 When you finish, state explicitly: what you built, where you disagreed with the
 brief, and any number in the brief you found to be wrong.
+
+## 8. Search for the prior art before you build
+
+Nine reinventions in one squad session, every artefact already present: a
+feature-replay method (three agents hand-rolled it while an 8,500-word usage
+guide sat in the repo), staleness detection (the CLI already reported it), a
+per-item enumerator, an aggregate KIND the type already had a member for, and a
+design whose exact analogue was one package away.
+
+The failure is not laziness. **Building feels like progress and searching feels
+like delay**, so the search gets skipped exactly when the thing is most likely
+to exist — in a mature codebase on a well-trodden path.
+
+Four commands, in order, then stop when you hit something:
+
+1. In-repo docs next to the package — `*_usage.md`, `CONTEXT.md`, `README`.
+   Highest-yield file in any repo, and **authoritative: it ships with the code,
+   so it cannot drift the way a brief or a skill does. If it contradicts your
+   brief, the doc wins.**
+2. The tool's own surface — the FULL `--help` verb list, and `<verb> --help`,
+   because flags are often not where you expect.
+3. The whole existing enum/const/spec block before adding a member. New members
+   are usually already anticipated by the type.
+4. The nearest sibling. Mirror the analogue rather than inventing a second
+   pattern.
+
+Tells that you are reinventing: you are writing "we need a new X"; you are
+about to describe a procedure in a brief (a procedure worth describing is
+usually worth documenting, so someone probably did); you are filing an upstream
+bug from a derived observation rather than from the producer; you measured
+something as absent without asking absent-from-*where*; or the task feels
+surprisingly greenfield in a mature area — the strongest tell of all.
+
+**Coordinators: run steps 1-4 BEFORE dispatching.** A brief that tells an agent
+to build a procedure commits their whole session to it. One missing pointer
+cost three agent-sessions.
+
+When it genuinely does not exist, say where you looked. An unstated search is
+indistinguishable from no search.
