@@ -218,6 +218,24 @@ union of keys ever written on a `run_start` is `agent`, `at`, `harness`,
 `trigger`, `v`, `worktree`. So `_sha_is_post_flag` returns `None` every time and
 the era is decided **purely by wall clock**.
 
+E1 has a **second half, also measured rather than inferred**, contributed by
+cos-opus from the live watch loops (each seat's resolved release sha is visible
+in its argv). Even if `run_start` *did* record a sha, the allow-list it would be
+checked against is stale: of the six distinct release shas actually executing on
+this box, four are unrecognised by `scheduler._PRE_FLAG_PIN_PREFIXES` /
+`FLAG_PIN` / `FLAG_FEATURE_PIN`, and the two that are recognised are classified
+**pre-FLAG** — cursor-modal, optimizer and cursor-fable on `21ca63c`, cursor-demo
+on `1c8335b`, all four owning a large share of the scored rows. **Not one running
+seat is on a pin the module recognises as post-FLAG**: `db6229d` and `705dd05`
+are executing nowhere. So `_sha_is_post_flag` would return `None` for every live
+seat regardless.
+
+**This changes the fix shape for T-483:** stamping the sha on `run_start` (half
+i) is *not sufficient on its own* — the era would still fall through to the clock
+for most seats because of half (ii). Whoever takes T-483 must fix both, or
+replace the hand-maintained pin allow-list with something that does not need
+editing every release.
+
 That compounds D4 rather than duplicating it, because the sha branch exists for
 exactly the situation this board was in: the FLAG landed at `20:37:13Z` but the
 seats did not restart onto it until roughly `23:00Z`, so for about two and a
@@ -332,14 +350,19 @@ with the ticket that owns it:
 | 2 | A release sha stamped on `run_start`, or `row_era` refusing to label rather than falling through to wall clock (E1) | **T-483** |
 | 3 | A liveness/limit filter in the shadow candidate set, plus an agreement line computed over live candidates only (D2) | **T-484** |
 | 4 | Harness cost capture on the seats that do the work. T-480's read-time list-price estimate is the right shape but **cannot be back-applied** to these 27 rows — they stay UNMEASURED by name (D1 cost axis) | **T-480** |
-| 5 | A live-CLI recut onto the fix in (1) and (2), so later rows are measured under the corrected rules | *no ticket filed as of 2026-09-08; the planner still owes this id* |
-| 6 | Re-read the corrected instrument and issue the GO/NO-GO | **T-470** — but its premise needs re-scoping first, see below |
+| 5 | A live-CLI recut onto the fixes in (1)–(3), so later rows are measured under the corrected rules — and, per E1 half (ii), so that the seats are actually *running* a release the era logic recognises | **T-486** |
+| 6 | Re-read the corrected instrument and issue the GO/NO-GO | **T-470** (re-scoped; see below) |
 
-**T-470 as currently written is void and must be re-scoped before it is worked.**
-It is framed as "the n≥20 GO/NO-GO … once cost rows exist", and n≥20 has been
-met since this snapshot. Whoever re-scopes it should require that (1)–(3) above
-have landed and a recut has happened, and should note that this document — not
-the 80-line `28d482c` version — is the one to read.
+**T-470 was void as originally written, and has since been re-scoped.** Its
+first framing was "the n≥20 GO/NO-GO … once cost rows exist" — void, because n≥20
+was already met at this snapshot and no amount of additional n touches any defect
+above. It now reads "GO/NO-GO for V1 routing on ORGANIC POST-RECUT rows (T-486
+epoch): agreement all-rows **and live-candidate-subset**, turns delta with n, cost
+UNMEASURED/est by name (T-480), one disagreement argued from the trajectory", and
+is gated `BLOCKED-BY T-486, T-482`. That is the right shape: it reads a *recut*
+epoch rather than a bigger sample of the same broken window, and the
+live-candidate-subset line answers D2 directly. Recorded here so the correction
+is not re-litigated.
 
 A **role** fix is *not* needed, and should not be filed: the role gate passed on
 27/27 (see D2). Reporting the 1/27 agreement as a wrong-role finding would be
