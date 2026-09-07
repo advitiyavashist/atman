@@ -28,6 +28,7 @@ from ..storage import BoardStore, ids
 from ..storage.db import write_txn
 from . import hooks, master, validate, views
 from .auth import (
+    SAFE_METHODS,
     SESSION_LEASE_SECONDS,
     CredentialStore,
     check_csrf,
@@ -119,7 +120,7 @@ class BoardServer:
         try:
             handler, params, auth, needs_project = self._match(request)
             project_id = self._project_id(request) if needs_project else None
-            principal = self._authorize(request, auth, project_id)
+            principal = self._authorize(request, handler, auth, project_id)
             ctx = Ctx(request, principal, project_id, params)
             response = handler(ctx)
         except BoardError as err:
@@ -172,7 +173,7 @@ class BoardServer:
                                    {"missing_fields": ["X-Project-Id"]})
         return value
 
-    def _authorize(self, request, auth, project_id):
+    def _authorize(self, request, handler, auth, project_id):
         """Pick the credential this route accepts, then check it.
 
         `security` in the contract is a list of alternatives, so a request that
@@ -185,21 +186,26 @@ class BoardServer:
         if auth == NONE:
             # This route carries its own proof in the body -- the enrollment
             # code -- so it authenticates nothing, and a credential that happens
-            # to be attached is not part of the decision. Refusing a
-            # present-but-invalid one would break the flow that needs this route
-            # most: an agent whose lease was revoked has a dead token in its
-            # configured headers *by construction*, and re-enrolment is how it
-            # comes back. It must not have to know to strip its own header first.
+            # to be attached is not part of the decision. It is not refused
+            # over a present-but-invalid one (an agent whose lease was
+            # revoked has a dead token in its configured headers *by
+            # construction*, and it must not have to know to strip its own
+            # header first just to reach this route), and, per T-264, it is
+            # not handed to the handler either: resolving a credential here
+            # and filtering it by in_scope() would still expose an
+            # authenticated identity from a route whose contract is that no
+            # authentication decision is made -- the seam's job is to resolve
+            # a principal, and here it resolves none. A handler behind
+            # auth=NONE that needs caller identity has to read its own proof
+            # from the body, the same shape as this route's enrollment code --
+            # never from ctx.principal, which is always None here regardless
+            # of what credential (valid, foreign, or dead) was attached.
             #
-            # This is the only place the present-but-bad rule is relaxed, and it
-            # is relaxed because the route asked for no credential at all -- not
-            # because a bad one is acceptable. Every other auth level falls
-            # through to the call below and still fails closed.
-            try:
-                principals = self.credentials.authenticate_all(request)
-            except Unauthenticated:
-                return None
-            return principals[0] if principals else None
+            # (T-275: this is not, by itself, a recovery path for a revoked
+            # agent's dead token -- see the KNOWN LIMITATION note on
+            # create_enrollment for why re-enrolment does not give an agent
+            # its old identity back today.)
+            return None
 
         principals = self.credentials.authenticate_all(request)
         if not principals:
@@ -219,7 +225,36 @@ class BoardServer:
             )
         principal = candidates[0]
         check_csrf(principal, request, allowed_origins=self.allowed_origins)
+        self._require_lease_if_unsafe(request, handler, principal)
         return principal
+
+    def _require_lease_if_unsafe(self, request, handler, principal):
+        """An agent's bearer token outlives its lease; an unsafe write must not.
+
+        `_agent_principal` only checks `agent_tokens.revoked_at` -- a lease that
+        has merely *expired* leaves the token itself perfectly valid, so every
+        route reached this far with nothing standing between an offline agent
+        and a write. That is the T-265 hole: GET /overview and POST /tickets
+        both answered for a session whose lease was dead on the clock.
+
+        The rule, decided before this was coded rather than inferred from what
+        `claim_ticket` happened to do: a read stays allowed on an expired lease
+        -- an agent that can no longer act should still be observable, and
+        refusing overview/ticket reads would hurt recovery, not help it. An
+        unsafe request (POST/PUT/PATCH/DELETE) from an agent credential needs a
+        session lease that is present, not revoked and not expired, checked
+        once here rather than re-derived per route.
+
+        `post_hook_event` is the one named exception: `hooks.record` already
+        deliberately revives a lapsed-but-not-revoked lease on every event --
+        that *is* the recovery path -- so gating it here would make a lapsed
+        agent unable to ever heal itself.
+        """
+        if not principal.is_agent or request.method in SAFE_METHODS:
+            return
+        if handler == self.post_hook_event:
+            return
+        self._require_live_lease(principal, principal.session_id)
 
     # ------------------------------------------------------------- overview
 
@@ -438,9 +473,13 @@ class BoardServer:
 
         `BoardStore._session_is_current` tests only that a lease was not
         revoked, which is the right question for "is this update superseded".
-        It is the wrong question for a claim: the contract's release bar is that
-        an agent whose adapter has stopped delivering events cannot claim
-        offline, and that agent's lease is expired, not revoked.
+        It is the wrong question here: the contract's release bar is that an
+        agent whose adapter has stopped delivering events cannot act offline,
+        and that agent's lease is expired, not revoked. Shared by `claim_ticket`
+        (which checks the session_id the caller names in the body, since a
+        claim can be challenged on a session that is not the caller's own) and
+        `_require_lease_if_unsafe` (which checks the caller's own token
+        session).
         """
         lease = self.store.conn.execute(
             "SELECT * FROM session_leases WHERE session_id = ?", (session_id,)
@@ -673,6 +712,17 @@ class BoardServer:
             self.store, self.store.get_agent(agent_id, ctx.project_id)))
 
     def create_enrollment(self, ctx):
+        # KNOWN LIMITATION (T-275, V1): this always mints a NEW agent_id via
+        # store.create_agent, which enforces UNIQUE(project_id, name) -- there
+        # is no path that re-enrols an EXISTING agent under its own identity.
+        # A revoked agent cannot come back as itself in V1: the operator
+        # enrols it under a new name, which gets a new agent_id, and whatever
+        # was assigned to the old agent (tickets, lease history) stays with
+        # the old agent and must be reassigned by hand. This is deliberate
+        # for now, not an oversight -- adding a same-identity re-enrolment
+        # route is a contract change against the frozen T-178 contract and is
+        # tracked on T-192 (agent creation API / identity lifecycle), not
+        # here.
         body = validate.check_body(
             ctx.body(),
             required=("request_id", "agent_name", "role"),

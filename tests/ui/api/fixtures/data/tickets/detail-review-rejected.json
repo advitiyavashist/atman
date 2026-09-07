@@ -46,7 +46,7 @@
       },
       "submitted_at": "2026-09-06T14:32:00Z",
       "evidence": {
-        "repository": "advitiyavashist/tickets",
+        "repository": "demo-org/demo-repo",
         "branch": "feature/demo-13",
         "sha": "b2c3d4e5f60718293a4b5c6d7e8f90123456789a",
         "pr_url": null,

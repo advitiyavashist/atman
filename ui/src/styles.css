@@ -221,3 +221,17 @@ code.block { display: block; background: var(--bg); padding: 12px; border-radius
   .app-shell { grid-template-columns: 1fr; }
   nav.main-nav { display: flex; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+/* A refused write is not a passing remark: it gets a border and stays put. */
+.notice.error {
+  color: var(--red, #ff6b6b);
+  border: 1px solid var(--red, #ff6b6b);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.notice.error strong { display: block; margin-bottom: 4px; }
+.notice.error small { display: block; opacity: 0.8; margin-top: 4px; }
+
+/* The hook doctor reads as a sequence, so each step carries its own reason. */
+.checklist li small { display: block; opacity: 0.75; margin-left: 22px; }
