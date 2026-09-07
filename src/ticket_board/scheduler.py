@@ -28,6 +28,16 @@ MIN_SUPPORT = 5
 MIN_COMPARE = 3
 APPLY_MSG = "tickets route --apply is unimplemented (T-315: shadow only; nothing is assigned)"
 
+# T-425 FLAG landed on atman main as db6229d (feature sha 705dd05). Rows whose
+# bound run_start pin is before that commit still count idle IN-REVIEW wakes.
+FLAG_PIN = "db6229d"
+FLAG_FEATURE_PIN = "705dd05"
+FLAG_AT = "2026-09-07T20:37:13Z"
+ERA_PRE = "pre-T-425 (idle review wakes counted)"
+ERA_POST = "post-FLAG"
+_PRE_FLAG_PIN_PREFIXES = ("8f513fe", "1c8335b", "21ca63c")
+_POST_FLAG_PIN_PREFIXES = (FLAG_PIN, FLAG_FEATURE_PIN)
+
 DOCS_TEST_ROLES = ("docs", "documentation", "qa", "verification", "acceptance",
                    "test", "tests")
 
@@ -420,6 +430,70 @@ def _has_bound_run_start(evs):
     return any(e.get("kind") == "run_start" and e.get("ticket") for e in evs)
 
 
+def _first_bound_run_start(evs):
+    bound = [e for e in (evs or []) if e.get("kind") == "run_start" and e.get("ticket")]
+    if not bound:
+        return None
+    bound.sort(key=lambda e: e.get("at") or "")
+    return bound[0]
+
+
+def _run_start_sha(ev):
+    """CLI/worktree sha on a run_start, if the writer recorded one."""
+    if not ev:
+        return ""
+    sha = str(ev.get("sha") or "").strip()
+    if sha:
+        return sha
+    pin = str(ev.get("pin") or "").strip()
+    if "@" in pin:
+        pin = pin.rsplit("@", 1)[-1]
+    return pin
+
+
+def _sha_is_post_flag(sha):
+    """True/False when the pin is in the known live-release history; else None."""
+    s = (sha or "").lower().strip()
+    if not s:
+        return None
+    if any(s.startswith(p) for p in _POST_FLAG_PIN_PREFIXES):
+        return True
+    if any(s.startswith(p) for p in _PRE_FLAG_PIN_PREFIXES):
+        return False
+    return None
+
+
+def row_era(evs):
+    """Label a scored row pre-T-425 vs post-FLAG from run_start sha, then time."""
+    ev = _first_bound_run_start(evs)
+    known = _sha_is_post_flag(_run_start_sha(ev))
+    if known is True:
+        return ERA_POST
+    if known is False:
+        return ERA_PRE
+    at = (ev or {}).get("at") or ""
+    if at >= FLAG_AT:
+        return ERA_POST
+    return ERA_PRE
+
+
+def _era_short(era):
+    return "post-FLAG" if era == ERA_POST else "pre-T-425"
+
+
+def format_agreement_line(n_agree, n, label=None):
+    """T-461: n<2 prints n/a with no percentage."""
+    if n < 2:
+        head = "agreement n/a (n=%d)" % n
+        if label:
+            return "agreement %s: n/a (n=%d)" % (label, n)
+        return head
+    rate = (n_agree / n) if n else 0.0
+    if label:
+        return "agreement %s: %.2f (%d/%d)" % (label, rate, n_agree, n)
+    return "agreement rate: %.2f (%d/%d)" % (rate, n_agree, n)
+
+
 def _historical_claimed_load(events, before_at):
     load_ = {}
     for tid, evs in _group_events(events).items():
@@ -508,6 +582,7 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
         actual_med, actual_n = _median_or_null(actual_nums)
         shadow_med, shadow_n = _median_or_null(shadow_nums)
         realized = _measured_turns(evs)
+        era = row_era(evs)
         rows.append({
             "ticket": tid,
             "role": role,
@@ -522,31 +597,58 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
             "actual_n": actual_n,
             "shadow_median": shadow_med,
             "shadow_n": shadow_n,
+            "era": era,
         })
     compared = len(rows)
     agree_n = sum(1 for r in rows if r["agree"])
-    rate = (agree_n / compared) if compared else None
+    n_pre = sum(1 for r in rows if r["era"] == ERA_PRE)
+    n_post = sum(1 for r in rows if r["era"] == ERA_POST)
+    mixed = n_pre > 0 and n_post > 0
+    rate = None if (compared < 2 or mixed) else (agree_n / compared)
     return {
         "rows": rows,
         "n": compared,
         "agreement_rate": rate,
         "n_agree": agree_n,
+        "n_pre": n_pre,
+        "n_post": n_post,
+        "mixed_eras": mixed,
     }
 
 
 def render_score_table(rep):
     lines = ["shadow-vs-actual scorecard (observational; not a counterfactual)"]
-    rate = rep.get("agreement_rate")
-    lines.append("agreement rate: %s (%d/%d)" % (
-        "-" if rate is None else ("%.2f" % rate),
-        rep.get("n_agree") or 0, rep.get("n") or 0))
-    lines.append("%-8s %-8s %-14s %-14s %-5s %5s %12s %12s %5s" % (
+    n = int(rep.get("n") or 0)
+    n_agree = int(rep.get("n_agree") or 0)
+    n_pre = int(rep.get("n_pre") or 0)
+    n_post = int(rep.get("n_post") or 0)
+    mixed = bool(rep.get("mixed_eras"))
+    if mixed:
+        by = {ERA_PRE: [], ERA_POST: []}
+        for r in rep.get("rows") or []:
+            by.setdefault(r.get("era") or ERA_PRE, []).append(r)
+        for era in (ERA_PRE, ERA_POST):
+            subset = by.get(era) or []
+            if not subset:
+                continue
+            agree = sum(1 for r in subset if r.get("agree"))
+            lines.append(format_agreement_line(agree, len(subset), label=era))
+        lines.append("era counts: %s=%d  %s=%d (not mixed into one pct)" % (
+            ERA_PRE, n_pre, ERA_POST, n_post))
+    else:
+        lines.append(format_agreement_line(n_agree, n))
+        if n:
+            era = ((rep.get("rows") or [{}])[0].get("era") or ERA_PRE)
+            lines.append("era: %s (n=%d)" % (era, n))
+        else:
+            lines.append("era counts: %s=0  %s=0" % (ERA_PRE, ERA_POST))
+    lines.append("%-8s %-8s %-14s %-14s %-5s %5s %12s %12s %5s %-9s" % (
         "ticket", "role", "actual", "shadow", "agree", "turns",
-        "actual_med", "shadow_med", "src"))
+        "actual_med", "shadow_med", "src", "flag"))
     for r in rep.get("rows") or []:
         am = r.get("actual_median")
         sm = r.get("shadow_median")
-        lines.append("%-8s %-8s %-14s %-14s %-5s %5s %12s %12s %5s" % (
+        lines.append("%-8s %-8s %-14s %-14s %-5s %5s %12s %12s %5s %-9s" % (
             r.get("ticket") or "-",
             (r.get("role") or "-")[:8],
             (r.get("actual") or "-")[:14],
@@ -556,6 +658,7 @@ def render_score_table(rep):
             "-" if am is None else ("%.1f(n=%d)" % (am, r.get("actual_n") or 0)),
             "-" if sm is None else ("%.1f(n=%d)" % (sm, r.get("shadow_n") or 0)),
             (r.get("source") or "-")[:5],
+            _era_short(r.get("era") or ERA_PRE),
         ))
     return "\n".join(lines)
 
@@ -575,9 +678,14 @@ def render_scorecard_doc(rep, generated_at):
         "## Limits",
         "",
         "Survivorship: only tickets that reached `done` with a bound `run_start`",
-        "(post T-352/T-388 recut) enter the table. Small *n* on disagreement",
-        "medians is reported as `-` when either side has fewer than %d comparable" % MIN_COMPARE,
-        "finished tickets. No cost axis until T-403 lands.",
+        "(post T-352/T-388 recut) enter the table. Agreement with *n*<2 prints",
+        "`n/a` and no percentage. Rows are labelled %s vs %s from the" % (ERA_PRE, ERA_POST),
+        "bound `run_start` sha against live pin %s (else `at` vs %s); mixed" % (FLAG_PIN, FLAG_AT),
+        "eras are never one silent pct. Small *n* on disagreement medians is",
+        "`-` when either side has fewer than %d comparable finished tickets." % MIN_COMPARE,
+        "Turns come from the same `_measured_turns` / `tickets turns --json`",
+        "source as T-416 (T-425 idle FLAG is not reimplemented here). No cost",
+        "axis until T-403 lands.",
         "",
     ]
     return "\n".join(lines)
