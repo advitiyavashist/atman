@@ -159,3 +159,98 @@ def test_load_trajectory_events_raises_on_malformed_line(board):
     with pytest.raises(TrajectoryParseError) as exc:
         load_trajectory_events(str(board))
     assert exc.value.line_no == 2
+
+
+def test_idle_review_run_id_does_not_increment_turns():
+    """T-425: claim run + two idle IN-REVIEW pulses -> turns stays 1, not 3."""
+    evs = [
+        {"kind": "claim", "ticket": "T-001", "agent": "alice", "run_id": "r-claim",
+         "at": "2026-09-08T00:00:00Z"},
+        {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r-claim",
+         "run_no": 1, "at": "2026-09-08T00:00:00Z"},
+        {"kind": "update", "ticket": "T-001", "agent": "alice", "run_id": "r-claim",
+         "at": "2026-09-08T00:00:01Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r-claim",
+         "run_no": 1, "exit": 0, "bound_write": True, "at": "2026-09-08T00:01:00Z"},
+        {"kind": "review", "ticket": "T-001", "agent": "alice", "run_id": "r-claim",
+         "at": "2026-09-08T00:01:01Z"},
+        {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r-idle-1",
+         "run_no": 2, "at": "2026-09-08T00:02:00Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r-idle-1",
+         "run_no": 2, "exit": 0, "at": "2026-09-08T00:02:01Z"},
+        {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r-idle-2",
+         "run_no": 3, "at": "2026-09-08T00:03:00Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r-idle-2",
+         "run_no": 3, "exit": 0, "at": "2026-09-08T00:03:01Z"},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] == 1
+    assert report["aggregates"]["n"] == 1
+    assert report["aggregates"]["median"] == 1.0
+
+
+def test_broadcast_msg_without_re_does_not_count():
+    evs = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "run_no": 1},
+        {"kind": "msg", "agent": "alice", "run_id": "r1", "to": "everyone",
+         "text_len": 20},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "run_no": 1, "exit": 0},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] is None
+
+
+def test_msg_re_on_bound_ticket_counts():
+    evs = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "run_no": 1},
+        {"kind": "msg", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "to": "boss", "text_len": 8},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "run_no": 1, "exit": 0},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] == 1
+
+
+def test_session_limit_fail_is_idle():
+    evs = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "run_no": 1},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "run_no": 1, "exit": 1, "outcome": "limit"},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] is None
+
+
+def test_nonzero_exit_without_limit_counts():
+    evs = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "run_no": 1},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r1",
+         "run_no": 1, "exit": 1},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] == 1
+
+
+def test_other_seat_write_same_minute_does_not_credit():
+    evs = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "alice", "run_id": "r-alice",
+         "run_no": 1, "at": "2026-09-08T00:00:00Z"},
+        {"kind": "update", "ticket": "T-001", "agent": "bob", "run_id": "r-bob",
+         "at": "2026-09-08T00:00:01Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r-alice",
+         "run_no": 1, "exit": 0, "at": "2026-09-08T00:00:02Z"},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] is None

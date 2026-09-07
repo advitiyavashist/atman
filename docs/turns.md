@@ -6,13 +6,23 @@ what a turn is and the `--json` shape. Do not rename keys.
 
 ## What is a turn
 
-**One completed watch run = one turn.** In the trajectory log that is a
-`run_start` followed by its `run_end`. Incomplete starts (no `run_end`) do
-not count.
+**One completed productive watch run = one turn.** In the trajectory log that
+is a `run_start` followed by its `run_end`. Incomplete starts (no `run_end`)
+do not count.
 
-A **ticket's turns** are those runs from the first `claim` to the final
-`done` (or `merge`). A `reopen` does not reset the counter: later runs are
-added.
+T-425: a `run_start`/`run_end` pair increments `turns` only when THAT
+`run_id` also recorded a bound-ticket write (claim, update, review, done,
+block, reopen, or `msg --re` that ticket) or a non-limit harness
+failure/timeout. Idle pulses (`watch --every N` with no ticket write) and
+session-limit fails (`run_end.outcome=limit`) stay in jsonl but do not
+increment. Broadcasts without `--re` never increment. The FLAG is
+`bound_write` on `run_end` (and matching `run_id` on the write events), not a
+grep of message text for `idle:`. Pre-T-425 events with no `run_id` still
+count every completed run. No backfill of existing jsonl.
+
+A **ticket's turns** are those productive runs from the first `claim` to the
+final `done` (or `merge`). A `reopen` does not reset the counter: later runs
+are added.
 
 This is the **board's** turn count, not the harness `num_turns` field on
 `run_end`. Harness-reported turns stay on `tickets trajectories --summary`.
@@ -40,7 +50,7 @@ Table columns: ticket, owner, model, turns, wall-clock, reopens, stuck, outcome.
 
 - **owner** — ticket owner, else the last claim/run agent
 - **model** — last model on the ticket's events, else `tickets join --model`
-- **turns** — `run_end` count, or `-` / `null` if none
+- **turns** — productive `run_end` count (T-425 FLAG), or `-` / `null` if none
 - **wall-clock** — first `claim` (else first event) to last `done`/`merge` (else last event)
 - **reopens** — `reopen` events
 - **stuck** — messages whose text starts with `stuck` and `--re` that ticket
