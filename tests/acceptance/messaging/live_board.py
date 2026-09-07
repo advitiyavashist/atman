@@ -272,7 +272,7 @@ class LiveBoard:
     def ticket(self, title="T-190 ticket", *, dependencies=None,
                http: Http = None) -> Dict[str, Any]:
         body = {"request_id": rid(), "title": title,
-                "outcome": "verified", "acceptance": ["it is verified"]}
+                "outcome": "verified", "acceptance": [{"text": "it is verified"}]}
         if dependencies:
             body["dependencies"] = list(dependencies)
         r = (http or self.operator).post("/tickets", body)

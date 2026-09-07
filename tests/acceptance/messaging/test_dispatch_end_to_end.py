@@ -66,6 +66,34 @@ def test_a_dm_task_wakes_claims_runs_and_reports_over_a_real_socket(board):
     assert board.wake_job(task["wake_job"]["id"])["state"] == "completed"
 
 
+def test_the_real_launcher_completes_a_run_with_a_real_child_process(board, tmp_path):
+    """The same chain through the REAL `ClaudeLauncher` and a real child, no
+    model call: `CLAUDE_BIN` is a shell script that echoes its stdin.
+
+    F-12 (found by the live proof, fixed on this branch): `start()` closed the
+    child's stdin after writing the prompt, and `wait()` then called
+    `communicate()`, which flushes a still-set stdin -- `ValueError: I/O
+    operation on closed file`. Every real spawn crashed the supervisor at the
+    wait, left the run `running` on the board and the child orphaned. Fakes
+    never reached it because `FakeProcess.communicate` does not flush.
+    """
+    from ticket_board.runners.launcher import ClaudeLauncher
+
+    script = tmp_path / "fake-claude"
+    script.write_text("#!/bin/sh\ncat\n")
+    script.chmod(0o755)
+    agent = board.enroll("claude-a")
+    _, _, task = _dm_task(board, agent, outcome="Reply with ECHO-PROOF.")
+
+    launcher = ClaudeLauncher(binary=str(script))
+    outcomes = board.supervisor(agent, launcher=launcher).run_forever(
+        wait_seconds=1, max_polls=1)
+    assert [o.state for o in outcomes] == ["responded"], outcomes
+    assert board.run(outcomes[0].run_id)["state"] == "responded"
+    assert board.wake_job(task["wake_job"]["id"])["state"] == "completed"
+    assert "TICKET_AGENT" not in launcher.env
+
+
 def test_a_plain_dm_or_channel_message_wakes_nobody(board):
     """Human messages alone do not fan out to all agents.
 
