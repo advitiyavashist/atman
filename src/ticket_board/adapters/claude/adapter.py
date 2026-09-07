@@ -79,6 +79,17 @@ class SpoolFull(RuntimeError):
     """Raised when offline delivery would exceed the configured spool cap."""
 
 
+class GitProbeInconclusive(RuntimeError):
+    """Raised when git exits non-zero for a reason other than "not a repository".
+
+    A guard that reads any non-zero exit as "not a repository" cannot tell a
+    healthy checkout with a broken ``~/.gitconfig`` or ``$XDG_CONFIG_HOME/git/config``
+    (neither stripped by :func:`clean_git_env`, which only removes ``GIT_*``) from
+    an ordinary non-repository directory. Only the latter is a negative result;
+    the former is indeterminate and must not be treated as one.
+    """
+
+
 @dataclass(frozen=True)
 class AdapterConfig:
     project_id: str
@@ -339,10 +350,21 @@ def _ensure_safe_project_dir(project_dir: Path) -> None:
                 "refusing to enroll a live agent worktree: %s is inside the protected checkout %s" % (resolved, root)
             )
 
-    repo = _git_common_dir(resolved)
+    try:
+        repo = _git_common_dir(resolved)
+    except GitProbeInconclusive as exc:
+        raise ClaudeHookError(
+            "refusing to enroll: could not determine whether %s is a git repository: %s" % (resolved, exc)
+        ) from exc
     if repo is not None:
         for root in protected:
-            root_repo = _git_common_dir(root)
+            try:
+                root_repo = _git_common_dir(root)
+            except GitProbeInconclusive as exc:
+                raise ClaudeHookError(
+                    "refusing to enroll: could not determine whether protected root %s is a git repository: %s"
+                    % (root, exc)
+                ) from exc
             if root_repo is not None and _same_path(repo, root_repo):
                 raise ClaudeHookError(
                     "refusing to enroll a live agent worktree: %s shares the git repository %s with the protected "
@@ -405,13 +427,27 @@ def _git_common_dir(path: Path) -> Optional[Path]:
     worktree registered against it report the same one no matter where on disk the
     worktree sits, which is what makes this a structural check and not another
     path list. Git prints it relative to the directory the command ran in.
+
+    Raises :class:`GitProbeInconclusive` when git exits non-zero for a reason
+    other than "not a repository" -- for example a malformed ``~/.gitconfig``
+    or ``$XDG_CONFIG_HOME/git/config``. Reading that kind of error as a plain
+    None would tell the caller "not a repository" when the honest answer is
+    "could not tell", and this probe backs a security guard that must not
+    silently degrade to the open state.
     """
     if not path.exists():
         return None
+    # LC_ALL/LANGUAGE=C pin git's stderr to English regardless of the caller's
+    # locale: the "not a repository" match below is a text match, and a
+    # translated message would otherwise misclassify an ordinary non-repo
+    # directory as an inconclusive probe instead of a plain negative.
+    probe_env = dict(clean_git_env())
+    probe_env["LC_ALL"] = "C"
+    probe_env["LANGUAGE"] = "C"
     try:
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
-            env=clean_git_env(),
+            env=probe_env,
             capture_output=True,
             check=False,
             text=True,
@@ -420,7 +456,13 @@ def _git_common_dir(path: Path) -> Optional[Path]:
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
-        return None
+        stderr = (result.stderr or "").strip()
+        if "not a git repository" in stderr.lower():
+            return None
+        raise GitProbeInconclusive(
+            "git -C %s rev-parse --git-common-dir exited %d: %s"
+            % (path, result.returncode, stderr or "<no stderr>")
+        )
     common = result.stdout.strip()
     if not common:
         return None
