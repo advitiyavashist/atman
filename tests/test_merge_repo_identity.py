@@ -192,3 +192,357 @@ def test_in_progress_ticket_sharing_a_branch_name_is_untouched_by_merge(board):
         "a ticket that was never submitted for review must be untouched by any merge, "
         "branch name shared or not:\n%s" % r.stdout
     )
+
+
+# ---------------------------------------------------------------------------
+# T-272: the recorded repo must be the repo the ARTIFACT is in, not the repo
+# the agent happened to run `tickets review` from.
+#
+# T-215 (above) aimed the guard correctly at a pin that was itself correct.
+# The pin was not correct. Every E-010 agent drives the CLI from its steer
+# worktree while the deliverable lives in advitiyavashist/tickets, so the guard
+# was comparing against the caller's cwd repo -- which fails in BOTH
+# directions on the same ticket: it refuses the correct merge, and it permits
+# an unrelated merge in the cwd repo that merely contains the recorded sha.
+# ---------------------------------------------------------------------------
+
+
+def _artifact_repo(tmp_root, name, board):
+    """A second, genuinely separate repo -- the 'advitiyavashist/tickets' of
+    the real setup -- with its own trunk and its own origin URL, containing no
+    board of its own."""
+    repo = tmp_root / name
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "artifact repo init")
+    # A distinct origin URL is what makes repo_identity() stable and distinct
+    # across worktrees of the same repo -- the real repos both have one.
+    _git(repo, "remote", "add", "origin", "https://example.invalid/%s.git" % name)
+    return repo
+
+
+def test_review_from_repo_a_for_an_artifact_in_repo_b(board):
+    """Acceptance (1). Review is run from repo A (where the board lives) for a
+    deliverable that lives in repo B, and then:
+      (i)  a merge in B CAN close it, and
+      (ii) an unrelated merge in A that genuinely contains the recorded sha
+           CANNOT.
+    """
+    repo_a = board.parent
+    _ignore_board(repo_a)
+    run(board, "master", "take", "--owner", "ceo")
+
+    repo_b = _artifact_repo(board.parent.parent, "artifact_repo", board)
+
+    # The deliverable: a real branch with a real commit, in repo B.
+    tid = _create(board, "Work whose artifact lives in another repo", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo_b, "checkout", "-q", "-b", "alice/real-work")
+    (repo_b / "deliverable.txt").write_text("the actual work")
+    _git(repo_b, "add", "deliverable.txt")
+    _git(repo_b, "commit", "-m", "the actual work")
+    b_sha = _git(repo_b, "rev-parse", "HEAD")
+
+    # Review is run FROM REPO A -- exactly how every E-010 agent runs it --
+    # naming repo B as the artifact tree.
+    r = run(board, "review", tid, "--notes", "work is in the other repo",
+            "--artifact", str(repo_b), agent="alice", cwd=repo_a)
+    assert r.returncode == 0, r.stderr
+
+    rec = _ticket(board, tid)
+    assert rec["repo"] == "https://example.invalid/artifact_repo.git", (
+        "the pin must name the ARTIFACT repo, not the cwd repo: %r" % rec["repo"]
+    )
+    assert rec["commit"] == "alice/real-work@" + _git(repo_b, "rev-parse", "--short", "HEAD"), (
+        "branch and sha must come from the artifact tree too -- a repo field re-aimed "
+        "on its own would leave a repo-B claim carrying a repo-A sha: %r" % rec["commit"]
+    )
+    assert rec["repo_source"] == "artifact"
+    assert rec["cwd_repo"] and rec["cwd_repo"] != rec["repo"], (
+        "the cwd repo must be kept as provenance, not silently dropped: %r" % rec
+    )
+
+    # (ii) An UNRELATED merge in repo A that really does contain the recorded
+    # sha must NOT close it. We give repo A the same commit object honestly,
+    # the same way the T-215 test does, so this is genuine sha reuse.
+    trunk_a = _git(repo_a, "symbolic-ref", "--short", "HEAD")
+    _git(repo_a, "fetch", "-q", str(repo_b), b_sha)
+    _git(repo_a, "merge", "-q", "--no-edit", "--allow-unrelated-histories", b_sha)
+    # _git asserts on a non-zero exit, so this IS the precondition check:
+    # repo A's trunk now genuinely contains the recorded sha.
+    _git(repo_a, "merge-base", "--is-ancestor", b_sha, "HEAD")
+    _git(repo_a, "checkout", "-q", "-b", "someone/unrelated-a-work")
+    (repo_a / "unrelated.txt").write_text("nothing to do with the ticket")
+    _git(repo_a, "add", "unrelated.txt")
+    _git(repo_a, "commit", "-m", "unrelated work in repo A")
+    tid_a = _create(board, "Unrelated work in the board's own repo", role="backend")
+    run(board, "claim", tid_a, agent="bob")
+    r = run(board, "review", tid_a, "--notes", "unrelated", agent="bob", cwd=repo_a)
+    assert r.returncode == 0, r.stderr
+    _git(repo_a, "checkout", "-q", trunk_a)
+
+    r = run(board, "merge", "someone/unrelated-a-work", "--no-test", agent="ceo", cwd=repo_a)
+    assert r.returncode == 0, r.stderr
+    assert _status(board, tid_a) == "done", "repo A's own ticket should close in repo A:\n%s" % r.stdout
+    assert _status(board, tid) == "review", (
+        "an unrelated merge in the board's repo must NOT close a ticket whose artifact "
+        "is in another repo, even though that repo's trunk really does contain the "
+        "recorded sha:\n%s" % r.stdout
+    )
+
+    # (i) The CORRECT merge, run in repo B, closes it. The artifact repo must
+    # be on its own trunk, exactly as the board's main checkout must be.
+    _git(repo_b, "checkout", "-q", "main")
+    r = run(board, "merge", "alice/real-work", "--artifact", str(repo_b),
+            "--no-test", agent="ceo", cwd=repo_a)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _status(board, tid) == "done", (
+        "the merge in the artifact's own repo must be able to close it:\n%s" % r.stdout
+    )
+
+
+def test_pin_taken_from_cwd_is_labelled_as_such(board):
+    """A pin the tool merely inherited from the caller's cwd must be
+    distinguishable from one the agent aimed. Without this the merger cannot
+    tell a verified pin from a defaulted one, which is how the 9 bad closes in
+    T-253 went unnoticed."""
+    repo = board.parent
+    _ignore_board(repo)
+    tid = _create(board, "Ordinary same-repo work", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo, "checkout", "-q", "-b", "alice/plain")
+    (repo / "f.txt").write_text("x")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "work")
+    r = run(board, "review", tid, "--notes", "plain", agent="alice", cwd=repo)
+    assert r.returncode == 0, r.stderr
+    rec = _ticket(board, tid)
+    assert rec["repo_source"] == "cwd"
+    assert "cwd_repo" not in rec, "provenance is only recorded when it differs from the pin"
+
+
+def test_repin_corrects_a_queued_ticket_without_reopening_it(board):
+    """Acceptance (2): the 11 tickets already queued with a cwd pin need a
+    path that does not reset review_at or re-notify the master 11 times."""
+    repo_a = board.parent
+    _ignore_board(repo_a)
+    repo_b = _artifact_repo(board.parent.parent, "artifact_repo2", board)
+
+    tid = _create(board, "Queued with a wrong pin", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo_a, "checkout", "-q", "-b", "alice/steer-side")
+    (repo_a / "x.txt").write_text("x")
+    _git(repo_a, "add", "x.txt")
+    _git(repo_a, "commit", "-m", "x")
+    # The bad pin: reviewed from repo A while the deliverable is in repo B.
+    r = run(board, "review", tid, "--notes", "real work is in the other repo", agent="alice", cwd=repo_a)
+    assert r.returncode == 0, r.stderr
+    bad = _ticket(board, tid)
+    reviewed_at = bad["review_at"]
+    notes_before = len(bad["notes"])
+
+    _git(repo_b, "checkout", "-q", "-b", "alice/real")
+    (repo_b / "real.txt").write_text("real")
+    _git(repo_b, "add", "real.txt")
+    _git(repo_b, "commit", "-m", "real work")
+
+    r = run(board, "repin", tid, "--artifact", str(repo_b),
+            "--notes", "pin named steer; artifact is in the tickets repo", agent="alice", cwd=repo_a)
+    assert r.returncode == 0, r.stderr
+
+    fixed = _ticket(board, tid)
+    assert fixed["status"] == "review", "repin must not change status"
+    assert fixed["review_at"] == reviewed_at, "repin must not reset the review clock"
+    assert fixed["repo"] == "https://example.invalid/artifact_repo2.git"
+    assert fixed["branch"] == "alice/real"
+    assert fixed["repo_source"] == "artifact"
+    assert len(fixed["notes"]) == notes_before + 1
+    assert fixed["notes"][-1]["text"].startswith("REPIN: "), fixed["notes"][-1]["text"]
+    assert "was alice/steer-side@" in fixed["notes"][-1]["text"], (
+        "the correction must record what it replaced, not silently overwrite: %s"
+        % fixed["notes"][-1]["text"]
+    )
+
+
+def test_repin_refuses_a_closed_ticket(board):
+    """A done ticket's record is history. Repin exists to correct a pin still
+    awaiting merge, not to rewrite what was already closed."""
+    repo = board.parent
+    _ignore_board(repo)
+    repo_b = _artifact_repo(board.parent.parent, "artifact_repo3", board)
+    tid = _create(board, "Already closed", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo, "checkout", "-q", "-b", "alice/closed")
+    (repo / "c.txt").write_text("c")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-m", "c")
+    r = run(board, "done", tid, "--notes", "closed it", agent="alice", cwd=repo)
+    assert r.returncode == 0, r.stderr
+    r = run(board, "repin", tid, "--artifact", str(repo_b), agent="alice", cwd=repo)
+    assert r.returncode != 0
+    assert "IN REVIEW" in r.stdout + r.stderr
+
+
+def test_done_can_be_aimed_at_the_artifact_repo(board):
+    """T-254's guard hard-exits when the recorded repo differs from the current
+    one and explicitly refuses --force as an override. Re-aiming `review`
+    without re-aiming `done` would make every correctly-pinned cross-repo
+    ticket permanently unclosable."""
+    repo_a = board.parent
+    _ignore_board(repo_a)
+    repo_b = _artifact_repo(board.parent.parent, "artifact_repo4", board)
+
+    tid = _create(board, "Closed from the artifact repo", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo_b, "checkout", "-q", "-b", "alice/b-work")
+    (repo_b / "b.txt").write_text("b")
+    _git(repo_b, "add", "b.txt")
+    _git(repo_b, "commit", "-m", "b work")
+    r = run(board, "review", tid, "--notes", "in repo B", "--artifact", str(repo_b),
+            agent="alice", cwd=repo_a)
+    assert r.returncode == 0, r.stderr
+
+    # Without --artifact, done is run in repo A and must still refuse.
+    r = run(board, "done", tid, "--notes", "closing", agent="ceo", cwd=repo_a)
+    assert r.returncode != 0, "closing from the wrong repo must still be refused"
+    assert "does not match" in r.stdout + r.stderr
+
+    r = run(board, "done", tid, "--notes", "closing", "--artifact", str(repo_b),
+            agent="ceo", cwd=repo_a)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _status(board, tid) == "done"
+
+
+def test_merge_refuses_a_repo_parked_off_trunk_instead_of_closing_nothing(board):
+    """The fast-forward targets the checked-out branch while the close loop
+    tests ancestry against trunk. Off trunk those diverge and every ticket is
+    skipped with no reason printed -- which reads exactly like the repo guard
+    rejecting them. It must refuse out loud instead."""
+    repo_a = board.parent
+    _ignore_board(repo_a)
+    run(board, "master", "take", "--owner", "ceo")
+    repo_b = _artifact_repo(board.parent.parent, "artifact_repo5", board)
+
+    tid = _create(board, "Artifact repo parked off trunk", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo_b, "checkout", "-q", "-b", "alice/off-trunk")
+    (repo_b / "w.txt").write_text("w")
+    _git(repo_b, "add", "w.txt")
+    _git(repo_b, "commit", "-m", "w")
+    r = run(board, "review", tid, "--notes", "in repo B", "--artifact", str(repo_b),
+            agent="alice", cwd=repo_a)
+    assert r.returncode == 0, r.stderr
+
+    # repo_b is still on alice/off-trunk, not main.
+    r = run(board, "merge", "alice/off-trunk", "--artifact", str(repo_b),
+            "--no-test", agent="ceo", cwd=repo_a)
+    assert r.returncode != 0, "must refuse, not merge into the wrong branch"
+    out = r.stdout + r.stderr
+    assert "not main" in out and "checkout" in out, out
+    assert _status(board, tid) == "review"
+
+
+# ---------------------------------------------------------------------------
+# T-287: --artifact targeting and the T-243 env scrub must be true AT THE SAME
+# TIME. Neither branch could carry this test, because each predates the other's
+# feature: T-272 threaded cwd= through git() but passed no env=, and an
+# inherited GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE overrides cwd-based discovery
+# inside git ITSELF. So under a leaked env `tickets review --artifact <dir>`
+# pinned whatever repo the leak named and exited 0 -- the exact defect the
+# --artifact flag exists to fix, reappearing on the command that fixes it.
+#
+# The leak is not hypothetical on this board: agents run `tickets` from steer
+# worktrees while the deliverable lives in advitiyavashist/tickets, and
+# sonnet-qa reproduced this against T-272's branch by exporting those three
+# variables at a steer worktree.
+# ---------------------------------------------------------------------------
+
+
+def _leak_env(repo):
+    """The three variables git consults BEFORE cwd-based discovery."""
+    return {
+        "GIT_DIR": str(repo / ".git"),
+        "GIT_COMMON_DIR": str(repo / ".git"),
+        "GIT_WORK_TREE": str(repo),
+    }
+
+
+def test_artifact_pin_survives_a_leaked_git_env(board):
+    """Acceptance (2). Same setup as the test above, plus a leaked git env
+    aimed at repo A. The pin must still name repo B.
+
+    Asserted on the recorded pin rather than on stderr: the failure mode is
+    silent and exit 0, so 'it did not crash' is not evidence."""
+    repo_a = board.parent
+    _ignore_board(repo_a)
+    run(board, "master", "take", "--owner", "ceo")
+    # Repo A must NOT be on main. If it is, the never-work-on-main guard
+    # rejects the review first and the defect never gets to show itself -- the
+    # test would go red for the wrong reason and, worse, would go green against
+    # a fix that only made the guard fire. The reported harm is a WRONG PIN
+    # WRITTEN WITH EXIT 0, so repo A is put on a feature branch to let the
+    # command run all the way to the write.
+    _git(repo_a, "checkout", "-q", "-b", "alice/cwd-side-branch")
+
+    repo_b = _artifact_repo(board.parent.parent, "leak_artifact_repo", board)
+
+    tid = _create(board, "Artifact in repo B, reviewed under a leaked env", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo_b, "checkout", "-q", "-b", "alice/leak-proof")
+    (repo_b / "deliverable.txt").write_text("the actual work")
+    _git(repo_b, "add", "deliverable.txt")
+    _git(repo_b, "commit", "-m", "the actual work")
+
+    r = run(board, "review", tid, "--notes", "artifact is in repo B",
+            "--artifact", str(repo_b), agent="alice", cwd=repo_a,
+            env=_leak_env(repo_a))
+    assert r.returncode == 0, r.stderr
+
+    rec = _ticket(board, tid)
+    assert rec["repo"] == "https://example.invalid/leak_artifact_repo.git", (
+        "a leaked GIT_DIR/GIT_WORK_TREE re-pinned the review to the cwd repo. "
+        "cwd= alone does not stop git's own env-first discovery; git() must "
+        "also scrub the environment (T-243/T-287). got repo=%r" % rec["repo"]
+    )
+    assert rec["commit"] == "alice/leak-proof@" + _git(repo_b, "rev-parse", "--short", "HEAD"), (
+        "branch and sha must come from the ARTIFACT tree under a leaked env too "
+        "-- a correct repo field carrying the cwd repo's branch/sha is still an "
+        "unmergeable pin: %r" % rec["commit"]
+    )
+    assert rec["repo_source"] == "artifact"
+
+
+def test_leaked_git_env_does_not_change_the_pin_at_all(board):
+    """The A/B control. The leak must be a NO-OP, not merely survivable: the
+    pin recorded under a leaked env must equal the pin recorded without one.
+
+    Without this, a fix that happened to fail closed -- refusing, or writing
+    "?@?" -- would satisfy the assertions above while still not resolving the
+    artifact tree. T-259 defect 2 is exactly that failure dressed as a pass."""
+    repo_a = board.parent
+    _ignore_board(repo_a)
+    run(board, "master", "take", "--owner", "ceo")
+    _git(repo_a, "checkout", "-q", "-b", "alice/cwd-side-branch")
+
+    repo_b = _artifact_repo(board.parent.parent, "control_artifact_repo", board)
+    _git(repo_b, "checkout", "-q", "-b", "alice/control")
+    (repo_b / "deliverable.txt").write_text("the actual work")
+    _git(repo_b, "add", "deliverable.txt")
+    _git(repo_b, "commit", "-m", "the actual work")
+
+    pins = {}
+    for label, extra in (("clean", None), ("leaked", _leak_env(repo_a))):
+        tid = _create(board, "control %s" % label, role="backend")
+        run(board, "claim", tid, agent="alice")
+        r = run(board, "review", tid, "--notes", "n", "--artifact", str(repo_b),
+                agent="alice", cwd=repo_a, env=extra)
+        assert r.returncode == 0, r.stderr
+        rec = _ticket(board, tid)
+        pins[label] = (rec["repo"], rec["commit"], rec.get("repo_source"))
+
+    assert pins["leaked"] == pins["clean"], (
+        "the git env leak changed the recorded pin: clean=%r leaked=%r"
+        % (pins["clean"], pins["leaked"]))
+    # And the shared answer is the real one, not a shared failure.
+    assert pins["clean"][0] == "https://example.invalid/control_artifact_repo.git"
+    assert pins["clean"][1].startswith("alice/control@")
