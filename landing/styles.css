@@ -64,7 +64,8 @@ a:focus-visible,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1.5rem;
+  flex-wrap: wrap;
+  gap: 0.85rem 1.5rem;
   max-width: var(--wide);
   margin: 0 auto;
   padding: 1.35rem 1.5rem 0;
@@ -102,8 +103,19 @@ main {
 }
 
 .hero {
-  max-width: 34rem;
-  padding: 5.5rem 0 4.25rem;
+  display: grid;
+  grid-template-columns: minmax(0, 36rem) minmax(7rem, 11rem);
+  align-items: center;
+  justify-content: space-between;
+  gap: 2.5rem 3rem;
+  padding: 6.25rem 0 4.75rem;
+}
+
+.hero-mark {
+  width: 100%;
+  height: auto;
+  opacity: 0.2;
+  pointer-events: none;
 }
 
 .kicker {
@@ -116,10 +128,10 @@ main {
 
 h1 {
   margin: 0;
-  font-size: clamp(2.15rem, 6.4vw, 3.55rem);
+  font-size: clamp(2.35rem, 6.8vw, 4.15rem);
   font-weight: 560;
-  line-height: 1.08;
-  letter-spacing: -0.035em;
+  line-height: 1.06;
+  letter-spacing: -0.038em;
 }
 
 .lede {
@@ -167,8 +179,8 @@ h1 {
 .pillars h2,
 .position h2,
 .run h2 {
-  margin: 0 0 0.55rem;
-  font-size: 0.95rem;
+  margin: 0 0 0.6rem;
+  font-size: 1.02rem;
   font-weight: 650;
   letter-spacing: 0.01em;
 }
@@ -263,7 +275,11 @@ code, pre {
 }
 
 @media (max-width: 760px) {
-  .hero { padding: 3.5rem 0 3rem; }
+  .hero {
+    grid-template-columns: 1fr;
+    padding: 3.75rem 0 3.1rem;
+  }
+  .hero-mark { display: none; }
   .pillars { grid-template-columns: 1fr; gap: 1.6rem; }
   .position, .run { padding-top: 2.5rem; }
 }
