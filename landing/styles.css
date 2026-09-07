@@ -247,11 +247,11 @@ h2 {
   color: var(--mute);
 }
 .metric-face .value {
-  margin: 0.15rem 0 0;
-  font-size: 3.1rem;
-  font-weight: 520;
-  letter-spacing: -0.04em;
-  line-height: 1;
+  margin: 0.35rem 0 0;
+  font-size: 1.35rem;
+  font-weight: 560;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
 }
 .metric-face .note {
   margin: 0.45rem 0 0;
@@ -299,7 +299,7 @@ pre {
 
 @media (max-width: 840px) {
   .hero { grid-template-columns: 1fr; padding: 3.5rem 0 3.25rem; }
-  .hero-mark { justify-self: start; width: 8.5rem; }
+  .hero-mark { justify-self: start; width: 6.5rem; }
   .split { grid-template-columns: 1fr; }
   .steps { grid-template-columns: 1fr 1fr; }
 }
