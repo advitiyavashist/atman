@@ -569,6 +569,38 @@ def test_watch_sigterm_exits_within_poll_interval(board):
     assert time.time() - t0 < 2.0, "SIGTERM should interrupt the sleep, not wait up to --every"
 
 
+def test_dash_health_flag_duplicate_watchers(board):
+    """T-433: dash/list/health surface watcher_count and flag count != 1."""
+    run(board, "join", "dup", "--roles", "docs")
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="dup",
+               HOME=str(board.parent.parent / "home"))
+    cwd = str(board.parent)
+    argv = [sys.executable, str(TOOL), "watch", "--agent", "dup", "--cwd", cwd,
+            "--every", "3600", "--exec", "true"]
+    p1 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    pid_file = board / "agents" / "dup.watch.pid"
+    assert pid_file.exists()
+    os.unlink(pid_file)
+    p2 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    dash = run(board, "dash", "--once").stdout
+    assert "watchers=2 !!" in dash
+    ui = json.loads(run(board, "ui", "--json").stdout)
+    dup = next(a for a in ui["agents"] if a["name"] == "dup")
+    assert dup["watcher_count"] == 2
+    assert any("2 watch loops" in h["msg"] for h in ui["health"])
+    r = run(board, "spawn", "dup", "--stop", agent="master")
+    assert r.returncode == 0, r.stderr
+    p1.wait(timeout=10)
+    p2.wait(timeout=10)
+    ui2 = json.loads(run(board, "ui", "--json").stdout)
+    dup2 = next(a for a in ui2["agents"] if a["name"] == "dup")
+    assert dup2["watcher_count"] in (0, 1)
+
+
 def test_spawn_passes_heartbeat_to_watch(board):
     run(board, "master", "take", agent="boss")
     r = run(board, "spawn", "boss", "--master", "--heartbeat", "15", "--exec", "true", "--every", "5", agent="boss")
