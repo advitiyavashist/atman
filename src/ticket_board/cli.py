@@ -1442,7 +1442,18 @@ def _trunk():
 
 
 def cmd_sync(a, board):
-    """Agent side: bring main into my branch now, so the master's merge is trivial."""
+    """Agent side: bring main into my branch now, so the master's merge is trivial.
+
+    T-423: the local `main`/`master` ref is not the source of truth for "am I
+    behind" -- nothing here moves it, so a plain `git fetch` (which only
+    updates `origin/<trunk>`) leaves it stale indefinitely. Comparing against
+    it made sync answer "already contains main; nothing to do" for a branch
+    that was genuinely behind origin. Fetch origin's trunk and compare/merge
+    against `origin/<trunk>` instead, which the fetch just made fresh. If the
+    fetch cannot be done at all (no origin remote, or it is unreachable),
+    refuse rather than silently falling back to the stale local ref -- that
+    fallback is exactly the bug.
+    """
     g = git_state()
     if not g:
         sys.exit("not in a git repo")
@@ -1451,18 +1462,26 @@ def cmd_sync(a, board):
         sys.exit("you are on %s; sync is for your own worktree branch" % g["branch"])
     if g["dirty"] and not a.force:
         sys.exit("%d uncommitted files; commit first (sync merges %s into your branch)" % (g["dirty"], trunk))
-    if git("merge-base", "--is-ancestor", trunk, "HEAD") is not None:
-        print("%s already contains %s; nothing to do" % (g["branch"], trunk))
+    if git("remote", "get-url", "origin") is None:
+        sys.exit("no 'origin' remote configured; cannot confirm %s is not stale without one "
+                  "(comparing against the local %s ref is the bug this refusal exists to avoid)"
+                  % (trunk, trunk))
+    if git("fetch", "origin", trunk) is None:
+        sys.exit("could not fetch origin/%s -- refusing to sync against a possibly-stale local "
+                  "ref; retry once the remote is reachable" % trunk)
+    remote_trunk = "origin/" + trunk
+    if git("merge-base", "--is-ancestor", remote_trunk, "HEAD") is not None:
+        print("%s already contains %s; nothing to do" % (g["branch"], remote_trunk))
         return
     import subprocess
-    r = subprocess.run(["git", "merge", "--no-edit", "-m", "Sync %s into %s" % (trunk, g["branch"]), trunk],
+    r = subprocess.run(["git", "merge", "--no-edit", "-m", "Sync %s into %s" % (remote_trunk, g["branch"]), remote_trunk],
                        capture_output=True, text=True)
     if r.returncode == 0:
-        print("merged %s into %s -> %s" % (trunk, g["branch"], git("rev-parse", "--short", "HEAD")))
-        checkin(board, whoami(), None, "synced with %s" % trunk)
+        print("merged %s into %s -> %s" % (remote_trunk, g["branch"], git("rev-parse", "--short", "HEAD")))
+        checkin(board, whoami(), None, "synced with %s" % remote_trunk)
         return
     conflicted = (git("diff", "--name-only", "--diff-filter=U") or "").splitlines()
-    print("CONFLICTS merging %s into %s -- these files need you:" % (trunk, g["branch"]))
+    print("CONFLICTS merging %s into %s -- these files need you:" % (remote_trunk, g["branch"]))
     for f in conflicted:
         print("  " + f)
     print("Resolve, `git add` them, `git commit`, then `tickets review` again. "
