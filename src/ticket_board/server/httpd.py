@@ -52,7 +52,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def _dispatch(self):
         split = urlsplit(self.path)
-        length = int(self.headers.get("Content-Length") or 0)
+        length = self._declared_body_length()
         if length > MAX_REQUEST_BODY_BYTES:
             self._reject_oversized_body(length)
             return
@@ -70,6 +70,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._write_body(response)
 
     do_GET = do_POST = do_DELETE = do_PUT = do_PATCH = _dispatch
+
+    def _declared_body_length(self):
+        """Parse Content-Length defensively, before the cap check ever runs.
+
+        T-308: `int(header or 0)` let a negative value straight through --
+        `-1 > MAX_REQUEST_BODY_BYTES` is false, so the cap check passed it,
+        and `rfile.read(-1)` then means read-until-EOF, i.e. unbounded. A
+        non-integer header raised ValueError unhandled. Neither a negative
+        nor a garbage declaration describes a real body length, so both are
+        treated the same as a missing header: zero bytes to read, not a
+        length to hand to the socket.
+        """
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            return 0
+        try:
+            length = int(raw)
+        except ValueError:
+            return 0
+        return length if length >= 0 else 0
 
     def _reject_oversized_body(self, declared_length):
         """Refuse a request body over the cap without ever reading it.

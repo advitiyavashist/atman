@@ -73,6 +73,60 @@ def test_oversized_declared_length_is_refused_without_reading_the_body(live):
     assert str(MAX_REQUEST_BODY_BYTES) in body["error"]["message"]
 
 
+def test_negative_declared_length_does_not_trigger_unbounded_read(live):
+    """T-308: a declared length of -1 used to bypass the cap check entirely.
+
+    `-1 > MAX_REQUEST_BODY_BYTES` is false, so the pre-fix gate let it through
+    unchanged into `self.rfile.read(-1)` -- which on a `BufferedReader` means
+    read-until-EOF, i.e. block until the client closes the connection. This
+    socket is deliberately left open and no body is sent, so a prompt
+    response is only possible if the negative length was rejected (treated
+    as zero) before the read, never handed to it.
+    """
+    sock = socket.create_connection(live, timeout=5)
+    try:
+        sock.sendall(
+            ("POST /tickets HTTP/1.1\r\n"
+             "Host: {}:{}\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: -1\r\n"
+             "\r\n").format(*live).encode("ascii")
+        )
+        started = time.monotonic()
+        response = _read_http_response(sock, deadline=4.0)
+        elapsed = time.monotonic() - started
+    finally:
+        sock.close()
+
+    assert elapsed < 4.0, "server blocked on rfile.read(-1) instead of rejecting it"
+    assert response["status"] != 0, "no response arrived before the deadline"
+
+
+def test_non_integer_declared_length_does_not_crash_the_handler(live):
+    """A garbage Content-Length used to raise ValueError straight out of
+    `int(...)`, unhandled, before the cap check ever ran. It must be treated
+    as if no length were declared (0 bytes), not crash and not be handed to
+    `rfile.read`.
+    """
+    sock = socket.create_connection(live, timeout=5)
+    try:
+        sock.sendall(
+            ("POST /tickets HTTP/1.1\r\n"
+             "Host: {}:{}\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: not-a-number\r\n"
+             "\r\n").format(*live).encode("ascii")
+        )
+        started = time.monotonic()
+        response = _read_http_response(sock, deadline=4.0)
+        elapsed = time.monotonic() - started
+    finally:
+        sock.close()
+
+    assert elapsed < 4.0, "server hung instead of treating the garbage header as 0"
+    assert response["status"] != 0, "no response arrived before the deadline"
+
+
 def test_oversized_body_is_refused_even_when_the_client_sends_it_all(live):
     """Belt and suspenders: refused too when the bytes really are there.
 
