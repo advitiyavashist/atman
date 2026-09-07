@@ -62,6 +62,63 @@ This is a local operator convenience with the same threat model as the file it
 reads: whoever can reach it is the operator, because whoever can read
 `operator-session.json` already was.
 
+### V1 only: this host exists in dev and preview, and in no production build
+
+**Stated so the next person reads it as a boundary and not as a bug.** E-010 V1
+is deliberately local-first, and the token path above is scoped to that.
+
+`boardHost()` registers exactly two hooks — `configureServer` and
+`configurePreviewServer` — so it runs under `vite dev` and `vite preview` and
+**nowhere else**. `npm run build -w ui` emits static assets only; nothing in
+that output answers `GET /__board/session`, proxies `/api/*`, attaches a
+cookie, or rewrites `Origin`.
+
+Be precise about what that leaves, because the bundle was checked rather than
+assumed. `grep` over `dist/` finds **no** trace of the plugin
+(`ticket-board-host`, `http.request`, `createServer`: 0 hits). What *does*
+survive is the client half: the `HOSTED` probe still asks for
+`/__board/session` and, in a production build, **nothing answers it**; and the
+`URL_TOKEN` fallback survives intact, so `?token=` still works — but only where
+the page is already same-origin with the board, since it sets `document.cookie`
+and the board sends no CORS headers. Nothing serves the bundle from the board's
+origin today, so in practice a statically-hosted dashboard resolves no session
+and says so on screen.
+
+That is the designed V1 state, not a regression: there is no production
+credential story yet, and inventing one here would have meant either editing
+another lane's `src/ticket_board/server/` or making `?token=` the primary path,
+which leaks the token into history, access logs and `Referer`.
+
+**What serves the token in V1:** the vite dev/preview host process, reading
+`operator-session.json` (0600, written by `serve()`) off the local disk on
+every request, and never handing the session token to JavaScript.
+
+**What a production seam has to provide**, all six, because each is a
+constraint proved against a real board rather than assumed:
+
+1. **One origin.** The board sends no CORS headers at all, so the bundle and
+   the API must be same-origin — a reverse proxy in front of both, or a board
+   that learns to serve static files.
+2. **Session discovery** — answer `GET /__board/session` with `project_id` and
+   the CSRF token *only*, or render `window.__BOARD_SESSION__` into the page
+   (`src/session.ts`, `INJECTED`). The session token must stay server-side.
+3. **Credential attachment** — add the `tb_session` cookie in the proxy, not in
+   the browser.
+4. **`Origin` rewriting** to the board's own base URL, or `check_csrf` refuses
+   every unsafe cookie-authenticated write.
+5. **`Content-Length` forwarding.** The board reads exactly that many bytes; a
+   proxy that drops it falls back to chunked encoding, every write answers "A
+   JSON object body is required", and the unread body desynchronises the
+   keep-alive connection so the *next* request on it fails too. This bit me in
+   `board-host.ts` and it will bite the next implementation identically.
+6. **Unbuffered `text/event-stream`**, or the live board never streams.
+
+The real fix above all six is a **sign-in route**, which the frozen contract
+does not have — that is a contract amendment and its own ticket (T-211's plan),
+not something a deployment lane should improvise. Until then, reading a 0600
+file off local disk is the whole credential story, and it does not leave the
+machine.
+
 ## What the dashboard will not do
 
 These are the ticket's "prevent optimistic false success" requirement, spelled
@@ -141,6 +198,12 @@ list.
 
 Read these before extending; each is a real limit, not a caveat.
 
+- **No production build story, on purpose.** `board-host.ts` is a vite
+  dev/preview plugin and is absent from `npm run build` output, so a
+  statically-hosted bundle has nothing answering `/__board/session` and (absent
+  a same-origin `?token=`) resolves no session. This is V1's local-first
+  boundary, not a defect — see "V1 only: this host exists in dev and
+  preview" above for the six things a production seam must provide.
 - **No browser screenshot.** This environment has no Chromium/Playwright
   binaries. The suite mounts real React trees in jsdom and drives a real vite
   server against a real board over HTTP, but no test renders pixels.
