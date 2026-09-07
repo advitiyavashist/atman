@@ -504,6 +504,45 @@ def test_no_auth_none_route_rejects_a_present_but_invalid_credential(
                 "credential with 401".format(method, path))
 
 
+def test_no_auth_none_route_can_never_resolve_a_principal(server, operator, project):
+    """T-264, pinning the RULE the test above cannot state.
+
+    The test above only pins "not 401" -- the symptom T-236 fixed, not the
+    rule it stated ("no credential is read"). A future NONE route that reads
+    `ctx.principal` and acts on it answers 200 and satisfies that assertion
+    even when the principal belongs to someone else's project entirely --
+    T-249 proved this against already-merged code by registering exactly such
+    a route and watching it leak.
+
+    `_authorize` is the one seam every route shares, present and future (its
+    own docstring: "Authorization is decided in exactly one place"), so this
+    pins the rule there directly rather than against today's two NONE routes,
+    neither of which happens to read ctx.principal yet. A VALID credential,
+    scoped to a project other than the caller's X-Project-Id, must still
+    resolve to no principal at all for auth=NONE -- not a foreign one, not a
+    filtered-to-None one, never resolved in the first place.
+    """
+    from ticket_board.server.app import NONE
+    from ticket_board.server.wire import Request
+
+    other = server.store.create_project("Other")
+    other_session = server.bootstrap_operator(other["id"])
+    other_operator = Client(server, project_id=other["id"],
+                            cookie=other_session["session_token"],
+                            csrf=other_session["csrf_token"])
+    foreign = _enroll(server, other_operator, other, "t264-seam")
+
+    request = Request("POST", "/sessions", query="", headers={
+        "X-Project-Id": project["id"],
+        "Authorization": "Bearer " + foreign["client"].token,
+    }, body=b"{}")
+
+    assert server._authorize(request, server.exchange_enrollment, NONE,
+                             project["id"]) is None, (
+        "a live, valid, foreign-project credential must not resolve to a "
+        "principal on an auth=NONE route")
+
+
 def test_a_revoked_token_still_fails_closed_on_routes_that_require_it(
         server, operator, project):
     """Acceptance 4: the fix must not weaken anything that actually authenticates.
