@@ -35,6 +35,7 @@ from . import validate
 from .auth import in_seconds, mint_secret
 from .errors import (
     ForbiddenScope,
+    InvitationCodeInvalid,
     InvitationReplayRefused,
     MalformedRequest,
     NotFound,
@@ -218,8 +219,24 @@ class MessagingRoutes:
         body = validate.check_body(
             ctx.body(), required=("request_id", "code", "display_name"),
         )
-        validate.request_id(body)
+        request_id = validate.request_id(body)
         display_name = validate.text(body, "display_name", max_length=120)
+        # T-325/F2. This route required a `request_id`, validated it, and then
+        # never used it -- alone among the writes on the route table. A lost
+        # 201 (proxy timeout, closed laptop) and the ordinary client retry that
+        # follows produced 422 `enrollment_code_invalid` with no Set-Cookie
+        # while the member row was already there: a human who is a member of
+        # the project, holding no session, on a contract with no operator
+        # sign-in route. Only an admin minting a second invitation recovered
+        # it, and the dead member row stayed.
+        #
+        # Checked before the first write, like `send_task` and `master.py`: the
+        # contract's rule is same id + same body = the stored response, and a
+        # replay that gets as far as consuming the code has already destroyed
+        # the thing it needed to replay.
+        replay = self._exchange_replay(ctx.project_id, request_id, body)
+        if replay is not None:
+            return self._exchange_response(ctx.project_id, replay)
         redeemed = self.credentials.consume_invitation_code(
             ctx.project_id, body.get("code"))
 
@@ -235,9 +252,52 @@ class MessagingRoutes:
             " version = version + 1 WHERE id = ?",
             (member["id"], redeemed["invitation_id"]),
         )
+        # In the same transaction as the member and the session, not after the
+        # commit: a crash between the two would leave exactly the state this
+        # fix exists to prevent -- a member row with no replayable result.
+        self.store._remember(self.store.conn, ctx.project_id, request_id,
+                             self._EXCHANGE_OPERATION,
+                             self._exchange_key(body), member)
+        self.store.conn.commit()
+        return self._exchange_response(ctx.project_id, member, operator=operator)
+
+    _EXCHANGE_OPERATION = "messaging.exchange_invitation"
+
+    def _exchange_key(self, body):
+        """What a retry has to match: the code and the name it was redeemed
+        under. The code is in the key deliberately -- it is the whole
+        authorization argument for honouring this replay at all. Only its HASH
+        reaches the request log (`_body_hash`), so the bearer secret is not
+        persisted, which is the objection that forced T-286 the other way on
+        `POST /invitations`."""
+        return {"code": body.get("code"),
+                "display_name": body.get("display_name")}
+
+    def _exchange_replay(self, project_id, request_id, body):
+        return self.store._replay(self.store.conn, project_id, request_id,
+                                  self._EXCHANGE_OPERATION,
+                                  self._exchange_key(body))
+
+    def _exchange_response(self, project_id, member, operator=None):
+        """The 201 for both the first exchange and its replay.
+
+        The cookie IS the delivered result on this route -- the contract's own
+        201 description says the session arrives as `Set-Cookie` and that no
+        token appears in the body -- so a replay that returned the Member body
+        with no Set-Cookie would reproduce the defect through a different door.
+
+        A replay therefore mints a FRESH session rather than replaying the
+        first one. Storing the session token in the request log to hand back
+        later would put a live bearer secret in a durable table, which is the
+        exact objection that made T-286 refuse its replay; and the first
+        session is orphaned by definition, since a retry means its response
+        never arrived. The operator id and the member id are the same value by
+        construction above, so no extra lookup is needed to find the seat.
+        """
+        if operator is None:
+            operator = self._operator_row(project_id, member["id"])
         session = self.credentials.open_operator_session(operator)
         self.store.conn.commit()
-
         response = Response(201, member)
         response.headers["Set-Cookie"] = (
             "tb_session={}; Path=/; HttpOnly; SameSite=Lax".format(
@@ -248,6 +308,24 @@ class MessagingRoutes:
         # the page could never read it back to send the header.
         response.headers["X-CSRF-Token"] = session["csrf_token"]
         return response
+
+    def _operator_row(self, project_id, operator_id):
+        """The seat a replay is re-opening a session for.
+
+        Not reachable as a failure today -- nothing deletes an operator -- but
+        a replay that could not find the seat must refuse rather than mint a
+        session for an id it did not verify, and `enrollment_code_invalid` is
+        the answer the route already gives for "this exchange is not live".
+        """
+        row = self.store.conn.execute(
+            "SELECT id, project_id, display_name, role FROM operators"
+            " WHERE id = ? AND project_id = ?",
+            (operator_id, project_id),
+        ).fetchone()
+        if row is None:
+            raise InvitationCodeInvalid()
+        return {"id": row["id"], "project_id": row["project_id"],
+                "display_name": row["display_name"], "role": row["role"]}
 
     # ----------------------------------------------------------- channels
 
@@ -309,7 +387,11 @@ class MessagingRoutes:
         channel_id = ctx.params["channel_id"]
         caller = self._require_member_id(ctx.principal, ctx.project_id)
 
-        channel = self.store.get_channel(ctx.project_id, channel_id)
+        # as_system: this read decides WHICH rule applies (below), so it cannot
+        # be gated on the caller passing that rule. The caller's own authority
+        # is checked immediately afterwards and nothing from `channel` is
+        # returned to them, so no private channel is disclosed by asking.
+        channel = self.store.get_channel(ctx.project_id, channel_id, as_system=True)
         if channel["visibility"] == "private":
             # "Owner/admin only for private channels" -- and a member of the
             # channel cannot add others, because on a private channel the
@@ -331,10 +413,18 @@ class MessagingRoutes:
                                    {"missing_fields": ["channel_id"]})
         thread_id = ctx.request.param("thread_id")
         limit = _page_limit(ctx.request.param("limit"))
+        # T-325/F1. `cursor` is declared on this operation
+        # (components/parameters/Cursor) and used to be dropped on the floor
+        # right here, next to the `limit` this handler does parse -- so a
+        # client that paged got page 1 back forever while `next_cursor: null`
+        # told it there was nothing more. The keyset itself lives in the store,
+        # on the same (created_at, rowid) key the ordering uses; this handler
+        # only has to stop discarding the parameter.
+        cursor = ctx.request.param("cursor")
         member_id = self._member_id_of(ctx.principal, ctx.project_id)
         payload = self.store.list_messages(
             ctx.project_id, channel_id, member_id=member_id,
-            thread_id=thread_id, limit=limit,
+            thread_id=thread_id, limit=limit, cursor=cursor,
         )
         return Response(200, payload)
 
@@ -354,6 +444,7 @@ class MessagingRoutes:
         causation_id = validate.text(body, "causation_id", max_length=36,
                                      required=False)
         mentions = validate.string_list(body, "mentions", max_length=36) or []
+        _assert_ticket_reference(self.store, ctx.project_id, ticket_id)
         # The author is the credential. This is the single place it is bound,
         # and `_reject_author_field` above is the only reason a body could ever
         # have tried to say otherwise.
@@ -389,6 +480,54 @@ class MessagingRoutes:
     def _assert_readable(self, project_id, channel_id, member_id):
         self.store._assert_channel_visible(self.store.conn, project_id,
                                            channel_id, member_id)
+
+
+# The contract's TicketId (openapi.yaml components/schemas/TicketId).
+_TICKET_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,15}-[0-9]{1,6}$")
+
+
+def _assert_ticket_reference(store, project_id, ticket_id):
+    """A cited ticket must exist, in THIS project. T-325/F3.
+
+    `POST /messages` used to apply `validate.text(..., max_length=40)` and
+    nothing else, so `ticket_id="T-DOES-NOT-EXIST"` was accepted and the 201 it
+    produced failed the frozen schema on its own body, and a real key from
+    ANOTHER project was written into the message record and the audit trail as
+    a permanent cross-project citation.
+
+    Both refusals are 400 `malformed_request`, not 404. That is not a stylistic
+    choice: `sendMessage` declares exactly 201/400/403, so answering 404 here
+    would fix a conformance break by committing a second one -- the same shape
+    as T-309. 400 is also the honest description: the request named something
+    that is not a ticket of this project, and an unknown ticket and another
+    project's ticket give the SAME answer so that ids stay unprobeable across
+    projects, which is the rule `_message_or_404` already applies to messages.
+
+    Placed at the API boundary rather than in `storage.send_message` on
+    purpose. The store treats `ticket_id` as a free citation and has callers
+    that rely on it -- an archived board's message can name a ticket that was
+    never imported -- so tightening it there would change a lower-level
+    primitive's contract to fix an HTTP-layer defect. The sibling route
+    `POST /messages/{id}/task` already scope-checks at this same layer.
+    """
+    if ticket_id is None:
+        return
+    if not _TICKET_ID_RE.match(ticket_id):
+        raise MalformedRequest(
+            "ticket_id is not a valid ticket key.",
+            {"rejected_fields": ["ticket_id"]})
+    # NotFound alone, deliberately: `get_ticket` carries `project_id` in its
+    # WHERE clause, so ANOTHER project's ticket arrives here as "no such
+    # ticket" and never as a scope error. Catching ForbiddenScope too would
+    # read as if it handled the cross-project case while in fact never firing
+    # -- and it would be the server's ForbiddenScope, a different class from
+    # the storage one, so it could not catch that either.
+    try:
+        store.get_ticket(project_id, ticket_id)
+    except NotFound:
+        raise MalformedRequest(
+            "ticket_id does not name a ticket in this project.",
+            {"rejected_fields": ["ticket_id"]})
 
 
 def _page_limit(raw):
