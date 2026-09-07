@@ -504,7 +504,7 @@ def test_no_auth_none_route_rejects_a_present_but_invalid_credential(
                 "credential with 401".format(method, path))
 
 
-def test_no_auth_none_route_can_ever_resolve_a_principal(server, operator, project):
+def test_no_auth_none_route_can_never_resolve_a_principal(server, operator, project):
     """T-264, pinning the RULE the test above cannot state.
 
     The test above only pins "not 401" -- the symptom T-236 fixed, not the
