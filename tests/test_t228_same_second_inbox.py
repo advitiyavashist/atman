@@ -181,3 +181,75 @@ def test_stuck_message_in_the_read_second_still_wakes_the_master(tmp_path):
             if m.get("from") != "bob" and mod._is_unread(m, TIE, remaining)
             and str(m.get("text", "")).lower().startswith(("stuck", "blocked"))]
     assert len(hits) == 1, "a same-second 'stuck' must still wake the master"
+
+
+# ---- composition with T-278's agent-record lock -------------------------
+#
+# Added when this branch was merged onto main 5200f9d, which had gained T-278
+# (every agent-record write serialised behind a per-agent flock). T-228 was
+# built on f7b5d0c, which predates that, so _mark_inbox_read here was still the
+# old unlocked read / json.dump / os.replace. Merging kept both sides textually
+# clean while leaving the inbox as the ONE writer still racing outside the
+# flock -- and the field it drops on a lost race is inbox_seen itself.
+#
+# T-278's own suite does not catch this: its `interleave` gates the HEARTBEAT's
+# read, and a heartbeat re-reads inside its lock, so it passes whether or not
+# the inbox writer is locked. The uncovered direction is the mirror image --
+# the inbox reader holding a stale pre-image and clobbering what a concurrent
+# writer committed in between. Verified toothed: this test FAILS against the
+# unlocked _mark_inbox_read and passes with it routed through _agent_update.
+
+class _Args:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def test_inbox_read_does_not_clobber_a_limit_written_while_it_scanned(board, monkeypatch):
+    """A `tickets limit` landing between the inbox's read and its write must
+    survive. Losing it marks a usage-limited agent as available and routes
+    work to an agent that cannot answer -- the 03:36Z incident, reached
+    through the inbox instead of through a heartbeat.
+    """
+    import threading
+
+    monkeypatch.setenv("TICKET_AGENT", "bob")
+    mod = _mod()
+    b = str(board)
+    mod.checkin(b, "bob")
+
+    gated = threading.Event()
+    writer_done = threading.Event()
+    real_rec = mod._agent_rec
+    armed = {"on": True}
+
+    def gated_rec(bd, own):
+        # Gate only the FIRST read taken by the inbox thread, and gate it
+        # AFTER the read: the point is to hand back a genuinely stale
+        # pre-image, which is what an unlocked implementation writes back on
+        # top of the concurrent writer. Gating before the read instead makes
+        # this test pass against the broken code -- it re-reads after the
+        # writer commits and sees the limit it was supposed to lose.
+        rec = real_rec(bd, own)
+        if threading.current_thread().name == "inbox" and armed["on"]:
+            armed["on"] = False
+            gated.set()
+            writer_done.wait(1.5)  # bounded: the fixed code blocks on the lock
+        return rec
+
+    mod._agent_rec = gated_rec
+    try:
+        t = threading.Thread(target=lambda: mod._mark_inbox_read(b, "bob"), name="inbox")
+        t.start()
+        assert gated.wait(5), "inbox thread never reached its read"
+        mod.cmd_limit(_Args(agent="bob", clear=False, until="2026-09-12 19:41",
+                            note="credits out"), b)
+        writer_done.set()
+        t.join(10)
+        assert not t.is_alive(), "inbox thread hung"
+    finally:
+        mod._agent_rec = real_rec
+
+    rec = json.loads(open(os.path.join(b, "agents", "bob.json")).read())
+    assert "limit" in rec, "the inbox read silently discarded the limit"
+    assert rec["limit"]["until"] == "2026-09-12 19:41"
+    assert rec.get("inbox_seen") is not None, "the inbox's own write must land too"

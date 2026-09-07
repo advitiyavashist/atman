@@ -56,6 +56,23 @@ export const streamStateCopy = {
   stale: (asOf: string) => `Connection lost. Showing updates from ${formatTime(asOf)}.`,
 };
 
+/**
+ * Shown when this client has never had a snapshot at all. Distinct from the
+ * stale copy above, which promises "updates from <time>" — a promise we cannot
+ * keep when there is no time to name.
+ */
+export const noSnapshotCopy = "Not connected to a board yet.";
+
+/** A replay gap: the cursor aged out and everything on screen was re-read. */
+export const recoveredGapCopy = (at: string) =>
+  `Reconnected after a gap at ${formatTime(at)} — the board's event history had moved past this tab, so every screen was re-read from the server.`;
+
+export const pendingWriteCopy = "Sending… nothing has changed on the board yet.";
+
+/** The rule that keeps a reservation from reading as work in progress. */
+export const queuedNotWorkingNote =
+  "Reserved, not started — the agent has not claimed it yet.";
+
 export function formatTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;

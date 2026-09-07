@@ -1,6 +1,16 @@
 """Claude Code hook adapter helpers for Ticket Board V1."""
 
 from .adapter import (
+    current_agent_version,
+    disconnect_project,
+    OperatorCredentials,
+    PREFLIGHT_MARKER,
+    receipts_path,
+    preflight_hook_command,
+    load_receipts,
+    hook_runtime,
+    diagnose_live,
+    append_receipt,
     AdapterConfig,
     BoardClient,
     ClaudeHookError,
@@ -21,6 +31,16 @@ from .adapter import (
 )
 
 __all__ = [
+    "current_agent_version",
+    "disconnect_project",
+    "OperatorCredentials",
+    "PREFLIGHT_MARKER",
+    "receipts_path",
+    "preflight_hook_command",
+    "load_receipts",
+    "hook_runtime",
+    "diagnose_live",
+    "append_receipt",
     "AdapterConfig",
     "BoardClient",
     "ClaudeHookError",
