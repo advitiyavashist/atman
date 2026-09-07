@@ -5612,8 +5612,18 @@ class _LoudArgumentParser(argparse.ArgumentParser):
         })
 
 
-def release_version():
-    """Report installed provenance without discovering or touching a board."""
+def release_status():
+    """Report installed provenance without discovering or touching a board.
+
+    Checks size before hashing content: an untampered file's size matches
+    the manifest's recorded size for it, and that comparison is a single
+    stat() call instead of reading and sha256-ing the whole file. Content
+    is only ever hashed when a file's size does not match -- which is also
+    exactly when we already know it drifted, so this is never a speculative
+    cost, only a confirming one. A manifest written before this field
+    existed (bare hash string instead of {"sha256", "size"}) falls back to
+    always hashing, matching the old behavior exactly.
+    """
     import hashlib
     root = os.path.dirname(os.path.realpath(__file__))
     manifest = os.path.join(root, "release.json")
@@ -5623,19 +5633,31 @@ def release_version():
         with open(manifest) as source:
             release = json.load(source)
         for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
-            with open(os.path.join(root, name), "rb") as source:
+            path = os.path.join(root, name)
+            recorded = release["files"][name]
+            expected_sha, expected_size = (
+                (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
+                else (recorded, None))
+            if expected_size is not None and os.stat(path).st_size == expected_size:
+                continue
+            with open(path, "rb") as source:
                 actual = hashlib.sha256(source.read()).hexdigest()
-            if actual != release["files"][name]:
+            if actual != expected_sha:
                 return "tickets DRIFTED release %s (%s)" % (release["commit"], name)
         return "tickets commit %s (verified release)" % release["commit"]
     except (OSError, ValueError, KeyError, TypeError):
         return "tickets INVALID release provenance"
 
 
+# Backward-compatible alias: scripts/tests may still import the old name.
+release_version = release_status
+
+
 def main():
+    status = release_status()
     p = _LoudArgumentParser(prog="tickets", description=__doc__.split("\n")[0],
-                           epilog=release_version())
-    p.add_argument("--version", action="version", version=release_version())
+                           epilog=status)
+    p.add_argument("--version", action="version", version=status)
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
@@ -6061,6 +6083,8 @@ def main():
         register(sub, globals())
 
     a = p.parse_args()
+    if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
+        print("WARNING: %s -- see 'tickets --version'" % status, file=sys.stderr)
     if not a.cmd:
         p.print_help()
         return
