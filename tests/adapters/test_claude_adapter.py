@@ -321,6 +321,58 @@ def test_project_dir_guard_still_refuses_when_git_cannot_run(board_layout, monke
             adapter_module._ensure_safe_project_dir(project_dir)
 
 
+def test_git_common_dir_still_returns_none_for_an_ordinary_non_repository_directory(tmp_path):
+    """Regression guard for T-260: the plain negative case must still be None,
+    not raise. Only a git error that is not "not a repository" is inconclusive."""
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert adapter_module._git_common_dir(plain) is None
+
+
+def test_git_common_dir_raises_on_a_git_error_other_than_not_a_repository(
+        board_layout, tmp_path, monkeypatch):
+    """T-260, isolating the mechanism: a healthy repository whose git merely
+    refused to run (bad ~/.gitconfig) must not look identical to a plain
+    directory. Before this fix `_git_common_dir` mapped both to None."""
+    fake_home = tmp_path / "fakehome-broken"
+    fake_home.mkdir()
+    (fake_home / ".gitconfig").write_text("[this is not valid config\n")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    with pytest.raises(adapter_module.GitProbeInconclusive):
+        adapter_module._git_common_dir(board_layout["off_tree"])
+    assert (board_layout["off_tree"] / ".git").exists(), "the repository is still perfectly real"
+
+
+def test_a_broken_home_gitconfig_makes_the_off_tree_probe_fail_closed(
+        board_layout, tmp_path, monkeypatch):
+    """T-260 finding from T-251: clean_git_env() strips GIT_* but git also
+    reads $HOME/.gitconfig, which is documented as 'unrelated' and left alone.
+    A junk config there must not silently reopen the off-tree case that check
+    2 exists for -- the guard must refuse rather than misread the error as
+    'not a repository'."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    (fake_home / ".gitconfig").write_text("[this is not valid config\n")
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    with pytest.raises(ClaudeHookError, match="could not determine"):
+        adapter_module._ensure_safe_project_dir(board_layout["off_tree"])
+
+
+def test_a_broken_xdg_gitconfig_makes_the_off_tree_probe_fail_closed(
+        board_layout, tmp_path, monkeypatch):
+    """Same leak through $XDG_CONFIG_HOME/git/config, likewise not a GIT_* key."""
+    xdg = tmp_path / "xdg"
+    (xdg / "git").mkdir(parents=True)
+    (xdg / "git" / "config").write_text("[this is not valid config\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+
+    with pytest.raises(ClaudeHookError, match="could not determine"):
+        adapter_module._ensure_safe_project_dir(board_layout["off_tree"])
+
+
 def test_protected_roots_come_from_configuration(tmp_path, monkeypatch):
     monkeypatch.delenv(adapter_module.FORBIDDEN_ROOTS_ENV, raising=False)
     fake_home = tmp_path / "home"
