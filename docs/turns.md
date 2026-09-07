@@ -123,6 +123,19 @@ Console (T-372): home hero reads `aggregates.median`; the turns-efficiency
 panel shows worst-10 + per-agent medians from this same object. Do not
 reshape `--json` for the UI.
 
+## Shadow route ranking (T-415)
+
+`tickets route --shadow` picks the `(agent, model)` cell with enough support
+(`n` ≥ 5 measured turns) that finished comparable tickets (same role and
+priority band) in the **fewest median turns**, tie-broken by **lowest median
+`cost_usd`** among cells that actually reported cost. `cost_usd` null is
+**unmeasured**, never treated as $0.00 — an agent with unknown cost cannot win
+a cost tie-break against one with measured cost. When every learned candidate
+for a ready ticket has `n_cost=0`, the command still prints the turns-only
+pick and labels it `cost: unmeasured (n=0)`. `--by cost` inverts the axes
+(cost first, then turns) for comparison. Shadow mode assigns nothing; it only
+prints and appends `shadow_decision` events.
+
 ## Source
 
 Events come from `.tickets/trajectories.jsonl` (and dated archives). Schema:

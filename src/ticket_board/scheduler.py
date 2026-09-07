@@ -1,12 +1,13 @@
-"""T-315: shadow scheduler v0.
+"""T-315 / T-415: shadow scheduler v0 -> v1 (turns + cost).
 
 `tickets route --shadow` compares the existing rule-based owner pick with a
-learned pick (median turns-to-done, n>=5) or a named tier prior. It does not
-assign, note, or message. The only write is a `shadow_decision` trajectory
-event per ready ticket.
+learned pick (median turns-to-done, n>=5, tie-broken by median cost_usd when
+measured) or a named tier prior. It does not assign, note, or message. The only
+write is a `shadow_decision` trajectory event per ready ticket.
 
 turns=null (no run_end / backfill) is never treated as 0: those tickets are
-counted as n_unmeasured and excluded from the estimate.
+counted as n_unmeasured and excluded from the estimate. cost_usd=null is
+UNMEASURED, never 0 and never summed into medians.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from statistics import median
 
 from ticket_board.turns import (
     TrajectoryParseError,
+    _measured_cost,
     _measured_turns,
     _model,
     _owner,
@@ -103,15 +105,18 @@ def _laplace(k, n):
 
 
 def build_estimates(events, tickets=None, workforce=None):
-    """Per (role, band) x (agent, model) stats. Null turns excluded."""
+    """Per (role, band) x (agent, model) stats. Null turns/cost excluded."""
     tickets = tickets or []
     workforce = workforce or {}
     idx = _ticket_index(tickets)
     cells = defaultdict(lambda: {
-        "turns": [], "n_unmeasured": 0, "reopens": 0, "successes": 0, "n_finished": 0,
+        "turns": [], "costs": [], "n_unmeasured": 0, "n_cost_unmeasured": 0,
+        "reopens": 0, "successes": 0, "n_finished": 0,
     })
     n_measured = 0
     n_unmeasured = 0
+    n_cost_measured = 0
+    n_cost_unmeasured = 0
     for tid, evs in _group_events(events).items():
         t = idx.get(tid) or {}
         if not _finished(evs, t):
@@ -128,6 +133,13 @@ def build_estimates(events, tickets=None, workforce=None):
             continue
         n_measured += 1
         cell["turns"].append(turns)
+        cost = _measured_cost(evs)
+        if cost is None:
+            cell["n_cost_unmeasured"] += 1
+            n_cost_unmeasured += 1
+        else:
+            cell["costs"].append(cost)
+            n_cost_measured += 1
         if _reopened(evs):
             cell["reopens"] += 1
         if _success(evs, t):
@@ -135,7 +147,9 @@ def build_estimates(events, tickets=None, workforce=None):
     out = {}
     for key, cell in cells.items():
         nums = cell["turns"]
+        costs = cell["costs"]
         n = len(nums)
+        n_cost = len(costs)
         rec = {
             "role": key[0],
             "band": key[1],
@@ -143,7 +157,10 @@ def build_estimates(events, tickets=None, workforce=None):
             "model": key[3],
             "n": n,
             "n_unmeasured": cell["n_unmeasured"],
+            "n_cost": n_cost,
+            "n_cost_unmeasured": cell["n_cost_unmeasured"],
             "median_turns": median(nums) if nums else None,
+            "median_cost_usd": median(costs) if costs else None,
             "reopen_rate": _laplace(cell["reopens"], n) if n else None,
             "success_rate": _laplace(cell["successes"], n) if n else None,
             "source": "learned" if n >= MIN_SUPPORT else "prior",
@@ -153,11 +170,20 @@ def build_estimates(events, tickets=None, workforce=None):
         "cells": out,
         "n_measured": n_measured,
         "n_unmeasured": n_unmeasured,
+        "n_cost_measured": n_cost_measured,
+        "n_cost_unmeasured": n_cost_unmeasured,
     }
 
 
-def learned_ranking(estimates, role, band):
-    """(agent, model) cells with n>=5, best (fewest median turns) first."""
+def _rank_cost_key(rec):
+    """Sort key for median cost; unmeasured sorts after any measured cost."""
+    if (rec.get("n_cost") or 0) > 0 and rec.get("median_cost_usd") is not None:
+        return rec["median_cost_usd"]
+    return float("inf")
+
+
+def learned_ranking(estimates, role, band, rank_by="turns"):
+    """(agent, model) cells with n>=5; default fewest turns then lowest cost."""
     ranked = []
     for rec in estimates["cells"].values():
         if rec["role"] != role or rec["band"] != band:
@@ -165,8 +191,19 @@ def learned_ranking(estimates, role, band):
         if rec["n"] < MIN_SUPPORT or rec["median_turns"] is None:
             continue
         ranked.append(rec)
-    ranked.sort(key=lambda r: (r["median_turns"], -r["n"], r["agent"] or "", r["model"] or ""))
+    if rank_by == "cost":
+        ranked.sort(key=lambda r: (
+            _rank_cost_key(r), r["median_turns"], -r["n"],
+            r["agent"] or "", r["model"] or ""))
+    else:
+        ranked.sort(key=lambda r: (
+            r["median_turns"], _rank_cost_key(r), -r["n"],
+            r["agent"] or "", r["model"] or ""))
     return ranked
+
+
+def _all_cost_unmeasured(ranked):
+    return bool(ranked) and all((r.get("n_cost") or 0) == 0 for r in ranked)
 
 
 def _agent_names(workforce, roles, only=None, agents=None):
@@ -226,14 +263,18 @@ def prior_pick(ticket, names, workforce, roles, board, score_agent):
     return None, label, None
 
 
-def decide_ticket(board, ticket, estimates, names, workforce, roles, score_agent, load_):
+def decide_ticket(board, ticket, estimates, names, workforce, roles, score_agent, load_,
+                    rank_by="turns"):
     role, band = _role(ticket), priority_band(ticket)
     rule_agent, rule_why, rule_runner = rule_pick(
         board, ticket, names, workforce, roles, score_agent, load_)
-    ranked = learned_ranking(estimates, role, band)
+    ranked = learned_ranking(estimates, role, band, rank_by=rank_by)
     if ranked:
         best = ranked[0]
         runner = ranked[1] if len(ranked) > 1 else None
+        cost_note = None
+        if _all_cost_unmeasured(ranked):
+            cost_note = "cost: unmeasured (n=0)"
         return {
             "ticket": ticket.get("id"),
             "priority": ticket.get("priority", 2),
@@ -246,10 +287,15 @@ def decide_ticket(board, ticket, estimates, names, workforce, roles, score_agent
             "learned_agent": best["agent"] or None,
             "learned_model": best["model"] or None,
             "expected_turns": best["median_turns"],
+            "expected_cost_usd": best.get("median_cost_usd"),
             "n": best["n"],
+            "n_cost": best.get("n_cost") or 0,
             "n_unmeasured": best["n_unmeasured"],
+            "n_cost_unmeasured": best.get("n_cost_unmeasured") or 0,
             "runner_up": (runner or {}).get("agent") if runner else None,
             "source": "learned",
+            "rank_by": rank_by,
+            "cost_note": cost_note,
         }
     agent, label, runner = prior_pick(
         ticket, names, workforce, roles, board, score_agent)
@@ -266,11 +312,16 @@ def decide_ticket(board, ticket, estimates, names, workforce, roles, score_agent
         "learned_agent": agent,
         "learned_model": (wf.get("model") or None) if agent else None,
         "expected_turns": None,
+        "expected_cost_usd": None,
         "n": 0,
+        "n_cost": 0,
         "n_unmeasured": 0,
+        "n_cost_unmeasured": 0,
         "runner_up": runner,
         "source": "prior",
         "prior": label,
+        "rank_by": rank_by,
+        "cost_note": "cost: unmeasured (n=0)",
     }
 
 
@@ -294,15 +345,19 @@ def render_shadow_table(decisions, estimates):
     lines = []
     if estimates["n_measured"] == 0:
         lines.append("no measured trajectories")
-    lines.append("%-8s %-3s %-8s %-14s %-14s %-8s %5s %8s %-14s %s" % (
-        "ticket", "pri", "source", "rule", "learned", "n", "exp", "unmeas", "runner-up", "why"))
+    lines.append("%-8s %-3s %-8s %-14s %-14s %5s %8s %8s %8s %5s %-14s %s" % (
+        "ticket", "pri", "source", "rule", "learned", "n", "exp", "cost", "unmeas",
+        "n_cost", "runner-up", "why"))
     for d in decisions:
         exp = d.get("expected_turns")
+        cost = d.get("expected_cost_usd")
         src = d.get("source") or "prior"
         why = d.get("prior") if src == "prior" else (d.get("rule_why") or "")
         if src == "prior":
             why = "prior (%s)" % (d.get("prior") or why)
-        lines.append("%-8s %-3s %-8s %-14s %-14s %5s %8s %8s %-14s %s" % (
+        if d.get("cost_note"):
+            why = "%s; %s" % (why, d["cost_note"]) if why else d["cost_note"]
+        lines.append("%-8s %-3s %-8s %-14s %-14s %5s %8s %8s %8s %5s %-14s %s" % (
             d.get("ticket") or "-",
             str(d.get("priority", 2)),
             src,
@@ -310,13 +365,36 @@ def render_shadow_table(decisions, estimates):
             (d.get("learned_agent") or "-")[:14],
             str(d.get("n") or 0),
             "-" if exp is None else ("%.1f" % exp),
+            "-" if cost is None else ("$%.4f" % cost),
             str(d.get("n_unmeasured") or 0),
+            str(d.get("n_cost") or 0),
             (d.get("runner_up") or "-")[:14],
             why,
         ))
     lines.append("measured tickets used for estimates: %d; unmeasured (null turns, not 0): %d" % (
         estimates["n_measured"], estimates["n_unmeasured"]))
+    lines.append("cost measured on finished tickets: %d; cost unmeasured (null, not $0): %d" % (
+        estimates.get("n_cost_measured") or 0, estimates.get("n_cost_unmeasured") or 0))
     return "\n".join(lines)
+
+
+def build_shadow_json(decisions, estimates):
+    """Frozen additive --json for `tickets route --shadow` (T-315 + T-415)."""
+    rows = []
+    for d in decisions:
+        row = dict(d)
+        row.pop("title", None)
+        rows.append(row)
+    return {
+        "v": 1,
+        "decisions": rows,
+        "estimates": {
+            "n_measured": estimates["n_measured"],
+            "n_unmeasured": estimates["n_unmeasured"],
+            "n_cost_measured": estimates.get("n_cost_measured") or 0,
+            "n_cost_unmeasured": estimates.get("n_cost_unmeasured") or 0,
+        },
+    }
 
 
 def _write_shadow_events(board, decisions, traj_event):
@@ -338,6 +416,12 @@ def _write_shadow_events(board, decisions, traj_event):
         }
         if d.get("expected_turns") is not None:
             fields["expected_turns"] = d["expected_turns"]
+        if d.get("expected_cost_usd") is not None:
+            fields["expected_cost_usd"] = d["expected_cost_usd"]
+        if d.get("n_cost") is not None:
+            fields["n_cost"] = d["n_cost"]
+        if d.get("n_cost_unmeasured") is not None:
+            fields["n_cost_unmeasured"] = d["n_cost_unmeasured"]
         if d.get("prior"):
             fields["prior"] = d["prior"]
         rec = traj_event(board, "shadow_decision", ticket=d.get("ticket"), **fields)
@@ -418,6 +502,9 @@ def cmd_route_shadow(a, board, load_all, load_workforce, load_roles, load_agents
     roles = load_roles(board)
     agents = dict((r["owner"], r) for r in load_agents(board))
     names = _agent_names(workforce, roles, only=getattr(a, "only", None), agents=agents)
+    rank_by = getattr(a, "by", None) or "turns"
+    if rank_by not in ("turns", "cost"):
+        rank_by = "turns"
     estimates = build_estimates(events, tickets=tickets, workforce=workforce)
     if getattr(a, "report", False):
         print(render_report(report_shadow(events, tickets=tickets, workforce=workforce)))
@@ -425,6 +512,9 @@ def cmd_route_shadow(a, board, load_all, load_workforce, load_roles, load_agents
     ready = ready_tickets(tickets)
     load_ = claimed_load(tickets)
     decisions = [decide_ticket(board, t, estimates, names, workforce, roles,
-                               score_agent, load_) for t in ready]
-    print(render_shadow_table(decisions, estimates))
+                               score_agent, load_, rank_by=rank_by) for t in ready]
+    if getattr(a, "json", False):
+        print(json.dumps(build_shadow_json(decisions, estimates), indent=2, sort_keys=True))
+    else:
+        print(render_shadow_table(decisions, estimates))
     _write_shadow_events(board, decisions, traj_event)
