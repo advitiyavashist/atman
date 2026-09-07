@@ -6374,6 +6374,8 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .next-step .lbl{font-weight:700;color:var(--acc);white-space:nowrap}
 .next-step .msg{flex:1;min-width:160px}
 .next-step .cmd{font:12px/1.35 ui-monospace,Menlo,monospace;color:var(--mute);white-space:nowrap}
+.next-step.unreachable{background:color-mix(in srgb,var(--bad) 14%,var(--card));border-bottom-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
+.next-step.unreachable .lbl{color:var(--bad)}
 .onboard{margin:0 16px;padding:10px 0 12px;border-bottom:1px solid var(--line)}
 .onboard summary{cursor:pointer;list-style:none;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700;display:flex;gap:8px;align-items:center}
 .onboard summary::-webkit-details-marker{display:none}
@@ -6567,13 +6569,37 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   finally{btn.disabled=false}
 });
 function tickClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}
+let snapshotFails=0;
+function unreachableNextStep(msg,cmd){
+  return{kind:'unreachable',label:'Board unavailable',message:msg,cmd:cmd||''};
+}
 async function load(){
-  const r=await fetch('/board.json?'+Date.now());const d=await r.json();
-  document.getElementById('title').textContent=d.project||'Ticket board';
+  let d;
+  try{
+    const r=await fetch('/board.json?'+Date.now());
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    d=await r.json();
+  }catch(e){
+    snapshotFails++;
+    renderNextStep(unreachableNextStep(
+      snapshotFails>2?'Cannot reach the board server — is `tickets ui` still running? ('+e+')'
+        :'Board unreachable — retrying… ('+e+')',
+      'tickets ui'));
+    return;
+  }
+  if(d.error){
+    snapshotFails++;
+    renderNextStep(d.next_step||unreachableNextStep(
+      'Board snapshot failed — '+d.error+(snapshotFails>2?' (still failing; check TICKETS_DIR and board files)':''),
+      'tickets ui --json'));
+    d.counts=d.counts||{total:0,done:0};
+  }else snapshotFails=0;
+  document.getElementById('title').textContent=d.project||'Atman';
+  const counts=d.counts||{total:0,done:0};
   document.getElementById('chips').innerHTML=
     '<span class="chip master"><b>master</b> '+esc(d.master||'nobody')+'</span>'+
     '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
-    '<span class="chip"><b>'+esc(d.counts.done)+'</b>/'+esc(d.counts.total)+' done</span>';
+    '<span class="chip"><b>'+esc(counts.done)+'</b>/'+esc(counts.total)+' done</span>';
   const s=d.sprint;
   document.getElementById('sprint').innerHTML=s
     ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
@@ -6594,7 +6620,7 @@ async function load(){
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
   fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
   renderEmptyBoard(d);
-  renderNextStep(d.next_step);
+  if(!d.error)renderNextStep(d.next_step);
   renderOnboarding(d.onboarding);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
@@ -6613,12 +6639,13 @@ async function load(){
     ||'<div class="empty">no messages yet</div>';
 }
 function renderOnboarding(ob){
+  // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
   const steps=[
-    ['initialized','Board initialized','tickets master init'],
-    ['first_ticket','First ticket created','tickets create "..."'],
-    ['first_agent','First agent joined','tickets join <name> --roles backend'],
+    ['initialized','Board ready','tickets quickstart --agent <you>'],
+    ['first_ticket','Work on the board','tickets quickstart'],
+    ['first_agent','You registered','tickets quickstart --agent <you>'],
     ['first_review','First review submitted','tickets review <id> --notes "..."'],
-    ['first_merge','First merge to main','tickets done <id> --notes "..."'],
+    ['first_merge','First merge','tickets done <id> --notes "..."'],
     ['objective_set','Objective set','tickets objective "..."']
   ];
   const done=steps.filter(s=>ob&&ob[s[0]]).length;
@@ -6630,8 +6657,9 @@ function renderOnboarding(ob){
 }
 function renderNextStep(ns){
   const el=document.getElementById('nextStep');
-  if(!ns||!ns.message){el.hidden=true;return}
+  if(!ns||!ns.message){el.hidden=true;el.className='next-step';return}
   el.hidden=false;
+  el.className='next-step'+(ns.kind==='unreachable'?' unreachable':'');
   el.innerHTML='<span class="lbl">'+esc(ns.label||'Next')+'</span><span class="msg">'+esc(ns.message)+'</span>'+
     (ns.cmd?'<span class="cmd">'+esc(ns.cmd)+'</span>':'');
 }
@@ -6652,7 +6680,11 @@ load();setInterval(load,5000);setInterval(tickClock,1000);
 
 
 def _onboarding_checklist(board, tickets):
-    """First-run checklist ticks for the UI (mirrors T-322 quickstart steps)."""
+    """First-run checklist ticks for the UI.
+
+    Display labels/cmds in UI_HTML match T-322 quickstart + README
+    (opus-console/t322-quickstart); keys here are the board-state probes.
+    """
     initialized = os.path.isfile(master_path(board)) or os.path.isfile(os.path.join(board, "roles.json"))
     agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
     workforce = load_workforce(board)
@@ -6783,7 +6815,13 @@ def cmd_ui(a, board):
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.startswith("/board.json"):
-                body = json.dumps(_safe(lambda: board_snapshot(board), {"error": "snapshot failed"})).encode()
+                body = json.dumps(_safe(lambda: board_snapshot(board), {
+                    "error": "snapshot failed",
+                    "counts": {"total": 0, "done": 0},
+                    "next_step": {"kind": "unreachable", "label": "Snapshot failed",
+                                  "message": "Could not read the board — check TICKETS_DIR and board files.",
+                                  "cmd": "tickets ui --json"},
+                })).encode()
                 ctype = "application/json"
             else:
                 body = UI_HTML.encode()

@@ -68,7 +68,10 @@ def test_ui_html_contains_onboarding_markers():
         "renderOnboarding",
         "renderNextStep",
         "renderEmptyBoard",
+        "unreachableNextStep",
+        "snapshotFails",
         "tickets quickstart",
+        "Board ready",
         "Turns",
         "Utilization",
         "Lane",
@@ -86,3 +89,11 @@ def test_next_step_spawn_when_no_agents(board):
     assert d["next_step"]["kind"] == "spawn"
     assert d["onboarding"]["first_ticket"] is True
     assert d["onboarding"]["first_agent"] is False
+
+
+def test_snapshot_error_payload_has_next_step():
+    """Server fallback when board_snapshot() throws must still guide the user."""
+    text = TOOL.read_text(encoding="utf-8")
+    assert '"kind": "unreachable"' in text
+    assert '"error": "snapshot failed"' in text
+    assert "next_step" in text.split("snapshot failed", 1)[1]
