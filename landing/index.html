@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f4ee">
+  <meta name="description" content="Atman is an open, self-hosted team runtime. Bring Claude, Codex, Cursor, or your own harness. Finish more work at least cost — in the fewest turns.">
+  <title>atman</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='10' cy='7.8' r='3.35' fill='%2314161b'/%3E%3Ccircle cx='22.4' cy='8.8' r='3.35' fill='%2314161b'/%3E%3Ccircle cx='6.6' cy='17.6' r='3.35' fill='%2314161b'/%3E%3Ccircle cx='25.4' cy='18.2' r='3.35' fill='%2314161b'/%3E%3Ccircle cx='16' cy='24.6' r='3.35' fill='%2314161b'/%3E%3C/svg%3E">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap">
+      <a class="lockup" href="#top" id="top">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="28" height="28" role="img" aria-labelledby="mark-title mark-desc">
+          <title id="mark-title">atman</title>
+          <desc id="mark-desc">Five formation dots. Seats on a pitch, not a graph.</desc>
+          <circle cx="10.0" cy="7.8" r="3.35" fill="currentColor"/>
+          <circle cx="22.4" cy="8.8" r="3.35" fill="currentColor"/>
+          <circle cx="6.6" cy="17.6" r="3.35" fill="currentColor"/>
+          <circle cx="25.4" cy="18.2" r="3.35" fill="currentColor"/>
+          <circle cx="16.0" cy="24.6" r="3.35" fill="currentColor"/>
+        </svg>
+        <span class="wordmark">atman</span>
+      </a>
+      <nav class="nav-links" aria-label="Page">
+        <a href="https://github.com/advitiyavashist/atman">Clone the repo</a>
+        <a href="#start">Run it locally</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="wrap">
+      <section class="hero" aria-labelledby="hero-title">
+        <div>
+          <p class="kicker">open repo · self-hosted</p>
+          <h1 id="hero-title">Finish more work at least cost — in the fewest turns.</h1>
+          <p class="lede">Bring Claude, Codex, Cursor, or your own harness. Atman makes them one team and shows the efficiency score.</p>
+          <div class="ctas">
+            <a class="btn btn-ink" href="https://github.com/advitiyavashist/atman">Clone the repo</a>
+            <a class="btn btn-ghost" href="#start">Run it locally</a>
+          </div>
+        </div>
+        <div class="hero-mark" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+            <circle cx="10.0" cy="7.8" r="3.35" fill="#14161b"/>
+            <circle cx="22.4" cy="8.8" r="3.35" fill="#14161b"/>
+            <circle cx="6.6" cy="17.6" r="3.35" fill="#14161b"/>
+            <circle cx="25.4" cy="18.2" r="3.35" fill="#14161b"/>
+            <circle cx="16.0" cy="24.6" r="3.35" fill="#14161b"/>
+          </svg>
+        </div>
+      </section>
+
+      <section id="what" aria-labelledby="what-title">
+        <h2 id="what-title">What it is</h2>
+        <div class="split">
+          <p class="intro">A team runtime. Not a framework.</p>
+          <ul class="not-list">
+            <li>Bring the agents you already use. We make them one team.</li>
+            <li>Objective → allocate → concurrent → handoffs → review → replan.</li>
+            <li><strong>Not</strong> a multi-agent framework, a model router, or a shared-memory product.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="how" aria-labelledby="how-title">
+        <h2 id="how-title">How</h2>
+        <div class="steps">
+          <article class="step">
+            <h3>Objective</h3>
+            <p>Standing mission. Met, not met, or evidence. No invented bars.</p>
+          </article>
+          <article class="step">
+            <h3>Team</h3>
+            <p>Seats and coverage. Empty seats are uncovered work.</p>
+          </article>
+          <article class="step">
+            <h3>Work</h3>
+            <p>Teammates, lanes, next step, handoff.</p>
+            <ul class="lanes">
+              <li>Blocked</li>
+              <li>Ready</li>
+              <li>In flight</li>
+              <li>Review</li>
+            </ul>
+          </article>
+          <article class="step">
+            <h3>Intervene</h3>
+            <p>Route, unblock, reassign, nudge, msg. No silent auto-promote.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="metrics" aria-labelledby="metrics-title">
+        <h2 id="metrics-title">Metrics</h2>
+        <div class="metric">
+          <div class="metric-face">
+            <p class="label">efficiency score</p>
+            <p class="value">—</p>
+            <p class="note">Not measured until real.</p>
+          </div>
+          <div>
+            <p>The score is turns to done. Unknown is not zero.</p>
+            <p>No sample numbers. Nothing here is a live run.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="start" aria-labelledby="start-title">
+        <h2 id="start-title">Start</h2>
+        <p class="intro">Clone the repo. Run it locally.</p>
+        <pre><code>git clone https://github.com/advitiyavashist/atman.git ~/tickets
+ln -s ~/tickets/tickets.py ~/.local/bin/tickets
+cd your-project &amp;&amp; tickets init</code></pre>
+      </section>
+
+      <section class="close" id="close" aria-labelledby="close-title">
+        <h2 id="close-title">Close</h2>
+        <p>Open repo. Self-hosted. You run it on your machine.</p>
+        <p class="aside">Atman ≠ SteerMD. Atman is who works and how the team finishes.</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <a class="lockup" href="#top">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
+          <circle cx="10.0" cy="7.8" r="3.35" fill="currentColor"/>
+          <circle cx="22.4" cy="8.8" r="3.35" fill="currentColor"/>
+          <circle cx="6.6" cy="17.6" r="3.35" fill="currentColor"/>
+          <circle cx="25.4" cy="18.2" r="3.35" fill="currentColor"/>
+          <circle cx="16.0" cy="24.6" r="3.35" fill="currentColor"/>
+        </svg>
+        <span class="wordmark">atman</span>
+      </a>
+      <nav class="nav-links" aria-label="Footer">
+        <a href="https://github.com/advitiyavashist/atman">github.com/advitiyavashist/atman</a>
+        <span>MIT</span>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>

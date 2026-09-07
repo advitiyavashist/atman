@@ -1,0 +1,313 @@
+/* Atman public landing. Light craft. Tokens adapted from docs/brand/atman-tokens.md. */
+:root {
+  --bg: #f6f4ee;
+  --fg: #14161b;
+  --mute: #5a5e66;
+  --line: #ddd9cf;
+  --card: #fffdf8;
+  --acc: #2f56b3;
+  --ink: #14161b;
+  --ok: #1f7a4d;
+  --space: clamp(1.25rem, 4vw, 2.5rem);
+  --measure: 40rem;
+  --wide: 68rem;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+a { color: var(--acc); text-underline-offset: 0.15em; }
+a:hover { color: var(--fg); }
+
+:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 3px;
+}
+
+.skip {
+  position: absolute;
+  left: 0.75rem;
+  top: -3rem;
+  background: var(--card);
+  color: var(--fg);
+  padding: 0.4rem 0.7rem;
+  z-index: 2;
+}
+.skip:focus { top: 0.75rem; }
+
+.wrap {
+  width: min(var(--wide), calc(100% - 2 * var(--space)));
+  margin-inline: auto;
+}
+
+.wordmark {
+  font: 650 15px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  letter-spacing: 0.22em;
+  text-transform: lowercase;
+}
+
+.lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  color: inherit;
+  text-decoration: none;
+}
+.lockup svg { display: block; flex: none; }
+
+.site-header {
+  padding: 1.25rem 0 0;
+}
+
+.site-header .wrap,
+.site-footer .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.nav-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.1rem;
+  font-size: 0.92rem;
+}
+.nav-links a { color: var(--mute); text-decoration: none; }
+.nav-links a:hover { color: var(--fg); }
+
+.hero {
+  padding: 5.5rem 0 5rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 14rem);
+  gap: 2.5rem;
+  align-items: center;
+}
+
+.kicker {
+  margin: 0 0 1rem;
+  color: var(--mute);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+}
+
+h1 {
+  margin: 0 0 1.15rem;
+  font-size: clamp(2.05rem, 5.2vw, 3.35rem);
+  font-weight: 560;
+  letter-spacing: -0.035em;
+  line-height: 1.12;
+  max-width: 14ch;
+}
+
+.lede {
+  margin: 0 0 1.75rem;
+  max-width: 32rem;
+  font-size: 1.125rem;
+  color: var(--mute);
+}
+
+.ctas {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.1rem;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.6rem;
+  padding: 0.45rem 1rem;
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.btn-ink {
+  background: var(--ink);
+  color: var(--bg);
+}
+.btn-ink:hover { color: var(--bg); filter: brightness(1.12); }
+
+.btn-ghost {
+  color: var(--fg);
+  border: 1px solid var(--line);
+  background: transparent;
+}
+.btn-ghost:hover { border-color: var(--fg); color: var(--fg); }
+
+.hero-mark {
+  justify-self: end;
+  width: min(100%, 13.5rem);
+  opacity: 0.88;
+}
+.hero-mark svg { width: 100%; height: auto; display: block; }
+
+section { padding: 4.25rem 0; border-top: 1px solid var(--line); }
+
+h2 {
+  margin: 0 0 1.15rem;
+  font-size: 0.82rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  color: var(--mute);
+}
+
+.intro {
+  margin: 0;
+  font-size: clamp(1.35rem, 2.4vw, 1.7rem);
+  font-weight: 520;
+  letter-spacing: -0.025em;
+  line-height: 1.3;
+  max-width: 22ch;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 22rem) minmax(0, 1fr);
+  gap: 2rem 3rem;
+  align-items: start;
+}
+
+.not-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--mute);
+  max-width: var(--measure);
+}
+.not-list li + li { margin-top: 0.55rem; }
+.not-list strong { color: var(--fg); font-weight: 600; }
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1.5rem 1.35rem;
+}
+
+.step h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1.05rem;
+  font-weight: 620;
+}
+.step p {
+  margin: 0;
+  color: var(--mute);
+  font-size: 0.95rem;
+}
+
+.lanes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.85rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.lanes li {
+  font-size: 0.78rem;
+  color: var(--mute);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+}
+
+.metric {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1.5rem 2.25rem;
+  align-items: center;
+}
+.metric-face {
+  min-width: 10rem;
+  padding: 1.15rem 1.25rem 1.2rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.metric-face .label {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  color: var(--mute);
+}
+.metric-face .value {
+  margin: 0.15rem 0 0;
+  font-size: 3.1rem;
+  font-weight: 520;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+.metric-face .note {
+  margin: 0.45rem 0 0;
+  color: var(--ok);
+  font-size: 0.88rem;
+}
+.metric p { margin: 0 0 0.7rem; max-width: 32rem; color: var(--mute); }
+.metric p:last-child { margin-bottom: 0; }
+
+pre {
+  margin: 1.25rem 0 0;
+  padding: 1.05rem 1.15rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow-x: auto;
+  font: 13.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.close p {
+  margin: 0;
+  font-size: clamp(1.25rem, 2.2vw, 1.55rem);
+  font-weight: 520;
+  letter-spacing: -0.02em;
+  line-height: 1.35;
+  max-width: 24ch;
+}
+.close .aside {
+  margin: 1rem 0 0;
+  color: var(--mute);
+  font-size: 1rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  max-width: var(--measure);
+}
+
+.site-footer {
+  padding: 1.5rem 0 2.25rem;
+  border-top: 1px solid var(--line);
+  color: var(--mute);
+  font-size: 0.88rem;
+}
+.site-footer a { color: inherit; text-decoration: none; }
+.site-footer a:hover { color: var(--fg); }
+
+@media (max-width: 840px) {
+  .hero { grid-template-columns: 1fr; padding: 3.5rem 0 3.25rem; }
+  .hero-mark { justify-self: start; width: 8.5rem; }
+  .split { grid-template-columns: 1fr; }
+  .steps { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 560px) {
+  h1 { max-width: none; }
+  .steps { grid-template-columns: 1fr; }
+  .metric { grid-template-columns: 1fr; }
+  .site-header .wrap,
+  .site-footer .wrap { flex-wrap: wrap; }
+}
