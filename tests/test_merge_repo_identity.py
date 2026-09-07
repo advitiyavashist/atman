@@ -21,6 +21,7 @@ review` from the repo it claims to be in.
 """
 import json
 import subprocess
+import time
 
 from test_wakeup import board, run  # noqa: F401
 
@@ -362,6 +363,99 @@ def test_repin_corrects_a_queued_ticket_without_reopening_it(board):
         "the correction must record what it replaced, not silently overwrite: %s"
         % fixed["notes"][-1]["text"]
     )
+
+
+def test_repin_corrects_a_stale_pin_after_a_followup_commit_in_the_same_repo(board):
+    """T-285's actual trigger, reproduced honestly: T-184's pin was CORRECT at
+    write time (right repo, right branch) and went stale because the author
+    pushed a follow-up commit (docs-only + a sync of main) while the ticket
+    sat IN REVIEW. This is not a cross-repo problem -- `--artifact` here names
+    the SAME repo the ticket was already correctly pinned to, just its
+    current HEAD instead of the reviewed-time HEAD. Before `repin` existed the
+    only channel for this correction was reopening (loses queue position and
+    review state, T-215 warns an owner may not get it back cleanly) or a
+    free-text note no tool reads -- exactly the defect T-285 files."""
+    repo = board.parent
+    _ignore_board(repo)
+
+    tid = _create(board, "Correct pin that goes stale in review", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo, "checkout", "-q", "-b", "alice/t184-style")
+    (repo / "work.txt").write_text("v1")
+    _git(repo, "add", "work.txt")
+    _git(repo, "commit", "-m", "the reviewed work")
+    r = run(board, "review", tid, "--notes", "reviewed at v1", agent="alice", cwd=repo)
+    assert r.returncode == 0, r.stderr
+    reviewed = _ticket(board, tid)
+    stale_commit = reviewed["commit"]
+    reviewed_at = reviewed["review_at"]
+
+    # 1.1s, not 0: review_at is second-resolution, so without this a repin
+    # that wrongly re-stamps review_at can land in the same second as the
+    # original and the equality assertion below passes by timing coincidence
+    # rather than because the clock was actually left alone (board convention,
+    # see test_rotation_unread.py).
+    time.sleep(1.1)
+
+    # A follow-up commit lands on the SAME branch, in the SAME repo, while the
+    # ticket is still IN REVIEW -- the recorded pin no longer names trunk-mergeable HEAD.
+    (repo / "docs.txt").write_text("docs-only follow-up")
+    _git(repo, "add", "docs.txt")
+    _git(repo, "commit", "-m", "docs-only follow-up")
+    fresh_sha = _git(repo, "rev-parse", "--short", "HEAD")
+
+    r = run(board, "repin", tid, "--artifact", str(repo),
+            "--notes", "follow-up commit landed after review", agent="alice", cwd=repo)
+    assert r.returncode == 0, r.stderr
+
+    fixed = _ticket(board, tid)
+    assert fixed["status"] == "review", "repin must not force a reopen"
+    assert fixed["review_at"] == reviewed_at, "repin must not reset the review clock"
+    assert fixed["repo"] == reviewed["repo"], "the repo did not change, only the tip did"
+    assert fixed["commit"].startswith("alice/t184-style@%s" % fresh_sha), (
+        "the pin must follow the branch's real current head: %s" % fixed["commit"]
+    )
+    assert fixed["commit"] != stale_commit
+    assert "REPIN: " in fixed["notes"][-1]["text"]
+    assert "was %s" % stale_commit in fixed["notes"][-1]["text"], (
+        "must record what it replaced, not just what it became: %s" % fixed["notes"][-1]["text"]
+    )
+
+
+def test_repin_records_who_performed_the_correction_not_the_tickets_owner(board):
+    """T-285's SHAPE explicitly requires 'recording who changed it and when' --
+    a pin is evidence, and the correcting agent is often not the ticket's
+    owner (T-272's own notes: the merger repins on behalf of a hard-limited
+    owner like gpt-codex or gpt-cursor who cannot run anything themselves).
+    The note must attribute the CALLER, never silently credit the ticket's
+    assigned owner for a correction they did not make."""
+    repo = board.parent
+    _ignore_board(repo)
+
+    tid = _create(board, "Owned by alice, corrected by the merger", role="backend")
+    run(board, "claim", tid, agent="alice")
+    _git(repo, "checkout", "-q", "-b", "alice/needs-a-repin")
+    (repo / "f.txt").write_text("x")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "alice's work, wrong tree reviewed")
+    r = run(board, "review", tid, "--notes", "submitted", agent="alice", cwd=repo)
+    assert r.returncode == 0, r.stderr
+
+    (repo / "f.txt").write_text("y")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "the real head")
+
+    r = run(board, "repin", tid, "--artifact", str(repo),
+            "--notes", "correcting on alice's behalf", agent="bob", cwd=repo)
+    assert r.returncode == 0, r.stderr
+
+    fixed = _ticket(board, tid)
+    note = fixed["notes"][-1]
+    assert note["by"] == "bob", (
+        "the correction must be attributed to whoever ran it, not the ticket owner: %s" % note
+    )
+    assert note["by"] != fixed.get("owner"), "bob is not this ticket's owner"
+    assert "at" in note and note["at"], "when the correction happened must be recorded"
 
 
 def test_repin_refuses_a_closed_ticket(board):
