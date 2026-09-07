@@ -28,6 +28,7 @@ import errno
 import glob
 import json
 import os
+import re
 import shlex
 import sys
 import threading
@@ -3898,7 +3899,8 @@ def _agent_harness(board, owner):
         entry = load_workforce(board).get(owner) or {}
     except (IOError, ValueError, OSError):
         entry = {}
-    return (entry.get("tool", "") or "", entry.get("model", "") or "",
+    return (entry.get("harness") or entry.get("tool", "") or "",
+            entry.get("model", "") or "",
             entry.get("effort", "") or "")
 
 
@@ -4716,8 +4718,31 @@ def cmd_join(a, board):
     os.replace(tmp, roles_path)
     wf = load_workforce(board)
     entry = wf.get(owner, {})
-    if a.tool:
-        entry["tool"] = a.tool
+    # BYOA: --harness is the current spelling, --tool the original one; they are
+    # the same field. `custom:<cmd>` folds the command into the harness flag.
+    harness, inline_cmd = _split_harness(getattr(a, "harness", "") or a.tool)
+    cmd_template = (getattr(a, "cmd_template", "") or "").strip() or inline_cmd
+    # A bare executable name still works (it is the command). "custom" with
+    # nothing to run is a typo that would otherwise register an agent no
+    # watcher can ever start, so it is refused at the point of the mistake.
+    if harness == "custom" and not cmd_template:
+        sys.exit("--harness custom needs --cmd '<shell template>' "
+                 "(placeholders: %s)" % " ".join(HARNESS_PLACEHOLDERS))
+    if cmd_template and not harness:
+        harness = "custom"
+    prev_harness = entry.get("harness") or entry.get("tool") or ""
+    if harness:
+        entry["harness"] = harness
+        entry["tool"] = harness  # back-compat: older records/readers say "tool"
+    if cmd_template:
+        entry["cmd"] = cmd_template
+    elif harness and prev_harness and harness != prev_harness and entry.pop("cmd", None):
+        # A command template belongs to the harness it was registered with.
+        # Switching harness without a new --cmd must DROP it: keeping it would
+        # make `spawn --harness codex` silently launch the old custom runner,
+        # which is the exact "it ran something else" failure BYOA is here to
+        # make impossible.
+        print("dropped the %s command template (harness is now %s)" % (prev_harness, harness))
     if a.model:
         entry["model"] = a.model
     if a.can is not None:
@@ -4730,13 +4755,22 @@ def cmd_join(a, board):
     entry.setdefault("cost", "medium")
     wf[owner] = entry
     save_workforce(board, wf)
-    rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""))
+    rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
     post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
-        (" via %s" % a.tool) if a.tool else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
+        (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
     root = os.path.dirname(board)
-    print("joined as %s  roles=%s  can=%s  cost=%s" % (
-        owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"]))
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s" % (
+        owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
+        entry.get("harness") or "claude (default)"))
+    if entry.get("cmd"):
+        print("cmd: %s" % entry["cmd"])
+    elif harness and harness not in BUILTIN_HARNESSES:
+        # A typo'd built-in name ("cluade") is indistinguishable from a
+        # deliberate bare executable, so say which reading was taken rather
+        # than discovering it a poll interval later in the watch log.
+        print("note: %r is not a built-in harness, so it is run as the command itself; "
+              "`tickets harness check %s` proves it works" % (harness, owner))
     print("board: %s" % board)
     m = current_master(board)
     print("master: %s" % (m["owner"] if m else "nobody -- `tickets master take` if you are it"))
@@ -4972,7 +5006,11 @@ def cmd_drive(a, board):
     elif not load_objective(board):
         sys.exit("give an objective: tickets drive \"<what done looks like>\"")
     argv = [sys.executable, os.path.realpath(__file__), "spawn", owner, "--master",
-            "--heartbeat", str(a.heartbeat), "--every", str(a.every), "--tool", a.tool]
+            "--heartbeat", str(a.heartbeat), "--every", str(a.every)]
+    if a.tool:  # absent means "the harness `tickets join` registered for this seat"
+        argv += ["--harness", a.tool]
+    if getattr(a, "cmd_template", ""):
+        argv += ["--cmd", a.cmd_template]
     if a.model:
         argv += ["--model", a.model]
     import subprocess
@@ -5028,13 +5066,22 @@ def ticket_context(board, owner):
 
 
 def cmd_prompt(a, board):
+    print(prompt_text(a, board))
+
+
+def prompt_text(a, board):
+    """The worker/master/cos prompt as a string.
+
+    Split out of cmd_prompt so the watcher can write it to a {prompt_file} for
+    a BYOA harness without shelling back out to `tickets prompt` -- one
+    renderer, so a custom harness and the built-in ones cannot drift.
+    """
     owner = whoami(a.agent)
     m = current_master(board)
     master = (m["owner"] if m else "the master")
     cos = (m or {}).get("cos") or ""
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
-        print(cos_prompt_text(owner, board, os.path.dirname(board), a.extra or ""))
-        return
+        return cos_prompt_text(owner, board, os.path.dirname(board), a.extra or "")
     if getattr(a, "master", False):
         extra = a.extra or ""
         obj = _safe(lambda: load_objective(board), {})
@@ -5043,12 +5090,9 @@ def cmd_prompt(a, board):
             extra = DRIVE_PROMPT.format(objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
                                         status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
         if cos and owner != cos:
-            print(PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
-                                        extra=extra))
-        else:
-            print(MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board),
-                                       extra=extra))
-        return
+            return PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
+                                         extra=extra)
+        return MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
     parts = []
     brief = agent_brief(board, owner)
     if brief:
@@ -5063,8 +5107,8 @@ def cmd_prompt(a, board):
         parts.append("Context attached to your ticket(s):\n" + tctx)
     if a.extra:
         parts.append(a.extra)
-    print(WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                               extra="\n\n".join(parts)))
+    return WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
+                                extra="\n\n".join(parts))
 
 
 def cmd_brief(a, board):
@@ -5458,10 +5502,24 @@ def cmd_watch(a, board):
     cwd = os.path.abspath(a.cwd or root)
     if not os.path.isdir(cwd):
         sys.exit("--cwd %s does not exist" % cwd)
-    cmd = a.exec or (
-        'claude -p "$(tickets prompt)" --permission-mode %s%s'
-        % (a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else "")
-    )
+    if a.exec:
+        cmd = a.exec
+    else:
+        # No --exec: run whatever `tickets join` registered for this agent.
+        # Defaulting to claude here would make `tickets watch --agent qwen`
+        # (the cron-able form, used without spawn) launch the wrong harness.
+        harness, cmd_template = harness_of(board, owner)
+        if harness == "claude" and not cmd_template:
+            cmd = ('claude -p "$(tickets prompt)" --permission-mode %s%s'
+                   % (a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else ""))
+        else:
+            cmd = _worker_cmd(board, owner, "", a.permission_mode, harness,
+                              master=getattr(a, "prompt_kind", "") or "", cmd_template=cmd_template)
+    # BYOA: a custom harness command is a template, not a finished command line.
+    # Expansion happens per run rather than once here because {prompt_file} must
+    # be a FRESH prompt every time -- the whole point of the watcher is that the
+    # board changed since the last run.
+    templated = any(ph in cmd for ph in HARNESS_PLACEHOLDERS)
     every = max(WATCH_MIN_INTERVAL, int(a.every))
     harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
     lock = None
@@ -5514,6 +5572,21 @@ def cmd_watch(a, board):
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
                 print("%s work found (%s) -> run %d" % (now(), ", ".join(p), runs))
+                run_cmd, cleanup = cmd, None
+                if templated:
+                    pf = ""
+                    if "{prompt_file}" in cmd:
+                        try:
+                            pf, cleanup = _render_prompt_file(board, owner, getattr(a, "prompt_kind", "") or "")
+                        except OSError as e:
+                            log("%s run %d could not write the prompt file: %s" % (now(), runs, e))
+                            print("  run %d skipped: could not write the prompt file (%s)" % (runs, e))
+                            failures += 1
+                            if a.once:
+                                sys.exit(1)
+                            _time.sleep(min(every * (2 ** min(failures, 5)), 900))
+                            continue
+                    run_cmd = _expand_harness_cmd(cmd, agent=owner, cwd=cwd, prompt_file=pf)
                 # The trigger is recorded as the pending KEYS only: the values
                 # are message text and ticket titles, and neither belongs in
                 # the trajectory log (T-311 privacy rule).
@@ -5524,7 +5597,9 @@ def cmd_watch(a, board):
                                          trigger=sorted(p), harness_cmd=harness,
                                          worktree=cwd), None)
                 if a.dry_run:
-                    print("  dry-run; would execute: %s" % cmd)
+                    print("  dry-run; would execute: %s" % run_cmd)
+                    if cleanup:
+                        cleanup()
                     rc = 0
                     _safe(lambda: traj_event(board, "run_end", agent=owner,
                                              ticket=held_ticket, run_no=runs,
@@ -5543,7 +5618,7 @@ def cmd_watch(a, board):
                     # would attribute one run's tokens to another).
                     log_before = _safe(lambda: os.path.getsize(log_path), 0) or 0
                     rc, timed_out = _watch_run_capped(
-                        cmd, cwd, env, log_path,
+                        run_cmd, cwd, env, log_path,
                         a.run_timeout * 60 if a.run_timeout else None,
                         WATCH_LOG_MAX_BYTES,
                         on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
@@ -5551,6 +5626,8 @@ def cmd_watch(a, board):
                         beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
                     )
                     _safe(lambda: _run_end(board, owner, runs, rc), None)
+                    if cleanup:
+                        cleanup()
                     ended = now()
                     usage = _safe(lambda: parse_harness_usage(
                         _read_run_slice(log_path, log_before)), {}) or {}
@@ -5652,6 +5729,8 @@ def cmd_boot(a, board):
     roles = load_roles(board)
     if owner not in wf or (a.roles is not None):
         ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
+                                harness=getattr(a, "harness", "") or "",
+                                cmd_template=getattr(a, "cmd_template", "") or "",
                                 model=a.model, best_for="")
         _silent(lambda: cmd_join(ns, board))
         steps.append("joined as %s (roles=%s)" % (owner, a.roles or roles.get(owner, [])))
@@ -5740,6 +5819,12 @@ Spawning a team from a master session (models per agent):
   tickets drive "<what done looks like>" --as boss --heartbeat 30               # objective + master seat that wakes
                                                                                 #   every 30 min to plan toward it
   tickets spawn --list | tickets spawn <name> --stop
+
+Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
+  tickets join qwen --roles backend --harness custom --cmd 'ollama run qwen3:8b < {prompt_file}'
+  tickets harness check qwen          # runs it on 'reply OK' under a 60s cap, records pass/fail + latency
+  tickets spawn qwen                  # no --harness: uses what `join` registered
+  Placeholders: {prompt_file} (this wake-up's prompt, fresh per run) {cwd} (the agent's worktree) {agent}.
   Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
   a detached watcher that runs the tool with that model only when `tickets pending` says there is
   work. Workers persist until --stop, logout or reboot; new tickets created later are picked up on
@@ -5756,39 +5841,153 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 """
 
 
-def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False):
+# ---- BYOA: bring your own agent ------------------------------------------
+#
+# A harness is whatever actually runs the model: the Claude CLI, the Codex CLI,
+# the Cursor agent, or ANY command of your own (`custom:<cmd>` / --cmd). The
+# runtime's side of the contract never changes -- it hands the harness a prompt
+# and a working directory, and reads the board afterwards. docs/byoa.md is the
+# operator-facing version of this.
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude")
+HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
+
+
+def _split_harness(spec):
+    """`custom:<cmd>` -> ("custom", "<cmd>"); anything else -> (spec, "").
+
+    The inline form exists so a harness and its command fit in one flag
+    (`--harness 'custom:my-agent --prompt {prompt_file}'`), which is what a
+    spawn line in a shell script wants. `--cmd` is the same thing, spelled out.
+    """
+    spec = (spec or "").strip()
+    if spec.startswith("custom:"):
+        return "custom", spec[len("custom:"):].strip()
+    return spec, ""
+
+
+def harness_of(board, owner, harness="", cmd=""):
+    """Resolve (harness, cmd_template) for an agent: explicit flags win, then
+    the workforce record written by `tickets join`, then the claude default.
+
+    This is the single place that answers "what runs this agent", so `spawn`,
+    `watch` and `harness check` cannot disagree about it.
+    """
+    harness, inline = _split_harness(harness)
+    cmd = cmd or inline
+    entry = load_workforce(board).get(owner, {}) or {}
+    if not harness:
+        stored, stored_inline = _split_harness(entry.get("harness") or entry.get("tool") or "")
+        harness = stored
+        cmd = cmd or stored_inline or (entry.get("cmd") or "")
+    elif not cmd and harness == (entry.get("harness") or entry.get("tool") or ""):
+        cmd = entry.get("cmd") or ""
+    return (harness or "claude"), cmd
+
+
+def _expand_harness_cmd(template, agent="", cwd="", prompt_file=""):
+    """Substitute {prompt_file} {cwd} {agent} in a custom harness command.
+
+    str.replace, deliberately not str.format: a real harness command carries
+    braces of its own (a curl with a JSON body, an awk program), and .format
+    would raise KeyError on them -- the agent would simply never start, with
+    the failure a hundred lines away from the template that caused it.
+
+    Every substituted value is shell-quoted because the result is run through
+    the shell. The TEMPLATE itself is not: it is a command line by definition,
+    and it comes from whoever ran `tickets join` for this agent.
+    """
+    out = template
+    for name, value in (("{prompt_file}", prompt_file), ("{cwd}", cwd), ("{agent}", agent)):
+        if name in out:
+            out = out.replace(name, shlex.quote(value or ""))
+    return out
+
+
+def _render_prompt_file(board, owner, kind="", text=""):
+    """Write this agent's prompt to a fresh temp file; return (path, cleanup).
+
+    A file, not an argv string: a worker prompt is thousands of characters of
+    briefs and ticket context, and pasting that into a command line is how you
+    meet ARG_MAX on a long board. The file is mode 0600 and removed by the
+    cleanup callable, which never raises -- a harness run must not fail because
+    the prompt file was already gone.
+    """
+    import tempfile
+
+    if not text:
+        ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="")
+        text = _safe(lambda: prompt_text(ns, board), "") or ""
+    fd, path = tempfile.mkstemp(prefix="tickets-prompt-%s-" % re.sub(r"[^A-Za-z0-9_.-]", "_", owner)[:32],
+                                suffix=".txt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+    except OSError:
+        os.close(fd)
+        raise
+
+    def cleanup():
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    return path, cleanup
+
+
+def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False,
+                cmd_template="", prompt_expr=""):
     """The headless command a spawned worker runs. Model comes from --model or
     the workforce record (`tickets join --model`). Spawned workers run without
     permission prompts by default: nobody is there to answer them, and the
     blast radius is the agent's own worktree and branch (--safe for acceptEdits).
+
+    `cmd_template` (from `join --cmd` / `spawn --cmd`) overrides the built-in
+    line for ANY harness, so bringing your own agent is not a second code path:
+    the watcher runs one string either way. `prompt_expr` replaces the shell
+    expression that produces the prompt -- `harness check` passes a literal
+    probe prompt through it so the probe exercises the real command shape.
     """
     # The workforce record is writable by any agent, so the model name is quoted
     # before it reaches `watch`, which runs this string through the shell.
     model = shlex.quote(model or load_workforce(board).get(owner, {}).get("model", "") or "")
     model = "" if model == "''" else model
+    if cmd_template:
+        # Placeholders are expanded per run by the watcher (a fresh prompt file
+        # each time), so the template is returned as written.
+        return cmd_template
+    if tool == "custom":
+        # Without a template there is nothing to run, and the fall-through below
+        # would launch a binary literally named "custom".
+        sys.exit("%s is registered as a custom harness with no command; "
+                 "re-register it: tickets join %s --harness custom --cmd '<shell template>'" % (owner, owner))
     prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
         master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
+    prompt = prompt_expr or '"$(%s)"' % prompt
     if tool == "claude":
         flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
                 else "--permission-mode %s" % permission_mode)
-        return 'claude -p "$(%s)" %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
+        return 'claude -p %s %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
     if tool == "codex":
         # Codex CLI headless: exec mode; unattended needs the bypass flag (no one
         # can answer approvals), --safe keeps the workspace-write sandbox instead.
         mode = ("--dangerously-bypass-approvals-and-sandbox" if permission_mode == "bypassPermissions"
                 else "-s workspace-write")
-        return 'codex exec --skip-git-repo-check %s%s "$(%s)"' % (mode, (" -m %s" % model) if model else "", prompt)
+        return 'codex exec --skip-git-repo-check %s%s %s' % (mode, (" -m %s" % model) if model else "", prompt)
     if tool == "cursor":
         # Cursor CLI (`agent`): runs any model Cursor offers (gpt-5.5-high, claude-fable-5-1-thinking-high, ...)
         force = "--force" if permission_mode == "bypassPermissions" else ""
-        return 'agent -p --output-format text %s%s "$(%s)"' % (force, (" --model %s" % model) if model else "", prompt)
+        return 'agent -p --output-format text %s%s %s' % (force, (" --model %s" % model) if model else "", prompt)
     if tool == "cursor+claude":
         # Fable through Cursor first; if that run errors, the same prompt through the
         # Claude CLI (opus). One identity, two engines -- the master never goes dark.
-        first = _worker_cmd(board, owner, model or "claude-fable-5-1-thinking-high", permission_mode, "cursor", master)
-        second = _worker_cmd(board, owner, "opus", permission_mode, "claude", master)
+        first = _worker_cmd(board, owner, model or "claude-fable-5-1-thinking-high", permission_mode, "cursor",
+                            master, prompt_expr=prompt_expr)
+        second = _worker_cmd(board, owner, "opus", permission_mode, "claude", master, prompt_expr=prompt_expr)
         return "%s || %s" % (first, second)
-    return tool  # any other executable that reads the prompt itself
+    # Any other executable, named directly: it is the command, and it reads the
+    # prompt itself. Kept for the pre-BYOA `spawn --tool ./my-runner` form.
+    return tool
 
 
 def _inherit_settings(root, wt):
@@ -5834,11 +6033,16 @@ def cmd_spawn(a, board):
     root = os.path.dirname(board)
     if a.list:
         wf = load_workforce(board)
-        print("%-14s %-9s %-8s %-8s %s" % ("agent", "watcher", "model", "seen", "worktree"))
+        print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+            "agent", "watcher", "harness", "model", "check", "seen", "worktree"))
         for r in sorted(load_agents(board), key=lambda r: r["owner"]):
             pid = _watcher_pid(board, r["owner"])
-            print("%-14s %-9s %-8s %-8s %s" % (
-                r["owner"][:14], ("pid %d" % pid) if pid else "-", (wf.get(r["owner"], {}).get("model") or "-")[:8],
+            entry = wf.get(r["owner"], {})
+            print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+                r["owner"][:14], ("pid %d" % pid) if pid else "-",
+                (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                (entry.get("model") or "-")[:8],
+                _harness_check_label(r.get("harness_check")),
                 (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
                 (r.get("worktree") or "").replace(os.path.expanduser("~"), "~")))
         return
@@ -5856,8 +6060,15 @@ def cmd_spawn(a, board):
         post_message(board, whoami(), "%s watcher asked to stop" % owner)
         return
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
+                            harness=getattr(a, "harness", "") or "",
+                            cmd_template=getattr(a, "cmd_template", "") or "",
                             model=a.model, best_for=a.best_for or "")
     _silent(lambda: cmd_join(ns, board))
+    # --tool/--harness no longer defaults to "claude" in the parser: an absent
+    # flag must mean "use what `tickets join` registered for this agent",
+    # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
+    harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
+                                       getattr(a, "cmd_template", ""))
     wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
     if not os.path.isdir(wt):
         base = a.base or _trunk()
@@ -5896,9 +6107,10 @@ def cmd_spawn(a, board):
         pass
     mode = "acceptEdits" if a.safe else "bypassPermissions"
     kind = "cos" if a.cos else ("master" if a.master else "")
-    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, a.tool or "claude", master=kind)
+    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, harness, master=kind, cmd_template=cmd_template)
     argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
+            "--prompt-kind", kind,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
     # T-243: strip Git's LOCATION vars before handing the parent's environment
     # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
@@ -5916,10 +6128,119 @@ def cmd_spawn(a, board):
     _time.sleep(1.0)
     pid = _watcher_pid(board, owner)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; model=%s; log %s" % (owner, (" (pid %d)" % pid) if pid else "", model, log_path))
+    print("watcher for %s started%s; harness=%s; model=%s; log %s" % (
+        owner, (" (pid %d)" % pid) if pid else "", harness, model, log_path))
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
-                 % (owner, a.tool or "claude", model))
+                 % (owner, harness, model))
+
+
+HARNESS_PROBE_PROMPT = "reply OK"
+HARNESS_CHECK_TIMEOUT = 60
+
+
+def _harness_check_label(check):
+    """One column's worth of the last `harness check`, for `spawn --list`."""
+    if not check:
+        return "-"
+    age = hours_since(check.get("at", ""))
+    ms = check.get("latency_ms")
+    return "%s %s" % ("ok" if check.get("ok") else "FAIL",
+                      ("%.1fs" % (ms / 1000.0)) if isinstance(ms, (int, float)) else
+                      ((fmt_hours(age) + " ago") if age is not None else ""))
+
+
+def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HARNESS_CHECK_TIMEOUT):
+    """Run the agent's harness on a trivial prompt and report what happened.
+
+    Returns the record stored on the agent: harness, cmd, ok, exit, latency_ms,
+    output (head), at. The probe runs the REAL command shape -- same binary,
+    same flags, same template -- with only the prompt swapped, because the
+    failure this is for ("that harness is not installed / not logged in / the
+    template is wrong") lives in the command, not in the model's answer.
+
+    `ok` is exit status only. Whether the model actually said OK is reported in
+    `replied`, and deliberately does not gate `ok`: a harness that answers a
+    trivial prompt with a preamble is working, and a check that called that a
+    failure would take a live agent out of the fleet.
+    """
+    import subprocess
+    import time as _time
+
+    harness, cmd_template = harness_of(board, owner, harness, cmd)
+    cwd = cwd or (_agent_rec(board, owner) or {}).get("worktree") or os.path.dirname(board)
+    if not os.path.isdir(cwd):
+        cwd = os.path.dirname(board)
+    prompt_file, cleanup = "", None
+    if cmd_template:
+        if "{prompt_file}" in cmd_template:
+            prompt_file, cleanup = _render_prompt_file(board, owner, text=HARNESS_PROBE_PROMPT)
+        run_cmd = _expand_harness_cmd(cmd_template, agent=owner, cwd=cwd, prompt_file=prompt_file)
+    else:
+        run_cmd = _worker_cmd(board, owner, model, "bypassPermissions", harness,
+                              prompt_expr=shlex.quote(HARNESS_PROBE_PROMPT))
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    started = _time.time()
+    out, rc, timed_out = "", None, False
+    try:
+        r = subprocess.run(run_cmd, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=timeout)
+        rc, out = r.returncode, ((r.stdout or "") + (r.stderr or ""))
+    except subprocess.TimeoutExpired as e:
+        timed_out, rc = True, 124
+        out = "".join(x.decode("utf-8", "replace") if isinstance(x, bytes) else (x or "")
+                      for x in (e.stdout, e.stderr))
+    except OSError as e:
+        rc, out = 127, str(e)
+    finally:
+        if cleanup:
+            cleanup()
+    latency_ms = int((_time.time() - started) * 1000)
+    out = out.strip()
+    return {"harness": harness, "cmd": run_cmd, "ok": rc == 0, "exit": rc, "timed_out": timed_out,
+            "latency_ms": latency_ms, "replied": "ok" in out.lower()[:400],
+            "output": out[:400], "at": now()}
+
+
+def cmd_harness(a, board):
+    """`tickets harness check <name>` / `tickets harness list`.
+
+    check: prove the agent's harness actually runs before a watcher spends a
+    poll interval discovering it does not. The result is written to the agent
+    record so `spawn --list` and the master can see who is really reachable.
+    """
+    if a.harness_cmd == "list":
+        wf = load_workforce(board)
+        names = sorted(set(list(wf) + [r["owner"] for r in load_agents(board)]))
+        if not names:
+            print("no agents registered yet -- tickets join <name> --harness ...")
+            return
+        print("%-16s %-12s %-14s %s" % ("agent", "harness", "check", "cmd"))
+        for n in names:
+            e = wf.get(n, {}) or {}
+            rec = _agent_rec(board, n) or {}
+            print("%-16s %-12s %-14s %s" % (
+                n[:16], (e.get("harness") or e.get("tool") or "claude")[:12],
+                _harness_check_label(rec.get("harness_check")),
+                e.get("cmd") or "(built-in)"))
+        return
+    owner = a.name or whoami()
+    if owner.startswith("agent-"):
+        sys.exit("harness check needs an agent name: tickets harness check <name>")
+    harness, cmd_template = harness_of(board, owner, a.harness, a.cmd_template)
+    print("checking %s: harness=%s%s" % (owner, harness, (" cmd=%s" % cmd_template) if cmd_template else ""))
+    res = harness_probe(board, owner, a.harness, a.cmd_template, a.model, a.cwd, a.timeout)
+    _safe(lambda: _agent_set(board, owner, harness_check=res), None)
+    print("  cmd:      %s" % res["cmd"])
+    print("  exit:     %s%s" % (res["exit"], " (TIMEOUT after %ds)" % a.timeout if res["timed_out"] else ""))
+    print("  latency:  %.1fs" % (res["latency_ms"] / 1000.0))
+    print("  replied:  %s" % ("saw 'OK' in the output" if res["replied"] else "no 'OK' in the first 400 chars"))
+    if res["output"]:
+        print("  output:   %s" % res["output"].splitlines()[0][:160])
+    print("%s: %s" % (owner, "harness OK" if res["ok"] else "HARNESS FAILED"))
+    if not res["ok"]:
+        sys.exit(1)
 
 
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Ticket board</title>
@@ -6537,10 +6858,31 @@ def main():
     c.add_argument("--roles", default=None, help="backend,console")
     c.add_argument("--can", default=None, help="docker,browser,own-machine,gpu")
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
-    c.add_argument("--tool", default="", help="claude|codex|cursor|grok")
+    c.add_argument("--harness", default="",
+                   help="claude | codex | cursor | cursor+claude | custom | custom:<cmd> | <executable>")
+    c.add_argument("--tool", default="", help="original spelling of --harness")
+    # dest is cmd_template, not cmd: `sub = p.add_subparsers(dest="cmd")` above
+    # means main() dispatches on a.cmd, and a --cmd flag would overwrite the
+    # subcommand name with the harness template (or with "" when absent, which
+    # sends every `join` straight to print_help).
+    c.add_argument("--cmd", dest="cmd_template", default="",
+                   help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
     c.set_defaults(fn=cmd_join)
+
+    c = sub.add_parser("harness", help="BYOA: check or list the harness that actually runs each agent")
+    hs = c.add_subparsers(dest="harness_cmd")
+    x = hs.add_parser("check", help="run the agent's harness on a trivial prompt under a time cap")
+    x.add_argument("name", nargs="?", default="")
+    x.add_argument("--harness", default="", help="override the registered harness for this check")
+    x.add_argument("--cmd", dest="cmd_template", default="", help="override the registered command template")
+    x.add_argument("--model", default="")
+    x.add_argument("--cwd", default="", help="run the probe here (default: the agent's worktree)")
+    x.add_argument("--timeout", type=int, default=HARNESS_CHECK_TIMEOUT, help="seconds (default 60)")
+    hs.add_parser("list", help="every registered agent, its harness and its last check")
+    c.set_defaults(fn=cmd_harness, harness_cmd="list", name="", harness="", cmd_template="", model="", cwd="",
+                   timeout=HARNESS_CHECK_TIMEOUT)
 
     c = sub.add_parser("route", help="master: suggest an owner for every open ticket by model/roles/capabilities/cost")
     c.add_argument("--claim", action="store_true", help="hard-assign the ready ones (claims on their behalf)")
@@ -6577,7 +6919,9 @@ def main():
     c.add_argument("--by", "--as", dest="by", default="", help="agent name for the master seat (default TICKET_AGENT)")
     c.add_argument("--heartbeat", type=int, default=30, help="minutes between objective wake-ups")
     c.add_argument("--every", type=int, default=60, help="seconds between board polls")
-    c.add_argument("--tool", default="claude", help="claude | codex | cursor | cursor+claude")
+    c.add_argument("--harness", "--tool", dest="tool", default="",
+                   help="claude | codex | cursor | cursor+claude | custom:<cmd> (default: the registered harness)")
+    c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--model", default="")
     c.add_argument("--restart", action="store_true", help="stop an existing watcher for this seat first")
     c.set_defaults(fn=cmd_drive)
@@ -6587,7 +6931,10 @@ def main():
     c.add_argument("--every", type=int, default=60, help="seconds between polls")
     c.add_argument("--heartbeat", type=int, default=0,
                    help="master seat only: also wake every N minutes to drive the objective (0 = off)")
-    c.add_argument("--exec", default="", help="command to run (default: headless claude with `tickets prompt`)")
+    c.add_argument("--exec", default="", help="command to run (default: headless claude with `tickets prompt`); "
+                                              "{prompt_file} {cwd} {agent} are expanded per run")
+    c.add_argument("--prompt-kind", dest="prompt_kind", default="", choices=("", "master", "cos"),
+                   help="which prompt to write to {prompt_file} (default: the worker prompt)")
     c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
     c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
     c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
@@ -6608,6 +6955,8 @@ def main():
     c = sub.add_parser("boot", help="every startup step: join, hooks, check-in, briefing (idempotent)")
     c.add_argument("--agent", default="")
     c.add_argument("--tool", default="", help="claude | codex | cursor (installs that tool's hooks)")
+    c.add_argument("--harness", default="", help="harness to register for this agent (see `tickets join --harness`)")
+    c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--roles", default=None)
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
@@ -6625,7 +6974,12 @@ def main():
     c = sub.add_parser("spawn", help="start a persistent worker: register, worktree, detached watcher (model per agent)")
     c.add_argument("name", nargs="?", default="")
     c.add_argument("--model", default="", help="claude: opus | sonnet | haiku (or a full model id); codex: its model name")
-    c.add_argument("--tool", default="claude", help="claude | codex | <executable>")
+    c.add_argument("--harness", default="",
+                   help="claude | codex | cursor | cursor+claude | custom:<cmd> | <executable>; "
+                        "default: whatever `tickets join` registered for this agent")
+    c.add_argument("--tool", default="", help="original spelling of --harness")
+    c.add_argument("--cmd", dest="cmd_template", default="",
+                   help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--roles", default=None)
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
