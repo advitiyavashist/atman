@@ -159,11 +159,14 @@ def test_pending_counts_post_join_broadcast_without_sleep(board):
 
 @pytest.mark.parametrize("entry", ["root", "pkg"])
 def test_broadcasts_after_join_are_delivered(board, entry):
-    """Suppression is scoped to history: ordinary broadcasts must still arrive."""
+    """Suppression is scoped to history: ordinary broadcasts must still arrive.
+
+    No sleep after join: now() is second-precision, and a same-second
+    announcement must still be delivered (wakeup pending: broadcasts==1).
+    """
     _history(board, 12, entry=entry)
     time.sleep(1.1)
     run(board, "join", "newbie", "--roles", "backend", agent="newbie", entry=entry)
-    time.sleep(1.1)
     run(board, "msg", "AFTER-THE-JOIN announcement", agent="master", entry=entry)
     out = run(board, "inbox", agent="newbie", entry=entry).stdout
     assert "AFTER-THE-JOIN" in out, out
