@@ -68,7 +68,9 @@ def test_run_start_omits_ticket_when_idle(board, tmp_path):
     assert "ticket" not in start[0]
 
 
-def test_turns_n_increases_for_review_owned_watch_pair(board, tmp_path):
+def test_turns_n_increases_for_review_owned_watch_pair(board, tmp_path, monkeypatch):
+    for var in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"):
+        monkeypatch.delenv(var, raising=False)
     b, repo = _worked(board)
     run(b, "next", "--role", "backend", agent="alice", cwd=repo)
     tid = "T-002"
