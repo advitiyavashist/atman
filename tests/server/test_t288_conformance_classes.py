@@ -180,17 +180,35 @@ def test_documented_required_evidence_fields_are_enforced(operator, enrolled, ti
 # app.py stayed narrow and revoke_session_lease -- a security-relevant verb --
 # began failing CLOSED on ~35 legitimate live ids (T-288 gap 4). Add a row here
 # whenever code copies a contract pattern, so the copy cannot drift silently.
+#
+# Class 4 compares PATTERN STRINGS, not match behaviour. Python's `$` also
+# matches before a trailing newline; ECMA-262 `$` is end-of-input. So
+# AGENT_ID_RE.match('claude-fable\n') succeeds on an id the contract rejects
+# while this check still passes. Pre-existing for every `_RE` (T-402 finding b);
+# not a silent regression of T-288.
 MIRRORED_PATTERNS = [
     ("AgentId", "AGENT_ID_RE"),
+    ("ProjectId", "PROJECT_ID_RE"),
+    ("SessionId", "SESSION_ID_RE"),
+    ("TicketId", "TICKET_ID_RE"),
+    ("RequestId", "REQUEST_ID_RE"),
 ]
 
 
-def test_contract_patterns_copied_into_code_still_match_the_contract():
+def _mirrored_regex(attr):
+    """Resolve a copied pattern: most live on app.py; ticket/request ids on ids."""
     from ticket_board.server import app as app_module
+    from ticket_board.storage import ids as ids_module
 
+    if hasattr(app_module, attr):
+        return getattr(app_module, attr)
+    return getattr(ids_module, attr)
+
+
+def test_contract_patterns_copied_into_code_still_match_the_contract():
     for schema_name, attr in MIRRORED_PATTERNS:
         contract = _schema_of(schema_name)["pattern"]
-        compiled = getattr(app_module, attr)
+        compiled = _mirrored_regex(attr)
         assert compiled.pattern == contract, (
             "%s hardcodes %r but the contract's %s is %r -- a widened or narrowed "
             "contract pattern must be copied through, or the code silently "
@@ -200,9 +218,7 @@ def test_contract_patterns_copied_into_code_still_match_the_contract():
 
 def test_the_mirrored_pattern_list_names_real_schemas_and_real_symbols():
     """A typo in either column would make the check above vacuously pass."""
-    from ticket_board.server import app as app_module
-
     for schema_name, attr in MIRRORED_PATTERNS:
         assert "pattern" in _schema_of(schema_name), (
             "%s has no pattern in the contract" % schema_name)
-        assert hasattr(app_module, attr), "app.py has no %s" % attr
+        _mirrored_regex(attr)
