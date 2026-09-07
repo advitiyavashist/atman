@@ -2624,13 +2624,28 @@ def _mark_inbox_read(board, owner):
     os.replace(tmp, path)
 
 
+def _visible_after_join(msgs, owner, joined):
+    """Hide BROADCAST history from before this agent existed -- never directed mail.
+
+    Kept byte-identical to the root tickets.py copy on purpose: this file is the
+    packaged entry point (pyproject: tickets = ticket_board.cli:main) and the two
+    copies of the delivery path drifting apart is precisely how T-228 shipped a
+    half-ported fix. If you change one, change both.
+    """
+    if not joined:
+        return msgs  # every pre-existing agent: unchanged, by construction
+    return [m for m in msgs if m.get("to") == owner or m.get("at", "") >= joined]
+
+
 def unread(board, owner):
-    since = _agent_rec(board, owner).get("inbox_seen", "")
+    rec = _agent_rec(board, owner)
+    since = rec.get("inbox_seen", "")
+    joined = rec.get("joined_at", "")
     msgs = load_messages(board)
-    return [m for m in msgs
-            if m.get("from") != owner
-            and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
-            and m.get("at", "") > since]
+    return _visible_after_join([m for m in msgs
+                                if m.get("from") != owner
+                                and (not m.get("to") or m.get("to") == owner or m.get("to") == "all")
+                                and m.get("at", "") > since], owner, joined)
 
 
 def fmt_msg(m):
@@ -3014,6 +3029,9 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    # Before checkin(), which creates the record: only a genuinely new agent is
+    # stamped, so a re-join never moves the watermark over unread mail.
+    first_join = not _agent_rec(board, owner)
     roles_path = os.path.join(board, "roles.json")
     roles = {}
     if os.path.isfile(roles_path):
@@ -3048,6 +3066,14 @@ def cmd_join(a, board):
     wf[owner] = entry
     save_workforce(board, wf)
     rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""))
+    if first_join:
+        jrec = _agent_rec(board, owner)
+        jrec.setdefault("joined_at", now())
+        os.makedirs(agents_dir(board), exist_ok=True)
+        jpath = os.path.join(agents_dir(board), owner + ".json")
+        with open(jpath + ".tmp", "w") as f:
+            json.dump(jrec, f, indent=2)
+        os.replace(jpath + ".tmp", jpath)
     post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
         (" via %s" % a.tool) if a.tool else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
