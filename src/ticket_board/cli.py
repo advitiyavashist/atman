@@ -1405,6 +1405,7 @@ def cmd_review(a, board):
             sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
     owner = t.get("owner") or whoami(a.owner)
+    author = whoami(a.owner)
     t["status"] = "review"
     t["owner"] = owner
     t["review_at"] = now()
@@ -1419,7 +1420,11 @@ def cmd_review(a, board):
         text += " (PR %s)" % a.pr
     t["notes"].append({"by": owner, "at": now(), "text": "REVIEW: " + text})
     save(board, t)
-    checkin(board, owner, t["id"], "submitted %s for review" % t["id"])
+    checkin(board, author, t["id"], "submitted %s for review" % t["id"])
+    if owner != author:
+        # T-428: do not copy the submitter's cwd/branch/sha onto the owner.
+        _agent_set(board, owner, ticket=t["id"],
+                   note="submitted %s for review by %s" % (t["id"], author))
     _tmr = timing(t)
     traj_event(board, "review", agent=owner, ticket=t,
                state_before="claimed", state_after="review",
@@ -1961,7 +1966,16 @@ def cmd_done(a, board):
         t["notes"].append({"by": t.get("owner") or "agent", "at": now(), "text": text})
     save(board, t)
     if t.get("owner"):
-        checkin(board, t["owner"], "", "finished %s" % a.id)
+        # T-428: checkin() always writes THIS process's cwd/branch/sha. That is
+        # the closer's location. Stamping it onto a different owner makes
+        # `tickets who` lie (the owner appears to sit in the closer's tree).
+        closer = whoami()
+        note = "finished %s by %s" % (a.id, closer)
+        if t["owner"] == closer:
+            checkin(board, t["owner"], "", note)
+        else:
+            _agent_set(board, t["owner"], ticket="", note=note)
+            checkin(board, closer, None, note)
     tm = timing(t)
     traj_event(board, "done", agent=whoami(), ticket=t,
                state_before="review" if t.get("review_at") else "claimed",
@@ -2657,6 +2671,23 @@ def _agent_rec(board, owner):
             return json.load(f)
     except (IOError, ValueError):
         return {}
+
+
+def _agent_set(board, owner, **fields):
+    """Update fields on an agent record without touching the rest of it.
+
+    T-428: must not invent cwd/branch/sha from the caller. Those belong on the
+    caller's own record via checkin().
+    """
+    rec = _agent_rec(board, owner) or {"owner": owner}
+    rec.update(fields)
+    os.makedirs(agents_dir(board), exist_ok=True)
+    path = os.path.join(agents_dir(board), owner + ".json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, path)
+    return rec
 
 
 def _mark_inbox_read(board, owner, scan=None):

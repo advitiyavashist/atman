@@ -1783,6 +1783,11 @@ def cmd_review(a, board):
     t["notes"].append({"by": author, "at": now(), "text": "REVIEW: " + text})
     save(board, t)
     checkin(board, author, t["id"], "submitted %s for review" % t["id"])
+    if owner != author:
+        # T-428: the owner still holds the ticket in review; do not copy the
+        # submitter's git location onto their agent record.
+        _agent_set(board, owner, ticket=t["id"],
+                   note="submitted %s for review by %s" % (t["id"], author))
     tmr = timing(t)
     _safe(lambda: traj_event(board, "review", agent=author, ticket=t,
                              state_before="claimed", state_after="review",
@@ -3142,7 +3147,16 @@ def cmd_done(a, board):
                              pin=t.get("commit", ""),
                              **_traj_git(cwd=art)), None)
     if t.get("owner"):
-        checkin(board, t["owner"], "", "finished %s" % a.id)
+        # T-428: checkin() always writes THIS process's cwd/branch/sha. That is
+        # the closer's location. Stamping it onto a different owner makes
+        # `tickets who` lie (the owner appears to sit in the closer's tree).
+        closer = whoami()
+        note = "finished %s by %s" % (a.id, closer)
+        if t["owner"] == closer:
+            checkin(board, t["owner"], "", note)
+        else:
+            _agent_set(board, t["owner"], ticket="", note=note)
+            checkin(board, closer, None, note)
     print("%s done in %s (waited %s before claim)" % (
         a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
     if g:
