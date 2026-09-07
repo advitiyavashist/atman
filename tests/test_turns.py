@@ -8,7 +8,14 @@ import json
 import shutil
 from pathlib import Path
 
-from ticket_board.turns import ROW_KEYS, build_turns_report, load_trajectory_events
+import pytest
+
+from ticket_board.turns import (
+    ROW_KEYS,
+    TrajectoryParseError,
+    build_turns_report,
+    load_trajectory_events,
+)
 from test_wakeup import board, run  # noqa: F401
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
@@ -134,3 +141,21 @@ def test_load_events_from_board_dir(board):
     shutil.copy(FIXTURE, board / "trajectories.jsonl")
     ev = load_trajectory_events(str(board))
     assert any(e.get("ticket") == "T-010" and e.get("kind") == "run_end" for e in ev)
+
+
+def test_malformed_jsonl_line_errors_with_line_number(board):
+    """T-350: malformed trajectories.jsonl must error with line number, not skip."""
+    repo = board.parent
+    (board / "trajectories.jsonl").write_text(
+        '{"v":1,"kind":"claim","ticket":"T-001"}\nNOT VALID JSON\n'
+    )
+    r = run(board, "turns", "--json", cwd=repo)
+    assert r.returncode != 0, "expected malformed-line error, got silent skip: %r" % r.stdout
+    assert ":2:" in r.stderr or "line 2" in r.stderr.lower() or "2:" in r.stderr
+
+
+def test_load_trajectory_events_raises_on_malformed_line(board):
+    (board / "trajectories.jsonl").write_text('{"v":1}\n{broken\n')
+    with pytest.raises(TrajectoryParseError) as exc:
+        load_trajectory_events(str(board))
+    assert exc.value.line_no == 2
