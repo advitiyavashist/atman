@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="title desc">
   <title id="title">atman</title>
-  <desc id="desc">Five formation dots. Total Football constellation  seats on a pitch, not a graph. No edges.</desc>
-  <!-- Mark A / Week-1. 35 dots, fluid 2-2-1. Hold B. C only if 16px fails.
+  <desc id="desc">Five formation dots. Total Football constellation - seats on a pitch, not a graph. No edges.</desc>
+  <!-- Mark A / Week-1. 3-5 dots, fluid 2-2-1. Hold B. C only if 16px fails.
        Designed to stay five distinct seats at 16px. Never draw lines between dots. -->
   <circle cx="10.0" cy="7.8"  r="3.35" fill="#e8e6e1"/>
   <circle cx="22.4" cy="8.8"  r="3.35" fill="#e8e6e1"/>
