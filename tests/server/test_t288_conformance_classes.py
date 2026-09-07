@@ -36,8 +36,6 @@ PENDING_ROUTES = {
     ("POST", "/channels/{channel_id}/members"): "T-187 messaging API",
     ("GET", "/messages/{message_id}/deliveries"): "T-187 messaging API",
     ("POST", "/messages/{message_id}/task"): "T-187 messaging API",
-    ("POST", "/runs/{run_id}/cancel"): "T-188 managed runner",
-    ("POST", "/runs/{run_id}/events"): "T-188 managed runner",
 }
 
 
