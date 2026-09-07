@@ -5434,7 +5434,7 @@ def cmd_route(a, board):
     `--shadow` (T-315) is print-only plus one `shadow_decision` event per
     ready ticket. `--apply` is unimplemented.
     """
-    if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False):
+    if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False) or getattr(a, "score", False):
         return _scheduler_cmd()(
             a, board, load_all, load_workforce, load_roles, load_agents,
             score_agent, traj_event)
@@ -8789,6 +8789,11 @@ def main():
                    help="with --shadow: rank learned pick by turns then cost (default) or cost then turns")
     c.add_argument("--json", action="store_true",
                    help="with --shadow: print additive JSON (T-315/T-415 shape)")
+    c.add_argument("--score", action="store_true",
+                   help="with --shadow: retrospective shadow-vs-actual scorecard (read-only)")
+    c.add_argument("--write-scorecard", nargs="?", const="docs/turns-scorecard.md",
+                   metavar="PATH",
+                   help="with --shadow --score: also write markdown scorecard (default docs/turns-scorecard.md)")
     c.add_argument("--apply", action="store_true",
                    help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)
