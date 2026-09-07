@@ -72,9 +72,12 @@ def test_ui_html_is_command_board_not_spreadsheet(board):
     start = html.index('UI_HTML = r"""')
     ui = html[start:html.index('"""', start + 14)]
     assert "--bg:#0c0e12" in ui
-    assert 'data-tab-btn="board"' in ui
-    assert 'data-tab-btn="agents"' in ui
-    assert 'data-tab-btn="messages"' in ui
+    assert 'data-tab-btn="objective"' in ui
+    assert 'data-tab-btn="team"' in ui
+    assert 'data-tab-btn="work"' in ui
+    assert 'data-tab-btn="intervene"' in ui
+    assert "Total Football." in ui
+    assert 'id="band-keep"' in ui and 'id="band-attack"' in ui
     assert 'id="col-blocked"' in ui and 'id="col-ready"' in ui
     assert 'id="col-flight"' in ui and 'id="col-review"' in ui
     assert 'id="missionOne"' in ui
@@ -93,7 +96,7 @@ def test_composer_post_lands_in_the_same_board_and_reaches_mentioned_agent(board
         assert status == 200 and out["ok"], out
         assert "cursor" in out["posted"]
         page = srv.get("/", raw=True).decode()
-        assert 'data-tab-btn="board"' in page
+        assert 'data-tab-btn="work"' in page
         assert 'id="col-blocked"' in page
     finally:
         srv.stop()

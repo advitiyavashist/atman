@@ -7371,11 +7371,13 @@ def cmd_harness(a, board):
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Ticket board</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff}
+:root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff;--intervene:#e0a53d}
 *{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
 header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:linear-gradient(180deg,#12151c 0%,#0c0e12 100%);border-bottom:1px solid var(--line)}
-.brand{display:flex;flex-direction:column;gap:1px;min-width:140px}
+.brand{display:flex;flex-direction:row;gap:10px;align-items:center;min-width:160px}
+.brand .mark{width:22px;height:22px;color:var(--acc);flex:none}
+.brand .word{display:flex;flex-direction:column;gap:1px}
 .brand .prod{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);font-weight:700}
 .brand h1{font-size:16px;margin:0;font-weight:650}
 .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
@@ -7401,9 +7403,12 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 nav.tabs{display:flex;gap:4px;padding:8px 16px 0;border-bottom:1px solid var(--line)}
 nav.tabs button{appearance:none;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--mute);padding:8px 12px;font:13px/1 inherit;font-weight:650;cursor:pointer}
 nav.tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
+nav.tabs button[data-tab-btn=intervene].on{border-bottom-color:var(--intervene)}
 main{flex:1;min-height:0;padding:14px 16px 18px;overflow:auto}
 .pane{display:none;height:100%}
-body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-tab=messages] #pane-messages{display:flex;flex-direction:column;gap:12px}
+body[data-tab=objective] #pane-objective,body[data-tab=team] #pane-team,body[data-tab=work] #pane-work,body[data-tab=intervene] #pane-intervene{display:flex;flex-direction:column;gap:12px}
+#team-roster,#team-pitch{display:none}
+body[data-team=roster] #team-roster,body[data-team=pitch] #team-pitch{display:flex;flex-direction:column;gap:12px}
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
 @media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
 .col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
@@ -7473,7 +7478,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .promise-strip .lbl{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--mute)}
 .promise-strip .msg{color:var(--mute)}
 .chip.promise{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
-body[data-tab=board] .promise-chips{display:none}
+body[data-tab=objective] .promise-chips{display:none}
 .promise-hero{display:flex;gap:32px;align-items:flex-end;padding:2px 0 12px;border-bottom:1px solid var(--line)}
 .promise-card{display:flex;flex-direction:column;gap:2px;min-width:132px;background:transparent;border:0;padding:0}
 .promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
@@ -7512,6 +7517,27 @@ body[data-tab=board] .promise-chips{display:none}
 .bench{display:flex;gap:10px;flex-wrap:wrap;padding:8px 2px}
 .bench .player .av{background:#2a3344;color:#d5dbe6}
 @media(max-width:700px){.pitch{min-height:560px}.player{width:64px}}
+.honesty{font-size:12px;color:var(--mute);padding:8px 12px;border:1px dashed var(--line);border-radius:10px;background:#10141b}
+.obj-hero{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 16px;display:flex;flex-direction:column;gap:8px}
+.obj-hero .k{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.obj-hero .one{font-size:20px;font-weight:650;line-height:1.35}
+.obj-hero .meta{font-size:12px;color:var(--mute)}
+.obj-hero .badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--line)}
+.obj-hero .badge.met{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.obj-ctx{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.obj-ctx .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700;margin-bottom:6px}
+.subnav{display:flex;gap:4px}
+.subnav button{appearance:none;background:var(--chip);border:1px solid var(--line);color:var(--mute);padding:6px 12px;border-radius:99px;font:12px/1 inherit;font-weight:650;cursor:pointer}
+.subnav button.on{color:var(--fg);border-color:color-mix(in srgb,var(--acc) 45%,var(--line));background:color-mix(in srgb,var(--acc) 12%,var(--chip))}
+.quota{font:11px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
+.quota.lim{color:var(--warn)}
+.acts{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.act{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:6px}
+.act h3{margin:0;font-size:13px}
+.act .cmd{font:12px/1.35 ui-monospace,Menlo,monospace;color:var(--acc);word-break:break-all}
+.act button{align-self:flex-start;font:12px inherit;background:var(--chip);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;cursor:pointer;font-weight:600}
+.act button:hover{border-color:var(--acc)}
+.advisory{font-size:12px;color:var(--mute);padding:8px 12px;border-left:3px solid var(--intervene);background:color-mix(in srgb,var(--intervene) 8%,var(--card));border-radius:0 10px 10px 0}
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
   #clock{margin-left:0}
@@ -7523,32 +7549,40 @@ body[data-tab=board] .promise-chips{display:none}
   nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
   .agents{grid-template-columns:1fr}
   .sprint{min-width:0}
+  .obj-hero .one{font-size:16px}
 }
-</style></head><body data-tab="board">
+</style></head><body data-tab="work" data-team="roster">
 <header class="cmd">
-  <div class="brand"><span class="prod">tickets</span><h1 id="title">Ticket board</h1></div>
+  <div class="brand">
+    <svg class="mark" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true" focusable="false"><circle cx="6" cy="15" r="2.2" fill="#5b8def"/><circle cx="11" cy="7" r="2.2" fill="#e8e6e1"/><circle cx="16" cy="15" r="2.2" fill="#9b7dff"/><circle cx="11" cy="14" r="1.5" fill="#e0a53d" opacity=".9"/></svg>
+    <div class="word"><span class="prod">ATMAN</span><h1 id="title">Atman</h1></div>
+  </div>
   <div class="chips" id="chips"></div>
   <div class="chips promise-chips" id="promiseChips">
     <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
     <span class="chip promise" id="hdrYield"><b>yield@cost</b> <span id="hdrYieldVal">—</span></span>
   </div>
   <div class="sprint" id="sprint"></div>
-  <div class="pulse" id="pulse"><i></i><span>clean</span></div>
+  <div class="pulse" id="pulse" title="Open Intervene"><i></i><span>clean</span></div>
   <div id="clock"></div>
 </header>
-<details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
 <div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
 <details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
-  <button type="button" data-tab-btn="board" class="on">Board</button>
-  <button type="button" data-tab-btn="agents">Agents</button>
-  <button type="button" data-tab-btn="messages">Messages</button>
+  <button type="button" data-tab-btn="objective">Objective</button>
+  <button type="button" data-tab-btn="team">Team</button>
+  <button type="button" data-tab-btn="work" class="on">Work</button>
+  <button type="button" data-tab-btn="intervene">Intervene</button>
 </nav>
 <main>
-<div class="pane" id="pane-board">
-  <div id="emptyBoard" class="empty-board" hidden></div>
+<div class="pane" id="pane-objective">
+  <article class="obj-hero" id="objHero">
+    <div class="k">Objective</div>
+    <div class="one" id="missionOne"></div>
+    <div class="meta" id="objMeta"></div>
+  </article>
   <section id="objectivePromise" data-fold="objective">
     <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
     <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."><!-- V1 MUST: home median turns + yield@cost; T-344 worst-10 is NICE only -->
@@ -7556,6 +7590,35 @@ body[data-tab=board] .promise-chips{display:none}
       <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
     </div>
   </section>
+  <p class="honesty" id="objHonesty">Set with <span class="mono">tickets objective "…"</span>. The console is read-only — Atman does not edit the standing mission from this pane.</p>
+  <section class="obj-ctx"><div class="k">Mission context</div><pre id="goals"></pre></section>
+</div>
+<div class="pane" id="pane-team">
+  <div class="subnav">
+    <button type="button" data-team-btn="roster" class="on">Roster</button>
+    <button type="button" data-team-btn="pitch">Pitch</button>
+  </div>
+  <div id="team-roster"><div class="agents" id="agents"></div></div>
+  <div id="team-pitch">
+    <p class="pitch-lede" id="coverageLede"><b>Total Football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
+    <div class="pitch" id="pitch">
+      <div class="band" data-band="attack"><div class="lbl">Attack · ready / uncovered</div><div class="row" id="band-attack"></div></div>
+      <div class="band" data-band="mid"><div class="lbl">Midfield · in flight</div><div class="row" id="band-mid"></div></div>
+      <div class="band" data-band="back"><div class="lbl">Defense · review</div><div class="row" id="band-back"></div></div>
+      <div class="band" data-band="keep"><div class="lbl">Keeper · master / CoS</div><div class="row" id="band-keep"></div></div>
+    </div>
+    <div class="mute" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px">Bench · idle or down</div>
+    <div class="bench" id="band-bench"></div>
+  </div>
+  <section class="promise-panel" id="usagePanel">
+    <h2>Usage / cost</h2>
+    <small id="usageHonesty" class="mute">Harness-reported only. Not reported by harness stays — never a made-up $0.</small>
+    <div class="usage-cards" id="usageCards"></div>
+    <table class="promise-table" id="usageAgents"></table>
+  </section>
+</div>
+<div class="pane" id="pane-work">
+  <div id="emptyBoard" class="empty-board" hidden></div>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
@@ -7568,25 +7631,9 @@ body[data-tab=board] .promise-chips{display:none}
     <div class="turns-grid"><div><h3 class="subh">Worst tickets (watch runs)</h3><table class="promise-table" id="turnsWorst"></table></div><div><h3 class="subh">Per-agent median</h3><table class="promise-table" id="turnsAgents"></table></div></div>
   </details>
 </div>
-<div class="pane" id="pane-agents">
-  <p class="pitch-lede" id="coverageLede"><b>Total Football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
-  <div class="pitch" id="pitch">
-    <div class="band" data-band="attack"><div class="lbl">Attack · ready / uncovered</div><div class="row" id="band-attack"></div></div>
-    <div class="band" data-band="mid"><div class="lbl">Midfield · in flight</div><div class="row" id="band-mid"></div></div>
-    <div class="band" data-band="back"><div class="lbl">Defense · review</div><div class="row" id="band-back"></div></div>
-    <div class="band" data-band="keep"><div class="lbl">Keeper · master / CoS</div><div class="row" id="band-keep"></div></div>
-  </div>
-  <div class="mute" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px">Bench · idle or down</div>
-  <div class="bench" id="band-bench"></div>
-  <section class="promise-panel" id="usagePanel">
-    <h2>Usage / cost</h2>
-    <small id="usageHonesty" class="mute">Harness-reported only. Not reported by harness stays — never a made-up $0.</small>
-    <div class="usage-cards" id="usageCards"></div>
-    <table class="promise-table" id="usageAgents"></table>
-  </section>
-  <div class="agents" id="agents"></div>
-</div>
-<div class="pane" id="pane-messages">
+<div class="pane" id="pane-intervene">
+  <p class="advisory">Interventions post to the board. Agents apply them in their harness — Atman does not remote-control your IDE.</p>
+  <div class="acts" id="acts"></div>
   <div class="msgs" id="msgs"></div>
   <section id="composer">
     <div id="composerRow">
@@ -7697,13 +7744,23 @@ function renderPitch(d){
   put('band-attack',attack.join(''),'no uncovered work');
   put('band-bench',bench.join(''),'everyone is on the pitch');
 }
+const TAB_MAP={board:'work',pitch:'team',agents:'team',messages:'intervene'};
 function setTab(name){
+  name=TAB_MAP[name]||name;
   document.body.dataset.tab=name;
   try{localStorage.setItem('tickets-ui-tab',name)}catch(e){}
   document.querySelectorAll('[data-tab-btn]').forEach(b=>b.classList.toggle('on',b.dataset.tabBtn===name));
 }
 document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
+function setTeam(name){
+  document.body.dataset.team=name;
+  try{localStorage.setItem('tickets-ui-team',name)}catch(e){}
+  document.querySelectorAll('[data-team-btn]').forEach(b=>b.classList.toggle('on',b.dataset.teamBtn===name));
+}
+document.querySelectorAll('[data-team-btn]').forEach(b=>b.addEventListener('click',()=>setTeam(b.dataset.teamBtn)));
 try{const saved=localStorage.getItem('tickets-ui-tab');if(saved)setTab(saved)}catch(e){}
+try{const savedT=localStorage.getItem('tickets-ui-team');if(savedT)setTeam(savedT)}catch(e){}
+document.getElementById('pulse').addEventListener('click',()=>setTab('intervene'));
 let AGENTS=[];
 function loadAgentPickers(){
   const from=document.getElementById('cFrom'),to=document.getElementById('cTo');
@@ -7804,9 +7861,22 @@ async function load(){
   pulse.className='pulse'+(crit?' bad':warn?' warn':'');
   pulse.innerHTML='<i></i><span>'+(crit?'CRIT '+crit:warn?'WARN '+warn:'clean')+'</span>';
   tickClock();
+  const obj=d.objective||null;
   const goals=d.goals||'(no MASTER.md yet -- tickets master init)';
   document.getElementById('goals').textContent=goals;
-  document.getElementById('missionOne').textContent=missionLine(goals);
+  const one=obj&&obj.text?obj.text:missionLine(goals);
+  document.getElementById('missionOne').textContent=one;
+  const meta=[];
+  if(obj&&obj.set_by)meta.push('set by '+obj.set_by);
+  if(obj&&obj.at)meta.push(obj.at);
+  if(obj&&obj.done)meta.push('met');
+  document.getElementById('objMeta').innerHTML=obj
+    ?(obj.done?'<span class="badge met">met</span> ':'')+esc(meta.filter(x=>x!=='met').join(' · '))
+      +(obj.done&&obj.evidence?' — '+esc(obj.evidence):'')
+    :'<span class="mute">No objective set. The master defines what done looks like: tickets objective "…"</span>';
+  document.getElementById('objHonesty').innerHTML=obj
+    ?'Set with <span class="mono">tickets objective "…"</span>. The console is read-only — Atman does not edit the standing mission from this pane.'
+    :'No objective set. The master defines what done looks like: <span class="mono">tickets objective "…"</span>';
   const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length);
   const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
   fillCol('blocked',blocked,blocked.map(t=>card(t)).join(''));
@@ -7825,17 +7895,73 @@ async function load(){
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
+    const quota=a.quota
+      ?'<span class="quota lim" title="Session or usage limit reported by the harness">'+esc(a.quota)+'</span>'
+      :'<span class="quota" title="Not reported by harness">—</span>';
+    const harness=[a.harness,a.model].filter(Boolean).join(' · ')||'—';
     return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
-      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
+      '<div class="mute mono">'+esc(harness)+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — a proxy for productive turns">Turns</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
-      '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div></article>';
-  }).join('')||'<div class="empty">no agents checked in</div>';
+      '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — coverage can differ from enrolled lane">Lane</span></div></div>'+
+      '<div>Quota / limit '+quota+'</div></article>';
+  }).join('')||'<div class="empty">No agents checked in. Register a seat: <span class="mono">tickets join &lt;name&gt; --roles backend</span> or <span class="mono">tickets quickstart --agent &lt;you&gt;</span>.</div>';
+  renderIntervene(d);
   const thread=(d.messages||[]).slice().reverse();
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtLocal(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
     ||'<div class="empty">no messages yet</div>';
 }
+function copyCmd(cmd){
+  if(!cmd)return;
+  const go=()=>{
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(cmd).catch(()=>{});
+    }
+  };
+  if(/tickets done /.test(cmd)){
+    if(!confirm('This is a master merge command. Copy it to run yourself?\n\n'+cmd))return;
+  }
+  go();
+}
+function actCard(title,body,cmd){
+  const attr=s=>esc(s).replace(/"/g,'&quot;');
+  return '<article class="act"><h3>'+esc(title)+'</h3><div class="mute">'+esc(body)+'</div>'+
+    (cmd?'<div class="cmd">'+esc(cmd)+'</div><button type="button" data-cmd="'+attr(cmd)+'">Copy command</button>':'')+
+    '</article>';
+}
+function renderIntervene(d){
+  const acts=[];
+  const ns=d.next_step||{};
+  if(ns.kind&&ns.kind!=='ok'&&ns.kind!=='unreachable'){
+    acts.push(actCard(ns.label||'Next',ns.message||'',ns.cmd||''));
+  }
+  (d.health||[]).forEach(h=>{
+    acts.push(actCard(h.sev+' health',h.msg,''));
+  });
+  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length);
+  blocked.slice(0,3).forEach(t=>{
+    acts.push(actCard('Unblock '+t.id,t.title||'Blocked work','tickets show '+t.id));
+  });
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  if(ready.length){
+    acts.push(actCard('Route / assign',ready.length+' ready ticket(s) waiting for a seat. Suggestion only until an agent claims.','tickets next'));
+  }
+  (d.in_flight||[]).filter(t=>t.owner).slice(0,3).forEach(t=>{
+    acts.push(actCard('Reassign / nudge '+t.id,'Ping owner — does not force-drop the claim.','tickets msg --to '+t.owner+' --re '+t.id+' please update or hand off'));
+  });
+  (d.review||[]).slice(0,3).forEach(t=>{
+    acts.push(actCard('Review / merge '+t.id,'Master-only. Confirm before you run this.','tickets done '+t.id+' --notes ...'));
+  });
+  if(!acts.length){
+    acts.push(actCard('On track','No operator action queued. Message the team below.',''));
+  }
+  document.getElementById('acts').innerHTML=acts.join('');
+}
+document.getElementById('acts').addEventListener('click',e=>{
+  const btn=e.target.closest('button[data-cmd]');
+  if(btn)copyCmd(btn.dataset.cmd);
+});
 function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
   const steps=[
@@ -8104,11 +8230,19 @@ def board_snapshot(board, messages=40):
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
-        out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
+        wf_rec = wf.get(r["agent"], {})
+        lim = rec.get("limit") or None
+        quota = None
+        if lim:
+            until = lim.get("until") or ""
+            quota = "limited" + ((" \u00b7 back %s" % until) if until else "")
+        out_agents.append({"name": r["agent"], "state": r["state"], "model": wf_rec.get("model", ""),
+                           "harness": wf_rec.get("tool", "") or wf_rec.get("harness", ""),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
                            "watcher": _watcher_count(r["agent"], board) > 0,
                            "watcher_count": _watcher_count(r["agent"], board),
-                           "roles": roles.get(r["agent"]) or []})
+                           "roles": list(roles.get(r["agent"], []) or []),
+                           "quota": quota, "limit": bool(lim)})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
     try:
@@ -8123,8 +8257,16 @@ def board_snapshot(board, messages=40):
         goals = "\n\n".join(picked)
     except OSError:
         pass
-    obj = _safe(lambda: load_objective(board), {})
-    if obj:
+    obj = _safe(lambda: load_objective(board), {}) or {}
+    objective = None
+    if obj.get("text"):
+        objective = {
+            "text": obj.get("text", ""),
+            "done": bool(obj.get("done")),
+            "set_by": obj.get("set_by", ""),
+            "at": obj.get("at", ""),
+            "evidence": obj.get("evidence", "") if obj.get("done") else "",
+        }
         goals = "OBJECTIVE%s\n%s\n\n%s" % (" (met)" if obj.get("done") else "", obj.get("text", ""), goals)
     util_rows = [r for r in rows if r["state"] != "DOWN"]
     in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
@@ -8146,6 +8288,7 @@ def board_snapshot(board, messages=40):
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
         "goals": goals,
+        "objective": objective,
         "util": sorted(util_rows, key=lambda r: (-r["done"], r["agent"])),
         "in_flight": in_flight,
         "review": review,

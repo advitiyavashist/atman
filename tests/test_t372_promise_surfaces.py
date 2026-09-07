@@ -49,25 +49,24 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
         "usagePanel", "Usage / cost", "usageHonesty", "Not reported by harness",
         "renderUsage", "coverageLede", "Total Football.", "band-keep", "band-attack",
         "renderPitch", "uncovered", "emptyBoard", "nextStep", "obSteps",
-        'data-tab-btn="board"', 'data-tab-btn="agents"', 'data-tab-btn="messages"',
+        'data-tab-btn="objective"', 'data-tab-btn="team"', 'data-tab-btn="work"', 'data-tab-btn="intervene"',
         "fetch('/msg'", "mentionBar",
     ):
         assert marker in ui, "missing UI marker: %s" % marker
     assert "DAG" not in ui
     assert "graph editor" not in ui.lower()
-    assert 'data-tab-btn="board"' in ui
+    assert 'data-tab-btn="objective"' in ui
 
 
 def test_home_hero_is_v1_must_not_t344_deferral():
-    """CEO ACCEPT: median turns + yield@cost on home (Board pane) is V1 MUST."""
+    """CEO ACCEPT: median turns + yield@cost on Objective pane is V1 MUST."""
     ui = _ui_html()
-    board = ui[ui.index('id="pane-board"'):ui.index('id="pane-agents"')]
-    assert 'id="promiseHero"' in board
-    assert "Median turns" in board
-    assert "Yield@cost" in board
-    assert board.index("promiseHero") < board.index("turnsPanel")
-    # T-344 worst-10 is NICE and collapsed; it must not be the only turns surface.
-    assert "<details" in board and "Turns efficiency" in board
+    objective = ui[ui.index('id="pane-objective"'):ui.index('id="pane-team"')]
+    assert 'id="promiseHero"' in objective
+    assert "Median turns" in objective
+    assert "Yield@cost" in objective
+    work = ui[ui.index('id="pane-work"'):ui.index('id="pane-intervene"')]
+    assert "<details" in work and "Turns efficiency" in work
 
 
 def test_promise_chips_strip_on_home_objective():
@@ -83,8 +82,8 @@ def test_promise_chips_strip_on_home_objective():
     assert "fmtMedian" in ui and "fmtYield" in ui
     assert "hdrMedianVal" in ui
     assert "stripMedianVal" not in ui
-    # Craft bar: numbers once on home (hero); chips hide on Board.
-    assert "body[data-tab=board] .promise-chips{display:none}" in ui
+    # Craft bar: numbers once on Objective; chips hide on that tab.
+    assert "body[data-tab=objective] .promise-chips{display:none}" in ui
 
 
 def test_promise_hero_copy_nits():
