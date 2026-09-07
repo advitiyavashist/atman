@@ -74,10 +74,14 @@ def test_session_start_maps_to_contract_envelope_without_actor(enrollment, confi
     event = parse_claude_hook_event(fixture("session_start.json"), enrollment, config)
     envelope = build_hook_envelope(event, request_id="0f1e2d3c-4b5a-4968-8776-655443322110")
 
+    # T-181: the event_id literal changed because event identity now also
+    # digests the wire's correlation ids. Without that term, five real
+    # PreToolUse payloads hashed to ONE id and the server's dedupe dropped four
+    # of them. Envelope SHAPE is unchanged -- still no actor field.
     assert envelope == {
         "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
         "event": {
-            "event_id": "hev_764079c6615f3a4717c41693",
+            "event_id": "hev_bb3cd450fbdb623c48f16555",
             "agent_id": "agt_backend01",
             "session_id": "ses_a1b2c3d4",
             "kind": "session_start",
@@ -456,7 +460,7 @@ class RecordingClient(BoardClient):
         self.calls.append((path, body, token))
         return {"accepted": True, "deduplicated": False, "context": {"lines": ["ok"]}}
 
-    def delete_json(self, path, body, *, token, expected_status=(200,)):
+    def delete_json(self, path, body, *, token=None, operator=None, expected_status=(200,)):
         self.calls.append((path, body, token))
         return {"agent": {"id": "agt_backend01"}, "session": None}
 
@@ -492,8 +496,12 @@ def test_doctor_reports_delivery_and_adoption_separately(tmp_path, enrollment, c
         [fixture("notification_probe.json")],
         [{"accepted": True, "deduplicated": False, "context": {"lines": ["ok"]}}],
     ).as_dict()
-    assert probe_only["config"] == {"installed": True}
-    assert probe_only["delivery"] == {"server_received": True, "response_delivered": True}
+    # T-181 added `hook_executable`, populated only by the live doctor
+    # (`diagnose_live`); the fixture-driven `diagnose()` leaves it None.
+    assert probe_only["config"] == {"installed": True, "hook_executable": None}
+    assert probe_only["delivery"] == {
+        "hook_executed": None, "server_received": True, "response_delivered": True,
+    }
     assert probe_only["adoption"] == {"session_adopted": False}
     assert "synthetic probe" in probe_only["remediation"][0]
 
@@ -517,16 +525,29 @@ def test_two_project_dirs_keep_sessions_distinct(tmp_path, enrollment, config):
 
 
 def test_revoke_requires_note_and_uses_session_lease_route(enrollment):
-    client = RecordingClient()
-    with pytest.raises(ClaudeHookError, match="explicit note"):
-        revoke_session_lease(client, enrollment, note="")
+    """T-181 changed the credential this route uses.
 
-    revoke_session_lease(client, enrollment, note="operator requested recovery", expected_version=7)
+    This test previously asserted `token == "agent-token-value"`. Against the
+    real server that request is a 403 `agent_token_insufficient` on every
+    invocation: the frozen contract makes revokeSessionLease "Operator or master
+    only". The old assertion pinned a call that could never succeed, so it is
+    replaced rather than kept. Fuller coverage, including the stale
+    expected_version bug, is in test_live_session_tail.py.
+    """
+    from ticket_board.adapters.claude import OperatorCredentials
+
+    client = RecordingClient()
+    operator = OperatorCredentials("sess-token", "csrf-token", "http://127.0.0.1:4319")
+    with pytest.raises(ClaudeHookError, match="explicit note"):
+        revoke_session_lease(client, enrollment, note="", operator=operator)
+
+    revoke_session_lease(client, enrollment, note="operator requested recovery",
+                         operator=operator, expected_version=7)
     path, body, token = client.calls[-1]
     assert path == "/agents/agt_backend01/session-lease"
     assert body["expected_version"] == 7
     assert body["note"] == "operator requested recovery"
-    assert token == "agent-token-value"
+    assert token is None, "an agent token must not be sent on an operator-only route"
 
 
 def test_hook_command_refuses_server_url_mismatch_before_delivery(tmp_path, enrollment, monkeypatch):
