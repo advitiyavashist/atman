@@ -42,13 +42,15 @@ export interface LiveHarness {
   calls(): { method: string; path: string; body: unknown }[];
 }
 
-const CREATED_ROUTES = [
+export const CREATED_ROUTES = [
   "/updates",
   "/reviews",
   "/tickets",
   "/enrollments",
   "/sessions",
   "/assignments",
+  "/invitations",
+  "/invitations/exchange",
   "/channels",
   "/messages",
   "/task",
