@@ -2716,6 +2716,52 @@ def _looks_limited(text):
     return any(k in low for k in CLI_LIMIT_STRINGS)
 
 
+def _structured_limit_signal(text):
+    """True when the harness emitted a structured usage-limit error.
+
+    Recognized envelopes (Anthropic / Claude Code, not invented strings):
+      {"type":"error","error":{"type":"rate_limit_error",...}}
+      {"type":"result","is_error":true,"error":{"type":"rate_limit_error",...}}
+    Codex `token_count` `rate_limits` telemetry is NOT a limit (MASTER item 7 /
+    T-230: every healthy turn writes that block).
+    """
+    for blob in _json_candidates(text):
+        try:
+            rec = json.loads(blob)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        err = rec.get("error")
+        if not isinstance(err, dict) or err.get("type") != "rate_limit_error":
+            continue
+        if rec.get("type") in ("error", "result"):
+            return True
+    return False
+
+
+def _run_end_limit_outcome(rc, timed_out, log_text, bound_write=False):
+    """run_end.outcome is 'limit' only on a limit-shaped failure, never prose.
+
+    T-478: grepping CLI_LIMIT_STRINGS in the run log labelled productive
+    exit=0 reviews as limit (r-opus-authz-1 talked about session resets).
+    `limit` requires (nonzero exit OR timed_out OR a structured harness
+    rate_limit_error) AND (that structured signal OR CLI limit text). An
+    exit=0 bound-write run is never limit. Generic exit=1 with no limit
+    evidence stays unlabelled so T-425 FLAG still treats it as a non-turn.
+    `tickets limits` / liveness greps are unchanged.
+    """
+    if (rc in (0, None)) and not timed_out and bound_write:
+        return None
+    structured = _structured_limit_signal(log_text)
+    failed = (rc not in (0, None)) or bool(timed_out)
+    if not failed and not structured:
+        return None
+    if structured or _looks_limited(log_text):
+        return "limit"
+    return None
+
+
 def _looks_auth(text):
     low = (text or "").lower()
     return any(k in low for k in CLI_AUTH_STRINGS)
@@ -8363,7 +8409,10 @@ def cmd_watch(a, board):
                         exit=rc, timed_out=bool(timed_out),
                         bound_write=True if bw else None,
                         duration_s=_iso_span_secs(run_started, ended),
-                        outcome=("limit" if _looks_limited(run_output) else None),
+                        outcome=_run_end_limit_outcome(
+                            rc, timed_out,
+                            _read_run_slice(log_path, log_before),
+                            bound_write=bool(bw)),
                         usage_error=usage_error, **usage), None)
                     if timed_out:
                         with open(log_path, "a") as lf:
