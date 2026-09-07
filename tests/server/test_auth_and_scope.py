@@ -222,12 +222,14 @@ def test_no_served_route_is_still_an_unbuilt_lane_stub(operator, enrolled):
     """
     from ticket_board.server.app import _ROUTE_TABLE
 
+    # SSE: the stream is open-ended and never returns a Response to this
+    # client. Its own ACL and framing are covered by test_events_stream.py.
+    skipped = {("GET", "/events")}
+
     checked = []
     for method, pattern, handler, _auth, _csrf in _ROUTE_TABLE:
         path = _concrete_path(pattern)
-        if path == "/events":
-            # SSE: the stream is open-ended and never returns a Response here.
-            # Its own ACL and framing are covered by test_events_stream.py.
+        if (method, path) in skipped:
             continue
         for client in (operator, enrolled["client"]):
             response = client.request(method, path)
@@ -238,8 +240,31 @@ def test_no_served_route_is_still_an_unbuilt_lane_stub(operator, enrolled):
                                      details.get("owner_ticket")))
         checked.append((method, path))
 
-    # A sweep that silently swept nothing would pass forever.
-    assert len(checked) >= 30, checked
+    # Two coverage guards, and they catch different things. Raised by
+    # opus-verify reviewing this rewrite: a sweep has a vacuous-pass mode that
+    # its own teeth run cannot reach. Re-injecting a stub proves the assertion
+    # FIRES for a route the loop visits; it proves nothing about how many
+    # routes the loop visits. A later filter, prefix change, lazy registration
+    # or a different app factory in the fixture could shrink this to three
+    # routes, or zero, and it would stay green forever and look exactly like
+    # the property holding.
+    #
+    #   - equality catches an enumeration that silently drops rows, because it
+    #     is measured against the app's own table rather than a number typed
+    #     here;
+    #   - the floor catches the table ITSELF shrinking, which equality cannot
+    #     see -- both sides would fall together.
+    #
+    # Neither is redundant, and a test whose coverage is computed rather than
+    # asserted can shrink to nothing without a single red run.
+    assert len(checked) == len(_ROUTE_TABLE) - len(skipped), (
+        "swept {} of the {} routes the app declares (minus {} deliberately "
+        "skipped) -- the enumeration is dropping rows".format(
+            len(checked), len(_ROUTE_TABLE), len(skipped)))
+    assert len(checked) >= 30, (
+        "only {} routes in the whole table; this build is far smaller than "
+        "the contract, so the sweep is not evidence of anything".format(
+            len(checked)))
     assert ("GET", "/runners/jobs") in checked
     assert ("GET", "/messages") in checked
 
