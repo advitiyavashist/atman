@@ -253,3 +253,184 @@ def test_inbox_read_does_not_clobber_a_limit_written_while_it_scanned(board, mon
     assert "limit" in rec, "the inbox read silently discarded the limit"
     assert rec["limit"]["until"] == "2026-09-12 19:41"
     assert rec.get("inbox_seen") is not None, "the inbox's own write must land too"
+
+
+# ---- FIX-FIRST (cos-opus): a future-stamped record must not blind an agent --
+#
+# The first version of this fix clamped nothing: _inbox_scan set the watermark
+# to max(`at`) over the messages it loaded, so a single record stamped ahead of
+# wall-clock dragged the agent's inbox_seen into the future and every message
+# posted afterwards was "older than the watermark" and therefore invisible --
+# not for a second, but for the length of the skew. T-228 exists because "a
+# message is invisible to that agent forever"; closing a one-second window of
+# that harm while opening an unbounded one is not a fix.
+#
+# The skew does not need malice: T-213 is lossless legacy import, so foreign
+# records with foreign clocks are in scope, and messages.jsonl is plain JSON
+# that several tools append to. A fast clock is enough.
+#
+# These tests use no sleep. cos-opus needed a 2.2s gap for their A/B because
+# origin/main has BOTH defects and the same-second one masks this one; on this
+# branch the same-second hole is already closed, so the future-stamp defect is
+# isolated without one.
+
+
+def _skew_board(tmp_path, mod, records):
+    """A board whose messages are stamped relative to the real clock, so the
+    present-day clamp is actually exercised (the fixtures above are pinned to
+    2026-01-05 and never reach it)."""
+    import datetime
+    b = tmp_path / ".tickets"
+    (b / "agents").mkdir(parents=True)
+    base = datetime.datetime.now(datetime.timezone.utc)
+
+    def stamp(delta):
+        return (base + datetime.timedelta(seconds=delta)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+
+    (b / "messages.jsonl").write_text("".join(
+        json.dumps(dict(r, at=stamp(r["at"]))) + "\n" for r in records))
+    return b, stamp
+
+
+def _append(b, mod, **rec):
+    with open(str(b / "messages.jsonl"), "a") as f:
+        f.write(json.dumps(dict(rec, at=rec.get("at") or mod.now())) + "\n")
+
+
+def test_future_stamped_message_does_not_blind_the_agent(tmp_path):
+    """cos-opus's FIX-FIRST repro, as the reader sees it.
+
+    One record two hours ahead, an inbox read, then an ordinary message: the
+    ordinary message must arrive. Before the clamp this returned [].
+    """
+    mod = _mod()
+    b, _ = _skew_board(tmp_path, mod, [
+        {"at": 7200, "from": "alice", "to": "dave", "re": "",
+         "text": "FROM-THE-FUTURE"},
+    ])
+    mod._mark_inbox_read(str(b), "dave")
+    _append(b, mod, **{"from": "alice", "to": "dave", "re": "",
+                       "text": "AFTER-THE-READ"})
+    # Containment, not equality: this test's claim is that the agent is not
+    # BLIND. Whether the future-stamped record is also redelivered is a
+    # separate property with its own test below, and folding both into one
+    # assertion would leave neither able to say which one broke.
+    assert "AFTER-THE-READ" in [m["text"] for m in mod.unread(str(b), "dave")]
+
+
+def test_future_stamp_addressed_to_someone_else_does_not_blind_a_bystander(
+        tmp_path):
+    """The watermark is max(`at`) over the whole file, computed BEFORE the
+    addressing filter, so the skewed record does not have to be the victim's
+    mail -- or anyone's. One bad record blinds every agent that reads its
+    inbox after it, which is why this is a fleet-wide failure and not a
+    per-message one."""
+    mod = _mod()
+    b, _ = _skew_board(tmp_path, mod, [
+        {"at": 7200, "from": "alice", "to": "carol", "re": "",
+         "text": "NOT-FOR-DAVE"},
+    ])
+    mod._mark_inbox_read(str(b), "dave")
+    _append(b, mod, **{"from": "alice", "to": "dave", "re": "",
+                       "text": "AFTER-THE-READ"})
+    assert [m["text"] for m in mod.unread(str(b), "dave")] == ["AFTER-THE-READ"]
+
+
+def test_future_stamped_message_is_delivered_exactly_once(tmp_path):
+    """The other half of the fix, and the half a bare clamp would get wrong.
+
+    Clamping the watermark alone leaves the future-stamped message permanently
+    above it, so it is redelivered on every poll for the length of the skew --
+    the wake storm the boundary-identity multiset exists to prevent, and
+    exactly what origin/main does today (three polls, three deliveries).
+    The identity set covers everything at or ABOVE the watermark, not only the
+    watermark second, so the message is delivered once and then stays quiet.
+    """
+    mod = _mod()
+    b, _ = _skew_board(tmp_path, mod, [
+        {"at": 7200, "from": "alice", "to": "dave", "re": "",
+         "text": "FROM-THE-FUTURE"},
+    ])
+    polls = []
+    for _ in range(3):
+        polls.append([m["text"] for m in mod.unread(str(b), "dave")])
+        mod._mark_inbox_read(str(b), "dave")
+    assert polls == [["FROM-THE-FUTURE"], [], []], (
+        "future-stamped mail must be delivered once, not on every poll: %r"
+        % (polls,))
+
+
+def test_a_watermark_already_in_the_future_heals_on_the_next_read(tmp_path):
+    """An agent poisoned before this fix shipped must recover by itself.
+
+    The clamp is applied when inbox_seen is READ, not only when it is written,
+    precisely so that a record already carrying a future watermark does not
+    stay blind until its skew expires. Clamping down can re-show a message
+    that was already delivered; that is the safe direction, and it settles
+    after one poll.
+    """
+    mod = _mod()
+    import datetime
+    b, _ = _skew_board(tmp_path, mod, [])
+    poisoned = (datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(seconds=7200)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (b / "agents" / "dave.json").write_text(
+        json.dumps({"name": "dave", "inbox_seen": poisoned}))
+    _append(b, mod, **{"from": "alice", "to": "dave", "re": "",
+                       "text": "AFTER-THE-POISONING"})
+    assert [m["text"] for m in mod.unread(str(b), "dave")] == [
+        "AFTER-THE-POISONING"]
+    rec = json.loads((b / "agents" / "dave.json").read_text())
+    assert rec["inbox_seen"] == poisoned, "read-side clamp must not rewrite yet"
+    mod._mark_inbox_read(str(b), "dave")
+    rec = json.loads((b / "agents" / "dave.json").read_text())
+    assert rec["inbox_seen"] <= mod.now(), (
+        "the watermark must be back in the present after a read, got %r"
+        % rec["inbox_seen"])
+
+
+def test_retained_ids_are_bounded_by_the_skew_not_by_history(tmp_path):
+    """The disclosed cost of the above, pinned rather than asserted in prose.
+
+    Widening the identity set from "the watermark second" to "at or above the
+    watermark" means future-stamped records stay in it until the clock reaches
+    them. What must NOT happen is ordinary history joining them.
+    """
+    mod = _mod()
+    records = [{"at": -300 + i, "from": "alice", "to": "dave", "re": "",
+                "text": "old %d" % i} for i in range(50)]
+    records += [{"at": 7200 + i, "from": "alice", "to": "dave", "re": "",
+                 "text": "ahead %d" % i} for i in range(3)]
+    b, _ = _skew_board(tmp_path, mod, records)
+    mod._mark_inbox_read(str(b), "dave")
+    rec = json.loads((b / "agents" / "dave.json").read_text())
+    assert len(rec.get("inbox_seen_ids", [])) == 3, (
+        "only the 3 skewed records should need identities, got %r"
+        % rec.get("inbox_seen_ids"))
+
+
+def test_master_stuck_wake_is_not_blinded_by_a_future_stamp(tmp_path):
+    """The master's stuck-message wake reads the same field with the same
+    comparison, so it inherited the same blindness -- and it is the single
+    worst place on this board to lose a message: a "stuck:" that does not
+    wake the master is an agent parked until someone notices by hand.
+
+    Driven through the real pending_work() rather than through the predicate,
+    because the defect here is in which `since` the caller passes, and a test
+    that calls _is_unread directly cannot see that.
+    """
+    mod = _mod()
+    import datetime
+    b, _ = _skew_board(tmp_path, mod, [])
+    (b / "master.json").write_text(json.dumps({"owner": "boss", "cos": ""}))
+    poisoned = (datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(seconds=7200)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (b / "agents" / "boss.json").write_text(
+        json.dumps({"name": "boss", "inbox_seen": poisoned}))
+    _append(b, mod, **{"from": "alice", "to": "", "re": "",
+                       "text": "stuck: need a decision"})
+    out = mod.pending_work(str(b), "boss")
+    assert out.get("stuck_messages"), (
+        "a 'stuck' posted after a future-stamped record must still wake the "
+        "master, got %r" % (out,))
