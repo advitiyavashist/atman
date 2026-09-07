@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from api_client import rid
+from api_client import Client, rid
 from ticket_board.server.auth import in_seconds
 from ticket_board.server.hooks import RateLimiter
 
@@ -56,6 +56,57 @@ def test_a_retried_event_yields_one_record_and_still_answers(server, operator,
     audits = server.store.conn.execute(
         "SELECT COUNT(*) FROM audit_events WHERE action LIKE 'hook.%'").fetchone()
     assert audits[0] == 1
+
+
+def test_dedup_is_scoped_by_project_not_just_event_id(server, operator, project,
+                                                       enrolled):
+    """Two unrelated projects choosing the same `event_id` is not a replay.
+
+    `hook_events` used to be keyed on `event_id` alone; a second project's
+    first-ever event for its own agent, colliding only on that string, was
+    silently treated as a duplicate of the first project's event and never
+    wrote the heartbeat that gates the fleet's whole liveness story.
+    """
+    other_project = server.store.create_project("Other")
+    other_session = server.bootstrap_operator(other_project["id"])
+    other_operator = Client(server, project_id=other_project["id"],
+                            cookie=other_session["session_token"],
+                            csrf=other_session["csrf_token"])
+    created = other_operator.post("/enrollments", {
+        "request_id": rid(), "agent_name": "backend-2", "role": "backend",
+        "connection_mode": "managed"})
+    assert created.status == 201, created.json()
+    other_session_id = "ses_" + uuid.uuid4().hex[:8]
+    exchanged = Client(server, project_id=other_project["id"]).post("/sessions", {
+        "request_id": rid(), "code": created.json()["code"],
+        "session_id": other_session_id})
+    assert exchanged.status == 201, exchanged.json()
+    other_payload = exchanged.json()
+    other_agent_id = other_payload["agent"]["id"]
+    other_client = Client(server, project_id=other_project["id"],
+                          token=other_payload["token"], origin=None)
+
+    shared_event_id = "hev_" + uuid.uuid4().hex
+    first = post(enrolled, event_id=shared_event_id)
+    assert first.status == 200 and first.json()["deduplicated"] is False
+
+    second = other_client.post("/hook-events", {
+        "request_id": rid(),
+        "event": {"event_id": shared_event_id, "agent_id": other_agent_id,
+                  "session_id": other_session_id, "kind": "session_start",
+                  "occurred_at": "2026-09-07T09:00:00Z"}})
+    assert second.status == 200, second.json()
+    assert second.json()["deduplicated"] is False
+
+    other_health = other_operator.get("/agents").json()["items"]
+    other_agent = next(a for a in other_health if a["id"] == other_agent_id)
+    assert other_agent["hook_health"]["server_received"] is True
+    assert other_agent["last_heartbeat_at"] is not None
+
+    rows = server.store.conn.execute(
+        "SELECT COUNT(*) FROM hook_events WHERE event_id = ?",
+        (shared_event_id,)).fetchone()
+    assert rows[0] == 2, "one row per project, not deduplicated across them"
 
 
 def test_a_stop_event_is_a_finished_turn_not_a_finished_ticket(operator,
