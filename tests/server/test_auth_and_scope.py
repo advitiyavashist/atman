@@ -537,7 +537,8 @@ def test_no_auth_none_route_can_never_resolve_a_principal(server, operator, proj
         "Authorization": "Bearer " + foreign["client"].token,
     }, body=b"{}")
 
-    assert server._authorize(request, NONE, project["id"]) is None, (
+    assert server._authorize(request, server.exchange_enrollment, NONE,
+                             project["id"]) is None, (
         "a live, valid, foreign-project credential must not resolve to a "
         "principal on an auth=NONE route")
 
