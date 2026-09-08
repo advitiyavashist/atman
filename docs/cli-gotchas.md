@@ -30,7 +30,10 @@ Several verbs put things where you would not look for them:
 - **`assign <id> --owner <agent>`** — owner is a FLAG. `assign` takes exactly
   one positional. It also carries `--priority`, `--role`, `--epic`, `--sprint`,
   `--title` and `--notes`, so **re-ranking priority IS possible** — it is just
-  not under `update`.
+  not under `update`. If you do not want to read `assign --help` first,
+  `tickets priority <id> <n>` and `tickets retitle <id> <title>` are
+  top-level aliases for exactly this (same field, same note text) — they
+  exist purely for discoverability, not new behaviour.
 - **`done <id> --notes "..."`** — the notes are REQUIRED (pass `--no-notes` only
   if there is genuinely nothing to hand off).
 

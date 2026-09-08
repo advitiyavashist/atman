@@ -3543,6 +3543,26 @@ def cmd_assign(a, board):
     print("%s: %s" % (t["id"], ", ".join(changed)))
 
 
+def _assign_only(board, tid, by="", notes="", **fields):
+    """`assign`, with everything but the given fields left untouched. Backs
+    the top-level `priority` / `retitle` verbs (T-015): re-ranking and
+    retitling are real `assign` operations, just findable without reading
+    `assign --help` first."""
+    ns = argparse.Namespace(id=tid, epic=None, sprint=None, role=None, owner=None,
+                             needs=None, priority=None, title="", by=by, notes=notes)
+    for k, v in fields.items():
+        setattr(ns, k, v)
+    cmd_assign(ns, board)
+
+
+def cmd_priority(a, board):
+    _assign_only(board, a.id, by=a.by, notes=a.notes, priority=a.value)
+
+
+def cmd_retitle(a, board):
+    _assign_only(board, a.id, by=a.by, notes=a.notes, title=a.title)
+
+
 # ---- epics --------------------------------------------------------------
 
 def cmd_epic(a, board):
@@ -9058,6 +9078,27 @@ def main():
     c.add_argument("--by", default="")
     c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
     c.set_defaults(fn=cmd_assign)
+
+    # `priority` and `retitle` are thin `assign` aliases (T-015): the field
+    # was always editable via `assign --priority` / `assign --title`, but
+    # neither shows up unless you already know to read `assign --help`, and
+    # a re-ranking master reading the top-level verb list concluded the
+    # capability did not exist. No `role` alias here on purpose -- `role` is
+    # already taken, for durable agent roles (list/show/take), not ticket
+    # roles.
+    c = sub.add_parser("priority", help="re-rank a ticket (alias: assign --priority)")
+    c.add_argument("id")
+    c.add_argument("value", type=int, help="1=critical/hard, 2=normal, 3=routine")
+    c.add_argument("--by", default="")
+    c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
+    c.set_defaults(fn=cmd_priority)
+
+    c = sub.add_parser("retitle", help="rename a ticket (alias: assign --title)")
+    c.add_argument("id")
+    c.add_argument("title")
+    c.add_argument("--by", default="")
+    c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
+    c.set_defaults(fn=cmd_retitle)
 
     c = sub.add_parser("epic", help="epics: create | list | show | done")
     es = c.add_subparsers(dest="epic_cmd")
