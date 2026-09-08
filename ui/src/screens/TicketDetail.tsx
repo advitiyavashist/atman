@@ -211,6 +211,11 @@ export function TicketDetail({ ticketId, onClose }: { ticketId: string; onClose:
           Reload
         </button>
       </div>
+      <p className="tag" data-testid="ticket-timestamps">
+        Created <time dateTime={ticket.created_at}>{formatDateTime(ticket.created_at)}</time>
+        {" · "}
+        Updated <time dateTime={ticket.updated_at}>{formatDateTime(ticket.updated_at)}</time>
+      </p>
 
       {detail.stale && detail.error && <ErrorNotice error={detail.error} onRetry={detail.refetch} />}
 
@@ -281,7 +286,10 @@ export function TicketDetail({ ticketId, onClose }: { ticketId: string; onClose:
             <div className="row" key={u.id} data-testid={`update-${u.id}`}>
               <div>
                 <strong>
-                  {u.author.display_name}
+                  {u.author.display_name}{" "}
+                  <time className="tag" dateTime={u.created_at} data-testid={`update-time-${u.id}`}>
+                    {formatDateTime(u.created_at)}
+                  </time>
                   {u.superseded && (
                     <span className="tag" data-testid="superseded-tag">
                       {" "}

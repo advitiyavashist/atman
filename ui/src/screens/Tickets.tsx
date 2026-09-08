@@ -7,7 +7,7 @@ import { ErrorNotice } from "../components/ErrorNotice";
 import { EmptyStateView } from "../components/EmptyStateView";
 import { TicketStatePill } from "../components/TicketStatePill";
 import { Modal } from "../components/Modal";
-import { dependencyWaitingLabel, pendingWriteCopy } from "../copy";
+import { dependencyWaitingLabel, formatDateTime, pendingWriteCopy } from "../copy";
 import { TicketDetail } from "./TicketDetail";
 import type { Ticket, TicketListResponse } from "../types";
 
@@ -164,6 +164,7 @@ export function Tickets() {
                   <th>Outcome</th>
                   <th>State</th>
                   <th>Agent</th>
+                  <th>Updated</th>
                 </tr>
               </thead>
               <tbody>
@@ -184,6 +185,11 @@ export function Tickets() {
                       <TicketStatePill ticket={t} />
                     </td>
                     <td>{t.owner ?? "Unassigned"}</td>
+                    <td>
+                      <time dateTime={t.updated_at} data-testid={`ticket-updated-${t.id}`}>
+                        {formatDateTime(t.updated_at)}
+                      </time>
+                    </td>
                   </tr>
                 ))}
               </tbody>

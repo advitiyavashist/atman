@@ -8,6 +8,7 @@ import { EmptyStateView } from "../components/EmptyStateView";
 import { Modal } from "../components/Modal";
 import {
   deliveryReceiptLabel,
+  formatDateTime,
   memberAvailabilityLabel,
   memberKindLabel,
   pendingWriteCopy,
@@ -119,6 +120,9 @@ function MessageRow({
         {message.intent === "receipt" && <span className="tag">System receipt</span>}
         {message.intent === "task" && <span className="tag">Task</span>}
         <span className="spacer" />
+        <time className="tag" dateTime={message.created_at} data-testid={`message-time-${message.id}`}>
+          {formatDateTime(message.created_at)}
+        </time>
         {chipTicketId && <TicketChip ticketId={chipTicketId} />}
       </div>
       <p style={{ whiteSpace: "pre-wrap", marginBottom: 4 }}>{message.body}</p>

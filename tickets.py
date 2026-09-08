@@ -1428,7 +1428,8 @@ def detail(board, t, tickets):
         out.append("")
         out.append("Notes:")
         for nt in t["notes"]:
-            out.append("  - [%s] %s" % (nt.get("by", "?"), nt["text"]))
+            when = (" " + fmt_local(nt["at"])) if nt.get("at") else ""
+            out.append("  -%s [%s] %s" % (when, nt.get("by", "?"), nt["text"]))
     return "\n".join(out)
 
 
@@ -7731,8 +7732,9 @@ body[data-tab=board] .promise-chips{display:none}
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
 // Server sends timestamps as raw ISO-8601 UTC; render in whatever timezone
-// this browser is actually in, not the server's.
-const fmtLocal=iso=>{if(!iso)return '-';const d=new Date(iso);return isNaN(d)?String(iso):d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
+// this browser is actually in (undefined locale, no timeZone:'UTC'). A naive
+// stamp is treated as UTC so `new Date()` cannot misread it as already-local.
+const fmtLocal=iso=>{if(!iso)return '-';const raw=String(iso);const n=/[zZ]|[+-]\d{2}:?\d{2}$/.test(raw)?raw:(raw.includes('T')?raw+'Z':raw);const d=new Date(n);return isNaN(d)?raw:d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'});};
 function initials(name){const s=String(name||'?').split(/[-_ ]/).filter(Boolean);
   return ((s[0]||'?')[0]+(s.length>1?s[1][0]:(s[0]||'?')[1]||'')).toUpperCase()}
 function who(name){if(!name)return '';return '<span class="who"><span class="av">'+esc(initials(name))+'</span>'+esc(name)+'</span>'}

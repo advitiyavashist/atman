@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Tickets } from "../../ui/src/screens/Tickets";
+import { formatDateTime } from "../../ui/src/copy";
 import { boardFetch, renderLive } from "./support/render-live";
 import ticketsPopulated from "../../ui/src/fixtures/data/tickets/list-populated.json";
 import ticketsEmpty from "../../ui/src/fixtures/data/tickets/list-empty.json";
@@ -14,6 +15,15 @@ describe("Tickets, reading a live board", () => {
   it("marks a dependency-blocked ticket as waiting on its dependency, not as started", async () => {
     renderLive(<Tickets />, boardFetch(listRoutes));
     await waitFor(() => expect(screen.getByText("Waiting on DEMO-13")).toBeInTheDocument());
+  });
+
+  it("shows each ticket's updated_at in the host local timezone, not the raw UTC ISO", async () => {
+    renderLive(<Tickets />, boardFetch(listRoutes));
+    const first = ticketsPopulated.items[0];
+    await waitFor(() => expect(screen.getByTestId(`ticket-updated-${first.id}`)).toBeInTheDocument());
+    const cell = screen.getByTestId(`ticket-updated-${first.id}`);
+    expect(cell).toHaveTextContent(formatDateTime(first.updated_at));
+    expect(cell).not.toHaveTextContent(first.updated_at);
   });
 
   it("fetches the ticket from the board when its row is opened, and shows a reservation as waiting", async () => {
@@ -31,6 +41,24 @@ describe("Tickets, reading a live board", () => {
     expect(screen.queryByText(/^Working$/)).not.toBeInTheDocument();
     // The detail came from the board, not from a bundled scenario.
     expect(harness.calls().some((c) => c.path === `/tickets/${detailQueued.ticket.id}`)).toBe(true);
+  });
+
+  it("shows ticket and note timestamps in local time on the detail dialog", async () => {
+    const user = userEvent.setup();
+    renderLive(
+      <Tickets />,
+      boardFetch({ ...listRoutes, [`GET /tickets/${detailClaimed.ticket.id}`]: detailClaimed }),
+    );
+    await waitFor(() => expect(screen.getByTestId(`ticket-row-${detailClaimed.ticket.id}`)).toBeInTheDocument());
+    await user.click(within(screen.getByTestId(`ticket-row-${detailClaimed.ticket.id}`)).getByRole("button"));
+
+    const stamps = await screen.findByTestId("ticket-timestamps");
+    expect(stamps).toHaveTextContent(formatDateTime(detailClaimed.ticket.created_at));
+    expect(stamps).toHaveTextContent(formatDateTime(detailClaimed.ticket.updated_at));
+    expect(stamps).not.toHaveTextContent(detailClaimed.ticket.updated_at);
+
+    const note = detailClaimed.updates[0];
+    expect(screen.getByTestId(`update-time-${note.id}`)).toHaveTextContent(formatDateTime(note.created_at));
   });
 
   it("filters by state through the server, not by slicing the page it already has", async () => {

@@ -83,16 +83,47 @@ export const pendingWriteCopy = "Sending… nothing has changed on the board yet
 export const queuedNotWorkingNote =
   "Reserved, not started — the agent has not claimed it yet.";
 
+/**
+ * Stored timestamps are UTC/ISO (often "...Z"). Display must use the viewer's
+ * OS timezone — never `timeZone: "UTC"` and never a sliced UTC substring.
+ * A naive stamp (no Z / offset) is treated as UTC, matching the wire contract;
+ * `new Date("2026-09-06T14:32:00")` would otherwise be read as local and
+ * shown as if the UTC clock already were the viewer's.
+ */
+const HAS_EXPLICIT_ZONE = /[zZ]|[+-]\d{2}:?\d{2}$/;
+
+export function parseUtcInstant(iso: string): Date | null {
+  const raw = String(iso ?? "").trim();
+  if (!raw) return null;
+  const normalized = HAS_EXPLICIT_ZONE.test(raw) ? raw : raw.includes("T") ? `${raw}Z` : raw;
+  const d = new Date(normalized);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+const LOCAL_TIME: Intl.DateTimeFormatOptions = {
+  hour: "2-digit",
+  minute: "2-digit",
+};
+
+const LOCAL_DATE_TIME: Intl.DateTimeFormatOptions = {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZoneName: "short",
+};
+
 export function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const d = parseUtcInstant(iso);
+  if (!d) return iso;
+  // `undefined` locale + no `timeZone` option → host (browser/OS) zone.
+  return d.toLocaleTimeString(undefined, LOCAL_TIME);
 }
 
 export function formatDateTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const d = parseUtcInstant(iso);
+  if (!d) return iso;
+  return d.toLocaleString(undefined, LOCAL_DATE_TIME);
 }
 
 export const hookOnlyNote =

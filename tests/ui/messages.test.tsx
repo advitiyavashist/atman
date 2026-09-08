@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Messages } from "../../ui/src/screens/Messages";
+import { formatDateTime } from "../../ui/src/copy";
 import { boardFetch, renderLive } from "./support/render-live";
 
 import messagesChannelsPopulated from "../../ui/src/fixtures/data/messages/channels-populated.json";
@@ -72,6 +73,9 @@ describe("Messages, reading a live board", () => {
     await user.click(screen.getByTestId("channel-chn_work0001"));
     await waitFor(() => expect(screen.getByTestId(`message-${ROOT_MESSAGE.id}`)).toBeInTheDocument());
     expect(screen.getByText("Can you take the paging bug on DEMO-14?")).toBeInTheDocument();
+    expect(screen.getByTestId(`message-time-${ROOT_MESSAGE.id}`)).toHaveTextContent(
+      formatDateTime(ROOT_MESSAGE.created_at),
+    );
 
     expect(
       harness.calls().some((c) => c.method === "GET" && c.path === "/messages"),
