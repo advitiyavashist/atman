@@ -6198,15 +6198,46 @@ def role_context(board, owner, explicit=None, limit=ROLE_CONTEXT_LIMIT):
 
 
 def _safe_role_slug(role):
-    """CLI guard for `brief --role`. Same names as role_brief_path; exits on bad input."""
+    """CLI guard for `brief --role`. Same names as role_brief_path, plus the
+    literal `_shared` for the lane-wide baseline; exits on bad input."""
     name = (role or "").strip()
-    if role_brief_path(".", name):
+    if name == "_shared" or role_brief_path(".", name):
         return name
     if not name:
-        sys.exit("brief --role needs a role name")
+        sys.exit("brief --role needs a role name (the name passed to `join --roles`, or _shared)")
+    sys.exit("brief --role %r is not a role name: use letters, digits, `_ . -` only "
+             "(exactly as passed to `join --roles`), or _shared for the lane-wide file" % role)
+
+
+def role_context_path(board, name):
+    """Write target for `brief --role <name>`: briefs/_shared.md for _shared,
+    else briefs/roles/<name>.md. Same files T-529 inject reads."""
     if name == "_shared":
-        sys.exit("brief --role _shared refused; shared baseline is briefs/_shared.md")
-    sys.exit("brief --role %r is not a safe role name" % role)
+        return shared_brief_path(board)
+    return role_brief_path(board, name)
+
+
+def seats_with_role(board, role):
+    """Registered seats whose roles (roles.json / DEFAULT_ROLES) include `role`.
+    `_shared` addresses every seat. Retired seats have no record and drop out."""
+    out = []
+    for rec in load_agents(board):
+        owner = (rec or {}).get("owner") or ""
+        if not owner or owner.startswith("agent-"):
+            continue
+        if role == "_shared" or role in (roles_for(board, owner) or []):
+            out.append(owner)
+    return sorted(set(out))
+
+
+def notify_role_context_update(board, who, role, summary):
+    """Tell every seat on the lane that its standing context moved, so the
+    change is read on the next wake (T-529 re-reads the file per prompt; no
+    re-join). Returns the seats messaged."""
+    seats = seats_with_role(board, role)
+    for owner in seats:
+        post_message(board, who, "role context for %s updated by %s: %s" % (role, who, summary[:160]), to=owner)
+    return seats
 
 
 def _read_brief_file(path, limit=6000):
@@ -6287,11 +6318,15 @@ def prompt_text(a, board):
 def cmd_brief(a, board):
     """Give an agent, a role, or a ticket context. Agent and ticket briefs are
     shown on every claim, in `tickets prompt`, and in `boot`. `--role` updates
-    the T-529 inject source at .tickets/briefs/roles/<role>.md (watch/spawn
-    reads the same path). Appends with a timestamp; --file replaces from a
-    file; --show prints. Exactly one target: agent name, --role, or --ticket."""
+    the T-529 inject source at .tickets/briefs/roles/<role>.md (`--role _shared`
+    is .tickets/briefs/_shared.md; watch/spawn reads the same paths) and
+    messages every seat on that lane. Appends with a timestamp; --file replaces
+    from a file; --show prints. Exactly one target: agent name, --role, or --ticket."""
     who = whoami(a.by)
-    role = getattr(a, "role", "") or ""
+    role = getattr(a, "role", None)
+    if role is not None:
+        role = _safe_role_slug(role)  # `--role ""` is a refusal, not "no --role"
+    role = role or ""
     if role and a.ticket:
         sys.exit("brief: use --role or --ticket, not both")
     if role and a.agent and a.text:
@@ -6301,10 +6336,10 @@ def cmd_brief(a, board):
     if role and a.agent:
         sys.exit("brief: use --role or an agent name, not both")
     if role:
-        slug = _safe_role_slug(role)
-        path = role_brief_path(board, slug)
+        slug = role
+        path = role_context_path(board, slug)
         if a.show:
-            print(_read_brief_file(path) or "(no role brief for %s)" % slug)
+            print(_read_brief_file(path) or "(no role context for %s)" % slug)
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if a.file:
@@ -6312,16 +6347,27 @@ def cmd_brief(a, board):
                 body = f.read()
             with open(path, "w") as f:
                 f.write(body if body.endswith("\n") else body + "\n")
-            print("brief for role %s replaced from %s" % (slug, a.file))
+            print("role context for %s replaced from %s" % (slug, a.file))
+            summary = "replaced from %s" % a.file
         elif a.text:
             exists = os.path.exists(path)
             with open(path, "a") as f:
                 if not exists:
-                    f.write("# Role brief for %s\n\n" % slug)
+                    f.write("# Role context: %s\n\n" % slug)
                 f.write("- %s [%s] %s\n" % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), who, a.text))
             print("added to %s" % path)
+            summary = a.text
         else:
             sys.exit("give context text, --file, or --show")
+        seats = notify_role_context_update(board, who, slug, summary)
+        if seats:
+            print("messaged %d seat%s (%s); they read %s on their next wake"
+                  % (len(seats), "" if len(seats) == 1 else "s", ", ".join(seats), os.path.basename(path)))
+        elif slug == "_shared":
+            print("no seats registered on this board yet; every seat reads _shared.md on its next wake")
+        else:
+            print("warning: no seat on this board has role %r yet (roles come from `join --roles`); "
+                  "the context is stored and injected once one joins" % slug)
         return
     if a.ticket:
         t = load(board, a.ticket)
@@ -7331,7 +7377,7 @@ def cmd_spawn(a, board):
         print("worktree %s (branch %s)" % (wt, owner))
     if a.brief:
         bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
-                                role="", by=whoami())
+                                role=None, by=whoami())
         _silent(lambda: cmd_brief(bn, board))
     inherited = _inherit_settings(root, wt)
     if inherited:
@@ -9280,8 +9326,9 @@ def main():
     c = sub.add_parser("brief", help="give an agent, role, or ticket context (shown on claim, in prompt, in boot)")
     c.add_argument("agent", nargs="?", default="")
     c.add_argument("text", nargs="?", default="")
-    c.add_argument("--role", default="",
-                   help="update role standing context at .tickets/briefs/roles/<role>.md (T-529 inject source)")
+    c.add_argument("--role", default=None,
+                   help="update role standing context at .tickets/briefs/roles/<role>.md, or _shared for "
+                        ".tickets/briefs/_shared.md (T-529 inject source; seats on that lane are messaged)")
     c.add_argument("--ticket", default="", help="attach to a ticket instead (owner is messaged)")
     c.add_argument("--file", default="", help="replace the agent or role brief from a file")
     c.add_argument("--show", action="store_true")

@@ -70,9 +70,13 @@ def test_brief_role_append_creates_contract_file(board):
     path = board / "briefs" / "roles" / "backend.md"
     assert path.is_file()
     text = path.read_text()
-    assert text.startswith("# Role brief for backend\n")
+    assert text.startswith("# Role context: backend\n")
     assert "Prefer one file per change." in text
     assert "added to" in r.stdout and str(path) in r.stdout
+    # Same '- <ts> [by] text' line style as the agent brief.
+    assert "[master] Prefer one file per change." in text
+    # Nobody has joined with --roles backend yet: stored, but say so.
+    assert "no seat on this board has role 'backend'" in r.stdout
     # Shared baseline is a sibling, not briefs/roles/_shared.md
     assert not (board / "briefs" / "roles" / "_shared.md").exists()
 
@@ -86,14 +90,14 @@ def test_brief_role_append_then_replace_and_show(board, tmp_path):
     second = path.read_text()
     assert first in second
     assert "second standing line" in second
-    assert second.count("# Role brief for docs") == 1
+    assert second.count("# Role context: docs") == 1
 
     src = tmp_path / "role.md"
-    src.write_text("# Role brief for docs\n\nreplace body\n")
+    src.write_text("# Role context: docs\n\nreplace body\n")
     r = run(board, "brief", "--role", "docs", "--file", str(src), agent="master")
     assert r.returncode == 0, r.stderr
-    assert path.read_text() == "# Role brief for docs\n\nreplace body\n"
-    assert "brief for role docs replaced from" in r.stdout
+    assert path.read_text() == "# Role context: docs\n\nreplace body\n"
+    assert "role context for docs replaced from" in r.stdout
 
     shown = run(board, "brief", "--role", "docs", "--show")
     assert shown.returncode == 0
@@ -103,16 +107,75 @@ def test_brief_role_append_then_replace_and_show(board, tmp_path):
 def test_brief_role_show_missing(board):
     r = run(board, "brief", "--role", "console", "--show")
     assert r.returncode == 0
-    assert "(no role brief for console)" in r.stdout
+    assert "(no role context for console)" in r.stdout
 
 
-def test_brief_role_rejects_traversal_and_shared(board):
-    for bad in ("../agent", "backend/../agent", "foo/bar", "_shared", ".", ".."):
+def test_brief_role_rejects_traversal_and_empty(board):
+    for bad in ("../agent", "backend/../agent", "foo/bar", ".", "..", "_hidden", ""):
         r = run(board, "brief", "--role", bad, "nope", agent="master")
         assert r.returncode != 0, bad
+        assert "brief --role" in r.stderr, bad
     assert not (board / "briefs" / "roles").exists()
     # Traversal must not write outside the roles/ directory either.
     assert not (board.parent / "agent.md").exists()
+    # Refusals are explained, not just exit codes.
+    r = run(board, "brief", "--role", "", "nope", agent="master")
+    assert "needs a role name" in r.stderr
+    r = run(board, "brief", "--role", "foo/bar", "nope", agent="master")
+    assert "not a role name" in r.stderr and "join --roles" in r.stderr
+
+
+def test_brief_role_shared_addresses_lane_wide_file(board, tmp_path):
+    """--role _shared is the lane-wide baseline T-529 injects for every seat."""
+    run(board, "join", "alice", "--roles", "backend")
+    run(board, "join", "bob", "--roles", "docs")
+    r = run(board, "brief", "--role", "_shared", "Board-first updates.", agent="master")
+    assert r.returncode == 0, r.stderr + r.stdout
+    shared = board / "briefs" / "_shared.md"
+    assert shared.is_file()
+    assert shared.read_text().startswith("# Role context: _shared\n")
+    assert "Board-first updates." in shared.read_text()
+    assert not (board / "briefs" / "roles" / "_shared.md").exists()
+    # Every seat is on the shared lane.
+    assert "messaged 2 seats (alice, bob)" in r.stdout
+    for who in ("alice", "bob"):
+        inbox = run(board, "inbox", agent=who).stdout
+        assert "role context for _shared updated by master" in inbox, who
+        assert "Board-first updates." in run(board, "prompt", "--agent", who).stdout
+
+    src = tmp_path / "shared.md"
+    src.write_text("# Role context: _shared\n\nnew baseline\n")
+    r = run(board, "brief", "--role", "_shared", "--file", str(src), agent="master")
+    assert r.returncode == 0, r.stderr
+    assert shared.read_text() == "# Role context: _shared\n\nnew baseline\n"
+    shown = run(board, "brief", "--role", "_shared", "--show")
+    assert shown.stdout.strip().endswith("new baseline")
+
+
+def test_brief_role_messages_only_seats_on_that_lane(board, tmp_path):
+    """Seats whose roles include <role> hear about the update; others do not.
+    No re-join is needed: the next prompt render re-reads the file."""
+    run(board, "join", "alice", "--roles", "backend")
+    run(board, "join", "bob", "--roles", "backend,docs")
+    run(board, "join", "carol", "--roles", "console")
+    r = run(board, "brief", "--role", "backend", "Pin torch==2.5.1.", agent="master")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "messaged 2 seats (alice, bob)" in r.stdout
+    assert "next wake" in r.stdout
+    for who in ("alice", "bob"):
+        inbox = run(board, "inbox", agent=who).stdout
+        assert "role context for backend updated by master: Pin torch==2.5.1." in inbox, who
+    assert "role context for backend" not in run(board, "inbox", agent="carol").stdout
+    # Replace notifies too (the whole file changed under them).
+    src = tmp_path / "backend.md"
+    src.write_text("# Role context: backend\n\nfresh\n")
+    r = run(board, "brief", "--role", "backend", "--file", str(src), agent="master")
+    assert "messaged 2 seats (alice, bob)" in r.stdout
+    assert "replaced from" in run(board, "inbox", agent="alice").stdout
+    # Retired seats drop out of the lane.
+    run(board, "retire", "alice", agent="master")
+    r = run(board, "brief", "--role", "backend", "after retire", agent="master")
+    assert "messaged 1 seat (bob)" in r.stdout
 
 
 def test_brief_role_rejects_agent_or_ticket_combo(board):
@@ -161,8 +224,11 @@ def test_role_brief_path_contract_helpers():
     assert t.shared_brief_path(board) == "/tmp/board/briefs/_shared.md"
     assert t.role_brief_path(board, "../x") is None
     assert t.role_brief_path(board, "_shared") is None
+    assert t.role_context_path(board, "_shared") == "/tmp/board/briefs/_shared.md"
+    assert t.role_context_path(board, "backend") == "/tmp/board/briefs/roles/backend.md"
     assert t._safe_role_slug("docs") == "docs"
+    assert t._safe_role_slug("_shared") == "_shared"
     with pytest.raises(SystemExit):
         t._safe_role_slug("../x")
     with pytest.raises(SystemExit):
-        t._safe_role_slug("_shared")
+        t._safe_role_slug("")

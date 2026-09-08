@@ -177,7 +177,7 @@ not store conversation and it is not a memory product.
 
 | File | Who sees it | How you write it |
 |---|---|---|
-| `.tickets/briefs/_shared.md` | every seat | edit the file |
+| `.tickets/briefs/_shared.md` | every seat | `tickets brief --role _shared "…"` or `--file` |
 | `.tickets/briefs/roles/<role>.md` | seats whose `join --roles` include `<role>` | `tickets brief --role <role> "…"` or `--file` |
 | `.tickets/briefs/<agent>.md` | that **worker** on `tickets prompt` / claim | `tickets brief <agent> "…"` or `--file` |
 
@@ -189,15 +189,10 @@ them; do not expect watch/spawn to load them.
 Seed on a fresh board:
 
 ```sh
-# Shared baseline — create once; inject reads this path only
-mkdir -p .tickets/briefs/roles
-cat > .tickets/briefs/_shared.md <<'EOF'
-# Shared seat context
-
-- One ticket at a time. Own worktree. Board-only comms (`tickets msg`).
-- If blocked: `tickets msg "stuck: …" --to <master> --re <id>` early.
-- Do not edit `.tickets/` by hand. Do not run `tickets clear`.
-EOF
+# Shared baseline — every seat reads .tickets/briefs/_shared.md
+tickets brief --role _shared "One ticket at a time. Own worktree. Board-only comms (tickets msg)."
+tickets brief --role _shared "If blocked: tickets msg 'stuck: ...' --to <master> --re <id> early."
+tickets brief --role _shared "Do not edit .tickets/ by hand. Do not run tickets clear."
 
 # Lane files — append (creates the file) or replace from --file
 tickets brief --role backend "Implementation and wiring. Ship change + tests. Do not hold review."
@@ -214,8 +209,14 @@ tickets prompt --master --agent boss     # master / drive prompt + role context
 ```
 
 `tickets brief --role` **appends** a timestamped line. `--file` **replaces**
-the whole file. `--role _shared` is refused — edit `_shared.md` yourself.
+the whole file. `--role _shared` addresses `.tickets/briefs/_shared.md`.
 Exactly one target: agent name, `--role`, or `--ticket`.
+
+Every update **messages the seats on that lane** (`role context for backend
+updated by boss: …`; `_shared` reaches every seat). No re-join is needed: the
+next `watch`/`spawn` prompt re-reads the file. If no seat has joined with that
+role yet the command warns but still stores the text. Empty or unsafe role
+names (`../x`, `foo/bar`) are refused.
 
 Missing role file is not an error. That lane simply has no extra paragraph.
 Do not treat silence as "it loaded the template."
