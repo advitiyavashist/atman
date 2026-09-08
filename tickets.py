@@ -5816,7 +5816,7 @@ def cmd_route(a, board):
         if a.redo:
             return True
         if _deps_done(t):
-            return not t.get("suggested")
+            return not t.get("suggested") and not _reserved_agent(t)
         return not _reserved_agent(t)
 
     ready_first = sorted(
