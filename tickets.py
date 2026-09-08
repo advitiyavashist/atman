@@ -5603,21 +5603,23 @@ def cmd_route(a, board):
     if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False) or getattr(a, "score", False):
         return _scheduler_cmd()(
             a, board, load_all, load_workforce, load_roles, load_agents,
-            score_agent, traj_event)
+            score_agent, traj_event, DEFAULT_ROLES)
+    from ticket_board.scheduler import (
+        DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, format_excluded, _candidate_names)
     tickets = load_all(board)
     wf = load_workforce(board)
     roles = load_roles(board)
     agents = dict((r["owner"], r) for r in load_agents(board))
-    names = sorted(set(list(wf) + [n for n in roles if roles[n]]))
-    if a.only:
-        names = [n for n in names if n in a.only]
-    # exclude agents that are out on a limit
-    names = [n for n in names if not agents.get(n, {}).get("limit")]
+    alive_within = int(getattr(a, "alive_within", None) or DEFAULT_ALIVE_WITHIN_MIN)
     done = set(t["id"] for t in tickets if t["status"] == "done")
     load_ = {}
     for t in tickets:
         if t["status"] == "claimed":
             load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    names, excluded = filter_eligible(
+        _candidate_names(wf, roles, only=a.only), wf, roles, agents, load_, DEFAULT_ROLES,
+        alive_within_min=alive_within)
+    print(format_excluded(excluded))
     ready_first = sorted(
         [t for t in tickets if t["status"] == "open" and (not t.get("suggested") or a.redo)],
         key=lambda t: (0 if all(d in done for d in t.get("deps", [])) else 1, t.get("priority", 2), t["id"]))
@@ -9144,6 +9146,8 @@ def main():
     c.add_argument("--write-scorecard", nargs="?", const="docs/turns-scorecard.md",
                    metavar="PATH",
                    help="with --shadow --score: also write markdown scorecard (default docs/turns-scorecard.md)")
+    c.add_argument("--alive-within", type=int, default=90,
+                   help="exclude seats with no heartbeat/here/run within N minutes (default 90)")
     c.add_argument("--apply", action="store_true",
                    help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)

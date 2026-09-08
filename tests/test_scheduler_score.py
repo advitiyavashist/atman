@@ -45,13 +45,19 @@ def _event(kind, ticket, agent, model, at, **extra):
     return rec
 
 
-def _finish_with_turns(tid, agent, model, n_turns, day, sha=None, release_sha=None):
+def _finish_with_turns(tid, agent, model, n_turns, day, sha=None, release_sha=None, warmup=False):
     extra = {}
     if sha:
         extra["sha"] = sha
     if release_sha:
         extra["release_sha"] = release_sha
-    evs = [_event("claim", tid, agent, model, "%sT10:00:00Z" % day, **extra)]
+    evs = []
+    if warmup:
+        evs.extend([
+            _event("run_start", "T-000", agent, model, "%sT09:00:00Z" % day, run_no=1, **extra),
+            _event("run_end", "T-000", agent, model, "%sT09:01:00Z" % day, run_no=1, exit=0, **extra),
+        ])
+    evs.append(_event("claim", tid, agent, model, "%sT10:00:00Z" % day, **extra))
     for i in range(n_turns):
         evs.append(_event("run_start", tid, agent, model,
                           "%sT10:%02d:00Z" % (day, i + 1), run_no=i + 1, **extra))
@@ -118,7 +124,7 @@ def test_score_leakage_post_claim_record_ignored(board):
 
 def test_score_command_read_only(board):
     _join(board, "alice", "backend", "opus", "high")
-    events = _finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01")
+    events = _finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", warmup=True)
     _stamp(board, "T-001", "alice", "backend", 1)
     _write_jsonl(board, events)
     before = (board / "trajectories.jsonl").read_text()
@@ -143,7 +149,11 @@ def test_score_fixture_t349_two_rows(board):
     events = [json.loads(ln) for ln in FIXTURE.read_text().splitlines() if ln.strip()]
     # second scorable row: alice finishes with bound run_start before T-002's claim
     _stamp(board, "T-010", "sonnet-a", "backend", 2, status="done")
-    events = _finish_with_turns("T-010", "sonnet-a", "sonnet", 2, "2026-09-06") + events
+    events = _finish_with_turns("T-010", "sonnet-a", "sonnet", 2, "2026-09-06", warmup=True) + events
+    events.extend([
+        _event("run_start", "T-010", "sonnet-a", "sonnet", "2026-09-07T14:30:00Z", run_no=3),
+        _event("run_end", "T-010", "sonnet-a", "sonnet", "2026-09-07T14:31:00Z", run_no=3, exit=0),
+    ])
     _write_jsonl(board, events)
     tickets = [json.loads(p.read_text()) for p in board.glob("T-*.json")]
     workforce = json.loads((board / "workforce.json").read_text())
@@ -215,7 +225,7 @@ def test_agreement_na_n0_n1_n2(board):
     assert r0.returncode == 0, r0.stderr
     assert "agreement pre-T-425 (idle review wakes counted): n/a (n=0)" in r0.stdout
     assert "agreement rate:" not in r0.stdout
-    events = _finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", release_sha="8f513fe")
+    events = _finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", release_sha="8f513fe", warmup=True)
     _stamp(board, "T-001", "alice", "backend", 1)
     _write_jsonl(board, events)
     r1 = run(board, "route", "--shadow", "--score", cwd=board.parent)
@@ -226,7 +236,7 @@ def test_agreement_na_n0_n1_n2(board):
     assert "%" not in agree_ln
     assert "0.00" not in agree_ln
     _stamp(board, "T-002", "alice", "backend", 1)
-    events.extend(_finish_with_turns("T-002", "alice", "opus", 2, "2026-05-02", release_sha="8f513fe"))
+    events.extend(_finish_with_turns("T-002", "alice", "opus", 2, "2026-05-02", release_sha="8f513fe", warmup=True))
     _write_jsonl(board, events)
     r2 = run(board, "route", "--shadow", "--score", cwd=board.parent)
     assert r2.returncode == 0, r2.stderr
@@ -240,9 +250,9 @@ def test_pre_flag_and_post_flag_labels_not_mixed_pct(board):
     _join(board, "alice", "backend", "opus", "high")
     events = []
     _stamp(board, "T-001", "alice", "backend", 1)
-    events.extend(_finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", release_sha="21ca63c"))
+    events.extend(_finish_with_turns("T-001", "alice", "opus", 2, "2026-05-01", release_sha="21ca63c", warmup=True))
     _stamp(board, "T-002", "alice", "backend", 1)
-    events.extend(_finish_with_turns("T-002", "alice", "opus", 2, "2026-09-08", release_sha=FLAG_PIN))
+    events.extend(_finish_with_turns("T-002", "alice", "opus", 2, "2026-09-08", release_sha=FLAG_PIN, warmup=True))
     _write_jsonl(board, events)
     tickets = [json.loads(p.read_text()) for p in board.glob("T-*.json")]
     workforce = json.loads((board / "workforce.json").read_text())
