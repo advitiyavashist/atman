@@ -169,7 +169,7 @@ def test_sonnet_rows_are_per_vendor_model():
         assert vm.count("/") == 0, "one vendor model per row: %s" % key
 
 
-def test_cost_est_by_model_groups_by_run_model_not_row_model():
+def test_cost_est_by_run_model_honest_key_and_per_run_grouping():
     evs = [
         {"v": 1, "at": "2026-09-08T01:00:00Z", "kind": "claim", "ticket": "T-910",
          "agent": "alice"},
@@ -181,7 +181,45 @@ def test_cost_est_by_model_groups_by_run_model_not_row_model():
     row = rep["tickets"][0]
     assert row["model"] == "opus"
     assert row["cost_usd_est"] == pytest.approx(2.0, rel=1e-3)
-    by_model = rep["aggregates"]["cost_est_by_model"]
-    assert len(by_model) == 1
-    assert by_model[0]["model"] == "sonnet"
-    assert by_model[0]["total"] == pytest.approx(2.0, rel=1e-3)
+    aggs = rep["aggregates"]
+    assert "cost_est_by_model" not in aggs
+    by_run_model = aggs["cost_est_by_run_model"]
+    assert len(by_run_model) == 1
+    assert by_run_model[0]["model"] == "sonnet"
+    assert by_run_model[0]["total"] == pytest.approx(2.0, rel=1e-3)
+
+
+def test_cost_est_by_run_model_keeps_unbound_runs():
+    evs = [
+        _run_end("T-921", "opus", tokens_in=1_000_000, tokens_out=0),
+        _run_end(None, "opus", tokens_in=1_000_000, tokens_out=0, agent="cos-opus"),
+    ]
+    rep = build_turns_report(evs, tickets=[{"id": "T-921", "status": "claimed"}])
+    aggs = rep["aggregates"]
+    run_total = sum(b["total"] for b in aggs["cost_est_by_run_model"])
+    assert run_total == pytest.approx(10.0, rel=1e-3)
+    assert aggs["cost_est"]["total"] == pytest.approx(5.0, rel=1e-3)
+    assert aggs["cost_est_unbound"]["total"] == pytest.approx(5.0, rel=1e-3)
+    assert aggs["cost_est"]["total"] + aggs["cost_est_unbound"]["total"] == pytest.approx(
+        run_total, rel=1e-3)
+
+
+def test_cost_est_unbound_groups_by_agent_and_model():
+    evs = [
+        _run_end(None, "opus", tokens_in=1_000_000, tokens_out=0, agent="cos-opus"),
+        _run_end(None, "opus", tokens_in=500_000, tokens_out=0, agent="cos-opus"),
+        _run_end(None, "sonnet", tokens_in=1_000_000, tokens_out=0, agent="cos-opus"),
+    ]
+    rep = build_turns_report(evs, tickets=[])
+    unbound = rep["aggregates"]["cost_est_unbound"]
+    assert unbound["n"] == 3
+    assert unbound["total"] == pytest.approx(9.5, rel=1e-3)
+    assert len(unbound["by_agent"]) == 2
+    opus = next(r for r in unbound["by_agent"] if r["model"] == "opus")
+    sonnet = next(r for r in unbound["by_agent"] if r["model"] == "sonnet")
+    assert opus["agent"] == "cos-opus"
+    assert opus["model"] == "opus"
+    assert opus["n"] == 2
+    assert opus["total"] == pytest.approx(7.5, rel=1e-3)
+    assert sonnet["n"] == 1
+    assert sonnet["total"] == pytest.approx(2.0, rel=1e-3)

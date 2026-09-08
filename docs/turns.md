@@ -131,9 +131,14 @@ T-396 added `cost_usd`, `tokens_in`, `tokens_out` and the three `cost*`
 aggregates. T-480 adds optional `cost_usd_est`, `cost_source`, and
 `cost_price_as_of` on rows that have tokens but no harness cost, plus
 `aggregates.cost_est*` (list-price estimates from `src/ticket_board/prices.json`;
-not a bill and not fed into T-415 ranking until T-470). The addition is
-**additive**: `v` stays `1`, no existing key was renamed, removed or reordered,
-and the pre-existing keys above are still present on every row.
+not a bill and not fed into T-415 ranking until T-470). T-499 renames
+`cost_est_by_model` → `cost_est_by_run_model` (per-run, not per-ticket row) and
+adds `cost_est_unbound` `{n, total, by_agent:[{agent, model, n, total}]}` for
+token-carrying `run_end` rows with no ticket. **`cost_est` is per-ticket;
+`cost_est_by_run_model` is per-run; they are not a decomposition of each other.**
+T-470 must quote coverage with `n` attached (today ~4% of tickets / ~6% of runs
+on live data). The addition is **additive**: `v` stays `1`, and the pre-existing
+row keys above are still present on every row.
 
 Console (T-372): home hero reads `aggregates.median`; the turns-efficiency
 panel shows worst-10 + per-agent medians from this same object. Do not

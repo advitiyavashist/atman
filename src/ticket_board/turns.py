@@ -457,6 +457,37 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
+    def cost_est_unbound(events):
+        """Token spend on run_ends not bound to any ticket (e.g. review-lane runs)."""
+        by_agent = {}
+        all_ests = []
+        for e in events:
+            if e.get("kind") != "run_end":
+                continue
+            if e.get("ticket"):
+                continue
+            est, _, _ = estimate_run_end_cost(e)
+            if est is None:
+                continue
+            all_ests.append(est)
+            key = (e.get("agent"), e.get("model"))
+            by_agent.setdefault(key, []).append(est)
+        out_by_agent = []
+        for key in sorted(by_agent, key=lambda x: (str(x[0] or ""), str(x[1] or ""))):
+            vals = by_agent[key]
+            agent, model = key
+            out_by_agent.append({
+                "agent": agent,
+                "model": model,
+                "n": len(vals),
+                "total": round(sum(vals), 6),
+            })
+        return {
+            "n": len(all_ests),
+            "total": round(sum(all_ests), 6) if all_ests else None,
+            "by_agent": out_by_agent,
+        }
+
     public_rows = []
     for r in rows:
         pub = {k: r[k] for k in ROW_KEYS}
@@ -485,7 +516,8 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "cost_est": cost_est_agg,
             "cost_est_by_agent": cost_group(
                 lambda r: r.get("owner"), "agent", field="cost_usd_est"),
-            "cost_est_by_model": cost_est_by_run_model(sel),
+            "cost_est_by_run_model": cost_est_by_run_model(sel),
+            "cost_est_unbound": cost_est_unbound(sel),
         },
     }
 
