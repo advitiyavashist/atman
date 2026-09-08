@@ -137,3 +137,6 @@ tickets guide                                                # connect claude / 
 Then read the worker loop and master loop sections of
 [README.md](../README.md), and `tickets connect` for wiring a real agent to the
 board.
+
+Taking the master seat in a fresh session:
+[onboarding/master-howto.md](onboarding/master-howto.md).
