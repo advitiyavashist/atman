@@ -40,12 +40,12 @@ describe("copy rules that are contract, not styling", () => {
   });
 
   it("labels the 24h completion stat Done(24h), distinct from ticket Done", () => {
-    expect(done24hLabel).toBe("Done(24h)");
+    expect(done24hLabel).toBe("Done (24h)");
     expect(ticketStatusLabel({ state: "done", dependency_blocked: false })).toBe("Done");
   });
 
-  it("keeps the day-one path as Objective, Team, Work", () => {
-    expect(DAY_ONE_STEPS.map((s) => s.title)).toEqual(["Objective", "Team", "Work"]);
+  it("keeps the day-one path as Work, Team, Objective", () => {
+    expect(DAY_ONE_STEPS.map((s) => s.title)).toEqual(["Work", "Team", "Objective"]);
   });
 
   it("renders the stale-stream copy from the design doc verbatim in shape", () => {

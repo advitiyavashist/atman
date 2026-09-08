@@ -133,8 +133,7 @@ def test_ui_html_has_seat_thread_ia_without_football():
         "isBoardBroadcast", "visibleMessages", "seat_threads",
         "data-seat-chat", "it.id||'board'",
         "class=\"intervene\"", ">Msg<", ">Work<",
-        "tickets msg --to", "Not a shared-memory brain",
-        "vector DB", ".tickets/briefs/",
+        "tickets msg --to",
         "Channel-wide", "1:1 with this BYOA seat",
         "Intervene ·",
     ):

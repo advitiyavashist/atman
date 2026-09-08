@@ -1,4 +1,4 @@
-import { DAY_ONE_STEPS, dayOneLede, dayOneIntervene } from "../copy";
+import { DAY_ONE_STEPS, dayOneHonesty, dayOneIntervene, dayOneLede } from "../copy";
 
 /** Day-one empty board: Objective · Team · Work, then Intervene. */
 export function DayOnePath() {
@@ -19,6 +19,7 @@ export function DayOnePath() {
           </li>
         ))}
       </ol>
+      <p className="empty-honesty">{dayOneHonesty}</p>
       <p className="empty-intervene">{dayOneIntervene}</p>
     </div>
   );

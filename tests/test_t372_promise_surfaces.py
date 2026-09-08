@@ -107,7 +107,7 @@ def test_team_seats_follow_brand_lock():
     assert "Who’s present. What’s uncovered." in ui
     assert "Coverage by work, not fixed role." in ui
     assert "Open seat — uncovered work." in ui
-    assert "self ↔ whole" in ui
+    assert "self ↔ whole" not in ui
     assert "renderSeats" in ui
     assert 'id="seats"' in ui
     assert "lane-ready" in ui and "lane-operator" in ui

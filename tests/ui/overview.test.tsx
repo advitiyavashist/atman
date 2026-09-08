@@ -20,7 +20,8 @@ describe("Overview, reading a live board", () => {
     renderLive(<Overview onNavigate={() => {}} onOpenMasterPanel={() => {}} />, harness);
     await waitFor(() => expect(screen.getByText(overviewEmpty.empty_state.headline)).toBeInTheDocument());
     expect(screen.getByTestId("day-one-path")).toBeInTheDocument();
-    expect(screen.getByTestId("day-one-path").textContent).toMatch(/Objective · Team · Work · Intervene/);
+    expect(screen.getByTestId("day-one-path").textContent).toMatch(/Work · Team · Objective/);
+    expect(screen.getByTestId("day-one-path").textContent).toMatch(/Median turns and yield@cost stay/);
     expect(screen.getByTestId("day-one-path").querySelectorAll("li")).toHaveLength(3);
   });
 

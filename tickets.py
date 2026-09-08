@@ -7874,7 +7874,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .empty-steps .n{flex:none;width:22px;height:22px;border-radius:50%;background:var(--chip);border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--fg)}
 .empty-board .cta{margin-top:6px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
 .empty-board .empty-cta{margin-top:14px}
-.empty-intervene{margin-top:14px}
+.empty-honesty,.empty-intervene{margin-top:14px}
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
 .hero-eyebrow{margin:0 0 6px;font-size:12px;color:var(--mute);font-weight:650}
@@ -7971,7 +7971,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
 <div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
-<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
+<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/7</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
   <button type="button" data-tab-btn="board" class="on">Work</button>
@@ -8002,7 +8002,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 </div>
 <div class="pane" id="pane-agents">
   <div class="seats-head">
-    <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="constellation — self to whole">
+    <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="atman">
       <circle cx="10" cy="7.8" r="3.35" fill="#e8e6e1"/>
       <circle cx="22.4" cy="8.8" r="3.35" fill="#e8e6e1"/>
       <circle cx="6.6" cy="17.6" r="3.35" fill="#e8e6e1"/>
@@ -8011,9 +8011,8 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
     </svg>
     <div>
       <h2 class="seats-title">Team</h2>
-      <p class="seats-vibe">self ↔ whole</p>
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
-      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — same <span class="mono">tickets msg --to</span>. Standing context is <span class="mono">.tickets/briefs/</span>, not a shared-memory brain or vector DB.</p>
+      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">tickets msg --to</span>.</p>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -8106,9 +8105,12 @@ function renderPromise(p){
   setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);
   setTxt('heroYieldVal',yld);setTxt('hdrYieldVal',yld);
   const yh=document.getElementById('heroYieldHint');
-  if(!yh)return;
-  if(!p||p.yield_per_usd==null)yh.textContent=(p&&p.n_unmeasured_cost)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';
-  else yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
+  if(yh){
+    if(!p||p.yield_per_usd==null)yh.textContent=(p&&p.n_unmeasured_cost)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';
+    else yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
+  }
+  const panel=document.getElementById('turnsPanel');
+  if(panel&&(!p||p.median_turns==null)&&( !p||p.yield_per_usd==null))panel.open=true;
 }
 function renderTurns(t){
   const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
@@ -8202,7 +8204,7 @@ function renderChatHead(){
   if(!el)return;
   if(THREAD_SEAT){
     el.innerHTML='<h2 class="seats-title">Seat · '+esc(THREAD_SEAT)+'</h2>'+
-      '<p class="seats-lede">1:1 with this BYOA seat. Chat is <span class="mono">tickets msg --to '+esc(THREAD_SEAT)+'</span>. Standing context is <span class="mono">.tickets/briefs/</span>. Not a shared-memory brain or vector DB.</p>';
+      '<p class="seats-lede">1:1 with this BYOA seat. <span class="mono">tickets msg --to '+esc(THREAD_SEAT)+'</span>.</p>';
   }else{
     el.innerHTML='<h2 class="seats-title">Board</h2>'+
       '<p class="seats-lede">Channel-wide. Directed seat mail lives on that seat’s thread.</p>';
@@ -8362,7 +8364,7 @@ async function load(){
     return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
       '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
-      '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done(24h)</span></div>'+
+      '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
       '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div>'+
       '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
@@ -8378,7 +8380,8 @@ function renderOnboarding(ob){
     ['first_ticket','Work on the board','tickets quickstart'],
     ['first_agent','You registered','tickets quickstart --agent <you>'],
     ['first_review','First review submitted','tickets review <id> --notes "..."'],
-    ['first_merge','First merge','tickets done <id> --notes "..."'],
+    ['first_merge','First merge','tickets merge'],
+    ['second_harness','Second harness','tickets join <name> --harness …'],
     ['objective_set','Objective set','tickets objective "..."']
   ];
   const done=steps.filter(s=>ob&&ob[s[0]]).length;
@@ -8402,14 +8405,14 @@ function renderEmptyBoard(d){
   el.hidden=!empty;
   if(!empty)return;
   el.innerHTML='<p class="empty-kicker">Day one</p>'+
-    '<p><b>Three steps.</b> Then intervene when a seat needs you. Objective · Team · Work · Intervene.</p>'+
+    '<p><b>Three steps.</b> Work · Team · Objective — then intervene when a seat needs you.</p>'+
     '<ol class="empty-steps" id="emptySteps">'+
-      '<li><span class="n">1</span><div><b>Objective</b> — name what the team finishes.<div class="cta">tickets objective "…"</div></div></li>'+
-      '<li><span class="n">2</span><div><b>Team</b> — register a seat. Coverage by work, not a fixed role.<div class="cta">tickets join &lt;you&gt; --roles backend</div></div></li>'+
-      '<li><span class="n">3</span><div><b>Work</b> — put a ticket on the board, then claim it.<div class="cta">tickets create "…" · tickets next</div></div></li>'+
+      '<li><span class="n">1</span><div><b>Work</b> — seed the board and claim a first ticket.<div class="cta">tickets quickstart --agent &lt;you&gt;</div></div></li>'+
+      '<li><span class="n">2</span><div><b>Team</b> — plug a second harness. Coverage by work, not a fixed role.<div class="cta">tickets join … --harness</div></div></li>'+
+      '<li><span class="n">3</span><div><b>Objective</b> — name what the team finishes.<div class="cta">tickets objective "…"</div></div></li>'+
     '</ol>'+
-    '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock. No silent auto-promote.</p>'+
-    '<div class="cta empty-cta">One command: tickets quickstart --agent &lt;you&gt;</div>';
+    '<p class="empty-honesty">Median turns and yield@cost stay — until a done ticket reports.</p>'+
+    '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock.</p>';
 }
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
@@ -8424,10 +8427,16 @@ def _onboarding_checklist(board, tickets):
     initialized = os.path.isfile(master_path(board)) or os.path.isfile(os.path.join(board, "roles.json"))
     agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
     workforce = load_workforce(board)
+    names = set()
+    for rec in agents:
+        if rec.get("name"):
+            names.add(rec["name"])
+    names.update(workforce)
     return {
         "initialized": initialized,
         "first_ticket": len(tickets) > 0,
-        "first_agent": bool(agents or workforce),
+        "first_agent": bool(names),
+        "second_harness": len(names) >= 2,
         "first_review": any(t.get("status") in ("review", "done") for t in tickets),
         "first_merge": any(t.get("status") == "done" for t in tickets),
         "objective_set": bool((load_objective(board) or {}).get("text")),
