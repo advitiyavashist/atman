@@ -29,7 +29,8 @@ def _worked(board):
     return board, repo
 
 
-def test_run_start_binds_review_owned_ticket(board, tmp_path):
+def test_run_start_omits_review_when_mine_empty(board, tmp_path):
+    """T-563: IN REVIEW with empty mine must not bind on watch (T-377 claimed unchanged)."""
     b, repo = _worked(board)
     run(b, "next", "--role", "backend", agent="alice", cwd=repo)
     tid = "T-002"
@@ -41,8 +42,10 @@ def test_run_start_binds_review_owned_ticket(board, tmp_path):
         agent="alice", cwd=repo)
     start = events(b, kind="run_start")
     end = events(b, kind="run_end")
-    assert len(start) == 1 and start[0].get("ticket") == tid
-    assert len(end) == 1 and end[0].get("ticket") == tid
+    assert len(start) == 1
+    assert "ticket" not in start[0] or start[0].get("ticket") != tid
+    assert len(end) == 1
+    assert "ticket" not in end[0] or end[0].get("ticket") != tid
 
 
 def test_run_start_claimed_unchanged(board, tmp_path):
@@ -69,9 +72,9 @@ def test_run_start_omits_ticket_when_idle(board, tmp_path):
 
 
 def test_turns_n_increases_for_review_owned_watch_pair(board, tmp_path, monkeypatch):
-    """T-425: idle review-owned echo (no bound-ticket write) is not a turn.
+    """T-425/T-563: idle review-owned echo (no bound-ticket write) is not a turn.
 
-    Binding the run_start.ticket still happens (tests above); n_measured must
+    run_start omits the stale IN REVIEW ticket when mine is empty; n_measured must
     not rise from the idle pulse.
     """
     for var in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"):

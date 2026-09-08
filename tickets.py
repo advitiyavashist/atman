@@ -1165,9 +1165,9 @@ def _here_ticket(board, owner):
 def _watch_bind_ticket(board, owner):
     """Ticket id for watch run_start/run_end pairing.
 
-    T-543: after `tickets here` with mine empty clears agent.json ticket=,
-    do not re-bind an IN REVIEW id from a board scan. T-425: when review
-    submit left ticket= on the agent record, idle pulses still pair to it.
+    Claimed holds bind from the board. agent.json ticket= may bind claimed or
+    blocked only — never IN REVIEW when mine is empty (T-543/T-563). T-425
+    idle pulses pair via run_id, not a stale review ticket= field.
     """
     for t in load_all(board):
         if t.get("status") == "claimed" and t.get("owner") == owner:
@@ -1182,7 +1182,7 @@ def _watch_bind_ticket(board, owner):
     except (IOError, ValueError):
         return ""
     if isinstance(t, dict) and t.get("owner") == owner and t.get("status") in (
-            "claimed", "review", "blocked"):
+            "claimed", "blocked"):
         return tid
     return ""
 

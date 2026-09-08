@@ -70,8 +70,9 @@ def test_idle_review_watch_once_pairs_turns_stay_at_claim(board, tmp_path, monke
     assert after["v"] == 1
     from ticket_board.turns import ROW_KEYS
     assert tuple(after["tickets"][0].keys()) == ROW_KEYS
-    ends = events(board, kind="run_end", ticket=tid)
+    ends = events(board, kind="run_end", agent="alice")
     assert len(ends) == 4
+    assert ends[0].get("ticket") == tid
     assert ends[0].get("bound_write") is True
     assert "bound_write" not in ends[1]
     assert ends[-1].get("exit") == 1
