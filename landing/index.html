@@ -88,9 +88,12 @@
     <section id="start">
       <h2>Start</h2>
       <p class="lead">Clone the repo. Run it locally.</p>
-      <pre><code>git clone https://github.com/advitiyavashist/atman.git
-cd atman
-# tickets init — then join harnesses and set an objective</code></pre>
+      <pre><code>cd your-project
+tickets quickstart --agent alice        # or: export TICKET_AGENT=alice first
+tickets next                            # claims the first sample ticket
+tickets update T-001 "poking at it"
+tickets review T-001 --notes "what I did, what I ran, what I decided"
+tickets quickstart --remove             # delete the samples when you are done</code></pre>
     </section>
 
     <section id="close">
