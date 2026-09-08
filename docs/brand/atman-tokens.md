@@ -49,7 +49,7 @@ Chrome wordmark is lowercase `atman` with tracking — never `ATMAN`.
 |---|---|---|---|
 | `--intervene` | `#e0a53d` (warn amber) | Intervene CTAs: route, unblock, reassign, nudge, msg. Operator is about to act. | Do not replace this amber with mint. Do not use mint on primary Intervene buttons. |
 | `--warn` | `#e0a53d` | Attention, aging updates, In-flight lane. Same hex as `--intervene`. | |
-| `--live` | `#3ee8c5` electric mint | Pulse / live-seat indicator only. “Someone is on the pitch.” One 8px dot, or a 1-item chip. | Page wash, glow field, neon spam, Intervene CTA fill. |
+| `--live` | `#3ee8c5` electric mint | Pulse / live-seat indicator only. One 8px dot, or a 1-item chip. | Page wash, glow field, neon spam, Intervene CTA fill. |
 
 `--live` is a signal, not a theme. If a control fires an intervene, it is amber. If a seat is live, it may pulse mint.
 

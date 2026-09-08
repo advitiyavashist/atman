@@ -47,8 +47,9 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
         "turnsPanel", "Turns efficiency", "turnsWorst", "turnsAgents",
         "renderTurns", "turns-grid", "Worst tickets", "Per-agent median",
         "usagePanel", "Usage / cost", "usageHonesty", "Not reported by harness",
-        "renderUsage", "coverageLede", "Total Football.", "band-keep", "band-attack",
-        "renderPitch", "uncovered", "emptyBoard", "nextStep", "obSteps",
+        "renderUsage", "coverageLede", "Who’s present. What’s uncovered.",
+        "Coverage by work, not fixed role.", "lane-operator", "lane-ready",
+        "renderSeats", "Open seat — uncovered work.", "emptyBoard", "nextStep", "obSteps",
         'data-tab-btn="board"', 'data-tab-btn="agents"', 'data-tab-btn="messages"',
         "fetch('/msg'", "mentionBar",
     ):
@@ -88,17 +89,37 @@ def test_promise_chips_strip_on_home_objective():
 
 
 def test_promise_hero_copy_nits():
-    """T-372 follow-up: eyebrow + median hint + Total Football + soft a11y on #promiseHero."""
+    """T-372 follow-up: eyebrow + median hint + soft a11y on #promiseHero."""
     ui = _ui_html()
     assert "Fewest turns. Max output at least cost." in ui
     assert "Lower is better · unknown is not zero" in ui
-    assert "Total Football." in ui
     assert 'id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."' in ui
     assert "tickets turns --json" not in ui
-    assert "Total football." not in ui
     # Median hint is static copy; do not overwrite it with CLI/measured text.
     assert "heroMedianHint').textContent" not in ui
     assert 'heroMedianHint").textContent' not in ui
+
+
+def test_team_seats_follow_brand_lock():
+    """Console Team pane: brand-lock copy; no sports pitch chrome."""
+    ui = _ui_html()
+    assert "Who’s present. What’s uncovered." in ui
+    assert "Coverage by work, not fixed role." in ui
+    assert "Open seat — uncovered work." in ui
+    assert "renderSeats" in ui
+    assert 'id="seats"' in ui
+    assert "lane-ready" in ui and "lane-operator" in ui
+    banned = (
+        "Total Football", "total football", "football", "goalpost",
+        "keeper", "shirts", "midfield", "Attack ·", "Defense ·",
+        "on the pitch", "class=\"pitch\"", "renderPitch", "playerChip",
+        "#2a7a4c", "#14532d", "band-keep", "band-attack",
+    )
+    for word in banned:
+        assert word not in ui, "retired sports copy still in console: %s" % word
+    # Formation-dots mark is constellation only — five circles, no field.
+    assert 'class="mark" viewBox="0 0 32 32"' in ui
+    assert ui.count("<circle ") >= 5
 
 
 def test_board_snapshot_turns_matches_cli_json(board):
@@ -151,13 +172,15 @@ def test_promise_hero_yield_from_harness_cost(board):
     assert agents["bob"]["cost_usd"] == 0.20
 
 
-def test_coverage_uncovered_ready_and_keeper(board):
+def test_coverage_uncovered_ready_and_operator(board):
     run(board, "master", "take", agent="boss")
     run(board, "master", "init", agent="boss")
     run(board, "join", "worker", "--roles", "backend")
     d = json.loads(run(board, "ui", "--json").stdout)
     assert "coverage" in d
-    assert any(k["name"] == "boss" and k["role"] == "master" for k in d["coverage"]["keeper"])
+    assert any(k["name"] == "boss" and k["role"] == "master" for k in d["coverage"]["operator"])
+    assert "keeper" not in d["coverage"]
+    assert "bench" not in d["coverage"]
     # test_wakeup board fixture creates an unowned docs ticket
     assert d["coverage"]["uncovered_ready"]
     worker = next(a for a in d["agents"] if a["name"] == "worker")

@@ -36,7 +36,7 @@ Do not invent a product URL in this file.
 
 ### A — Formation dots (recommended)
 
-3–5 dots in a loose football pitch / constellation. At 16–32px it must read as a **team formation**, not a flowchart. Fluid spacing. Works on dark `#0c0e12`.
+3–5 dots in a loose constellation. At 16–32px it must read as **presence / the whole**, not a flowchart. Fluid spacing. Works on dark `#0c0e12`. Never a literal pitch, goals, or grass.
 
 ### B — Open ring / continuum A (alternate)
 
@@ -62,7 +62,7 @@ Shipped assets live in [`assets/`](assets/).
 
 See [atman-tokens.md](atman-tokens.md). Dark command-board roots. Status color is evidence-backed or it is not shown. No fake utilization percentages.
 
-`--live` is a sparse "someone is on the pitch" signal, not a page wash. Intervene controls stay amber (`--warn` / `--intervene`).
+`--live` is a sparse live-seat signal, not a page wash. Intervene controls stay amber (`--warn` / `--intervene`).
 
 ---
 
@@ -70,8 +70,8 @@ See [atman-tokens.md](atman-tokens.md). Dark command-board roots. Status color i
 
 **Use:** teammates, seats, lanes, coverage, next step, handoff, intervene, objective, roster, BYOA, fewest turns.
 
-**Ban:** DAG, nodes, edges, orchestration framework, "multi-agent SDK", fake telemetry walls, Purview / compliance / shield / enforce chrome, spiritual kitsch.
+**Ban:** DAG, nodes, edges, orchestration framework, "multi-agent SDK", fake telemetry walls, Purview / compliance / shield / enforce chrome, spiritual kitsch, pitch, field, football, Total Football, keeper, shirts, sports formation.
 
-The board is a pitch. Empty seats are uncovered work. The operator intervenes; the product does not silently auto-promote.
+Team: *Who’s present. What’s uncovered.* Empty seat: *Open seat — uncovered work.* Coverage: *Coverage by work, not fixed role.* The operator intervenes; the product does not silently auto-promote.
 
 See also: [TEAM IA v1](../product/atman-team-ia-v1.md).
