@@ -1148,6 +1148,20 @@ def _current_ticket(board, owner):
     return review[0]["id"]
 
 
+def _here_ticket(board, owner):
+    """Ticket id for tickets here (T-543 / T-551).
+
+    Stamp the claimed hold when present; otherwise clear. Never stamp an
+    IN REVIEW id whose live owner is not me (T-551), and never re-bind stale
+    IR when mine is empty (T-543).
+    """
+    claimed = [t["id"] for t in load_all(board)
+               if t.get("status") == "claimed" and t.get("owner") == owner]
+    if claimed:
+        return claimed[0]
+    return ""
+
+
 def _watch_bind_ticket(board, owner):
     """Ticket id for watch run_start/run_end pairing.
 
@@ -4303,12 +4317,8 @@ def cmd_context(a, board):
 def cmd_here(a, board):
     """Manually check in: where am I working, on what."""
     owner = whoami(a.owner)
-    has_claimed = any(
-        t.get("status") == "claimed" and t.get("owner") == owner
-        for t in load_all(board)
-    )
-    # T-543: mine empty -> clear stale IN REVIEW bind; keep cwd/branch/sha.
-    rec = checkin(board, owner, None if has_claimed else "", a.note or "")
+    # T-543/T-551: stamp claimed hold only; never foreign IN REVIEW binds.
+    rec = checkin(board, owner, _here_ticket(board, owner), a.note or "")
     print("%s @ %s" % (owner, rec["worktree"] or rec["cwd"]))
     print("  branch %s@%s%s" % (rec["branch"] or "?", rec["sha"] or "?",
                                "  (%d uncommitted)" % rec["dirty"] if rec["dirty"] else ""))

@@ -767,6 +767,15 @@ def _current_ticket(board, owner):
     return ""
 
 
+def _here_ticket(board, owner):
+    """Ticket id for tickets here (T-543 / T-551). Two-copy of tickets.py."""
+    claimed = [t["id"] for t in load_all(board)
+               if t.get("status") == "claimed" and t.get("owner") == owner]
+    if claimed:
+        return claimed[0]
+    return ""
+
+
 def load_agents(board):
     return _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else []
 
@@ -2824,11 +2833,7 @@ def cmd_context(a, board):
 def cmd_here(a, board):
     """Manually check in: where am I working, on what."""
     owner = whoami(a.owner)
-    has_claimed = any(
-        t.get("status") == "claimed" and t.get("owner") == owner
-        for t in load_all(board)
-    )
-    rec = checkin(board, owner, None if has_claimed else "", a.note or "")
+    rec = checkin(board, owner, _here_ticket(board, owner), a.note or "")
     print("%s @ %s" % (owner, rec["worktree"] or rec["cwd"]))
     print("  branch %s@%s%s" % (rec["branch"] or "?", rec["sha"] or "?",
                                "  (%d uncommitted)" % rec["dirty"] if rec["dirty"] else ""))
