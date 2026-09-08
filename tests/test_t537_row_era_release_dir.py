@@ -3,7 +3,6 @@ dir (no .git above scheduler.py) must never shell out to git in a non-repo.
 """
 
 import importlib.util
-import os
 import shutil
 import subprocess
 
@@ -91,9 +90,6 @@ def _copy_scheduler_to_release_dir(tmp_path, label):
     return dest
 
 
-_ATMAN_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(sched.__file__))))
-
-
 def test_release_dir_no_git_no_env_never_calls_git(tmp_path, monkeypatch):
     monkeypatch.delenv("TICKETS_ATMAN_REPO", raising=False)
     dest = _copy_scheduler_to_release_dir(tmp_path, "release_a")
@@ -107,12 +103,55 @@ def test_release_dir_no_git_no_env_never_calls_git(tmp_path, monkeypatch):
     assert mod._sha_is_post_flag("8346c38") is None
 
 
+def _init_repo_with_known_head(tmp_path, label):
+    """A hermetic repo with one commit, built in tmp_path like the dual-root
+    fixture -- unlike asserting against the live checkout's HEAD, this does
+    not depend on what the runner's own atman checkout happens to be on."""
+    repo = tmp_path / label
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    env = _git_env()
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "root"], cwd=repo, check=True, env=env)
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True, env=env).strip()
+    return repo, head
+
+
 def test_release_dir_no_git_with_env_repo_resolves_post(tmp_path, monkeypatch):
-    monkeypatch.setenv("TICKETS_ATMAN_REPO", _ATMAN_REPO_ROOT)
+    repo, head = _init_repo_with_known_head(tmp_path, "atman_repo")
+    monkeypatch.setenv("TICKETS_ATMAN_REPO", str(repo))
     dest = _copy_scheduler_to_release_dir(tmp_path, "release_b")
     mod = _load_module_from_path("t537_release_copy_with_env", dest)
-    assert mod._scheduler_repo_root() == _ATMAN_REPO_ROOT
-
-    head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=_ATMAN_REPO_ROOT, text=True).strip()
+    monkeypatch.setattr(mod, "T522_ROOT_PIN", head)
+    assert mod._scheduler_repo_root() == str(repo)
     assert mod._sha_is_post_flag(head) is True
+
+
+def test_env_repo_not_atman_returns_none_and_warns_once(tmp_path, monkeypatch, capsys):
+    """T-540: a path with a .git dir proves gitness, not atman-ness -- e.g.
+    TICKETS_ATMAN_REPO pointed at the steer checkout by mistake. Must return
+    None (not the path) and warn exactly once, not once per call."""
+    repo, _head = _init_repo_with_known_head(tmp_path, "not_atman_repo")
+    monkeypatch.setenv("TICKETS_ATMAN_REPO", str(repo))
+    dest = _copy_scheduler_to_release_dir(tmp_path, "release_c")
+    mod = _load_module_from_path("t540_release_copy_not_atman", dest)
+
+    assert mod._scheduler_repo_root() is None
+    assert mod._scheduler_repo_root() is None
+
+    err = capsys.readouterr().err
+    assert err.count("TICKETS_ATMAN_REPO") == 1
+    assert str(repo) in err
+
+
+def test_env_repo_with_atman_pin_resolves(tmp_path, monkeypatch):
+    """Same shape as the not-atman case, but the candidate repo actually
+    carries a pin -- must resolve, not warn."""
+    repo, head = _init_repo_with_known_head(tmp_path, "atman_repo_2")
+    monkeypatch.setenv("TICKETS_ATMAN_REPO", str(repo))
+    dest = _copy_scheduler_to_release_dir(tmp_path, "release_d")
+    mod = _load_module_from_path("t540_release_copy_is_atman", dest)
+    monkeypatch.setattr(mod, "FLAG_PIN", head)
+
+    assert mod._scheduler_repo_root() == str(repo)
