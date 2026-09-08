@@ -136,6 +136,22 @@ def test_brief_role_does_not_touch_agent_brief(board):
     p = run(board, "prompt", "--agent", "doc").stdout
     assert "agent standing" in p
     assert "lane standing" in p
+    assert str(board / "briefs" / "roles" / "docs.md") in p
+
+
+def test_brief_role_is_seen_on_next_prompt_not_repo_root(board):
+    """wake/spawn must see `brief --role` — one store, no repo-root roles/."""
+    run(board, "join", "alice", "--roles", "backend")
+    decoy = board.parent / "roles"
+    decoy.mkdir()
+    (decoy / "backend.md").write_text("T530-ROOT-DECOY\n")
+    r = run(board, "brief", "--role", "backend", "Prefer one file per change.", agent="master")
+    assert r.returncode == 0, r.stderr + r.stdout
+    p = run(board, "prompt", "--agent", "alice").stdout
+    assert "Prefer one file per change." in p
+    assert "Role context" in p
+    assert "T530-ROOT-DECOY" not in p
+    assert str(board / "briefs" / "roles" / "backend.md") in p
 
 
 def test_role_brief_path_contract_helpers():
