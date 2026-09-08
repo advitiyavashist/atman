@@ -3035,17 +3035,14 @@ def _watcher_run_active(board, owner, pid):
     return _has_child_process(pid)
 
 
-def _live_watch_pids(owner=None, board=None):
-    """Live `tickets watch --agent <name>` processes from the OS process table.
+# One `ps` parse can be reused for every owner filter inside a board snapshot.
+_WATCH_TABLE = threading.local()
 
-    The pid file only tracks one loop per board; duplicates (interrupted pytest
-    runs, races before lock) show up here. `owner` filters to one agent name.
-    When `board` is set, only loops whose --cwd lies under that repo count
-    (spawn/list/dash). Omit `board` for fleet-wide stop of every loop for the name.
-    """
+
+def _parse_watch_table():
+    """All live `tickets watch` rows from one process-table snapshot."""
     import subprocess
 
-    repo = os.path.realpath(os.path.dirname(board)) if board else None
     out = []
     try:
         r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
@@ -3069,11 +3066,51 @@ def _live_watch_pids(owner=None, board=None):
         agent = _watch_cmd_agent(cmd)
         if not agent:
             continue
+        argv = _split_cmdline(cmd)
+        out.append({"pid": pid, "agent": agent, "cwd": _argv_flag_value(argv, "--cwd")})
+    return out
+
+
+class _shared_watch_table:
+    """Bind one process-table snapshot for nested `_live_watch_pids` calls."""
+
+    def __enter__(self):
+        self._prev_bound = getattr(_WATCH_TABLE, "bound", False)
+        self._prev_rows = getattr(_WATCH_TABLE, "rows", None)
+        _WATCH_TABLE.rows = _parse_watch_table()
+        _WATCH_TABLE.bound = True
+        return _WATCH_TABLE.rows
+
+    def __exit__(self, *exc):
+        _WATCH_TABLE.bound = self._prev_bound
+        _WATCH_TABLE.rows = self._prev_rows
+
+
+def _watch_table_rows():
+    if getattr(_WATCH_TABLE, "bound", False):
+        return _WATCH_TABLE.rows or []
+    return _parse_watch_table()
+
+
+def _live_watch_pids(owner=None, board=None):
+    """Live `tickets watch --agent <name>` processes from the OS process table.
+
+    The pid file only tracks one loop per board; duplicates (interrupted pytest
+    runs, races before lock) show up here. `owner` filters to one agent name.
+    When `board` is set, only loops whose --cwd lies under that repo count
+    (spawn/list/dash). Omit `board` for fleet-wide stop of every loop for the name.
+    Inside `_shared_watch_table`, every caller shares one `ps` snapshot.
+    """
+    repo = os.path.realpath(os.path.dirname(board)) if board else None
+    bound = getattr(_WATCH_TABLE, "bound", False)
+    out = []
+    for row in _watch_table_rows():
+        pid = row["pid"]
+        agent = row["agent"]
         if owner is not None and agent != owner:
             continue
-        argv = _split_cmdline(cmd)
         if repo:
-            watch_cwd = _argv_flag_value(argv, "--cwd")
+            watch_cwd = row.get("cwd") or ""
             if not watch_cwd:
                 continue
             try:
@@ -3082,7 +3119,7 @@ def _live_watch_pids(owner=None, board=None):
                     continue
             except OSError:
                 continue
-        if agent and _pid_alive(pid):
+        if agent and (bound or _pid_alive(pid)):
             out.append(pid)
     return sorted(set(out))
 
@@ -5488,7 +5525,7 @@ def seat_thread_summaries(messages, seat_names):
 
 def board_snapshot_for_request(board, seat="", messages=40):
     """board_snapshot plus optional ?seat= filter. Same store, scoped view."""
-    snap = board_snapshot(board, messages=messages)
+    snap = _snapshot_single_flight(board, messages=messages)
     seat = (seat or "").strip()
     if not seat:
         return snap
@@ -8721,20 +8758,25 @@ document.getElementById('cSend').addEventListener('click',async()=>{
 });
 function tickClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}
 let snapshotFails=0;
+let _loadCtl=null;
 function unreachableNextStep(msg,cmd){
   return{kind:'unreachable',label:'Board unavailable',message:msg,cmd:cmd||''};
 }
 async function load(manual){
+  if(_loadCtl){if(!manual)return;_loadCtl.abort()}
   const refreshBtn=document.getElementById('refreshBtn');
   if(manual&&refreshBtn){refreshBtn.disabled=true;refreshBtn.classList.add('spin')}
   if(firstLoad)document.body.classList.add('loading');
   if(snapshotFails)setConn('reconnecting');
+  const ctl=new AbortController();
+  _loadCtl=ctl;
   let d;
   try{
-    const r=await fetch('/board.json?'+Date.now());
+    const r=await fetch('/board.json?'+Date.now(),{signal:ctl.signal});
     if(!r.ok)throw new Error('HTTP '+r.status);
     d=await r.json();
   }catch(e){
+    if(e&&e.name==='AbortError')return;
     snapshotFails++;
     setConn('offline');
     renderNextStep(unreachableNextStep(
@@ -8743,8 +8785,10 @@ async function load(manual){
       'tickets ui'));
     document.body.classList.remove('loading');
     if(refreshBtn){refreshBtn.disabled=false;refreshBtn.classList.remove('spin')}
+    if(_loadCtl===ctl)_loadCtl=null;
     return;
   }
+  if(_loadCtl===ctl)_loadCtl=null;
   if(d.error){
     snapshotFails++;
     renderNextStep(d.next_step||unreachableNextStep(
@@ -9151,8 +9195,8 @@ def _message_recipients(msg):
     return []
 
 
-def _agent_acked_message(board, agent, msg):
-    rec = _agent_rec(board, agent)
+def _agent_acked_message(board, agent, msg, rec=None):
+    rec = rec if rec is not None else _agent_rec(board, agent)
     if not rec:
         return False
     since = _seen_since(rec)
@@ -9160,12 +9204,15 @@ def _agent_acked_message(board, agent, msg):
     return not _is_unread(msg, since, remaining)
 
 
-def _message_delivery(board, msg):
+def _message_delivery(board, msg, agents_by=None):
     """Delivery/ack status for the UI composer thread."""
     recipients = _message_recipients(msg)
     if not recipients:
         return {"status": "broadcast"}
-    acks = [{"agent": r, "acked": _agent_acked_message(board, r, msg)} for r in recipients]
+    acks = []
+    for r in recipients:
+        rec = (agents_by or {}).get(r)
+        acks.append({"agent": r, "acked": _agent_acked_message(board, r, msg, rec=rec)})
     return {"status": "direct", "acks": acks}
 
 
@@ -9179,8 +9226,90 @@ def _attention_snapshot(health_items, coverage):
     return out[:16]
 
 
+_ANALYTICS_TTL_S = 3.0
+_ANALYTICS_LOCK = threading.Lock()
+_ANALYTICS_CACHE = {}
+_SNAP_GATE = threading.Lock()
+_SNAP_SLOTS = {}
+
+
+def _file_mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _analytics_stamp(board):
+    return (_file_mtime(os.path.join(board, "trajectories.jsonl")),
+            _file_mtime(messages_path(board)))
+
+
+def _cached_turns_usage_promise(board, tickets):
+    """Reuse turns/usage/promise across a few warm UI refreshes.
+
+    Tickets, messages, and master stay uncached so leadership and mail stay live.
+    Trajectory analytics are bounded: recompute when the log mtime changes or
+    the short TTL expires.
+    """
+    import time as _time
+
+    stamp = _analytics_stamp(board)
+    key = os.path.realpath(board)
+    now_m = _time.monotonic()
+    with _ANALYTICS_LOCK:
+        hit = _ANALYTICS_CACHE.get(key)
+        if hit and hit["stamp"] == stamp and now_m - hit["at"] < _ANALYTICS_TTL_S:
+            return hit["turns"], hit["usage"], hit["promise"]
+    turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
+    events = _safe(lambda: _turns_mod()[1](board), [])
+    usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
+    promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
+    with _ANALYTICS_LOCK:
+        _ANALYTICS_CACHE[key] = {
+            "stamp": stamp, "at": now_m, "turns": turns, "usage": usage, "promise": promise,
+        }
+    return turns, usage, promise
+
+
+def _snapshot_single_flight(board, messages=40):
+    """One in-flight board_snapshot per board so overlapping HTTP refreshes share work."""
+    key = (os.path.realpath(board), int(messages))
+    with _SNAP_GATE:
+        slot = _SNAP_SLOTS.get(key)
+        if slot is None:
+            slot = {"event": threading.Event(), "snap": None, "exc": None}
+            _SNAP_SLOTS[key] = slot
+            owner = True
+        else:
+            owner = False
+    if owner:
+        try:
+            slot["snap"] = board_snapshot(board, messages=messages)
+        except Exception as exc:
+            slot["exc"] = exc
+            raise
+        finally:
+            slot["event"].set()
+            with _SNAP_GATE:
+                if _SNAP_SLOTS.get(key) is slot:
+                    _SNAP_SLOTS.pop(key, None)
+        return slot["snap"]
+    slot["event"].wait(timeout=60)
+    if slot["exc"] is not None:
+        raise slot["exc"]
+    if slot["snap"] is None:
+        return board_snapshot(board, messages=messages)
+    return slot["snap"]
+
+
 def board_snapshot(board, messages=40):
     """Everything the UI shows, as plain data. Read-only."""
+    with _shared_watch_table():
+        return _board_snapshot_body(board, messages)
+
+
+def _board_snapshot_body(board, messages=40):
     tickets = load_all(board)
     cur = active_sprint(board)
     m = current_master(board) or {}
@@ -9192,18 +9321,26 @@ def board_snapshot(board, messages=40):
         d, n, c, b = progress(mine)
         sprint = {"id": cur["id"], "goal": cur.get("goal", ""), "done": d, "total": n, "in_flight": c, "blocked": b,
                   "review": len([t for t in mine if t["status"] == "review"])}
-    rows, burn = utilization(board, tickets, hours=24)
-    agents = {r["owner"]: r for r in load_agents(board)}
+    agent_list = load_agents(board)
+    agents = {r["owner"]: r for r in agent_list}
+    live = {}
+    for rec in agent_list:
+        n = rec.get("owner") or ""
+        if not n or n.startswith("agent-"):
+            continue
+        live[n] = _safe(lambda rec=rec: agent_liveness(board, rec, agent_list), {}) or {}
+    rows, burn = utilization(board, tickets, hours=24, live=live)
     wf = load_workforce(board)
     roles = load_roles(board)
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
         lim = rec.get("limit")
+        wc = _watcher_count(r["agent"], board)
         out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
-                           "watcher": _watcher_count(r["agent"], board) > 0,
-                           "watcher_count": _watcher_count(r["agent"], board),
+                           "watcher": wc > 0,
+                           "watcher_count": wc,
                            "roles": roles.get(r["agent"]) or [],
                            "limit": lim,
                            "limit_until": (lim or {}).get("until", "") if lim else ""})
@@ -9236,16 +9373,13 @@ def board_snapshot(board, messages=40):
                   "title": t["title"], "role": t.get("role", ""), "owner": t.get("owner", ""),
                   "waiting": [d for d in t.get("deps", []) if d not in done]}
                  for t in tickets if t["status"] in ("open", "blocked")]
-    turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
-    events = _safe(lambda: _turns_mod()[1](board), [])
-    usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
-    promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
+    turns, usage, promise = _cached_turns_usage_promise(board, tickets)
     raw_msgs = []
     for x in load_messages(board)[-messages:]:
         row = {"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
                "kind": x.get("kind") or "message",
-               "delivery": _message_delivery(board, x)}
+               "delivery": _message_delivery(board, x, agents_by=agents)}
         raw_msgs.append(row)
     seat_names = []
     seen_seats = set()
@@ -9295,7 +9429,7 @@ def cmd_ui(a, board):
     composer POST at /msg that posts through post_message() -- same board,
     same messages.jsonl, no second store. /board.json?seat=<name> filters
     messages to that agent-scoped thread (Advitiya PRIORITY agent chats)."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     if a.json:
         print(json.dumps(board_snapshot(board), indent=2))
@@ -9353,7 +9487,8 @@ def cmd_ui(a, board):
         def log_message(self, *args):
             pass
 
-    srv = HTTPServer((a.host, a.port), H)
+    srv = ThreadingHTTPServer((a.host, a.port), H)
+    srv.daemon_threads = True
     print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via tickets msg)" % (a.host, a.port))
     if a.open:
         import subprocess
