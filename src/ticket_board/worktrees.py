@@ -175,6 +175,89 @@ def overlaps(a, b):
     return longer[:len(shorter)] == shorter
 
 
+def is_bare_worktrees_root(path):
+    """True when `path` names a fleet container, not one agent's checkout.
+
+    Operators and agents on this board put seats under `.../.worktrees/<name>`.
+    A runner that registers the bare `.../.worktrees` root is not naming its
+    own checkout -- it is claiming every sibling beneath that directory.
+    """
+    segments = _segments(path)
+    return bool(segments) and segments[-1] == ".worktrees"
+
+
+def _extra_segments(parent, child):
+    outer, inner = _segments(parent), _segments(child)
+    if len(inner) <= len(outer) or inner[:len(outer)] != outer:
+        return ()
+    return inner[len(outer):]
+
+
+def child_is_nested_worktree(parent, child):
+    """True when `child` is a git worktree parked inside `parent`.
+
+    Nested layouts look like `.../desk/.worktrees/integration`. They share a
+    path prefix with the parent seat but are independent checkouts, not
+    subdirectories of one checkout tree.
+    """
+    return ".worktrees" in _extra_segments(parent, child)
+
+
+def _lease_contains(parent, child):
+    """Casefolded containment for the runner-lease scan only (T-495/T-555).
+
+    `contains` stays case-sensitive for operator approvals. The lease half
+    answers "is this checkout free?", where the loose answer is a REFUSAL, so
+    casefolding here matches `overlaps` (T-496) without widening grants.
+    """
+    outer = _segments(parent, casefold=True)
+    inner = _segments(child, casefold=True)
+    if not outer or not inner:
+        return False
+    if is_absolute(parent) != is_absolute(child):
+        return False
+    if ".." in _segments(parent) or ".." in _segments(child):
+        return False
+    return inner[:len(outer)] == outer
+
+
+def lease_precludes_registration(held, requested):
+    """Does a live runner lease block this registration attempt?
+
+    T-495/C2. `overlaps` is symmetric, which is right for "is this checkout
+    free?" on the operator registry, but on the runner-lease half it turns a
+    runner-supplied parent into an exclusive reservation over every child
+    beneath it. The lease scan therefore drops the PARENT direction: an
+    existing lease that merely CONTAINS the requested path does not block,
+    except when the held path is a bare `.worktrees` fleet root (the land-grab
+    case) or when the child is a subdirectory of the same checkout rather than
+    a nested worktree layout.
+
+    The CHILD direction is kept: equal paths still collide, a registration that
+    would wrap an existing narrower lease is refused, and a subdirectory of an
+    occupied checkout is still refused when it is not a nested-worktree path.
+
+    T-555/T-496 composition: segment comparisons here casefold like `overlaps`,
+    so a case-variant path cannot evade the scan while `contains` stays strict
+    for operator approvals.
+    """
+    held_norm = normalize(held)
+    req_norm = normalize(requested)
+    if not held_norm or not req_norm:
+        return False
+    if _segments(held, casefold=True) == _segments(requested, casefold=True):
+        return True
+    if _lease_contains(requested, held):
+        return True
+    if _lease_contains(held, requested):
+        if is_bare_worktrees_root(held):
+            return False
+        if child_is_nested_worktree(held, requested):
+            return False
+        return True
+    return False
+
+
 def contains(parent, child):
     """Is `child` the same directory as `parent`, or inside it?
 
