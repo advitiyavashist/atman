@@ -53,6 +53,9 @@ def test_atman_chrome_wordmark_and_formation_dots():
     assert "↗" not in header
     assert "Ticket board" not in header
     assert 'class="prod"' not in header
+    assert 'id="title">atman</h1>' in header
+    assert "textContent='atman'" in ui
+    assert "textContent=d.project||'Atman'" not in ui
 
 
 def test_done_24h_label_on_agent_roster():
@@ -99,6 +102,7 @@ def test_team_ledes_stay_lean():
     assert "self ↔ whole" not in team
     assert "shared-memory brain" not in team
     assert "vector DB" not in team
+    assert "seats-vibe" not in ui
     assert 'class="mark" viewBox="0 0 32 32"' in team
 
 

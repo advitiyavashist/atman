@@ -7776,7 +7776,8 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .brand{display:flex;align-items:center;gap:10px;min-width:148px}
 .brand .mark{flex:none;width:22px;height:22px}
 .wordmark{font:650 16px/1.2 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:.22em;text-transform:lowercase}
-.brand h1{font-size:12px;margin:2px 0 0;font-weight:650;color:var(--mute)}
+.brand h1{font-size:12px;margin:2px 0 0;font-weight:650;color:var(--mute);text-transform:lowercase}
+.brand .board-name{margin:2px 0 0;font-size:11px}
 .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;background:var(--chip);border:1px solid var(--line);font-size:12px}
 .chip b{font-weight:650}
@@ -7787,7 +7788,7 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .bar{height:6px;background:#1b1f28;border-radius:99px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--acc)}
 .pulse{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:650}
-.pulse i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.pulse i{width:8px;height:8px;border-radius:50%;background:var(--live);box-shadow:0 0 0 3px color-mix(in srgb,var(--live) 25%,transparent)}
 .pulse.warn i{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 25%,transparent)}
 .pulse.bad i{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 25%,transparent)}
 #clock{margin-left:auto;font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
@@ -7847,7 +7848,6 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .seats-head{display:flex;gap:12px;align-items:flex-start;max-width:760px}
 .seats-head .mark{flex:none;width:22px;height:22px;margin-top:2px}
 .seats-title{margin:0 0 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:650}
-.seats-vibe{margin:0 0 6px;font-size:11px;letter-spacing:.12em;color:var(--mute)}
 .seats-lede{color:var(--mute);font-size:12px;margin:0;max-width:720px}
 .seats-lede b{color:var(--fg)}
 .next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
@@ -7957,6 +7957,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
     <div>
       <span class="wordmark">atman</span>
       <h1 id="title">atman</h1>
+      <p class="board-name mute" id="boardName" hidden></p>
     </div>
   </div>
   <div class="chips" id="chips"></div>
@@ -8323,7 +8324,14 @@ async function load(){
       'tickets ui --json'));
     d.counts=d.counts||{total:0,done:0};
   }else snapshotFails=0;
-  document.getElementById('title').textContent=d.project||'Atman';
+  document.getElementById('title').textContent='atman';
+  const boardName=document.getElementById('boardName');
+  if(boardName){
+    const proj=String(d.project||'').trim();
+    const show=proj&&proj.toLowerCase()!=='atman';
+    boardName.textContent=show?proj:'';
+    boardName.hidden=!show;
+  }
   const counts=d.counts||{total:0,done:0};
   document.getElementById('chips').innerHTML=
     '<span class="chip master"><b>master</b> '+esc(d.master||'nobody')+'</span>'+
