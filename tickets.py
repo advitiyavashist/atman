@@ -792,6 +792,41 @@ def current_master(board):
         return None
 
 
+def _notify_review_submitted(board, author, tid, text, master_state=None):
+    """Task-wake current CoS once; master copy stays notification-only.
+
+    Static review_queue is still recorded on pending() for both seats but is
+    not itself a wake key. After the CoS reads inbox, the task is consumed
+    and review_queue alone must not re-wake.
+    """
+    m = master_state if master_state is not None else (current_master(board) or {})
+    master_name = (m or {}).get("owner") or ""
+    cos_name = (m or {}).get("cos") or ""
+    body = "%s ready for review: %s" % (tid, text)
+    if cos_name:
+        post_message(board, author, body, to=cos_name, re=tid, kind="task")
+        if master_name and master_name != cos_name:
+            post_message(board, author, body, to=master_name, re=tid)
+    else:
+        post_message(board, author, body, to=master_name, re=tid)
+    return master_name, cos_name
+
+
+def spawn_watch_max_runs(cos=False, persist=False, max_runs=None):
+    """Watch --max-runs for `tickets spawn`. 0 loops until spawn --stop.
+
+    CoS is persistent by default. An explicit --max-runs (including 1 for
+    one-shot) overrides that. --persist always loops. Workers default to 1.
+    """
+    if persist:
+        return 0
+    if max_runs is not None:
+        return int(max_runs)
+    if cos:
+        return 0
+    return 1
+
+
 def hours_since(stamp):
     try:
         d = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -2013,17 +2048,22 @@ def cmd_review(a, board):
                              active_hours=_round3(tmr.get("active")),
                              pin=t.get("commit", ""),
                              **_traj_git(cwd=art)), None)
-    m = current_master(board)
-    post_message(board, author, "%s ready for review: %s" % (t["id"], text),
-                 to=(m["owner"] if m else ""), re=t["id"])
+    m = current_master(board) or {}
+    master_name, cos_name = _notify_review_submitted(board, author, t["id"], text, m)
     tm = timing(t)
     if t.get("commit"):
         print("pinned %s in %s (%s)" % (
             t["commit"], t.get("repo") or "?",
             "artifact tree %s" % t["artifact_dir"] if t.get("repo_source") == "artifact"
             else "this checkout -- pass --artifact <dir> if the deliverable is in another repo"))
-    print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
-        t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
+    if cos_name:
+        who = "CoS (%s) tasked" % cos_name
+        if master_name and master_name != cos_name:
+            who += "; master (%s) notified" % master_name
+    else:
+        who = "master%s notified" % ((" (%s)" % master_name) if master_name else "")
+    print("%s -> IN REVIEW after %s of work; %s. Claim your next ticket." % (
+        t["id"], fmt_hours(tm["active"]), who))
 
 
 def _trunk(cwd=None):
@@ -8192,10 +8232,13 @@ def cmd_spawn(a, board):
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
             "--prompt-kind", kind,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
-    if getattr(a, "persist", False) or int(getattr(a, "max_runs", 1) or 0) == 0:
-        argv += ["--max-runs", "0"]
-    elif int(getattr(a, "max_runs", 1)) != 1:
-        argv += ["--max-runs", str(int(a.max_runs))]
+    max_runs = spawn_watch_max_runs(
+        cos=bool(a.cos), persist=bool(getattr(a, "persist", False)),
+        max_runs=getattr(a, "max_runs", None))
+    if max_runs == 0:
+        argv += ["--persist", "--max-runs", "0"]
+    else:
+        argv += ["--max-runs", str(max_runs)]
     # T-243: strip Git's LOCATION vars before handing the parent's environment
     # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
     # cascades into every agent this launches. _clean_git_env is deliberately
@@ -8212,8 +8255,9 @@ def cmd_spawn(a, board):
     _time.sleep(1.0)
     pid = _watcher_pid(board, owner)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; harness=%s; model=%s; log %s" % (
-        owner, (" (pid %d)" % pid) if pid else "", harness, model, log_path))
+    print("watcher for %s started%s; harness=%s; model=%s; persist=%s; max-runs=%s; log %s" % (
+        owner, (" (pid %d)" % pid) if pid else "", harness, model,
+        "yes" if max_runs == 0 else "no", max_runs, log_path))
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
@@ -10586,14 +10630,16 @@ def main():
     c.add_argument("--heartbeat", type=int, default=0,
                    help="with --master: also wake every N minutes to drive the objective (0 = off)")
     c.add_argument("--persist", action="store_true",
-                   help="keep the watcher looping (default is one model run then stop)")
-    c.add_argument("--max-runs", type=int, default=1,
-                   help="passed to watch; default 1; 0 with --persist loops")
+                   help="keep the watcher looping (default is one model run then stop; implied by --cos)")
+    c.add_argument("--max-runs", type=int, default=None,
+                   help="passed to watch; workers default 1; --cos defaults 0 (persist); "
+                        "pass 1 for a CoS one-shot")
     c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
     c.add_argument("--master", action="store_true",
                    help="spawn the board master/planner (scope, routing by complexity, escalations)")
     c.add_argument("--cos", action="store_true",
-                   help="spawn the chief of staff (review, unblock, merge) under the current master")
+                   help="spawn the chief of staff (review, unblock, merge) under the current master; "
+                        "persistent watcher by default (override with --max-runs 1)")
     c.add_argument("--exec", default="", help="override the worker command entirely")
     c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
     c.add_argument("--list", action="store_true")

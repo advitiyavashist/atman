@@ -1,4 +1,4 @@
-"""T-425: idle IN-REVIEW watch pulses must not increment turns."""
+"""T-425: ordinary DM after IN REVIEW must not wake or increment turns."""
 
 import json
 import os
@@ -20,7 +20,7 @@ def _commit(repo, msg="work"):
 
 
 def test_idle_review_watch_once_pairs_turns_stay_at_claim(board, tmp_path, monkeypatch):
-    """Throwaway board: claim run counts 1; two idle IN-REVIEW --once stay 1, not 3."""
+    """Claim run counts 1; ordinary DMs after IN REVIEW do not start watch runs."""
     for var in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"):
         monkeypatch.delenv(var, raising=False)
     repo = board.parent
@@ -30,7 +30,6 @@ def test_idle_review_watch_once_pairs_turns_stay_at_claim(board, tmp_path, monke
     subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "alice/work"], check=True)
     run(board, "join", "alice", "--roles", "docs", "--tool", "claude", "--model", "opus",
         agent="alice", cwd=repo)
-    # board fixture already created T-001 (docs). Claim it.
     run(board, "next", "--role", "docs", agent="alice", cwd=repo)
     tid = "T-001"
     update_sh = tmp_path / "update.sh"
@@ -47,20 +46,22 @@ def test_idle_review_watch_once_pairs_turns_stay_at_claim(board, tmp_path, monke
     assert by[tid]["turns"] == 1
     n_before = mid["aggregates"]["n"]
     median_before = mid["aggregates"]["median"]
+    starts_after_claim = len(events(board, kind="run_start"))
 
     idle = _fake_harness(tmp_path, "echo idle-pulse\n")
     for _ in range(2):
         run(board, "msg", "wake", "--to", "alice", agent="boss", cwd=repo)
         r = run(board, "watch", "--agent", "alice", "--once", "--exec", str(idle),
                 "--cwd", str(repo), agent="alice", cwd=repo)
-        assert r.returncode == 0, r.stdout + r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
 
     fail_dir = tmp_path / "failh"
     fail_dir.mkdir()
     fail = _fake_harness(fail_dir, "exit 1\n")
     run(board, "msg", "wake-fail", "--to", "alice", agent="boss", cwd=repo)
-    run(board, "watch", "--agent", "alice", "--once", "--exec", str(fail),
-        "--cwd", str(repo), agent="alice", cwd=repo)
+    r = run(board, "watch", "--agent", "alice", "--once", "--exec", str(fail),
+            "--cwd", str(repo), agent="alice", cwd=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
 
     after = json.loads(run(board, "turns", "--json", cwd=repo).stdout)
     by = {row["ticket"]: row for row in after["tickets"]}
@@ -70,9 +71,7 @@ def test_idle_review_watch_once_pairs_turns_stay_at_claim(board, tmp_path, monke
     assert after["v"] == 1
     from ticket_board.turns import ROW_KEYS
     assert tuple(after["tickets"][0].keys()) == ROW_KEYS
+    assert len(events(board, kind="run_start")) == starts_after_claim
     ends = events(board, kind="run_end", ticket=tid)
-    assert len(ends) == 4
+    assert len(ends) == 1
     assert ends[0].get("bound_write") is True
-    assert "bound_write" not in ends[1]
-    assert ends[-1].get("exit") == 1
-    assert ends[0].get("run_id") and ends[1].get("run_id") != ends[0].get("run_id")

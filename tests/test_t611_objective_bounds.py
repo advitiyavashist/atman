@@ -129,8 +129,7 @@ def test_stuck_held_and_ready_assigned_still_wake(board):
     assert p.get("wake_reason") == "stuck_messages"
 
 
-def test_review_queue_alone_does_not_wake_master(board):
-    run(board, "master", "take", agent="boss")
+def _submit_docs_review(board):
     run(board, "join", "doc", "--roles", "docs")
     run(board, "next", agent="doc")
     repo = board.parent
@@ -143,9 +142,64 @@ def test_review_queue_alone_does_not_wake_master(board):
     subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "doc"], check=True)
     r = run(board, "review", "T-001", "--notes", "done", agent="doc", cwd=repo)
     assert r.returncode == 0, r.stderr
+    return repo
+
+
+def test_review_queue_alone_does_not_wake_master(board):
+    run(board, "master", "take", agent="boss")
+    _submit_docs_review(board)
     rc, p = pending(board, "boss")
     assert "review_queue" in p, p
     assert p.get("pending") is False and rc == 1, p
+    recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    mail = next(m for m in recs if m.get("to") == "boss" and "ready for review" in m.get("text", ""))
+    assert mail.get("kind") != "task"
+
+
+def test_review_tasks_cos_once_then_inbox_clears_repeat_wake(board):
+    run(board, "master", "take", agent="planner")
+    run(board, "master", "cos", "cos-x", agent="planner")
+    run(board, "join", "cos-x", "--roles", "review")
+    _submit_docs_review(board)
+    time.sleep(1.1)
+    rc, p = pending(board, "cos-x")
+    assert rc == 0 and p.get("pending") is True, p
+    assert p.get("wake_reason") == "task_messages"
+    assert p.get("task_messages")
+    assert "review_queue" in p
+    recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    cos_mail = next(m for m in recs if m.get("to") == "cos-x" and "ready for review" in m.get("text", ""))
+    assert cos_mail.get("kind") == "task"
+    master_mail = next(m for m in recs if m.get("to") == "planner" and "ready for review" in m.get("text", ""))
+    assert master_mail.get("kind") != "task"
+    rc, p = pending(board, "planner")
+    assert p.get("pending") is False and rc == 1, p
+    run(board, "inbox", agent="cos-x")
+    time.sleep(1.1)
+    rc, p = pending(board, "cos-x")
+    assert "review_queue" in p, p
+    assert p.get("pending") is False and rc == 1, p
+    assert not p.get("task_messages")
+
+
+def test_spawn_cos_defaults_persistent_with_max_runs_oneshot(board):
+    run(board, "master", "take", agent="boss")
+    wt = board.parent / "cos-wt"
+    wt.mkdir()
+    r = run(board, "spawn", "cos-x", "--cos", "--roles", "review", "--exec", "true",
+            "--every", "3600", "--worktree", str(wt), agent="boss")
+    try:
+        assert r.returncode == 0, r.stderr
+        assert "persist=yes" in r.stdout and "max-runs=0" in r.stdout
+    finally:
+        run(board, "spawn", "cos-x", "--stop", agent="boss")
+    r2 = run(board, "spawn", "cos-x", "--cos", "--max-runs", "1", "--roles", "review",
+             "--exec", "true", "--every", "3600", "--worktree", str(wt), agent="boss")
+    try:
+        assert r2.returncode == 0, r2.stderr
+        assert "persist=no" in r2.stdout and "max-runs=1" in r2.stdout
+    finally:
+        run(board, "spawn", "cos-x", "--stop", agent="boss")
 
 
 def test_heartbeat_requires_exit_criterion(board):
