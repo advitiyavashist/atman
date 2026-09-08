@@ -7500,7 +7500,7 @@ def cmd_harness(a, board):
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Ticket board</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff}
+:root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff;--live:#3ee8c5;--intervene:#e0a53d}
 *{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
 header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:linear-gradient(180deg,#12151c 0%,#0c0e12 100%);border-bottom:1px solid var(--line)}
@@ -7574,8 +7574,12 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .mchip{cursor:pointer;border:1px solid var(--line);background:var(--chip);border-radius:99px;padding:1px 9px;font-size:12px}
 .mchip:hover{border-color:var(--acc)}
 #composerMsg{font-size:12px;margin-top:4px;min-height:14px}
-.pitch-lede{color:var(--mute);font-size:12px;max-width:720px}
-.pitch-lede b{color:var(--fg)}
+.seats-head{display:flex;gap:12px;align-items:flex-start;max-width:760px}
+.seats-head .mark{flex:none;width:22px;height:22px;margin-top:2px}
+.seats-title{margin:0 0 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:650}
+.seats-vibe{margin:0 0 6px;font-size:11px;letter-spacing:.12em;color:var(--mute)}
+.seats-lede{color:var(--mute);font-size:12px;margin:0;max-width:720px}
+.seats-lede b{color:var(--fg)}
 .next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
 .next-step .lbl{font-weight:700;color:var(--acc);white-space:nowrap}
 .next-step .msg{flex:1;min-width:160px}
@@ -7621,26 +7625,25 @@ body[data-tab=board] .promise-chips{display:none}
 .usage-card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:10px}
 .usage-card .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
 .usage-card .v{font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}
-.pitch{background:radial-gradient(1200px 400px at 50% 0%,#2a7a4c 0%,#14532d 55%,#0f3d24 100%);
-  border:2px solid #0a2a18;border-radius:18px;min-height:460px;display:flex;flex-direction:column;
-  position:relative;overflow:hidden;box-shadow:inset 0 0 0 2px rgba(255,255,255,.06)}
-.pitch:before{content:"";position:absolute;left:50%;top:50%;width:88px;height:88px;margin:-44px 0 0 -44px;
-  border:2px solid rgba(255,255,255,.18);border-radius:50%;pointer-events:none}
-.band{flex:1;display:flex;flex-direction:column;justify-content:center;padding:10px 14px;border-top:1px dashed rgba(255,255,255,.16);min-height:88px}
-.band:first-child{border-top:0}
-.band .lbl{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.55);font-weight:700;margin-bottom:8px}
-.band .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center}
-.player{width:72px;display:flex;flex-direction:column;align-items:center;gap:4px;color:#f4f7f2}
-.player .av{width:36px;height:36px;font-size:12px;background:#f4f7f2;color:#14532d}
-.player.keeper .av{background:var(--warn);color:#1a1204}
-.player.cover .av{background:var(--acc)}
-.player.ghost{opacity:.7}
-.player.ghost .av{background:transparent;border:2px dashed rgba(255,255,255,.55);color:#fff}
-.player .nm{font-size:11px;font-weight:650;text-align:center;max-width:80px;overflow:hidden;text-overflow:ellipsis}
-.player .cov{font-size:10px;color:rgba(255,255,255,.7);text-align:center}
-.bench{display:flex;gap:10px;flex-wrap:wrap;padding:8px 2px}
-.bench .player .av{background:#2a3344;color:#d5dbe6}
-@media(max-width:700px){.pitch{min-height:560px}.player{width:64px}}
+.seats{display:flex;flex-direction:column;gap:8px}
+.lane{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.lane .lbl{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700;margin-bottom:8px}
+.lane .row{display:flex;gap:8px;flex-wrap:wrap;align-items:stretch}
+.lane.ready .lbl{color:var(--ready)}
+.lane.flight .lbl{color:var(--flight)}
+.lane.review .lbl{color:var(--review)}
+.seat{min-width:120px;max-width:160px;background:#10141b;border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.seat .top{display:flex;align-items:center;gap:8px}
+.seat .av{width:22px;height:22px;font-size:9px}
+.seat .nm{font-size:12px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seat .cov{font-size:11px;color:var(--mute)}
+.seat.operator .av{background:var(--acc)}
+.seat.cover .av{background:var(--acc)}
+.seat.cover .nm::after{content:"";display:inline-block;width:6px;height:6px;margin-left:6px;border-radius:50%;background:var(--live);vertical-align:middle}
+.seat.ghost{border-style:dashed}
+.seat.ghost .av{background:transparent;border:1px dashed var(--mute);color:var(--mute)}
+.seat.idle .av{background:var(--chip);color:var(--mute)}
+@media(max-width:700px){.seat{min-width:108px}}
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
   #clock{margin-left:0}
@@ -7672,7 +7675,7 @@ body[data-tab=board] .promise-chips{display:none}
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
   <button type="button" data-tab-btn="board" class="on">Board</button>
-  <button type="button" data-tab-btn="agents">Agents</button>
+  <button type="button" data-tab-btn="agents">Team</button>
   <button type="button" data-tab-btn="messages">Messages</button>
 </nav>
 <main>
@@ -7698,15 +7701,27 @@ body[data-tab=board] .promise-chips{display:none}
   </details>
 </div>
 <div class="pane" id="pane-agents">
-  <p class="pitch-lede" id="coverageLede"><b>Total Football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
-  <div class="pitch" id="pitch">
-    <div class="band" data-band="attack"><div class="lbl">Attack · ready / uncovered</div><div class="row" id="band-attack"></div></div>
-    <div class="band" data-band="mid"><div class="lbl">Midfield · in flight</div><div class="row" id="band-mid"></div></div>
-    <div class="band" data-band="back"><div class="lbl">Defense · review</div><div class="row" id="band-back"></div></div>
-    <div class="band" data-band="keep"><div class="lbl">Keeper · master / CoS</div><div class="row" id="band-keep"></div></div>
+  <div class="seats-head">
+    <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="constellation — self to whole">
+      <circle cx="10" cy="7.8" r="3.35" fill="#e8e6e1"/>
+      <circle cx="22.4" cy="8.8" r="3.35" fill="#e8e6e1"/>
+      <circle cx="6.6" cy="17.6" r="3.35" fill="#e8e6e1"/>
+      <circle cx="25.4" cy="18.2" r="3.35" fill="#e8e6e1"/>
+      <circle cx="16" cy="24.6" r="3.35" fill="#e8e6e1"/>
+    </svg>
+    <div>
+      <h2 class="seats-title">Team</h2>
+      <p class="seats-vibe">self ↔ whole</p>
+      <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
+    </div>
   </div>
-  <div class="mute" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px">Bench · idle or down</div>
-  <div class="bench" id="band-bench"></div>
+  <div class="seats" id="seats">
+    <section class="lane ready" data-lane="ready"><div class="lbl">Ready</div><div class="row" id="lane-ready"></div></section>
+    <section class="lane flight" data-lane="flight"><div class="lbl">In flight</div><div class="row" id="lane-flight"></div></section>
+    <section class="lane review" data-lane="review"><div class="lbl">Review</div><div class="row" id="lane-review"></div></section>
+    <section class="lane" data-lane="operator"><div class="lbl">Operator · master / CoS</div><div class="row" id="lane-operator"></div></section>
+    <section class="lane" data-lane="idle"><div class="lbl">Idle · down</div><div class="row" id="lane-idle"></div></section>
+  </div>
   <section class="promise-panel" id="usagePanel">
     <h2>Usage / cost</h2>
     <small id="usageHonesty" class="mute">Harness-reported only. Not reported by harness stays — never a made-up $0.</small>
@@ -7805,30 +7820,34 @@ function renderUsage(u){
   const by=u.by_agent||[];
   tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
 }
-function playerChip(name,cover,kind){
-  return '<div class="player '+(kind||'cover')+'"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span><span class="cov">'+esc(cover||'')+'</span></div>';
+function seatChip(name,cover,kind){
+  return '<article class="seat '+(kind||'cover')+'"><div class="top"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span></div><span class="cov">'+esc(cover||'')+'</span></article>';
 }
-function renderPitch(d){
+function renderSeats(d){
   const placed=new Set();
-  const keep=[],back=[],mid=[],attack=[],bench=[];
-  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(playerChip(name,cover,kind))};
-  add(keep,d.master,'master','keeper');
-  add(keep,d.cos,'CoS','keeper');
-  (d.review||[]).forEach(t=>add(back,t.owner,t.id));
-  (d.in_flight||[]).forEach(t=>add(mid,t.owner,t.id));
-  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
-  ready.forEach(t=>{if(t.owner)add(attack,t.owner,t.id);else attack.push(playerChip(t.id,'uncovered','ghost'))});
+  const operator=[],review=[],flight=[],ready=[],idle=[];
+  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(seatChip(name,cover,kind))};
+  add(operator,d.master,'master','operator');
+  add(operator,d.cos,'CoS','operator');
+  (d.review||[]).forEach(t=>add(review,t.owner,t.id+' · review','cover'));
+  (d.in_flight||[]).forEach(t=>add(flight,t.owner,t.id+' · busy','cover'));
+  const openReady=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  openReady.forEach(t=>{if(t.owner)add(ready,t.owner,t.id+' · ready','cover');else ready.push(seatChip(t.id,'Open seat — uncovered work.','ghost'))});
+  const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   (d.agents||[]).forEach(a=>{
     if(placed.has(a.name))return;
-    const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any shirt';
-    bench.push(playerChip(a.name,(a.state==='DOWN'?'down · ':'idle · ')+hint,a.state==='DOWN'?'ghost':''));
+    const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any lane';
+    const u=utilBy[a.name]||{};
+    const quota=u.util_pct!=null?' · '+Math.round(u.util_pct)+'%':'';
+    const st=a.state==='DOWN'?'down':'idle';
+    idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'?'ghost':'idle'));
   });
   const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
-  put('band-keep',keep.join(''),'no keeper');
-  put('band-back',back.join(''),'nobody covering review');
-  put('band-mid',mid.join(''),'nobody in flight');
-  put('band-attack',attack.join(''),'no uncovered work');
-  put('band-bench',bench.join(''),'everyone is on the pitch');
+  put('lane-operator',operator.join(''),'no operator');
+  put('lane-review',review.join(''),'nobody covering review');
+  put('lane-flight',flight.join(''),'nobody in flight');
+  put('lane-ready',ready.join(''),'Open seat — uncovered work.');
+  put('lane-idle',idle.join(''),'no idle seats');
 }
 function setTab(name){
   document.body.dataset.tab=name;
@@ -7952,7 +7971,7 @@ async function load(){
   renderPromise(d.promise);
   renderTurns(d.turns);
   renderUsage(d.usage);
-  renderPitch(d);
+  renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
@@ -8194,7 +8213,7 @@ def _promise_hero(turns, tickets, events):
 
 
 def _coverage_snapshot(master, cos, open_rows, in_flight, review, agents):
-    """Total Football coverage: empty shirts = uncovered ready work."""
+    """Team coverage: empty seats = uncovered ready work."""
     uncovered = [{"id": t["id"], "title": t.get("title", "")}
                  for t in (open_rows or [])
                  if t.get("status") != "BLOCKED" and not t.get("waiting") and not t.get("owner")]
@@ -8202,10 +8221,10 @@ def _coverage_snapshot(master, cos, open_rows, in_flight, review, agents):
         "uncovered_ready": uncovered,
         "in_flight": [{"id": t["id"], "owner": t.get("owner", "")} for t in (in_flight or [])],
         "review": [{"id": t["id"], "owner": t.get("owner", "")} for t in (review or [])],
-        "keeper": ([{"name": master, "role": "master"}] if master else []) + (
+        "operator": ([{"name": master, "role": "master"}] if master else []) + (
             [{"name": cos, "role": "cos"}] if cos else []),
-        "bench": [{"name": a["name"], "state": a.get("state", "")}
-                  for a in (agents or []) if a.get("name")],
+        "idle": [{"name": a["name"], "state": a.get("state", "")}
+                 for a in (agents or []) if a.get("name")],
     }
 
 

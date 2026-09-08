@@ -1,6 +1,6 @@
 # The handoff contract
 
-The goal is total football: **any agent can take any position, including
+The goal is one team: **any agent can take any seat, including
 master, and be productive from one read.** No agent is special, no context is
 private, and no handover depends on a conversation that happened to still be
 in someone's window.
@@ -113,5 +113,5 @@ claim whose owner has no recorded id.
 
 It is deterministic, needs no model, and costs nothing. Run it before you
 clear, before you hand over, and after editing any of the three files. If it
-FAILs, the next agent to take the shirt will be worse off than you were — which
+FAILs, the next agent to take the seat will be worse off than you were — which
 is the one thing this contract exists to prevent.

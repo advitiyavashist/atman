@@ -35,7 +35,9 @@ Seats / cards, not a workforce table-as-identity.
 
 Each seat shows: status, quota / limit, utilization (real numbers only), lane / coverage.
 
-Empty seats = **uncovered work**. That is the point of the view. Roles flex; do not pin a seat to a permanent persona.
+Copy (brand lock): **Who’s present. What’s uncovered.** Empty seat: **Open seat — uncovered work.** Coverage: **Coverage by work, not fixed role.**
+
+Empty seats = **uncovered work**. That is the point of the view. Roles flex; do not pin a seat to a permanent persona. Spare dark seat cards + lanes. Quiet formation-dots as constellation / **self ↔ whole** — never a literal pitch, goals, or grass. No Om / mandala kitsch.
 
 ### 3. Work
 
@@ -68,7 +70,7 @@ Confirm destructive actions. **No silent auto-promote.** Where the product is ad
 | Messages | Thread from `board_snapshot.messages`. Keep; do not make it the home. |
 | Turns / efficiency | Fewest-turns objective; no fake telemetry wall. |
 | Onboarding | Empty / next / checklist. First-run path, not a fifth primary pane. |
-| Pitch / formation | A view of Team, not a separate product. |
+| Team seats | A view of Team, not a separate product. Spare dark seats; formation-dots as constellation / presence only. |
 
 ---
 
