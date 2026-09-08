@@ -7457,6 +7457,24 @@ def _watch_lock(board, owner):
     return None
 
 
+def reclaim_stale_watch_lock(board, owner):
+    """Inspect and, when safe, reclaim one dead watch pid file."""
+    path = os.path.join(agents_dir(board), owner + ".watch.pid")
+    existed = os.path.lexists(path)
+    lock = _watch_lock(board, owner)
+    if lock is None:
+        return {"state": "live", "detail": "watcher is running"}
+    try:
+        with open(lock) as f:
+            ours = int((f.read() or "0").strip() or 0) == os.getpid()
+        if ours:
+            os.unlink(lock)
+    except (OSError, ValueError):
+        pass
+    return {"state": "reclaimed" if existed else "clear",
+            "detail": "stale watcher lock reclaimed" if existed else "no watcher lock"}
+
+
 def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
                       on_beat=None, beat_secs=None):
     """Run cmd with stdout+stderr teed into log_path, capped at cap_bytes for
@@ -7709,6 +7727,20 @@ def cmd_watch(a, board):
                     if cleanup:
                         cleanup()
                     ended = now()
+                    run_output = _read_run_slice(log_path, log_before)
+                    if harness == "cursor":
+                        run_auth_state = _classify_auth_output(rc, run_output)
+                        if run_auth_state in ("login_required", "quota") or rc == 0:
+                            previous_auth = (_agent_rec(board, owner) or {}).get("auth_check") or {}
+                            run_auth = {
+                                "state": "ready" if rc == 0 else run_auth_state,
+                                "harness": "cursor", "at": now(), "exit": rc,
+                                "detail": ("headless run succeeded" if rc == 0 else
+                                           ((run_output or "run failed").strip().splitlines()[-1][:240])),
+                                "identity": previous_auth.get("identity", "") if rc == 0 else "",
+                                "status_cmd": "agent status", "login_cmd": "agent login",
+                            }
+                            _safe(lambda ra=run_auth: _agent_set(board, owner, auth_check=ra), None)
                     # Tokens/cost for THIS run: the harness's own stdout when
                     # it was asked for a JSON format, else its session store.
                     # usage_error records "reported something unreadable",
@@ -7728,8 +7760,7 @@ def cmd_watch(a, board):
                         exit=rc, timed_out=bool(timed_out),
                         bound_write=True if bw else None,
                         duration_s=_iso_span_secs(run_started, ended),
-                        outcome=("limit" if _looks_limited(
-                            _read_run_slice(log_path, log_before)) else None),
+                        outcome=("limit" if _looks_limited(run_output) else None),
                         usage_error=usage_error, **usage), None)
                     if timed_out:
                         with open(log_path, "a") as lf:
@@ -8175,6 +8206,18 @@ def cmd_spawn(a, board):
                 ", ".join(str(p) for p in busy), owner))
         post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
         return
+    # Prove the headless Cursor credential before creating a watcher. This is
+    # a local status call, not a model turn. Keep it before cmd_join so a failed
+    # relaunch cannot alter the seat's roles, harness, or worktree record.
+    requested_harness = getattr(a, "harness", "") or a.tool
+    resolved_harness, _ = harness_of(board, owner, requested_harness,
+                                     getattr(a, "cmd_template", ""))
+    if resolved_harness == "cursor" and not a.exec:
+        auth = harness_auth_probe(board, owner, requested_harness)
+        _safe(lambda: _agent_set(board, owner, auth_check=auth), None)
+        if auth.get("state") != "ready":
+            _print_auth_result(owner, auth)
+            sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                             harness=getattr(a, "harness", "") or "",
                             cmd_template=getattr(a, "cmd_template", "") or "",
@@ -8266,6 +8309,99 @@ def cmd_spawn(a, board):
 HARNESS_PROBE_PROMPT = "reply OK"
 HARNESS_CHECK_TIMEOUT = 60
 
+HARNESS_AUTH_COMMANDS = {
+    "cursor": (["agent", "status"], ["agent", "login"]),
+    "claude": (["claude", "auth", "status"], ["claude", "auth", "login"]),
+    "codex": (["codex", "login", "status"], ["codex", "login"]),
+}
+
+
+def _classify_auth_output(rc, output):
+    """Keep credentials, quota, and host failures as separate operator states."""
+    text = (output or "").strip()
+    low = text.lower()
+    if _looks_auth(text) or "authentication required" in low or "login required" in low:
+        return "login_required"
+    if _looks_limited(text):
+        return "quota"
+    if rc == 0:
+        return "ready"
+    return "unavailable"
+
+
+def harness_auth_probe(board, owner, harness="", timeout=15):
+    """Cheap credential preflight; never starts a model or consumes a turn."""
+    import subprocess
+
+    resolved, _ = harness_of(board, owner, harness, "")
+    spec = HARNESS_AUTH_COMMANDS.get(resolved)
+    if not spec:
+        return {"state": "unsupported", "harness": resolved, "at": now(),
+                "detail": "auth preflight is not defined for this harness", "login_cmd": ""}
+    status_cmd, login_cmd = spec
+    env = dict(os.environ,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    try:
+        r = subprocess.run(status_cmd, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, env=env)
+        output = ((r.stdout or "") + (r.stderr or "")).strip()
+        state = _classify_auth_output(r.returncode, output)
+        rc = r.returncode
+    except FileNotFoundError:
+        state, rc, output = "unavailable", 127, "%s is not installed" % status_cmd[0]
+    except subprocess.TimeoutExpired:
+        state, rc, output = "unavailable", 124, "authentication status timed out"
+    return {"state": state, "harness": resolved, "at": now(), "exit": rc,
+            "detail": (output.splitlines()[0][:240] if output else "status returned no identity"),
+            "identity": (output.splitlines()[0][:240] if state == "ready" and output else ""),
+            "status_cmd": " ".join(status_cmd), "login_cmd": " ".join(login_cmd)}
+
+
+def _print_auth_result(owner, result):
+    labels = {"ready": "Ready", "login_required": "Login required",
+              "quota": "Usage quota reached", "unavailable": "Harness unavailable",
+              "unsupported": "Auth check unsupported"}
+    print("%s: %s" % (owner, labels.get(result.get("state"), result.get("state", "unknown"))))
+    if result.get("identity"):
+        print("  identity: %s" % result["identity"])
+    elif result.get("detail"):
+        print("  detail:   %s" % result["detail"])
+    if result.get("state") == "login_required":
+        print("  recover:  %s" % result["login_cmd"])
+        print("  verify:   tickets harness auth %s" % owner)
+
+
+def cmd_harness_auth(a, board):
+    """Show auth, optionally run the interactive login, and verify afterward."""
+    import subprocess
+
+    owner = a.name or whoami()
+    if owner.startswith("agent-"):
+        sys.exit("harness auth needs an agent name: tickets harness auth <name>")
+    if a.recover_stale:
+        recovered = reclaim_stale_watch_lock(board, owner)
+        print("watcher: %s" % recovered["detail"])
+        if recovered["state"] == "live":
+            sys.exit(2)
+    result = harness_auth_probe(board, owner, a.harness, a.timeout)
+    _safe(lambda: _agent_set(board, owner, auth_check=result), None)
+    _print_auth_result(owner, result)
+    if a.login:
+        if result.get("state") == "unsupported":
+            sys.exit("interactive login is not supported for %s" % result.get("harness"))
+        login_cmd = HARNESS_AUTH_COMMANDS[result["harness"]][1]
+        env = dict(os.environ,
+                   PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+        rc = subprocess.call(login_cmd, env=env)
+        if rc:
+            sys.exit(rc)
+        result = harness_auth_probe(board, owner, a.harness, a.timeout)
+        _safe(lambda: _agent_set(board, owner, auth_check=result), None)
+        print("verification:")
+        _print_auth_result(owner, result)
+    if result.get("state") != "ready":
+        sys.exit(1)
+
 
 def _harness_check_label(check):
     """One column's worth of the last `harness check`, for `spawn --list`."""
@@ -8338,6 +8474,8 @@ def cmd_harness(a, board):
     poll interval discovering it does not. The result is written to the agent
     record so `spawn --list` and the master can see who is really reachable.
     """
+    if a.harness_cmd == "auth":
+        return cmd_harness_auth(a, board)
     if a.harness_cmd == "list":
         wf = load_workforce(board)
         names = sorted(set(list(wf) + [r["owner"] for r in load_agents(board)]))
@@ -9045,9 +9183,11 @@ async function load(manual){
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
+    const auth=a.auth==='login_required'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Login required · '+esc(a.auth_login_cmd||'agent login')+'</span>':'';
+    const quota=a.auth==='quota'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Usage quota</span>':'';
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span>'+lim+'</div>'+
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span>'+auth+quota+lim+'</div>'+
       '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
@@ -9540,6 +9680,9 @@ def _board_snapshot_body(board, messages=40):
                            "watcher": wc > 0,
                            "watcher_count": wc,
                            "roles": roles.get(r["agent"]) or [],
+                           "auth": (rec.get("auth_check") or {}).get("state", ""),
+                           "auth_detail": (rec.get("auth_check") or {}).get("detail", ""),
+                           "auth_login_cmd": (rec.get("auth_check") or {}).get("login_cmd", ""),
                            "limit": lim,
                            "limit_until": (lim or {}).get("until", "") if lim else ""})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
@@ -10488,9 +10631,15 @@ def main():
     x.add_argument("--model", default="")
     x.add_argument("--cwd", default="", help="run the probe here (default: the agent's worktree)")
     x.add_argument("--timeout", type=int, default=HARNESS_CHECK_TIMEOUT, help="seconds (default 60)")
+    x = hs.add_parser("auth", help="check login without a model run; optionally log in and recover a stale watch lock")
+    x.add_argument("name", nargs="?", default="")
+    x.add_argument("--harness", default="", help="override the registered harness for this check")
+    x.add_argument("--login", action="store_true", help="run the harness's interactive login, then verify identity")
+    x.add_argument("--recover-stale", action="store_true", help="atomically reclaim a dead watcher pid lock")
+    x.add_argument("--timeout", type=int, default=15)
     hs.add_parser("list", help="every registered agent, its harness and its last check")
     c.set_defaults(fn=cmd_harness, harness_cmd="list", name="", harness="", cmd_template="", model="", cwd="",
-                   timeout=HARNESS_CHECK_TIMEOUT)
+                   timeout=HARNESS_CHECK_TIMEOUT, login=False, recover_stale=False)
 
     c = sub.add_parser("route", help="master: suggest an owner for every open ticket by model/roles/capabilities/cost")
     c.add_argument("--claim", action="store_true", help="hard-assign the ready ones (claims on their behalf)")
