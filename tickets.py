@@ -1002,6 +1002,59 @@ def artifact_tree(a):
     return path
 
 
+def _behind_trunk_refusal(g, art, trunk):
+    """The text `tickets review` refuses with when the branch is behind trunk.
+
+    T-422. The gate is correct and is T-272 working as designed: it measures
+    the ARTIFACT tree. The text did not say so -- it said a bare "Run `tickets
+    sync`", and cmd_sync without --artifact operates on the process cwd. On a
+    cross-repo ticket those are different repos, so the instruction could not
+    clear the refusal:
+
+        review --artifact B  -> "your branch is behind main"
+        sync                 -> "<branch> already contains main; nothing to do"
+        review --artifact B  -> "your branch is behind main"
+
+    Both lines are true and each is about a different repository, so the loop
+    is closed and the text alone offers no way out. The agent's natural next
+    move from "already contains main" is to conclude the gate is wrong and
+    start merging, which on a less careful lane is a merge into the wrong
+    repo's main -- so this is a message defect with a merge-shaped cost.
+
+    Only the wording changes here; what the gate measures is untouched.
+
+    The split is on the trees being genuinely DIFFERENT, not on whether
+    --artifact was passed: `--artifact .` is the common path wearing a flag and
+    gets the common path's message. Comparing resolved toplevels rather than
+    repo_identity() is deliberate -- a second worktree of the SAME repo has an
+    identical identity, and `tickets sync` there merges the cwd worktree's own
+    branch, so it cannot clear this refusal either and the agent still has to
+    be sent elsewhere.
+    """
+    tail = ("(merges %s in, so conflicts are yours to fix now, not the master's later), "
+            "then submit again." % trunk)
+    plain = "RULE: your branch is behind %s. Run `tickets sync` %s" % (trunk, tail)
+    if not art:
+        return plain
+    cg = git_state()
+    if cg and os.path.realpath(cg["top"]) == os.path.realpath(g["top"]):
+        return plain
+    if cg:
+        wrong = "the tree you are standing in, %s (%s)" % (cg["top"], cg["repo"] or "no origin remote")
+        kind = "repo" if cg["repo"] != g["repo"] else "worktree"
+    else:
+        wrong = "the directory you are standing in (not a git tree)"
+        kind = "place"
+    return (
+        "RULE: branch %s in %s (%s) is behind %s.\n"
+        "That ARTIFACT tree is what this gate measured (--artifact), NOT %s.\n"
+        "Sync THERE, not here: `tickets sync --artifact %s` %s\n"
+        "A bare `tickets sync` would sync that other %s and cannot clear this refusal."
+        % (g["branch"], g["top"], g["repo"] or "no origin remote", trunk,
+           wrong, art, tail, kind)
+    )
+
+
 def _record_pin(t, g, art):
     """Write the (repo, branch, sha) evidence triple onto a ticket.
 
@@ -2045,8 +2098,7 @@ def cmd_review(a, board):
     if g and not a.force:
         trunk = _trunk(cwd=art)
         if git("merge-base", "--is-ancestor", trunk, "HEAD", cwd=art) is None:
-            sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
-                     "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
+            sys.exit(_behind_trunk_refusal(g, art, trunk))
     # `owner` decides who the ticket is filed under (unchanged: claim it via
     # review if nobody holds it yet, otherwise keep the existing owner).
     # `author` is who actually ran this command -- always whoami(), never
