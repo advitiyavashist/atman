@@ -9424,6 +9424,35 @@ def _board_snapshot_body(board, messages=40):
     }
 
 
+_UI_MSG_MAX_BYTES = 65536
+_UI_MSG_KINDS = frozenset(("message", "task"))
+
+
+def _ui_msg_is_json(headers):
+    raw = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    return raw == "application/json"
+
+
+def _ui_msg_origin_ok(headers):
+    """Browser writes send Origin; it must match Host (same-origin).
+
+    Local API clients (curl, urllib, tickets tests) omit Origin — that is
+    allowed once Content-Type is JSON and `from` is a registered agent.
+    A present Origin that is missing, `null`, or a different host is rejected.
+    """
+    origin = (headers.get("Origin") or "").strip()
+    if not origin:
+        return True
+    host = (headers.get("Host") or "").strip()
+    if not host or origin.lower() == "null":
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse(origin)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    return parsed.netloc.lower() == host.lower()
+
+
 def cmd_ui(a, board):
     """Local status UI: serves an auto-refreshing page, /board.json, and a
     composer POST at /msg that posts through post_message() -- same board,
@@ -9464,8 +9493,18 @@ def cmd_ui(a, board):
                 self.end_headers()
                 return
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = -1
+                if length < 0 or length > _UI_MSG_MAX_BYTES:
+                    raise ValueError("body exceeds %d bytes" % _UI_MSG_MAX_BYTES)
+                raw = self.rfile.read(length) if length else b"{}"
+                if not _ui_msg_is_json(self.headers):
+                    raise ValueError("Content-Type must be application/json")
+                if not _ui_msg_origin_ok(self.headers):
+                    raise ValueError("origin mismatch")
+                payload = json.loads(raw or b"{}")
                 sender = str(payload.get("from") or "").strip()
                 text = str(payload.get("text") or "").strip()
                 to = str(payload.get("to") or "").strip()
@@ -9473,6 +9512,10 @@ def cmd_ui(a, board):
                 kind = str(payload.get("kind") or "message").strip() or "message"
                 if not sender or not text:
                     raise ValueError("from and text are required")
+                if kind not in _UI_MSG_KINDS:
+                    raise ValueError("kind must be message or task")
+                if not _agent_rec(board, sender):
+                    raise ValueError("from must be a registered agent")
                 rec = post_message(board, sender, text, to, re_, kind=kind)
                 status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
             except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
