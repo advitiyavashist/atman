@@ -141,6 +141,7 @@ def test_join_then_dm_still_wakes_the_agent(board):
     p = json.loads(r.stdout)
     assert p.get("messages_to_me"), r.stdout
     assert "please look at this" in " ".join(p["messages_to_me"])
+    assert p.get("pending") is False, "ordinary DMs are notification-only after T-611"
 
 
 def test_pending_counts_post_join_broadcast_without_sleep(board):

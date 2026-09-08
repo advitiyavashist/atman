@@ -712,6 +712,37 @@ def load_objective(board):
         return {}
 
 
+OBJECTIVE_STATES = ("active", "achieved", "blocked", "replaced")
+STOP_CONDITION = "one model run this session; restart watch to continue (--persist or --max-runs 0 to loop)"
+WAKE_KEYS = frozenset({
+    "holding", "suggested_for_me", "ready_in_my_lane",
+    "task_messages", "stuck_messages", "drive", "forced",
+})
+
+
+def objective_state(obj):
+    """Terminal state achieved|blocked|replaced, else active. Legacy done => achieved."""
+    if not obj:
+        return ""
+    st = obj.get("state")
+    if st in OBJECTIVE_STATES:
+        return st
+    return "achieved" if obj.get("done") else "active"
+
+
+def objective_exit_ok(obj):
+    return bool(str((obj or {}).get("exit_criterion") or "").strip())
+
+
+def objective_exit_missing(obj):
+    """True when the standing objective has no measurable exit criterion."""
+    if not obj:
+        return False
+    if "exit_missing" in obj:
+        return bool(obj.get("exit_missing"))
+    return not objective_exit_ok(obj) and objective_state(obj) == "active"
+
+
 def drive_status(board, tickets=None):
     """One-paragraph progress picture for the master's heartbeat: sprint burn,
     review queue, unowned ready work, live workers whose lane is empty."""
@@ -5361,12 +5392,14 @@ def resolve_to_and_mentions(text, to=""):
     return to, mentions
 
 
-def post_message(board, sender, text, to="", re="", kind=""):
+def post_message(board, sender, text, to="", re="", kind="", task=False):
     _rotate_messages_if_big(board)
     to, mentions = resolve_to_and_mentions(text, to)
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
     if mentions:
         rec["mentions"] = mentions
+    if task and not kind:
+        kind = "task"
     if kind and kind not in ("", "message"):
         rec["kind"] = kind
     line_ = json.dumps(rec) + "\n"
@@ -5764,7 +5797,8 @@ def cmd_msg(a, board):
     sender = whoami(a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
-    m = post_message(board, sender, a.text, a.to or "", a.re or "")
+    m = post_message(board, sender, a.text, a.to or "", a.re or "",
+                     task=bool(getattr(a, "task", False)))
     print("posted: " + fmt_msg(m))
 
 
@@ -6435,6 +6469,9 @@ def pending_work(board, owner):
     direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
     if direct:
         out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
+        tasks = [fmt_msg(m) for m in direct if _message_wakes(m)]
+        if tasks:
+            out["task_messages"] = tasks[-5:]
     elif msgs:
         out["broadcasts"] = len(msgs)
     tickets = _safe(lambda: load_all(board), [])
@@ -6480,16 +6517,48 @@ def pending_work(board, owner):
     # objective instead of going quiet. Opt-in per seat; off for plain workers.
     obj = _safe(lambda: load_objective(board), {})
     every = int(rec.get("drive_every") or 0)
-    if obj and not obj.get("done") and every > 0:
+    # Heartbeat wakes only an active objective that has a measurable exit.
+    if (obj and objective_state(obj) == "active" and objective_exit_ok(obj)
+            and every > 0):
         last = rec.get("drive_at", "")
         if not last or hours_since(last) * 60 >= every:
             out["drive"] = {"objective": obj.get("text", "")[:100], "last": last or "never"}
     return out
 
 
+def _message_wakes(m):
+    """Explicit task / stuck / blocked mail wakes a model; ACKs and ordinary DMs do not."""
+    if m.get("task"):
+        return True
+    text = str(m.get("text") or "").strip().lower()
+    if text.startswith(("stuck", "blocked", "task:", "task ")):
+        return True
+    return False
+
+
+def wake_reason_of(pending):
+    for k in ("forced", "holding", "suggested_for_me", "ready_in_my_lane",
+              "stuck_messages", "task_messages", "drive"):
+        if pending.get(k):
+            return k
+    return "none"
+
+
+def pending_view(pending, force=False):
+    """pending_work plus why/stop, for CLI/UI. Does not change wake gates."""
+    out = dict(pending)
+    if force:
+        out["forced"] = True
+    out["wake_reason"] = wake_reason_of(out)
+    out["stop_condition"] = STOP_CONDITION
+    return out
+
+
 def actionable(pending):
-    """Broadcast-only noise or a recorded usage limit should not start a run."""
-    return bool(pending) and not (set(pending) <= {"broadcasts", "limited"})
+    """Only held/ready work, explicit task or stuck mail, force, or a valid drive."""
+    if not pending or pending.get("limited"):
+        return False
+    return any(k in WAKE_KEYS for k in pending)
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
@@ -6511,7 +6580,13 @@ Do now, in order:
 {extra}"""
 
 MASTER_PROMPT = """You are {agent}, the MASTER of the shared ticket board at {board} (repo {root}).
-TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets. Your three jobs, every wake-up:
+TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
+This run: pick ONE concrete outcome (one unblock, one merge batch, or one routing act) and stop.
+Ordinary messages and ACKs are notification-only and must not extend the run.
+If there is no standing objective with a measurable --exit criterion, ask for one
+(`tickets objective "<what done looks like>" --exit "<observable end>"`) and do not invent it.
+Transition the objective with `--done`/`--achieved`, `--blocked`, or `--replaced` when that is the outcome.
+Your three jobs, every wake-up:
 1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
    grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
    (`tickets create ... --blocks <id>`, `tickets dep`), reassign (`tickets assign <id> --owner <who>`), or
@@ -6524,12 +6599,14 @@ TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
    (`tickets limits` first: AUTH means /login is needed, not a wait), `tickets route` new tickets,
    keep one ticket per agent, spawn or brief workers when lanes are empty (`tickets spawn <name> --model ...`).
    Log every non-obvious call: `tickets master log "..."`. Post a short status pulse with `tickets msg`.
-Stop when the inbox is empty, the review queue is empty and no health item needs action.
+Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
 {extra}"""
 
 PLANNER_PROMPT = """You are {agent}, the MASTER PLANNER of the shared ticket board at {board} (repo {root}).
 TICKET_AGENT is set; run `tickets ...` plainly. A chief of staff ({cos}) handles review, merge and day-to-day
 unblocking; you do not take feature tickets and you do not merge unless the cos is silent.
+You own objective discipline: if none is active, ask for one with --exit; plan and route only work that advances it.
+Do not invent objectives. This run: ONE concrete outcome, then stop. ACKs are notification-only.
 Your jobs, every wake-up:
 1. SCOPE + VISION: `tickets master` and `tickets dash --once`. Keep the sprint pointed at what the user wants
    (MASTER.md "CEO memo" and decision log). Split, re-scope, or cut tickets that drift; add the ones that are missing
@@ -6542,60 +6619,81 @@ Your jobs, every wake-up:
    (spend, deploy provider, default flips) get a `tickets msg` to the user's attention, not a guess.
 4. STAFFING: if a lane has ready work and no live worker, `tickets spawn <name> --model <tier> --roles ...`;
    if a worker is silent > 90 min, `tickets limits` then `tickets reopen`.
-Stop when there is nothing addressed to you, the sprint matches the vision, and every ready ticket has an owner.
+Stop after that one bounded batch. Do not keep the model awake for acknowledgements or a broad review queue alone.
 {extra}"""
 
 
-STANDING_SEAT_PROMPT = """HEARTBEAT: this seat is woken every {every} minutes whether or not anything is pending. This wake-up may be
-such a heartbeat: do the standing brief above end to end, post one short finding with numbers, and stop. The board's
+STANDING_SEAT_PROMPT = """HEARTBEAT: this seat is woken every {every} minutes only when the objective has an --exit criterion.
+Do the standing brief as one bounded batch, post one short finding with numbers, and stop. The board's
 objective, which your brief serves: {objective}"""
 
-DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; `tickets objective` to read it in full):
+DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; state={state}; `tickets objective` to read it in full):
 {objective}
+EXIT CRITERION: {exit_criterion}
 
 DRIVE STATUS now:
 {status}
 
-5. DRIVE THE OBJECTIVE (this wake-up may have been a heartbeat with nothing else pending -- that is the point):
-   compare the status above with the objective. If the sprint is done, lanes are empty, or ready work is
-   unowned, plan the next slice toward the objective NOW: `tickets plan`/`tickets create` the missing tickets,
-   `tickets route` + `tickets assign`, `tickets brief` the context, `tickets spawn` where a lane has no live
-   worker, and log the reasoning with `tickets master log`. If the objective is met, run
-   `tickets objective --done "<evidence>"` and post it. If it cannot be met without the user (spend, credentials,
-   a decision they reserved), post exactly what you need with `tickets msg` and log it; do not guess.
-   Never end a heartbeat without either advancing the plan or logging why nothing needed to change."""
+5. DRIVE THE OBJECTIVE (one bounded batch this run, then stop):
+   compare the status above with the exit criterion. Plan or route only the next slice that advances it:
+   `tickets plan`/`tickets create`, `tickets route` + `tickets assign`, `tickets brief`, `tickets spawn` if a
+   lane has no live worker, and `tickets master log`. If the criterion is met, run
+   `tickets objective --done "<evidence>"`. If blocked on the user, `tickets objective --blocked "<why>"`.
+   If a better objective replaced it, `tickets objective --replaced "<why>"`. Do not invent a new objective.
+   Stop after this batch; do not keep looping on acknowledgements or an unbounded heartbeat."""
 
 
 def cmd_objective(a, board):
     """Set, show or close the standing objective the master drives toward."""
     path = objective_path(board)
     cur = load_objective(board)
-    if a.done is not None:
+    blocked = getattr(a, "blocked", None)
+    replaced = getattr(a, "replaced", None)
+    done = a.done
+    terminals = [(blocked, "blocked"), (replaced, "replaced"), (done, "achieved")]
+    chosen = [(ev, st) for ev, st in terminals if ev is not None]
+    if len(chosen) > 1:
+        sys.exit("use only one of --done/--achieved, --blocked, --replaced")
+    if chosen:
         if not cur:
             sys.exit("no objective set")
-        cur["done"] = True
+        evidence, state = chosen[0]
+        cur["state"] = state
+        cur["done"] = state == "achieved"
         cur["done_at"] = now()
-        cur["evidence"] = a.done
+        cur["evidence"] = evidence
         with open(path, "w") as f:
             json.dump(cur, f, indent=2)
-        post_message(board, whoami(a.by), "objective met: %s -- %s" % (cur.get("text", "")[:120], a.done))
-        _master_log(board, "objective met: %s" % a.done, by=whoami(a.by))
-        print("objective marked met")
+        label = {"achieved": "met", "blocked": "blocked", "replaced": "replaced"}[state]
+        post_message(board, whoami(a.by), "objective %s: %s -- %s" % (
+            label, cur.get("text", "")[:120], evidence))
+        _master_log(board, "objective %s: %s" % (label, evidence), by=whoami(a.by))
+        print("objective marked %s" % state)
         return
     if a.text:
-        rec = {"text": a.text, "set_by": whoami(a.by), "at": now(), "done": False}
+        exit_c = (getattr(a, "exit_criterion", None) or "").strip()
+        rec = {"text": a.text, "set_by": whoami(a.by), "at": now(), "done": False,
+               "state": "active", "exit_criterion": exit_c, "exit_missing": not bool(exit_c)}
         with open(path, "w") as f:
             json.dump(rec, f, indent=2)
         post_message(board, whoami(a.by), "objective set: %s" % a.text[:200])
         _master_log(board, "objective set: %s" % a.text, by=whoami(a.by))
         print("objective set")
+        if rec["exit_missing"]:
+            print("FLAG: no measurable exit criterion; add --exit \"<observable end state>\"")
         return
     if not cur:
-        print("no objective set; `tickets objective \"<what done looks like>\"`")
+        print("no objective set; `tickets objective \"<what done looks like>\" --exit \"<observable end>\"`")
         return
-    print("OBJECTIVE%s (set by %s, %s)" % (" -- MET" if cur.get("done") else "", cur.get("set_by", "?"), cur.get("at", "")))
+    st = objective_state(cur).upper()
+    print("OBJECTIVE -- %s%s (set by %s, %s)" % (
+        st, " / MET" if st == "ACHIEVED" else "", cur.get("set_by", "?"), cur.get("at", "")))
     print(cur.get("text", ""))
-    if cur.get("done"):
+    exit_c = (cur.get("exit_criterion") or "").strip()
+    print("exit: %s" % (exit_c or "(none)"))
+    if objective_exit_missing(cur):
+        print("FLAG: no measurable exit criterion; add --exit \"<observable end state>\"")
+    if cur.get("evidence"):
         print("evidence: %s" % cur.get("evidence", ""))
     print()
     print(drive_status(board))
@@ -6606,7 +6704,8 @@ def cmd_drive(a, board):
     `tickets drive "<objective>" --as boss --tool cursor+claude --heartbeat 30`."""
     owner = whoami(a.by)
     if a.text:
-        ns = argparse.Namespace(text=a.text, done=None, by=owner)
+        ns = argparse.Namespace(text=a.text, done=None, by=owner, blocked=None, replaced=None,
+                                exit_criterion=getattr(a, "exit_criterion", None))
         cmd_objective(ns, board)
     elif not load_objective(board):
         sys.exit("give an objective: tickets drive \"<what done looks like>\"")
@@ -6628,13 +6727,15 @@ def cos_prompt_text(agent, board, root, extra):
     return MASTER_PROMPT.replace("the MASTER of", "the CHIEF OF STAFF of").replace(
         "Your three jobs, every wake-up:",
         "The master planner sets scope and routes by complexity; you review, unblock and merge. "
+        "Do not invent objectives. One bounded outcome this run, then stop. "
         "Escalate scope or vision questions to the planner with `tickets msg --to <master>`. "
         "Your three jobs, every wake-up:").format(agent=agent, board=board, root=root, extra=extra)
 
 
 def cmd_pending(a, board):
     owner = whoami(a.agent)
-    p = pending_work(board, owner)
+    force = bool(getattr(a, "force", False))
+    p = pending_view(pending_work(board, owner), force=force)
     if a.json:
         print(json.dumps({"agent": owner, "pending": actionable(p), **p}))
     elif p:
@@ -6783,8 +6884,11 @@ def prompt_text(a, board):
         obj = _safe(lambda: load_objective(board), {})
         if obj and not obj.get("done"):
             _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
-            extra = DRIVE_PROMPT.format(objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
-                                        status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
+            extra = DRIVE_PROMPT.format(
+                objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
+                state=objective_state(obj) or "active",
+                exit_criterion=(obj.get("exit_criterion") or "(none — FLAG: add --exit)"),
+                status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
         if cos and owner != cos:
             return PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
                                          extra=extra)
@@ -6797,7 +6901,7 @@ def prompt_text(a, board):
         parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     obj = _safe(lambda: load_objective(board), {})
-    if int(rec.get("drive_every") or 0) > 0 and obj and not obj.get("done"):
+    if int(rec.get("drive_every") or 0) > 0 and obj and objective_state(obj) == "active" and objective_exit_ok(obj):
         _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
         parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
     tctx = ticket_context(board, owner)
@@ -7426,6 +7530,11 @@ def cmd_watch(a, board):
     import threading
     stop_event = threading.Event()
     stop = {"now": False}
+    persist = bool(getattr(a, "persist", False))
+    max_runs = int(getattr(a, "max_runs", 1) or 0)
+    if persist:
+        max_runs = 0
+    stop_cond = STOP_CONDITION if max_runs else "until spawn --stop or SIGTERM (--persist)"
 
     def _term(signum, frame):
         stop["now"] = True
@@ -7459,10 +7568,15 @@ def cmd_watch(a, board):
                 print("stop requested via tickets spawn --stop")
                 break
             p = _safe(lambda: pending_work(board, owner), {})
+            force = bool(getattr(a, "force", False))
+            if force and not actionable(p):
+                p = dict(p or {}, forced=True)
             if actionable(p):
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
-                print("%s work found (%s) -> run %d" % (now(), ", ".join(p), runs))
+                print("%s work found (%s) wake=%s stop=%s -> run %d" % (
+                    now(), ", ".join(k for k in p if k in WAKE_KEYS or k in ("messages_to_me", "review_queue")),
+                    wake_reason_of(p), stop_cond, runs))
                 run_cmd, cleanup = cmd, None
                 if templated:
                     pf = ""
@@ -7561,7 +7675,7 @@ def cmd_watch(a, board):
                     log("%s run %d exit %s" % (now(), runs, rc))
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
                 failures = failures + 1 if rc not in (0, None) else 0
-                if a.max_runs and runs >= a.max_runs:
+                if max_runs and runs >= max_runs:
                     print("max-runs reached")
                     break
             elif a.verbose:
@@ -7676,8 +7790,9 @@ def cmd_boot(a, board):
     print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
     if a.watch:
         wn = argparse.Namespace(agent=owner, every=a.every, exec=a.exec, cwd=a.cwd or root,
-                                permission_mode="acceptEdits", allowed_tools="", max_runs=0,
-                                once=False, dry_run=False, verbose=False, run_timeout=a.run_timeout)
+                                permission_mode="acceptEdits", allowed_tools="", max_runs=1,
+                                once=False, dry_run=False, verbose=False, run_timeout=a.run_timeout,
+                                heartbeat=0, persist=False, force=False, prompt_kind="", beat_every=0)
         cmd_watch(wn, board)
 
 
@@ -8055,6 +8170,10 @@ def cmd_spawn(a, board):
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
             "--prompt-kind", kind,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
+    if getattr(a, "persist", False) or int(getattr(a, "max_runs", 1) or 0) == 0:
+        argv += ["--max-runs", "0"]
+    elif int(getattr(a, "max_runs", 1)) != 1:
+        argv += ["--max-runs", str(int(a.max_runs))]
     # T-243: strip Git's LOCATION vars before handing the parent's environment
     # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
     # cascades into every agent this launches. _clean_git_env is deliberately
@@ -8426,7 +8545,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   <div class="attn-list" id="attnList"></div></details>
 <details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
-<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
+<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span><span id="wakeGates" hidden></span></div>
 <details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/7</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
@@ -8558,6 +8677,18 @@ function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(
 function fmtMedian(p){return(!p||p.median_turns==null)?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0)}
 function fmtYield(p){return(!p||p.yield_per_usd==null)?'—':(Number(p.yield_per_usd).toFixed(2)+' per $')}
 function setTxt(id,v){const el=document.getElementById(id);if(el)el.textContent=v}
+function renderObjective(o){
+  const line=document.getElementById('promiseStripLine');
+  const gates=document.getElementById('wakeGates');
+  if(gates)gates.textContent=(o&&o.wake_gates)||'';
+  if(!line)return;
+  if(!o||!o.text){line.textContent='Fewest turns. Max output at least cost.';return;}
+  const bits=[(o.state||'active'), o.text];
+  if(o.exit_criterion)bits.push('exit: '+o.exit_criterion);
+  else if(o.exit_missing)bits.push('FLAG: no exit criterion');
+  if(o.stop_condition)bits.push('stop: '+o.stop_condition);
+  line.textContent=bits.join(' · ');
+}
 function renderPromise(p){
   const med=fmtMedian(p),yld=fmtYield(p);
   setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);
@@ -8838,6 +8969,7 @@ async function load(manual){
   if(!d.error)renderNextStep(d.next_step);
   renderOnboarding(d.onboarding);
   renderPromise(d.promise);
+  renderObjective(d.objective);
   renderTurns(d.turns);
   renderUsage(d.usage);
   renderSeats(d);
@@ -9360,7 +9492,10 @@ def _board_snapshot_body(board, messages=40):
         pass
     obj = _safe(lambda: load_objective(board), {})
     if obj:
-        goals = "OBJECTIVE%s\n%s\n\n%s" % (" (met)" if obj.get("done") else "", obj.get("text", ""), goals)
+        st = objective_state(obj)
+        flag = " FLAG:no-exit" if objective_exit_missing(obj) else ""
+        goals = "OBJECTIVE (%s%s)\n%s\nexit: %s\n\n%s" % (
+            st, flag, obj.get("text", ""), obj.get("exit_criterion") or "(none)", goals)
     util_rows = [r for r in rows if r["state"] != "DOWN"]
     in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
                   "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
@@ -9420,6 +9555,14 @@ def _board_snapshot_body(board, messages=40):
         "turns": turns,
         "usage": usage,
         "promise": promise,
+        "objective": {
+            "text": (obj or {}).get("text", ""),
+            "state": objective_state(obj) if obj else "",
+            "exit_criterion": (obj or {}).get("exit_criterion") or "",
+            "exit_missing": bool(obj) and objective_exit_missing(obj),
+            "wake_gates": "task messages, stuck/blocked, held tickets, ready assigned work; ACKs and ordinary DMs notify-only",
+            "stop_condition": STOP_CONDITION,
+        },
         "coverage": coverage,
     }
 
@@ -10314,6 +10457,7 @@ def main():
     c = sub.add_parser("pending", help="exit 0 if there is work for the agent (messages, held or ready ticket)")
     c.add_argument("--agent", default="")
     c.add_argument("--json", action="store_true")
+    c.add_argument("--force", action="store_true", help="treat as actionable even without a wake gate (manual override)")
     c.set_defaults(fn=cmd_pending)
 
     c = sub.add_parser("prompt", help="print the standard worker (or --master) prompt for a headless run")
@@ -10328,12 +10472,19 @@ def main():
 
     c = sub.add_parser("objective", help="set/show/close the standing objective the master drives toward")
     c.add_argument("text", nargs="?", default="")
-    c.add_argument("--done", default=None, metavar="EVIDENCE", help="mark the objective met, with evidence")
+    c.add_argument("--exit", dest="exit_criterion", default=None, metavar="CRITERION",
+                   help="measurable exit criterion (observable end state)")
+    c.add_argument("--done", "--achieved", dest="done", default=None, metavar="EVIDENCE",
+                   help="mark the objective achieved, with evidence")
+    c.add_argument("--blocked", default=None, metavar="REASON", help="mark the objective blocked")
+    c.add_argument("--replaced", default=None, metavar="REASON", help="mark the objective replaced")
     c.add_argument("--by", default="")
     c.set_defaults(fn=cmd_objective)
 
     c = sub.add_parser("drive", help="set the objective and spawn the master seat with a heartbeat")
     c.add_argument("text", nargs="?", default="")
+    c.add_argument("--exit", dest="exit_criterion", default=None, metavar="CRITERION",
+                   help="measurable exit criterion (observable end state)")
     c.add_argument("--by", "--as", dest="by", default="", help="agent name for the master seat (default TICKET_AGENT)")
     c.add_argument("--heartbeat", type=int, default=30, help="minutes between objective wake-ups")
     c.add_argument("--every", type=int, default=60, help="seconds between board polls")
@@ -10356,7 +10507,10 @@ def main():
     c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
     c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
     c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
-    c.add_argument("--max-runs", type=int, default=0)
+    c.add_argument("--max-runs", type=int, default=1,
+                   help="model runs this session then stop (default 1; 0 = loop until --stop)")
+    c.add_argument("--persist", action="store_true", help="loop until spawn --stop / SIGTERM (sets --max-runs 0)")
+    c.add_argument("--force", action="store_true", help="run once even if wake gates are empty")
     c.add_argument("--run-timeout", type=int, default=90, help="minutes per run before it is killed (0 = none)")
     c.add_argument("--beat-every", type=int, default=0,
                    help="seconds between in-run heartbeats (0 = TICKETS_RUN_HEARTBEAT_SECS, default 30)")
@@ -10409,6 +10563,10 @@ def main():
     c.add_argument("--run-timeout", type=int, default=90)
     c.add_argument("--heartbeat", type=int, default=0,
                    help="with --master: also wake every N minutes to drive the objective (0 = off)")
+    c.add_argument("--persist", action="store_true",
+                   help="keep the watcher looping (default is one model run then stop)")
+    c.add_argument("--max-runs", type=int, default=1,
+                   help="passed to watch; default 1; 0 with --persist loops")
     c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
     c.add_argument("--master", action="store_true",
                    help="spawn the board master/planner (scope, routing by complexity, escalations)")
@@ -10483,6 +10641,8 @@ def main():
     c.add_argument("text")
     c.add_argument("--to", default="", help="seat / agent name, or omit for everyone")
     c.add_argument("--re", default="", help="ticket id this is about")
+    c.add_argument("--task", action="store_true",
+                   help="explicit task message: wakes the addressee (ordinary DMs and ACKs do not)")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_msg)
 

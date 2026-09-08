@@ -91,7 +91,7 @@ def _assert_reaper_clears_qwen(board, tmp_path, pid):
 
 def test_spawn_child_does_not_survive_fixture_reaper(board, tmp_path):
     run(board, "join", "qwen", "--roles", "docs")
-    pid = _spawn_qwen_watch(board, tmp_path, "--exec", "true", "--every", "3600")
+    pid = _spawn_qwen_watch(board, tmp_path, "--exec", "true", "--every", "3600", "--persist")
     _assert_reaper_clears_qwen(board, tmp_path, pid)
 
 
@@ -99,7 +99,7 @@ def test_byoa_spawn_stored_harness_reaped_without_pid_file(board, tmp_path):
     script = _stub(tmp_path)
     run(board, "join", "qwen", "--roles", "docs", "--harness",
         "custom:%s {prompt_file}" % script)
-    pid = _spawn_qwen_watch(board, tmp_path, "--every", "3600")
+    pid = _spawn_qwen_watch(board, tmp_path, "--every", "3600", "--persist")
     _assert_reaper_clears_qwen(board, tmp_path, pid)
 
 
@@ -107,7 +107,7 @@ def test_byoa_spawn_tool_flag_reaped_without_pid_file(board, tmp_path):
     script = _stub(tmp_path)
     run(board, "join", "qwen", "--roles", "docs", "--harness",
         "custom:%s {prompt_file}" % script)
-    pid = _spawn_qwen_watch(board, tmp_path, "--tool", "codex", "--every", "3600")
+    pid = _spawn_qwen_watch(board, tmp_path, "--tool", "codex", "--every", "3600", "--persist")
     _assert_reaper_clears_qwen(board, tmp_path, pid)
 
 
@@ -115,7 +115,7 @@ def test_byoa_spawn_custom_cmd_reaped_without_pid_file(board, tmp_path):
     script = _stub(tmp_path)
     pid = _spawn_qwen_watch(
         board, tmp_path, "--harness", "custom", "--cmd",
-        "%s {prompt_file}" % script, "--roles", "docs", "--every", "3600",
+        "%s {prompt_file}" % script, "--roles", "docs", "--every", "3600", "--persist",
     )
     _assert_reaper_clears_qwen(board, tmp_path, pid)
 
