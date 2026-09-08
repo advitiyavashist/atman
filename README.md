@@ -188,4 +188,6 @@ rules are deliberately opinionated — is in
 
 Python 3.9+, stdlib only. MIT licensed.
 
-Before publishing this repository, see [docs/PUBLIC_PREP.md](docs/PUBLIC_PREP.md).
+Before publishing this repository, see [docs/PUBLIC_PREP.md](docs/PUBLIC_PREP.md)
+and the history-rewrite runbook in [docs/HISTORY_REWRITE.md](docs/HISTORY_REWRITE.md).
+Visibility stays private until Advitiya / CTO flip it.

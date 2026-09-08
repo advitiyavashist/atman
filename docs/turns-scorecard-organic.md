@@ -10,7 +10,7 @@ independent data-quality defects, each recorded below.
 | Live CLI sha (`tickets --version`) | `52f8eaff2d1637ec0c3b296b88fe30becb9228a4` |
 | FLAG recut sha | `db6229d` (T-425); `merge-base --is-ancestor db6229d 52f8eaf` = YES |
 | Doc written on | atman `origin/main` `3e7e82b`; `src/ticket_board/scheduler.py` byte-identical to `52f8eaf` (`git diff 52f8eaf origin/main -- src/ticket_board/scheduler.py` empty) |
-| Board read | `/Users/kavana/Downloads/steer/.tickets` (live, read-only) |
+| Board read | operator coordination board (live, read-only; host path redacted) |
 | Reader | opus-verify — authored none of T-415 / T-416 / T-461 |
 
 Turns are taken verbatim from `tickets turns --json`; the T-425 idle FLAG is
