@@ -228,10 +228,9 @@ class BoardServer:
             # never from ctx.principal, which is always None here regardless
             # of what credential (valid, foreign, or dead) was attached.
             #
-            # (T-275: this is not, by itself, a recovery path for a revoked
-            # agent's dead token -- see the KNOWN LIMITATION note on
-            # create_enrollment for why re-enrolment does not give an agent
-            # its old identity back today.)
+            # (T-275/T-405: this route alone does not recover a revoked agent's
+            # identity -- the operator must call `POST /agents/{agent_id}/
+            # enrollments` first to mint a fresh code for the SAME agent_id.)
             return None
 
         principals = self.credentials.authenticate_all(request)
@@ -784,17 +783,8 @@ class BoardServer:
             self.store, self.store.get_agent(agent_id, ctx.project_id)))
 
     def create_enrollment(self, ctx):
-        # KNOWN LIMITATION (T-275, V1): this always mints a NEW agent_id via
-        # store.create_agent, which enforces UNIQUE(project_id, name) -- there
-        # is no path that re-enrols an EXISTING agent under its own identity.
-        # A revoked agent cannot come back as itself in V1: the operator
-        # enrols it under a new name, which gets a new agent_id, and whatever
-        # was assigned to the old agent (tickets, lease history) stays with
-        # the old agent and must be reassigned by hand. This is deliberate
-        # for now, not an oversight -- adding a same-identity re-enrolment
-        # route is a contract change against the frozen T-178 contract and is
-        # tracked on T-192 (agent creation API / identity lifecycle), not
-        # here.
+        # Mint a NEW agent identity. Same-identity recovery for a revoked agent
+        # is `POST /agents/{agent_id}/enrollments` (T-405).
         body = validate.check_body(
             ctx.body(),
             required=("request_id", "agent_name", "role"),
@@ -895,6 +885,89 @@ class BoardServer:
             "expires_at": enrollment["expires_at"],
             # Returned exactly once. It is never written to the database (only
             # its hash is), never logged and never put in a URL.
+            "code": enrollment["code"],
+            "install_command": "tickets connect --project {} --server {}".format(
+                ctx.project_id, self.base_url),
+            "config_changes": _CONFIG_CHANGES,
+        })
+
+    def re_enroll_agent(self, ctx):
+        """Operator-scoped recovery: mint a new code for an EXISTING agent_id.
+
+        T-405 closes the T-275 gap. A revoked agent cannot reach
+        `POST /hook-events` (401 before the lease check), and
+        `POST /enrollments` always mints a new identity. This route reuses
+        the agent_id so tickets, assignments and lease history stay attached.
+        """
+        agent_id = ctx.params["agent_id"]
+        if not AGENT_ID_RE.match(agent_id):
+            raise NotFound("No such agent in this project.", {"agent_id": agent_id})
+        body = validate.check_body(
+            ctx.body(),
+            required=("request_id", "expected_version", "role"),
+            allowed=("capabilities", "worktree", "connection_mode",
+                     "max_active_tickets"),
+        )
+        validate.request_id(body)
+        expected_version = validate.integer(body, "expected_version", minimum=0)
+        role = validate.text(body, "role", max_length=40)
+        connection_mode = validate.enum(body, "connection_mode",
+                                        ("managed", "hook_only"),
+                                        required=False, default="managed")
+        max_active = validate.integer(body, "max_active_tickets", minimum=1,
+                                      default=1)
+        capabilities = validate.string_list(body, "capabilities", max_length=40)
+        worktree = validate.text(body, "worktree", max_length=300, required=False)
+
+        agent = self.store.get_agent(agent_id, ctx.project_id)
+        if agent["version"] != expected_version:
+            raise _version_conflict("agent_id", agent_id, expected_version,
+                                    agent["version"])
+        if agent["state"] != "revoked":
+            raise MalformedRequest(
+                "Only a revoked agent may be re-enrolled under its existing"
+                " identity; this agent is {}.".format(agent["state"]),
+                {"rejected_fields": ["agent_id"]},
+            )
+
+        try:
+            preset = presets.resolve(role)
+        except presets.AmbiguousRole as ambiguous:
+            raise MalformedRequest(
+                "role={} is not a permission preset, but it is close enough to"
+                " {} that defaulting it could grant more than you meant. Use"
+                " {} exactly, or a role name that is not a near miss of it."
+                .format(ambiguous.role, ambiguous.preset, ambiguous.preset),
+                {"rejected_fields": ["role"]},
+            )
+
+        if worktree:
+            occupant = self.store.find_worktree_occupant(
+                ctx.project_id, worktree, exclude_agent_id=agent_id)
+            if occupant is not None:
+                raise MalformedRequest(
+                    "Agent {} is already working in {}; enrol this agent in a"
+                    " directory no other agent occupies.".format(
+                        occupant["name"], occupant["worktree"]),
+                    {"rejected_fields": ["worktree"]},
+                )
+
+        agent = self.store.re_enroll_agent(
+            ctx.project_id, agent_id, role=role, capabilities=capabilities,
+            connection_mode=connection_mode, max_active_tickets=max_active,
+            worktree=worktree,
+        )
+        self.store.set_agent_preset(
+            ctx.project_id, agent_id, preset,
+            permission_policy=presets.policy_for(preset),
+            runtime_profile=presets.profile_for(preset),
+            allowlisted_worktree=worktree or None,
+        )
+        enrollment = self.credentials.create_enrollment(ctx.project_id, agent_id)
+        return Response(201, {
+            "enrollment_id": enrollment["enrollment_id"],
+            "agent": views.serialize_agent(self.store, agent),
+            "expires_at": enrollment["expires_at"],
             "code": enrollment["code"],
             "install_command": "tickets connect --project {} --server {}".format(
                 ctx.project_id, self.base_url),
@@ -1547,6 +1620,8 @@ _ROUTE_TABLE = [
     ("GET",    r"^/agents$", "list_agents", ANY, True),
     ("DELETE", r"^/agents/(?P<agent_id>[^/]+)/session-lease$",
      "revoke_session_lease", OPERATOR, True),
+    ("POST",   r"^/agents/(?P<agent_id>[^/]+)/enrollments$",
+     "re_enroll_agent", OPERATOR, True),
     ("POST",   r"^/enrollments$", "create_enrollment", OPERATOR, True),
     ("POST",   r"^/sessions$", "exchange_enrollment", NONE, True),
     ("POST",   r"^/hook-events$", "post_hook_event", AGENT, True),
