@@ -42,6 +42,20 @@ ERA_POST = "post-FLAG"
 ERA_UNKNOWN = "unknown"
 _PRE_FLAG_PIN_PREFIXES = ("8f513fe", "1c8335b", "21ca63c")
 _POST_FLAG_PIN_PREFIXES = (FLAG_PIN, FLAG_FEATURE_PIN)
+
+# T-522 re-rooted atman main as an orphan commit (abfcdae) that already
+# carries the T-425 FLAG code (turns.py bound_write/_run_is_productive,
+# TICKETS_RUN_ID stamps). db6229d is not reachable from the new root, so it
+# can no longer certify any new-main sha as post-FLAG by itself (T-537):
+# every descendant of EITHER root is post-FLAG. Read as (FLAG_PIN,
+# T522_ROOT_PIN) at call time, not cached, so patching either pin (tests,
+# or a future re-root) takes effect without a second edit.
+T522_ROOT_PIN = "abfcdae"
+
+# Explicit atman checkout for era resolution from a release dir (T-537): the
+# live shim at tickets-releases/<sha>/src has no .git above it, so ancestry
+# must not fall back to running git in a non-repo (T-243 rule 11: never cwd).
+_ATMAN_REPO_ENV = "TICKETS_ATMAN_REPO"
 _GIT_LOCATION_VARS = (
     "GIT_DIR",
     "GIT_COMMON_DIR",
@@ -563,7 +577,14 @@ def _clean_git_env(environ=None):
 
 
 def _scheduler_repo_root():
-    """Repo root for the checkout that owns scheduler.py (never cwd)."""
+    """Repo root for the checkout that owns scheduler.py (never cwd).
+
+    A release dir (e.g. tickets-releases/<sha>/src) has no .git above it --
+    scheduler.py there is a plain export, not a checkout. In that case fall
+    back to an explicit atman checkout via TICKETS_ATMAN_REPO; absent that,
+    return None so callers skip git entirely instead of running it in a
+    non-repo (T-537).
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     root = here
     while True:
@@ -573,7 +594,10 @@ def _scheduler_repo_root():
         if parent == root:
             break
         root = parent
-    return here
+    env_root = os.environ.get(_ATMAN_REPO_ENV, "").strip()
+    if env_root and os.path.exists(os.path.join(env_root, ".git")):
+        return env_root
+    return None
 
 
 def _git_run(*args, cwd, env=None):
@@ -609,10 +633,13 @@ def clear_sha_post_flag_cache():
 def _sha_is_post_flag_ancestry(sha):
     """Resolve era via git ancestry when the prefix table is silent."""
     repo = _scheduler_repo_root()
+    if repo is None:
+        return None
     if not _sha_exists_in_repo(sha, repo):
         return None
-    if _git_is_ancestor(FLAG_PIN, sha, repo):
-        return True
+    for root in (FLAG_PIN, T522_ROOT_PIN):
+        if _git_is_ancestor(root, sha, repo):
+            return True
     if _git_is_ancestor(sha, FLAG_PIN, repo):
         return False
     return None
