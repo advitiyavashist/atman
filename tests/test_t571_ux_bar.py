@@ -9,7 +9,7 @@ BANNED = (
     "keeper", "shirts", "midfield", "Attack ·", "Defense ·",
     "on the pitch", 'class="pitch"', "renderPitch", "playerChip",
     "#2a7a4c", "#14532d", "band-keep", "band-attack",
-    "mandala", "awakening", "Brahman", "Om ",
+    "mandala", "awakening", "Om ",
     "↗ Ticket Board", "Steer ^",
     'class="prod">tickets',
     "#c6ff00", "#bef264", "#ccff00",
@@ -48,13 +48,13 @@ def test_atman_chrome_wordmark_and_formation_dots():
     assert "text-transform:lowercase" in ui
     assert 'class="mark" viewBox="0 0 32 32"' in header
     assert header.count("<circle ") >= 5
-    assert "--bg:#0c0e12" in ui
-    assert "--acc:#5b8def" in ui
+    assert "--bg:#0b1416" in ui
+    assert "--acc:#c8f04a" in ui
     assert "↗" not in header
     assert "Ticket board" not in header
     assert 'class="prod"' not in header
-    assert 'id="title">atman</h1>' in header
-    assert "textContent='atman'" in ui
+    assert 'id="title" class="sr-only">Atman</h1>' in header
+    assert "textContent='Atman'" in ui
     assert "textContent=d.project||'Atman'" not in ui
 
 
