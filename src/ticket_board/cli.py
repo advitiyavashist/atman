@@ -3757,6 +3757,8 @@ def main():
                    help="with --shadow: print additive JSON (T-315/T-415 shape)")
     c.add_argument("--score", action="store_true",
                    help="with --shadow: retrospective shadow-vs-actual scorecard (read-only)")
+    c.add_argument("--era-by-time", action="store_true",
+                   help="with --shadow --score: fall back to wall-clock era when release_sha absent (prints warning)")
     c.add_argument("--write-scorecard", nargs="?", const="docs/turns-scorecard.md",
                    metavar="PATH",
                    help="with --shadow --score: also write markdown scorecard (default docs/turns-scorecard.md)")

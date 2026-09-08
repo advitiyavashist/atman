@@ -6686,10 +6686,11 @@ def cmd_watch(a, board):
                     owner, runs,
                     hashlib.sha1(("%s:%d:%s" % (owner, runs, run_started)).encode()).hexdigest()[:12])
                 env["TICKETS_RUN_ID"] = run_id
-                _safe(lambda rid=run_id, ht=held_ticket: traj_event(
+                release_sha = _release_commit()
+                _safe(lambda rid=run_id, ht=held_ticket, rs=release_sha: traj_event(
                     board, "run_start", agent=owner, ticket=ht, run_no=runs,
                     run_id=rid, trigger=sorted(p), harness_cmd=harness,
-                    worktree=cwd), None)
+                    worktree=cwd, release_sha=rs), None)
                 if a.dry_run:
                     print("  dry-run; would execute: %s" % run_cmd)
                     if cleanup:
@@ -8818,6 +8819,21 @@ class _LoudArgumentParser(argparse.ArgumentParser):
         })
 
 
+def _release_commit():
+    """Resolved release commit from release.json, or None if uninstalled."""
+    root = os.path.dirname(os.path.realpath(__file__))
+    manifest = os.path.join(root, "release.json")
+    if not os.path.isfile(manifest):
+        return None
+    try:
+        with open(manifest) as source:
+            release = json.load(source)
+        commit = release.get("commit")
+        return str(commit).strip() if commit else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def release_status():
     """Report installed provenance without discovering or touching a board.
 
@@ -8972,6 +8988,8 @@ def main():
                    help="with --shadow: print additive JSON (T-315/T-415 shape)")
     c.add_argument("--score", action="store_true",
                    help="with --shadow: retrospective shadow-vs-actual scorecard (read-only)")
+    c.add_argument("--era-by-time", action="store_true",
+                   help="with --shadow --score: fall back to wall-clock era when release_sha absent (prints warning)")
     c.add_argument("--write-scorecard", nargs="?", const="docs/turns-scorecard.md",
                    metavar="PATH",
                    help="with --shadow --score: also write markdown scorecard (default docs/turns-scorecard.md)")
