@@ -5324,12 +5324,14 @@ def resolve_to_and_mentions(text, to=""):
     return to, mentions
 
 
-def post_message(board, sender, text, to="", re=""):
+def post_message(board, sender, text, to="", re="", kind=""):
     _rotate_messages_if_big(board)
     to, mentions = resolve_to_and_mentions(text, to)
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
     if mentions:
         rec["mentions"] = mentions
+    if kind and kind not in ("", "message"):
+        rec["kind"] = kind
     line_ = json.dumps(rec) + "\n"
     # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
     fd = os.open(messages_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
@@ -8151,8 +8153,10 @@ UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</tit
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff;--live:#3ee8c5;--intervene:#e0a53d}
+body[data-theme=light]{--bg:#f4f2ed;--fg:#1a1c22;--mute:#5c6068;--line:#d8d4cb;--card:#fff;--chip:#ece8e0;--acc:#3a6fd8}
 *{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
+body.loading main{opacity:.55;pointer-events:none}
 header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:linear-gradient(180deg,#12151c 0%,#0c0e12 100%);border-bottom:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:10px;min-width:148px}
 .brand .mark{flex:none;width:22px;height:22px}
@@ -8172,7 +8176,32 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .pulse i{width:8px;height:8px;border-radius:50%;background:var(--live);box-shadow:0 0 0 3px color-mix(in srgb,var(--live) 25%,transparent)}
 .pulse.warn i{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 25%,transparent)}
 .pulse.bad i{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 25%,transparent)}
-#clock{margin-left:auto;font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
+#clock{font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
+.conn{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+.conn-status{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:99px;border:1px solid var(--line)}
+.conn-status.live{color:var(--live);border-color:color-mix(in srgb,var(--live) 45%,var(--line))}
+.conn-status.reconnecting{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.conn-status.offline{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
+#lastUpdated{font-size:11px;color:var(--mute)}
+#refreshBtn,#themeBtn{appearance:none;background:var(--chip);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font:12px inherit;cursor:pointer}
+#refreshBtn:disabled{opacity:.5;cursor:default}
+#refreshBtn.spin{animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.attention{margin:0 16px;padding:8px 0;border-bottom:1px solid var(--line)}
+.attention summary{cursor:pointer;list-style:none;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.attention summary::-webkit-details-marker{display:none}
+.attn-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.attn-item{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--card);border:1px solid var(--line)}
+.attn-item.CRIT{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+.attn-item.WARN{border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+.epics{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px}
+.epic{min-width:180px;flex:1;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.epic .row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--mute);margin-bottom:4px}
+.epic .id{font-weight:700;color:var(--acc)}
+.tag.task{border-color:color-mix(in srgb,var(--flight) 45%,var(--line));color:var(--flight)}
+.tag.ack{border-color:color-mix(in srgb,var(--ok) 45%,var(--line));color:var(--ok)}
+.tag.pending{border-color:color-mix(in srgb,var(--warn) 45%,var(--line));color:var(--warn)}
+.tag.limit{border-color:color-mix(in srgb,var(--bad) 45%,var(--line));color:var(--bad)}
 .mission{margin:0 16px;border-bottom:1px solid var(--line)}
 .mission summary{cursor:pointer;list-style:none;padding:8px 0;color:var(--mute);font-size:12px;display:flex;gap:8px;align-items:baseline}
 .mission summary::-webkit-details-marker{display:none}
@@ -8348,8 +8377,16 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   </div>
   <div class="sprint" id="sprint"></div>
   <div class="pulse" id="pulse"><i></i><span>clean</span></div>
-  <div id="clock"></div>
+  <div class="conn" id="connBar">
+    <span id="connStatus" class="conn-status live" aria-live="polite">live</span>
+    <span id="lastUpdated" class="mute">—</span>
+    <button type="button" id="refreshBtn" title="Refresh board" aria-label="Refresh board">↻</button>
+    <button type="button" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    <span id="clock"></span>
+  </div>
 </header>
+<details class="attention" id="attentionBox" hidden><summary>Needs attention <span id="attnCount" class="mute">0</span></summary>
+  <div class="attn-list" id="attnList"></div></details>
 <details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
 <div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
@@ -8363,6 +8400,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 <main>
 <div class="pane" id="pane-board">
   <div id="emptyBoard" class="empty-board" hidden></div>
+  <section id="epicsPanel" class="epics" hidden aria-label="Epic progress"></section>
   <section id="objectivePromise" data-fold="objective">
     <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
     <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."><!-- V1 MUST: home median turns + yield@cost; T-344 worst-10 is NICE only -->
@@ -8423,6 +8461,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
           <label class="who"><small>from</small> <select id="cFrom"></select></label>
           <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
           <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+          <label class="who"><small>type</small> <select id="cKind"><option value="message">message</option><option value="task">task</option></select></label>
         </div>
         <textarea id="cText" placeholder="Message the board or a seat. Type @ to tag an agent (e.g. @cursor) -- mentions reach that agent even if 'to' is someone else."></textarea>
         <div id="mentionBar"></div>
@@ -8663,6 +8702,7 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   const text=document.getElementById('cText').value.trim();
   const to=document.getElementById('cTo').value.trim();
   const re=document.getElementById('cRe').value.trim();
+  const kind=document.getElementById('cKind').value.trim()||'message';
   const btn=document.getElementById('cSend'),msg=document.getElementById('composerMsg');
   if(!from){msg.className='bad';msg.textContent='pick who you are posting as';return}
   if(!text){msg.className='bad';msg.textContent='message is empty';return}
@@ -8670,7 +8710,7 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   btn.disabled=true;msg.className='';msg.textContent='posting…';
   try{
     const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({from,text,to,re})});
+      body:JSON.stringify({from,text,to,re,kind})});
     const out=await r.json();
     if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
       document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';
@@ -8684,7 +8724,11 @@ let snapshotFails=0;
 function unreachableNextStep(msg,cmd){
   return{kind:'unreachable',label:'Board unavailable',message:msg,cmd:cmd||''};
 }
-async function load(){
+async function load(manual){
+  const refreshBtn=document.getElementById('refreshBtn');
+  if(manual&&refreshBtn){refreshBtn.disabled=true;refreshBtn.classList.add('spin')}
+  if(firstLoad)document.body.classList.add('loading');
+  if(snapshotFails)setConn('reconnecting');
   let d;
   try{
     const r=await fetch('/board.json?'+Date.now());
@@ -8692,10 +8736,13 @@ async function load(){
     d=await r.json();
   }catch(e){
     snapshotFails++;
+    setConn('offline');
     renderNextStep(unreachableNextStep(
       snapshotFails>2?'Cannot reach the board server — is `tickets ui` still running? ('+e+')'
         :'Board unreachable — retrying… ('+e+')',
       'tickets ui'));
+    document.body.classList.remove('loading');
+    if(refreshBtn){refreshBtn.disabled=false;refreshBtn.classList.remove('spin')}
     return;
   }
   if(d.error){
@@ -8705,6 +8752,10 @@ async function load(){
       'tickets ui --json'));
     d.counts=d.counts||{total:0,done:0};
   }else snapshotFails=0;
+  setConn('live',d.generated);
+  firstLoad=false;
+  document.body.classList.remove('loading');
+  if(refreshBtn){refreshBtn.disabled=false;refreshBtn.classList.remove('spin')}
   document.getElementById('title').textContent='atman';
   const boardName=document.getElementById('boardName');
   if(boardName){
@@ -8738,6 +8789,8 @@ async function load(){
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
   fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
   renderEmptyBoard(d);
+  renderAttention(d.attention);
+  renderEpics(d.epics);
   if(!d.error)renderNextStep(d.next_step);
   renderOnboarding(d.onboarding);
   renderPromise(d.promise);
@@ -8750,8 +8803,10 @@ async function load(){
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
-      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
+    const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
+    const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span>'+lim+'</div>'+
+      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
@@ -8759,7 +8814,7 @@ async function load(){
       '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
   }).join('')||'<div class="empty">no agents checked in</div>';
   const thread=visibleMessages(d.messages||[]).slice().reverse();
-  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
+  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+deliveryTags(m)+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
     ||'<div class="empty">'+(THREAD_SEAT?'No messages with this seat yet.':'no messages yet')+'</div>';
 }
 function renderOnboarding(ob){
@@ -8803,6 +8858,56 @@ function renderEmptyBoard(d){
     '<p class="empty-honesty">Median turns and yield@cost stay — until a done ticket reports.</p>'+
     '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock.</p>';
 }
+function renderAttention(items){
+  const box=document.getElementById('attentionBox'),list=document.getElementById('attnList'),cnt=document.getElementById('attnCount');
+  const rows=items||[];
+  if(!box)return;
+  box.hidden=!rows.length;
+  if(cnt)cnt.textContent=String(rows.length);
+  if(list)list.innerHTML=rows.map(a=>'<div class="attn-item '+esc(a.sev||'')+'">'+esc(a.msg||'')+'</div>').join('');
+}
+function renderEpics(epics){
+  const el=document.getElementById('epicsPanel');
+  if(!el)return;
+  const rows=epics||[];
+  el.hidden=!rows.length;
+  el.innerHTML=rows.map(e=>{
+    const pct=Math.round(100*(e.done||0)/Math.max(1,e.total||1));
+    return '<article class="epic"><div class="row"><span><span class="id">'+esc(e.id)+'</span> '+esc(e.title||'')+'</span><span>'+e.done+'/'+e.total+'</span></div>'+
+      '<div class="bar"><i style="width:'+pct+'%"></i></div>'+
+      '<div class="row"><span class="mute">flight '+esc(e.in_flight||0)+' · review '+esc(e.review||0)+' · blocked '+esc(e.blocked||0)+'</span></div></article>';
+  }).join('');
+}
+function deliveryTags(m){
+  const tags=[];
+  if((m.kind||'message')==='task')tags.push('<span class="tag task">task</span>');
+  const d=m.delivery||{};
+  if(d.status==='broadcast')tags.push('<span class="tag">broadcast</span>');
+  else if((d.acks||[]).length){
+    const all=d.acks.every(a=>a.acked);
+    const any=d.acks.some(a=>a.acked);
+    if(all)tags.push('<span class="tag ack">acked</span>');
+    else if(any)tags.push('<span class="tag pending">partial ack</span>');
+    else tags.push('<span class="tag pending">pending</span>');
+  }
+  return tags.join(' ');
+}
+function setConn(phase,updated){
+  const st=document.getElementById('connStatus'),lu=document.getElementById('lastUpdated');
+  if(st){st.className='conn-status '+phase;st.textContent=phase}
+  if(lu)lu.textContent=updated?('updated '+fmtRel(updated)+' · '+fmtLocal(updated)):'—';
+}
+let firstLoad=true;
+try{
+  const savedTheme=localStorage.getItem('tickets-ui-theme');
+  if(savedTheme)document.body.dataset.theme=savedTheme;
+}catch(e){}
+document.getElementById('themeBtn').addEventListener('click',()=>{
+  const next=document.body.dataset.theme==='light'?'':'light';
+  document.body.dataset.theme=next;
+  try{localStorage.setItem('tickets-ui-theme',next)}catch(e){}
+});
+document.getElementById('refreshBtn').addEventListener('click',()=>load(true));
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
 
@@ -9020,6 +9125,60 @@ def _empty_promise_hero():
     }
 
 
+def _epics_snapshot(board, tickets):
+    """Per-epic progress for the live dashboard."""
+    out = []
+    for e in load_epics(board):
+        mine = [t for t in tickets if t.get("epic") == e["id"]]
+        if not mine:
+            continue
+        d, n, c, b = progress(mine)
+        out.append({
+            "id": e["id"], "title": e.get("title", ""),
+            "done": d, "total": n, "in_flight": c, "blocked": b,
+            "review": sum(1 for t in mine if t["status"] == "review"),
+        })
+    return out
+
+
+def _message_recipients(msg):
+    to = (msg.get("to") or "").strip()
+    mentions = msg.get("mentions") or []
+    if to:
+        return [to]
+    if mentions:
+        return list(mentions)
+    return []
+
+
+def _agent_acked_message(board, agent, msg):
+    rec = _agent_rec(board, agent)
+    if not rec:
+        return False
+    since = _seen_since(rec)
+    remaining = _seen_counts(rec.get("inbox_seen_ids") or [])
+    return not _is_unread(msg, since, remaining)
+
+
+def _message_delivery(board, msg):
+    """Delivery/ack status for the UI composer thread."""
+    recipients = _message_recipients(msg)
+    if not recipients:
+        return {"status": "broadcast"}
+    acks = [{"agent": r, "acked": _agent_acked_message(board, r, msg)} for r in recipients]
+    return {"status": "direct", "acks": acks}
+
+
+def _attention_snapshot(health_items, coverage):
+    """Blockers and items requiring operator attention."""
+    out = [{"sev": h["sev"], "msg": h["msg"]} for h in (health_items or [])]
+    for u in (coverage or {}).get("uncovered_ready", []):
+        title = (u.get("title") or "")[:72]
+        out.append({"sev": "WARN", "msg": "%s ready and unowned%s" % (
+            u.get("id", "?"), (" — " + title) if title else "")})
+    return out[:16]
+
+
 def board_snapshot(board, messages=40):
     """Everything the UI shows, as plain data. Read-only."""
     tickets = load_all(board)
@@ -9040,11 +9199,14 @@ def board_snapshot(board, messages=40):
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
+        lim = rec.get("limit")
         out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
                            "watcher": _watcher_count(r["agent"], board) > 0,
                            "watcher_count": _watcher_count(r["agent"], board),
-                           "roles": roles.get(r["agent"]) or []})
+                           "roles": roles.get(r["agent"]) or [],
+                           "limit": lim,
+                           "limit_until": (lim or {}).get("until", "") if lim else ""})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
     try:
@@ -9078,9 +9240,13 @@ def board_snapshot(board, messages=40):
     events = _safe(lambda: _turns_mod()[1](board), [])
     usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
     promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
-    raw_msgs = [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
-                 "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or []}
-                for x in load_messages(board)[-messages:]]
+    raw_msgs = []
+    for x in load_messages(board)[-messages:]:
+        row = {"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
+               "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
+               "kind": x.get("kind") or "message",
+               "delivery": _message_delivery(board, x)}
+        raw_msgs.append(row)
     seat_names = []
     seen_seats = set()
     def _add_seat(name):
@@ -9093,6 +9259,9 @@ def board_snapshot(board, messages=40):
         _add_seat(a.get("name"))
     _add_seat(m.get("owner", ""))
     _add_seat(m.get("cos", ""))
+    health_items = [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12]
+    coverage = _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
+                                open_rows, in_flight, review, out_agents)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -9102,7 +9271,9 @@ def board_snapshot(board, messages=40):
         "review": review,
         "open": open_rows,
         "agents": out_agents,
-        "health": [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12],
+        "epics": _epics_snapshot(board, tickets),
+        "attention": _attention_snapshot(health_items, coverage),
+        "health": health_items,
         # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
         # so the UI can render it in whatever timezone the viewer's browser is
         # actually in -- truncating/reformatting it here would bake in UTC.
@@ -9115,8 +9286,7 @@ def board_snapshot(board, messages=40):
         "turns": turns,
         "usage": usage,
         "promise": promise,
-        "coverage": _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
-                                       open_rows, in_flight, review, out_agents),
+        "coverage": coverage,
     }
 
 
@@ -9166,9 +9336,10 @@ def cmd_ui(a, board):
                 text = str(payload.get("text") or "").strip()
                 to = str(payload.get("to") or "").strip()
                 re_ = str(payload.get("re") or "").strip()
+                kind = str(payload.get("kind") or "message").strip() or "message"
                 if not sender or not text:
                     raise ValueError("from and text are required")
-                rec = post_message(board, sender, text, to, re_)
+                rec = post_message(board, sender, text, to, re_, kind=kind)
                 status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
             except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
                 status, out = 400, {"ok": False, "error": str(e)}
