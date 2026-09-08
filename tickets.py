@@ -8224,6 +8224,18 @@ def _t427_verified_sha(tickets_py):
         return ""
 
 
+def _t427_idle_shim_path(executing_file):
+    """Shim for idle-boundary hop, or '' when hop must not run."""
+    if not _t427_release_dir(executing_file):
+        return ""
+    live = os.environ.get("TICKETS_LIVE_SHIM")
+    if live:
+        return live
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return ""
+    return os.path.expanduser("~/.claude/tools/tickets.py")
+
+
 def watch_idle_reexec(executing_file, shim_path, argv, log, pid_path=None,
                       executable=None, execv=None):
     """If idle and the live shim points at a different verified release, execv.
@@ -8387,14 +8399,15 @@ def cmd_watch(a, board):
                 print("stop requested via tickets spawn --stop")
                 break
             if not a.once:
-                watch_idle_reexec(
-                    executing_file=__file__,
-                    shim_path=(os.environ.get("TICKETS_LIVE_SHIM")
-                               or os.path.expanduser("~/.claude/tools/tickets.py")),
-                    argv=sys.argv[1:],
-                    log=log,
-                    pid_path=lock,
-                )
+                shim = _t427_idle_shim_path(__file__)
+                if shim:
+                    watch_idle_reexec(
+                        executing_file=__file__,
+                        shim_path=shim,
+                        argv=sys.argv[1:],
+                        log=log,
+                        pid_path=lock,
+                    )
             p = _safe(lambda: pending_work(board, owner), {})
             force = bool(getattr(a, "force", False))
             if force and not actionable(p):

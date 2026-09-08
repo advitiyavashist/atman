@@ -3842,6 +3842,18 @@ def _t427_verified_sha(tickets_py):
         return ""
 
 
+def _t427_idle_shim_path(executing_file):
+    """Shim for idle-boundary hop, or '' when hop must not run."""
+    if not _t427_release_dir(executing_file):
+        return ""
+    live = os.environ.get("TICKETS_LIVE_SHIM")
+    if live:
+        return live
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return ""
+    return os.path.expanduser("~/.claude/tools/tickets.py")
+
+
 def watch_idle_reexec(executing_file, shim_path, argv, log, pid_path=None,
                       executable=None, execv=None):
     """If idle and the live shim points at a different verified release, execv.

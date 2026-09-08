@@ -375,3 +375,32 @@ def test_unreadable_shim_does_not_crash_loop(board, tmp_path):
         assert proc.poll() is None
     finally:
         stop_watch(board, "doc", proc)
+
+
+def test_dev_checkout_watch_never_execv(board, tmp_path):
+    """watch --every 1 outside tickets-releases must not hop onto the live shim."""
+    from test_wakeup import run
+    run(board, "join", "doc", "--roles", "docs")
+    run(board, "next", agent="doc")
+    tool = ROOT / "tickets.py"
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="doc",
+               HOME=str(board.parent.parent / "home"))
+    env.pop("TICKETS_STOP_HOOK", None)
+    env.pop("TICKETS_LIVE_SHIM", None)
+    proc = subprocess.Popen(
+        [sys.executable, str(tool), "watch", "--agent", "doc", "--every", "1", "--exec", "true"],
+        cwd=str(board.parent), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        pid, _pid_file = wait_pid_file(board)
+        assert pid and pid_alive(pid)
+        time.sleep(2.0)
+        assert proc.poll() is None, proc.stdout.read() if proc.stdout else ""
+        cmd = cmdline_of(pid)
+        assert str(tool.resolve()) in cmd or str(tool) in cmd, cmd
+        assert "tickets-releases" not in cmd, cmd
+        log = (board / "agents" / "doc.watch.log").read_text()
+        assert "re-exec" not in log, log
+    finally:
+        stop_watch(board, "doc", proc)
