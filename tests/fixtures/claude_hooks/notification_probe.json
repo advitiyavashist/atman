@@ -1,0 +1,9 @@
+{
+  "hook_schema_version": "claude-code-hooks-v1",
+  "hook_event_name": "Notification",
+  "session_id": "ses_probe0001",
+  "occurred_at": "2026-09-06T14:35:00Z",
+  "cwd": "/tmp/ticket-board-scratch/project-a",
+  "message": "Synthetic connectivity probe",
+  "synthetic_probe": true
+}

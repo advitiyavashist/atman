@@ -1,0 +1,13 @@
+{
+  "accepted": true,
+  "deduplicated": false,
+  "context": {
+    "lines": [
+      "You hold DEMO-13 (claimed 14:32).",
+      "Next step you recorded: fix the last page boundary.",
+      "2 unread messages in #work."
+    ],
+    "current_ticket": "DEMO-13",
+    "unread_messages": 2
+  }
+}

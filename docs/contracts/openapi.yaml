@@ -1,0 +1,2779 @@
+openapi: 3.1.0
+info:
+  title: Ticket Board service API
+  version: 1.0.0-rc.2
+  summary: Connect your agents. Give them work. See what needs you.
+  description: |
+    Frozen V1 contract for the Ticket Board service (epic E-010), derived from
+    `docs/interface-v1.md` and the `docs/messages-and-runners.md` scope amendment
+    on branch `codex-interface-design`.
+
+    This document is the interface contract only. It describes routes, payloads,
+    versioning and error shapes so that T-179 (storage), T-180 (API), T-181
+    (adapter), T-183 (dashboard) and T-187 (messaging) can be built in parallel
+    against a fixed surface. No behaviour here has been implemented or measured;
+    every latency or timing figure that appears is an acceptance *target* copied
+    from the design docs, not an observation.
+
+    Read `docs/contracts/README.md` for the freeze rules and
+    `docs/contracts/dependent-notes.md` for the per-ticket handoff.
+  license:
+    name: MIT
+
+servers:
+  - url: http://127.0.0.1:4319/api/v1
+    description: |
+      Local pilot. The service binds loopback by default. Remote mode requires
+      TLS and explicit operator configuration before exposure; no TLS server is
+      part of V1.
+
+tags:
+  - name: overview
+    description: Overview screen snapshot.
+  - name: tickets
+    description: Tickets screen, ticket detail, claims, updates and reviews.
+  - name: agents
+    description: Agents screen, enrollment and session exchange.
+  - name: master
+    description: Master panel, lease and assignments.
+  - name: hooks
+    description: Claude adapter hook event intake.
+  - name: events
+    description: SSE stream, cursors and reconnect.
+  - name: activity
+    description: Activity screen.
+  - name: messages
+    description: Channels, members, messages, threads and delivery receipts.
+  - name: runners
+    description: Managed runner registration, wake jobs and runs.
+
+security:
+  - operatorSession: []
+  - agentToken: []
+
+components:
+  securitySchemes:
+    operatorSession:
+      type: apiKey
+      in: cookie
+      name: tb_session
+      description: |
+        Dashboard operator session. HttpOnly, SameSite=Lax, Secure when not on
+        loopback. Every unsafe method additionally requires the `X-CSRF-Token`
+        header to match the session's CSRF value and an `Origin`/`Referer` that
+        matches an allowed origin. Operator sessions may create enrollments,
+        accept reviews and take master authority.
+
+        V1 has no session-mint route: the operator session is bootstrapped
+        out of band (a one-time `?token=` on the UI root, written to
+        `operator-session.json`), which is honest only when the server binds
+        loopback. A `POST /session` (or equivalent) mint route is a known,
+        deliberately deferred future amendment for a non-loopback deployment
+        -- it is not solved by anything in this contract today. Do not infer
+        a sign-in flow from this scheme's presence. (T-224 ruling, planner
+        18:05Z, superseding T-211 §7's "deferred" framing with an explicit
+        decision: named and out of scope for V1, not silently assumed.)
+
+        No third, master-specific credential exists in V1: master authority is
+        gated by this same `operatorSession` scheme, the same as enrollment
+        and review acceptance. This is a deliberate divergence from the
+        existing `tickets master take` CLI command, which today is open to
+        any agent -- the API does not reproduce that. Revisit only if T-182's
+        assignment loop produces a concrete case for a narrower master
+        credential; it is its own ticket, not a default this contract assumes.
+        (T-224 ruling, planner 22:45Z.)
+    agentToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Project-scoped agent credential issued by `POST /sessions`. Stored by the
+        agent in a 0600 local file outside Git. An agent token MUST NOT be able
+        to create enrollments, accept reviews, or take master authority; the
+        server returns 403 `agent_token_insufficient` for those routes.
+
+        The authenticated principal determines the actor of every mutation.
+        Actor fields are never read from request bodies.
+
+  parameters:
+    ProjectId:
+      name: X-Project-Id
+      in: header
+      required: true
+      schema: { $ref: '#/components/schemas/ProjectId' }
+      description: |
+        Project scope for the request. The credential must already be authorized
+        for this project; a mismatch is 403 `forbidden_scope`, never 404, so that
+        project existence is not probeable.
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema: { $ref: '#/components/schemas/RequestId' }
+      description: Correlation id echoed in responses and audit records.
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string, maxLength: 512 }
+      description: Opaque forward cursor from a previous page's `next_cursor`.
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+  headers:
+    SnapshotVersion:
+      description: |
+        Monotonic snapshot version for this project. A client that holds a
+        snapshot at version N and receives an SSE event with
+        `snapshot_version <= N` has already applied it.
+      schema: { type: integer, minimum: 0 }
+    RequestId:
+      description: Echo of the request correlation id.
+      schema: { $ref: '#/components/schemas/RequestId' }
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Missing or invalid credential.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Authenticated but not permitted for this scope or route.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: No such record within the authorized project scope.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: |
+        Optimistic concurrency, capacity or lease conflict. The caller lost a
+        race; it must re-read and decide, never retry blindly.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unprocessable:
+      description: Well-formed but invalid state, dependency or evidence.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+
+    # ---------------------------------------------------------------- scalars
+
+    ProjectId:
+      type: string
+      pattern: '^prj_[0-9a-z]{8,32}$'
+      examples: ['prj_demo01']
+    TicketId:
+      type: string
+      description: Human-facing ticket key, unique within a project.
+      pattern: '^[A-Z][A-Z0-9]{1,15}-[0-9]{1,6}$'
+      examples: ['DEMO-13']
+    AgentId:
+      type: string
+      pattern: '^(agt_[0-9a-z]{8,32}|[a-z][a-z0-9-]{1,31})$'
+      description: |
+        Accepts a server-minted `agt_*` token or the board's real free-form
+        lowercase name (`claude-fable`, `sonnet-sdk`, ...). Widened 2026-09
+        (T-224) rather than rename ~35 live identities and every brief, hook
+        config and `tickets msg --to` that names one at cutover -- the
+        human-readable name IS the V1 identity, and the `agt_` form stays
+        legal so a server-minted id remains valid later.
+    SessionId:
+      type: string
+      description: Runtime session identity, distinct from the durable agent id.
+      pattern: '^ses_[0-9a-z]{8,32}$'
+    MemberId:
+      type: string
+      pattern: '^mem_[0-9a-z]{8,32}$'
+    ChannelId:
+      type: string
+      pattern: '^chn_[0-9a-z]{8,32}$'
+    MessageId:
+      type: string
+      pattern: '^msg_[0-9a-z]{8,32}$'
+    ThreadId:
+      type: string
+      pattern: '^thr_[0-9a-z]{8,32}$'
+    DeliveryId:
+      type: string
+      pattern: '^dlv_[0-9a-z]{8,32}$'
+    WakeJobId:
+      type: string
+      pattern: '^wjb_[0-9a-z]{8,32}$'
+    RunId:
+      type: string
+      pattern: '^run_[0-9a-z]{8,32}$'
+    EventId:
+      type: string
+      description: |
+        Monotonic, lexicographically sortable stream id. Used as the SSE
+        `id:` field and as `Last-Event-ID` on reconnect.
+      pattern: '^evt_[0-9]{12}_[0-9a-z]{6}$'
+    AuditEventId:
+      type: string
+      pattern: '^aud_[0-9a-z]{8,32}$'
+    RequestId:
+      type: string
+      description: |
+        Client-generated idempotency/correlation key. Replaying a mutation with
+        the same `request_id` and an identical body returns the original result;
+        replaying it with a different body is 409 `request_id_reused`.
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    Timestamp:
+      type: string
+      format: date-time
+      description: |
+        RFC 3339, always UTC, always assigned by the server. Clients never send
+        timestamps for durations; all displayed durations derive from these.
+    Sha:
+      type: string
+      pattern: '^[0-9a-f]{40}$'
+    Version:
+      type: integer
+      minimum: 0
+      description: Optimistic concurrency version of a single record.
+    Epoch:
+      type: integer
+      minimum: 0
+      description: Master lease fencing epoch; increases on every takeover.
+
+    # ----------------------------------------------------------------- errors
+
+    ErrorCode:
+      type: string
+      enum:
+        - malformed_request
+        - unauthenticated
+        - forbidden_scope
+        - agent_token_insufficient
+        - not_channel_member
+        - membership_revoked
+        - sender_identity_rejected
+        - not_found
+        - ticket_version_conflict
+        - ticket_already_claimed
+        - capacity_exhausted
+        - assignment_expired
+        - session_lease_expired
+        - master_lease_conflict
+        - master_lease_expired
+        - run_already_active
+        - request_id_reused
+        - invalid_state_transition
+        - dependency_cycle
+        - dependency_unmet
+        - missing_acceptance_criteria
+        - invalid_review_evidence
+        - enrollment_code_invalid
+        - enrollment_code_expired
+        - budget_exceeded
+        - legacy_writer_active
+        - rate_limited
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, status]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            status:
+              type: integer
+              enum: [400, 401, 403, 404, 409, 422, 429]
+            message:
+              type: string
+              description: |
+                Operator-readable, safe to display. Never contains tokens,
+                enrollment codes, transcripts, prompts or environment values.
+              maxLength: 500
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            details:
+              type: object
+              description: |
+                Machine-readable conflict context. For version conflicts this
+                carries `expected_version` and `actual_version` so the client can
+                re-read without a second round trip.
+              additionalProperties: true
+      examples:
+        - error:
+            code: ticket_version_conflict
+            status: 409
+            message: 'DEMO-13 changed since you read it. Re-read and retry.'
+            details: { expected_version: 4, actual_version: 5 }
+
+    # ------------------------------------------------------- mutation envelope
+
+    MutationEnvelope:
+      type: object
+      description: |
+        Fields common to every mutation body.
+
+        NOTE (contract decision): `docs/interface-v1.md` says every mutation
+        includes "actor, request_id, expected_version", while
+        `docs/messages-and-runners.md` says sender identity "comes from its
+        credential, never from request body fields". These are reconciled here in
+        favour of the stricter rule: the wire body carries `request_id` and
+        `expected_version` (plus a lease field where required), and the actor is
+        bound from the authenticated credential and recorded on the AuditEvent.
+        An `actor` field in a request body is rejected as `malformed_request`.
+      required: [request_id]
+      properties:
+        request_id: { $ref: '#/components/schemas/RequestId' }
+
+    Actor:
+      type: object
+      description: Server-derived principal, echoed on records and audit events.
+      additionalProperties: false
+      required: [type, id, display_name]
+      properties:
+        type:
+          type: string
+          enum: [human, agent, master, system]
+        id:
+          type: string
+          description: MemberId for humans, AgentId for agents, 'system' for the server.
+        display_name: { type: string, maxLength: 120 }
+        session_id:
+          anyOf:
+            - { $ref: '#/components/schemas/SessionId' }
+            - { type: 'null' }
+          description: Runtime session that performed the action, when it was an agent.
+
+    # ----------------------------------------------------------- core records
+
+    Project:
+      type: object
+      additionalProperties: false
+      required: [id, name, version, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/ProjectId' }
+        name: { type: string, maxLength: 120 }
+        version: { $ref: '#/components/schemas/Version' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        source:
+          type: string
+          enum: [native, imported_legacy]
+          description: |
+            `imported_legacy` marks a board migrated from the file-based CLI. The
+            original files are retained and rollback is documented; while server
+            ownership is active, direct legacy writes are rejected with 409
+            `legacy_writer_active`.
+        paused:
+          type: boolean
+          description: When true, no new wake dispatch occurs. Cancel is cooperative.
+
+    TicketState:
+      type: string
+      enum: [open, claimed, review, done, blocked]
+      description: |
+        `blocked` is an explicit, operator-set state. Dependency-blocked is NOT a
+        state -- it is derived and exposed as `dependency_blocked: true` on an
+        otherwise `open` ticket.
+
+    TicketAcceptanceItem:
+      type: object
+      additionalProperties: false
+      required: [text, checked]
+      properties:
+        text: { type: string, maxLength: 500 }
+        checked: { type: boolean }
+        checked_by:
+          anyOf: [{ $ref: '#/components/schemas/Actor' }, { type: 'null' }]
+        checked_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+
+    GitEvidence:
+      type: object
+      description: |
+        Pinned evidence. A changing branch tip cannot replace reviewed evidence:
+        the review stores `sha` and the server compares, it does not re-resolve
+        the branch name at accept time.
+
+        `repository` is required (T-224, folding in T-215's fix at this layer):
+        an unqualified `sha` with no repository identity is how an unrelated
+        merge in a different repo can appear to "contain" this evidence and
+        close the wrong ticket. This does not relax `sha`'s 40-hex shape --
+        legacy CLI evidence (`branch@shortsha`, no repo tag) is never fabricated
+        into a real SHA to satisfy this schema; it is archived verbatim and
+        reported as a contract mismatch instead (T-213's settled call, upheld
+        independently by two reviewers). Producing a real `repository` + 40-hex
+        `sha` pair is T-215's CLI-side work, not a contract relaxation.
+      additionalProperties: false
+      required: [repository, branch, sha]
+      properties:
+        repository: { type: string, maxLength: 200 }
+        branch: { type: string, maxLength: 200 }
+        sha: { $ref: '#/components/schemas/Sha' }
+        pr_url:
+          anyOf: [{ type: string, format: uri }, { type: 'null' }]
+        checks:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, status]
+            properties:
+              name: { type: string, maxLength: 120 }
+              status:
+                type: string
+                enum: [passed, failed, pending, skipped]
+              details_url:
+                anyOf: [{ type: string, format: uri }, { type: 'null' }]
+
+    Ticket:
+      type: object
+      additionalProperties: false
+      required:
+        [id, project_id, title, state, version, dependency_blocked, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/TicketId' }
+        project_id: { $ref: '#/components/schemas/ProjectId' }
+        title: { type: string, maxLength: 200 }
+        outcome:
+          type: string
+          description: What must be true when this is done. Required to create.
+          maxLength: 4000
+        acceptance:
+          type: array
+          items: { $ref: '#/components/schemas/TicketAcceptanceItem' }
+        state: { $ref: '#/components/schemas/TicketState' }
+        version: { $ref: '#/components/schemas/Version' }
+        role: { type: string, maxLength: 40 }
+        priority:
+          anyOf: [{ type: integer, minimum: 1, maximum: 3 }, { type: 'null' }]
+          description: |
+            1 = highest. Optional (T-224): a ticket with no priority is
+            routine, matching the CLI's default. Never required.
+        epic:
+          anyOf: [{ type: string, maxLength: 100 }, { type: 'null' }]
+        sprint:
+          anyOf: [{ type: string, maxLength: 50 }, { type: 'null' }]
+        needs:
+          type: array
+          items: { type: string, enum: [docker, own-machine, network, browser] }
+          default: []
+          description: |
+            Machine capabilities this ticket's work requires. Optional (T-224);
+            an empty list is the common case.
+        owner:
+          anyOf: [{ $ref: '#/components/schemas/AgentId' }, { type: 'null' }]
+        owner_session:
+          anyOf: [{ $ref: '#/components/schemas/SessionId' }, { type: 'null' }]
+        dependencies:
+          type: array
+          items: { $ref: '#/components/schemas/TicketId' }
+        dependency_blocked:
+          type: boolean
+          description: 'Derived: true when any dependency is not done.'
+        blocked_reason:
+          anyOf: [{ type: string, maxLength: 1000 }, { type: 'null' }]
+          description: Set only when `state` is `blocked`.
+        files:
+          type: array
+          description: Declared file/worktree boundaries, used for conflict eligibility.
+          items: { type: string, maxLength: 300 }
+        worktree:
+          anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+        evidence:
+          anyOf: [{ $ref: '#/components/schemas/GitEvidence' }, { type: 'null' }]
+        next_step:
+          anyOf: [{ type: string, maxLength: 1000 }, { type: 'null' }]
+        handoff:
+          anyOf: [{ type: string, maxLength: 4000 }, { type: 'null' }]
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+        claimed_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+        last_progress_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: |
+            Meaningful progress, tracked separately from agent heartbeat. A live
+            heartbeat with a stale `last_progress_at` is the signal the Overview
+            attention queue surfaces.
+
+    TicketUpdate:
+      type: object
+      additionalProperties: false
+      required: [id, ticket_id, author, body, created_at]
+      properties:
+        id: { type: string, pattern: '^upd_[0-9a-z]{8,32}$' }
+        ticket_id: { $ref: '#/components/schemas/TicketId' }
+        author: { $ref: '#/components/schemas/Actor' }
+        body: { type: string, maxLength: 4000 }
+        next_step:
+          anyOf: [{ type: string, maxLength: 1000 }, { type: 'null' }]
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        superseded:
+          type: boolean
+          description: |
+            True when this update arrived from a session that no longer owns the
+            ticket. Late updates from old sessions are retained as audit evidence
+            and never overwrite the new owner's state.
+
+    Review:
+      type: object
+      additionalProperties: false
+      required: [id, ticket_id, state, submitted_by, submitted_at]
+      properties:
+        id: { type: string, pattern: '^rev_[0-9a-z]{8,32}$' }
+        ticket_id: { $ref: '#/components/schemas/TicketId' }
+        state:
+          type: string
+          enum: [requested, accepted, rejected]
+          description: |
+            Rejection returns the ticket to `claimed` with notes. Acceptance
+            requires a reviewer distinct from the submitting actor; the master
+            cannot approve its own implementation (403 `forbidden_scope`).
+        submitted_by: { $ref: '#/components/schemas/Actor' }
+        submitted_at: { $ref: '#/components/schemas/Timestamp' }
+        evidence:
+          anyOf: [{ $ref: '#/components/schemas/GitEvidence' }, { type: 'null' }]
+          description: |
+            Null only for reviews imported from the legacy board (T-213/T-224
+            planner ruling, 2026-09-06): the legacy board had no repository
+            concept, so a review that genuinely happened there cannot be given
+            real, repository-qualified evidence without fabricating it. This is
+            a resource-side relaxation only -- `CreateReviewRequest.evidence`
+            stays required, so every review minted through this API still
+            carries real evidence. A null here means "imported, no repository
+            identity", never "the going-forward guarantee was skipped".
+        notes: { type: string, maxLength: 4000 }
+        decided_by:
+          anyOf: [{ $ref: '#/components/schemas/Actor' }, { type: 'null' }]
+        decided_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+        decision_notes:
+          anyOf: [{ type: string, maxLength: 4000 }, { type: 'null' }]
+
+    AgentState:
+      type: string
+      enum: [connected, idle, working, awaiting-input, offline, revoked, limited]
+      description: |
+        `limited` (T-224, promoted from a T-229 gap finding): the agent hit a
+        usage/rate limit and cannot spawn a session, distinct from `offline`
+        (no known reason) and from a live-but-idle `connected`/`idle` agent.
+        Load-bearing for T-185's recovery verification -- without this value a
+        dashboard renders an agent hard-limited for weeks as merely idle, which
+        is the confident-wrong-answer failure mode the board already suffers.
+
+    AgentLimitDetail:
+      type: object
+      additionalProperties: false
+      required: [source]
+      description: |
+        Set only when `Agent.state` is `limited`. A structured replacement for
+        a single free-text reason (T-224, corrected during review): T-230's
+        liveness-truth spec found that today's `limited` signal is
+        self-reported only, and a flat string cannot say whether a given
+        report is confirmed or guessed. `source` carries that distinction so
+        a dashboard never renders a heuristic guess with the same confidence
+        as a derived, evidenced one.
+      properties:
+        source:
+          type: string
+          enum: [manual, derived, heuristic]
+          description: |
+            `manual`: an operator or the agent itself explicitly reported the
+            limit (e.g. the CLI's `tickets limit`). `derived`: computed from a
+            concrete signal the board can point to (a watcher run's exit
+            code, a provider-reported reset time). `heuristic`: inferred from
+            an absence pattern (sustained silence, an overdue heartbeat) with
+            no confirmed cause -- lowest confidence, and must be rendered
+            distinguishably from `derived`, never collapsed into it.
+        since:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: When the limit was first observed or reported. Null if unknown.
+        until:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: Known reset time, when the source reports one. Null if unknown.
+        note:
+          anyOf: [{ type: string, maxLength: 200 }, { type: 'null' }]
+          description: Free text (e.g. "usage limit, resets 2026-10-05").
+
+    HookHealth:
+      type: object
+      description: |
+        Separate checks, because a synthetic event alone does not prove the real
+        Claude session adopted the hook.
+      additionalProperties: false
+      required: [config_installed, server_received, response_delivered, session_adopted]
+      properties:
+        config_installed: { type: boolean }
+        server_received: { type: boolean }
+        response_delivered: { type: boolean }
+        session_adopted:
+          type: boolean
+          description: |
+            True only after a real session (not the synthetic probe) delivered a
+            hook event. Hook-only connections report activity observed with
+            liveness unknown between events.
+        last_error:
+          anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+          description: Concrete delivery error, never including tokens or transcripts.
+
+    SessionLease:
+      type: object
+      description: |
+        A runtime session's exclusive worker lease. Simultaneous sessions of one
+        agent cannot share a lease; the second is refused, not silently adopted.
+      additionalProperties: false
+      required: [session_id, agent_id, acquired_at, expires_at, version]
+      properties:
+        session_id: { $ref: '#/components/schemas/SessionId' }
+        agent_id: { $ref: '#/components/schemas/AgentId' }
+        acquired_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        version: { $ref: '#/components/schemas/Version' }
+        revoked_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+        revocation_note:
+          anyOf: [{ type: string, maxLength: 1000 }, { type: 'null' }]
+          description: |
+            Recovery requires an explicit human/master revocation with a note.
+            Death is never inferred from silence.
+
+    Agent:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, name, state, connection_mode, capacity, version, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/AgentId' }
+        project_id: { $ref: '#/components/schemas/ProjectId' }
+        name: { type: string, maxLength: 80, description: Durable operator-chosen name. }
+        role: { type: string, maxLength: 40 }
+        capabilities:
+          type: array
+          items: { type: string, maxLength: 40 }
+        state: { $ref: '#/components/schemas/AgentState' }
+        connection_mode:
+          type: string
+          enum: [managed, hook_only]
+          description: |
+            `managed` has a supervised runner that can be woken. `hook_only`
+            cannot be woken; its messages show "Manual resume required".
+        runtime:
+          type: object
+          additionalProperties: false
+          properties:
+            adapter: { type: string, enum: [claude_code], default: claude_code }
+            version: { type: string, maxLength: 40 }
+            unsupported_capabilities:
+              type: array
+              description: Reported rather than silently degraded.
+              items: { type: string, maxLength: 60 }
+        capacity:
+          type: object
+          additionalProperties: false
+          required: [max_active_tickets, active_tickets]
+          properties:
+            max_active_tickets: { type: integer, minimum: 1, default: 1 }
+            active_tickets: { type: integer, minimum: 0 }
+        current_ticket:
+          anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+        limit:
+          anyOf: [{ $ref: '#/components/schemas/AgentLimitDetail' }, { type: 'null' }]
+          description: |
+            Set only when `state` is `limited`; null otherwise. See
+            `AgentLimitDetail` -- deliberately not a single free-text reason,
+            so a dashboard can tell a confirmed limit from a heuristic guess.
+        session:
+          anyOf: [{ $ref: '#/components/schemas/SessionLease' }, { type: 'null' }]
+        worktree:
+          anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+        hook_health: { $ref: '#/components/schemas/HookHealth' }
+        last_heartbeat_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: |
+            Liveness only. Pilot defaults: 30s interval, 90s stale, 5m offline.
+        last_progress_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: Meaningful work, deliberately distinct from heartbeat.
+        version: { $ref: '#/components/schemas/Version' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    Assignment:
+      type: object
+      description: |
+        A reservation, not a claim. Reservations expire; the dashboard shows
+        "Queued -- waiting for agent", never "Working".
+      additionalProperties: false
+      required: [id, ticket_id, agent_id, state, reason, created_at, expires_at, lease_epoch, version]
+      properties:
+        id: { type: string, pattern: '^asg_[0-9a-z]{8,32}$' }
+        ticket_id: { $ref: '#/components/schemas/TicketId' }
+        agent_id: { $ref: '#/components/schemas/AgentId' }
+        state:
+          type: string
+          enum: [queued, claimed, expired, withdrawn]
+        reason:
+          type: string
+          maxLength: 1000
+          description: Why the master chose this agent. Shown on the master panel.
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        lease_epoch: { $ref: '#/components/schemas/Epoch' }
+        version: { $ref: '#/components/schemas/Version' }
+
+    MasterLease:
+      type: object
+      description: |
+        A role lease, not a model name. Exactly one valid holder per board; the
+        server enforces expiry and checks the fencing epoch on every routing
+        mutation, returning 409 to superseded holders.
+      additionalProperties: false
+      required: [holder, epoch, acquired_at, expires_at, routing_mode, paused]
+      properties:
+        holder:
+          anyOf: [{ $ref: '#/components/schemas/Actor' }, { type: 'null' }]
+        epoch: { $ref: '#/components/schemas/Epoch' }
+        acquired_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        routing_mode:
+          type: string
+          enum: [deterministic, deterministic_plus_suggestions]
+          description: |
+            Deterministic eligibility (dependencies, capabilities, free capacity,
+            file/worktree conflicts) always runs first; model suggestions may only
+            reorder among already-eligible candidates.
+        paused: { type: boolean }
+        last_sweep_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+        next_sweep_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+        sweep_interval_seconds: { type: integer, minimum: 5, default: 30 }
+
+    HookEvent:
+      type: object
+      description: |
+        Bounded metadata only. Never carries raw prompts, tool arguments,
+        transcripts, environment values or credentials. User notes are the one
+        explicit exception and are marked as such.
+      additionalProperties: false
+      required: [event_id, agent_id, session_id, kind, occurred_at]
+      properties:
+        event_id:
+          type: string
+          description: Adapter-generated; the server deduplicates on this value.
+          pattern: '^hev_[0-9a-z]{8,64}$'
+        agent_id: { $ref: '#/components/schemas/AgentId' }
+        session_id: { $ref: '#/components/schemas/SessionId' }
+        kind:
+          type: string
+          enum: [session_start, user_prompt_submit, stop, probe]
+          description: |
+            `stop` means "Turn finished". It never implies ticket completion.
+            `probe` is the synthetic connection test and never sets
+            `hook_health.session_adopted`.
+        occurred_at:
+          allOf: [{ $ref: '#/components/schemas/Timestamp' }]
+          description: |
+            Adapter receipt time, not agent-reported (T-224, item 13; T-214
+            ground-truthed this against real Claude Code hook payloads, which
+            carry no timestamp of their own). This is the only honest source
+            -- do not read this field as when the agent's action happened.
+        cwd:
+          anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+        note:
+          anyOf: [{ type: string, maxLength: 2000 }, { type: 'null' }]
+          description: Explicit user-authored note. The only free text accepted.
+
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, event_id, project_id, actor, action, occurred_at]
+      properties:
+        id: { $ref: '#/components/schemas/AuditEventId' }
+        event_id: { $ref: '#/components/schemas/EventId' }
+        project_id: { $ref: '#/components/schemas/ProjectId' }
+        actor: { $ref: '#/components/schemas/Actor' }
+        action:
+          type: string
+          maxLength: 60
+          examples: ['ticket.claimed', 'master.lease.taken', 'review.accepted', 'agent.lease.revoked']
+        subject_type:
+          type: string
+          enum: [ticket, agent, assignment, master_lease, review, message, run, member, channel, project]
+        subject_id: { type: string, maxLength: 64 }
+        request_id:
+          anyOf: [{ $ref: '#/components/schemas/RequestId' }, { type: 'null' }]
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        summary: { type: string, maxLength: 500 }
+
+    # ------------------------------------------ messaging and runner records
+    # Scope amendment, docs/messages-and-runners.md.
+
+    ProjectRole:
+      type: string
+      enum: [owner, admin, member, viewer]
+      description: |
+        owner/admin control membership and agent enrollment; member chats and
+        requests work; viewer reads permitted channels only.
+
+    Member:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, kind, display_name, role, state, version, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/MemberId' }
+        project_id: { $ref: '#/components/schemas/ProjectId' }
+        kind:
+          type: string
+          enum: [human, agent, master]
+          description: Shown in the Members list beside availability and project role.
+        display_name: { type: string, maxLength: 120 }
+        role: { $ref: '#/components/schemas/ProjectRole' }
+        state:
+          type: string
+          enum: [active, revoked]
+          description: |
+            Revocation cancels pending unauthorized deliveries; it does not
+            delete artifacts already produced.
+        agent_id:
+          anyOf: [{ $ref: '#/components/schemas/AgentId' }, { type: 'null' }]
+          description: Set when `kind` is agent or master.
+        availability:
+          type: string
+          enum: [available, busy, offline, unknown]
+        version: { $ref: '#/components/schemas/Version' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    Invitation:
+      type: object
+      description: |
+        Single-use and expiring. The code itself is returned exactly once, at
+        creation, and is never stored in fixtures, logs, URLs or list responses.
+      additionalProperties: false
+      required: [id, project_id, role, state, created_at, expires_at]
+      properties:
+        id: { type: string, pattern: '^inv_[0-9a-z]{8,32}$' }
+        project_id: { $ref: '#/components/schemas/ProjectId' }
+        role: { $ref: '#/components/schemas/ProjectRole' }
+        state:
+          type: string
+          enum: [pending, accepted, expired, revoked]
+        created_by: { $ref: '#/components/schemas/Actor' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        accepted_by:
+          anyOf: [{ $ref: '#/components/schemas/MemberId' }, { type: 'null' }]
+
+    Channel:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, name, kind, visibility, version, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/ChannelId' }
+        project_id: { $ref: '#/components/schemas/ProjectId' }
+        name:
+          type: string
+          maxLength: 60
+          description: 'Starter channels: general, work, reviews.'
+          pattern: '^[a-z0-9][a-z0-9_-]{0,59}$'
+        kind:
+          type: string
+          enum: [channel, dm]
+        visibility:
+          type: string
+          enum: [public, private]
+          description: Private channels and DMs require explicit membership.
+        topic:
+          anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+        designated_master:
+          anyOf: [{ $ref: '#/components/schemas/AgentId' }, { type: 'null' }]
+          description: |
+            Unaddressed task posts in this channel wake this master to decide the
+            owner, rather than waking every subscribed agent.
+        unread_count: { type: integer, minimum: 0 }
+        version: { $ref: '#/components/schemas/Version' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    ChannelMember:
+      type: object
+      additionalProperties: false
+      required: [channel_id, member_id, subscribed, joined_at]
+      properties:
+        channel_id: { $ref: '#/components/schemas/ChannelId' }
+        member_id: { $ref: '#/components/schemas/MemberId' }
+        subscribed:
+          type: boolean
+          description: |
+            Subscription controls ordinary conversation delivery. It does not by
+            itself launch an agent; only a mention or an addressed task wakes one.
+        joined_at: { $ref: '#/components/schemas/Timestamp' }
+
+    Thread:
+      type: object
+      additionalProperties: false
+      required: [id, channel_id, root_message_id, reply_count, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/ThreadId' }
+        channel_id: { $ref: '#/components/schemas/ChannelId' }
+        root_message_id: { $ref: '#/components/schemas/MessageId' }
+        ticket_id:
+          anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+        reply_count: { type: integer, minimum: 0 }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+
+    MessageIntent:
+      type: string
+      enum: [message, task, reply, receipt]
+      description: |
+        `task` is the "Send task" composer action and requires an outcome plus an
+        assignee or explicit routing. `receipt` messages are system-authored and
+        never wake their author or generate another auto-reply.
+
+    Message:
+      type: object
+      description: |
+        Immutable body. Edits cannot silently change instructions on a started
+        run; a correction is a new versioned follow-up message that references
+        the original via `supersedes_message_id`.
+      additionalProperties: false
+      required: [id, project_id, channel_id, author, body, intent, version, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/MessageId' }
+        project_id: { $ref: '#/components/schemas/ProjectId' }
+        channel_id: { $ref: '#/components/schemas/ChannelId' }
+        thread_id:
+          anyOf: [{ $ref: '#/components/schemas/ThreadId' }, { type: 'null' }]
+        author:
+          allOf: [{ $ref: '#/components/schemas/Actor' }]
+          description: |
+            Derived from the credential. A body that tries to set an author is
+            rejected 403 `sender_identity_rejected`.
+        body: { type: string, maxLength: 16000 }
+        intent: { $ref: '#/components/schemas/MessageIntent' }
+        ticket_id:
+          anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+        mentions:
+          type: array
+          items: { $ref: '#/components/schemas/MemberId' }
+        causation_id:
+          anyOf: [{ $ref: '#/components/schemas/MessageId' }, { type: 'null' }]
+          description: The message that caused this one. Used to break reply loops.
+        conversation_id:
+          anyOf: [{ type: string, maxLength: 64 }, { type: 'null' }]
+        supersedes_message_id:
+          anyOf: [{ $ref: '#/components/schemas/MessageId' }, { type: 'null' }]
+        version: { $ref: '#/components/schemas/Version' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    DeliveryState:
+      type: string
+      enum: [sent, queued, delivered, started, responded, blocked, awaiting_approval, canceled, failed]
+      description: |
+        Receipt chain: sent -> queued -> delivered -> started -> responded, with
+        blocked / awaiting_approval / canceled / failed as visible alternatives.
+        Delivery is not acknowledgement and a process spawn is not proof of
+        execution: `started` requires runtime session initialization AND, for an
+        execution request, a valid task claim.
+
+    DeliveryReason:
+      type: string
+      enum:
+        - runner_offline
+        - manual_resume_required
+        - agent_busy
+        - dependency_unmet
+        - permission_required
+        - budget_exceeded
+        - project_paused
+        - canceled_by_operator
+        - dispatch_failed
+      description: |
+        Displayed verbatim as the reason a delivery is not progressing.
+        `runner_offline` renders "Queued -- runner offline"; `manual_resume_required`
+        renders "Manual resume required" for hook-only connections;
+        `dependency_unmet` renders "Waiting on DEMO-13" and never pretends work started.
+
+    Delivery:
+      type: object
+      additionalProperties: false
+      required: [id, message_id, recipient_agent_id, state, created_at, version]
+      properties:
+        id: { $ref: '#/components/schemas/DeliveryId' }
+        message_id: { $ref: '#/components/schemas/MessageId' }
+        recipient_agent_id: { $ref: '#/components/schemas/AgentId' }
+        state: { $ref: '#/components/schemas/DeliveryState' }
+        reason:
+          anyOf: [{ $ref: '#/components/schemas/DeliveryReason' }, { type: 'null' }]
+        reason_detail:
+          anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+        run_id:
+          anyOf: [{ $ref: '#/components/schemas/RunId' }, { type: 'null' }]
+        blocking_ticket_id:
+          anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+        attempts: { type: integer, minimum: 0 }
+        next_attempt_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: Bounded backoff. Final failures enter an inspectable failed queue.
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+        version: { $ref: '#/components/schemas/Version' }
+
+    WakeJob:
+      type: object
+      description: |
+        Durable at-least-once wake job consumed by a registered runner.
+        Deduplicated on (message_id, recipient_agent_id).
+      additionalProperties: false
+      required: [id, message_id, recipient_agent_id, state, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/WakeJobId' }
+        message_id: { $ref: '#/components/schemas/MessageId' }
+        recipient_agent_id: { $ref: '#/components/schemas/AgentId' }
+        delivery_id: { $ref: '#/components/schemas/DeliveryId' }
+        ticket_id:
+          anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+        state:
+          type: string
+          enum: [pending, leased, completed, failed, canceled]
+        dedupe_key:
+          type: string
+          description: 'Server-computed: message_id + ":" + recipient_agent_id.'
+          maxLength: 96
+        attempts: { type: integer, minimum: 0 }
+        lease_expires_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    RunBudget:
+      type: object
+      description: 'Pilot defaults: 3 hops, 10 turns, 15 minutes per run.'
+      additionalProperties: false
+      required: [max_hops, max_turns, max_seconds]
+      properties:
+        max_hops: { type: integer, minimum: 1, default: 3 }
+        max_turns: { type: integer, minimum: 1, default: 10 }
+        max_seconds: { type: integer, minimum: 30, default: 900 }
+        hops_used: { type: integer, minimum: 0 }
+        turns_used: { type: integer, minimum: 0 }
+        seconds_used: { type: integer, minimum: 0 }
+
+    Run:
+      type: object
+      additionalProperties: false
+      required: [id, recipient_agent_id, state, created_at, version]
+      properties:
+        id: { $ref: '#/components/schemas/RunId' }
+        recipient_agent_id: { $ref: '#/components/schemas/AgentId' }
+        session_id:
+          anyOf: [{ $ref: '#/components/schemas/SessionId' }, { type: 'null' }]
+          description: |
+            Retained before launching, so a crash between claim and spawn can be
+            reconciled against any existing local process before a retry.
+        wake_job_id:
+          anyOf: [{ $ref: '#/components/schemas/WakeJobId' }, { type: 'null' }]
+        ticket_claim:
+          anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+        state:
+          type: string
+          enum: [pending, starting, running, paused, responded, canceled, failed]
+        terminal_reason:
+          anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+        budget: { $ref: '#/components/schemas/RunBudget' }
+        needs_approval:
+          type: boolean
+          description: |
+            A runtime permission request surfaces "Needs approval" and pauses the
+            run with a visible reason rather than a false green status.
+        started_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+        ended_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        version: { $ref: '#/components/schemas/Version' }
+
+    RunnerLease:
+      type: object
+      description: |
+        The local supervisor's lease. It persists independently of a model turn.
+        Fencing prevents two supervisors starting the same agent in parallel.
+      additionalProperties: false
+      required: [runner_id, agent_id, epoch, acquired_at, expires_at]
+      properties:
+        runner_id: { type: string, pattern: '^rnr_[0-9a-z]{8,32}$' }
+        agent_id: { $ref: '#/components/schemas/AgentId' }
+        epoch: { $ref: '#/components/schemas/Epoch' }
+        acquired_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        allowlisted_worktree: { type: string, maxLength: 300 }
+        runtime_profile: { type: string, maxLength: 60 }
+        permission_policy:
+          type: string
+          enum: [prompt, allowlist, deny_all]
+          description: |
+            Runtime permission controls are preserved; nothing here grants an
+            agent broader permissions than the operator configured.
+        concurrency: { type: integer, minimum: 1, maximum: 1, default: 1 }
+        budget: { $ref: '#/components/schemas/RunBudget' }
+
+    # --------------------------------------------------- screen response bodies
+
+    StreamStatus:
+      type: object
+      description: |
+        Every screen snapshot carries this so the UI can render "Connection lost.
+        Showing updates from 14:32." without inventing a timestamp.
+      additionalProperties: false
+      required: [state, snapshot_version, as_of]
+      properties:
+        state:
+          type: string
+          enum: [live, reconnecting, stale]
+        snapshot_version: { $ref: '#/components/schemas/Version' }
+        as_of: { $ref: '#/components/schemas/Timestamp' }
+        last_event_id:
+          anyOf: [{ $ref: '#/components/schemas/EventId' }, { type: 'null' }]
+
+    EmptyState:
+      type: object
+      description: |
+        Server-supplied copy for a screen with no rows, so every client renders
+        the same wording. Absent when the screen has content.
+      additionalProperties: false
+      required: [headline]
+      properties:
+        headline: { type: string, maxLength: 160 }
+        detail:
+          anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+        primary_action:
+          anyOf: [{ type: string, maxLength: 60 }, { type: 'null' }]
+
+    AttentionItem:
+      type: object
+      description: |
+        The Overview attention queue. Every alert has an acknowledgement owner;
+        an unacknowledged alert is not silently dropped.
+      additionalProperties: false
+      required: [kind, subject_type, subject_id, headline, raised_at]
+      properties:
+        kind:
+          type: string
+          enum:
+            - awaiting_review
+            - no_heartbeat
+            - progress_stalled
+            - hook_delivery_failed
+            - runner_offline
+            - needs_approval
+            - master_lease_expired
+            - blocked
+        subject_type:
+          type: string
+          enum: [ticket, agent, run, master_lease]
+        subject_id: { type: string, maxLength: 64 }
+        headline:
+          type: string
+          maxLength: 200
+          examples: ['No heartbeat for 5m. Check session.']
+        raised_at: { $ref: '#/components/schemas/Timestamp' }
+        acknowledged_by:
+          anyOf: [{ $ref: '#/components/schemas/Actor' }, { type: 'null' }]
+
+    OverviewCounts:
+      type: object
+      additionalProperties: false
+      required: [ready, in_progress, awaiting_review, blocked]
+      properties:
+        ready: { type: integer, minimum: 0 }
+        in_progress: { type: integer, minimum: 0 }
+        awaiting_review: { type: integer, minimum: 0 }
+        blocked:
+          type: integer
+          minimum: 0
+          description: Explicitly blocked tickets only; dependency-blocked counted separately.
+        dependency_blocked: { type: integer, minimum: 0 }
+
+    OverviewResponse:
+      type: object
+      additionalProperties: false
+      required: [project, counts, attention, recent_accepted, master, stream]
+      properties:
+        project: { $ref: '#/components/schemas/Project' }
+        counts: { $ref: '#/components/schemas/OverviewCounts' }
+        attention:
+          type: array
+          items: { $ref: '#/components/schemas/AttentionItem' }
+        recent_accepted:
+          type: array
+          items: { $ref: '#/components/schemas/Review' }
+        master: { $ref: '#/components/schemas/MasterLease' }
+        stream: { $ref: '#/components/schemas/StreamStatus' }
+        empty_state: { $ref: '#/components/schemas/EmptyState' }
+
+    TicketListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, stream]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Ticket' }
+        next_cursor:
+          anyOf: [{ type: string, maxLength: 512 }, { type: 'null' }]
+        total_matching: { type: integer, minimum: 0 }
+        stream: { $ref: '#/components/schemas/StreamStatus' }
+        empty_state: { $ref: '#/components/schemas/EmptyState' }
+
+    TicketDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [ticket, updates, reviews, stream]
+      properties:
+        ticket: { $ref: '#/components/schemas/Ticket' }
+        updates:
+          type: array
+          items: { $ref: '#/components/schemas/TicketUpdate' }
+        reviews:
+          type: array
+          items: { $ref: '#/components/schemas/Review' }
+        assignment:
+          anyOf: [{ $ref: '#/components/schemas/Assignment' }, { type: 'null' }]
+        dependencies:
+          type: array
+          description: Resolved dependency summaries so the UI need not N+1.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, title, state]
+            properties:
+              id: { $ref: '#/components/schemas/TicketId' }
+              title: { type: string, maxLength: 200 }
+              state: { $ref: '#/components/schemas/TicketState' }
+        available_actions:
+          type: array
+          description: |
+            Role-filtered actions for the authenticated principal. The UI shows
+            only these; the server re-checks regardless of what the UI sent.
+          items:
+            type: string
+            enum: [assign, claim, update, request_review, accept, reject, block, unblock]
+        stream: { $ref: '#/components/schemas/StreamStatus' }
+
+    AgentListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, stream]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Agent' }
+        stream: { $ref: '#/components/schemas/StreamStatus' }
+        empty_state: { $ref: '#/components/schemas/EmptyState' }
+
+    ActivityResponse:
+      type: object
+      additionalProperties: false
+      required: [items, stream]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEvent' }
+        next_cursor:
+          anyOf: [{ type: string, maxLength: 512 }, { type: 'null' }]
+        stream: { $ref: '#/components/schemas/StreamStatus' }
+        empty_state: { $ref: '#/components/schemas/EmptyState' }
+
+    MasterPanelResponse:
+      type: object
+      additionalProperties: false
+      required: [lease, queue, stream]
+      properties:
+        lease: { $ref: '#/components/schemas/MasterLease' }
+        queue:
+          type: array
+          description: Pending reservations with the reason each was chosen.
+          items: { $ref: '#/components/schemas/Assignment' }
+        decisions:
+          type: array
+          description: Recent routing decisions, including deliberate non-assignments.
+          items:
+            type: object
+            additionalProperties: false
+            required: [ticket_id, decision, reason, decided_at]
+            properties:
+              ticket_id: { $ref: '#/components/schemas/TicketId' }
+              decision:
+                type: string
+                enum: [assigned, skipped, split_recommended, no_eligible_agent]
+              reason: { type: string, maxLength: 500 }
+              agent_id:
+                anyOf: [{ $ref: '#/components/schemas/AgentId' }, { type: 'null' }]
+              decided_at: { $ref: '#/components/schemas/Timestamp' }
+        stream: { $ref: '#/components/schemas/StreamStatus' }
+
+    ChannelListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, stream]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Channel' }
+        stream: { $ref: '#/components/schemas/StreamStatus' }
+        empty_state: { $ref: '#/components/schemas/EmptyState' }
+
+    MemberListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Member' }
+
+    MessageListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, stream]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        threads:
+          type: array
+          items: { $ref: '#/components/schemas/Thread' }
+        deliveries:
+          type: array
+          description: Receipts for the returned messages, so the pane renders in one read.
+          items: { $ref: '#/components/schemas/Delivery' }
+        next_cursor:
+          anyOf: [{ type: string, maxLength: 512 }, { type: 'null' }]
+        stream: { $ref: '#/components/schemas/StreamStatus' }
+        empty_state: { $ref: '#/components/schemas/EmptyState' }
+
+    DeliveryListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Delivery' }
+        runs:
+          type: array
+          items: { $ref: '#/components/schemas/Run' }
+
+    WakeJobListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/WakeJob'  }
+        poll_after_seconds:
+          type: integer
+          minimum: 0
+          description: Long-poll hint; the runner must tolerate an empty page.
+
+    # ------------------------------------------------------------- SSE events
+
+    StreamEnvelope:
+      type: object
+      description: |
+        The `data:` payload of every SSE frame. The frame's `id:` is `event_id`.
+        On reconnect the client sends `Last-Event-ID`; the server replays from
+        just after it, or, when that id has fallen out of the retention window,
+        emits a single `snapshot_required` event instead of silently skipping.
+      additionalProperties: false
+      required: [event_id, type, snapshot_version, occurred_at]
+      properties:
+        event_id: { $ref: '#/components/schemas/EventId' }
+        type:
+          type: string
+          enum:
+            - ticket_changed
+            - agent_changed
+            - assignment_changed
+            - master_lease_changed
+            - review_changed
+            - message_created
+            - delivery_changed
+            - run_changed
+            - audit_appended
+            - snapshot_required
+            - heartbeat
+        snapshot_version: { $ref: '#/components/schemas/Version' }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        subject_id:
+          anyOf: [{ type: string, maxLength: 64 }, { type: 'null' }]
+        payload:
+          description: |
+            The changed record, already ACL-filtered for the subscriber. A
+            subscriber never receives events for channels it cannot read.
+          type: ['object', 'null']
+          additionalProperties: true
+        resume_hint:
+          anyOf:
+            - type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  enum: [cursor_expired, project_changed, acl_changed]
+            - type: 'null'
+          description: Present only on `snapshot_required`.
+
+    # ---------------------------------------------------------- request bodies
+
+    CreateTicketRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, title]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            title: { type: string, minLength: 1, maxLength: 200 }
+            outcome:
+              type: string
+              maxLength: 4000
+              default: ""
+              description: |
+                Optional (T-224, forced by the objective: T-213's legacy
+                import must be lossless, and 141 real tickets on the live
+                board have no outcome field at all -- requiring one 422s our
+                own board's import). Defaults to "" when omitted.
+            acceptance:
+              type: array
+              default: []
+              description: |
+                Optional (T-224, same forcing reason as `outcome`). Defaults
+                to an empty list when omitted -- ticket quality is enforced by
+                the master in routing, not by a schema minimum.
+              items:
+                type: object
+                additionalProperties: false
+                required: [text]
+                properties:
+                  text: { type: string, minLength: 1, maxLength: 500 }
+            role: { type: string, maxLength: 40 }
+            dependencies:
+              type: array
+              description: A cycle is 422 `dependency_cycle` and creates nothing.
+              items: { $ref: '#/components/schemas/TicketId' }
+            files:
+              type: array
+              items: { type: string, maxLength: 300 }
+
+    ClaimTicketRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, session_id]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            session_id:
+              allOf: [{ $ref: '#/components/schemas/SessionId' }]
+              description: |
+                The claiming runtime session. Must hold a live session lease for
+                the authenticated agent, else 409 `session_lease_expired`. An
+                agent whose adapter is failing cannot claim offline.
+            assignment_id:
+              anyOf: [{ type: string, pattern: '^asg_[0-9a-z]{8,32}$' }, { type: 'null' }]
+              description: Present when claiming against a master reservation.
+
+    CreateUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, body, next_step]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            body: { type: string, minLength: 1, maxLength: 4000 }
+            next_step:
+              type: string
+              minLength: 1
+              maxLength: 1000
+              description: |
+                Required. An update without an explicit next step is not progress;
+                omitting it is 400 `malformed_request`.
+            session_id: { $ref: '#/components/schemas/SessionId' }
+
+    CreateReviewRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, evidence]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            evidence: { $ref: '#/components/schemas/GitEvidence' }
+            notes: { type: string, maxLength: 4000 }
+
+    ReviewDecisionRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, decision, evidence_sha]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            decision:
+              type: string
+              enum: [accept, reject]
+            evidence_sha:
+              allOf: [{ $ref: '#/components/schemas/Sha' }]
+              description: |
+                Must equal the SHA pinned on the submitted review. This is what
+                makes "done requires acceptance of the exact submitted artifact"
+                enforceable; a mismatch is 422 `invalid_review_evidence`.
+                Accepting while any check is `failed` is also 422.
+            notes: { type: string, maxLength: 4000 }
+
+    SetTicketBlockedRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, blocked]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            blocked: { type: boolean }
+            reason:
+              type: string
+              maxLength: 1000
+              description: Required when `blocked` is true.
+
+    ReopenTicketRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, reason]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            reason: { type: string, maxLength: 500 }
+
+    CreateEnrollmentRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, agent_name, role]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            agent_name: { type: string, minLength: 1, maxLength: 80 }
+            role: { type: string, maxLength: 40 }
+            capabilities:
+              type: array
+              items: { type: string, maxLength: 40 }
+            worktree: { type: string, maxLength: 300 }
+            connection_mode:
+              type: string
+              enum: [managed, hook_only]
+              default: managed
+            max_active_tickets: { type: integer, minimum: 1, default: 1 }
+
+    CreateEnrollmentResponse:
+      type: object
+      additionalProperties: false
+      required: [enrollment_id, agent, expires_at, code, install_command, config_changes]
+      properties:
+        enrollment_id: { type: string, pattern: '^enr_[0-9a-z]{8,32}$' }
+        agent: { $ref: '#/components/schemas/Agent' }
+        expires_at:
+          allOf: [{ $ref: '#/components/schemas/Timestamp' }]
+          description: 10 minutes after creation.
+        code:
+          type: string
+          description: |
+            Single-use enrollment code, returned exactly once here and never
+            again, never logged, never in a URL, never in a fixture. Fixtures
+            carry the literal placeholder "<enrollment-code-not-in-fixtures>".
+          maxLength: 64
+        install_command:
+          type: string
+          description: |
+            Proposed command shown to the operator. The agent runs it and is
+            prompted for the code on stdin, so the code never enters shell history.
+          maxLength: 300
+          examples: ['tickets connect --project prj_demo01 --server http://127.0.0.1:4319']
+        config_changes:
+          type: array
+          description: |
+            Exact hook entries that will be written. Only owned entries are
+            merged; unrelated entries are preserved.
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, change]
+            properties:
+              path: { type: string, maxLength: 300 }
+              change: { type: string, enum: [add, update, none] }
+              summary: { type: string, maxLength: 300 }
+
+    ExchangeEnrollmentRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, code, session_id]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            code: { type: string, minLength: 1, maxLength: 64 }
+            session_id: { $ref: '#/components/schemas/SessionId' }
+            runtime:
+              type: object
+              additionalProperties: false
+              properties:
+                adapter: { type: string, enum: [claude_code] }
+                version: { type: string, maxLength: 40 }
+
+    SessionCredentialResponse:
+      type: object
+      additionalProperties: false
+      required: [agent, token, lease]
+      properties:
+        agent: { $ref: '#/components/schemas/Agent' }
+        token:
+          type: string
+          description: |
+            Project-scoped agent token. Returned once. The agent stores it in a
+            0600 file outside Git. Fixtures carry "<agent-token-not-in-fixtures>".
+          maxLength: 200
+        lease: { $ref: '#/components/schemas/SessionLease' }
+
+    HookEventRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, event]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            event: { $ref: '#/components/schemas/HookEvent' }
+
+    HookEventResponse:
+      type: object
+      description: |
+        Bounded context injected back into the session. Never unbounded board
+        state; the adapter renders it as text at SessionStart/UserPromptSubmit.
+      additionalProperties: false
+      required: [accepted, deduplicated, context]
+      properties:
+        accepted: { type: boolean }
+        deduplicated:
+          type: boolean
+          description: |
+            True when this `event_id` was already recorded. A retried event
+            creates exactly one audit record; the response is still returned.
+        context:
+          type: object
+          additionalProperties: false
+          required: [lines]
+          properties:
+            lines:
+              type: array
+              maxItems: 20
+              items: { type: string, maxLength: 300 }
+            current_ticket:
+              anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+            unread_messages: { type: integer, minimum: 0 }
+
+    MasterLeaseRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_epoch]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_epoch:
+              allOf: [{ $ref: '#/components/schemas/Epoch' }]
+              description: |
+                Compare-and-swap. Two masters racing with the same
+                `expected_epoch` yield one winner; the loser gets 409
+                `master_lease_conflict` and must re-read.
+            ttl_seconds: { type: integer, minimum: 15, maximum: 600, default: 120 }
+
+    MasterPauseRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, lease_epoch, paused]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            lease_epoch: { $ref: '#/components/schemas/Epoch' }
+            paused: { type: boolean }
+
+    CreateAssignmentRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, ticket_id, agent_id, reason, lease_epoch, expected_version]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            ticket_id: { $ref: '#/components/schemas/TicketId' }
+            agent_id: { $ref: '#/components/schemas/AgentId' }
+            reason:
+              type: string
+              minLength: 1
+              maxLength: 1000
+              description: Required. Routing without a recorded reason is not auditable.
+            lease_epoch:
+              allOf: [{ $ref: '#/components/schemas/Epoch' }]
+              description: Stale epoch is 409 `master_lease_expired`.
+            expected_version: { $ref: '#/components/schemas/Version' }
+            ttl_seconds: { type: integer, minimum: 30, maximum: 3600, default: 600 }
+
+    RevokeSessionLeaseRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, note]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            note:
+              type: string
+              minLength: 1
+              maxLength: 1000
+              description: |
+                Explicit recovery note. Required: the server never revokes a lease
+                on silence alone, and recovery must leave a reason behind.
+
+    CreateInvitationRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, role]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            role: { $ref: '#/components/schemas/ProjectRole' }
+            ttl_seconds: { type: integer, minimum: 60, maximum: 604800, default: 86400 }
+
+    CreateInvitationResponse:
+      type: object
+      additionalProperties: false
+      required: [invitation, code]
+      properties:
+        invitation: { $ref: '#/components/schemas/Invitation' }
+        code:
+          type: string
+          description: |
+            Single-use invite code, returned exactly once. Fixtures carry
+            "<invite-code-not-in-fixtures>".
+          maxLength: 64
+
+    ExchangeInvitationRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, code, display_name]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            code: { type: string, minLength: 1, maxLength: 64 }
+            display_name: { type: string, minLength: 1, maxLength: 120 }
+
+    CreateChannelRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, name, visibility]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            name: { type: string, pattern: '^[a-z0-9][a-z0-9_-]{0,59}$' }
+            visibility: { type: string, enum: [public, private] }
+            topic: { type: string, maxLength: 300 }
+
+    AddChannelMemberRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, member_id]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            member_id: { $ref: '#/components/schemas/MemberId' }
+            subscribed: { type: boolean, default: true }
+
+    SendMessageRequest:
+      description: |
+        "Send" supports questions and follow-ups; the recipient can respond
+        without creating a new implementation claim. There is no command syntax:
+        `intent` carries the distinction, not the body text.
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, channel_id, body, intent]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            channel_id: { $ref: '#/components/schemas/ChannelId' }
+            body: { type: string, minLength: 1, maxLength: 16000 }
+            intent:
+              type: string
+              enum: [message, reply]
+              description: |
+                A task is created through `POST /messages/{id}/task`, not by
+                setting `intent: task` here, so that the task's required fields
+                are validated in one place.
+            thread_id:
+              anyOf: [{ $ref: '#/components/schemas/ThreadId' }, { type: 'null' }]
+            mentions:
+              type: array
+              description: |
+                A mention wakes the named agent. Ordinary conversation reaches
+                subscribed members without launching every agent.
+              items: { $ref: '#/components/schemas/MemberId' }
+            ticket_id:
+              anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+            causation_id:
+              anyOf: [{ $ref: '#/components/schemas/MessageId' }, { type: 'null' }]
+
+    SendMessageResponse:
+      type: object
+      additionalProperties: false
+      required: [message, deliveries]
+      properties:
+        message: { $ref: '#/components/schemas/Message' }
+        deliveries:
+          type: array
+          description: |
+            Written in the same transaction as the message. A message that is
+            persisted without its outbox rows is the bug this shape prevents.
+          items: { $ref: '#/components/schemas/Delivery' }
+
+    SendTaskRequest:
+      description: |
+        "Send task" requires an outcome, an assignee or explicit routing, and a
+        linked or new ticket.
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, outcome, routing]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            outcome: { type: string, minLength: 1, maxLength: 4000 }
+            routing:
+              type: object
+              additionalProperties: false
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [direct, via_master]
+                  description: |
+                    `via_master` posts to the channel's designated master to
+                    decide the owner instead of waking every capable agent.
+                agent_id:
+                  anyOf: [{ $ref: '#/components/schemas/AgentId' }, { type: 'null' }]
+                  description: Required when mode is `direct`.
+            ticket:
+              description: Link an existing ticket or create a draft for routing.
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [existing_ticket_id]
+                  properties:
+                    existing_ticket_id: { $ref: '#/components/schemas/TicketId' }
+                - type: object
+                  additionalProperties: false
+                  required: [new_ticket]
+                  properties:
+                    new_ticket:
+                      type: object
+                      additionalProperties: false
+                      required: [title]
+                      properties:
+                        title: { type: string, minLength: 1, maxLength: 200 }
+                        role: { type: string, maxLength: 40 }
+
+    SendTaskResponse:
+      type: object
+      additionalProperties: false
+      required: [message, ticket, deliveries]
+      properties:
+        message: { $ref: '#/components/schemas/Message' }
+        ticket: { $ref: '#/components/schemas/Ticket' }
+        deliveries:
+          type: array
+          items: { $ref: '#/components/schemas/Delivery' }
+        wake_job:
+          anyOf: [{ $ref: '#/components/schemas/WakeJob' }, { type: 'null' }]
+          description: Null when the recipient is hook-only or the project is paused.
+
+    RegisterRunnerRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, runner_id, agent_id, allowlisted_worktree]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            runner_id: { type: string, pattern: '^rnr_[0-9a-z]{8,32}$' }
+            agent_id: { $ref: '#/components/schemas/AgentId' }
+            allowlisted_worktree: { type: string, maxLength: 300 }
+            runtime_profile: { type: string, maxLength: 60 }
+            permission_policy: { type: string, enum: [prompt, allowlist, deny_all] }
+            expected_epoch:
+              anyOf: [{ $ref: '#/components/schemas/Epoch' }, { type: 'null' }]
+              description: |
+                Compare-and-swap against any existing runner lease. A second
+                supervisor for the same agent gets 409 `run_already_active`
+                rather than starting a parallel session.
+
+    RunEventRequest:
+      description: |
+        Reported by the runner as a run progresses. `started` is only accepted
+        once the runtime session exists and, for an execution request, the task
+        claim succeeded; otherwise the server returns 422
+        `invalid_state_transition` rather than showing a false green status.
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, event]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            event:
+              type: string
+              enum: [starting, started, turn_completed, needs_approval, responded, failed, budget_reached]
+            session_id:
+              anyOf: [{ $ref: '#/components/schemas/SessionId' }, { type: 'null' }]
+            ticket_claim:
+              anyOf: [{ $ref: '#/components/schemas/TicketId' }, { type: 'null' }]
+            reason:
+              anyOf: [{ type: string, maxLength: 300 }, { type: 'null' }]
+              description: Concrete and safe to display; never a token or transcript.
+            budget:
+              anyOf: [{ $ref: '#/components/schemas/RunBudget' }, { type: 'null' }]
+
+    CancelRunRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, reason]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            reason:
+              type: string
+              minLength: 1
+              maxLength: 300
+              description: |
+                Cancel is cooperative. It does not delete artifacts and never
+                marks a ticket complete.
+
+paths:
+
+  /overview:
+    get:
+      tags: [overview]
+      operationId: getOverview
+      summary: Overview screen snapshot.
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Counts, attention queue, recent accepted work and master status.
+          headers:
+            X-Snapshot-Version: { $ref: '#/components/headers/SnapshotVersion' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OverviewResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /tickets:
+    get:
+      tags: [tickets]
+      operationId: listTickets
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - { name: state, in: query, schema: { $ref: '#/components/schemas/TicketState' } }
+        - { name: role, in: query, schema: { type: string, maxLength: 40 } }
+        - { name: owner, in: query, schema: { $ref: '#/components/schemas/AgentId' } }
+        - name: dependency_blocked
+          in: query
+          schema: { type: boolean }
+          description: Filter on the derived flag rather than a stored state.
+        - { name: q, in: query, schema: { type: string, maxLength: 200 } }
+      responses:
+        '200':
+          description: Cursor page of tickets.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TicketListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [tickets]
+      operationId: createTicket
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTicketRequest' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /tickets/{ticket_id}:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [tickets]
+      operationId: getTicket
+      responses:
+        '200':
+          description: Ticket detail with updates, reviews and resolved dependencies.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TicketDetailResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /tickets/{ticket_id}/claim:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tickets]
+      operationId: claimTicket
+      summary: Atomic capacity, dependency and lease check.
+      description: |
+        Racing N claims on one ticket yields exactly one owner. Losers receive
+        409 `ticket_already_claimed`. Capacity remains one active ticket per
+        agent by default; exceeding it is 409 `capacity_exhausted`. An unmet
+        dependency is 422 `dependency_unmet`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimTicketRequest' }
+      responses:
+        '200':
+          description: Claimed. Returns the ticket at its new version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /tickets/{ticket_id}/updates:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tickets]
+      operationId: createTicketUpdate
+      summary: Explicit progress plus next step.
+      description: |
+        An update from a session that no longer owns the ticket is accepted and
+        stored with `superseded: true` as audit evidence; it does not modify
+        ticket state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUpdateRequest' }
+      responses:
+        '201':
+          description: Recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TicketUpdate' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /tickets/{ticket_id}/reviews:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tickets]
+      operationId: requestReview
+      summary: Submit pinned evidence for review.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateReviewRequest' }
+      responses:
+        '201':
+          description: Review requested; ticket moves to `review`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Review' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /tickets/{ticket_id}/reviews/{review_id}/decision:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - { name: review_id, in: path, required: true, schema: { type: string, pattern: '^rev_[0-9a-z]{8,32}$' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tickets]
+      operationId: decideReview
+      summary: Reviewer accepts or rejects, separately from submission.
+      description: |
+        Operator sessions only; 403 `agent_token_insufficient` for agent tokens.
+        The reviewer must differ from the submitter. Rejection returns the ticket
+        to `claimed` with notes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewDecisionRequest' }
+      responses:
+        '200':
+          description: Decision recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Review' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /tickets/{ticket_id}/blocked:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tickets]
+      operationId: setTicketBlocked
+      summary: Set or clear the explicit blocked state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetTicketBlockedRequest' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /tickets/{ticket_id}/reopen:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tickets]
+      operationId: reopenTicket
+      summary: Release a claim -- timeout/stuck recovery, distinct from a review decision.
+      description: |
+        T-224: recovery from a silent or timed-out claim (`MASTER.md`'s
+        HANDOVER step 2, and the mechanism T-182's assignment loop and T-185's
+        recovery verification both depend on) has no relationship to a review
+        decision -- a rejected review returns to `claimed` with the same
+        owner via `decideReview`; this route returns an *any-state* claimed
+        ticket to `open` with `owner` and `owner_session` cleared, for any
+        reason short of a review disposition. Operator-gated: this is a
+        recovery action taken *about* an agent, not something a stuck agent
+        calls on itself (a truly stuck agent may not be able to call anything).
+      security: [{ operatorSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReopenTicketRequest' }
+      responses:
+        '200':
+          description: Reopened. Returns the ticket at its new version -- state open, owner and owner_session null.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /agents:
+    get:
+      tags: [agents]
+      operationId: listAgents
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      responses:
+        '200':
+          description: Agents screen.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agents/{agent_id}/session-lease:
+    parameters:
+      - { name: agent_id, in: path, required: true, schema: { $ref: '#/components/schemas/AgentId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    delete:
+      tags: [agents]
+      operationId: revokeSessionLease
+      summary: Explicit recovery revocation with a note.
+      description: |
+        Operator or master only. Preserves the agent's work; the ticket is not
+        reassigned by this call. A new claim is a separate, explicit step.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RevokeSessionLeaseRequest' }
+      responses:
+        '200':
+          description: Lease revoked and recovery note recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Agent' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /enrollments:
+    post:
+      tags: [agents]
+      operationId: createEnrollment
+      summary: Operator-scoped one-time enrollment code.
+      description: |
+        Operator sessions only. Agent tokens receive 403
+        `agent_token_insufficient`. The code expires after 10 minutes.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      security: [{ operatorSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEnrollmentRequest' }
+      responses:
+        '201':
+          description: Code, proposed install command and exact config changes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateEnrollmentResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /sessions:
+    post:
+      tags: [agents]
+      operationId: exchangeEnrollment
+      summary: Exchange an enrollment code for scoped agent credentials.
+      description: |
+        Unauthenticated by credential; the code is the proof. Invalid is 422
+        `enrollment_code_invalid`, expired is 422 `enrollment_code_expired`, and
+        both messages are deliberately identical in shape so the code cannot be
+        probed for partial correctness. A second exchange of a used code fails.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExchangeEnrollmentRequest' }
+      responses:
+        '201':
+          description: Agent credentials and the initial session lease.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionCredentialResponse' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /hook-events:
+    post:
+      tags: [hooks]
+      operationId: postHookEvent
+      summary: Deduplicated metadata intake with a bounded context response.
+      description: |
+        Adapter failure is non-blocking for ordinary model work; this route never
+        grants a claim. Retrying the same `event_id` produces one audit record.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      security: [{ agentToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HookEventRequest' }
+      responses:
+        '200':
+          description: Accepted (possibly as a duplicate) with injectable context.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HookEventResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429':
+          description: Rate limited; the adapter queues and retries with backoff.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /master:
+    get:
+      tags: [master]
+      operationId: getMasterPanel
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      responses:
+        '200':
+          description: Lease, routing mode, sweeps, queue and decision reasons.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterPanelResponse' }
+
+  /master/lease:
+    post:
+      tags: [master]
+      operationId: takeMasterLease
+      summary: Compare-and-swap takeover with a fencing epoch.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MasterLeaseRequest' }
+      responses:
+        '200':
+          description: Lease held at a new epoch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterLease' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /master/pause:
+    post:
+      tags: [master]
+      operationId: setMasterPaused
+      summary: Pause or resume assignment sweeps.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MasterPauseRequest' }
+      responses:
+        '200':
+          description: Updated lease state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterLease' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /assignments:
+    post:
+      tags: [master]
+      operationId: createAssignment
+      summary: Master-scoped reservation with reason and expiry.
+      description: |
+        Requires the current `lease_epoch`; a superseded master receives 409
+        `master_lease_expired`. The reservation shows as "Queued -- waiting for
+        agent" and never as "Working".
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAssignmentRequest' }
+      responses:
+        '201':
+          description: Reservation created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /activity:
+    get:
+      tags: [activity]
+      operationId: listActivity
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - { name: subject_type, in: query, schema: { type: string, maxLength: 40 } }
+      responses:
+        '200':
+          description: Chronological audit events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivityResponse' }
+
+  /events:
+    get:
+      tags: [events]
+      operationId: streamEvents
+      summary: SSE stream with cursor replay.
+      description: |
+        Send `Last-Event-ID` to resume. The server replays from just after that
+        id. If the id is older than the retention window the server sends one
+        `snapshot_required` event with `resume_hint.reason = cursor_expired`, and
+        the client re-reads the screen snapshot instead of losing state silently.
+        A `heartbeat` event is emitted periodically so a dead connection is
+        distinguishable from an idle one.
+
+        Target (from the design doc, not a measurement): the dashboard reflects a
+        change within two seconds on a local system.
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { $ref: '#/components/schemas/EventId' }
+      responses:
+        '200':
+          description: 'text/event-stream of StreamEnvelope frames.'
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/StreamEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /members:
+    get:
+      tags: [messages]
+      operationId: listMembers
+      summary: Members list with Human / Agent / Master identity and project role.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      responses:
+        '200':
+          description: Project members.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberListResponse' }
+
+  /invitations:
+    post:
+      tags: [messages]
+      operationId: createInvitation
+      summary: Owner/admin issues an expiring single-use invite.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      security: [{ operatorSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateInvitationRequest' }
+      responses:
+        '201':
+          description: Invitation and its one-time code.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateInvitationResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /invitations/exchange:
+    post:
+      tags: [messages]
+      operationId: exchangeInvitation
+      summary: Member exchanges an invite for a server session.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExchangeInvitationRequest' }
+      responses:
+        '201':
+          description: |
+            Membership created. The operator session cookie is set by the
+            `Set-Cookie` response header; no token appears in the body or a URL.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /channels:
+    get:
+      tags: [messages]
+      operationId: listChannels
+      description: |
+        Returns only channels the caller may read. A private channel the caller
+        does not belong to is absent from the list, not returned with a flag.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      responses:
+        '200':
+          description: Channel rail.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelListResponse' }
+    post:
+      tags: [messages]
+      operationId: createChannel
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateChannelRequest' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /channels/{channel_id}/members:
+    parameters:
+      - { name: channel_id, in: path, required: true, schema: { $ref: '#/components/schemas/ChannelId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [messages]
+      operationId: addChannelMember
+      description: Owner/admin only for private channels.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddChannelMemberRequest' }
+      responses:
+        '201':
+          description: Added.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelMember' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /messages:
+    get:
+      tags: [messages]
+      operationId: listMessages
+      description: |
+        ACL-filtered. Reading a channel the caller does not belong to is 403
+        `not_channel_member`; a revoked member is 403 `membership_revoked`.
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - { name: channel_id, in: query, required: true, schema: { $ref: '#/components/schemas/ChannelId' } }
+        - { name: thread_id, in: query, schema: { $ref: '#/components/schemas/ThreadId' } }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Conversation pane with receipts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [messages]
+      operationId: sendMessage
+      description: |
+        Message and outbox rows are persisted in one transaction. The author is
+        taken from the credential; an author field in the body is 403
+        `sender_identity_rejected`.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendMessageRequest' }
+      responses:
+        '201':
+          description: Message plus its deliveries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendMessageResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /messages/{message_id}/task:
+    parameters:
+      - { name: message_id, in: path, required: true, schema: { $ref: '#/components/schemas/MessageId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [messages]
+      operationId: sendTask
+      summary: Turn a message into a task, linking or creating a ticket.
+      description: |
+        Creates the ticket link, the delivery and (for a managed recipient) the
+        wake job in one transaction. A hook-only recipient yields a delivery in
+        state `queued` with reason `manual_resume_required` and no wake job. A
+        paused project yields `queued` with reason `project_paused`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendTaskRequest' }
+      responses:
+        '201':
+          description: Task dispatched or explicitly queued with a reason.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendTaskResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /messages/{message_id}/deliveries:
+    parameters:
+      - { name: message_id, in: path, required: true, schema: { $ref: '#/components/schemas/MessageId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [messages]
+      operationId: listDeliveries
+      summary: Receipt chain for one message.
+      responses:
+        '200':
+          description: Deliveries and any runs they started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeliveryListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /runners/register:
+    post:
+      tags: [runners]
+      operationId: registerRunner
+      summary: Register a local supervisor and take its runner lease.
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      security: [{ agentToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRunnerRequest' }
+      responses:
+        '200':
+          description: Runner lease held.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunnerLease' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /runners/jobs:
+    get:
+      tags: [runners]
+      operationId: listWakeJobs
+      summary: Consume durable wake jobs.
+      description: |
+        At-least-once. The runner must deduplicate on
+        (message_id, recipient_agent_id) and reconcile any existing local process
+        after a crash before retrying. An empty page is normal and is not an
+        error; a periodic sweep plus the replay cursor means a disconnected
+        stream loses no work.
+
+        Acceptance target from the design doc (not an observed result): an idle
+        managed agent starts within 5s of a committed task message on a healthy
+        local system.
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - { name: runner_id, in: query, required: true, schema: { type: string, pattern: '^rnr_[0-9a-z]{8,32}$' } }
+        - { name: wait_seconds, in: query, schema: { type: integer, minimum: 0, maximum: 60, default: 20 } }
+      security: [{ agentToken: [] }]
+      responses:
+        '200':
+          description: Zero or more leased wake jobs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WakeJobListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: |
+            409 `run_already_active` when another runner holds this agent's lease.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /runs/{run_id}/events:
+    parameters:
+      - { name: run_id, in: path, required: true, schema: { $ref: '#/components/schemas/RunId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [runners]
+      operationId: postRunEvent
+      summary: Report run progress.
+      security: [{ agentToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunEventRequest' }
+      responses:
+        '200':
+          description: Run at its new state and version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /runs/{run_id}/cancel:
+    parameters:
+      - { name: run_id, in: path, required: true, schema: { $ref: '#/components/schemas/RunId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [runners]
+      operationId: cancelRun
+      summary: Cooperative cancel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CancelRunRequest' }
+      responses:
+        '200':
+          description: Cancellation requested; artifacts are retained.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '409': { $ref: '#/components/responses/Conflict' }

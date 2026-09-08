@@ -1,0 +1,11 @@
+{
+  "event_id": "evt_000000000047_a1b2c7",
+  "type": "snapshot_required",
+  "snapshot_version": 13,
+  "occurred_at": "2026-09-06T14:35:00Z",
+  "subject_id": null,
+  "payload": null,
+  "resume_hint": {
+    "reason": "cursor_expired"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "agent_token_insufficient",
+    "status": 403,
+    "message": "Agent tokens cannot create enrollments, accept reviews or take master authority.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "route": "POST /enrollments"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "cwd": "/home/agent/projects/example-project",
+  "duration_ms": 3,
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "permission_mode": "bypassPermissions",
+  "prompt_id": "22222222-2222-2222-2222-222222222222",
+  "scratchpad_dir": "/home/agent/projects/example-project/.scratch-root/11111111-1111-1111-1111-111111111111/scratchpad",
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "tool_input": {
+    "file_path": "/home/agent/projects/example-project/.scratch-root/11111111-1111-1111-1111-111111111111/scratchpad/notes.txt"
+  },
+  "tool_name": "Read",
+  "tool_response": {
+    "file": {
+      "content": "hello",
+      "filePath": "/home/agent/projects/example-project/.scratch-root/11111111-1111-1111-1111-111111111111/scratchpad/notes.txt",
+      "numLines": 1,
+      "startLine": 1,
+      "totalLines": 1
+    },
+    "type": "text"
+  },
+  "tool_use_id": "toolu_01YSwx4qPKFVyJvd43krDoST",
+  "transcript_path": "/home/agent/.claude/projects/example-project/11111111-1111-1111-1111-111111111111.jsonl"
+}

@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "ticket_version_conflict",
+    "status": 409,
+    "message": "DEMO-13 changed since you read it. Re-read and retry.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "expected_version": 4,
+      "actual_version": 5
+    }
+  }
+}

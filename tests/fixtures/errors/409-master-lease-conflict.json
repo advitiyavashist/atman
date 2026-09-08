@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "master_lease_conflict",
+    "status": 409,
+    "message": "Another master already took the lease at epoch 5.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "expected_epoch": 4,
+      "actual_epoch": 5
+    }
+  }
+}

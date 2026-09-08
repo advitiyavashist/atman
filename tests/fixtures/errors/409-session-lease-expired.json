@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "session_lease_expired",
+    "status": 409,
+    "message": "This session no longer holds a worker lease. A claim cannot be granted offline.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "session_id": "ses_a1b2c3d4"
+    }
+  }
+}

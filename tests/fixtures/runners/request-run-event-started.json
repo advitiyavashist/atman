@@ -1,0 +1,9 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "expected_version": 1,
+  "event": "started",
+  "session_id": "ses_a1b2c3d4",
+  "ticket_claim": "DEMO-14",
+  "reason": null,
+  "budget": null
+}

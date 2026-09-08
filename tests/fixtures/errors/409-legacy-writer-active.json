@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "legacy_writer_active",
+    "status": 409,
+    "message": "A legacy file writer is active on this board. Server ownership rejects direct writes.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "board_path": "/repos/demo/.tickets"
+    }
+  }
+}

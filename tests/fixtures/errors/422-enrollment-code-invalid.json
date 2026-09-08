@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "enrollment_code_invalid",
+    "status": 422,
+    "message": "That enrollment code is not usable.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {}
+  }
+}

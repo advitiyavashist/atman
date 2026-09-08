@@ -1,0 +1,22 @@
+{
+  "id": "run_00000005",
+  "recipient_agent_id": "agt_backend01",
+  "session_id": null,
+  "wake_job_id": "wjb_00000001",
+  "ticket_claim": null,
+  "state": "failed",
+  "terminal_reason": "Claim failed before spawn; no session was started.",
+  "budget": {
+    "max_hops": 3,
+    "max_turns": 10,
+    "max_seconds": 900,
+    "hops_used": 1,
+    "turns_used": 2,
+    "seconds_used": 45
+  },
+  "needs_approval": false,
+  "started_at": null,
+  "ended_at": "2026-09-06T14:40:00Z",
+  "created_at": "2026-09-06T14:32:00Z",
+  "version": 3
+}

@@ -1,0 +1,9 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "code": "<enrollment-code-not-in-fixtures>",
+  "session_id": "ses_a1b2c3d4",
+  "runtime": {
+    "adapter": "claude_code",
+    "version": "2.1.0"
+  }
+}

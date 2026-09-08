@@ -1,0 +1,12 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "channel_id": "chn_work0001",
+  "body": "Did the paging fix land?",
+  "intent": "message",
+  "thread_id": null,
+  "mentions": [
+    "mem_backend01"
+  ],
+  "ticket_id": "DEMO-14",
+  "causation_id": null
+}

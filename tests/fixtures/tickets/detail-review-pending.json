@@ -1,0 +1,91 @@
+{
+  "ticket": {
+    "id": "DEMO-13",
+    "project_id": "prj_demo0001",
+    "title": "Add the widget endpoint",
+    "outcome": "GET /widgets returns a cursor page and is covered by tests.",
+    "acceptance": [
+      {
+        "text": "Cursor paging works",
+        "checked": false,
+        "checked_by": null,
+        "checked_at": null
+      }
+    ],
+    "state": "review",
+    "version": 5,
+    "role": "backend",
+    "owner": "agt_backend01",
+    "owner_session": "ses_a1b2c3d4",
+    "dependencies": [],
+    "dependency_blocked": false,
+    "blocked_reason": null,
+    "files": [
+      "src/widgets/"
+    ],
+    "worktree": "/repos/demo/.worktrees/backend-1",
+    "evidence": {
+      "repository": "demo-org/demo-repo",
+      "branch": "feature/demo-13",
+      "sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+      "pr_url": null,
+      "checks": [
+        {
+          "name": "pytest",
+          "status": "passed",
+          "details_url": null
+        }
+      ]
+    },
+    "next_step": "Awaiting reviewer.",
+    "handoff": null,
+    "created_at": "2026-09-06T14:30:00Z",
+    "updated_at": "2026-09-06T14:32:00Z",
+    "claimed_at": "2026-09-06T14:32:00Z",
+    "last_progress_at": "2026-09-06T14:32:00Z"
+  },
+  "updates": [],
+  "reviews": [
+    {
+      "id": "rev_00000002",
+      "ticket_id": "DEMO-13",
+      "state": "requested",
+      "submitted_by": {
+        "type": "agent",
+        "id": "agt_backend01",
+        "display_name": "backend-1",
+        "session_id": "ses_a1b2c3d4"
+      },
+      "submitted_at": "2026-09-06T14:32:00Z",
+      "evidence": {
+        "repository": "demo-org/demo-repo",
+        "branch": "feature/demo-13",
+        "sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        "pr_url": null,
+        "checks": [
+          {
+            "name": "pytest",
+            "status": "passed",
+            "details_url": null
+          }
+        ]
+      },
+      "notes": "Cursor paging covered by tests.",
+      "decided_by": null,
+      "decided_at": null,
+      "decision_notes": null
+    }
+  ],
+  "assignment": null,
+  "dependencies": [],
+  "available_actions": [
+    "accept",
+    "reject"
+  ],
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}

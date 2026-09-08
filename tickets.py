@@ -1,0 +1,9453 @@
+#!/usr/bin/env python3
+"""A tiny file-based ticket board for coordinating AI coding agents.
+
+Tool-neutral on purpose: Claude Code, Codex and Cursor all just shell out to
+this script, so they share one board.
+
+One JSON file per ticket, so parallel agents never fight over a single file.
+Claiming is atomic (O_EXCL lock file), so two agents can never take the same
+ticket even if they call `next` at the same instant.
+
+Board location, in order of preference:
+  $TICKETS_DIR
+  nearest ancestor with a live .tickets/ board
+  git worktree/root .tickets
+  the only live .tickets/ in a child directory (so `tickets next` from a
+  parent folder like Downloads still finds the project)
+  cwd/.tickets
+
+`tickets board` does not scan children — SessionStart hooks stay silent in
+folders that are not the project. `tickets next` / `show` / `done` do.
+
+Agent identity comes from $TICKET_AGENT (set it per tool: claude, codex, cursor).
+Default roles for those names can be overridden by .tickets/roles.json.
+"""
+
+import argparse
+import errno
+import glob
+import hashlib
+import json
+import os
+import re
+import shlex
+import sys
+import threading
+from datetime import datetime, timezone
+
+STATUSES = ("open", "claimed", "review", "blocked", "done")
+LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
+         "blocked": "BLOCKED", "done": "DONE"}
+# words agents may type for `tickets status <id> <word>`
+STATUS_WORDS = {
+    "todo": "open", "to-do": "open", "open": "open", "unassigned": "open", "backlog": "open",
+    "in-progress": "claimed", "inprogress": "claimed", "progress": "claimed", "wip": "claimed",
+    "doing": "claimed", "claimed": "claimed", "started": "claimed",
+    "review": "review", "in-review": "review", "pr": "review", "ready": "review", "submitted": "review",
+    "blocked": "blocked", "stuck": "blocked",
+    "done": "done", "merged": "done", "closed": "done", "complete": "done",
+}
+UPDATE_EVERY_MIN = 45  # agents must post `tickets update` at least this often
+
+DEFAULT_ROLES = {
+    "codex": ["console"],
+    "claude": ["backend"],
+    "cursor": ["verification", "acceptance"],
+    "grok": [],
+}
+
+
+# --------------------------------------------------------------------------
+# board location + io
+# --------------------------------------------------------------------------
+
+def _live_board(path):
+    return os.path.isdir(path) and bool(glob.glob(os.path.join(path, "T-*.json")))
+
+
+def child_boards(cwd):
+    found = []
+    try:
+        for name in os.listdir(cwd):
+            path = os.path.join(cwd, name, ".tickets")
+            if _live_board(path):
+                found.append(os.path.abspath(path))
+    except OSError:
+        pass
+    return found
+
+
+# Git's *location* environment: the variables that override repo discovery and
+# make git answer for a repository other than the one cwd is standing in. This
+# is deliberately NOT "every GIT_* key" -- see _clean_git_env below.
+GIT_LOCATION_VARS = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+)
+
+
+def _clean_git_env(environ=None):
+    """Copy an environment without inherited Git *location* overrides (T-243).
+
+    GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE and friends take priority over cwd
+    during git's repo discovery, so a subprocess that inherits them silently
+    answers for whatever repo they name instead of the caller's own cwd. Once
+    such a value is forwarded into a spawned/exec'd child it cascades to every
+    agent the watcher launches, which is why the wrong repo tracked "whichever
+    worktree was most recently active globally" rather than any one agent.
+
+    Scope, deliberately narrow: only the
+    location family is removed. GIT_AUTHOR_*/GIT_COMMITTER_* must survive --
+    this env is also handed to `cmd_watch`/`cmd_spawn` as the launch
+    environment, and stripping identity there is the same class of attribution
+    loss. GIT_SSH_COMMAND/GIT_ASKPASS/GIT_TERMINAL_PROMPT likewise
+    survive so credential helpers keep working. None of those can redirect
+    which repository git resolves, so none of them is this bug's mechanism.
+
+    Always pair with an explicit cwd.
+    """
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items() if k not in GIT_LOCATION_VARS}
+
+
+def _fs_repo_link(start):
+    """Resolve (worktree_root, shared .git dir) for `start` from the FILESYSTEM.
+
+    No environment variable can redirect this, which is exactly the point: it
+    is ground truth to cross-check git's own answer against. Handles both a
+    normal checkout (.git is a directory) and a linked worktree (.git is a
+    file containing "gitdir: <common>/worktrees/<name>"), including a worktree
+    that lives OUTSIDE the main repo tree -- a supported layout that a naive
+    "the root must contain cwd" test wrongly rejects (T-259 defect 1).
+    Returns (None, None) when cwd is not inside a work tree at all.
+    """
+    d = os.path.realpath(start)
+    while True:
+        cand = os.path.join(d, ".git")
+        if os.path.isdir(cand):
+            return d, os.path.realpath(cand)
+        if os.path.isfile(cand):
+            try:
+                with open(cand, encoding="utf-8", errors="replace") as fh:
+                    line = fh.read().strip()
+            except OSError:
+                return None, None
+            if not line.startswith("gitdir:"):
+                return None, None
+            gitdir = os.path.realpath(os.path.join(d, line.split(":", 1)[1].strip()))
+            parent = os.path.dirname(gitdir)
+            if os.path.basename(parent) == "worktrees":
+                return d, os.path.realpath(os.path.dirname(parent))
+            return d, gitdir
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None, None
+        d = parent
+
+
+def _repo_root():
+    """Root of the MAIN worktree, so every linked worktree shares one board.
+
+    Explicit cwd + a scrubbed env (T-243): without them an ambient GIT_DIR or
+    GIT_COMMON_DIR silently reroutes board discovery to a DIFFERENT project's
+    board -- strictly worse than the misreported location this ticket was
+    filed for, because it means reading and writing another repo's tickets.
+
+    The result is then cross-checked against the filesystem. On disagreement
+    the FILESYSTEM WINS: it cannot be redirected by the environment, so it
+    recovers the correct shared board instead of refusing and letting
+    board_dir() fall through to a brand-new empty one (T-259 defect 1).
+    """
+    import subprocess
+    here = os.getcwd()
+    fs_root, fs_common = _fs_repo_link(here)
+    try:
+        out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                             capture_output=True, text=True, timeout=5,
+                             cwd=here, env=_clean_git_env())
+    except (OSError, subprocess.TimeoutExpired):
+        out = None
+    common = None
+    if out is not None and out.returncode == 0:
+        common = os.path.realpath(os.path.join(here, out.stdout.strip()))
+
+    if fs_common is not None and common is not None and fs_common != common:
+        sys.stderr.write(
+            "tickets: git resolved its common dir to %s but the filesystem says cwd %s "
+            "belongs to %s -- trusting the filesystem (T-243)\n" % (common, here, fs_common))
+        common = fs_common
+    elif common is None:
+        common = fs_common
+    if common is None:
+        return None
+    if os.path.basename(common) != ".git":
+        return None  # bare repo or unusual layout
+    return os.path.dirname(common)
+
+
+def _init_cwd_worktree_root(start=None):
+    """Root of the worktree cwd is LITERALLY in -- deliberately NOT _repo_root().
+
+    _repo_root() resolves `--git-common-dir` and therefore returns the MAIN
+    worktree: correct for board_dir(), because every linked worktree of a
+    project is meant to share one board.  For `init` that is the defect
+    (T-263/T-282).  It made init's "where am I about to write" answer
+    identical BY CONSTRUCTION to the ambient "where will this resolve later"
+    answer, so the refuse-on-disagreement check could never fire inside a
+    linked worktree -- a common configuration for parallel agents.
+    A guard whose two operands come out of the same resolver is not a guard.
+
+    So this function shares no code path with _repo_root().  The filesystem
+    walk is the answer: the first ancestor holding a `.git` entry, which no
+    environment variable can redirect.  git's own `--show-toplevel` is asked
+    only as a cross-check, and on disagreement the filesystem wins (T-243).
+    Returns None when cwd is not inside a git worktree at all.
+    """
+    import subprocess
+    here = os.path.realpath(start if start is not None else os.getcwd())
+    fs_root = None
+    d = here
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            fs_root = d
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    git_root = None
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5,
+                             cwd=here, env=env)
+        if out.returncode == 0 and out.stdout.strip():
+            git_root = os.path.realpath(out.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if fs_root is not None and git_root is not None and fs_root != git_root:
+        sys.stderr.write(
+            "tickets: git says cwd %s is in worktree %s but the filesystem says %s "
+            "-- trusting the filesystem (T-243)\n" % (here, git_root, fs_root))
+    if fs_root is not None:
+        return fs_root
+    return git_root
+
+
+def _same_board(a, b):
+    if a is None or b is None:
+        return False
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _init_resolve_board(a):
+    """(target, why): where `init` will write, decided from cwd alone."""
+    explicit = getattr(a, "board", None)
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit)), "an explicit --board"
+    root = _init_cwd_worktree_root()
+    if root is None:
+        return (os.path.join(os.path.realpath(os.getcwd()), ".tickets"),
+                "the current directory (not inside a git worktree)")
+    return os.path.join(root, ".tickets"), "the git worktree cwd is in (%s)" % root
+
+
+def _init_disagreement_cause(ambient):
+    """Plain-language reason the ambient board is not the cwd board."""
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return ("TICKETS_DIR is set to %r, and board resolution honours it "
+                "before anything on disk." % env)
+    here = _init_cwd_worktree_root()
+    main = _repo_root()
+    if here and main and os.path.realpath(here) != os.path.realpath(main):
+        return ("%s is a LINKED WORKTREE whose main worktree is %s, and every "
+                "linked worktree deliberately shares the main worktree's "
+                "board -- that sharing is the design, not a bug, so init "
+                "must not quietly fork a second board here." % (here, main))
+    return ("an ancestor directory already holds a board (%s) and the "
+            "upward search finds it before this one." % os.path.dirname(ambient))
+
+
+def _init_refusal(target, ambient):
+    return (
+        "REFUSING TO INIT: nothing was written.\n"
+        "  would write to: %s\n"
+        "  but `tickets` run from %s resolves to: %s\n"
+        "  because %s\n"
+        "\n"
+        "Writing anyway is the T-263 defect: init would report success, install "
+        "the protocol files into a DIFFERENT project, and leave every later "
+        "command on the other board (that is how T-256 minted a ticket on a "
+        "live board). Pick one:\n"
+        "  * bind this directory:      export TICKETS_DIR=%s\n"
+        "  * install into the board\n"
+        "    that is actually in effect: tickets init --board %s\n"
+        "  * run init in %s instead\n"
+        % (target, os.getcwd(), ambient, _init_disagreement_cause(ambient),
+           target, ambient, os.path.dirname(ambient))
+    )
+
+
+def _join_cwd_board():
+    """Board `join` would write to if TICKETS_DIR were not set (mirrors T-263's
+    _init_resolve_board, minus the --board override join has no equivalent of)."""
+    root = _init_cwd_worktree_root()
+    base = root if root is not None else os.path.realpath(os.getcwd())
+    return os.path.join(base, ".tickets")
+
+
+def _refuse_join_tickets_dir_shadow(board):
+    """Refuse a join whose cwd has its own .tickets that $TICKETS_DIR is shadowing.
+
+    board_dir() honours $TICKETS_DIR unconditionally (T-424): an agent that
+    mkdir's an isolated .tickets/ to probe the tool and then runs `join` from
+    there registers a real seat on whatever board TICKETS_DIR names instead,
+    with nothing in the join output to say so -- that is how opus-authz's
+    probe seat 'zed' ended up on the live production board. `init` already
+    refuses this shape (T-263); join gets the same treatment rather than a
+    second, different resolution rule for the same tool.
+    """
+    env = os.environ.get("TICKETS_DIR")
+    if not env:
+        return
+    cwd_board = _join_cwd_board()
+    if not os.path.isdir(cwd_board) or _same_board(cwd_board, board):
+        return
+    sys.exit(
+        "REFUSING TO JOIN: nothing was written.\n"
+        "  this directory's own board: %s\n"
+        "  TICKETS_DIR=%r makes `tickets` resolve to:  %s\n"
+        "\n"
+        "join would register a real seat on the SECOND path, not the board "
+        "sitting in this directory -- that is the T-424 defect (two agents hit "
+        "it inside half an hour). Pick one:\n"
+        "  * join the board TICKETS_DIR names (most agents want this): "
+        "remove or ignore the stray %s\n"
+        "  * join the board in this directory instead: unset TICKETS_DIR, "
+        "then re-run join\n"
+        % (cwd_board, env, board, cwd_board)
+    )
+
+
+def _refuse_board_outside_pytest_tmp(path):
+    """Refuse a board path that escapes the pytest temp dir.
+
+    Root cause -- board_dir() prefers $TICKETS_DIR unconditionally, and a
+    subprocess a test forgets to sandbox inherits that ambient value. pytest
+    sets PYTEST_CURRENT_TEST for the life of every test, and pytest's own
+    tmp_path/tmpdir fixtures always live under the system temp dir, so that
+    combination is a reliable signal a board resolution is about to escape
+    its sandbox. Fail loud instead of writing -- a silently-wrong resolution
+    here is indistinguishable from a real board write after the fact."""
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    import tempfile
+    tmp_root = os.path.realpath(tempfile.gettempdir())
+    real = os.path.realpath(path)
+    if real == tmp_root or real.startswith(tmp_root + os.sep):
+        return
+    sys.exit(
+        "REFUSING TO USE BOARD %r: running under pytest (PYTEST_CURRENT_TEST "
+        "is set) but this board resolved outside the system temp dir (%r). "
+        "This looks like a test about to read or write a real board instead "
+        "of an isolated tmp_path fixture -- see T-257. Make sure TICKETS_DIR "
+        "points at a tmp_path (and that any subprocess.run() call passes "
+        "env= explicitly rather than inheriting the ambient environment)."
+        % (real, tmp_root)
+    )
+
+
+def _cwd_belongs_to_board(board_path):
+    """True when cwd is this board's checkout (in-tree dir or linked worktree).
+
+    T-409 / zed class: a cwd with no board of its own must not silently write
+    a live board discovered as a unique child (Downloads -> project) or via
+    any other unbound resolution. Out-of-tree `git worktree add` still belongs
+    because `_repo_root()` is the main checkout that owns the board (T-243).
+    """
+    board = os.path.realpath(board_path)
+    board_root = os.path.dirname(board)
+    cwd = os.path.realpath(os.getcwd())
+    if cwd == board_root or cwd.startswith(board_root + os.sep):
+        return True
+    root = _repo_root()
+    if root and os.path.realpath(root) == board_root:
+        return True
+    here = _init_cwd_worktree_root()
+    if here and os.path.realpath(os.path.join(here, ".tickets")) == board:
+        return True
+    return False
+
+
+def _refuse_unbound_live_board(path):
+    """Refuse a live board cwd does not belong to, unless TICKETS_DIR binds it.
+
+    T-409: a mktemp / parent-folder cwd with no explicit TICKETS_DIR resolved
+    the shared live board (zed / T-331). Fail closed. An empty local
+    cwd/.tickets is not live, so init/join in a fresh dir still works.
+    """
+    if os.environ.get("TICKETS_DIR"):
+        return
+    if not _live_board(path):
+        return
+    if _cwd_belongs_to_board(path):
+        return
+    real = os.path.realpath(path)
+    sys.exit(
+        "REFUSING TO USE BOARD %r: cwd %r is not inside a board checkout "
+        "and TICKETS_DIR is unset. Binding a live board from an unbound "
+        "directory is the zed/T-331 class (a sandbox writing the shared "
+        "board). Export TICKETS_DIR to the board you mean, or run from "
+        "that project's checkout."
+        % (real, os.path.realpath(os.getcwd()))
+    )
+
+
+def board_dir(discover_children=True):
+    result = _board_dir_uncached(discover_children)
+    _refuse_board_outside_pytest_tmp(result)
+    _refuse_unbound_live_board(result)
+    return result
+
+
+def _board_dir_uncached(discover_children=True):
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    root = _repo_root()
+    if root:
+        shared = os.path.join(root, ".tickets")
+        if _live_board(shared) or os.path.isdir(shared) or root != os.getcwd():
+            return shared
+    d = os.getcwd()
+    git_root = None
+    while True:
+        tickets = os.path.join(d, ".tickets")
+        if _live_board(tickets) or os.path.isdir(tickets):
+            if _live_board(tickets) or os.path.isdir(os.path.join(d, ".git")) or os.path.isfile(
+                os.path.join(d, ".git")
+            ):
+                return os.path.abspath(tickets)
+        git = os.path.join(d, ".git")
+        if git_root is None and (os.path.isdir(git) or os.path.isfile(git)):
+            git_root = d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    if git_root:
+        return os.path.join(git_root, ".tickets")
+    if discover_children:
+        kids = child_boards(os.getcwd())
+        if len(kids) == 1:
+            return kids[0]
+    return os.path.join(os.getcwd(), ".tickets")
+
+
+def whoami(explicit=None):
+    return explicit or os.environ.get("TICKET_AGENT") or "agent-%d" % os.getpid()
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def ticket_path(board, tid):
+    return os.path.join(board, tid + ".json")
+
+
+def load(board, tid):
+    try:
+        with open(ticket_path(board, tid)) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        sys.exit("no such ticket: %s" % tid)
+
+
+def save(board, t):
+    t["updated"] = now()
+    path = ticket_path(board, t["id"])
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(t, f, indent=2)
+    os.replace(tmp, path)  # atomic
+    return t
+
+
+def load_all(board):
+    out = []
+    for path in sorted(glob.glob(os.path.join(board, "T-*.json"))):
+        try:
+            with open(path) as f:
+                out.append(json.load(f))
+        except (ValueError, IOError):
+            continue
+    return out
+
+
+def load_roles(board):
+    path = os.path.join(board, "roles.json")
+    roles = dict((k, list(v)) for k, v in DEFAULT_ROLES.items())
+    if os.path.isfile(path):
+        try:
+            with open(path) as f:
+                extra = json.load(f)
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    if isinstance(v, list):
+                        roles[k] = [str(x) for x in v]
+        except (ValueError, IOError):
+            pass
+    return roles
+
+
+def roles_for(board, owner, explicit=None):
+    if explicit:
+        return [r.strip() for r in explicit.split(",") if r.strip()]
+    mapped = load_roles(board).get(owner)
+    if mapped is not None:
+        return mapped
+    return None  # None = any role
+
+
+def workforce_path(board):
+    return os.path.join(board, "workforce.json")
+
+
+def load_workforce(board):
+    """{agent: {tool, can:[capabilities], cost: low|medium|high, best_for}}"""
+    try:
+        with open(workforce_path(board)) as f:
+            w = json.load(f)
+        return w if isinstance(w, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def save_workforce(board, w):
+    os.makedirs(board, exist_ok=True)
+    tmp = workforce_path(board) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(w, f, indent=2)
+    os.replace(tmp, workforce_path(board))
+
+
+def can_do(board, owner, ticket):
+    """False if the ticket declares needs this agent has not registered."""
+    needs = ticket.get("needs") or []
+    if not needs:
+        return True
+    have = set(load_workforce(board).get(owner, {}).get("can", []))
+    return all(n in have for n in needs)
+
+
+def cost_rank(board, owner):
+    return {"low": 0, "medium": 1, "high": 2}.get(
+        load_workforce(board).get(owner, {}).get("cost", "medium"), 1)
+
+
+def context_paths(board, owner=None):
+    """Briefing files an agent should read after a claim. Per-agent briefs live
+    in .tickets/briefs/<agent>.md and come first when present."""
+    paths = []
+    cands = []
+    if owner:
+        cands.append(os.path.join(board, "briefs", owner + ".md"))
+    cands += [
+        os.path.join(board, "MASTER.md"),
+        os.path.join(board, "CONTEXT.md"),
+        os.path.join(os.path.dirname(board), "docs", "handoffs", "AGENT_CONTEXT.md"),
+    ]
+    for p in cands:
+        if os.path.isfile(p) and p not in paths:
+            paths.append(p)
+    return paths
+
+
+def _alloc(directory, prefix, width, record):
+    """Write `record` under the next free `<prefix>-NNN` id. Race-safe via O_EXCL."""
+    os.makedirs(directory, exist_ok=True)
+    used = []
+    for path in glob.glob(os.path.join(directory, prefix + "-*.json")):
+        stem = os.path.basename(path)[len(prefix) + 1:-5]
+        if stem.isdigit():
+            used.append(int(stem))
+    n = max(used) + 1 if used else 1
+    while True:
+        rid = "%s-%0*d" % (prefix, width, n)
+        path = os.path.join(directory, rid + ".json")
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
+            n += 1
+            continue
+        record["id"] = rid
+        with os.fdopen(fd, "w") as f:
+            json.dump(record, f, indent=2)
+        return record
+
+
+def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None):
+    return _alloc(board, "T", 3, {
+        "title": title,
+        "body": body,
+        "role": role,
+        "status": "open",
+        "deps": deps or [],
+        "priority": priority,
+        "epic": epic,
+        "sprint": sprint,
+        "needs": needs or [],
+        "owner": "",
+        "created": now(),
+        "updated": now(),
+        "notes": [],
+    })
+
+
+# --------------------------------------------------------------------------
+# epics, sprints, master
+# --------------------------------------------------------------------------
+
+def epics_dir(board):
+    return os.path.join(board, "epics")
+
+
+def sprints_dir(board):
+    return os.path.join(board, "sprints")
+
+
+def _load_dir(directory, prefix):
+    out = []
+    pattern = (prefix + "-*.json") if prefix else "*.json"
+    for path in sorted(glob.glob(os.path.join(directory, pattern))):
+        try:
+            with open(path) as f:
+                out.append(json.load(f))
+        except (ValueError, IOError):
+            continue
+    return out
+
+
+def _save_in(directory, rec):
+    rec["updated"] = now()
+    path = os.path.join(directory, rec["id"] + ".json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, path)
+    return rec
+
+
+def load_epics(board):
+    return _load_dir(epics_dir(board), "E")
+
+
+def load_sprints(board):
+    return _load_dir(sprints_dir(board), "S")
+
+
+def get_epic(board, eid):
+    for e in load_epics(board):
+        if e["id"] == eid:
+            return e
+    sys.exit("no such epic: %s" % eid)
+
+
+def get_sprint(board, sid):
+    for s in load_sprints(board):
+        if s["id"] == sid:
+            return s
+    sys.exit("no such sprint: %s" % sid)
+
+
+def active_sprint(board):
+    for s in load_sprints(board):
+        if s.get("status") == "active":
+            return s
+    return None
+
+
+def progress(tickets):
+    """(done, total, claimed, blocked) over a set of tickets."""
+    done = sum(1 for t in tickets if t["status"] == "done")
+    claimed = sum(1 for t in tickets if t["status"] == "claimed")
+    blocked = sum(1 for t in tickets if t["status"] == "blocked")
+    return done, len(tickets), claimed, blocked
+
+
+def bar(done, total, width=20):
+    if not total:
+        return "[%s] 0/0" % (" " * width)
+    n = int(round(width * done / float(total)))
+    return "[%s%s] %d/%d" % ("#" * n, " " * (width - n), done, total)
+
+
+def master_path(board):
+    return os.path.join(board, "MASTER.md")
+
+
+def objective_path(board):
+    return os.path.join(board, "objective.json")
+
+
+def load_objective(board):
+    """The standing objective the master drives toward (`tickets objective`).
+    {} when none is set."""
+    try:
+        with open(objective_path(board)) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return {}
+
+
+def drive_status(board, tickets=None):
+    """One-paragraph progress picture for the master's heartbeat: sprint burn,
+    review queue, unowned ready work, live workers whose lane is empty."""
+    tickets = tickets if tickets is not None else load_all(board)
+    cur = active_sprint(board)
+    lines = []
+    if cur:
+        mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+        d = sum(1 for t in mine if t.get("status") == "done")
+        lines.append("sprint %s: %d/%d done, %d in flight, %d blocked -- %s" % (
+            cur["id"], d, len(mine), sum(1 for t in mine if t.get("status") in ("claimed", "review")),
+            sum(1 for t in mine if t.get("status") == "blocked"), cur.get("goal", "")[:100]))
+    else:
+        lines.append("no active sprint")
+    rq = [t["id"] for t in tickets if t.get("status") == "review"]
+    lines.append("review queue: %s" % (", ".join(rq) if rq else "empty"))
+    ready = [t for t in unblocked(board, tickets) if not t.get("owner")]
+    lines.append("ready and unowned: %s" % (", ".join(t["id"] for t in ready[:8]) if ready else "none"))
+    idle = []
+    for r in load_agents(board):
+        who = r.get("owner", "")
+        if not who or r.get("limit") or hours_since(r.get("seen", "")) > 2:
+            continue
+        holds = any(t.get("owner") == who and t.get("status") in ("claimed", "review") for t in tickets)
+        if holds:
+            continue
+        roles = roles_for(board, who, None)
+        lane = [t for t in _filter_ready(unblocked(board, tickets), roles) if can_do(board, who, t)]
+        if not lane:
+            idle.append(who)
+    lines.append("live workers with an empty lane: %s" % (", ".join(idle) if idle else "none"))
+    return "\n".join(lines)
+
+
+def master_state_path(board):
+    return os.path.join(board, "master.json")
+
+
+def current_master(board):
+    try:
+        with open(master_state_path(board)) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return None
+
+
+def hours_since(stamp):
+    try:
+        d = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - d).total_seconds() / 3600.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+# --------------------------------------------------------------------------
+# git awareness (agents must work on their own tree and commit)
+# --------------------------------------------------------------------------
+
+def git(*args, cwd=None):
+    """Run git and return stdout, or None if it failed.
+
+    `cwd=` picks the tree to ask. It matters: T-272 -- every caller used to
+    inherit os.getcwd(), so `tickets review` pinned whichever repo the agent
+    happened to be standing in rather than the repo the deliverable is in.
+
+    cwd is necessary and NOT sufficient (T-287). An inherited GIT_DIR,
+    GIT_COMMON_DIR or GIT_WORK_TREE overrides cwd-based discovery inside git
+    itself, so under a leaked env `tickets review --artifact <dir>` pinned the
+    wrong repo and reported success -- the defect T-272 exists to fix,
+    reappearing on the command that fixes it. The scrub and the targeting are
+    one mechanism; neither works alone, so they are applied together here at
+    the single choke point every caller goes through.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["git"] + list(args), capture_output=True, text=True, timeout=10,
+                             cwd=cwd or os.getcwd(), env=_clean_git_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip()
+
+
+def repo_identity(cwd):
+    """A repo identity that is stable across every worktree of the SAME repo.
+
+    T-215: 'tickets review' pins branch@sha from whatever repo the caller
+    happened to be standing in, and cross-repo work is the norm on this board
+    (every agent works in .worktrees/). The worktree's own toplevel path is
+    useless for identity -- it differs per worktree of the same repo -- so
+    this prefers the origin remote URL (identical across worktrees, and
+    across separate clones of the same repo on different machines) and falls
+    back to the shared .git directory's real path for a repo with no remote
+    configured (e.g. a fresh local board in a test).
+    """
+    import subprocess
+
+    def _git(*args):
+        try:
+            # T-243: cwd= alone is not enough -- an inherited GIT_DIR outranks
+            # it during discovery, so without the scrub this returns the
+            # identity of whatever repo the pollution names. That is precisely
+            # the cross-repo mis-pin T-215 exists to prevent, reached through
+            # T-243's mechanism instead of through the caller's cwd.
+            out = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True,
+                                 text=True, timeout=10, env=_clean_git_env())
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
+
+    url = _git("config", "--get", "remote.origin.url")
+    if url:
+        return url
+    common = _git("rev-parse", "--git-common-dir")
+    if common:
+        return os.path.realpath(os.path.join(cwd, common))
+    return None
+
+
+def _git_state_raw(cwd=None):
+    """(state, mismatch). See git_state() -- this keeps the mismatch signal
+    that git_state() deliberately throws away, for callers that record it.
+
+    `cwd` is the tree to describe, default the process cwd (T-272). All four
+    parts of the answer -- branch, sha, repo identity and dirty count -- are
+    asked of that ONE tree, so the pin they form is internally consistent.
+    The containment refusal below is applied to that tree too, not to the
+    process cwd: with --artifact those are deliberately different directories,
+    and checking the wrong one would refuse every correct cross-repo pin.
+    """
+    here = cwd or os.getcwd()
+    top = git("rev-parse", "--show-toplevel", cwd=here)
+    if not top:
+        return None, False
+    real_top = os.path.realpath(top)
+    real_here = os.path.realpath(here)
+    if os.path.commonpath([real_top, real_here]) != real_top:
+        # git resolved a work tree that does not contain where we are standing
+        # (e.g. a stale core.worktree). Refuse it rather than answer wrongly.
+        sys.stderr.write(
+            "tickets: git resolved toplevel %s which does not contain cwd %s -- "
+            "treating as unresolved rather than trusting it (T-243)\n" % (real_top, real_here))
+        return None, True
+    branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=here) or "?"
+    sha = git("rev-parse", "--short", "HEAD", cwd=here) or "?"
+    dirty = git("status", "--porcelain", cwd=here)
+    common = git("rev-parse", "--git-common-dir", cwd=here) or ""
+    gitdir = git("rev-parse", "--git-dir", cwd=here) or ""
+    is_main_tree = os.path.abspath(os.path.join(top, common)) == os.path.abspath(os.path.join(top, gitdir))
+    return {
+        "top": top,
+        "branch": branch,
+        "sha": sha,
+        "dirty": len(dirty.splitlines()) if dirty else 0,
+        "main_tree": is_main_tree,
+        "repo": repo_identity(top),
+    }, False
+
+
+def git_state(cwd=None):
+    """Branch, short sha, dirty-file count, and whether cwd is the main worktree.
+
+    `cwd` selects the tree to describe (T-272); it defaults to the process cwd.
+
+    Returns None -- never a partly-filled dict -- when resolution disagrees
+    with cwd. Every caller guards with `g = git_state()` / `if not g`, and the
+    on-main and dirty guards downstream read `branch` and `dirty`. A truthy
+    placeholder such as {"branch": "?", "dirty": 0} therefore does not fail
+    safe, it fails OPEN: it satisfies `not g`, passes the never-work-on-main
+    check ("?" is not main) and passes the clean-tree check (0 is not dirty),
+    so `tickets sync` would go on to run a real merge with all three guards
+    disabled, and `tickets review` would pin an unmergeable "?@?" (T-259
+    defect 2). Unresolved must mean None.
+    """
+    state, _mismatch = _git_state_raw(cwd)
+    return state
+
+
+def artifact_tree(a):
+    """Resolve `--artifact` to a real git working tree, or None meaning "use cwd".
+
+    `tickets review` used to derive branch, sha and repo from whatever
+    directory the agent ran it in. That is systematically the wrong tree when
+    the CLI is driven from a different clone than the deliverable, so the pin
+    named a repo that never built the work.
+
+    The agent supplies a LOCATION, not an assertion. Everything recorded is
+    still derived by running git inside that tree, so a pin no real tree can
+    produce cannot be recorded -- this is deliberately not a `--repo/--commit`
+    pair taken on trust, because a hand-typed sha is exactly how fiction gets
+    into the close record.
+    """
+    path = getattr(a, "artifact", "") or ""
+    if not path:
+        return None
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        sys.exit("--artifact %s is not a directory" % path)
+    if git("rev-parse", "--show-toplevel", cwd=path) is None:
+        sys.exit("--artifact %s is not inside a git working tree; point it at the "
+                 "checkout the deliverable actually lives in" % path)
+    return path
+
+
+def _record_pin(t, g, art):
+    """Write the (repo, branch, sha) evidence triple onto a ticket.
+
+    All three come from ONE tree (T-272). `repo` stays the field the merge
+    guard compares, so no existing record needs a field rename; `repo_source`
+    lets a reader tell a pin the agent aimed from one the tool merely
+    inherited, and the cwd provenance is kept alongside rather than thrown
+    away.
+    """
+    t["commit"] = "%s@%s" % (g["branch"], g["sha"])
+    t["branch"] = g["branch"]
+    t["repo"] = g["repo"]
+    t["repo_source"] = "artifact" if art else "cwd"
+    if art:
+        t["artifact_dir"] = art
+        cg = git_state()
+        if cg:
+            t["cwd_repo"] = cg["repo"]
+            t["cwd_commit"] = "%s@%s" % (cg["branch"], cg["sha"])
+    else:
+        t.pop("artifact_dir", None)
+        t.pop("cwd_repo", None)
+        t.pop("cwd_commit", None)
+    return t["commit"]
+
+
+def agents_dir(board):
+    return os.path.join(board, "agents")
+
+
+class _AgentLock:
+    """Serialize read-modify-write on one agents/<name>.json across processes.
+
+    The lock lives on a SEPARATE <name>.json.lock file, never on the record
+    itself: the record is published with os.replace, which swaps the inode out
+    from under any lock held on it, so locking the record would appear to work
+    and serialize nothing.
+
+    Blocking LOCK_EX, not the LOCK_NB used by merge.lock. A heartbeat must wait
+    its turn, never fail: the point of this lock is that no writer silently
+    loses, and refusing a check-in would trade a lost write for a dead agent.
+    flock is released by the kernel when the holder exits, so an agent killed
+    mid-write cannot strand the file the way an O_EXCL lockfile would.
+    """
+
+    def __init__(self, board, owner):
+        os.makedirs(agents_dir(board), exist_ok=True)
+        self.path = os.path.join(agents_dir(board), owner + ".json.lock")
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:  # no flock on this platform; degrade to today's behaviour
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
+def _agent_update(board, owner, mutate):
+    """Read-modify-write an agent record with the READ INSIDE the lock.
+
+    Every writer of agents/<name>.json goes through here. Doing the read
+    outside is the whole defect: os.replace makes each write atomic, but two
+    writers that both read the pre-image and then write in turn silently drop
+    whichever field the loser did not know about -- and both print success.
+
+    `mutate(rec)` edits the dict in place; returning False aborts without
+    writing. Anything slow (git, load_all, subprocesses) belongs OUTSIDE this
+    call: the critical section is meant to be a read, a dict update and a
+    rename, so a blocking lock is never held long enough to matter.
+    """
+    path = os.path.join(agents_dir(board), owner + ".json")
+    with _AgentLock(board, owner):
+        rec = _agent_rec(board, owner) or {}
+        if mutate(rec) is False:
+            return None
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+        os.replace(tmp, path)
+    return rec
+
+
+def _clear_agent_ticket(board, agent, tid):
+    """T-437: drop a stale ticket= bind on a previous owner's agent record.
+
+    Keeps cwd/branch/sha. Abort (no write) if the record is missing or names
+    a different ticket.
+    """
+    if not agent or not tid:
+        return
+
+    def mutate(rec):
+        if rec.get("ticket") != tid:
+            return False
+        rec["ticket"] = ""
+
+    _agent_update(board, agent, mutate)
+
+
+def _drop_unowned_agent_ticket(board, owner):
+    """T-439: drop agents/<me>.json ticket= when the live owner of that id is not me.
+
+    Also drop a leftover review bind when I already hold a different claimed
+    ticket (assign-not-claim: json still has T-438 after planner assigned T-415).
+    Keeps cwd/branch/sha. Missing ticket files count as unowned. Call at
+    watch/spawn start so a STOPPED seat's leftover bind cannot reach run_start.
+    """
+    if not owner:
+        return
+    rec = _agent_rec(board, owner) or {}
+    tid = rec.get("ticket") or ""
+    if not tid:
+        return
+    claimed = [t["id"] for t in load_all(board)
+               if t.get("status") == "claimed" and t.get("owner") == owner]
+    if claimed and tid not in claimed:
+        _clear_agent_ticket(board, owner, tid)
+        return
+    t = None
+    try:
+        with open(ticket_path(board, tid)) as f:
+            t = json.load(f)
+    except (IOError, ValueError):
+        t = None
+    if isinstance(t, dict) and t.get("owner") == owner:
+        return
+    _clear_agent_ticket(board, owner, tid)
+
+
+def _bind_agent_ticket(board, agent, tid):
+    """Set ticket= on the new owner's existing record without clobbering cwd."""
+    if not agent or not tid:
+        return
+    rec = _agent_rec(board, agent)
+    if rec:
+        def mutate(r):
+            r["ticket"] = tid
+        _agent_update(board, agent, mutate)
+    else:
+        checkin(board, agent, tid)
+
+
+def checkin(board, owner, ticket=None, note=""):
+    """Record where this agent is working: cwd, worktree root, branch, sha."""
+    _state, _mismatch = _git_state_raw()
+    g = _state or {}
+    # git_state and _current_ticket shell out; keep them off the critical section.
+    fields = {
+        "owner": owner,
+        "cwd": os.getcwd(),
+        "worktree": g.get("top", ""),
+        "branch": g.get("branch", ""),
+        "sha": g.get("sha", ""),
+        "dirty": g.get("dirty", 0),
+        # T-243: cwd above is recorded straight from os.getcwd() with no git
+        # resolution in its path, so it stays trustworthy even here.
+        "git_mismatch": bool(_mismatch),
+        "ticket": ticket if ticket is not None else _current_ticket(board, owner),
+        "note": note,
+        "seen": now(),
+    }
+
+    def _apply(rec):
+        # T-278 owns the WRITE (read-modify-write inside the flock); T-244 owns
+        # the inbox_seen STAMP. Resolving this toward the T-244 side would
+        # restore the unlocked json.dump/os.replace that T-278 exists to
+        # remove, so the stamp moves inside the lambda instead of the write
+        # moving back out.
+        rec.update(fields)
+        # NO inbox_seen STAMP HERE, and its absence is the fix, not an omission.
+        #
+        # T-244 stamped inbox_seen = now() at an agent's first check-in. Its
+        # target was real -- unread()'s `if since and (...)` treats since=""
+        # as "skip the archive check", which is backwards for the agent with
+        # the least history to fall back on -- but the mechanism overloaded
+        # inbox_seen to mean two different things: "the newest mail this agent
+        # has been SHOWN" (a receipt) and "when this agent APPEARED" (a clock).
+        #
+        # Once T-327 landed joined_at, that second meaning has its own field,
+        # and keeping the stamp is actively destructive: a message sent
+        # `--to <name>` BEFORE the seat joins is older than the stamp and is
+        # therefore never delivered. Posting the brief first is exactly how
+        # seats get briefed on this board, and T-327 measured and rejected
+        # this same regression (test_join_does_not_destroy_a_brief_posted_
+        # before_the_seat_existed, which the stamp turns red).
+        #
+        # So inbox_seen goes back to being a pure receipt that starts empty,
+        # T-327's joined_at owns the flood policy, and T-244's actual defect
+        # is fixed where its own docstring says it lives: at the since=""
+        # branch in _inbox_scan, which now reads the archives for an agent
+        # that has never read anything instead of skipping them.
+
+    # Other commands keep their own state in this record (inbox_seen, limit,
+    # stop_blocks); a check-in must not erase it or every watch poll re-wakes
+    # the agent. rec.update preserves them against the ORDERING hazard; the
+    # lock in _agent_update is what preserves them against the CONCURRENCY one.
+    return _agent_update(board, owner, _apply)
+
+
+def _current_ticket(board, owner):
+    """Return the ticket this agent is working on: claimed first, else review."""
+    mine = [t for t in load_all(board) if t.get("owner") == owner]
+    claimed = [t for t in mine if t.get("status") == "claimed"]
+    if claimed:
+        return claimed[0]["id"]
+    review = [t for t in mine if t.get("status") == "review"]
+    if not review:
+        return ""
+
+    def _last_touch(t):
+        stamps = [t.get("review_at")] + [n.get("at") for n in t.get("notes", []) if n.get("at")]
+        stamps = [s for s in stamps if s]
+        return max(stamps) if stamps else ""
+
+    review.sort(key=_last_touch, reverse=True)
+    return review[0]["id"]
+
+
+def load_agents(board):
+    return _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else []
+
+
+def worktree_warning(owner):
+    """Text telling an agent on main / the primary tree to move to its own tree."""
+    g = git_state()
+    if not g:
+        return None
+    on_trunk = g["branch"] in ("main", "master")
+    if on_trunk or g["main_tree"]:
+        lane = "%s-work" % owner
+        return (
+            "RULE: you are on branch %r in %s. Work on your own tree:\n"
+            "  git -C %s worktree add .worktrees/%s -b %s\n"
+            "  cd %s/.worktrees/%s"
+            % (g["branch"], "the primary worktree" if g["main_tree"] else "a shared branch",
+               g["top"], lane, lane, g["top"], lane)
+        )
+    return None
+
+
+def try_claim(board, tid, owner):
+    """Atomically take a ticket. Returns the ticket, or None if someone beat us."""
+    lock = os.path.join(board, tid + ".lock")
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            return None
+        raise
+    os.write(fd, owner.encode())
+    os.close(fd)
+    t = load(board, tid)
+    if t["status"] != "open":  # claimed by a slower path; give the lock back
+        os.unlink(lock)
+        return None
+    prev_owner = t.get("owner") or ""
+    t["status"] = "claimed"
+    t["owner"] = owner
+    t["claimed_at"] = now()
+    t["done_at"] = ""
+    got = save(board, t)
+    # Written here, not in cmd_next/cmd_claim: this is the single point where a
+    # claim actually succeeds, so no future caller can add a claim path that
+    # silently produces no trajectory.
+    _safe(lambda: traj_event(board, "claim", agent=owner, ticket=got,
+                             state_before="open", state_after="claimed",
+                             **_traj_git()), None)
+    if prev_owner and prev_owner != owner:
+        _safe(lambda: _clear_agent_ticket(board, prev_owner, tid), None)
+    return got
+
+
+def fmt_hours(h):
+    if h is None:
+        return "?"
+    if h < 1:
+        return "%dm" % int(round(h * 60))
+    if h < 48:
+        return "%.1fh" % h
+    return "%.1fd" % (h / 24.0)
+
+
+def timing(t):
+    """wait (created->claimed), active (claimed->done or now), and since last update."""
+    created, claimed, done = t.get("created"), t.get("claimed_at"), t.get("done_at")
+    out = {"wait": None, "active": None, "since_update": None}
+    if created and claimed:
+        out["wait"] = hours_since(created) - hours_since(claimed)
+    if claimed:
+        end = hours_since(done) if done else 0.0
+        out["active"] = hours_since(claimed) - end
+    if t["status"] == "claimed":
+        stamps = [n.get("at") for n in t.get("notes", []) if n.get("at")]
+        last = max(stamps) if stamps else claimed
+        out["since_update"] = hours_since(last) if last else None
+    return out
+
+
+def unblocked(board, tickets):
+    """Open tickets whose dependencies are all done."""
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    return [
+        t
+        for t in tickets
+        if t["status"] == "open" and all(d in done for d in t.get("deps", []))
+    ]
+
+
+def find_cycle(tickets):
+    """Return the ids forming a dependency cycle, or None. Iterative DFS."""
+    deps = dict((t["id"], list(t.get("deps", []))) for t in tickets)
+    color = {}
+    for root in deps:
+        if color.get(root):
+            continue
+        stack = [(root, iter(deps.get(root, [])))]
+        color[root] = 1
+        path = [root]
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for nxt in it:
+                if nxt not in deps:
+                    continue
+                if color.get(nxt) == 1:
+                    return path[path.index(nxt) :] + [nxt]
+                if not color.get(nxt):
+                    color[nxt] = 1
+                    path.append(nxt)
+                    stack.append((nxt, iter(deps.get(nxt, []))))
+                    advanced = True
+                    break
+            if not advanced:
+                color[node] = 2
+                stack.pop()
+                if path:
+                    path.pop()
+    return None
+
+
+def dangling(tickets):
+    """Map of ticket id -> dep ids that do not exist on the board."""
+    ids = set(t["id"] for t in tickets)
+    out = {}
+    for t in tickets:
+        missing = [d for d in t.get("deps", []) if d not in ids]
+        if missing:
+            out[t["id"]] = missing
+    return out
+
+
+def check_graph(board, extra=None):
+    """Abort if the board (plus any pending edits) is cyclic or references ghosts."""
+    tickets = load_all(board)
+    if extra:
+        by_id = dict((t["id"], t) for t in tickets)
+        for tid, deps in extra.items():
+            if tid in by_id:
+                by_id[tid] = dict(by_id[tid], deps=deps)
+        tickets = list(by_id.values())
+    cyc = find_cycle(tickets)
+    if cyc:
+        sys.exit("refusing: that would create a dependency cycle (%s)" % " -> ".join(cyc))
+    return tickets
+
+
+def set_deps(board, tid, deps):
+    t = load(board, tid)
+    t["deps"] = deps
+    return save(board, t)
+
+
+# --------------------------------------------------------------------------
+# rendering
+# --------------------------------------------------------------------------
+
+MARK = {"open": "[ ]", "claimed": "[>]", "review": "[r]", "done": "[x]", "blocked": "[!]"}
+
+
+def line(t, tickets=None):
+    s = "%s %-11s %s  %s" % (MARK.get(t["status"], "[?]"), LABEL.get(t["status"], t["status"]),
+                             t["id"], t["title"])
+    bits = []
+    tags = [x for x in (t.get("epic"), t.get("sprint")) if x]
+    if tags:
+        bits.append("/".join(tags))
+    if t.get("role"):
+        bits.append("role=" + t["role"])
+    if t.get("needs"):
+        bits.append("needs " + ",".join(t["needs"]))
+    if t.get("owner"):
+        bits.append("owner=" + t["owner"])
+    if t.get("deps"):
+        if tickets is not None:
+            done = set(x["id"] for x in tickets if x["status"] == "done")
+            pending = [d for d in t["deps"] if d not in done]
+            if pending and t["status"] == "open":
+                bits.append("BLOCKED-BY " + ",".join(pending))
+            else:
+                bits.append("after " + ",".join(t["deps"]))
+        else:
+            bits.append("after " + ",".join(t["deps"]))
+    if bits:
+        s += "  (%s)" % "; ".join(bits)
+    return s
+
+
+def _notes(t):
+    return list(t.get("notes") or [])
+
+
+def collect_handoffs(t, tickets):
+    """Direct deps: every note. Transitive ancestors: latest note only."""
+    by_id = dict((x["id"], x) for x in tickets)
+    direct, earlier = [], []
+    seen = set()
+
+    def walk(tid, depth):
+        if tid in seen or tid not in by_id:
+            return
+        seen.add(tid)
+        node = by_id[tid]
+        for d in node.get("deps", []):
+            walk(d, depth + 1)
+        notes = _notes(node)
+        if not notes:
+            return
+        if depth == 1:
+            for nt in notes:
+                direct.append((tid, node["title"], nt.get("text", "")))
+        else:
+            earlier.append((tid, node["title"], notes[-1].get("text", "")))
+
+    for d in t.get("deps", []):
+        walk(d, 1)
+    return direct, earlier
+
+
+def detail(board, t, tickets):
+    out = [line(t, tickets)]
+    packs = context_paths(board, t.get("owner") or whoami())
+    if packs:
+        out.append("")
+        out.append("Read this briefing before editing:")
+        for p in packs:
+            out.append("  " + p)
+    discovered = os.path.dirname(board)
+    if os.path.abspath(discovered) != os.path.abspath(os.getcwd()):
+        out.append("")
+        out.append("Board: %s  (cwd is %s)" % (board, os.getcwd()))
+    # where this ticket sits: sprint goal, epic + siblings, who waits on it
+    if t.get("sprint"):
+        for s in load_sprints(board):
+            if s["id"] == t["sprint"]:
+                out.append("Sprint %s: %s" % (s["id"], s.get("goal", "")))
+    if t.get("epic"):
+        for e in load_epics(board):
+            if e["id"] == t["epic"]:
+                sib = [x for x in tickets if x.get("epic") == e["id"]]
+                d, n, c, b = progress(sib)
+                out.append("Epic %s: %s  %s" % (e["id"], e["title"], bar(d, n, 12)))
+                if e.get("body"):
+                    out.append("  " + e["body"].strip().replace("\n", "\n  "))
+                others = [x for x in sib if x["id"] != t["id"] and x["status"] != "done"]
+                if others:
+                    out.append("  also in this epic: " + "; ".join(
+                        "%s %s%s" % (x["id"], MARK[x["status"]], (" @" + x["owner"]) if x.get("owner") else "")
+                        for x in others[:8]))
+    downstream = [x for x in tickets if t["id"] in x.get("deps", [])]
+    if downstream:
+        out.append("Waiting on this: " + "; ".join(
+            "%s %s" % (x["id"], x["title"][:40]) for x in downstream))
+    tm = timing(t)
+    if tm["active"] is not None:
+        stamp = "active %s" % fmt_hours(tm["active"])
+        if tm["wait"] is not None:
+            stamp += ", waited %s before claim" % fmt_hours(tm["wait"])
+        if t["status"] == "claimed" and tm["since_update"] is not None:
+            stamp += ", last update %s ago" % fmt_hours(tm["since_update"])
+        out.append("Time: " + stamp)
+    if t.get("body"):
+        out.append("")
+        out.append(t["body"])
+    direct, earlier = collect_handoffs(t, tickets)
+    if direct:
+        out.append("")
+        out.append("Handoff from dependencies (all notes):")
+        for tid, title, text in direct:
+            out.append("  %s (%s): %s" % (tid, title, text))
+    if earlier:
+        out.append("")
+        out.append("Handoff from earlier ancestors (latest note each):")
+        for tid, title, text in earlier:
+            out.append("  %s (%s): %s" % (tid, title, text))
+    if t.get("notes"):
+        out.append("")
+        out.append("Notes:")
+        for nt in t["notes"]:
+            out.append("  - [%s] %s" % (nt.get("by", "?"), nt["text"]))
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+
+def _ids(csv):
+    return [d.strip() for d in csv.split(",") if d.strip()] if csv else []
+
+
+def cmd_create(a, board):
+    deps = _ids(a.deps)
+    blocks = _ids(a.blocks)
+    existing = set(t["id"] for t in load_all(board))
+    for ref in deps + blocks:
+        if ref not in existing:
+            sys.exit("no such ticket: %s" % ref)
+    _ensure(board, "epic", a.epic)
+    _ensure(board, "sprint", a.sprint)
+    cur = active_sprint(board)
+    sprint = a.sprint if a.sprint is not None else (cur["id"] if cur and a.in_sprint else "")
+    t = create(board, a.title, a.body or "", a.role or "", deps, a.priority,
+               a.epic or "", sprint, _ids(a.needs))
+    pending = {}
+    for other in blocks:
+        o = load(board, other)
+        pending[other] = o["deps"] + [t["id"]]
+    if pending:
+        try:
+            check_graph(board, pending)
+        except SystemExit:
+            os.unlink(ticket_path(board, t["id"]))
+            raise
+        for other, d in pending.items():
+            set_deps(board, other, d)
+    print("created %s  %s" % (t["id"], t["title"]))
+    if deps:
+        print("  waits for: %s" % ", ".join(deps))
+    if blocks:
+        print("  now blocks: %s" % ", ".join(blocks))
+
+
+def cmd_dep(a, board):
+    """Rewire an existing ticket's dependencies."""
+    t = load(board, a.id)
+    deps = list(t.get("deps", []))
+    existing = set(x["id"] for x in load_all(board))
+    for ref in _ids(a.after):
+        if ref not in existing:
+            sys.exit("no such ticket: %s" % ref)
+        if ref == a.id:
+            sys.exit("a ticket cannot depend on itself")
+        if ref not in deps:
+            deps.append(ref)
+    for ref in _ids(a.drop):
+        if ref in deps:
+            deps.remove(ref)
+    check_graph(board, {a.id: deps})
+    set_deps(board, a.id, deps)
+    print("%s now waits for: %s" % (a.id, ", ".join(deps) if deps else "(nothing)"))
+
+
+def cmd_plan(a, board):
+    raw = sys.stdin.read().strip()
+    if not raw:
+        sys.exit("plan: expected JSON on stdin")
+    try:
+        items = json.loads(raw)
+    except ValueError as e:
+        sys.exit("plan: bad JSON (%s)" % e)
+    defaults = {}
+    if isinstance(items, dict):
+        defaults = {"epic": items.get("epic", ""), "sprint": items.get("sprint", ""),
+                    "role": items.get("role", "")}
+        items = items.get("tickets", [])
+    for k in ("epic", "sprint"):
+        if defaults.get(k):
+            _ensure(board, k, defaults[k])
+        for it in items:
+            if it.get(k):
+                _ensure(board, k, it[k])
+    keymap = {}
+    made = []
+    for it in items:
+        t = create(board, it["title"], it.get("body", ""), it.get("role", defaults.get("role", "")),
+                   [], it.get("priority", 2), it.get("epic", defaults.get("epic", "")),
+                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [])
+        if it.get("key"):
+            keymap[it["key"]] = t["id"]
+        made.append(t)
+    existing = set(x["id"] for x in load_all(board))
+    pending = {}
+    for it, t in zip(items, made):
+        deps = []
+        for d in it.get("deps", []) or []:
+            rid = keymap.get(d, d)
+            if rid not in existing:
+                for x in made:
+                    os.unlink(ticket_path(board, x["id"]))
+                sys.exit("plan references unknown ticket %r (no such key or id)" % d)
+            deps.append(rid)
+        if deps:
+            pending[t["id"]] = deps
+    try:
+        check_graph(board, pending)
+    except SystemExit:
+        for x in made:
+            os.unlink(ticket_path(board, x["id"]))
+        raise
+    for tid, deps in pending.items():
+        set_deps(board, tid, deps)
+    for t in made:
+        print("created %s  %s" % (t["id"], t["title"]))
+
+
+def cmd_list(a, board):
+    tickets = load_all(board)
+    if a.status:
+        tickets = [t for t in tickets if t["status"] == a.status]
+    if a.role:
+        wanted = [r.strip() for r in a.role.split(",") if r.strip()]
+        tickets = [t for t in tickets if t.get("role") in wanted]
+    if a.owner:
+        tickets = [t for t in tickets if t.get("owner") == a.owner]
+    if a.json:
+        print(json.dumps(tickets, indent=2))
+        return
+    if not tickets:
+        print("no tickets")
+        return
+    all_t = load_all(board)
+    for t in tickets:
+        print(line(t, all_t))
+
+
+def cmd_board(a, board):
+    tickets = load_all(board)
+    if not tickets:
+        return
+    counts = {}
+    for t in tickets:
+        counts[t["status"]] = counts.get(t["status"], 0) + 1
+    head = "Ticket board (%s): %s" % (
+        board,
+        ", ".join("%d %s" % (counts[s], s) for s in STATUSES if s in counts),
+    )
+    print(head)
+    cur = active_sprint(board)
+    m = current_master(board)
+    hdr = []
+    if cur:
+        mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+        d, n, _, _ = progress(mine)
+        hdr.append("sprint %s %s" % (cur["id"], bar(d, n, 10)))
+    hdr.append("master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    print("  " + " | ".join(hdr))
+    for t in tickets:
+        if t["status"] != "done" or a.all:
+            print("  " + line(t, tickets))
+    ready = unblocked(board, tickets)
+    if ready:
+        print("  -> ready to claim: %s" % ", ".join(t["id"] for t in ready))
+    if not a.quiet:
+        print(
+            "Shared across Claude/Codex/Cursor. `tickets next` claims one atomically; "
+            "`tickets done <id> --notes \"...\"` hands off to dependents."
+        )
+
+
+def cmd_graph(a, board):
+    tickets = load_all(board)
+    if not tickets:
+        print("no tickets")
+        return
+    by_id = dict((t["id"], t) for t in tickets)
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    kids = {}
+    for t in tickets:
+        for d in t.get("deps", []):
+            kids.setdefault(d, []).append(t["id"])
+
+    counts = {}
+    for t in tickets:
+        counts[t["status"]] = counts.get(t["status"], 0) + 1
+    print("Dependency graph (%s)" % ", ".join("%d %s" % (counts[s], s) for s in STATUSES if s in counts))
+
+    def label(tid):
+        t = by_id[tid]
+        s = "%s %s %s" % (MARK.get(t["status"], "[?]"), tid, t["title"])
+        bits = []
+        if t.get("role"):
+            bits.append(t["role"])
+        if t.get("owner"):
+            bits.append("@" + t["owner"])
+        waiting = [d for d in t.get("deps", []) if d not in done]
+        if waiting and t["status"] == "open":
+            bits.append("waiting on " + ",".join(waiting))
+        if bits:
+            s += "  (%s)" % "; ".join(bits)
+        return s
+
+    seen = set()
+
+    def walk(tid, prefix, last, ancestors):
+        if tid in ancestors:
+            print(prefix + ("`- " if last else "|- ") + "%s (cycle)" % tid)
+            return
+        mark = "`- " if last else "|- "
+        line_txt = label(tid)
+        if tid in seen and kids.get(tid):
+            line_txt += "  [shown above]"
+        print(prefix + mark + line_txt)
+        if tid in seen:
+            return
+        seen.add(tid)
+        nxt = prefix + ("   " if last else "|  ")
+        children = kids.get(tid, [])
+        for i, c in enumerate(children):
+            walk(c, nxt, i == len(children) - 1, ancestors | {tid})
+
+    roots = [t["id"] for t in tickets if not [d for d in t.get("deps", []) if d in by_id]]
+    for i, r in enumerate(roots):
+        walk(r, "", i == len(roots) - 1, set())
+
+    orphans = [t["id"] for t in tickets if t["id"] not in seen]
+    if orphans:
+        print("unreachable (part of a cycle):")
+        for o in orphans:
+            print("  " + label(o))
+    ghosts = dangling(tickets)
+    if ghosts:
+        print("broken references:")
+        for tid, miss in ghosts.items():
+            print("  %s -> %s (no such ticket)" % (tid, ", ".join(miss)))
+
+
+def cmd_map(a, board):
+    """Sprint -> epic -> ticket, with deps inline. The whole board, traversable."""
+    tickets = load_all(board)
+    epics = load_epics(board)
+    sprints = load_sprints(board)
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+
+    def tline(t):
+        s = "%s %s %s" % (MARK.get(t["status"], "[?]"), t["id"], t["title"][:60])
+        bits = []
+        if t.get("owner"):
+            bits.append("@" + t["owner"])
+        if t.get("role"):
+            bits.append(t["role"])
+        if t.get("needs"):
+            bits.append("needs " + ",".join(t["needs"]))
+        waiting = [d for d in t.get("deps", []) if d not in done]
+        if waiting and t["status"] == "open":
+            bits.append("waits " + ",".join(waiting))
+        elif t.get("deps"):
+            bits.append("after " + ",".join(t["deps"]))
+        down = [x["id"] for x in tickets if t["id"] in x.get("deps", [])]
+        if down:
+            bits.append("-> " + ",".join(down))
+        return s + ("  (%s)" % "; ".join(bits) if bits else "")
+
+    def epic_block(indent, eid, pool):
+        mine = [t for t in pool if t.get("epic") == eid]
+        if not mine and eid:
+            return
+        if eid:
+            e = next((x for x in epics if x["id"] == eid), {"title": "?"})
+            d, n, c, b = progress(mine)
+            print("%s%s %s  %s" % (indent, eid, e["title"][:50], bar(d, n, 12)))
+        else:
+            print("%s(no epic)" % indent)
+        for t in mine:
+            if t["status"] == "done" and not a.all:
+                continue
+            print("%s  %s" % (indent, tline(t)))
+
+    groups = [s for s in sprints if s.get("status") != "done" or a.all]
+    for s in groups:
+        pool = [t for t in tickets if t.get("sprint") == s["id"]]
+        d, n, c, b = progress(pool)
+        print("%s [%s] %s  %s" % (s["id"], s.get("status"), s.get("goal", ""), bar(d, n)))
+        for eid in [e["id"] for e in epics] + [""]:
+            epic_block("  ", eid, pool)
+    rest = [t for t in tickets if not t.get("sprint") or t["sprint"] not in set(s["id"] for s in groups)]
+    if rest:
+        print("Backlog (no sprint)")
+        for eid in [e["id"] for e in epics] + [""]:
+            epic_block("  ", eid, rest)
+    if not a.all:
+        print("(done tickets hidden; --all shows them)")
+
+
+def cmd_show(a, board):
+    tickets = load_all(board)
+    t = load(board, a.id)
+    if a.json:
+        print(json.dumps(t, indent=2))
+    else:
+        print(detail(board, t, tickets))
+
+
+def _filter_ready(ready, roles):
+    if roles is None:
+        return list(ready)
+    if roles == []:
+        return []
+    return [t for t in ready if t.get("role") in ("",) or t.get("role") in roles]
+
+
+def cmd_next(a, board):
+    owner = whoami(a.owner)
+    roles = roles_for(board, owner, a.role)
+    if roles == [] and not a.role:
+        print(
+            "agent %r has no default roles (see .tickets/roles.json). "
+            "Pass --role or do not claim." % owner
+        )
+        sys.exit(1)
+    tickets = load_all(board)
+    held = [t for t in tickets if t["status"] == "claimed" and t.get("owner") == owner]
+    if held and not a.another:
+        print("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
+              "more, or pass --another if you really want to work two in parallel."
+              % ", ".join(t["id"] for t in held))
+        sys.exit(1)
+    ready_all = unblocked(board, tickets)
+    ready = [t for t in _filter_ready(ready_all, roles) if can_do(board, owner, t)]
+    cur = active_sprint(board)
+    cur_id = cur["id"] if cur else None
+    rank = cost_rank(board, owner)
+
+    def order(t):
+        p = t.get("priority", 2)
+        # expensive agents go to hard/critical work first; cheap ones to the
+        # routine tickets first, so the master's budget stretches further
+        cost_key = p if rank == 2 else (-p if rank == 0 else 0)
+        needs_key = 0 if t.get("needs") else 1  # a ticket only I can do comes first
+        mine_key = 0 if t.get("suggested") == owner else (2 if t.get("suggested") else 1)
+        return (mine_key, 0 if cur_id and t.get("sprint") == cur_id else 1, needs_key, cost_key, p, t["id"])
+
+    ready.sort(key=order)
+    for t in ready:
+        got = try_claim(board, t["id"], owner)
+        if got:
+            checkin(board, owner, got["id"])
+            print(detail(board, got, load_all(board)))
+            warn = worktree_warning(owner)
+            if warn:
+                print("")
+                print(warn)
+            print("")
+            print("Post progress with `tickets update %s \"...\"` at least every %d min; "
+                  "finish with `tickets done %s --notes \"branch@sha, paths, decisions\"`."
+                  % (got["id"], UPDATE_EVERY_MIN, got["id"]))
+            return
+    open_blocked = [t for t in tickets if t["status"] == "open"]
+    if not open_blocked:
+        print("no tickets available (nothing open)")
+        sys.exit(1)
+    taken = [t["id"] for t in ready if load(board, t["id"])["status"] != "open"]
+    if taken:
+        print("lost the race; already claimed: %s" % ", ".join(taken))
+        sys.exit(1)
+    cannot = [t for t in _filter_ready(ready_all, roles) if not can_do(board, owner, t)]
+    if cannot:
+        print("%d ready ticket(s) need capabilities you have not registered: %s" % (
+            len(cannot), "; ".join("%s needs %s" % (t["id"], ",".join(t["needs"])) for t in cannot)))
+        print("register with: tickets join %s --can %s" % (owner, ",".join(sorted(set(
+            n for t in cannot for n in t["needs"])))))
+    others = [t for t in ready_all if t not in ready]
+    if roles is not None and others:
+        print(
+            "no ticket for roles %s; %d ready for other roles: %s"
+            % (roles, len(others), ", ".join(t["id"] for t in others))
+        )
+        sys.exit(1)
+    cyc = find_cycle(tickets)
+    if cyc:
+        print(
+            "DEADLOCK: dependency cycle %s -- no ticket can ever start.\n"
+            "Fix with: tickets dep %s --drop %s" % (" -> ".join(cyc), cyc[0], cyc[1])
+        )
+        sys.exit(2)
+    ghosts = dangling(tickets)
+    if ghosts:
+        print("BROKEN: these wait on tickets that do not exist:")
+        for tid, miss in ghosts.items():
+            print("  %s -> %s" % (tid, ", ".join(miss)))
+        print("Fix with: tickets dep <id> --drop <missing-id>")
+        sys.exit(2)
+    holders = sorted(set(t.get("owner") or "?" for t in tickets if t["status"] == "claimed"))
+    msg = "no ticket ready: %d open, all waiting on unfinished work" % len(open_blocked)
+    if holders:
+        msg += " (in progress with: %s)" % ", ".join(holders)
+    print(msg)
+    sys.exit(1)
+
+
+def cmd_claim(a, board):
+    owner = whoami(a.owner)
+    got = try_claim(board, a.id, owner)
+    if not got:
+        sys.exit("%s is already taken" % a.id)
+    checkin(board, owner, got["id"])
+    print(detail(board, got, load_all(board)))
+    warn = worktree_warning(owner)
+    if warn:
+        print("")
+        print(warn)
+
+
+def cmd_review(a, board):
+    """Agent finished: submit for the master to review + merge. Records branch@sha."""
+    t = load(board, a.id)
+    if t["status"] not in ("claimed", "blocked", "open"):
+        sys.exit("%s is %s; only in-progress work can be submitted" % (a.id, LABEL[t["status"]]))
+    if not a.notes:
+        sys.exit('review needs --notes "what to look at: paths, tests run, decisions"')
+    # T-272: every probe below asks the tree the DELIVERABLE is in, which is
+    # not the tree the command was run from whenever --artifact is passed.
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
+    if g and g["branch"] in ("main", "master") and not a.force:
+        sys.exit("RULE: submit from your own worktree branch, not %r (or --force)" % g["branch"])
+    if g and g["dirty"] and not a.force:
+        sys.exit("RULE: %d uncommitted files in %s -- commit before submitting for review "
+                 "(or --force)" % (g["dirty"], g["top"]))
+    if g and not a.force:
+        trunk = _trunk(cwd=art)
+        if git("merge-base", "--is-ancestor", trunk, "HEAD", cwd=art) is None:
+            sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
+                     "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
+    # `owner` decides who the ticket is filed under (unchanged: claim it via
+    # review if nobody holds it yet, otherwise keep the existing owner).
+    # `author` is who actually ran this command -- always whoami(), never
+    # borrowed from `owner` -- so the note, checkin and message below credit
+    # whoever really submitted, even when that is not the recorded owner
+    # (T-238; this was the same by=owner bug as cmd_note, one level up).
+    owner = t.get("owner") or whoami(a.owner)
+    author = whoami(a.owner)
+    t["status"] = "review"
+    t["owner"] = owner
+    t["review_at"] = now()
+    text = a.notes
+    if g:
+        # T-215 records WHICH repo the pin belongs to so `tickets merge` can
+        # refuse a cross-repo ancestry close. T-272 fixes what that repo is:
+        # the artifact's, not the caller's cwd.
+        stamp = _record_pin(t, g, art)
+        text = "%s -- %s" % (stamp, text)
+    if a.pr:
+        t["pr"] = a.pr
+        text += " (PR %s)" % a.pr
+    t["notes"].append({"by": author, "at": now(), "text": "REVIEW: " + text})
+    save(board, t)
+    checkin(board, author, t["id"], "submitted %s for review" % t["id"])
+    if owner != author:
+        # T-428: the owner still holds the ticket in review; do not copy the
+        # submitter's git location onto their agent record.
+        _agent_set(board, owner, ticket=t["id"],
+                   note="submitted %s for review by %s" % (t["id"], author))
+    tmr = timing(t)
+    _safe(lambda: traj_event(board, "review", agent=author, ticket=t,
+                             state_before="claimed", state_after="review",
+                             outcome="review", notes_len=len(a.notes or ""),
+                             active_hours=_round3(tmr.get("active")),
+                             pin=t.get("commit", ""),
+                             **_traj_git(cwd=art)), None)
+    m = current_master(board)
+    post_message(board, author, "%s ready for review: %s" % (t["id"], text),
+                 to=(m["owner"] if m else ""), re=t["id"])
+    tm = timing(t)
+    if t.get("commit"):
+        print("pinned %s in %s (%s)" % (
+            t["commit"], t.get("repo") or "?",
+            "artifact tree %s" % t["artifact_dir"] if t.get("repo_source") == "artifact"
+            else "this checkout -- pass --artifact <dir> if the deliverable is in another repo"))
+    print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
+        t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
+
+
+def _trunk(cwd=None):
+    for b in ("main", "master"):
+        if git("rev-parse", "--verify", "-q", b, cwd=cwd) is not None:
+            return b
+    return "main"
+
+
+def cmd_sync(a, board):
+    """Agent side: bring main into my branch now, so the master's merge is trivial.
+
+    T-272: `--artifact` syncs the tree the deliverable is in. `tickets review`
+    checks the artifact branch against ITS trunk, so the sync that clears that
+    check has to happen in the same tree -- otherwise the workflow instruction
+    "sync before review" quietly syncs a repo the review never looks at.
+
+    T-423: the local `main`/`master` ref is not the source of truth for "am I
+    behind" -- nothing here moves it, so a plain `git fetch` (which only
+    updates `origin/<trunk>`) leaves it stale indefinitely. Comparing against
+    it made sync answer "already contains main; nothing to do" for a branch
+    that was genuinely behind origin. Fetch origin's trunk and compare/merge
+    against `origin/<trunk>` instead, which the fetch just made fresh. If the
+    fetch cannot be done at all (no origin remote, or it is unreachable),
+    refuse rather than silently falling back to the stale local ref -- that
+    fallback is exactly the bug.
+    """
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
+    if not g:
+        sys.exit("not in a git repo")
+    trunk = _trunk(cwd=art)
+    if g["branch"] in ("main", "master"):
+        sys.exit("you are on %s; sync is for your own worktree branch" % g["branch"])
+    if g["dirty"] and not a.force:
+        sys.exit("%d uncommitted files; commit first (sync merges %s into your branch)" % (g["dirty"], trunk))
+    if git("remote", "get-url", "origin", cwd=art) is None:
+        sys.exit("no 'origin' remote configured; cannot confirm %s is not stale without one "
+                  "(comparing against the local %s ref is the bug this refusal exists to avoid)"
+                  % (trunk, trunk))
+    if git("fetch", "origin", trunk, cwd=art) is None:
+        sys.exit("could not fetch origin/%s -- refusing to sync against a possibly-stale local "
+                  "ref; retry once the remote is reachable" % trunk)
+    remote_trunk = "origin/" + trunk
+    if git("merge-base", "--is-ancestor", remote_trunk, "HEAD", cwd=art) is not None:
+        print("%s already contains %s; nothing to do" % (g["branch"], remote_trunk))
+        return
+    import subprocess
+    # cwd=art AND the scrub (T-287). Both, or this merge is wrong in one of two
+    # ways: os.getcwd() merges the repo the agent is standing in rather than the
+    # artifact repo every other call in this function targets, and without the
+    # env scrub an ambient GIT_DIR re-points it anyway. Note this is a real
+    # merge -- getting the tree wrong here writes commits into another repo.
+    r = subprocess.run(["git", "merge", "--no-edit", "-m", "Sync %s into %s" % (remote_trunk, g["branch"]), remote_trunk],
+                       cwd=art, env=_clean_git_env(), capture_output=True, text=True)
+    if r.returncode == 0:
+        print("merged %s into %s -> %s" % (remote_trunk, g["branch"], git("rev-parse", "--short", "HEAD", cwd=art)))
+        checkin(board, whoami(), None, "synced with %s" % remote_trunk)
+        return
+    conflicted = (git("diff", "--name-only", "--diff-filter=U", cwd=art) or "").splitlines()
+    print("CONFLICTS merging %s into %s -- these files need you:" % (remote_trunk, g["branch"]))
+    for f in conflicted:
+        print("  " + f)
+    print("Resolve, `git add` them, `git commit`, then `tickets review` again. "
+          "Or `git merge --abort` and ask the master (`tickets msg`).")
+    sys.exit(1)
+
+
+MERGE_CONFIG_DEFAULT = {
+    "test": ".venv/bin/python -m pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude",
+    "integration_dir": ".worktrees/integration",
+    "doc_exts": [".md", ".txt"],
+}
+
+
+def merge_config(board):
+    cfg = dict(MERGE_CONFIG_DEFAULT)
+    p = os.path.join(board, "merge.json")
+    if os.path.isfile(p):
+        try:
+            with open(p) as f:
+                cfg.update(json.load(f))
+        except (IOError, ValueError):
+            pass
+    return cfg
+
+
+def parse_review_sha(stamp):
+    """Extract the git object from a review stamp like 'branch@abc1234'."""
+    if not stamp or "@" not in str(stamp):
+        return None
+    return str(stamp).rsplit("@", 1)[-1].strip() or None
+
+
+def require_integrator(board, owner, force_master=False):
+    """Only the designated master.json owner may run tickets merge."""
+    m = current_master(board)
+    if not m or not m.get("owner"):
+        sys.exit("refused: no designated integrator in master.json (tickets master take first)")
+    # The master (planner) and the chief of staff (review/unblock/merge) may both integrate.
+    if owner not in (m["owner"], m.get("cos")) and not force_master:
+        sys.exit("rejected owner: %s is not the designated integrator (master %s, cos %s); "
+                 "pass --force-master only for break-glass recovery" % (owner, m["owner"], m.get("cos") or "-"))
+    return m
+
+
+class IntegrationLock:
+    """Serialize merge across processes; failed acquisition means another integrator is active."""
+
+    def __init__(self, board):
+        self.path = os.path.join(board, "merge.lock")
+        self.fd = None
+
+    def __enter__(self):
+        import fcntl
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            os.close(self.fd)
+            self.fd = None
+            sys.exit("refused: another integrator holds merge.lock; only one merge at a time")
+        os.ftruncate(self.fd, 0)
+        os.write(self.fd, ("%s %s\n" % (whoami(), now())).encode())
+        return self
+
+    def __exit__(self, *exc):
+        import fcntl
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self.fd)
+                self.fd = None
+
+
+def _order_shas_by_ancestry(sh, cwd, shas):
+    """Oldest-first unique SHAs so parent commits merge before descendants."""
+    unique, seen = [], set()
+    for s in shas:
+        full = sh("git", "rev-parse", s, cwd=cwd)
+        if full.returncode != 0:
+            continue
+        key = full.stdout.strip()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(key)
+    ordered = []
+    remaining = list(unique)
+    while remaining:
+        roots = [
+            cand for cand in remaining
+            if not any(
+                other != cand
+                and sh("git", "merge-base", "--is-ancestor", other, cand, cwd=cwd).returncode == 0
+                for other in remaining
+            )
+        ]
+        if not roots:
+            ordered.extend(remaining)
+            break
+        for cand in roots:
+            ordered.append(cand)
+            remaining.remove(cand)
+    return ordered
+
+
+def cmd_merge(a, board):
+    """Master side: integrate pinned review SHAs into main behind a green test run.
+
+    Guards (T-064 / T-079):
+      - only the designated integrator (master.json) may merge
+      - process lock serializes concurrent integrators
+      - merge recorded review commits, not moving branch tips
+      - close only tickets whose submitted SHA is ancestor of resulting main
+      - refuse blanket -X ours unless --discard-code
+      - failed checks leave review tickets untouched
+      - close only tickets IN REVIEW, and only from the repo their pin names
+        (T-215): ancestry alone is not identity -- this repo's own history can
+        trivially "contain" a foreign sha that was never built on it
+    """
+    import subprocess
+    # T-272: the board lives in one repo, the deliverable may live in another.
+    # Integration must be able to happen where the artifact is, or a correctly
+    # pinned cross-repo ticket could never be closed by a merge at all --
+    # `root` used to be the board's own parent unconditionally.
+    root = artifact_tree(a) or os.path.dirname(board)
+    cfg = merge_config(board)
+    trunk = _trunk(cwd=root)
+    owner = whoami(a.owner)
+    require_integrator(board, owner, force_master=getattr(a, "force_master", False))
+    merge_repo = repo_identity(root)
+
+    def sh(*args, cwd=root):
+        # cwd= alone does not stop a leaked GIT_DIR/GIT_COMMON_DIR from
+        # overriding repo discovery (T-243) -- the env must be scrubbed too.
+        # _clean_git_env keeps GIT_AUTHOR_*/GIT_COMMITTER_*, which this
+        # function's `git commit` depends on for correct authorship.
+        return subprocess.run(list(args), cwd=cwd, capture_output=True, text=True,
+                              env=_clean_git_env())
+
+    with IntegrationLock(board):
+        tickets = load_all(board)
+        queue = [t for t in tickets if t["status"] == "review"]
+        branches = list(a.branches) or sorted(set(t.get("branch") for t in queue if t.get("branch")))
+        if not branches:
+            sys.exit("nothing to merge: no branches given and the review queue is empty")
+        dirty = sh("git", "status", "--porcelain", "--untracked-files=no").stdout.strip()
+        if dirty:
+            sys.exit("main checkout has uncommitted tracked changes; commit or move them first:\n" + dirty)
+        # T-272: the final step fast-forwards the CURRENT branch, and the close
+        # loop then tests ancestry against `trunk`. If the repo is parked on
+        # anything else those are two different commits, so every ticket is
+        # skipped with no reason printed -- indistinguishable from the repo
+        # guard rejecting them. Never silent: this is the merger's own repo and
+        # they need to know which.
+        head_branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=root)
+        if head_branch and head_branch != trunk:
+            sys.exit("%s is checked out on %r, not %s. `tickets merge` fast-forwards the "
+                     "branch that is checked out, so merging from here would leave %s "
+                     "untouched and close nothing, without saying why. "
+                     "`git -C %s checkout %s` first." % (
+                         root, head_branch, trunk, trunk, root, trunk))
+
+        idir = os.path.join(root, cfg["integration_dir"])
+        if os.path.isdir(idir):
+            if sh("git", "status", "--porcelain", "--untracked-files=no", cwd=idir).stdout.strip():
+                sys.exit("integration worktree %s has uncommitted changes; inspect it, then "
+                         "`git worktree remove %s` and rerun" % (idir, idir))
+            sh("git", "checkout", "-q", "-B", "integration", trunk, cwd=idir)
+        else:
+            sh("git", "branch", "-D", "integration")
+            r = sh("git", "worktree", "add", "-q", idir, "-b", "integration", trunk)
+            if r.returncode != 0:
+                sys.exit("could not create integration worktree: " + (r.stderr or r.stdout).strip())
+        print("integration: %s (from %s@%s in %s)" % (
+            idir, trunk, git("rev-parse", "--short", trunk, cwd=root), merge_repo or root))
+        stray = os.path.join(idir, ".tickets")
+        if os.path.islink(stray):
+            os.unlink(stray)
+
+        merged_branches, merged_shas, actively_merged_shas, skipped, resolved_docs = [], [], [], [], []
+        for b in branches:
+            if sh("git", "rev-parse", "--verify", "-q", b).returncode != 0:
+                skipped.append((b, "no such branch"))
+                continue
+            branch_tickets = [t for t in queue if t.get("branch") == b]
+            pins = []
+            for t in branch_tickets:
+                pin = parse_review_sha(t.get("commit"))
+                if not pin:
+                    skipped.append((t["id"], "review ticket on %s has no recorded commit sha" % b))
+                    continue
+                if sh("git", "rev-parse", "--verify", "-q", pin).returncode != 0:
+                    skipped.append((t["id"], "recorded sha %s not found" % pin))
+                    continue
+                pins.append(pin)
+            if not pins:
+                # Never fall back to moving tip — that was the T-064 hole.
+                skipped.append((b, "no pinned review SHAs (refusing to merge live tip)"))
+                continue
+            if b in (a.ours or []) and not getattr(a, "discard_code", False):
+                skipped.append((b, "refused -X ours without --discard-code"))
+                print("  SKIPPED %s -- refused blanket conflict discard; pass --discard-code to override" % b)
+                continue
+            extra = ["-X", "ours"] if b in (a.ours or []) else []
+            for pin in _order_shas_by_ancestry(sh, root, pins):
+                if sh("git", "merge-base", "--is-ancestor", pin, "HEAD", cwd=idir).returncode == 0:
+                    merged_shas.append(pin)
+                    if b not in merged_branches:
+                        merged_branches.append(b)
+                    print("  already present %s (pinned %s)" % (b, pin[:12]))
+                    continue
+                short = sh("git", "rev-parse", "--short", pin).stdout.strip() or pin[:12]
+                r = sh("git", "merge", "--no-edit", *extra, "-m",
+                       "Integrate %s@%s into %s (master %s via tickets merge%s)" % (
+                           b, short, trunk, owner,
+                           "; conflicts resolved in favour of the integrated tree" if extra else ""),
+                       pin, cwd=idir)
+                if r.returncode == 0:
+                    merged_shas.append(pin)
+                    actively_merged_shas.append(pin)
+                    if b not in merged_branches:
+                        merged_branches.append(b)
+                    print("  merged %s@%s%s" % (b, short, "  (-X ours)" if extra else ""))
+                    continue
+                conflicted = sh("git", "diff", "--name-only", "--diff-filter=U", cwd=idir).stdout.split()
+                if not conflicted:
+                    sh("git", "merge", "--abort", cwd=idir)
+                    why = (r.stderr or r.stdout).strip().splitlines()
+                    skipped.append((b, "merge refused for %s: %s" % (short, why[0] if why else "?")))
+                    print("  SKIPPED %s@%s -- %s" % (b, short, "; ".join(why[:3])))
+                    continue
+                only_docs = all(any(f.endswith(x) for x in cfg["doc_exts"]) for f in conflicted)
+                if only_docs:
+                    keep = os.path.join(idir, "docs", "handoffs", "conflicts")
+                    os.makedirs(keep, exist_ok=True)
+                    for f in conflicted:
+                        theirs = sh("git", "show", "%s:%s" % (pin, f), cwd=idir).stdout
+                        alt = os.path.join(keep, "%s.%s" % (os.path.basename(f), b.replace("/", "_")))
+                        with open(alt, "w") as fh:
+                            fh.write(theirs)
+                        sh("git", "checkout", "--ours", f, cwd=idir)
+                        sh("git", "add", f, os.path.relpath(alt, idir), cwd=idir)
+                        resolved_docs.append((f, os.path.relpath(alt, idir)))
+                    sh("git", "commit", "-q", "--no-edit", cwd=idir)
+                    merged_shas.append(pin)
+                    actively_merged_shas.append(pin)
+                    if b not in merged_branches:
+                        merged_branches.append(b)
+                    print("  merged %s@%s (doc-only conflicts kept both copies: %s)" % (
+                        b, short, ", ".join(conflicted)))
+                else:
+                    sh("git", "merge", "--abort", cwd=idir)
+                    skipped.append((b, "code conflicts at %s: %s" % (short, ", ".join(conflicted[:6]))))
+                    print("  SKIPPED %s@%s -- code conflicts in %s; ask its owner to `tickets sync` and resolve"
+                          % (b, short, ", ".join(conflicted[:6])))
+
+        if not merged_shas and not merged_branches:
+            print("nothing merged.")
+            for b, why in skipped:
+                print("  %s: %s" % (b, why))
+            sys.exit(1)
+
+        if sh("git", "ls-files", "--error-unmatch", ".tickets", cwd=idir).returncode == 0:
+            sh("git", "rm", "-q", "-r", "--cached", ".tickets", cwd=idir)
+            sh("git", "commit", "-q", "-m", "Untrack .tickets (the board is never versioned)", cwd=idir)
+            print("  untracked .tickets that a branch had committed")
+
+        test_cmd = cfg["test"].replace("{root}", root)
+        if test_cmd.startswith(".venv/") and not os.path.exists(os.path.join(idir, ".venv")):
+            test_cmd = os.path.join(root, test_cmd)
+        print("tests: %s" % test_cmd)
+        t = subprocess.run(test_cmd, shell=True, cwd=idir, capture_output=True, text=True)
+        tail = (t.stdout or t.stderr).strip().splitlines()
+        last = tail[-1] if tail else "(no output)"
+        if t.returncode != 0 and not a.no_test:
+            print("TESTS FAILED on the integrated tree; %s untouched; review tickets preserved. "
+                  "Integration left at %s.\n%s" % (trunk, idir, "\n".join(tail[-8:])))
+            _master_log(board, "merge of %s aborted: tests failed (%s); review state preserved" % (
+                ", ".join(merged_branches), last), by=owner)
+            sys.exit(2)
+        print("  " + last)
+
+        r = sh("git", "merge", "--ff-only", "integration")
+        if r.returncode != 0:
+            print("could not fast-forward %s. Usually an untracked file in the main checkout that a "
+                  "branch now tracks; move it aside and rerun:\n%s" % (trunk, (r.stderr or r.stdout).strip()))
+            sys.exit(3)
+        sha = git("rev-parse", "--short", trunk, cwd=root)
+        full_trunk = sh("git", "rev-parse", trunk).stdout.strip()
+        if getattr(a, "push", False):
+            pr = sh("git", "push", "origin", trunk)
+            if pr.returncode != 0:
+                why = (pr.stderr or pr.stdout).strip()
+                print("PUSH FAILED: could not push %s to origin/%s\n%s" % (trunk, trunk, why))
+                _master_log(board, "tickets merge: integrated %s@%s locally but PUSH FAILED (%s)" % (
+                    trunk, sha, why.splitlines()[0] if why else "?"), by=owner)
+                sys.exit(4)
+            remote = sh("git", "ls-remote", "--heads", "origin", trunk).stdout.strip().split()
+            remote_sha = remote[0] if remote else ""
+            if remote_sha != full_trunk:
+                print("PUSH FAILED: origin/%s is %s, expected %s" % (
+                    trunk, remote_sha[:12] if remote_sha else "?", sha))
+                _master_log(board, "tickets merge: push reported success but origin/%s != local %s" % (
+                    trunk, sha), by=owner)
+                sys.exit(4)
+            print("%s -> %s   (pushed to origin/%s)" % (trunk, sha, trunk))
+        else:
+            print("%s -> %s   (push when ready: git push origin %s)" % (trunk, sha, trunk))
+
+        # Resolve merged pin set to full SHAs for ancestry checks.
+        pin_full = set()
+        for pin in merged_shas:
+            got = sh("git", "rev-parse", pin).stdout.strip()
+            if got:
+                pin_full.add(got)
+        actively_merged_full = set()
+        for pin in actively_merged_shas:
+            got = sh("git", "rev-parse", pin).stdout.strip()
+            if got:
+                actively_merged_full.add(got)
+
+        closed = []
+        for t2 in queue:
+            pin = parse_review_sha(t2.get("commit"))
+            if not pin:
+                skipped.append((t2["id"], "review ticket has no recorded commit sha"))
+                continue
+            # T-215: ancestry alone is not identity. This repo's history can
+            # trivially "contain" a sha it never built on (a short-prefix
+            # collision, or an unrelated commit that happens to be an
+            # ancestor) -- refuse to close unless the pin names THIS repo.
+            # A pin from before this field existed is not eligible for an
+            # automatic close either: absence must never read as "matches
+            # everything".
+            recorded_repo = t2.get("repo")
+            if not recorded_repo:
+                skipped.append((t2["id"],
+                    "no repo recorded on this review pin (reviewed before T-215) -- "
+                    "not eligible for an automatic close; verify by hand which repo "
+                    "its deliverable is in, then close it with `tickets done`"))
+                continue
+            if recorded_repo != merge_repo:
+                skipped.append((t2["id"],
+                    "recorded repo %s does not match this merge's repo %s -- "
+                    "refusing a cross-repo close" % (recorded_repo, merge_repo)))
+                continue
+            got = sh("git", "rev-parse", pin)
+            if got.returncode != 0:
+                skipped.append((t2["id"], "recorded sha %s not found in this repo" % pin))
+                continue
+            full = got.stdout.strip()
+            if sh("git", "merge-base", "--is-ancestor", full, full_trunk).returncode != 0:
+                continue  # submitted SHA not on resulting main
+            # Close only tickets whose recorded SHA was actually integrated (not merely same branch).
+            if full not in pin_full:
+                continue
+            # T-324: sha membership in pin_full alone is not identity either --
+            # a ticket's `commit` field can be corrupted to hold a sha that
+            # some OTHER ticket's branch legitimately merged this pass (seen in
+            # production: T-223 was recorded with a sha ("cos-opus@af27511")
+            # that was really an unrelated sync commit, matched merge_repo,
+            # resolved, was ancestor, and happened to be in pin_full anyway --
+            # closing T-223 while its real fix stayed unmerged). Require that
+            # the ticket's OWN recorded branch was actually part of this pass;
+            # a coincidental sha match on some other branch is not evidence.
+            if t2.get("branch") not in merged_branches:
+                skipped.append((t2["id"],
+                    "recorded sha %s matches a commit integrated this pass, but ticket's own "
+                    "branch %r was not one of the branches merged -- refusing to close on a "
+                    "sha coincidence alone" % (pin, t2.get("branch"))))
+                continue
+            # T-389: the idempotency path ("already present") folds trunk snapshots
+            # into pin_full when some OTHER ticket on the same bare agent branch had
+            # real work integrated this pass. Refuse to close a ticket whose pin was
+            # only already-on-trunk unless it was the sole work merged on that branch.
+            if full not in actively_merged_full:
+                branch = t2.get("branch")
+                sibling_active = False
+                if branch:
+                    for ot in queue:
+                        if ot["id"] == t2["id"] or ot.get("branch") != branch:
+                            continue
+                        op = parse_review_sha(ot.get("commit"))
+                        if not op:
+                            continue
+                        og = sh("git", "rev-parse", op)
+                        if og.returncode != 0:
+                            continue
+                        if og.stdout.strip() in actively_merged_full:
+                            sibling_active = True
+                            break
+                if sibling_active:
+                    skipped.append((t2["id"],
+                        "recorded sha %s is already on trunk but another ticket on branch %r "
+                        "was the work integrated this pass -- refusing to close a pin that "
+                        "contributed nothing this merge" % (pin, branch)))
+                    continue
+            t2["status"] = "done"
+            t2["done_at"] = now()
+            t2["notes"].append({"by": owner, "at": now(),
+                                "text": "merged into %s as %s (tickets merge; pinned %s)" % (
+                                    trunk, sha, pin)})
+            save(board, t2)
+            closed.append(t2["id"])
+            _tm2 = timing(t2)
+            _safe(lambda t2=t2, _tm2=_tm2: traj_event(
+                board, "merge", agent=owner, ticket=t2,
+                state_before="review", state_after="done", outcome="done",
+                pin=pin, merged_as=sha, trunk=trunk,
+                prev_owner=t2.get("owner", ""),
+                active_hours=_round3(_tm2.get("active"))), None)
+            post_message(board, owner, "%s merged into %s as %s" % (t2["id"], trunk, sha),
+                         to=t2.get("owner", ""), re=t2["id"])
+        if closed:
+            print("closed: %s" % ", ".join(closed))
+        for b, why in skipped:
+            print("  skipped %s: %s" % (b, why))
+        for f, alt in resolved_docs:
+            print("  doc conflict %s: kept %s's copy, branch copy at %s" % (f, trunk, alt))
+        _master_log(board, "tickets merge: pins %s -> %s@%s; tests %s; closed %s%s" % (
+            ", ".join(p[:7] for p in merged_shas) or "-",
+            trunk, sha, "green" if t.returncode == 0 else "skipped",
+            ", ".join(closed) or "-",
+            ("; skipped " + ", ".join(str(b) for b, _ in skipped)) if skipped else ""), by=owner)
+        post_message(board, owner, "%s is now %s (merged %s). Everyone: run `tickets sync` in your worktree "
+                     "before your next `tickets review`." % (trunk, sha, ", ".join(merged_branches)))
+
+
+# ---- liveness truth (T-237, implementing the T-230 spec) ----------------
+#
+# `seen` on an agent record is written by checkin(), and the only caller that
+# writes it on a schedule is the WATCHER, at loop boundaries: once at startup,
+# and once more after the child session exits. It therefore measures "time
+# since the watcher last came back from waiting on its child", not "time since
+# the agent last did something". That single fact fails in BOTH directions at
+# once, and they are the same mechanism seen from two sides:
+#
+#   - A long real session holds `seen` stale for its entire duration, so the
+#     agent doing the most work reads as the deadest, and a master acting on
+#     that number reopens tickets out from under a live session.
+#   - A session that fails instantly (usage limit, dead login) returns in
+#     seconds, so `checkin()` fires on nearly every poll tick and the agent
+#     failing hardest reads as the healthiest.
+#
+# Polling faster cannot fix this: it makes the second direction strictly worse.
+# So this module keeps THREE facts apart instead of folding them into one
+# number, because they are different facts:
+#
+#   watcher alive  -- agents/<name>.watch.pid exists and that pid exists
+#   run in flight  -- agents/<name>.run, heartbeated DURING the child run
+#   agent working  -- the session's own transcript has a recent event
+#
+# Only the third is evidence that work is happening. A fresh in-run heartbeat
+# over a session that cannot start is exactly the false signal this ticket
+# exists to kill, so it is never rendered as "working" on its own.
+#
+# `unknown` is a real state with its own marker. It is never folded into
+# `idle` or `working`: half the damage on this board came from a confident
+# wrong answer, not from a missing one.
+
+RUN_HEARTBEAT_SECS = int(os.environ.get("TICKETS_RUN_HEARTBEAT_SECS") or 30)
+# How recent a transcript event has to be before we will call an agent working.
+LIVENESS_FRESH_SECS = int(os.environ.get("TICKETS_LIVENESS_FRESH_SECS") or 300)
+# A run that starts and exits inside this many seconds did not host real work.
+FAST_FAIL_SECS = int(os.environ.get("TICKETS_FAST_FAIL_SECS") or 90)
+FAST_FAIL_STREAK = int(os.environ.get("TICKETS_FAST_FAIL_STREAK") or 3)
+# Newest codex rollout files to consider when matching one to a worktree.
+CODEX_SCAN_FILES = int(os.environ.get("TICKETS_CODEX_SCAN_FILES") or 60)
+
+# Strings the CLIs themselves print to stderr when a session cannot start.
+# Matched ONLY against a single run's own slice of watch.log -- never against
+# a raw scan of a transcript, which is how the old cmd_limits scan came to
+# report every healthy codex session as limited (every turn writes a
+# `rate_limits` telemetry block).
+CLI_LIMIT_STRINGS = ("session limit", "usage limit", "hit your limit", "limit reached",
+                     "actionrequirederror", "quota exceeded", "out of credits",
+                     "429", "rate limit")
+CLI_AUTH_STRINGS = ("authentication_error", "token has been revoked", "please run /login",
+                    "invalid api key", "not logged in", "oauth token")
+
+STATE_WORDS = ("working", "idle", "limited", "dead", "unknown")
+
+# A source saying "I looked and there was nothing here" is not the same as one
+# saying "I looked and could not make sense of what I found". The second is a
+# real finding and must survive to the reader; folding both into one `unknown`
+# is how a diagnosis gets thrown away on the way to the screen.
+NOTHING_FOUND = ""
+
+
+def fmt_age(secs):
+    """Short age for a number of seconds. Distinct from fmt_hours() because a
+    liveness answer is worth reading at second resolution: 'transcript active
+    0s ago' is the whole point, and '0m' would throw it away."""
+    if secs is None:
+        return "?"
+    if secs < 90:
+        return "%ds" % int(secs)
+    if secs < 3600:
+        return "%dm" % int(round(secs / 60.0))
+    if secs < 48 * 3600:
+        return "%.1fh" % (secs / 3600.0)
+    return "%.1fd" % (secs / 86400.0)
+
+
+def _age_secs(stamp):
+    """Seconds since an ISO-8601 stamp, tolerating both the tool's own
+    '...Z' form and the fractional-second form the transcripts use."""
+    if not stamp:
+        return None
+    s = str(stamp).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, datetime.now(timezone.utc).timestamp() - dt.timestamp())
+
+
+def _tail_text(path, max_bytes=65536):
+    """Last max_bytes of a file as text. Seeks from the end: these transcripts
+    run to hundreds of KB and the answer is always in the last few lines."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - max_bytes))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _newest(paths):
+    """(path, mtime) of the most recently modified path, ('', -1) if none."""
+    best, best_mt = "", -1.0
+    for p in paths:
+        try:
+            mt = os.stat(p).st_mtime
+        except OSError:
+            continue
+        if mt > best_mt:
+            best, best_mt = p, mt
+    return best, best_mt
+
+
+def _mtime_age(mtime):
+    return None if mtime is None or mtime < 0 else max(0.0, datetime.now(timezone.utc).timestamp() - mtime)
+
+
+def _looks_limited(text):
+    low = (text or "").lower()
+    return any(k in low for k in CLI_LIMIT_STRINGS)
+
+
+def _looks_auth(text):
+    low = (text or "").lower()
+    return any(k in low for k in CLI_AUTH_STRINGS)
+
+
+# ---- in-run heartbeat ---------------------------------------------------
+
+def _run_file(board, owner):
+    return os.path.join(agents_dir(board), owner + ".run")
+
+
+_RUN_BEAT_LOCK = threading.Lock()
+
+
+def _run_beat(board, owner, **fields):
+    """Write the in-run heartbeat.
+
+    Deliberately its OWN file rather than a field on agents/<name>.json: the
+    child session runs `tickets` commands that read-modify-write that record,
+    and a heartbeat thread rewriting it every few seconds would race them and
+    silently drop whatever the child had just written (inbox_seen, limit,
+    ticket). One watcher per agent holds the pid lock, so this file has a
+    single writer.
+    """
+    try:
+        os.makedirs(agents_dir(board), exist_ok=True)
+        path = _run_file(board, owner)
+        # The beat thread and the run-end write are both in this process and
+        # can overlap: the lock keeps a read-modify-write whole, and the tmp
+        # name is per-writer so two overlapping writers cannot truncate each
+        # other's scratch file and leave a spliced record on disk.
+        with _RUN_BEAT_LOCK:
+            rec = _read_run(board, owner)
+            rec.update(fields)
+            rec["beat"] = now()
+            tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+            with open(tmp, "w") as f:
+                json.dump(rec, f)
+            os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _read_run(board, owner):
+    try:
+        with open(_run_file(board, owner)) as f:
+            rec = json.load(f)
+        return rec if isinstance(rec, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def _run_begin(board, owner, run_no, cwd):
+    _run_beat(board, owner, pid=os.getpid(), run=run_no, cwd=cwd,
+              started=now(), active=True, rc=None, ended="")
+
+
+def _run_end(board, owner, run_no, rc):
+    _run_beat(board, owner, run=run_no, active=False, rc=rc, ended=now())
+
+
+# ---- ground truth per tool ---------------------------------------------
+
+def _claude_project_dir(cwd):
+    """Claude Code stores a session transcript per working directory, under a
+    name built by replacing '/', '.' and '_' in the absolute path with '-'."""
+    import re as _re
+    return os.path.join(os.path.expanduser("~"), ".claude", "projects", _re.sub(r"[/._]", "-", cwd or ""))
+
+
+def _claude_transcript_state(cwd):
+    """(state, age_secs, detail) from the Claude transcript for `cwd`.
+
+    Reliable: every transcript line carries a `timestamp`, written as the turn
+    happens, by the session itself -- not by the watcher wrapped around it.
+    """
+    if not cwd:
+        return ("unknown", None, "no cwd recorded for this agent")
+    d = _claude_project_dir(cwd)
+    path, mt = _newest(glob.glob(os.path.join(d, "*.jsonl")))
+    if not path:
+        return ("unknown", None, "no Claude transcript under %s" % _tilde(d))
+    for ln in reversed(_tail_text(path).splitlines()):
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            continue  # a tail read can slice the first line in half
+        if not isinstance(ev, dict) or not ev.get("timestamp"):
+            continue
+        age = _age_secs(ev["timestamp"])
+        if age is None:
+            continue
+        if age <= LIVENESS_FRESH_SECS:
+            return ("working", age, "transcript active %s ago" % fmt_age(age))
+        return ("idle", age, "transcript quiet %s" % fmt_age(age))
+    age = _mtime_age(mt)
+    if age is not None and age <= LIVENESS_FRESH_SECS:
+        return ("working", age, "transcript written %s ago (no parseable timestamp)" % fmt_age(age))
+    return ("unknown", age, "transcript tail carries no parseable timestamp")
+
+
+def _codex_rollouts():
+    """[(mtime, path)] newest first for the local codex rollout files, computed
+    once per process -- `dash` asks for every agent's state on every refresh."""
+    global _CODEX_ROLLOUTS
+    try:
+        return _CODEX_ROLLOUTS
+    except NameError:
+        pass
+    home = os.path.expanduser("~")
+    out = []
+    for p in glob.glob(os.path.join(home, ".codex", "sessions", "**", "*.jsonl"), recursive=True):
+        try:
+            out.append((os.stat(p).st_mtime, p))
+        except OSError:
+            continue
+    out.sort(reverse=True)
+    _CODEX_ROLLOUTS = out
+    return out
+
+
+def _codex_transcript_state(cwd):
+    """(state, age_secs, detail) from the newest codex rollout for `cwd`.
+
+    Reads the last `task_complete` event's `payload.error`, which is the CLI's
+    own verdict on the turn. Specifically NOT the raw substring scan the old
+    cmd_limits used: every codex turn writes a `rate_limits` telemetry block,
+    so that scan hits on healthy and dead sessions alike and carries zero
+    information.
+    """
+    if not cwd:
+        return ("unknown", None, "no cwd recorded for this agent")
+    needles = ('"cwd":"%s"' % cwd, '"cwd": "%s"' % cwd)
+    for mt, p in _codex_rollouts()[:CODEX_SCAN_FILES]:
+        try:
+            with open(p, "rb") as f:
+                head = f.read(8192).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if not any(n in head for n in needles):
+            continue
+        return _codex_last_turn(p, mt)
+    return ("unknown", None, NOTHING_FOUND)
+
+
+def _codex_last_turn(path, mtime):
+    file_age = _mtime_age(mtime)
+    for ln in reversed(_tail_text(path, 262144).splitlines()):
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        pay = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        if pay.get("type") != "task_complete" and ev.get("type") != "task_complete":
+            continue
+        err = pay.get("error") if pay else ev.get("error")
+        age = _age_secs(ev.get("timestamp"))
+        if age is None:
+            age = file_age
+        if err:
+            msg = (err.get("message") if isinstance(err, dict) else str(err)) or "turn failed"
+            msg = " ".join(str(msg).split())
+            if _looks_limited(msg):
+                return ("limited", age, msg[:110])
+            # A failed turn that is not a usage limit is a broken host, a dead
+            # login, or something nobody here has classified. Saying "idle"
+            # would be the confident wrong answer this ticket is about.
+            return ("unknown", age, "last turn failed: %s" % msg[:90])
+        if file_age is not None and file_age <= LIVENESS_FRESH_SECS:
+            return ("working", file_age, "rollout active %s ago" % fmt_age(file_age))
+        return ("idle", age if age is not None else file_age,
+                "last turn ok %s ago" % fmt_age(age if age is not None else file_age))
+    if file_age is not None and file_age <= LIVENESS_FRESH_SECS:
+        return ("working", file_age, "rollout active %s ago (no task_complete yet)" % fmt_age(file_age))
+    return ("unknown", file_age, "no task_complete in the rollout tail")
+
+
+# ---- watcher / watch-log signals ---------------------------------------
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _tickets_tool_path():
+    return os.path.realpath(__file__)
+
+
+def _argv_flag_value(argv, flag):
+    """Return the value after `flag` in argv, or '' if absent."""
+    for i, tok in enumerate(argv):
+        if tok == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith(flag + "="):
+            return tok[len(flag) + 1:]
+    return ""
+
+
+def _live_watch_pids(owner=None, board=None):
+    """Live `tickets watch --agent <name>` processes from the OS process table.
+
+    The pid file only tracks one loop per board; duplicates (interrupted pytest
+    runs, races before lock) show up here. `owner` filters to one agent name.
+    When `board` is set, only loops whose --cwd lies under that repo count
+    (spawn/list/dash). Omit `board` for fleet-wide stop of every loop for the name.
+    """
+    import subprocess
+
+    tool = _tickets_tool_path()
+    repo = os.path.realpath(os.path.dirname(board)) if board else None
+    out = []
+    try:
+        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
+    except OSError:
+        return out
+    me = os.getpid()
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        cmd = parts[1]
+        if pid == me or tool not in cmd:
+            continue
+        if " watch" not in cmd and not cmd.rstrip().endswith(" watch"):
+            continue
+        argv = shlex.split(cmd)
+        agent = _argv_flag_value(argv, "--agent")
+        if owner is not None and agent != owner:
+            continue
+        if repo:
+            watch_cwd = _argv_flag_value(argv, "--cwd")
+            if not watch_cwd:
+                continue
+            try:
+                real = os.path.realpath(watch_cwd)
+                if real != repo and not real.startswith(repo + os.sep):
+                    continue
+            except OSError:
+                continue
+        if agent and _pid_alive(pid):
+            out.append(pid)
+    return sorted(set(out))
+
+
+def _watcher_pid(board, owner):
+    """One live watcher pid: process table first, then the board pid file."""
+    live = _live_watch_pids(owner, board=board)
+    if live:
+        return live[0]
+    try:
+        with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
+            pid = int((f.read() or "0").strip() or 0)
+    except (IOError, OSError, ValueError):
+        return 0
+    return pid if pid and _pid_alive(pid) else 0
+
+
+def _watcher_count(owner, board=None):
+    return len(_live_watch_pids(owner, board=board))
+
+
+def _watch_runs(board, owner, keep=12):
+    """Parse the tail of watch.log into [{n, start, exit_at, rc, text}] oldest
+    first. `exit_at` is None for a run still executing."""
+    import re as _re
+    path = os.path.join(agents_dir(board), owner + ".watch.log")
+    text = _tail_text(path, 131072)
+    if not text:
+        return []
+    runs = {}
+    order = []
+    cur = None
+    line_re = _re.compile(r"^(\S+) run (\d+) (trigger=|exit |TIMEOUT)(.*)$")
+    for ln in text.splitlines():
+        m = line_re.match(ln)
+        if not m:
+            if cur is not None:
+                runs[cur]["text"].append(ln)
+            continue
+        stamp, n, kind, rest = m.group(1), int(m.group(2)), m.group(3), m.group(4)
+        if kind == "trigger=":
+            runs[n] = {"n": n, "start": stamp, "exit_at": None, "rc": None, "text": []}
+            order.append(n)
+            cur = n
+        elif n in runs:
+            if kind.startswith("exit"):
+                runs[n]["exit_at"] = stamp
+                runs[n]["rc"] = rest.strip()
+            else:
+                runs[n]["text"].append(ln)
+    out = [runs[n] for n in order if n in runs]
+    return out[-keep:]
+
+
+def _watch_log_state(board, owner):
+    """(state, detail) from the watcher's own log and pid.
+
+    Corroborating evidence, always labeled heuristic when it is the only
+    source: it can see that a run started, that it ended fast, and what the
+    CLI printed while failing -- never that the agent thought about anything.
+    """
+    pid = _watcher_pid(board, owner)
+    runs = _watch_runs(board, owner)
+    if not runs:
+        if pid and not _pid_alive(pid):
+            return ("dead", "watcher pid %d is gone, no runs logged" % pid)
+        return ("unknown", NOTHING_FOUND)
+    last = runs[-1]
+    if last["exit_at"] is None:
+        age = _age_secs(last["start"])
+        if pid and not _pid_alive(pid):
+            return ("dead", "watcher pid %d died mid-run %d" % (pid, last["n"]))
+        return ("working", "run %d in flight %s (watcher alive)" % (last["n"], fmt_age(age)))
+    # Closed runs: walk back over CONSECUTIVE FAILING runs. The evidence that
+    # makes this `limited` is the CLI's own error text inside those runs' own
+    # log slices -- watch.log holds the CLI's human-readable stderr, never a
+    # transcript's per-turn telemetry, which is what made the old raw scan
+    # useless. Run duration is corroboration reported in the detail, NOT a
+    # gate: a hard-limited agent can fail many times in a row, and gating on
+    # speed dropped it the moment one of those failures happened to take
+    # longer than the usual few seconds.
+    streak = []
+    for r in reversed(runs):
+        if r["exit_at"] is None or r["rc"] in ("0", None):
+            break
+        streak.append(r)
+    if len(streak) >= FAST_FAIL_STREAK:
+        blob = "\n".join("\n".join(r["text"]) for r in streak)
+        why = _first_match(blob, CLI_LIMIT_STRINGS + CLI_AUTH_STRINGS)
+        kind = "auth" if _looks_auth(blob) and not _looks_limited(blob) else "limit"
+        fast = len([r for r in streak
+                    if (_span_secs(r["start"], r["exit_at"]) or FAST_FAIL_SECS + 1) <= FAST_FAIL_SECS])
+        detail = "%d runs failed in a row, %d of them inside %ds%s" % (
+            len(streak), fast, FAST_FAIL_SECS, (" -- %s" % why) if why else "")
+        if why:
+            return ("limited", ("dead login: " if kind == "auth" else "") + detail)
+        # Repeated failure with nothing quotable is not enough to call an agent
+        # limited, and it is certainly not enough to call it healthy.
+        return ("unknown", detail + " -- no CLI error text in the log, read it by hand")
+    if pid and not _pid_alive(pid):
+        return ("dead", "watcher pid %d is gone" % pid)
+    age = _age_secs(last["exit_at"])
+    return ("idle", "last run %d exited %s ago" % (last["n"], fmt_age(age)))
+
+
+def _span_secs(a, b):
+    aa, bb = _age_secs(a), _age_secs(b)
+    return None if aa is None or bb is None else max(0.0, aa - bb)
+
+
+def _first_match(text, needles):
+    """The first log LINE containing one of `needles`, trimmed. Line-scoped
+    rather than a byte window around the match, so the quote does not drag in
+    the tail of whatever unrelated line came before it."""
+    for ln in (text or "").splitlines():
+        low = ln.lower()
+        if any(n in low for n in needles):
+            return " ".join(ln.split())[:110]
+    return ""
+
+
+def _tilde(p):
+    home = os.path.expanduser("~")
+    return "~" + p[len(home):] if p and p.startswith(home) else (p or "")
+
+
+# ---- the one answer who / dash / limits all read -----------------------
+
+def _cwd_sharers(board, owner, cwd, peers=None):
+    """Other agent records claiming the same working directory.
+
+    A Claude transcript is keyed by directory and carries no agent name, so if
+    two agents' records point at one directory the transcript cannot say whose
+    activity it is. That is not hypothetical: several records can point at
+    one worktree, and reading the transcript naively reports all of them as
+    working when at most one is.
+    """
+    if not cwd:
+        return []
+    recs = peers if peers is not None else load_agents(board)
+    return sorted(r["owner"] for r in recs
+                  if r.get("owner") and r["owner"] != owner
+                  and (r.get("cwd") or r.get("worktree") or "") == cwd)
+
+
+def _dedup(paths):
+    """Non-empty, order-preserving, no repeats."""
+    out = []
+    for p in paths:
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def _transcript_over_cwds(cwds):
+    """First cwd with a real Claude transcript wins; otherwise report against
+    the first candidate so the 'nothing found' message names the directory a
+    reader should actually go and look in.
+
+    Returns (state, age, detail, cwd_used).
+    """
+    first = None
+    for c in cwds:
+        st, age, detail = _safe(lambda: _claude_transcript_state(c), ("unknown", None, "transcript unreadable"))
+        if first is None:
+            first = (st, age, detail, c)
+        if st != "unknown":
+            return st, age, detail, c
+    return first or ("unknown", None, "transcript unreadable", "")
+
+
+def agent_liveness(board, rec, peers=None):
+    """One per-agent state, derived from ground truth rather than from the
+    watcher's own `seen` field.
+
+    Returns {state, detail, source, heuristic, watcher, run, seen_age}.
+    `state` is one of STATE_WORDS. `heuristic` marks an answer that rests on
+    run cadence or on an unattributable transcript rather than on this agent's
+    own confirmed activity, so the renderer can show it as weaker evidence
+    instead of dressing it up as a fact.
+    """
+    owner = (rec or {}).get("owner") or ""
+    pid = _watcher_pid(board, owner)
+    run = _read_run(board, owner)
+    # Where does this agent's session actually live? The agent RECORD's cwd is
+    # whatever directory the last `tickets` command was typed in, and for this
+    # epic that is routinely a second repo -- `tickets review` may run in the
+    # deliverable clone while the session lives in another worktree. The
+    # WATCHER's cwd, recorded in the run file, is the session's
+    # own directory and does not move when a command is run elsewhere, so it
+    # is tried first. Both are kept: an agent running by hand has no run file.
+    cwds = _dedup([run.get("cwd") or "",
+                   (rec or {}).get("cwd") or "",
+                   (rec or {}).get("worktree") or ""])
+    cwd = cwds[0] if cwds else ""
+    beat_age = _age_secs(run.get("beat"))
+    out = {"state": "unknown", "detail": "", "source": "none", "heuristic": True,
+           "watcher": _watcher_count(owner, board) > 0,
+           "watcher_count": _watcher_count(owner, board),
+           "run": run if run.get("active") else {},
+           "seen_age": _age_secs((rec or {}).get("seen"))}
+
+    # 1. A human asserting a state always wins: `tickets limit` is a person
+    #    saying "I read the log". Keep it, but it is no longer the ONLY path
+    #    to a limited render -- that is how an agent can look healthy while
+    #    hard-limited for a long window.
+    lim = (rec or {}).get("limit")
+    if lim:
+        out.update(state="limited", source="manual", heuristic=False,
+                   detail="asserted by hand%s%s" % (
+                       (", back %s" % lim["until"]) if lim.get("until") else "",
+                       (" -- %s" % lim["note"]) if lim.get("note") else ""))
+        return out
+
+    wstate, wdetail = _safe(lambda: _watch_log_state(board, owner), ("unknown", "watch log unreadable"))
+
+    # 2. A fast-fail streak outranks any transcript freshness, because a
+    #    session that fails instantly manufactures fresh-looking artefacts by
+    #    construction -- that IS the bug. Checked before the transcript, not
+    #    after it.
+    if wstate == "limited":
+        out.update(state="limited", source="watchlog", heuristic=True, detail=wdetail)
+        return out
+
+    tstate, tage, tdetail, cwd = _transcript_over_cwds(cwds)
+    tsource = "claude"
+    if tstate == "unknown":
+        cstate, cage, cdetail = _safe(lambda: _codex_transcript_state(cwd), ("unknown", None, "rollout unreadable"))
+        if cdetail != NOTHING_FOUND:
+            # A codex rollout that exists but ended on an error nobody has
+            # classified ("spawn codex-code-mode-host ENOENT") is a FINDING.
+            # Taking it only when it resolved to a confident state would drop
+            # exactly the cases a master needs to go and look at.
+            tstate, tage, tdetail, tsource = cstate, cage, cdetail, "codex"
+        elif "no Claude transcript" in tdetail:
+            # Neither tool left a transcript for this cwd: say so, and say
+            # which two we looked for, rather than picking one's error message.
+            tdetail = "no Claude or Codex transcript for %s" % _tilde(cwd)
+
+    if tstate != "unknown":
+        out.update(state=tstate, source=tsource, heuristic=False, detail=tdetail)
+        # A dead watcher under a quiet transcript is a real dead lane; a dead
+        # watcher under a live transcript is just an agent running by hand.
+        if tstate == "idle" and pid and not _pid_alive(pid):
+            out.update(state="dead", detail="%s; watcher pid %d is gone" % (tdetail, pid))
+        shared = _safe(lambda: _cwd_sharers(board, owner, cwd, peers), [])
+        if shared:
+            # Keep the state -- the activity is real -- but stop presenting it
+            # as a fact about THIS agent, and name who else it could be so the
+            # reader can go and settle it.
+            out.update(heuristic=True,
+                       detail="%s; cwd shared with %s -- transcript cannot say which"
+                              % (out["detail"], ", ".join(shared)))
+        return out
+
+    if wstate == "dead":
+        out.update(state="dead", source="watchlog", heuristic=True, detail=wdetail)
+        return out
+
+    # 3. A run in flight with a fresh heartbeat proves the WATCHER is alive and
+    #    a child is up. It does not prove the agent is doing anything, and it
+    #    must not be rendered as if it did -- so it stays `unknown` and says
+    #    exactly what it knows.
+    if run.get("active") and beat_age is not None and beat_age <= max(RUN_HEARTBEAT_SECS * 3, 90):
+        out.update(state="unknown", source="heartbeat", heuristic=True,
+                   detail="run %s in flight, heartbeat %s ago -- watcher alive, no transcript to confirm work"
+                          % (run.get("run", "?"), fmt_age(beat_age)))
+        return out
+
+    if wstate == "working":
+        out.update(state="unknown", source="watchlog", heuristic=True,
+                   detail="%s -- no transcript ground truth for this tool" % wdetail)
+        return out
+
+    # Nothing was conclusive. Report everything that was actually observed,
+    # both sources, rather than letting one source's "I found nothing" hide
+    # the other's "I found something I cannot explain".
+    parts = [d for d in (wdetail, tdetail) if d and d != NOTHING_FOUND]
+    out.update(state="unknown", source="watchlog" if wdetail else "none", heuristic=True,
+               detail="; ".join(parts) or "no ground-truth source for this agent")
+    return out
+
+
+def _clip(text, n):
+    """Trim to a word boundary. Cutting mid-token turned '11 of them inside
+    90s' into '...inside 9', which changes the number rather than shortening
+    the sentence."""
+    t = " ".join((text or "").split())
+    if len(t) <= n:
+        return t
+    cut = t[:n]
+    sp = cut.rfind(" ")
+    return (cut[:sp] if sp > n // 2 else cut).rstrip(" ,;") + "..."
+
+
+def liveness_mark(live):
+    """One character telling a reader HOW the state was reached, so 'a human
+    told us' never reads the same as 'the tool worked it out'."""
+    if live.get("state") == "unknown":
+        return "?"
+    if live.get("source") == "manual":
+        return "!"
+    return "~" if live.get("heuristic") else " "
+
+
+def liveness_line(live):
+    m = liveness_mark(live)
+    return "%-8s%s %s" % (live.get("state", "unknown"), m, live.get("detail", ""))
+
+
+# ---- usage limits -------------------------------------------------------
+
+LIMIT_PATTERNS = ("usage limit", "rate limit", "rate_limit", "hit your limit", "limit reached",
+                  "out of credits", "quota exceeded", "429", "resets at", "try again in")
+# A dead session is not always a rate limit: revoked tokens and expired logins
+# look identical from the board (silence), so the scan reports them too.
+AUTH_PATTERNS = ("authentication_error", "token has been revoked", "please run /login",
+                 "invalid api key", "401", "not logged in", "oauth")
+
+
+def _classify(line):
+    low = line.lower()
+    if any(k in low for k in AUTH_PATTERNS) and ("auth" in low or "revoked" in low or "login" in low or "401" in low):
+        return "auth"
+    if any(k in low for k in LIMIT_PATTERNS) and ("limit" in low or "429" in low or "credit" in low or "quota" in low):
+        return "limit"
+    return None
+
+
+def _agent_from_path(path):
+    """Best-effort: worktree names encode the agent (…-worktrees-claude-opus/…)."""
+    import re
+    m = re.search(r"worktrees?-([a-z0-9-]+?)(?:-work)?(?:/|$)", path)
+    return m.group(1) if m else ""
+
+
+def _scan_logs(paths, hours):
+    """[(path, hits, last_mtime, kind, agent, last_line)] for recent files mentioning limits/auth."""
+    import time
+    cutoff = time.time() - hours * 3600
+    out = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if st.st_mtime < cutoff or st.st_size > 200 * 1024 * 1024:
+            continue
+        hits = 0
+        kind = None
+        last = ""
+        try:
+            with open(p, "r", errors="ignore") as f:
+                for ln in f:
+                    k = _classify(ln)
+                    if k:
+                        hits += 1
+                        kind = k if kind != "auth" else kind
+                        i = ln.lower().find("error")
+                        last = ln[max(0, i - 40):i + 160].strip() if i >= 0 else ln.strip()[:200]
+        except OSError:
+            continue
+        if hits:
+            out.append((p, hits, st.st_mtime, kind or "limit", _agent_from_path(p), last))
+    return out
+
+
+def cmd_limit(a, board):
+    """Record (or clear) that an agent hit a usage limit; shown in who/master."""
+    owner = a.agent or whoami()
+    if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
+        checkin(board, owner)
+    if a.clear:
+        mutate = lambda rec: rec.pop("limit", None)
+        msg = "%s is back (limit cleared)" % owner
+    else:
+        limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
+        mutate = lambda rec: rec.update({"limit": limit})
+        msg = "%s hit a usage limit%s%s" % (owner, (" until %s" % a.until) if a.until else "",
+                                            (": %s" % a.note) if a.note else "")
+    # Read-modify-write under the lock: a watch-loop heartbeat lands on this
+    # same record every 60s, and unsynchronised it would drop the limit while
+    # this command still printed success -- the exact bug this guards.
+    _agent_update(board, owner, mutate)
+    post_message(board, owner, msg)
+    print(msg)
+    held = [t for t in load_all(board) if t["status"] == "claimed" and t.get("owner") == owner]
+    if held and not a.clear:
+        print("still holding: %s -- master may `tickets reopen` them for someone else" % ", ".join(t["id"] for t in held))
+
+
+def cmd_limits(a, board):
+    """Who is limited: manual records + silence + a scan of local tool logs."""
+    print("Recorded limits:")
+    any_ = False
+    for r in load_agents(board):
+        lim = r.get("limit")
+        if lim:
+            any_ = True
+            print("  %-14s hit %s ago%s%s" % (r["owner"], fmt_hours(hours_since(lim["at"])),
+                                             (", back %s" % lim["until"]) if lim.get("until") else "",
+                                             (" -- %s" % lim["note"]) if lim.get("note") else ""))
+    if not any_:
+        print("  none (agents record one with `tickets limit --until \"...\"`)")
+    print("")
+    print("Probably limited (holding a ticket, silent > %d min):" % (UPDATE_EVERY_MIN * 2))
+    quiet = False
+    for t in load_all(board):
+        if t["status"] == "claimed":
+            su = timing(t)["since_update"]
+            if su is not None and su * 60 > UPDATE_EVERY_MIN * 2:
+                quiet = True
+                print("  %-14s %s silent %s" % (t.get("owner", "?"), t["id"], fmt_hours(su)))
+    if not quiet:
+        print("  nobody")
+    print("")
+    home = os.path.expanduser("~")
+    # The old section here scanned every recent tool log for the substring
+    # "rate_limit" and printed the hit count as if it were evidence. Every
+    # codex turn writes a `rate_limits` telemetry block, so a perfectly
+    # healthy session and a hard-limited one produced identical output --
+    # MASTER.md already told masters not to trust it. It is replaced by the
+    # per-agent state derived in agent_liveness(), and kept only behind
+    # --raw-scan, labelled for what it is.
+    print("Live state (from each session's own transcript, not from the watcher's `seen`):")
+    agents = load_agents(board)
+    if not agents:
+        print("  nobody has checked in yet")
+    for r in sorted(agents, key=lambda r: r.get("owner", "")):
+        lv = _safe(lambda r=r: agent_liveness(board, r, agents),
+                   {"state": "unknown", "detail": "liveness read failed",
+                    "source": "none", "heuristic": True})
+        print("  %-14s %-8s%s %-9s %s" % (r["owner"][:14], lv["state"], liveness_mark(lv),
+                                          "via " + (lv.get("source") or "none"), (lv.get("detail") or "")[:70]))
+    print("  legend: ! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- read the log by hand")
+    if getattr(a, "raw_scan", False):
+        sources = {
+            "claude": glob.glob(os.path.join(home, ".claude", "projects", "*", "*.jsonl")),
+            "codex": glob.glob(os.path.join(home, ".codex", "sessions", "**", "*.jsonl"), recursive=True)
+                     + glob.glob(os.path.join(home, ".codex", "log", "*")),
+            "cursor": glob.glob(os.path.join(home, ".cursor", "chats", "**", "*.json*"), recursive=True)
+                      + glob.glob(os.path.join(home, ".cursor", "*.log")),
+        }
+        print("")
+        print("RAW SUBSTRING SCAN, last %dh -- NOT EVIDENCE OF ANYTHING." % a.hours)
+        print("  Codex writes a `rate_limits` telemetry block on every turn, so a healthy session "
+              "scores hits here exactly like a dead one. Shown only because it is occasionally useful "
+              "for finding WHICH file to open by hand.")
+        found = False
+        for tool, paths in sources.items():
+            hits = _scan_logs(paths, a.hours)
+            hits.sort(key=lambda x: -x[2])
+            for p, n, mt, kind, agent, last in hits[:6]:
+                found = True
+                short = p.replace(home, "~")
+                print("  %-7s %-5s %3d hits  %s ago  agent=%s  %s" % (
+                    tool, kind.upper(), n, fmt_hours((datetime.now(timezone.utc).timestamp() - mt) / 3600.0),
+                    agent or "?", short[-70:]))
+                if last and getattr(a, "verbose", False):
+                    print("          last: %s" % last[:180])
+        if not found:
+            print("  no files matched")
+    print("")
+    print("AUTH means the session's login died (revoked/expired token): the fix is `/login` in that "
+          "session, not waiting. LIMIT means a usage/rate cap: wait for the reset or switch accounts. "
+          "Either way, if the agent holds a ticket, `tickets reopen` it so someone else can continue. "
+          "UNKNOWN means this tool cannot tell you -- go read the log; it is not a synonym for fine, "
+          "and nothing should be reopened on it alone.")
+
+
+def cmd_status(a, board):
+    """Generic status setter with the words agents actually use."""
+    word = a.status.lower()
+    target = STATUS_WORDS.get(word)
+    if not target:
+        sys.exit("unknown status %r; use one of: %s" % (a.status, ", ".join(sorted(STATUS_WORDS))))
+    t = load(board, a.id)
+    if target == t["status"]:
+        print("%s already %s" % (a.id, LABEL[target]))
+        return
+    if target == "claimed":
+        owner = whoami(a.owner)
+        if t["status"] == "open":
+            got = try_claim(board, a.id, owner)
+            if not got:
+                sys.exit("%s is already taken" % a.id)
+            checkin(board, owner, a.id)
+        else:
+            t["status"] = "claimed"
+            t["owner"] = t.get("owner") or owner
+            t.setdefault("claimed_at", now())
+            save(board, t)
+        print("%s -> IN PROGRESS (@%s)" % (a.id, t.get("owner") or owner))
+        return
+    if target == "open":
+        a.__dict__.setdefault("id", a.id)
+        cmd_reopen(a, board)
+        return
+    if target == "blocked":
+        if not a.notes:
+            sys.exit("blocked needs --notes \"why\"")
+        a.reason = a.notes
+        cmd_block(a, board)
+        return
+    if target == "review":
+        a.pr = getattr(a, "pr", "")
+        a.force = getattr(a, "force", False)
+        cmd_review(a, board)
+        return
+    if target == "done":
+        a.no_notes = False
+        a.force = getattr(a, "force", False)
+        cmd_done(a, board)
+        return
+
+
+def cmd_repin(a, board):
+    """Correct a review pin so it names the repo the artifact is really in (T-272).
+
+    Backfill. Every pin recorded before `review` learned --artifact was taken
+    from the caller's cwd, which on this board is systematically the wrong
+    clone. Re-running `tickets review` would also fix it, but it resets
+    review_at and re-notifies the master once per ticket, which for a queue
+    this deep is worse than the problem -- so correcting evidence gets its own
+    verb, and leaves an explicit REPIN note rather than silently rewriting
+    history.
+
+    The new pin is the artifact tree's CURRENT HEAD, derived by running git
+    there. Check that tree out at the commit that was actually reviewed first.
+    """
+    t = load(board, a.id)
+    if t["status"] != "review":
+        sys.exit("%s is %s; repin corrects the pin on work that is IN REVIEW "
+                 "(a closed ticket's record is history -- do not rewrite it)" % (
+                     a.id, LABEL[t["status"]]))
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
+    if not g:
+        sys.exit("--artifact %s is not a git working tree" % art)
+    if g["dirty"] and not a.force:
+        sys.exit("RULE: %d uncommitted files in %s -- the pin must name a committed "
+                 "state; commit or check out the reviewed sha first (or --force)" % (
+                     g["dirty"], g["top"]))
+    was_commit, was_repo = t.get("commit"), t.get("repo")
+    stamp = _record_pin(t, g, art)
+    author = whoami(a.owner)
+    t["notes"].append({"by": author, "at": now(), "text": "REPIN: %s in %s (was %s in %s)%s" % (
+        stamp, t.get("repo") or "?", was_commit or "-", was_repo or "-",
+        (" -- " + a.notes) if a.notes else "")})
+    save(board, t)
+    checkin(board, author, None, "repinned %s" % a.id)
+    print("%s repinned" % a.id)
+    print("  was %s in %s" % (was_commit or "-", was_repo or "-"))
+    print("  now %s in %s  (from %s)" % (stamp, t.get("repo") or "?", art))
+    print("  verify this is the sha you submitted; repin records that tree's HEAD.")
+
+
+def cmd_done(a, board):
+    t = load(board, a.id)
+    if not a.notes and not a.no_notes:
+        sys.exit(
+            'done needs --notes "paths, names, decisions the next agent must match" '
+            "(or --no-notes if there is truly nothing to hand off)"
+        )
+    # T-272: `done` must be aimable at the artifact tree too. Without this,
+    # re-aiming `review` would leave every correctly-pinned cross-repo ticket
+    # permanently unclosable -- T-254's guard below hard-exits on a repo
+    # mismatch and explicitly refuses --force as an override.
+    art = artifact_tree(a)
+    g = git_state(cwd=art)
+    # A branch/SHA match is not proof of repository identity (T-254).
+    # Check before mutating the ticket; --force only bypasses worktree rules.
+    recorded_repo = t.get("repo")
+    current_repo = g.get("repo") if g else None
+    if (g or recorded_repo) and not current_repo:
+        sys.exit("RULE: %s cannot be closed without a verifiable repository; "
+                 "run done from the deliverable's checkout, or pass "
+                 "--artifact <dir> pointing at it." % a.id)
+    if recorded_repo and recorded_repo != current_repo:
+        sys.exit("RULE: %s recorded repository %r does not match %r; close it from the "
+                 "recorded repository, or pass --artifact <dir> pointing at that "
+                 "checkout. --force cannot override repository evidence." % (
+                     a.id, recorded_repo, current_repo))
+    if t["status"] == "review":
+        # the master closes reviewed work from main after merging; the agent's
+        # branch@sha is already on the ticket, so the branch/clean rules do not apply
+        a.force = True
+    if g and g["branch"] in ("main", "master") and not a.force:
+        sys.exit(
+            "RULE: %s is being closed from branch %r. Work belongs on the agent's own "
+            "worktree branch; commit there and merge, then run done from that tree "
+            "(or pass --force if this really was merged trunk work)." % (a.id, g["branch"])
+        )
+    if g and g["dirty"] and not a.force:
+        sys.exit(
+            "RULE: %d uncommitted files in %s. Commit before marking %s done "
+            "(or --force to override)." % (g["dirty"], g["top"], a.id)
+        )
+    t["status"] = "done"
+    t["done_at"] = now()
+    if not t.get("claimed_at"):
+        t["claimed_at"] = t.get("updated") or t["created"]
+    text = a.notes
+    if g:
+        stamp = "%s@%s" % (g["branch"], g["sha"])
+        if stamp not in text:
+            text = ("%s -- %s" % (stamp, text)) if text else stamp
+        if t.get("commit") and not recorded_repo:
+            print("WARNING: %s previous pin has no recorded repository; its provenance "
+                  "cannot be verified. Recording only the current completion repository."
+                  % a.id, file=sys.stderr)
+        _record_pin(t, g, art)
+    if text:
+        # by=whoami(), not t["owner"]: the note records who wrote it, which is
+        # not always who the ticket is filed under (T-238 -- see cmd_note).
+        t["notes"].append({"by": whoami(), "at": now(), "text": text})
+    save(board, t)
+    tm = timing(t)
+    _safe(lambda: traj_event(board, "done", agent=whoami(), ticket=t,
+                             state_before="review" if t.get("review_at") else "claimed",
+                             state_after="done", outcome="done",
+                             notes_len=len(a.notes or ""),
+                             active_hours=_round3(tm.get("active")),
+                             wait_hours=_round3(tm.get("wait")),
+                             pin=t.get("commit", ""),
+                             **_traj_git(cwd=art)), None)
+    if t.get("owner"):
+        # T-428: checkin() always writes THIS process's cwd/branch/sha. That is
+        # the closer's location. Stamping it onto a different owner makes
+        # `tickets who` lie (the owner appears to sit in the closer's tree).
+        closer = whoami()
+        note = "finished %s by %s" % (a.id, closer)
+        if t["owner"] == closer:
+            checkin(board, t["owner"], "", note)
+        else:
+            _agent_set(board, t["owner"], ticket="", note=note)
+            checkin(board, closer, None, note)
+    print("%s done in %s (waited %s before claim)" % (
+        a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
+    if g:
+        print("recorded %s" % t["commit"])
+    tickets = load_all(board)
+    freed = [x["id"] for x in unblocked(board, tickets) if a.id in x.get("deps", [])]
+    if freed:
+        print("unblocked: %s" % ", ".join(freed))
+
+
+def cmd_block(a, board):
+    t = load(board, a.id)
+    before = t["status"]
+    t["status"] = "blocked"
+    t["notes"].append({"by": whoami(), "at": now(), "text": a.reason})
+    save(board, t)
+    _safe(lambda: traj_event(board, "block", agent=whoami(), ticket=t,
+                             state_before=before, state_after="blocked",
+                             outcome="blocked", notes_len=len(a.reason or ""),
+                             **_traj_git()), None)
+    print("%s blocked: %s" % (a.id, a.reason))
+
+
+def cmd_note(a, board):
+    """Add a note (`tickets note` / `tickets update`).
+
+    `by` is always the caller's own identity (`--by`, else $TICKET_AGENT),
+    never the ticket's `owner` field. T-238: a fallback to `t.get("owner")`
+    here meant a second agent working the same ticket in parallel -- exactly
+    the case a duplicate lane needs to be visible -- had its notes silently
+    relabeled as the owner's, so nothing in the note history could ever
+    reveal the second lane. This was a write-path bug: the on-disk `by` was
+    wrong, not just its rendering in `tickets show`.
+    """
+    t = load(board, a.id)
+    who = whoami(a.by)
+    t["notes"].append({"by": who, "at": now(), "text": a.text})
+    save(board, t)
+    # notes_len only -- the note body is the agent's own prose and never enters
+    # the trajectory log.
+    _safe(lambda: traj_event(board, "update", agent=who, ticket=t,
+                             notes_len=len(a.text or ""), state_after=t["status"],
+                             **_traj_git()), None)
+    if t["status"] == "claimed":
+        checkin(board, who, t["id"], a.text[:80])
+    owner = t.get("owner")
+    if owner and owner != who:
+        # Correct attribution only helps a reader who goes looking; a
+        # stranger's note on a claimed ticket needs to actively surface to
+        # the owner, since silent duplicate work is the actual harm.
+        post_message(board, who, "posted on %s (owned by %s): %s" % (
+            t["id"], owner, a.text[:120]), to=owner, re=t["id"])
+        print("warning: %s is owned by %s, not %s -- %s notified" % (
+            t["id"], owner, who, owner))
+    tm = timing(t)
+    if t["status"] == "claimed" and tm["active"] is not None:
+        print("update on %s recorded (%s into the task)" % (a.id, fmt_hours(tm["active"])))
+    else:
+        print("noted on %s" % a.id)
+
+
+def _ensure(board, kind, ref):
+    if not ref:
+        return
+    if kind == "epic":
+        get_epic(board, ref)
+    else:
+        get_sprint(board, ref)
+
+
+def cmd_assign(a, board):
+    """Modify an existing ticket: epic, sprint, role, owner, priority, title."""
+    t = load(board, a.id)
+    changed = []
+    if a.epic is not None:
+        _ensure(board, "epic", a.epic)
+        t["epic"] = a.epic
+        changed.append("epic=%s" % (a.epic or "(none)"))
+    if a.sprint is not None:
+        _ensure(board, "sprint", a.sprint)
+        t["sprint"] = a.sprint
+        changed.append("sprint=%s" % (a.sprint or "(none)"))
+    if a.role is not None:
+        t["role"] = a.role
+        changed.append("role=%s" % (a.role or "(any)"))
+    if a.priority is not None:
+        t["priority"] = a.priority
+        changed.append("priority=%d" % a.priority)
+    if a.title:
+        t["title"] = a.title
+        changed.append("title")
+    if a.needs is not None:
+        t["needs"] = _ids(a.needs)
+        changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
+    if a.owner is not None:
+        # hard assignment by the master: takes the lock on their behalf
+        prev_owner = t.get("owner") or ""
+        if t["status"] == "open" and a.owner:
+            got = try_claim(board, t["id"], a.owner)
+            if not got:
+                sys.exit("%s was claimed by someone else while assigning" % t["id"])
+            t = got
+            changed.append("claimed for %s" % a.owner)
+            _safe(lambda: _bind_agent_ticket(board, a.owner, t["id"]), None)
+        elif t["status"] in ("claimed", "review"):
+            t["owner"] = a.owner
+            changed.append("owner=%s" % a.owner)
+            if prev_owner and prev_owner != a.owner:
+                _safe(lambda: _clear_agent_ticket(board, prev_owner, t["id"]), None)
+            if a.owner:
+                _safe(lambda: _bind_agent_ticket(board, a.owner, t["id"]), None)
+    if not changed:
+        sys.exit("nothing to change; see tickets assign --help")
+    note_text = "assign: " + ", ".join(changed)
+    if getattr(a, "notes", ""):
+        note_text += " -- " + a.notes
+    t["notes"].append({"by": whoami(a.by), "at": now(), "text": note_text})
+    save(board, t)
+    print("%s: %s" % (t["id"], ", ".join(changed)))
+
+
+# ---- epics --------------------------------------------------------------
+
+def cmd_epic(a, board):
+    sub = a.epic_cmd
+    if sub == "create":
+        e = _alloc(epics_dir(board), "E", 3, {
+            "title": a.title, "body": a.body or "", "status": "open",
+            "created": now(), "updated": now(),
+        })
+        print("created %s  %s" % (e["id"], e["title"]))
+        return
+    if sub == "done":
+        e = get_epic(board, a.id)
+        e["status"] = "done"
+        _save_in(epics_dir(board), e)
+        print("%s done" % a.id)
+        return
+    tickets = load_all(board)
+    epics = load_epics(board)
+    if sub == "show":
+        e = get_epic(board, a.id)
+        mine = [t for t in tickets if t.get("epic") == e["id"]]
+        d, n, c, b = progress(mine)
+        print("%s  %s  %s  (%d in flight, %d blocked)" % (e["id"], e["title"], bar(d, n), c, b))
+        if e.get("body"):
+            print(e["body"])
+        for t in mine:
+            print("  " + line(t, tickets))
+        return
+    # list
+    if not epics:
+        print("no epics (tickets epic create \"title\")")
+        return
+    for e in epics:
+        mine = [t for t in tickets if t.get("epic") == e["id"]]
+        d, n, c, b = progress(mine)
+        flag = " DONE" if e.get("status") == "done" else ""
+        print("%s  %-40s %s  %d active, %d blocked%s" % (e["id"], e["title"][:40], bar(d, n), c, b, flag))
+    loose = [t for t in tickets if not t.get("epic")]
+    if loose:
+        print("(%d tickets have no epic: %s)" % (len(loose), ", ".join(t["id"] for t in loose[:12])
+                                                  + (" ..." if len(loose) > 12 else "")))
+
+
+# ---- sprints ------------------------------------------------------------
+
+def cmd_sprint(a, board):
+    sub = a.sprint_cmd
+    tickets = load_all(board)
+    if sub == "create":
+        s = _alloc(sprints_dir(board), "S", 2, {
+            "goal": a.goal, "status": "planned", "start": a.start or "", "end": a.end or "",
+            "created": now(), "updated": now(),
+        })
+        print("created %s  %s" % (s["id"], s["goal"]))
+        if a.activate:
+            a.id = s["id"]
+            sub = "start"
+        else:
+            return
+    if sub == "start":
+        for s in load_sprints(board):
+            if s.get("status") == "active" and s["id"] != a.id:
+                s["status"] = "done" if a.close_previous else "planned"
+                _save_in(sprints_dir(board), s)
+        s = get_sprint(board, a.id)
+        s["status"] = "active"
+        if not s.get("start"):
+            s["start"] = now()
+        _save_in(sprints_dir(board), s)
+        print("%s is now the active sprint: %s" % (s["id"], s["goal"]))
+        return
+    if sub == "add":
+        _ensure(board, "sprint", a.id)
+        for tid in _ids(a.tickets):
+            t = load(board, tid)
+            t["sprint"] = a.id
+            save(board, t)
+        print("%s <- %s" % (a.id, a.tickets))
+        return
+    if sub == "close":
+        s = get_sprint(board, a.id)
+        mine = [t for t in tickets if t.get("sprint") == s["id"]]
+        left = [t for t in mine if t["status"] != "done"]
+        s["status"] = "done"
+        s["end"] = now()
+        d, n, c, b = progress(mine)
+        _save_in(sprints_dir(board), s)
+        print("%s closed: %s" % (s["id"], bar(d, n)))
+        if left:
+            if a.carry:
+                _ensure(board, "sprint", a.carry)
+                for t in left:
+                    t["sprint"] = a.carry
+                    t["notes"].append({"by": whoami(), "at": now(),
+                                       "text": "carried over from %s" % s["id"]})
+                    save(board, t)
+                print("carried %d unfinished into %s: %s" % (
+                    len(left), a.carry, ", ".join(t["id"] for t in left)))
+            else:
+                print("unfinished (still tagged %s): %s" % (s["id"], ", ".join(t["id"] for t in left)))
+        return
+    if sub == "show":
+        s = get_sprint(board, a.id) if a.id else active_sprint(board)
+        if not s:
+            print("no active sprint")
+            return
+        mine = [t for t in tickets if t.get("sprint") == s["id"]]
+        d, n, c, b = progress(mine)
+        print("%s [%s]  %s  %s  (%d in flight, %d blocked)" % (
+            s["id"], s.get("status"), s["goal"], bar(d, n), c, b))
+        if s.get("start"):
+            print("started %s ago" % fmt_hours(hours_since(s["start"])))
+        for t in mine:
+            print("  " + line(t, tickets))
+        return
+    # list
+    sprints = load_sprints(board)
+    if not sprints:
+        print("no sprints (tickets sprint create \"goal\" --activate)")
+        return
+    for s in sprints:
+        mine = [t for t in tickets if t.get("sprint") == s["id"]]
+        d, n, c, b = progress(mine)
+        print("%s [%-7s] %-40s %s" % (s["id"], s.get("status"), s["goal"][:40], bar(d, n)))
+
+
+# ---- master -------------------------------------------------------------
+
+MASTER_TEMPLATE = """# MASTER -- coordination node for this board
+
+Any agent can become master: run `tickets master take`, then `tickets master`
+to get the full briefing. Keep this file current; it is the memory that
+survives agent restarts and timeouts.
+
+## Mission
+(what we are building, one paragraph)
+
+## Workforce
+| agent (TICKET_AGENT) | tool | default roles | worktree |
+|---|---|---|---|
+| example | Claude Code | backend | .worktrees/example |
+
+## Rules for every agent
+1. Claim before you work (`tickets next`). Never work without a ticket; never
+   edit `.tickets/` by hand.
+2. Finish what you claim. If you cannot, `tickets block` with a reason or
+   `tickets reopen` -- do not go silent. Hold one ticket at a time.
+3. You may create, split, re-wire and assign tickets (`create --blocks`,
+   `dep`, `assign`, `plan`). Extending the graph is expected, not exceptional.
+4. Work on your own git worktree and branch, never on main. Commit as you go.
+   `tickets done` refuses from main or with uncommitted files.
+5. Post `tickets update <id> "..."` at least every 45 minutes and at each
+   milestone. Silence longer than that is treated as a timeout.
+6. `done --notes` must include branch@sha (added automatically), the paths
+   you touched, and every decision a dependent ticket must match. Then merge
+   (or open the PR) before claiming the next ticket.
+7. Set `TICKET_AGENT` to your own name so the board can tell agents apart.
+
+## Sprint plan
+(goals per sprint; `tickets sprint list` has the live numbers)
+
+## Decision log
+(append with `tickets master log "..."`)
+"""
+
+
+def cmd_master(a, board):
+    sub = a.master_cmd or "brief"
+    path = master_path(board)
+    if sub == "init":
+        if os.path.exists(path) and not a.force:
+            print("MASTER.md exists; use --force to overwrite")
+            return
+        with open(path, "w") as f:
+            f.write(MASTER_TEMPLATE)
+        print("wrote %s -- fill in Mission, Workforce, Sprint plan" % path)
+        return
+    if sub == "cos":
+        prev = current_master(board) or {}
+        if not prev.get("owner"):
+            sys.exit("no master yet (tickets master take first)")
+        who = a.text or ""
+        if not who:
+            print("chief of staff: %s" % (prev.get("cos") or "(none)"))
+            return
+        prev["cos"] = "" if who in ("none", "-", "clear") else who
+        with open(master_state_path(board), "w") as f:
+            json.dump(prev, f)
+        _master_log(board, "chief of staff set to %s (master %s keeps planning/scope; cos reviews, unblocks, merges)"
+                    % (prev["cos"] or "none", prev["owner"]))
+        print("chief of staff: %s" % (prev["cos"] or "none"))
+        return
+    if sub == "take":
+        owner = whoami(a.owner)
+        prev = current_master(board)
+        with open(master_state_path(board), "w") as f:
+            json.dump({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, f)
+        _master_log(board, "%s took over as master%s" % (
+            owner, (" from %s" % prev["owner"]) if prev and prev.get("owner") != owner else ""))
+        print("%s is master now. Run `tickets master` for the briefing." % owner)
+        return
+    if sub == "release":
+        if os.path.exists(master_state_path(board)):
+            os.unlink(master_state_path(board))
+        _master_log(board, "%s released master" % whoami(a.owner))
+        print("master released")
+        return
+    if sub == "log":
+        _master_log(board, a.text, by=whoami(a.owner))
+        print("logged")
+        return
+    # brief
+    tickets = load_all(board)
+    m = current_master(board)
+    print("=" * 72)
+    print("MASTER BRIEFING  %s" % board)
+    obj = _safe(lambda: load_objective(board), {})
+    if obj:
+        print("OBJECTIVE%s: %s" % (" (met)" if obj.get("done") else "", obj.get("text", "")[:300]))
+    me = whoami()
+    if m:
+        stale = hours_since(m["since"])
+        print("current master: %s (for %s)%s" % (m["owner"], fmt_hours(stale),
+              "  <- that is you" if m["owner"] == me else ""))
+        if m["owner"] != me:
+            print("TAKING OVER? Masters die on usage limits. Run `tickets master take`, then in order: "
+                  "`tickets limits` (who is out), REVIEW QUEUE below (merge with `tickets merge`), "
+                  "HEALTH below, `tickets who`. Everything decided so far is in the Decision log.")
+    else:
+        print("current master: nobody -- `tickets master take` to become it, then follow HANDOVER in MASTER.md")
+    print("=" * 72)
+    if os.path.exists(path):
+        with open(path) as f:
+            print(f.read().rstrip())
+    else:
+        print("(no MASTER.md yet -- `tickets master init`)")
+    print("")
+    print("-" * 72)
+    print("LIVE STATUS")
+    print("-" * 72)
+    cur = active_sprint(board)
+    if cur:
+        mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+        d, n, c, b = progress(mine)
+        print("Sprint %s: %s  %s  (%d in flight, %d blocked)" % (cur["id"], cur["goal"], bar(d, n), c, b))
+    else:
+        print("Sprint: none active")
+    epics = load_epics(board)
+    if epics:
+        print("Epics:")
+        for e in epics:
+            mine = [t for t in tickets if t.get("epic") == e["id"]]
+            d, n, c, b = progress(mine)
+            print("  %s %-38s %s" % (e["id"], e["title"][:38], bar(d, n)))
+    d, n, c, b = progress(tickets)
+    print("Board: %s  %d in flight, %d blocked, %d ready" % (
+        bar(d, n), c, b, len(unblocked(board, tickets))))
+    wf = load_workforce(board)
+    roles = load_roles(board)
+    agents = dict((r["owner"], r) for r in load_agents(board))
+    names = sorted(set(list(wf) + [r for r in roles if roles[r] or r in agents] + list(agents)))
+    if names:
+        print("")
+        print("Workforce:")
+        print("  %-14s %-8s %-22s %-26s %-8s %s" % ("agent", "cost", "roles", "can", "seen", "where"))
+        for nme in names:
+            e = wf.get(nme, {})
+            r = agents.get(nme, {})
+            where = ""
+            if r.get("branch"):
+                where = "%s%s" % (r["branch"], (" +%d" % r["dirty"]) if r.get("dirty") else "")
+                if r.get("ticket"):
+                    where += "  on %s" % r["ticket"]
+            print("  %-14s %-8s %-22s %-26s %-8s %s" % (
+                nme[:14], e.get("cost", "-"), ",".join(roles.get(nme, []))[:22] or "any",
+                ",".join(e.get("can", []))[:26] or "-",
+                (fmt_hours(hours_since(r["seen"])) if r.get("seen") else "never"), where))
+    m_owner = m["owner"] if m else whoami()
+    msgs = unread(board, m_owner)
+    if msgs:
+        print("")
+        print("Unread messages for %s (%d):" % (m_owner, len(msgs)))
+        for mm in msgs[-8:]:
+            print("  " + fmt_msg(mm))
+    queue = [t for t in tickets if t["status"] == "review"]
+    if queue:
+        print("")
+        print("REVIEW QUEUE (%d) -- master: review, merge, then `tickets done <id> --notes \"merged as <sha>\"`:" % len(queue))
+        for t in queue:
+            print("  %s @%-12s %-46s %s  waiting %s%s" % (
+                t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
+                fmt_hours(hours_since(t.get("review_at", t["updated"]))),
+                ("  PR " + t["pr"]) if t.get("pr") else ""))
+    print("")
+    print("In flight:")
+    for t in tickets:
+        if t["status"] == "claimed":
+            tm = timing(t)
+            print("  %s @%-14s %-50s active %s, updated %s ago" % (
+                t["id"], t.get("owner", "?"), t["title"][:50],
+                fmt_hours(tm["active"]), fmt_hours(tm["since_update"])))
+    finished = [t for t in tickets if t["status"] == "done" and t.get("claimed_at") and t.get("done_at")]
+    if finished:
+        avg = sum(timing(t)["active"] or 0 for t in finished) / len(finished)
+        print("Cycle time: avg %s over %d timed tickets" % (fmt_hours(avg), len(finished)))
+    print("")
+    issues = health(board, tickets)
+    print("-" * 72)
+    print("HEALTH  (%d issues)" % len(issues))
+    print("-" * 72)
+    if not issues:
+        print("  clean")
+    for sev, msg, fix in issues:
+        print("  [%s] %s" % (sev, msg))
+        if fix:
+            print("        fix: %s" % fix)
+
+
+def _master_log(board, text, by=None):
+    path = master_path(board)
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write(MASTER_TEMPLATE)
+    elif os.path.getsize(path) > MASTER_LOG_MAX_BYTES:
+        _trim_decision_log(board, path)
+    with open(path) as f:
+        body = f.read()
+    entry = "- %s [%s] %s\n" % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), by or whoami(), text)
+    if "## Decision log" in body:
+        if not body.endswith("\n"):
+            body += "\n"
+        body += entry
+    else:
+        body += "\n## Decision log\n" + entry
+    with open(path, "w") as f:
+        f.write(body)
+
+
+def _trim_decision_log(board, path):
+    """MASTER.md's Decision log only ever grows. Once the file passes
+    MASTER_LOG_MAX_BYTES, move all but the most recent MASTER_LOG_KEEP_ENTRIES
+    '- ' entries to an append-only archive so the briefing stays readable and
+    `tickets master log` stays a small, bounded rewrite."""
+    try:
+        with open(path) as f:
+            body = f.read()
+    except OSError:
+        return
+    head, marker, tail = body.partition("## Decision log\n")
+    if not marker:
+        return
+    entries = [ln for ln in tail.split("\n") if ln.startswith("- ")]
+    if len(entries) <= MASTER_LOG_KEEP_ENTRIES:
+        return
+    overflow = entries[: len(entries) - MASTER_LOG_KEEP_ENTRIES]
+    kept = entries[len(entries) - MASTER_LOG_KEEP_ENTRIES:]
+    archive = os.path.join(board, "MASTER.decisions.archive.md")
+    fd = os.open(archive, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, ("\n".join(overflow) + "\n").encode())
+    finally:
+        os.close(fd)
+    new_body = (head + "## Decision log\n"
+                + "(%d older entries archived to MASTER.decisions.archive.md)\n" % len(overflow)
+                + "\n".join(kept) + "\n")
+    with open(path, "w") as f:
+        f.write(new_body)
+
+
+def health(board, tickets):
+    """Things a master must act on. Returns [(severity, message, fix)]."""
+    out = []
+    by_id = dict((t["id"], t) for t in tickets)
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    cyc = find_cycle(tickets)
+    if cyc:
+        out.append(("CRIT", "dependency cycle %s" % " -> ".join(cyc),
+                    "tickets dep %s --drop %s" % (cyc[0], cyc[1])))
+    for tid, miss in dangling(tickets).items():
+        out.append(("CRIT", "%s depends on non-existent %s" % (tid, ",".join(miss)),
+                    "tickets dep %s --drop %s" % (tid, ",".join(miss))))
+    for t in tickets:
+        if t["status"] != "claimed":
+            continue
+        tm = timing(t)
+        su = tm["since_update"]
+        if su is not None and su * 60 > UPDATE_EVERY_MIN * 2:
+            out.append(("WARN", "%s (@%s) silent for %s -- likely timed out" % (
+                t["id"], t.get("owner"), fmt_hours(su)),
+                "tickets reopen %s   # or ping the agent" % t["id"]))
+        elif su is not None and su * 60 > UPDATE_EVERY_MIN:
+            out.append(("INFO", "%s (@%s) no update for %s" % (t["id"], t.get("owner"), fmt_hours(su)),
+                        "ask for `tickets update %s`" % t["id"]))
+    for t in tickets:
+        if t["status"] != "blocked":
+            continue
+        reason = t["notes"][-1]["text"] if t.get("notes") else ""
+        import re
+        refs = [r for r in re.findall(r"\bT-\d{3}\b", reason) if r != t["id"] and r in by_id]
+        unwired = [r for r in refs if r not in t.get("deps", [])]
+        if unwired:
+            ready = all(r in done for r in unwired)
+            out.append(("WARN", "%s blocked 'on %s' in prose but no graph edge%s" % (
+                t["id"], ",".join(unwired), " -- and those are DONE now" if ready else ""),
+                "tickets dep %s --after %s && tickets reopen %s" % (t["id"], ",".join(unwired), t["id"])
+                if ready else "tickets dep %s --after %s" % (t["id"], ",".join(unwired))))
+        elif not refs and not t.get("deps"):
+            out.append(("INFO", "%s blocked on something outside the board: %s" % (
+                t["id"], reason[:70]), "create a ticket for the prerequisite with --blocks %s" % t["id"]))
+    owners = {}
+    for t in tickets:
+        if t["status"] == "claimed":
+            owners.setdefault(t.get("owner"), []).append(t["id"])
+    for o, ids in owners.items():
+        if len(ids) > 1:
+            out.append(("INFO", "%s holds %d tickets at once: %s" % (o, len(ids), ",".join(ids)),
+                        "one at a time unless deliberately parallel"))
+    wf = load_workforce(board)
+    all_can = set(c for e in wf.values() for c in e.get("can", []))
+    for t in tickets:
+        if t["status"] in ("open",) and t.get("needs"):
+            missing = [n for n in t["needs"] if n not in all_can]
+            if missing:
+                out.append(("WARN", "%s needs %s but no registered agent can do that" % (
+                    t["id"], ",".join(missing)),
+                    "tickets join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
+    for r in load_agents(board):
+        if r.get("limit"):
+            held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
+            out.append(("WARN", "%s hit a usage limit %s ago%s%s" % (
+                r["owner"], fmt_hours(hours_since(r["limit"]["at"])),
+                (", back %s" % r["limit"]["until"]) if r["limit"].get("until") else "",
+                (" -- still holds %s" % ",".join(held)) if held else ""),
+                ("tickets reopen %s   # hand to someone else" % held[0]) if held else "tickets limit %s --clear when back" % r["owner"]))
+    for r in load_agents(board):
+        if r.get("branch") in ("main", "master") and hours_since(r.get("seen", "")) < 24:
+            out.append(("WARN", "%s is working on %s (rule 4)" % (r["owner"], r["branch"]),
+                        "git worktree add .worktrees/%s -b %s-work" % (r["owner"], r["owner"])))
+    for r in load_agents(board):
+        n = _watcher_count(r["owner"], board)
+        if n > 1:
+            out.append(("WARN", "%s has %d watch loops running (expected 1)" % (r["owner"], n),
+                        "tickets spawn %s --stop" % r["owner"]))
+    if not active_sprint(board):
+        out.append(("INFO", "no active sprint", "tickets sprint create \"goal\" --activate"))
+    loose = [t["id"] for t in tickets if not t.get("epic") and t["status"] != "done"]
+    if loose and load_epics(board):
+        out.append(("INFO", "%d open tickets have no epic" % len(loose),
+                    "tickets assign <id> --epic E-xxx"))
+    if not os.path.exists(master_path(board)):
+        out.append(("WARN", "no MASTER.md -- nobody can take over cleanly", "tickets master init"))
+    return out
+
+
+def cmd_reopen(a, board):
+    t = load(board, a.id)
+    notes = getattr(a, "notes", "") or ""
+    # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
+    # ticket to `next` while notes still read as REVIEW. Claimed work that
+    # never entered review stays reopenable without notes (T-246).
+    if (t["status"] == "review" or t.get("review_at")) and not notes.strip():
+        sys.exit(
+            'reopen of IN REVIEW work needs --notes "why" '
+            "(silent reopen returns it to next and looks like a next-reissue bug)"
+        )
+    if notes:
+        # Attribute to the acting agent, not the ticket's outgoing owner --
+        # reopen is very often one agent (a reviewer, the master) sending
+        # BACK another agent's ticket, and stamping the reason as though the
+        # outgoing owner wrote it is the same misattribution class as T-238.
+        t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": notes})
+    before = t["status"]
+    prev_owner = t.get("owner", "")
+    t["status"] = "open"
+    t["owner"] = ""
+    save(board, t)
+    _safe(lambda: traj_event(board, "reopen", agent=whoami(getattr(a, "by", "")),
+                             ticket=t, state_before=before, state_after="open",
+                             outcome="reopened", prev_owner=prev_owner,
+                             notes_len=len(getattr(a, "notes", "") or ""),
+                             **_traj_git()), None)
+    lock = os.path.join(board, a.id + ".lock")
+    if os.path.exists(lock):
+        os.unlink(lock)
+    print("%s reopened" % a.id)
+
+
+def is_fixture_board(board):
+    """True only when the board is explicitly marked disposable."""
+    return os.path.isfile(os.path.join(board, ".fixture-board"))
+
+
+def cmd_clear(a, board):
+    """Delete ticket files — FIXTURE BOARDS ONLY."""
+    if not is_fixture_board(board):
+        sys.exit(
+            "REFUSED: tickets clear will not wipe a live board (missing .fixture-board).\n"
+            "This command only deletes tickets on disposable fixture boards.\n"
+            "Use a disposable fixture board for tests, or:\n"
+            "  tickets board-backup --out /tmp/board.tgz\n"
+            "  tickets board-restore --archive /tmp/board.tgz --dest /tmp/fixture\n"
+            "There is no --force that clears a live board."
+        )
+    if not getattr(a, "yes", False):
+        sys.exit(
+            "refusing: fixture board %s — pass --yes to delete T-*.json / locks there" % board
+        )
+    n = 0
+    for path in glob.glob(os.path.join(board, "T-*.json")) + glob.glob(
+        os.path.join(board, "T-*.lock")
+    ):
+        os.unlink(path)
+        n += 1
+    print("removed %d files from fixture board %s" % (n, board))
+
+
+def cmd_board_backup(a, board):
+    """Backup tickets/roles/coordination to a tarball (fixture by default)."""
+    from pathlib import Path
+
+    from board_backup import backup
+
+    manifest = backup(
+        Path(board),
+        Path(a.out),
+        allow_live=bool(getattr(a, "i_understand_live", False)),
+    )
+    print(json.dumps(manifest, indent=2))
+
+
+def cmd_board_restore(a, board):
+    """Restore a backup into a fixture destination board."""
+    from pathlib import Path
+
+    from board_backup import restore
+
+    result = restore(
+        Path(a.archive),
+        Path(a.dest),
+        allow_live=bool(getattr(a, "i_understand_live", False)),
+    )
+    print(json.dumps(result, indent=2))
+
+
+def cmd_where(a, board):
+    print(board)
+    kids = child_boards(os.getcwd())
+    if len(kids) > 1:
+        print("other live boards in child dirs:")
+        for k in kids:
+            print("  " + k)
+        print("set TICKETS_DIR to pick one")
+
+
+def cmd_context(a, board):
+    paths = context_paths(board)
+    if not paths:
+        print("no CONTEXT.md or docs/handoffs/AGENT_CONTEXT.md next to %s" % board)
+        sys.exit(1)
+    for p in paths:
+        print("# " + p)
+        with open(p) as f:
+            print(f.read().rstrip())
+        print()
+
+
+def cmd_here(a, board):
+    """Manually check in: where am I working, on what."""
+    owner = whoami(a.owner)
+    rec = checkin(board, owner, None, a.note or "")
+    print("%s @ %s" % (owner, rec["worktree"] or rec["cwd"]))
+    print("  branch %s@%s%s" % (rec["branch"] or "?", rec["sha"] or "?",
+                               "  (%d uncommitted)" % rec["dirty"] if rec["dirty"] else ""))
+    print("  ticket %s" % (rec["ticket"] or "none"))
+    warn = worktree_warning(owner)
+    if warn:
+        print(warn)
+
+
+def cmd_who(a, board):
+    """Everyone's last known location, branch and ticket."""
+    agents = load_agents(board)
+    if not agents:
+        print("nobody has checked in yet (agents check in automatically on next/claim/update/done)")
+        return
+    tickets = dict((t["id"], t) for t in load_all(board))
+    live = {} if getattr(a, "no_liveness", False) else dict(
+        (r["owner"], _safe(lambda r=r: agent_liveness(board, r, agents),
+                           {"state": "unknown", "detail": "liveness read failed",
+                            "source": "none", "heuristic": True}))
+        for r in agents)
+    print("%-14s %-9s %-8s %-30s %-20s %s" % ("agent", "state", "loop-seen", "branch@sha", "ticket", "worktree"))
+    for r in sorted(agents, key=lambda r: r.get("seen", ""), reverse=True):
+        tid = r.get("ticket") or ""
+        t = tickets.get(tid)
+        tdesc = ("%s %s" % (tid, MARK.get(t["status"], "")) if t else (tid or "-"))
+        b = "%s@%s" % (r.get("branch") or "?", r.get("sha") or "?")
+        if r.get("dirty"):
+            b += " +%d" % r["dirty"]
+        # cwd is recorded straight from os.getcwd() with no git resolution in
+        # its path, so it is ground truth even when the git-derived "worktree"
+        # field was resolved against a polluted environment (T-243).
+        wt = r.get("cwd") or r.get("worktree") or ""
+        home = os.path.expanduser("~")
+        if wt.startswith(home):
+            wt = "~" + wt[len(home):]
+        lv = live.get(r["owner"]) or {}
+        # `loop-seen` is named, not hidden: it is still the honest answer to
+        # "when did the watcher last idle", it is just not the answer to "is
+        # this agent alive" -- which is what reading it as `seen` implied.
+        print("%-14s %-8s%s %-8s %-30s %-20s %s" % (
+            r["owner"][:14], (lv.get("state") or "-")[:8], liveness_mark(lv) if lv else " ",
+            fmt_hours(hours_since(r.get("seen"))) + " ago", b[:30], tdesc[:20], wt))
+        if lv.get("detail"):
+            print("%-14s %s" % ("", lv["detail"][:100]))
+        if r.get("git_mismatch"):
+            print("%-14s !! git resolved a repo that does not contain this agent's cwd at its last "
+                  "check-in -- branch/sha above are unreliable; cwd is ground truth (T-243)" % "")
+        if r.get("limit"):
+            lim = r["limit"]
+            print("%-14s !! USAGE LIMIT hit %s ago%s" % ("", fmt_hours(hours_since(lim["at"])),
+                                                        (", back %s" % lim["until"]) if lim.get("until") else ""))
+        if r.get("note"):
+            print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
+    # collisions
+    by_branch = {}
+    for r in agents:
+        # "?" is the unresolved placeholder, not a real branch: agents sharing
+        # it are not sharing a worktree, so it must not raise a clobber warning.
+        if r.get("branch") and r["branch"] not in ("main", "master", "?"):
+            by_branch.setdefault(r["branch"], []).append(r["owner"])
+    for b, os_ in by_branch.items():
+        if len(set(os_)) > 1:
+            print("!! %s share branch %s -- they will clobber each other" % (", ".join(sorted(set(os_))), b))
+    on_main = [r["owner"] for r in agents if r.get("branch") in ("main", "master")]
+    if on_main:
+        print("!! on main/master: %s -- rule 4, move to a worktree" % ", ".join(on_main))
+    if live:
+        print("")
+        print("state is read from the session's own transcript, not from loop-seen.  "
+              "! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- go read the log")
+
+
+# ---- trajectories: the team's own record of who did what, and at what cost --
+#
+# T-311. One append-only JSONL per board, alongside messages.jsonl, written by
+# the writers that already know a fact rather than reconstructed later by a
+# reader guessing from timestamps.
+#
+# The product objective is TASK COMPLETION IN THE FEWEST TURNS, so this file
+# exists to make "turns" measurable: how many watch runs a ticket cost, how
+# many updates and messages an agent needed, how often work came back. Nothing
+# here is allowed to answer that with a guess -- a field the writer does not
+# actually know is OMITTED, never defaulted. A reader can tell "0 tokens" from
+# "this harness never told us", and only the first is a number.
+#
+# PRIVACY: ids, counts, outcomes and timings only. No prompt text, no tool
+# input or output, no note or message bodies -- their LENGTH is recorded
+# (notes_len, text_len) and nothing else. `msg` events carry from/to/re only.
+
+TRAJ_VERSION = 1
+TRAJ_MAX_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_MAX_BYTES", 50 * 1024 * 1024))
+TRAJ_KINDS = ("run_start", "run_end", "claim", "update", "review", "done",
+              "reopen", "block", "msg", "merge", "shadow_decision")
+
+
+def trajectories_path(board):
+    return os.path.join(board, "trajectories.jsonl")
+
+
+def _rotate_trajectories_if_big(board):
+    """Same swap-under-a-lock as messages.jsonl, and the same honest caveat:
+    a writer already inside an append during the swap can land its line in the
+    archive. Archives are read back by every reader that matters here
+    (`trajectories`, `export`, `backfill`), so a line in the archive is not a
+    lost line -- unlike the live-file-only fast path on the message side.
+    """
+    path = trajectories_path(board)
+    try:
+        if os.path.getsize(path) <= TRAJ_MAX_BYTES:
+            return
+    except OSError:
+        return
+    lock_path = path + ".rotate.lock"
+    try:
+        os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return
+    try:
+        if os.path.getsize(path) <= TRAJ_MAX_BYTES:
+            return
+        archive = os.path.join(board, "trajectories.%s.jsonl" % now()[:10])
+        empty_tmp = path + ".rotate.tmp"
+        open(empty_tmp, "wb").close()
+        if os.path.exists(archive):
+            with open(path, "rb") as src:
+                data = src.read()
+            fd = os.open(archive, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(empty_tmp, path)
+        else:
+            os.replace(path, archive)
+            os.replace(empty_tmp, path)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+
+
+def _objective_id(board):
+    """A stable id for the standing objective.
+
+    `tickets objective` stores no id, and adding one would rewrite a file
+    other seats read, so the id is DERIVED: a hash of the objective's text and
+    set-time. Same objective -> same id across every agent and every process;
+    editing the objective starts a new id, which is the behaviour a reader
+    grouping trajectories by objective actually wants.
+    """
+    obj = load_objective(board)
+    text = obj.get("text") if isinstance(obj, dict) else None
+    if not text:
+        return ""
+    import hashlib
+    h = hashlib.sha1(("%s|%s" % (text, obj.get("at", ""))).encode("utf-8", "replace"))
+    return "obj-" + h.hexdigest()[:8]
+
+
+def _agent_harness(board, owner):
+    """(harness, model, effort) for an agent, from what it registered with
+    `tickets join`. Unregistered -> empty strings, and the caller omits the
+    fields rather than writing a plausible-looking default."""
+    entry = {}
+    try:
+        entry = load_workforce(board).get(owner) or {}
+    except (IOError, ValueError, OSError):
+        entry = {}
+    return (entry.get("harness") or entry.get("tool", "") or "",
+            entry.get("model", "") or "",
+            entry.get("effort", "") or "")
+
+
+def traj_write(board, rec):
+    """Append one event. Best-effort by design: the trajectory log is
+    instrumentation, and instrumentation that can fail a `tickets done` is
+    worse than a missing line. Every writer here is on a command's success
+    path, so a raised exception would abort work that already happened."""
+    try:
+        _rotate_trajectories_if_big(board)
+        line_ = json.dumps(rec) + "\n"
+        fd = os.open(trajectories_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, line_.encode())
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, TypeError):
+        return None
+    return rec
+
+
+def traj_event(board, kind, agent="", ticket=None, **fields):
+    """Build and append one trajectory event.
+
+    `ticket` may be a ticket dict (epic/sprint/state are read off it) or an id
+    string. Optional fields are dropped when empty so a reader can distinguish
+    "not known" from a real zero; `exit` and the token counts are the
+    exception -- 0 is meaningful there, so only None is dropped.
+    """
+    if kind not in TRAJ_KINDS:
+        return None
+    rec = {"v": TRAJ_VERSION, "at": now(), "kind": kind}
+    tid = ""
+    if isinstance(ticket, dict):
+        tid = ticket.get("id", "")
+        for src, dst in (("epic", "epic"), ("sprint", "sprint")):
+            if ticket.get(src):
+                rec[dst] = ticket[src]
+        # NOT the ticket's pinned branch/sha: `branch`/`sha` on an event mean
+        # "the tree this event was recorded from", and a review pin can name a
+        # different repo entirely (T-272). Only the repo id, which is
+        # unambiguous, is taken from the ticket, and callers that know the
+        # deliverable tree pass worktree/branch/sha explicitly.
+        if ticket.get("repo"):
+            rec.setdefault("repo", ticket["repo"])
+    elif ticket:
+        tid = str(ticket)
+    if tid:
+        rec["ticket"] = tid
+    if agent:
+        rec["agent"] = agent
+        harness, model, effort = _agent_harness(board, agent)
+        if harness:
+            rec["harness"] = harness
+        if model:
+            rec["model"] = model
+        if effort:
+            rec["effort"] = effort
+    oid = _safe(lambda: _objective_id(board), "")
+    if oid:
+        rec["objective_id"] = oid
+    for k, v in fields.items():
+        if v is None:
+            continue
+        if v == "" or v == [] or v == {}:
+            continue
+        rec[k] = v
+    # T-425: stamp the watch run so writes attribute to THAT run_id, not a
+    # time window. Omitted when the process is not inside a watch child.
+    if "run_id" not in rec:
+        rid = (os.environ.get("TICKETS_RUN_ID") or "").strip()
+        if rid:
+            rec["run_id"] = rid
+    return traj_write(board, rec)
+
+
+_BOUND_WRITE_KINDS = ("claim", "update", "review", "done", "block", "reopen")
+
+
+def _run_had_bound_write(board, run_id, ticket):
+    """True when THIS run_id wrote a bound-ticket event (no idle: grep)."""
+    if not run_id or not ticket:
+        return False
+    for e in _safe(lambda: load_trajectories(board), []) or []:
+        if e.get("run_id") != run_id or e.get("ticket") != ticket:
+            continue
+        kind = e.get("kind")
+        if kind in _BOUND_WRITE_KINDS or kind == "msg":
+            return True
+    return False
+
+
+def _traj_git(cwd=None):
+    """worktree/branch/sha for an event, or {} when git cannot answer.
+
+    git_state() returns None rather than a partly-filled dict on purpose
+    (T-259); this keeps that contract instead of inventing "?" placeholders
+    that would read back as real branches.
+    """
+    g = _safe(lambda: git_state(cwd=cwd), None)
+    if not g:
+        return {}
+    return {"worktree": g.get("top", ""), "branch": g.get("branch", ""),
+            "sha": g.get("sha", "")}
+
+
+def load_trajectories(board, include_archives=True):
+    """Read events oldest-first. Unlike load_messages, archives are ON by
+    default: every reader of this file is analytical (a metric, an export, a
+    backfill dedup check) and a silently truncated history would corrupt the
+    answer rather than merely delay a message."""
+    paths = [trajectories_path(board)]
+    if include_archives:
+        paths = sorted(glob.glob(os.path.join(board, "trajectories.*.jsonl"))) + paths
+    out = []
+    for p in paths:
+        try:
+            with open(p) as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        rec = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if isinstance(rec, dict):
+                        out.append(rec)
+        except IOError:
+            pass
+    return out
+
+
+# ---- harness usage: parse it when the harness reports it, never estimate --
+
+class HarnessUsageError(Exception):
+    """The harness reported usage that could not be read.
+
+    Deliberately NOT the same outcome as "reported nothing". An absent count
+    means UNMEASURED, which the cost-learning layer is entitled to treat as
+    unknown; but a parser that silently swallowed a malformed blob would file
+    a real, billed run as unmeasured forever, and nothing downstream could
+    tell that from a genuinely quiet harness. T-396 keeps the two apart:
+    reported nothing -> {}, reported something unreadable -> this.
+    """
+
+
+def _num(v):
+    """A JSON number that is not a bool.
+
+    `True` is an `int` in Python, so without this a `"input_tokens": true`
+    would land in the trajectory log as a token count of 1.
+    """
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+# claude's names for the four counts -> the board's landed field names. The
+# board's names are the ones T-311 shipped and the dashboard and the T-372
+# promise surfaces already read; they are not renamed here (T-396 note).
+CLAUDE_USAGE_FIELDS = (("input_tokens", "tokens_in"),
+                       ("output_tokens", "tokens_out"),
+                       ("cache_read_input_tokens", "tokens_cache_read"),
+                       ("cache_creation_input_tokens", "tokens_cache_write"))
+
+# codex's names for the same four counts, in `exec --json` and in its rollout
+# files. Same meanings, different spellings -- the mapping is the whole reason
+# a second parser exists.
+CODEX_USAGE_FIELDS = (("input_tokens", "tokens_in"),
+                      ("output_tokens", "tokens_out"),
+                      ("cached_input_tokens", "tokens_cache_read"),
+                      ("cache_write_input_tokens", "tokens_cache_write"))
+
+
+def _usage_from_claude_result(rec):
+    """The final result object of `claude -p --output-format json`.
+
+    This is the only source on the board that carries a cost the harness
+    itself computed, so it is the only one that sets cost_source='harness'.
+    """
+    if "usage" not in rec and "total_cost_usd" not in rec:
+        return None
+    usage = rec.get("usage")
+    # Checked BEFORE the "is this even a usage record" shortcut: a record that
+    # carries a `usage` key at all IS reporting usage, so an unreadable one is
+    # an error even when no cost accompanies it. Testing for a dict first let
+    # exactly that case fall through as "reported nothing".
+    if "usage" in rec and not isinstance(usage, dict):
+        raise HarnessUsageError(
+            "claude result 'usage' is %s, not an object" % type(usage).__name__)
+    usage = usage if isinstance(usage, dict) else {}
+    out = {}
+    for src, dst in CLAUDE_USAGE_FIELDS:
+        if src in usage:
+            n = _num(usage[src])
+            if n is None:
+                raise HarnessUsageError(
+                    "claude usage.%s is not a number: %r" % (src, usage[src]))
+            out[dst] = int(n)
+    if "total_cost_usd" in rec:
+        n = _num(rec["total_cost_usd"])
+        if n is None:
+            raise HarnessUsageError(
+                "claude total_cost_usd is not a number: %r" % rec["total_cost_usd"])
+        out["cost_usd"] = n
+        out["cost_source"] = "harness"
+    for src, dst in (("num_turns", "turns"), ("duration_ms", "harness_duration_ms")):
+        if src in rec:
+            n = _num(rec[src])
+            if n is None:
+                raise HarnessUsageError("claude %s is not a number: %r" % (src, rec[src]))
+            out[dst] = int(n)
+    return out or None
+
+
+def _codex_total_usage(info):
+    """`total_token_usage` off one codex token_count event.
+
+    It is CUMULATIVE for the session, so callers take the last one seen and
+    never sum: summing a cumulative counter multiplies the bill.
+    """
+    if not isinstance(info, dict):
+        raise HarnessUsageError(
+            "codex token_count info is %s, not an object" % type(info).__name__)
+    tot = info.get("total_token_usage")
+    if not isinstance(tot, dict):
+        raise HarnessUsageError("codex token_count carries no total_token_usage object")
+    out = {}
+    for src, dst in CODEX_USAGE_FIELDS:
+        if src in tot:
+            n = _num(tot[src])
+            if n is None:
+                raise HarnessUsageError(
+                    "codex total_token_usage.%s is not a number: %r" % (src, tot[src]))
+            out[dst] = int(n)
+    # No cost field: codex reports tokens only. The ticket forbids inventing a
+    # price table, and a made-up cost is worse than an absent one because
+    # nothing downstream could tell it from a measured one.
+    return out or None
+
+
+def _usage_from_codex_event(rec):
+    """One line of `codex exec --json`, or one line of a rollout file."""
+    p = rec.get("payload") if isinstance(rec.get("payload"), dict) else rec
+    if not isinstance(p, dict) or p.get("type") != "token_count":
+        return None
+    if p.get("info") is None:
+        # A real event that carried no usage -- this is what every
+        # usage-limited codex run writes. Reported nothing, not unreadable.
+        return None
+    return _codex_total_usage(p["info"])
+
+
+def _json_candidates(text):
+    """Every JSON object a run's output might end with, newest first."""
+    blobs = []
+    stripped = (text or "").strip()
+    if not stripped:
+        return blobs
+    if stripped.startswith("{"):
+        blobs.append(stripped)
+    lines = stripped.splitlines()
+    for i in range(len(lines) - 1, max(-1, len(lines) - 400) - 1, -1):
+        ln = lines[i].strip()
+        if not ln.startswith("{"):
+            continue
+        # A complete object on its own line: this is the shape of every event
+        # in a `codex exec --json` stream, and of a compact claude result.
+        if ln.endswith("}"):
+            blobs.append(ln)
+        # A pretty-printed object runs to the end of the output, so the tail
+        # from this line is the candidate. Both are tried: a stream line at
+        # column 0 is complete on its own AND starts a (bad) tail, and only
+        # trying the tail would miss every codex event but the last.
+        if lines[i].startswith("{"):
+            blobs.append("\n".join(lines[i:]))
+    return blobs
+
+
+def parse_harness_usage(text):
+    """Pull token/cost/turn counts out of a run's own stdout.
+
+    `claude -p --output-format json` ends a run with one JSON object carrying
+    usage, total_cost_usd, num_turns and duration_ms; `codex exec --json`
+    streams token_count events. When the operator has NOT asked for either
+    format -- which is the case for the default watch commands -- there is
+    nothing here to parse and this returns {}; `_session_store_usage` is the
+    fallback that reads the harness's own session store instead.
+
+    It never estimates from output length: a made-up token count is worse than
+    no token count, because the cost-learning layer this data feeds cannot
+    tell the two apart.
+
+    Returns a dict with any of: tokens_in, tokens_out, tokens_cache_read,
+    tokens_cache_write, cost_usd, cost_source, turns, harness_duration_ms.
+    Raises HarnessUsageError if a blob IS a usage report but cannot be read.
+    """
+    if not text:
+        return {}
+    for blob in _json_candidates(text):
+        try:
+            rec = json.loads(blob)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        out = _usage_from_claude_result(rec)
+        if out:
+            return out
+        out = _usage_from_codex_event(rec)
+        if out:
+            return out
+    return {}
+
+
+# ---- harness usage, second source: the harness's own session store --------
+#
+# The default watch commands (_worker_cmd) are `claude -p ...` and
+# `codex exec ...` with no JSON output format, so parse_harness_usage sees
+# only prose and every run_end on the live board went out with no tokens at
+# all -- measured 09-08: 105 run_end records, 0 with tokens_in. Rather than
+# change how the harness is invoked (which would turn the watch log into JSON
+# and break the text greps that _looks_limited and the T-230 liveness read
+# depend on), the counts are read afterwards from the store the harness
+# writes for itself, attributed to this run by its own time window.
+#
+# Tokens only. Neither store records a cost, so cost_usd stays absent and
+# cost_source stays null on this path.
+
+CLAUDE_PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
+
+
+def _epoch(stamp):
+    """An ISO stamp -> epoch seconds, or None. Naive stamps are read as UTC,
+    which is what every writer here emits."""
+    try:
+        dt = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+# A session transcript grows to tens of megabytes over a long day, and this
+# runs at the end of EVERY watch run. Only the tail can hold events from the
+# run that just finished, so only the tail is read (T-230: mtime-first, no
+# full-file scans).
+SESSION_TAIL_BYTES = int(os.environ.get("TICKETS_SESSION_TAIL_BYTES", 4 * 1024 * 1024))
+
+
+def _iter_jsonl(path, cap=None):
+    """Every readable JSON object in the tail of a .jsonl.
+
+    A torn line -- the first one when the tail starts mid-record, or the last
+    one while the harness is still writing -- is skipped, not fatal.
+    """
+    cap = SESSION_TAIL_BYTES if cap is None else cap
+    try:
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            if size > cap:
+                f.seek(size - cap)
+                f.readline()  # discard the partial record the seek landed in
+            for raw in f:
+                ln = raw.decode("utf-8", "replace").strip()
+                if not ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    yield rec
+    except OSError:
+        return
+
+
+def _claude_transcript_dir(cwd):
+    """~/.claude/projects/<slug>, where the CLI's slug is the absolute path
+    with every non-alphanumeric character replaced by '-'."""
+    path = os.path.abspath(cwd or os.getcwd())
+    return os.path.join(CLAUDE_PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", path))
+
+
+def _session_usage_claude(cwd, t0, t1):
+    """Sum the per-message usage Claude Code wrote for this worktree during
+    the run window.
+
+    Per-message counts ARE additive (unlike codex's cumulative totals): each
+    assistant message reports the usage of its own request.
+    """
+    tot, seen = {}, False
+    for p in glob.glob(os.path.join(_claude_transcript_dir(cwd), "*.jsonl")):
+        # mtime first: a transcript last written before this run started
+        # cannot hold any of its messages, and this avoids reading megabytes
+        # of other sessions on every run.
+        try:
+            if os.path.getmtime(p) < t0 - 1:
+                continue
+        except OSError:
+            continue
+        for rec in _iter_jsonl(p):
+            ts = _epoch(rec.get("timestamp"))
+            if ts is None or ts < t0 or ts > t1:
+                continue
+            m = rec.get("message")
+            u = m.get("usage") if isinstance(m, dict) else None
+            if not isinstance(u, dict):
+                continue
+            for src, dst in CLAUDE_USAGE_FIELDS:
+                n = _num(u.get(src))
+                if n is not None:
+                    tot[dst] = tot.get(dst, 0) + int(n)
+                    seen = True
+    return tot if seen else {}
+
+
+def _rollout_cwd(path):
+    """The cwd a codex rollout announces in its session_meta header.
+
+    Read from the HEAD of the file: the header is the first record, and the
+    tail-bounded read below would miss it on any long session -- which would
+    silently un-attribute exactly the busiest runs.
+    """
+    try:
+        with open(path, "rb") as f:
+            for _ in range(5):          # the header is the first record
+                raw = f.readline()
+                if not raw:
+                    break
+                try:
+                    rec = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                pay = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+                if isinstance(pay.get("cwd"), str):
+                    return os.path.abspath(pay["cwd"])
+    except OSError:
+        return None
+    return None
+
+
+def _session_usage_codex(cwd, t0, t1):
+    """The last cumulative total_token_usage a codex rollout for this worktree
+    wrote during the run window.
+
+    Cumulative, so the LAST one in the window is the answer; summing them
+    would multiply-count the same tokens once per turn.
+    """
+    want = os.path.abspath(cwd or os.getcwd())
+    best, best_at = None, None
+    for p in glob.glob(os.path.join(CODEX_SESSIONS_DIR, "**", "*.jsonl"), recursive=True):
+        try:
+            if os.path.getmtime(p) < t0 - 1:
+                continue
+        except OSError:
+            continue
+        rollout_cwd, last, last_at = _rollout_cwd(p), None, None
+        for rec in _iter_jsonl(p):
+            pay = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+            if isinstance(pay.get("cwd"), str):
+                rollout_cwd = os.path.abspath(pay["cwd"])
+            ts = _epoch(rec.get("timestamp"))
+            if ts is None or ts < t0 or ts > t1:
+                continue
+            u = _usage_from_codex_event(rec)
+            if u:
+                last, last_at = u, ts
+        # A rollout that never named a cwd is not attributed to this agent:
+        # two agents run codex on this box and guessing would bill one for the
+        # other's tokens.
+        if not last or rollout_cwd != want:
+            continue
+        # If an older session for this same worktree was merely touched inside
+        # the window, glob order would decide the bill. The newest matching
+        # event wins instead.
+        if best_at is None or last_at > best_at:
+            best, best_at = last, last_at
+    return best or {}
+
+
+def _session_store_usage(harness, cwd, started_at, ended_at):
+    """Token counts for one run, from the harness's own session store.
+
+    `harness` is the name off the watch command line, so a custom or unknown
+    harness reads nothing rather than being guessed at.
+    """
+    t0, t1 = _epoch(started_at), _epoch(ended_at)
+    if t0 is None or t1 is None or t1 < t0:
+        return {}
+    if harness == "claude":
+        return _session_usage_claude(cwd, t0, t1)
+    if harness == "codex":
+        return _session_usage_codex(cwd, t0, t1)
+    # cursor: verified 09-08 to report usage nowhere -- `agent -p` emits none
+    # in text or json output format, and its transcripts
+    # (~/.cursor/projects/*/agent-transcripts/**/*.jsonl) carry only
+    # role/message/status/type. Absent, not zero, until it does.
+    return {}
+
+
+def _run_usage(log_path, log_before, harness, cwd, started_at, ended_at):
+    """(usage, error) for one finished run: stdout first, session store as the
+    fallback. Never raises -- the watch loop must not die over accounting."""
+    err = None
+    try:
+        usage = parse_harness_usage(_read_run_slice(log_path, log_before)) or {}
+    except HarnessUsageError as e:
+        usage, err = {}, str(e)
+    except Exception as e:                                    # noqa: BLE001
+        usage, err = {}, "stdout usage parse failed: %s" % e
+    if usage:
+        return usage, err
+    try:
+        return _session_store_usage(harness, cwd, started_at, ended_at) or {}, err
+    except HarnessUsageError as e:
+        return {}, err or str(e)
+    except Exception as e:                                    # noqa: BLE001
+        return {}, err or ("session store usage read failed: %s" % e)
+
+
+TRAJ_USAGE_SCAN_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_SCAN_BYTES", 256 * 1024))
+
+
+def _read_run_slice(log_path, offset, cap=None):
+    """The tail of ONE run's own output from the shared watch log.
+
+    `offset` is the log size taken just before the run started. If the file
+    shrank (the between-run rotation in cmd_watch's log(), or an operator
+    truncating it) the offset no longer means anything, so this returns "" --
+    reading from 0 would hand the parser a previous run's result object and
+    attribute its tokens here.
+    """
+    cap = cap or TRAJ_USAGE_SCAN_BYTES
+    try:
+        size = os.path.getsize(log_path)
+        if size < offset:
+            return ""
+        with open(log_path, "rb") as f:
+            start = max(offset, size - cap)
+            f.seek(start)
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _harness_of_cmd(cmd):
+    """Best-effort harness name from the watch command line. Only the three
+    names the board already knows are claimed; anything else is `custom`,
+    which is a fact, not a guess."""
+    head = os.path.basename(shlex.split(cmd or "")[0]) if (cmd or "").strip() else ""
+    return head if head in ("claude", "codex", "cursor") else ("custom" if head else "")
+
+
+def _round3(x):
+    """timing() reports HOURS as floats; keep the unit in the field name and
+    the precision short enough to diff."""
+    # + 0.0 folds the -0.0 that float subtraction produces for a same-second
+    # span; a negative zero in the log reads like a clock error.
+    return None if x is None else round(float(x), 3) + 0.0
+
+
+def _iso_span_secs(a, b):
+    try:
+        ta = datetime.fromisoformat(str(a).replace("Z", "+00:00"))
+        tb = datetime.fromisoformat(str(b).replace("Z", "+00:00"))
+        return round((tb - ta).total_seconds(), 3)
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+# ---- message board ------------------------------------------------------
+
+def messages_path(board):
+    return os.path.join(board, "messages.jsonl")
+
+
+def _rotate_messages_if_big(board):
+    """Move an overflowing live messages.jsonl to a dated archive before the
+    next append. Best-effort: a lock file makes concurrent rotators no-op
+    instead of double-rotating, but a poster mid-append during the swap can
+    still land its message in the archived file -- acceptable for this
+    tool's scale (a handful of agents), and far better than unbounded growth.
+    """
+    path = messages_path(board)
+    try:
+        if os.path.getsize(path) <= MESSAGES_MAX_BYTES:
+            return
+    except OSError:
+        return
+    lock_path = path + ".rotate.lock"
+    try:
+        os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return
+    try:
+        if os.path.getsize(path) <= MESSAGES_MAX_BYTES:
+            return
+        archive = os.path.join(board, "messages.%s.jsonl" % now()[:10])
+        empty_tmp = path + ".rotate.tmp"
+        open(empty_tmp, "wb").close()
+        if os.path.exists(archive):
+            # already rotated once today: fold the live file onto it instead
+            # of clobbering an existing archive.
+            with open(path, "rb") as src:
+                data = src.read()
+            fd = os.open(archive, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(empty_tmp, path)
+        else:
+            os.replace(path, archive)
+            os.replace(empty_tmp, path)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+
+
+# @cursor, @cursor-2, @claude-fable, @everyone -- not emails, not @@foo.
+# Inline so the installed single-file copy stays self-contained (T-221).
+_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_@])@([A-Za-z][A-Za-z0-9_-]{0,47})")
+_MENTION_BROADCAST = frozenset({"everyone", "all"})
+_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+
+
+def _strip_code_spans(text):
+    return _CODE_SPAN_RE.sub(" ", text)
+
+
+def parse_mentions(text):
+    """Unique @handles in first-seen order (no @). Skip `code` / ```fences```."""
+    out, seen = [], set()
+    for match in _MENTION_RE.finditer(_strip_code_spans(text or "")):
+        handle = match.group(1)
+        key = handle.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(handle)
+    return out
+
+
+def resolve_to_and_mentions(text, to=""):
+    """Empty --to + exactly one named mention becomes that recipient."""
+    mentions = parse_mentions(text)
+    to = (to or "").strip()
+    if to:
+        return to, mentions
+    named = [h for h in mentions if h.lower() not in _MENTION_BROADCAST]
+    if len(named) == 1 and len(named) == len(mentions):
+        return named[0], mentions
+    return to, mentions
+
+
+def post_message(board, sender, text, to="", re=""):
+    _rotate_messages_if_big(board)
+    to, mentions = resolve_to_and_mentions(text, to)
+    rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    if mentions:
+        rec["mentions"] = mentions
+    line_ = json.dumps(rec) + "\n"
+    # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
+    fd = os.open(messages_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, line_.encode())
+    finally:
+        os.close(fd)
+    # ids and a length, never the body (T-311 privacy rule). Best-effort: a
+    # message that reached the board must not be undone by instrumentation.
+    _safe(lambda: traj_event(board, "msg", agent=sender, ticket=re or None,
+                             to=to or "", text_len=len(text or "")), None)
+    return rec
+
+
+def load_messages(board, include_archives=False):
+    """By default reads only the live messages.jsonl (cheap, since the UI and
+    every watch poll re-read this every few seconds). Pass include_archives=True
+    to also read rotated messages.<date>.jsonl archives, oldest first, for
+    full history.
+    """
+    paths = [messages_path(board)]
+    if include_archives:
+        paths = sorted(glob.glob(os.path.join(board, "messages.*.jsonl"))) + paths
+    out = []
+    for p in paths:
+        try:
+            with open(p) as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        out.append(json.loads(ln))
+                    except ValueError:
+                        continue
+        except IOError:
+            pass
+    return out
+
+
+def _agent_set(board, owner, **fields):
+    """Update fields on an agent record without touching the rest of it."""
+    if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
+        checkin(board, owner)
+    return _agent_update(board, owner, lambda rec: rec.update(fields))
+
+
+def _agent_rec(board, owner):
+    path = os.path.join(agents_dir(board), owner + ".json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return {}
+
+
+def _msg_id(m):
+    """A stable identity for a message record.
+
+    Messages carry no id on the wire, and adding one would change a format
+    that T-213's legacy import round-trips verbatim, so identity is derived
+    from content instead: the same record hashes the same whether it is read
+    from the live file or from a rotated archive, and nothing already on disk
+    has to be migrated. Two byte-identical messages in the same second do
+    share an identity, which is exactly why the boundary list is consumed as
+    a multiset below -- one delivery per occurrence, not per distinct value.
+    """
+    raw = json.dumps([m.get("at", ""), m.get("from", ""), m.get("to", ""),
+                      m.get("re", ""), m.get("text", "")], sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _addressed_to(msg, owner):
+    """True if *owner* should see *msg*: broadcast, explicit --to, or @mention."""
+    to = (msg.get("to") or "").strip().lower()
+    mentions = {h.lower() for h in (msg.get("mentions") or [])}
+    target = owner.lower()
+    if not to and not mentions:
+        return True
+    if to in _MENTION_BROADCAST or mentions & _MENTION_BROADCAST:
+        return True
+    return to == target or target in mentions
+
+
+def _visible_after_join(msgs, owner, joined):
+    """Hide BROADCAST history from before this agent existed -- never directed mail.
+
+    A brand-new agent has no inbox_seen, so every message ever posted comes back
+    unread (measured: 1392 broadcasts on a real seat's first wake). It then
+    spends its first turn reading other people's mail, which is a direct hit on
+    the fewest-turns objective.
+
+    The tempting fix -- stamp inbox_seen = now() at join -- is wrong in two ways
+    this board would feel, and both are silent mail loss:
+      * a brief posted with `--to <name>` BEFORE the seat joins is destroyed,
+        and posting the brief first is exactly how seats get briefed here;
+      * `tickets spawn` calls cmd_join, so RESPAWNING an existing seat would
+        re-stamp its watermark and wipe everything pending -- including the
+        master's answer to that agent's own `stuck:` message.
+    So scope the suppression to what the ticket actually names, "mail addressed
+    to nobody": drop only broadcasts strictly before `joined`. Same-second
+    posts after join (the wakeup suite does not sleep) must still count.
+    Anything addressed to this agent by name is delivered no matter how old
+    it is. Nothing is deleted -- `tickets inbox --all` still shows history.
+    """
+    if not joined:
+        return msgs  # every pre-existing agent: unchanged, by construction
+    return [m for m in msgs if m.get("to") == owner or m.get("at", "") >= joined]
+
+
+def _seen_counts(seen_ids):
+    counts = {}
+    for k in seen_ids or []:
+        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def _addressed(m, owner):
+    """Would this message ever be shown to `owner`? (Own mail is never echoed.)
+
+    Addressing itself is main's `_addressed_to` (T-221 @mentions, T-327), not a
+    second copy of the rule: this function only adds "never echo an agent its
+    own mail", which is the one part the inbox owns.
+    """
+    return m.get("from") != owner and _addressed_to(m, owner)
+
+
+def _seen_since(rec):
+    """The agent's watermark, never read as being AHEAD of the present.
+
+    A stored `inbox_seen` in the future is not evidence that anything was
+    observed -- it is a clock, not a receipt -- and reading it verbatim makes
+    every message posted before wall-clock catches up older than the watermark,
+    and so invisible, silently, for the whole length of the skew.
+
+    The clamp lives on the READ side as well as the write side on purpose: a
+    record poisoned before this fix shipped would otherwise stay blind until
+    its skew expired, and a preventive-only clamp cannot heal it. Clamping down
+    can re-deliver a message already shown; that is the safe direction, and the
+    identity set below keeps it to at most one repeat.
+    """
+    since = rec.get("inbox_seen", "")
+    ceiling = now()
+    return ceiling if since > ceiling else since
+
+
+def _is_unread(m, since, remaining):
+    """Is `m` new to an agent whose watermark is `since`?
+
+    Two whole-second stamps cannot order events inside one second, so a strict
+    `at > since` silently and permanently drops everything posted during the
+    very second an agent read its inbox -- the mail stays on disk while the
+    agent is told its inbox is empty. The obvious repair, `>=`, redelivers on
+    every poll forever (a wake storm on a board whose watch loops wake on
+    unread mail), so the ambiguous region is disambiguated by IDENTITY instead:
+    anything at or ahead of the watermark is unread unless this agent has
+    already been shown that specific message.
+
+    "At or ahead" rather than "exactly at" is what makes a future-stamped
+    record safe. The watermark is clamped to the present, so a message stamped
+    ahead of now() sits above the watermark for the length of the skew; it is
+    delivered once, its identity is retained while it stays above the
+    watermark, and it is not redelivered on the next poll.
+
+    Consumes from `remaining` (a multiset of identities already delivered) so
+    that two identical messages in the same second are delivered twice, not
+    once.
+    """
+    at = m.get("at", "")
+    if not at or at < since:
+        return False
+    k = _msg_id(m)
+    if remaining.get(k):
+        remaining[k] -= 1
+        return False
+    return True
+
+
+def _inbox_scan(board, owner):
+    """The read side of the inbox: (unread, watermark, retained_ids).
+
+    The watermark returned is the newest `at` actually observed, clamped to the
+    present, and never wall-clock now() on its own. Both halves are load-bearing
+    and they fail in opposite directions:
+
+      * Stamping now() reopens the same-second hole one second later -- a
+        message posted between the read and the stamp is older than the stamp
+        and newer than anything delivered, so it is skipped forever.
+      * Letting max(at) run free trusts a timestamp that was never observed.
+        One future-stamped record drags the watermark past the present and
+        every message posted after it is invisible until the clock catches up.
+        Note that the max runs over the whole file, BEFORE the addressing
+        filter, so a skewed DM between two other agents blinds a bystander --
+        one bad record blinds every agent that reads its inbox after it.
+
+    So the watermark only ever advances to something this agent has actually
+    seen, and never past the present.
+    """
+    rec = _agent_rec(board, owner)
+    # since="" means "live file only" below, which would silently drop any
+    # already-rotated mail -- checkin() (T-244) stamps inbox_seen at an
+    # agent's first-ever check-in specifically so real agents never reach
+    # this function with since="". It stays possible here (e.g. a record
+    # written before that fix existed) rather than being asserted against.
+    since = _seen_since(rec)
+    # T-327's pre-join broadcast suppression is applied INSIDE this scan rather
+    # than as a filter over unread()'s result, so that the retained-identity set
+    # below is drawn from the same list the agent is actually shown. If the two
+    # disagreed, a broadcast hidden as pre-join could still occupy the watermark
+    # second and be recorded as delivered -- or, worse, not be.
+    joined = rec.get("joined_at", "")
+    seen_ids = rec.get("inbox_seen_ids") or []
+    msgs = load_messages(board)
+    # An agent that slept through a rotation has its unread mail sitting in an
+    # archive the fast path never reads, so its inbox would come back silently
+    # empty -- the one failure this whole board is built to prevent. Pay for
+    # the archives only when `since` predates what is left in the live file.
+    # since="" is an agent that has never read its inbox. That is the agent
+    # with the MOST to catch up on, not the least, so it reads the archives
+    # too -- the original `if since and ...` skipped them for exactly that
+    # agent, which is T-244's defect stated in T-244's own words.
+    if (not since) or (not msgs) or since < msgs[0].get("at", ""):
+        if glob.glob(os.path.join(board, "messages.*.jsonl")):
+            msgs = load_messages(board, include_archives=True)
+    remaining = _seen_counts(seen_ids)
+    visible = _visible_after_join([m for m in msgs if _addressed(m, owner)],
+                                  owner, joined)
+    out = [m for m in visible if _is_unread(m, since, remaining)]
+    watermark = max([m.get("at", "") for m in msgs] or [""])
+    ceiling = now()
+    if watermark > ceiling:
+        watermark = ceiling    # a future stamp is not something anyone observed
+    if watermark < since:
+        watermark = since      # nothing newer than the agent already knew
+    if not watermark:
+        # A board with no messages at all and no prior watermark: there is
+        # nothing that could be lost by starting from the current second.
+        watermark = now()
+    # Identities are needed only where the timestamp alone cannot settle the
+    # question -- at the watermark second, and above it while a future-stamped
+    # record is waiting for the clock. Everything older is settled by `at`, so
+    # this list is bounded by one second of traffic plus any skewed records,
+    # not by history. It is rebuilt from the file rather than carried forward,
+    # because a message delivered on an EARLIER poll is no longer in `out` and
+    # would otherwise lose its identity and be redelivered.
+    retained = [_msg_id(m) for m in visible if m.get("at", "") >= watermark]
+    return out, watermark, retained
+
+
+def unread(board, owner):
+    return _inbox_scan(board, owner)[0]
+
+
+def _mark_inbox_read(board, owner, scan=None):
+    """Advance the watermark to what was actually observed, inside the lock.
+
+    This function was written against the pre-T-278 world, where every writer
+    of an agent record did its own read / json.dump / os.replace. Keeping that
+    shape after T-278 landed would have made the inbox the one writer still
+    racing outside the flock -- and the field it drops on a lost race is
+    inbox_seen itself, which silently re-delivers or silently swallows mail.
+    So the whole read-modify-write goes through _agent_update.
+
+    _inbox_scan stays OUTSIDE the critical section deliberately: it reads
+    messages.jsonl and possibly a rotated archive, which is exactly the kind
+    of slow work _agent_update's docstring says must not hold the lock.
+    """
+    if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
+        checkin(board, owner)
+    if scan is None:
+        scan = _inbox_scan(board, owner)
+    watermark, retained = scan[1], scan[2]
+
+    def _apply(rec):
+        rec["inbox_seen"] = watermark
+        if retained:
+            rec["inbox_seen_ids"] = retained
+        else:
+            rec.pop("inbox_seen_ids", None)
+
+    _agent_update(board, owner, _apply)
+
+
+def fmt_local(iso):
+    """Render a stored UTC ISO timestamp in the reader's LOCAL time.
+
+    Stored values stay UTC; only the display converts. Falls back to the old
+    UTC substring on anything unparseable -- a bad timestamp must never break
+    `tickets msg` or `inbox`, and a wrong-looking time is a smaller failure
+    than a traceback.
+    """
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%m-%d %H:%M")
+    except (ValueError, TypeError, AttributeError):
+        return str(iso)[5:16].replace("T", " ")
+
+
+def fmt_msg(m):
+    to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
+    re_ = (" [%s]" % m["re"]) if m.get("re") else ""
+    return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
+
+
+def cmd_msg(a, board):
+    sender = whoami(a.owner)
+    if a.re:
+        load(board, a.re)  # validate the ticket exists
+    m = post_message(board, sender, a.text, a.to or "", a.re or "")
+    print("posted: " + fmt_msg(m))
+
+
+def cmd_inbox(a, board):
+    owner = whoami(a.owner)
+    scan = None
+    if a.all:
+        msgs = load_messages(board, include_archives=True)[-a.limit:]
+        if not msgs:
+            print("no messages yet (tickets msg \"text\" [--to agent] [--re T-001])")
+            return
+        for m in msgs:
+            print(fmt_msg(m))
+    else:
+        scan = _inbox_scan(board, owner)
+        msgs = scan[0]
+        if not msgs:
+            print("inbox empty for %s (tickets inbox --all for history)" % owner)
+        else:
+            print("%d unread for %s:" % (len(msgs), owner))
+            for m in msgs:
+                print("  " + fmt_msg(m))
+    if not a.keep:
+        # Mark exactly what this read observed. Recomputing here instead
+        # would advance the watermark past anything that landed in between.
+        _mark_inbox_read(board, owner, scan)
+
+
+# ---- trajectories: reader, export, backfill ------------------------------
+
+def _traj_filter(events, ticket="", agent="", kind="", since="", until=""):
+    out = []
+    kinds = [k.strip() for k in (kind or "").split(",") if k.strip()]
+    for e in events:
+        if ticket and e.get("ticket") != ticket:
+            continue
+        if agent and e.get("agent") != agent:
+            continue
+        if kinds and e.get("kind") not in kinds:
+            continue
+        at = e.get("at", "")
+        if since and at < since:
+            continue
+        if until and at > until:
+            continue
+        out.append(e)
+    return out
+
+
+def _traj_line(e):
+    bits = ["%s %-9s" % (e.get("at", "?"), e.get("kind", "?"))]
+    bits.append("%-16s" % (e.get("agent") or "-"))
+    bits.append("%-7s" % (e.get("ticket") or "-"))
+    extra = []
+    for k in ("run_no", "exit", "duration_s", "turns", "tokens_in", "tokens_out",
+              "tokens_cache_read", "tokens_cache_write", "cost_usd", "cost_source",
+              "usage_error", "outcome", "state_before", "state_after", "trigger",
+              "notes_len", "text_len", "to", "pin", "merged_as", "active_hours",
+              "wait_hours", "harness", "harness_cmd", "model", "effort",
+              "timed_out", "src"):
+        if k in e:
+            v = e[k]
+            extra.append("%s=%s" % (k, ",".join(v) if isinstance(v, list) else v))
+    return " ".join(bits) + ("  " + " ".join(extra) if extra else "")
+
+
+def _traj_summary(events):
+    """The numbers this log exists for: turns-to-done per ticket."""
+    by_ticket = {}
+    for e in events:
+        tid = e.get("ticket")
+        if not tid:
+            continue
+        s = by_ticket.setdefault(tid, {"runs": 0, "updates": 0, "msgs": 0,
+                                       "reopens": 0, "agents": set(), "outcome": "",
+                                       "turns": 0, "cost_usd": 0.0, "cost_known": False})
+        k = e.get("kind")
+        if k == "run_end":
+            s["runs"] += 1
+            if isinstance(e.get("turns"), int):
+                s["turns"] += e["turns"]
+            if isinstance(e.get("cost_usd"), (int, float)):
+                s["cost_usd"] += e["cost_usd"]
+                s["cost_known"] = True
+        elif k == "update":
+            s["updates"] += 1
+        elif k == "msg":
+            s["msgs"] += 1
+        elif k == "reopen":
+            s["reopens"] += 1
+        if k in ("done", "merge", "review", "block"):
+            s["outcome"] = e.get("outcome") or k
+        if e.get("agent"):
+            s["agents"].add(e["agent"])
+    return by_ticket
+
+
+def cmd_trajectories(a, board):
+    """Read, export or backfill the trajectory log."""
+    sub = getattr(a, "traj_cmd", "list") or "list"
+    if sub == "backfill":
+        return _traj_backfill(a, board)
+    events = load_trajectories(board)
+    sel = _traj_filter(events, ticket=getattr(a, "ticket", "") or "",
+                       agent=getattr(a, "agent", "") or "",
+                       kind=getattr(a, "kind", "") or "",
+                       since=getattr(a, "since", "") or "",
+                       until=getattr(a, "until", "") or "")
+    if sub == "export":
+        out = getattr(a, "out", "") or ""
+        if not out:
+            sys.exit("export needs --out <file.jsonl>")
+        tmp = out + ".tmp"
+        with open(tmp, "w") as f:
+            for e in sel:
+                f.write(json.dumps(e) + "\n")
+        os.replace(tmp, out)
+        print("exported %d event(s) of %d to %s" % (len(sel), len(events), out))
+        return
+    limit = int(getattr(a, "limit", 0) or 0)
+    shown = sel[-limit:] if limit else sel
+    if getattr(a, "json", False):
+        print(json.dumps(shown, indent=2))
+        return
+    if not events:
+        print("no trajectory events yet (%s)" % trajectories_path(board))
+        print("the log fills as agents claim, update, review and run; "
+              "`tickets trajectories backfill` synthesises the history already on the board")
+        return
+    if not shown:
+        print("no events match (%d in the log)" % len(events))
+        return
+    for e in shown:
+        print(_traj_line(e))
+    print("")
+    print("%d of %d event(s)%s" % (len(shown), len(events),
+                                   " (showing the last %d)" % limit if limit and len(sel) > limit else ""))
+    if getattr(a, "summary", False):
+        print("")
+        # cost is appended, never inserted: the existing columns are a
+        # positional contract that tests and operators already read.
+        print("%-8s %5s %8s %5s %5s %8s %10s  %s" % (
+            "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
+            "agents / outcome"))
+        for tid, s in sorted(_traj_summary(sel).items()):
+            # '-' is not $0.00: no harness on this board reports a cost unless
+            # the operator asked for a JSON output format, and a zero would
+            # read as a free ticket (T-396 null-not-zero).
+            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
+                tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
+                s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",
+                ("-> " + s["outcome"]) if s["outcome"] else ""))
+        print("")
+        print("runs = watch runs that reached run_end (the board's own turn count).  "
+              "turns = turns the harness itself reported, '-' when it reported none "
+              "-- an unreported count is never estimated from the run.")
+
+
+def _traj_backfill(a, board):
+    """Synthesise claim/update/review/done events from what the board already
+    records, so the 190+ tickets finished before this log existed are usable.
+
+    Two rules keep a re-run honest:
+
+      1. A synthesised event is stamped src=backfill and carries a
+         deterministic bf_key, so running backfill twice writes nothing new.
+      2. Backfill never writes into the instrumented era. Two separate guards,
+         because the two kinds of event fail differently:
+
+           - claim/review/done happen at most once per ticket, so if a LIVE
+             writer already recorded one, backfill refuses that kind for that
+             ticket outright. The timestamp cannot be trusted to separate
+             them: `claimed_at` is rewritten in place on a re-claim, so a
+             ticket whose stored claim time predates the log would otherwise
+             be counted once by the writer and once by the reader, and a
+             turns metric built on it would be silently inflated.
+           - updates happen many times per ticket, so they are cut at the
+             floor instead: the earliest instant a live writer recorded for
+             that ticket. The pre-instrumentation half of a ticket's note
+             history is recoverable; the instrumented half is already there.
+
+    What it cannot know, it does not write: a synthesised event has no run_no,
+    no exit, no tokens and no cost, because no such record was ever kept.
+    """
+    ONCE_PER_TICKET = ("claim", "review", "done")
+    existing = load_trajectories(board)
+    have_keys = set()
+    live_floor = {}
+    live_kinds = set()
+    for e in existing:
+        if e.get("bf_key"):
+            have_keys.add(e["bf_key"])
+        tid = e.get("ticket")
+        if tid and e.get("src") != "backfill":
+            live_kinds.add((tid, e.get("kind")))
+            at = e.get("at", "")
+            if at and (tid not in live_floor or at < live_floor[tid]):
+                live_floor[tid] = at
+    planned = []
+
+    def plan(t, kind, at, agent, **fields):
+        if not at:
+            return
+        if kind in ONCE_PER_TICKET and (t["id"], kind) in live_kinds:
+            return
+        floor = live_floor.get(t["id"])
+        if floor and at >= floor:
+            return
+        key = "%s:%s:%s" % (t["id"], kind, at)
+        if key in have_keys:
+            return
+        have_keys.add(key)
+        planned.append((t, kind, at, agent, fields))
+
+    for t in load_all(board):
+        owner = t.get("owner") or ""
+        plan(t, "claim", t.get("claimed_at", ""), owner,
+             state_before="open", state_after="claimed")
+        for n in t.get("notes", []):
+            text = str(n.get("text", ""))
+            if text.startswith("REVIEW: "):
+                continue  # the review stamp itself, not a progress update
+            plan(t, "update", n.get("at", ""), n.get("by", "") or owner,
+                 notes_len=len(text))
+        plan(t, "review", t.get("review_at", ""), owner,
+             state_before="claimed", state_after="review", outcome="review",
+             pin=t.get("commit", ""))
+        if t.get("done_at"):
+            plan(t, "done", t["done_at"], owner,
+                 state_before="review" if t.get("review_at") else "claimed",
+                 state_after="done", outcome="done", pin=t.get("commit", ""))
+        # No `block` events are synthesised: the board records a block REASON
+        # as a note but never a block timestamp, and `updated` is only "when
+        # this file was last written by anything". Dating a block from it
+        # would reorder the very sequence a turns metric reads.
+    planned.sort(key=lambda x: (x[2], x[0]["id"]))
+    if getattr(a, "dry_run", False):
+        print("would write %d event(s):" % len(planned))
+        for t, kind, at, agent, fields in planned[:40]:
+            print("  %s %-7s %-8s %s" % (at, kind, t["id"], agent or "-"))
+        if len(planned) > 40:
+            print("  ... and %d more" % (len(planned) - 40))
+        return
+    written = 0
+    ran_at = now()
+    for t, kind, at, agent, fields in planned:
+        # `at` overrides traj_event's wall clock: a synthesised event must
+        # carry the time the thing actually happened, or every backfilled
+        # ticket collapses onto the minute the backfill ran. `backfilled_at`
+        # keeps the wall clock available without pretending it is the event.
+        rec = traj_event(board, kind, agent=agent, ticket=t, at=at,
+                         src="backfill", backfilled_at=ran_at,
+                         bf_key="%s:%s:%s" % (t["id"], kind, at), **fields)
+        if rec:
+            written += 1
+    print("backfill wrote %d event(s) into %s" % (written, trajectories_path(board)))
+    if not planned:
+        print("nothing to synthesise: every claim/update/review/done on this board "
+              "is already in the log")
+
+
+def _turns_cmd():
+    try:
+        from ticket_board.turns import cmd_turns as impl
+        return impl
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.turns import cmd_turns as impl
+        return impl
+
+
+def cmd_turns(a, board):
+    """T-312: table / --json of watch-run turns per ticket. See docs/turns.md."""
+    return _turns_cmd()(
+        a, board, load_all, load_workforce,
+        lambda b: load_messages(b, include_archives=True))
+
+
+def _scheduler_cmd():
+    try:
+        from ticket_board.scheduler import cmd_route_shadow as impl
+        return impl
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.scheduler import cmd_route_shadow as impl
+        return impl
+
+
+# ---- routing: which agent should take which open ticket -----------------
+
+def score_agent(board, name, entry, roles, ticket):
+    """Higher is better. None = cannot take it."""
+    if ticket.get("needs") and not all(n in entry.get("can", []) for n in ticket["needs"]):
+        return None
+    my_roles = roles.get(name)
+    role = ticket.get("role") or ""
+    if my_roles == []:
+        return None
+    if role and my_roles is not None and role not in my_roles:
+        return None
+    s = 10.0
+    if role and my_roles and role == my_roles[0]:
+        s += 3  # primary role
+    cost = {"low": 0, "medium": 1, "high": 2}.get(entry.get("cost", "medium"), 1)
+    p = ticket.get("priority", 2)
+    # priority 1 -> want high cost; priority 3 -> want low cost
+    s += 3 - abs((3 - p) - cost)
+    if ticket.get("needs"):
+        s += 2  # scarce capability, use it where it is required
+    task = (ticket.get("title", "") + " " + ticket.get("body", "")).lower()
+    for kw in entry.get("best_for", "").lower().replace(",", " ").split():
+        if len(kw) > 3 and kw in task:
+            s += 0.5
+    return s
+
+
+def cmd_route(a, board):
+    """Suggest an owner for every unassigned open ticket, by model, roles,
+    capabilities and cost. Writes `suggested`; `tickets next` honours it.
+    Agents still pull -- this is a hint, not a lock -- unless --claim.
+
+    `--shadow` (T-315) is print-only plus one `shadow_decision` event per
+    ready ticket. `--apply` is unimplemented.
+    """
+    if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False) or getattr(a, "score", False):
+        return _scheduler_cmd()(
+            a, board, load_all, load_workforce, load_roles, load_agents,
+            score_agent, traj_event)
+    tickets = load_all(board)
+    wf = load_workforce(board)
+    roles = load_roles(board)
+    agents = dict((r["owner"], r) for r in load_agents(board))
+    names = sorted(set(list(wf) + [n for n in roles if roles[n]]))
+    if a.only:
+        names = [n for n in names if n in a.only]
+    # exclude agents that are out on a limit
+    names = [n for n in names if not agents.get(n, {}).get("limit")]
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    load_ = {}
+    for t in tickets:
+        if t["status"] == "claimed":
+            load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    ready_first = sorted(
+        [t for t in tickets if t["status"] == "open" and (not t.get("suggested") or a.redo)],
+        key=lambda t: (0 if all(d in done for d in t.get("deps", [])) else 1, t.get("priority", 2), t["id"]))
+    print("%-6s %-3s %-44s %-14s %s" % ("ticket", "pri", "title", "suggested", "why"))
+    changed = 0
+    for t in ready_first:
+        best, best_s, why = None, None, ""
+        for n in names:
+            e = wf.get(n, {})
+            s = score_agent(board, n, e, roles, t)
+            if s is None:
+                continue
+            s -= 1.5 * load_.get(n, 0)  # spread work; agents already holding tickets rank lower
+            if best_s is None or s > best_s:
+                best, best_s = n, s
+                why = "%s %s" % (e.get("model") or e.get("tool") or "", e.get("cost", ""))
+        if best:
+            t["suggested"] = best
+            save(board, t)
+            changed += 1
+            load_[best] = load_.get(best, 0) + 0.5  # soft-count suggestions too
+            if a.claim and t["status"] == "open" and all(d in done for d in t.get("deps", [])):
+                got = try_claim(board, t["id"], best)
+                if got:
+                    t = got
+                    why += "  CLAIMED"
+        print("%-6s %-3s %-44s %-14s %s" % (t["id"], t.get("priority", 2), t["title"][:44],
+                                          best or "(nobody fits)", why))
+    if changed:
+        _master_log(board, "route: suggested owners for %d tickets%s" % (changed, " and claimed ready ones" if a.claim else ""))
+    print("\nAgents pull with `tickets next`; their suggested tickets come first. "
+          "`tickets route --claim` hard-assigns the ready ones.")
+
+
+# ---- onboarding ---------------------------------------------------------
+
+CONNECT = """## Connecting an agent to this board
+
+Paste this at the start of ANY agent session (Claude Code, Codex, Cursor,
+Grok, a human shell). Replace the name and roles.
+
+    export TICKET_AGENT=claude-opus          # unique per agent, never reuse
+    cd {root}
+    tickets join $TICKET_AGENT --roles backend   # registers you, prints the loop
+    tickets master                            # read the briefing first
+    tickets inbox                             # anything addressed to you
+    tickets next                              # claim work; prints handoffs
+
+Then the loop, until `tickets next` says nothing is ready:
+
+    # work on your own worktree (join prints the exact command)
+    tickets update <id> "what changed, what is next"     # every {every} min
+    tickets msg "..." --to <agent> --re <id>             # questions, blockers
+    git add -A && git commit -m "..."                    # commit as you go
+    tickets done <id> --notes "paths, decisions"         # refuses on main / dirty
+    # merge or open a PR, then:
+    tickets next
+
+Tool-specific:
+- Claude Code: `TICKET_AGENT=claude-opus claude` -- the global SessionStart hook
+  shows the board automatically; `.tickets/CONTEXT.md` is offered on each claim.
+- Codex: reads AGENTS.md in the repo root (installed by `tickets init`);
+  launch with `TICKET_AGENT=codex codex`.
+- Cursor: reads AGENTS.md and .cursor/rules/tickets.mdc; set TICKET_AGENT in
+  the terminal you start it from, or pass `--owner cursor` on each command.
+- Anything else that can run a shell: the same commands work; `tickets` is one
+  stdlib Python file at ~/.claude/tools/tickets.py.
+
+To take coordination: `tickets master take`, then `tickets master` and act on
+the HEALTH section.
+
+## Making agents start on their own
+
+A session cannot be woken by a hook once its turn has ended, so use both:
+
+- Keep going while there is work (Claude Code): `tickets hooks claude` installs a
+  `Stop` hook that blocks the stop when the agent has unread messages or a
+  ticket in hand (loop-guarded: one extra continuation per user turn).
+- Start when work appears, without a human: run a watcher per agent from that
+  agent's worktree. It polls `tickets pending` and launches a headless run only
+  when there is something to do:
+
+      cd {root}/.worktrees/claude-opus
+      TICKET_AGENT=claude-opus tickets watch --every 60 --cwd "$PWD" \
+          --exec 'claude -p "$(tickets prompt)" --permission-mode acceptEdits'
+
+  Any tool works in `--exec` (codex, cursor-agent, a shell script). Logs go to
+  `.tickets/agents/<agent>.watch.log`. `tickets watch --once` is the cron-able
+  form (exit 0 = work exists).
+- Interactive sessions you keep open: `/loop 10m` with the prompt
+  `tickets inbox && tickets mine; continue my ticket or tickets next` re-checks
+  the board on a timer.
+"""
+
+
+def cmd_join(a, board):
+    _refuse_join_tickets_dir_shadow(board)
+    owner = a.name or whoami()
+    if owner.startswith("agent-"):
+        sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    # Read this BEFORE checkin(), which creates the record. Only a genuinely new
+    # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
+    # calls straight through here) must leave delivery completely alone.
+    first_join = not _agent_rec(board, owner)
+    roles_path = os.path.join(board, "roles.json")
+    roles = {}
+    if os.path.isfile(roles_path):
+        try:
+            with open(roles_path) as f:
+                roles = json.load(f)
+        except (IOError, ValueError):
+            roles = {}
+    if a.roles is not None:
+        roles[owner] = [r.strip() for r in a.roles.split(",") if r.strip()]
+    elif owner not in roles and owner not in DEFAULT_ROLES:
+        roles[owner] = []  # explicit: must pass --role until master assigns
+    os.makedirs(board, exist_ok=True)
+    tmp = roles_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(roles, f, indent=2)
+    os.replace(tmp, roles_path)
+    wf = load_workforce(board)
+    entry = wf.get(owner, {})
+    # BYOA: --harness is the current spelling, --tool the original one; they are
+    # the same field. `custom:<cmd>` folds the command into the harness flag.
+    harness, inline_cmd = _split_harness(getattr(a, "harness", "") or a.tool)
+    cmd_template = (getattr(a, "cmd_template", "") or "").strip() or inline_cmd
+    # A bare executable name still works (it is the command). "custom" with
+    # nothing to run is a typo that would otherwise register an agent no
+    # watcher can ever start, so it is refused at the point of the mistake.
+    if harness == "custom" and not cmd_template:
+        sys.exit("--harness custom needs --cmd '<shell template>' "
+                 "(placeholders: %s)" % " ".join(HARNESS_PLACEHOLDERS))
+    if cmd_template and not harness:
+        harness = "custom"
+    prev_harness = entry.get("harness") or entry.get("tool") or ""
+    if harness:
+        entry["harness"] = harness
+        entry["tool"] = harness  # back-compat: older records/readers say "tool"
+    if cmd_template:
+        entry["cmd"] = cmd_template
+    elif harness and prev_harness and harness != prev_harness and entry.pop("cmd", None):
+        # A command template belongs to the harness it was registered with.
+        # Switching harness without a new --cmd must DROP it: keeping it would
+        # make `spawn --harness codex` silently launch the old custom runner,
+        # which is the exact "it ran something else" failure BYOA is here to
+        # make impossible.
+        print("dropped the %s command template (harness is now %s)" % (prev_harness, harness))
+    if a.model:
+        entry["model"] = a.model
+    if a.can is not None:
+        entry["can"] = sorted(set([c.strip() for c in a.can.split(",") if c.strip()]))
+    if a.cost:
+        entry["cost"] = a.cost
+    if a.best_for:
+        entry["best_for"] = a.best_for
+    entry.setdefault("can", [])
+    entry.setdefault("cost", "medium")
+    wf[owner] = entry
+    save_workforce(board, wf)
+    rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
+    if first_join:
+        # setdefault, not update: if two joins race, the earlier stamp wins and
+        # neither can move the watermark forward over unread mail.
+        _agent_update(board, owner, lambda r: r.setdefault("joined_at", now()))
+    post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
+        (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
+        rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
+    root = os.path.dirname(board)
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s" % (
+        owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
+        entry.get("harness") or "claude (default)"))
+    if entry.get("cmd"):
+        print("cmd: %s" % entry["cmd"])
+    elif harness and harness not in BUILTIN_HARNESSES:
+        # A typo'd built-in name ("cluade") is indistinguishable from a
+        # deliberate bare executable, so say which reading was taken rather
+        # than discovering it a poll interval later in the watch log.
+        print("note: %r is not a built-in harness, so it is run as the command itself; "
+              "`tickets harness check %s` proves it works" % (harness, owner))
+    print("board: %s" % board)
+    m = current_master(board)
+    print("master: %s" % (m["owner"] if m else "nobody -- `tickets master take` if you are it"))
+    n = len(unread(board, owner))
+    if n:
+        print("inbox: %d unread (tickets inbox)" % n)
+    warn = worktree_warning(owner)
+    print("")
+    if warn:
+        print(warn)
+    else:
+        g = git_state()
+        if g:
+            print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
+    print("")
+    print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
+          "tickets update <id> \"...\" (every %d min)  ->  tickets done <id> --notes \"...\"  "
+          "->  merge  ->  tickets next" % UPDATE_EVERY_MIN)
+    print("Full instructions: tickets connect")
+    if not os.path.exists(os.path.join(root, "AGENTS.md")):
+        print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
+
+
+def _agent_holds_ticket(board, owner):
+    return any(
+        t.get("owner") == owner and t.get("status") in ("claimed", "review", "blocked")
+        for t in load_all(board)
+    )
+
+
+def cmd_retire(a, board):
+    """Remove a seat from the board (inverse of join). Refused while it holds a ticket."""
+    owner = (a.name or whoami()).strip()
+    if not owner:
+        sys.exit("usage: tickets retire <name>")
+    if owner.startswith("agent-"):
+        sys.exit("give a real agent name")
+    agent_path = os.path.join(agents_dir(board), owner + ".json")
+    wf = load_workforce(board)
+    roles_path = os.path.join(board, "roles.json")
+    roles = {}
+    if os.path.isfile(roles_path):
+        try:
+            with open(roles_path) as f:
+                roles = json.load(f)
+        except (IOError, ValueError):
+            roles = {}
+    if not (os.path.isfile(agent_path) or owner in wf or owner in roles):
+        sys.exit("no seat %r on this board" % owner)
+    if _agent_holds_ticket(board, owner):
+        sys.exit("refusing: %s holds a ticket; reopen or finish it first" % owner)
+    if os.path.isfile(agent_path):
+        os.remove(agent_path)
+    if owner in wf:
+        del wf[owner]
+        save_workforce(board, wf)
+    if owner in roles:
+        del roles[owner]
+        os.makedirs(board, exist_ok=True)
+        tmp = roles_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(roles, f, indent=2)
+        os.replace(tmp, roles_path)
+    retirer = whoami(getattr(a, "owner", None))
+    post_message(board, retirer, "retired seat %s from the board" % owner)
+    print("retired %s" % owner)
+
+
+def cmd_connect(a, board):
+    print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
+
+
+# ---- wake-up: is there work for this agent, and how to start it ----------
+#
+# Two mechanisms, because a session cannot be woken by a hook once its turn
+# has ended: `stop-hook` keeps a Claude Code turn alive while board work
+# remains; `watch` starts a headless run when work appears. Both are built on
+# `pending_work`, which never raises and never mutates the board.
+
+STOP_HOOK_MAX_PER_HOUR = 4
+WATCH_MIN_INTERVAL = 5
+# Bounds so long-lived boards do not grow files without limit. All overridable
+# for tests; defaults are generous enough to never matter in normal use.
+WATCH_LOG_MAX_BYTES = int(os.environ.get("TICKETS_WATCH_LOG_MAX_BYTES", 5 * 1024 * 1024))
+MESSAGES_MAX_BYTES = int(os.environ.get("TICKETS_MESSAGES_MAX_BYTES", 5 * 1024 * 1024))
+MASTER_LOG_MAX_BYTES = int(os.environ.get("TICKETS_MASTER_LOG_MAX_BYTES", 2 * 1024 * 1024))
+MASTER_LOG_KEEP_ENTRIES = int(os.environ.get("TICKETS_MASTER_LOG_KEEP_ENTRIES", 200))
+
+
+def _safe(fn, default):
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001 - wake-up paths must never take a session down
+        return default
+
+
+def pending_work(board, owner):
+    """What would make `owner` act right now. Empty dict = nothing.
+
+    Keys: messages_to_me, broadcasts (count), holding, suggested_for_me,
+    ready_in_my_lane, limited (agent recorded a usage limit; do not wake).
+    """
+    out = {}
+    if not owner or not os.path.isdir(board):
+        return out
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    if rec.get("limit"):
+        out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
+        return out
+    msgs = _safe(lambda: unread(board, owner), [])
+    direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
+    if direct:
+        out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
+    elif msgs:
+        out["broadcasts"] = len(msgs)
+    tickets = _safe(lambda: load_all(board), [])
+    held = [t for t in tickets if t.get("status") == "claimed" and t.get("owner") == owner]
+    if held:
+        out["holding"] = [t["id"] + " " + t.get("title", "")[:60] for t in held]
+    roles = _safe(lambda: roles_for(board, owner, None), None)
+    ready = _safe(lambda: [t for t in _filter_ready(unblocked(board, tickets), roles)
+                           if can_do(board, owner, t)], [])
+    mine_first = [t for t in ready if t.get("suggested") == owner]
+    if mine_first:
+        out["suggested_for_me"] = [t["id"] + " " + t.get("title", "")[:60] for t in mine_first[:3]]
+    elif ready and not held:
+        out["ready_in_my_lane"] = [t["id"] + " " + t.get("title", "")[:60] for t in ready[:3]]
+    # the master wakes for different reasons: reviews to merge, stuck agents, health
+    m = _safe(lambda: current_master(board), None)
+    if m and owner in (m.get("owner"), m.get("cos")):
+        rq = [t["id"] for t in tickets if t.get("status") == "review"]
+        if rq:
+            out["review_queue"] = rq[:6]
+        # A stuck message wakes both seats whoever it was addressed to.
+        # Same rule as the inbox itself (T-228), clamp included: a "stuck"
+        # posted in the second the master last read its mail must still wake
+        # it, and a future-stamped record must not blind the master to every
+        # "stuck" that follows it. This scan does not consume, so it gets
+        # its own counts.
+        since = _seen_since(rec)
+        _rem = _seen_counts(rec.get("inbox_seen_ids"))
+        stuck = [fmt_msg(x) for x in _visible_after_join(
+                     _safe(lambda: load_messages(board), []), owner,
+                     rec.get("joined_at", ""))
+                 if x.get("from") != owner and _is_unread(x, since, _rem)
+                 and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
+        if stuck:
+            out["stuck_messages"] = stuck[-5:]
+        crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
+        if crit:
+            out["health_crit"] = [i[1][:80] for i in crit[:3]]
+    # The objective heartbeat: any seat spawned with --heartbeat N (the master,
+    # or a standing seat such as an optimizer) is woken every N minutes even
+    # when nothing else is pending, so it keeps working its brief toward the
+    # objective instead of going quiet. Opt-in per seat; off for plain workers.
+    obj = _safe(lambda: load_objective(board), {})
+    every = int(rec.get("drive_every") or 0)
+    if obj and not obj.get("done") and every > 0:
+        last = rec.get("drive_at", "")
+        if not last or hours_since(last) * 60 >= every:
+            out["drive"] = {"objective": obj.get("text", "")[:100], "last": last or "never"}
+    return out
+
+
+def actionable(pending):
+    """Broadcast-only noise or a recorded usage limit should not start a run."""
+    return bool(pending) and not (set(pending) <= {"broadcasts", "limited"})
+
+
+WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
+TICKET_AGENT is already set in your environment; run `tickets ...` commands plainly (no env prefix).
+Rules: one ticket at a time; own git worktree, never main; `tickets sync` before `tickets review`;
+`tickets update <id> "..."` every 45 minutes; finish with `tickets review <id> --notes "paths, tests, decisions"`;
+never edit .tickets/ by hand; never run `tickets clear`. Board-only comms: `tickets msg`.
+STUCK RULE: if anything blocks you -- a permission you cannot get, a failing test you cannot fix,
+an unclear ticket, missing access or a decision that is not yours -- do not wait and do not stop
+silently. Post `tickets msg "stuck: <what, what you tried, what you need>" --to {master} --re <id>`,
+then `tickets update <id> "stuck: ..."`; if you cannot continue at all, `tickets block <id> --reason "..."`.
+The master's job is to unblock you; yours is to say so early.
+Do now, in order:
+1. `tickets inbox` -- read and, if anything is addressed to you, answer with `tickets msg --to <who>`.
+2. `tickets mine` -- if you hold a ticket, continue it from where the notes left off.
+3. Otherwise `tickets next` -- if it hands you a ticket, read the printed briefing files, then work it.
+4. When the ticket is finished and tests pass: commit, `tickets sync`, `tickets review <id> --notes ...`, then go to 3.
+5. If `tickets next` says nothing is ready and you hold nothing: post one line with `tickets msg "idle: <what you checked>"` and stop.
+{extra}"""
+
+MASTER_PROMPT = """You are {agent}, the MASTER of the shared ticket board at {board} (repo {root}).
+TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets. Your three jobs, every wake-up:
+1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
+   grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
+   (`tickets create ... --blocks <id>`, `tickets dep`), reassign (`tickets assign <id> --owner <who>`), or
+   decide and say so. Never leave a stuck agent without a reply.
+2. REVIEW + MERGE: `tickets master` shows the REVIEW QUEUE. For each entry read the diff against main
+   (`git diff main...<branch>`), check tests ran, then `tickets merge <branch>` (runs the suite, fast-forwards
+   main, closes the ticket). If it is not mergeable, `tickets msg --to <owner> --re <id>` with what to change
+   and `tickets reopen <id>`. Push main with `git push origin main` after merges.
+3. COORDINATE: `tickets dash --once` and `tickets util` -- reopen tickets whose owner is silent > 90 min
+   (`tickets limits` first: AUTH means /login is needed, not a wait), `tickets route` new tickets,
+   keep one ticket per agent, spawn or brief workers when lanes are empty (`tickets spawn <name> --model ...`).
+   Log every non-obvious call: `tickets master log "..."`. Post a short status pulse with `tickets msg`.
+Stop when the inbox is empty, the review queue is empty and no health item needs action.
+{extra}"""
+
+PLANNER_PROMPT = """You are {agent}, the MASTER PLANNER of the shared ticket board at {board} (repo {root}).
+TICKET_AGENT is set; run `tickets ...` plainly. A chief of staff ({cos}) handles review, merge and day-to-day
+unblocking; you do not take feature tickets and you do not merge unless the cos is silent.
+Your jobs, every wake-up:
+1. SCOPE + VISION: `tickets master` and `tickets dash --once`. Keep the sprint pointed at what the user wants
+   (MASTER.md "CEO memo" and decision log). Split, re-scope, or cut tickets that drift; add the ones that are missing
+   (`tickets create ... --blocks/--deps`, `tickets plan`). Log every call: `tickets master log "..."`.
+2. ROUTE BY COMPLEXITY: `tickets route`, then hard-assign where it matters (`tickets assign <id> --owner <agent>`):
+   priority-1 / contract / migration work to high-tier agents (opus); routine docs, tests, polish to low-tier
+   (sonnet, codex). Give each worker the context it needs: `tickets brief <agent> "..."` or `--ticket <id>`.
+3. ESCALATIONS: answer messages addressed to you (scope questions, decisions the cos escalated, anything
+   starting with "stuck:" that the cos has not answered within an hour). Decisions the user reserved
+   (spend, deploy provider, default flips) get a `tickets msg` to the user's attention, not a guess.
+4. STAFFING: if a lane has ready work and no live worker, `tickets spawn <name> --model <tier> --roles ...`;
+   if a worker is silent > 90 min, `tickets limits` then `tickets reopen`.
+Stop when there is nothing addressed to you, the sprint matches the vision, and every ready ticket has an owner.
+{extra}"""
+
+
+STANDING_SEAT_PROMPT = """HEARTBEAT: this seat is woken every {every} minutes whether or not anything is pending. This wake-up may be
+such a heartbeat: do the standing brief above end to end, post one short finding with numbers, and stop. The board's
+objective, which your brief serves: {objective}"""
+
+DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; `tickets objective` to read it in full):
+{objective}
+
+DRIVE STATUS now:
+{status}
+
+5. DRIVE THE OBJECTIVE (this wake-up may have been a heartbeat with nothing else pending -- that is the point):
+   compare the status above with the objective. If the sprint is done, lanes are empty, or ready work is
+   unowned, plan the next slice toward the objective NOW: `tickets plan`/`tickets create` the missing tickets,
+   `tickets route` + `tickets assign`, `tickets brief` the context, `tickets spawn` where a lane has no live
+   worker, and log the reasoning with `tickets master log`. If the objective is met, run
+   `tickets objective --done "<evidence>"` and post it. If it cannot be met without the user (spend, credentials,
+   a decision they reserved), post exactly what you need with `tickets msg` and log it; do not guess.
+   Never end a heartbeat without either advancing the plan or logging why nothing needed to change."""
+
+
+def cmd_objective(a, board):
+    """Set, show or close the standing objective the master drives toward."""
+    path = objective_path(board)
+    cur = load_objective(board)
+    if a.done is not None:
+        if not cur:
+            sys.exit("no objective set")
+        cur["done"] = True
+        cur["done_at"] = now()
+        cur["evidence"] = a.done
+        with open(path, "w") as f:
+            json.dump(cur, f, indent=2)
+        post_message(board, whoami(a.by), "objective met: %s -- %s" % (cur.get("text", "")[:120], a.done))
+        _master_log(board, "objective met: %s" % a.done, by=whoami(a.by))
+        print("objective marked met")
+        return
+    if a.text:
+        rec = {"text": a.text, "set_by": whoami(a.by), "at": now(), "done": False}
+        with open(path, "w") as f:
+            json.dump(rec, f, indent=2)
+        post_message(board, whoami(a.by), "objective set: %s" % a.text[:200])
+        _master_log(board, "objective set: %s" % a.text, by=whoami(a.by))
+        print("objective set")
+        return
+    if not cur:
+        print("no objective set; `tickets objective \"<what done looks like>\"`")
+        return
+    print("OBJECTIVE%s (set by %s, %s)" % (" -- MET" if cur.get("done") else "", cur.get("set_by", "?"), cur.get("at", "")))
+    print(cur.get("text", ""))
+    if cur.get("done"):
+        print("evidence: %s" % cur.get("evidence", ""))
+    print()
+    print(drive_status(board))
+
+
+def cmd_drive(a, board):
+    """Set the objective and spawn the master seat with a heartbeat, in one go:
+    `tickets drive "<objective>" --as boss --tool cursor+claude --heartbeat 30`."""
+    owner = whoami(a.by)
+    if a.text:
+        ns = argparse.Namespace(text=a.text, done=None, by=owner)
+        cmd_objective(ns, board)
+    elif not load_objective(board):
+        sys.exit("give an objective: tickets drive \"<what done looks like>\"")
+    argv = [sys.executable, os.path.realpath(__file__), "spawn", owner, "--master",
+            "--heartbeat", str(a.heartbeat), "--every", str(a.every)]
+    if a.tool:  # absent means "the harness `tickets join` registered for this seat"
+        argv += ["--harness", a.tool]
+    if getattr(a, "cmd_template", ""):
+        argv += ["--cmd", a.cmd_template]
+    if a.model:
+        argv += ["--model", a.model]
+    import subprocess
+    if a.restart:
+        subprocess.call([sys.executable, os.path.realpath(__file__), "spawn", owner, "--stop"])
+    sys.exit(subprocess.call(argv))
+
+
+def cos_prompt_text(agent, board, root, extra):
+    return MASTER_PROMPT.replace("the MASTER of", "the CHIEF OF STAFF of").replace(
+        "Your three jobs, every wake-up:",
+        "The master planner sets scope and routes by complexity; you review, unblock and merge. "
+        "Escalate scope or vision questions to the planner with `tickets msg --to <master>`. "
+        "Your three jobs, every wake-up:").format(agent=agent, board=board, root=root, extra=extra)
+
+
+def cmd_pending(a, board):
+    owner = whoami(a.agent)
+    p = pending_work(board, owner)
+    if a.json:
+        print(json.dumps({"agent": owner, "pending": actionable(p), **p}))
+    elif p:
+        for k, v in p.items():
+            print("%s: %s" % (k, v if not isinstance(v, list) else "; ".join(v)))
+    else:
+        print("nothing pending for %s" % owner)
+    sys.exit(0 if actionable(p) else 1)
+
+
+def brief_path(board, owner):
+    return os.path.join(board, "briefs", owner + ".md")
+
+
+def agent_brief(board, owner, limit=6000):
+    """The agent's standing context (.tickets/briefs/<agent>.md), if any."""
+    try:
+        with open(brief_path(board, owner)) as f:
+            text = f.read().strip()
+    except OSError:
+        return ""
+    return text if len(text) <= limit else text[:limit] + "\n...(brief truncated; read the file)"
+
+
+def ticket_context(board, owner):
+    """Context notes attached to the agent's held ticket(s)."""
+    out = []
+    for t in load_all(board):
+        if t.get("status") == "claimed" and t.get("owner") == owner:
+            ctx = [n["text"] for n in t.get("notes", []) if n.get("kind") == "context"]
+            if ctx:
+                out.append("%s %s:\n  - %s" % (t["id"], t.get("title", "")[:60], "\n  - ".join(ctx)))
+    return "\n".join(out)
+
+
+def cmd_prompt(a, board):
+    print(prompt_text(a, board))
+
+
+def prompt_text(a, board):
+    """The worker/master/cos prompt as a string.
+
+    Split out of cmd_prompt so the watcher can write it to a {prompt_file} for
+    a BYOA harness without shelling back out to `tickets prompt` -- one
+    renderer, so a custom harness and the built-in ones cannot drift.
+    """
+    owner = whoami(a.agent)
+    m = current_master(board)
+    master = (m["owner"] if m else "the master")
+    cos = (m or {}).get("cos") or ""
+    if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
+        return cos_prompt_text(owner, board, os.path.dirname(board), a.extra or "")
+    if getattr(a, "master", False):
+        extra = a.extra or ""
+        obj = _safe(lambda: load_objective(board), {})
+        if obj and not obj.get("done"):
+            _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
+            extra = DRIVE_PROMPT.format(objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
+                                        status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
+        if cos and owner != cos:
+            return PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
+                                         extra=extra)
+        return MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
+    parts = []
+    brief = agent_brief(board, owner)
+    if brief:
+        parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    obj = _safe(lambda: load_objective(board), {})
+    if int(rec.get("drive_every") or 0) > 0 and obj and not obj.get("done"):
+        _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
+        parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
+    tctx = ticket_context(board, owner)
+    if tctx:
+        parts.append("Context attached to your ticket(s):\n" + tctx)
+    if a.extra:
+        parts.append(a.extra)
+    return WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
+                                extra="\n\n".join(parts))
+
+
+def cmd_brief(a, board):
+    """Give an agent (or a ticket) context. Shown on every claim, in `tickets
+    prompt`, and in `boot`. Appends with a timestamp; --file replaces from a file;
+    --show prints; --ticket attaches to a ticket instead of an agent."""
+    who = whoami(a.by)
+    if a.ticket and not a.text and a.agent:
+        a.text, a.agent = a.agent, ""  # `brief --ticket T-1 "text"`: first positional is the text
+    if a.ticket:
+        t = load(board, a.ticket)
+        if a.show:
+            for n in t.get("notes", []):
+                if n.get("kind") == "context":
+                    print("- [%s] %s" % (n.get("by", "?"), n["text"]))
+            return
+        text = a.text or (open(a.file).read().strip() if a.file else "")
+        if not text:
+            sys.exit("give context text, --file, or --show")
+        t["notes"].append({"by": who, "at": now(), "kind": "context", "text": text})
+        save(board, t)
+        if t.get("owner") and t.get("status") == "claimed":
+            post_message(board, who, "context added to %s: %s" % (t["id"], text[:160]), to=t["owner"], re=t["id"])
+        print("context attached to %s%s" % (t["id"], (" (owner %s messaged)" % t["owner"]) if t.get("owner") else ""))
+        return
+    if not a.agent:
+        sys.exit("brief needs an agent name or --ticket")
+    path = brief_path(board, a.agent)
+    if a.show:
+        print(agent_brief(board, a.agent) or "(no brief for %s)" % a.agent)
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if a.file:
+        with open(a.file) as f:
+            body = f.read()
+        with open(path, "w") as f:
+            f.write(body if body.endswith("\n") else body + "\n")
+        print("brief for %s replaced from %s" % (a.agent, a.file))
+    elif a.text:
+        exists = os.path.exists(path)
+        with open(path, "a") as f:
+            if not exists:
+                f.write("# Brief for %s\n\n" % a.agent)
+            f.write("- %s [%s] %s\n" % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), who, a.text))
+        print("added to %s" % path)
+    else:
+        sys.exit("give context text, --file, or --show")
+    post_message(board, who, "brief updated for %s: %s" % (a.agent, (a.text or a.file)[:160]), to=a.agent)
+
+
+def utilization(board, tickets=None, hours=24, live=None):
+    """Per-agent throughput and load over the window, plus sprint burn."""
+    tickets = tickets if tickets is not None else load_all(board)
+    cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
+    agents = {r["owner"]: r for r in load_agents(board)}
+    names = sorted(set(list(agents) + [t.get("owner") for t in tickets if t.get("owner")]))
+    rows = []
+    for n in names:
+        if not n or n.startswith("agent-"):
+            continue
+        mine = [t for t in tickets if t.get("owner") == n]
+        done = [t for t in mine if t["status"] == "done" and t.get("done_at")]
+        recent = [t for t in done if _safe(lambda: datetime.strptime(t["done_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp(), 0) >= cutoff]
+        cycles = [timing(t)["active"] for t in recent if timing(t)["active"] is not None]
+        active_hours = sum(cycles)
+        held = [t for t in mine if t["status"] in ("claimed", "review")]
+        r = agents.get(n, {})
+        seen = hours_since(r["seen"]) if r.get("seen") else None
+        # DOWN is no longer reachable only through a hand-typed `tickets limit`
+        # record: an agent whose sessions cannot start is down whether or not
+        # anyone remembered to say so (T-237).
+        # `live` is this refresh's already-computed states. Recomputing here
+        # would double every transcript read on a dash that refreshes in place.
+        # It is passed in per refresh and never cached across refreshes: a
+        # stale liveness cache is precisely the bug this ticket exists to fix.
+        lv = (live.get(n) if live is not None
+              else (_safe(lambda: agent_liveness(board, r, list(agents.values())), {}) if r else {})) or {}
+        state = ("DOWN" if lv.get("state") in ("limited", "dead")
+                 else ("busy" if any(t["status"] == "claimed" for t in held) else "idle"))
+        rows.append({
+            "agent": n, "state": state, "done": len(recent), "done_total": len(done),
+            "avg_cycle_h": (sum(cycles) / len(cycles)) if cycles else None,
+            "active_h": active_hours, "util_pct": min(100.0, 100.0 * active_hours / hours) if hours else 0.0,
+            "in_flight": len([t for t in held if t["status"] == "claimed"]),
+            "in_review": len([t for t in held if t["status"] == "review"]),
+            "seen_h": seen,
+        })
+    cur = active_sprint(board)
+    burn = None
+    if cur:
+        mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+        d, n, c, b = progress(mine)
+        started = hours_since(cur["start"]) if cur.get("start") else None
+        burn = {"sprint": cur["id"], "done": d, "total": n, "in_flight": c, "blocked": b,
+                "elapsed_h": started, "done_per_day": (d / (started / 24.0)) if started and started > 1 else None,
+                "eta_days": ((n - d) / (d / (started / 24.0))) if started and started > 1 and d else None}
+    return rows, burn
+
+
+def cmd_util(a, board):
+    rows, burn = utilization(board, hours=a.hours)
+    if a.json:
+        print(json.dumps({"window_hours": a.hours, "agents": rows, "sprint": burn}, indent=2))
+        return
+    print("Utilization, last %dh" % a.hours)
+    print("  %-14s %-5s %5s %8s %8s %6s %6s %6s %s" % ("agent", "state", "done", "avg cyc", "active", "util%", "wip", "review", "seen"))
+    for r in rows:
+        print("  %-14s %-5s %5d %8s %8s %5.0f%% %6d %6d %s" % (
+            r["agent"][:14], r["state"], r["done"], fmt_hours(r["avg_cycle_h"]) if r["avg_cycle_h"] is not None else "-",
+            fmt_hours(r["active_h"]), r["util_pct"], r["in_flight"], r["in_review"],
+            (fmt_hours(r["seen_h"]) + " ago") if r["seen_h"] is not None else "never"))
+    if burn:
+        print("Sprint %s: %d/%d done, %d in flight, %d blocked, elapsed %s, %s/day, ETA %s" % (
+            burn["sprint"], burn["done"], burn["total"], burn["in_flight"], burn["blocked"],
+            fmt_hours(burn["elapsed_h"]) if burn["elapsed_h"] is not None else "?",
+            ("%.1f" % burn["done_per_day"]) if burn["done_per_day"] else "?",
+            ("%.1f days" % burn["eta_days"]) if burn["eta_days"] else "?"))
+    print("util% = hours of measured ticket cycle time completed in the window / window; 'active' is that sum.")
+
+
+def cmd_dash(a, board):
+    """Master's one-screen view, refreshing in place: sprint, in flight with
+    staleness, review queue, per-agent pending, health, last messages."""
+    import time as _time
+    while True:
+        tickets = load_all(board)
+        cur = active_sprint(board)
+        m = current_master(board)
+        lines = []
+        lines.append("=" * 78)
+        lines.append("BOARD %s   %s   master: %s" % (os.path.basename(os.path.dirname(board)), now(),
+                                                    m["owner"] if m else "nobody"))
+        if cur:
+            mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+            d, n, c, b = progress(mine)
+            lines.append("sprint %s %s  %d in flight, %d blocked | %s" % (cur["id"], bar(d, n), c, b, cur.get("goal", "")[:60]))
+        lines.append("-" * 78)
+        lines.append("IN FLIGHT")
+        for t in tickets:
+            if t["status"] == "claimed":
+                tm = timing(t)
+                su = tm["since_update"]
+                flag = "!!" if su is not None and su * 60 > UPDATE_EVERY_MIN * 2 else ("! " if su is not None and su * 60 > UPDATE_EVERY_MIN else "  ")
+                lines.append(" %s %-6s @%-13s %-40s upd %s" % (flag, t["id"], (t.get("owner") or "?")[:13], t["title"][:40], fmt_hours(su)))
+        rq = [t for t in tickets if t["status"] == "review"]
+        lines.append("REVIEW QUEUE (%d)%s" % (len(rq), ": tickets merge" if rq else ""))
+        for t in rq:
+            lines.append("    %-6s @%-13s %-40s %s%s" % (t["id"], (t.get("owner") or "?")[:13], t["title"][:40], t.get("commit", "")[:24], (" PR " + t["pr"]) if t.get("pr") else ""))
+        lines.append("AGENTS")
+        agents = load_agents(board)
+        names = sorted(set([r["owner"] for r in agents] + [k for k, v in load_roles(board).items() if v]))
+        live = {}
+        for nme in names:
+            r = next((x for x in agents if x["owner"] == nme), {})
+            live[nme] = _safe(lambda r=r, nme=nme: agent_liveness(board, dict(r, owner=nme), agents), {})
+        for nme in names:
+            r = next((x for x in agents if x["owner"] == nme), {})
+            lv = live[nme]
+            state, mark = (lv.get("state") or "unknown"), liveness_mark(lv)
+            if state in ("limited", "dead"):
+                # DOWN whether a human said so (!) or the tool worked it out
+                # (~) -- but the reader can still tell which, because those are
+                # different levels of evidence.
+                lines.append("  %-13s DOWN%s (%s)" % (nme[:13], mark, _clip(lv.get("detail") or state, 52)))
+                continue
+            p = pending_work(board, nme)
+            keys = [k for k in p if k != "broadcasts"]
+            wc = _watcher_count(nme, board)
+            wnote = ("watchers=%d !! " % wc) if wc != 1 else ""
+            lines.append("  %-13s %-8s%s %-9s %s%s" % (
+                nme[:13], state, mark,
+                ("seen " + fmt_hours(hours_since(r["seen"]))) if r.get("seen") else "never",
+                wnote, ("pending: " + ", ".join(keys)) if keys else (lv.get("detail") or "")[:40]))
+        rows, burn = utilization(board, tickets, hours=24, live=live)
+        live = [r for r in rows if r["state"] != "DOWN"]
+        lines.append("UTILIZATION 24h  (%d live agents, %d down)" % (len(live), len(rows) - len(live)))
+        for r in sorted(live, key=lambda r: -r["done"])[:8]:
+            lines.append("  %-13s %-4s done %2d  avg %-5s  wip %d  rev %d  util %3.0f%%" % (
+                r["agent"][:13], r["state"], r["done"], fmt_hours(r["avg_cycle_h"]) if r["avg_cycle_h"] is not None else "-",
+                r["in_flight"], r["in_review"], r["util_pct"]))
+        if burn and burn.get("done_per_day"):
+            lines.append("  burn: %.1f tickets/day, ETA %s" % (burn["done_per_day"], ("%.1f days" % burn["eta_days"]) if burn.get("eta_days") else "-"))
+        issues = health(board, tickets)
+        crit = [i for i in issues if i[0] in ("CRIT", "WARN")]
+        lines.append("HEALTH  %d issues (%d need action)" % (len(issues), len(crit)))
+        for sev, msg, fix in crit[:6]:
+            lines.append("  [%s] %s" % (sev, msg[:70]))
+        lines.append("MESSAGES")
+        for mm in load_messages(board)[-a.messages:]:
+            lines.append("  " + fmt_msg(mm)[:76])
+        lines.append("-" * 78)
+        lines.append("tickets assign <id> --owner X | tickets brief X \"...\" | tickets msg \"...\" --to X | tickets merge | tickets reopen <id>")
+        if not a.once:
+            sys.stdout.write("\033[2J\033[H")
+        print("\n".join(lines))
+        if a.once:
+            return
+        try:
+            _time.sleep(max(3, a.every))
+        except KeyboardInterrupt:
+            return
+
+
+def _record_stop_block(board, owner):
+    """Rate-limit continuations: returns False when the hourly cap is reached.
+
+    Counting and appending both happen inside the lock. Read the count outside
+    it and two stop hooks firing together each see the same pre-image, each
+    decide they are under the cap, and the agent gets more continuations than
+    the cap allows -- the same read-modify-write hole as the limit/heartbeat
+    race, cashed out as a rate limit that does not hold.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - 3600
+    capped = []
+
+    def mutate(rec):
+        stamps = [s for s in rec.get("stop_blocks", []) if _safe(lambda: datetime.strptime(
+            s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp(), 0) > cutoff]
+        if len(stamps) >= STOP_HOOK_MAX_PER_HOUR:
+            capped.append(True)
+            return False  # over the cap: abort without writing
+        stamps.append(now())
+        rec["stop_blocks"] = stamps
+
+    # Never raises: this is a hook, and a write failure must not stop the turn.
+    _safe(lambda: _agent_update(board, owner, mutate), None)
+    return not capped
+
+
+def cmd_stop_hook(a, board):
+    """Claude Code `Stop` hook: keep the turn alive while this agent still has work.
+
+    Never raises, always exits 0. Lets the session stop when: no TICKET_AGENT,
+    TICKETS_STOP_HOOK=off, the event says stop_hook_active (we already continued
+    once this turn), the agent recorded a usage limit, only broadcasts are
+    unread, or the hourly cap of continuations is reached.
+    """
+    try:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+        event = json.loads(raw or "{}")
+        if not isinstance(event, dict):
+            event = {}
+    except Exception:  # noqa: BLE001
+        event = {}
+    owner = os.environ.get("TICKET_AGENT") or ""
+    if (not owner or os.environ.get("TICKETS_STOP_HOOK", "").lower() in ("off", "0", "false")
+            or event.get("stop_hook_active")):
+        print("{}")
+        return
+    p = _safe(lambda: pending_work(board, owner), {})
+    p.pop("drive", None)  # the heartbeat wakes the watcher; it must never pin an interactive turn open
+    if not actionable(p) or not _record_stop_block(board, owner):
+        print("{}")
+        return
+    detail = "; ".join("%s=%s" % (k, v if not isinstance(v, list) else " | ".join(v))
+                       for k, v in p.items() if k != "broadcasts")
+    reason = ("Ticket board still has work for %s: %s. Run `TICKET_AGENT=%s tickets inbox`, then "
+              "continue your ticket (`tickets mine`) or claim one (`tickets next`). If you are truly "
+              "done or blocked, say so with `tickets msg` and stop." % (owner, detail, owner))
+    print(json.dumps({"decision": "block", "reason": reason[:1500]}))
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _watch_lock(board, owner):
+    """One watcher per agent name. Returns the lock path or None if another runs."""
+    os.makedirs(agents_dir(board), exist_ok=True)
+    path = os.path.join(agents_dir(board), owner + ".watch.pid")
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return path
+        except FileExistsError:
+            try:
+                with open(path) as f:
+                    other = int(f.read().strip() or "0")
+            except (OSError, ValueError):
+                other = 0
+            if other and _pid_alive(other):
+                return None
+            try:
+                os.unlink(path)  # stale lock from a dead watcher
+            except OSError:
+                return None
+    return None
+
+
+def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
+                      on_beat=None, beat_secs=None):
+    """Run cmd with stdout+stderr teed into log_path, capped at cap_bytes for
+    this run alone -- a single verbose run must not be able to blow past the
+    log's rotation budget before the between-run rotation in cmd_watch's
+    log() ever gets a chance to fire. Keeps draining the pipe past the cap so
+    the child never blocks on a full pipe buffer. Returns (rc, timed_out);
+    rc is 124 on timeout, matching the previous subprocess.call behavior.
+
+    `on_beat` is called every `beat_secs` for as long as the child is running
+    (T-237). It is a separate ticker thread rather than a hook on the output
+    pump because a session that is thinking writes nothing for minutes, and a
+    heartbeat that only fires when the child speaks reports silence as death.
+    """
+    import subprocess
+    import threading
+
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    state = {"written": 0, "capped": False}
+
+    def pump():
+        def note_capped(lf):
+            if not state["capped"]:
+                lf.write("\n[watch log: run output capped at %d bytes]\n" % cap_bytes)
+                lf.flush()
+                state["capped"] = True
+
+        try:
+            with open(log_path, "a") as lf:
+                for chunk in iter(lambda: proc.stdout.read(65536), b""):
+                    if state["written"] >= cap_bytes:
+                        note_capped(lf)
+                        continue
+                    take = chunk[: cap_bytes - state["written"]]
+                    lf.write(take.decode("utf-8", "replace"))
+                    state["written"] += len(take)
+                    if len(take) < len(chunk):
+                        # this single chunk already carried past the cap --
+                        # there may be no further chunk to trigger the note.
+                        note_capped(lf)
+        except OSError:
+            pass
+
+    pump_thread = threading.Thread(target=pump, daemon=True)
+    pump_thread.start()
+
+    beat_stop = threading.Event()
+    beat_thread = None
+    if on_beat:
+        interval = beat_secs or RUN_HEARTBEAT_SECS
+
+        def beat():
+            while not beat_stop.wait(interval):
+                _safe(on_beat, None)
+
+        _safe(on_beat, None)  # stamp the start of the run, do not wait a tick
+        beat_thread = threading.Thread(target=beat, daemon=True)
+        beat_thread.start()
+
+    try:
+        rc = proc.wait(timeout=timeout_s)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        rc = 124
+        timed_out = True
+    finally:
+        beat_stop.set()
+        # Join, do not just signal: a beat already inside its write would
+        # otherwise land AFTER the caller's run-end record and resurrect
+        # active=True on a finished run -- the exact class of lie this
+        # heartbeat exists to remove.
+        if beat_thread is not None:
+            beat_thread.join(timeout=10)
+    pump_thread.join(timeout=5)
+    return rc, timed_out
+
+
+def cmd_watch(a, board):
+    """Poll the board; when there is work for the agent, launch a worker command.
+
+    One watcher per agent (pid lock), one run at a time, per-run timeout,
+    exponential backoff after failed runs, clean exit on SIGTERM/Ctrl-C.
+    """
+    import signal
+    import time as _time
+
+    owner = whoami(a.agent)
+    if owner.startswith("agent-"):
+        sys.exit("set --agent or TICKET_AGENT to a real name")
+    _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
+    root = os.path.dirname(board)
+    cwd = os.path.abspath(a.cwd or root)
+    if not os.path.isdir(cwd):
+        sys.exit("--cwd %s does not exist" % cwd)
+    if a.exec:
+        cmd = a.exec
+    else:
+        # No --exec: run whatever `tickets join` registered for this agent.
+        # Defaulting to claude here would make `tickets watch --agent qwen`
+        # (the cron-able form, used without spawn) launch the wrong harness.
+        harness, cmd_template = harness_of(board, owner)
+        if harness == "claude" and not cmd_template:
+            cmd = ('claude -p "$(tickets prompt)" --permission-mode %s%s'
+                   % (a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else ""))
+        else:
+            cmd = _worker_cmd(board, owner, "", a.permission_mode, harness,
+                              master=getattr(a, "prompt_kind", "") or "", cmd_template=cmd_template)
+    # BYOA: a custom harness command is a template, not a finished command line.
+    # Expansion happens per run rather than once here because {prompt_file} must
+    # be a FRESH prompt every time -- the whole point of the watcher is that the
+    # board changed since the last run.
+    templated = any(ph in cmd for ph in HARNESS_PLACEHOLDERS)
+    every = max(WATCH_MIN_INTERVAL, int(a.every))
+    harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
+    lock = None
+    if not a.once:
+        lock = _watch_lock(board, owner)
+        if lock is None:
+            sys.exit("another watcher for %s is already running (see %s)" % (
+                owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
+    log_path = os.path.join(agents_dir(board), owner + ".watch.log")
+    # T-243: strip Git's LOCATION vars before handing the parent's environment
+    # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
+    # cascades into every agent this launches. _clean_git_env is deliberately
+    # narrow: GIT_AUTHOR_*/GIT_COMMITTER_* survive, because this is the
+    # fleet-launch env and stripping identity here would be a T-238-class
+    # attribution loss (T-259 defect 3).
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    import threading
+    stop_event = threading.Event()
+    stop = {"now": False}
+
+    def _term(signum, frame):
+        stop["now"] = True
+        stop_event.set()
+        raise InterruptedError()
+
+    signal.signal(signal.SIGTERM, _term)
+
+    def log(line):
+        try:
+            if os.path.exists(log_path) and os.path.getsize(log_path) > WATCH_LOG_MAX_BYTES:
+                os.replace(log_path, log_path + ".1")
+            with open(log_path, "a") as lf:
+                lf.write(line.rstrip("\n") + "\n")
+        except OSError:
+            pass
+
+    runs = failures = 0
+    try:
+        if not a.once:
+            print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, every, cwd, cmd))
+            _safe(lambda: checkin(board, owner, None, "watch loop online (every %ds)" % every), None)
+        _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
+        while not stop["now"]:
+            if os.path.exists(_stop_file(board, owner)):
+                try:
+                    os.unlink(_stop_file(board, owner))
+                except OSError:
+                    pass
+                stop_event.set()
+                print("stop requested via tickets spawn --stop")
+                break
+            p = _safe(lambda: pending_work(board, owner), {})
+            if actionable(p):
+                runs += 1
+                log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
+                print("%s work found (%s) -> run %d" % (now(), ", ".join(p), runs))
+                run_cmd, cleanup = cmd, None
+                if templated:
+                    pf = ""
+                    if "{prompt_file}" in cmd:
+                        try:
+                            pf, cleanup = _render_prompt_file(board, owner, getattr(a, "prompt_kind", "") or "")
+                        except OSError as e:
+                            log("%s run %d could not write the prompt file: %s" % (now(), runs, e))
+                            print("  run %d skipped: could not write the prompt file (%s)" % (runs, e))
+                            failures += 1
+                            if a.once:
+                                sys.exit(1)
+                            _time.sleep(min(every * (2 ** min(failures, 5)), 900))
+                            continue
+                    run_cmd = _expand_harness_cmd(cmd, agent=owner, cwd=cwd, prompt_file=pf)
+                # The trigger is recorded as the pending KEYS only: the values
+                # are message text and ticket titles, and neither belongs in
+                # the trajectory log (T-311 privacy rule).
+                run_started = now()
+                # After T-439 drop, bind claimed|review via _current_ticket — do
+                # not fall back to raw agent.json ticket= (that rebinds stale ids).
+                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or None
+                # T-425 FLAG: writes in the child stamp this id; aggregator
+                # credits THAT run_id, not a time window (two seats, one ticket).
+                run_id = "r-%s-%d-%s" % (
+                    owner, runs,
+                    hashlib.sha1(("%s:%d:%s" % (owner, runs, run_started)).encode()).hexdigest()[:12])
+                env["TICKETS_RUN_ID"] = run_id
+                release_sha = _release_commit()
+                _safe(lambda rid=run_id, ht=held_ticket, rs=release_sha: traj_event(
+                    board, "run_start", agent=owner, ticket=ht, run_no=runs,
+                    run_id=rid, trigger=sorted(p), harness_cmd=harness,
+                    worktree=cwd, release_sha=rs), None)
+                if a.dry_run:
+                    print("  dry-run; would execute: %s" % run_cmd)
+                    if cleanup:
+                        cleanup()
+                    rc = 0
+                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
+                        board, "run_end", agent=owner, ticket=ht, run_no=runs,
+                        run_id=rid, trigger=sorted(p), harness_cmd=harness,
+                        worktree=cwd, started_at=run_started, ended_at=now(),
+                        exit=0, dry_run=True,
+                        bound_write=True if bw else None,
+                        duration_s=_iso_span_secs(run_started, now())), None)
+                else:
+                    # The whole point of T-237: something must record that this
+                    # agent is alive WHILE the child runs. checkin() cannot --
+                    # the next call to it is on the far side of this line.
+                    _safe(lambda: _run_begin(board, owner, runs, cwd), None)
+                    # Where this run's own output starts in the shared log, so
+                    # the usage parse below reads THIS run's tail and not the
+                    # previous run's result object (T-311: a stale JSON blob
+                    # would attribute one run's tokens to another).
+                    log_before = _safe(lambda: os.path.getsize(log_path), 0) or 0
+                    rc, timed_out = _watch_run_capped(
+                        run_cmd, cwd, env, log_path,
+                        a.run_timeout * 60 if a.run_timeout else None,
+                        WATCH_LOG_MAX_BYTES,
+                        on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
+                                                  cwd=cwd, active=True),
+                        beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
+                    )
+                    _safe(lambda: _run_end(board, owner, runs, rc), None)
+                    if cleanup:
+                        cleanup()
+                    ended = now()
+                    # Tokens/cost for THIS run: the harness's own stdout when
+                    # it was asked for a JSON format, else its session store.
+                    # usage_error records "reported something unreadable",
+                    # which must never be confused with "reported nothing".
+                    usage, usage_error = _run_usage(
+                        log_path, log_before, _harness_of_cmd(run_cmd), cwd,
+                        run_started, ended)
+                    if usage_error:
+                        log("%s run %d usage not recorded: %s" % (now(), runs, usage_error))
+                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
+                        board, "run_end", agent=owner, ticket=ht,
+                        run_no=runs, run_id=rid, trigger=sorted(p),
+                        harness_cmd=harness, worktree=cwd,
+                        started_at=run_started, ended_at=ended,
+                        exit=rc, timed_out=bool(timed_out),
+                        bound_write=True if bw else None,
+                        duration_s=_iso_span_secs(run_started, ended),
+                        outcome=("limit" if _looks_limited(
+                            _read_run_slice(log_path, log_before)) else None),
+                        usage_error=usage_error, **usage), None)
+                    if timed_out:
+                        with open(log_path, "a") as lf:
+                            lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))
+                    log("%s run %d exit %s" % (now(), runs, rc))
+                    print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
+                failures = failures + 1 if rc not in (0, None) else 0
+                if a.max_runs and runs >= a.max_runs:
+                    print("max-runs reached")
+                    break
+            elif a.verbose:
+                print("%s nothing pending%s" % (now(), " (limited)" if p.get("limited") else ""))
+            if a.once:
+                sys.exit(0 if actionable(p) else 1)
+            wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
+            _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
+            if stop_event.wait(timeout=wait):
+                break
+    finally:
+        if lock:
+            try:
+                os.unlink(lock)
+            except OSError:
+                pass
+        if not a.once:
+            print("watch stopped")
+
+
+# ---- native Codex hook (SessionStart / UserPromptSubmit context) ----------
+
+def cmd_codex_hook(a, board):
+    """Codex hook body: print board context as hookSpecificOutput.additionalContext.
+
+    Scoped to --worktree via the event cwd so one install is silent elsewhere.
+    Read-only: does not acknowledge messages or touch tickets.
+    """
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+        if not isinstance(event, dict):
+            event = {}
+    except Exception:  # noqa: BLE001
+        event = {}
+    name = event.get("hook_event_name") or ""
+    if name not in ("SessionStart", "UserPromptSubmit"):
+        return
+    cwd = event.get("cwd") or os.getcwd()
+    if a.worktree:
+        try:
+            os.path.relpath(os.path.realpath(cwd), os.path.realpath(a.worktree)).startswith("..") and (_ for _ in ()).throw(ValueError())
+        except (ValueError, OSError):
+            return
+    owner = a.agent
+    p = _safe(lambda: pending_work(board, owner), {})
+    lines = [
+        "Ticket board context (%s):" % owner,
+        "- Agent: %s. Prefix every ticket command with TICKET_AGENT=%s." % (owner, owner),
+        "- Board: %s" % board,
+    ]
+    for k in ("holding", "messages_to_me", "suggested_for_me", "ready_in_my_lane", "limited"):
+        if k in p:
+            v = p[k]
+            lines.append("- %s: %s" % (k, "; ".join(v) if isinstance(v, list) else v))
+    if p.get("broadcasts"):
+        lines.append("- %d unread broadcasts: `tickets inbox`" % p["broadcasts"])
+    lines.append("- Loop: tickets inbox -> tickets mine / tickets next -> work -> tickets update -> tickets sync -> tickets review")
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": name, "additionalContext": "\n".join(lines)[:1900]}}))
+
+
+# ---- boot: every startup step for any tool, in one command -----------------
+
+def cmd_boot(a, board):
+    """Bring an agent online: join, hooks, check-in, briefing, next action.
+
+    Idempotent; safe to run at every session start. --watch continues into the
+    watch loop; --tool installs that tool's hooks.
+    """
+    owner = whoami(a.agent)
+    if owner.startswith("agent-"):
+        sys.exit("boot needs --agent <name> or TICKET_AGENT")
+    if not os.path.isdir(board):
+        sys.exit("no board at %s (run `tickets init` in the project first)" % board)
+    root = os.path.dirname(board)
+    steps = []
+    # 1. identity + roles
+    wf = load_workforce(board)
+    roles = load_roles(board)
+    if owner not in wf or (a.roles is not None):
+        ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
+                                harness=getattr(a, "harness", "") or "",
+                                cmd_template=getattr(a, "cmd_template", "") or "",
+                                model=a.model, best_for="")
+        _silent(lambda: cmd_join(ns, board))
+        steps.append("joined as %s (roles=%s)" % (owner, a.roles or roles.get(owner, [])))
+    else:
+        steps.append("identity ok: %s roles=%s" % (owner, roles.get(owner, [])))
+    # 2. hooks for the tool
+    if a.tool in ("claude", "cursor", "codex"):
+        hn = argparse.Namespace(tool=a.tool, agent=owner, force=False, settings=a.settings,
+                                hooks_file=a.hooks_file, worktree=a.worktree or "", stop=True)
+        _silent(lambda: cmd_hooks(hn, board))
+        steps.append("%s hooks installed/verified" % a.tool)
+    # 3. check-in with location
+    rec = checkin(board, owner, None, "boot (%s)" % (a.tool or "shell"))
+    warn = worktree_warning(owner)
+    steps.append("checked in at %s [%s]" % (rec.get("worktree") or rec.get("cwd"), rec.get("branch") or "?"))
+    # 4. briefing
+    p = pending_work(board, owner)
+    m = current_master(board)
+    print("BOOT %s @ %s" % (owner, board))
+    for s in steps:
+        print("  - " + s)
+    print("  - master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    if warn:
+        print("  ! " + warn.replace("\n", "\n    "))
+    if not p:
+        print("  - nothing pending: no messages, no held ticket, nothing ready in your lane")
+    for k, v in p.items():
+        print("  - %s: %s" % (k, "; ".join(v) if isinstance(v, list) else v))
+    nxt = ("tickets mine" if p.get("holding") else "tickets next") if actionable(p) else "tickets msg \"idle\""
+    print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
+    if a.watch:
+        wn = argparse.Namespace(agent=owner, every=a.every, exec=a.exec, cwd=a.cwd or root,
+                                permission_mode="acceptEdits", allowed_tools="", max_runs=0,
+                                once=False, dry_run=False, verbose=False, run_timeout=a.run_timeout)
+        cmd_watch(wn, board)
+
+
+def _silent(fn):
+    import io
+    import contextlib
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            fn()
+    except SystemExit:
+        pass
+    return buf.getvalue()
+
+
+GUIDE = """# Startup guide -- connecting any agent to the board
+
+NEW HERE? Do this first, then come back:
+
+    cd <your repo> && tickets quickstart        # board + sample work + you, registered
+                                                # then: tickets next
+    docs/first-session.md                       # the same run, captured and annotated
+    README.md                                   # the model, worker loop, master loop
+
+This guide is the next step after that: wiring a REAL agent (Claude Code,
+Codex, Cursor, your own harness) to a board that already exists.
+
+One command does every step (join, hooks, check-in, briefing):
+
+    export TICKET_AGENT=<unique-name>          # claude-opus, claude-sonnet, codex, cursor-2 ...
+    cd <repo or your worktree>
+    tickets boot --tool claude|codex|cursor [--roles backend] [--watch]
+
+What `boot` guarantees, idempotently:
+  1. identity registered (roles/cost/capabilities) so routing knows you
+  2. the tool's hooks installed:
+       claude : SessionStart -> board, UserPromptSubmit -> inbox, Stop -> keep working while work remains
+       codex  : SessionStart + UserPromptSubmit -> board context (scoped to your worktree)
+       cursor : .cursor/hooks.json sessionStart / beforeSubmitPrompt / stop -> board digest
+  3. check-in (worktree, branch, sha) so `tickets who` is truthful
+  4. a briefing: unread messages, held ticket, ready tickets in your lane, and the exact NEXT command
+
+Per tool, after boot:
+  Claude Code (interactive):  TICKET_AGENT=<name> claude      -- hooks do the rest each turn
+  Claude Code (unattended):   tickets boot --tool claude --watch    (or: tickets watch --every 60)
+                              runs `claude -p "$(tickets prompt)"` only when `tickets pending` says there is work
+  Codex:                      TICKET_AGENT=<name> codex        -- hook injects board context; AGENTS.md carries the rules
+  Cursor:                     open the repo/worktree; enable Hooks in settings; set TICKET_AGENT in the launching shell
+  Anything else:              `tickets prompt` prints the worker instructions; `tickets watch --exec '<your cli>'`
+
+Safety rails (all on by default):
+  - Stop hook: at most one extra continuation per user turn (stop_hook_active) and 4 per hour;
+    off with TICKETS_STOP_HOOK=off; never fires without TICKET_AGENT; never for broadcasts only.
+  - watch: one watcher per agent name (pid lock), one run at a time, --run-timeout, backoff on failures,
+    logs in .tickets/agents/<name>.watch.log, stops on SIGTERM.
+  - An agent that recorded `tickets limit` is never woken until `tickets limit --clear`.
+
+Spawning a team from a master session (models per agent):
+  tickets spawn scribe --model sonnet --roles docs --brief "house style: ..."     # cheap worker
+  tickets spawn core   --model opus   --roles backend --cost high                # hard tickets
+  tickets spawn boss   --master --model sonnet                                   # coordinate / unblock / review / merge
+  tickets drive "<what done looks like>" --as boss --heartbeat 30               # objective + master seat that wakes
+                                                                                #   every 30 min to plan toward it
+  tickets spawn --list | tickets spawn <name> --stop
+
+Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
+  tickets join qwen --roles backend --harness custom --cmd 'ollama run qwen3:8b < {prompt_file}'
+  tickets harness check qwen          # runs it on 'reply OK' under a 60s cap, records pass/fail + latency
+  tickets spawn qwen                  # no --harness: uses what `join` registered
+  Placeholders: {prompt_file} (this wake-up's prompt, fresh per run) {cwd} (the agent's worktree) {agent}.
+  Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
+  a detached watcher that runs the tool with that model only when `tickets pending` says there is
+  work. Workers persist until --stop, logout or reboot; new tickets created later are picked up on
+  the next poll. Spawned workers run unattended (no permission prompts); --safe keeps prompts.
+  To survive reboot, add the watcher command from `spawn --list`'s log to a login item / launchd job.
+
+Stuck rule (in every worker prompt): if blocked -- permission, failing test, unclear scope, missing
+access, a decision that is not yours -- post `tickets msg "stuck: ..." --to <master> --re <id>`
+immediately. The master wakes on stuck messages, the review queue and CRIT health, and its prompt
+is: unblock, review+merge, coordinate. Nobody waits silently.
+
+Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
+                 tickets who                       (where everyone is)
+"""
+
+
+# ---- BYOA: bring your own agent ------------------------------------------
+#
+# A harness is whatever actually runs the model: the Claude CLI, the Codex CLI,
+# the Cursor agent, or ANY command of your own (`custom:<cmd>` / --cmd). The
+# runtime's side of the contract never changes -- it hands the harness a prompt
+# and a working directory, and reads the board afterwards. docs/byoa.md is the
+# operator-facing version of this.
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude")
+HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
+
+
+def _split_harness(spec):
+    """`custom:<cmd>` -> ("custom", "<cmd>"); anything else -> (spec, "").
+
+    The inline form exists so a harness and its command fit in one flag
+    (`--harness 'custom:my-agent --prompt {prompt_file}'`), which is what a
+    spawn line in a shell script wants. `--cmd` is the same thing, spelled out.
+    """
+    spec = (spec or "").strip()
+    if spec.startswith("custom:"):
+        return "custom", spec[len("custom:"):].strip()
+    return spec, ""
+
+
+def harness_of(board, owner, harness="", cmd=""):
+    """Resolve (harness, cmd_template) for an agent: explicit flags win, then
+    the workforce record written by `tickets join`, then the claude default.
+
+    This is the single place that answers "what runs this agent", so `spawn`,
+    `watch` and `harness check` cannot disagree about it.
+    """
+    harness, inline = _split_harness(harness)
+    cmd = cmd or inline
+    entry = load_workforce(board).get(owner, {}) or {}
+    if not harness:
+        stored, stored_inline = _split_harness(entry.get("harness") or entry.get("tool") or "")
+        harness = stored
+        cmd = cmd or stored_inline or (entry.get("cmd") or "")
+    elif not cmd and harness == (entry.get("harness") or entry.get("tool") or ""):
+        cmd = entry.get("cmd") or ""
+    return (harness or "claude"), cmd
+
+
+def _expand_harness_cmd(template, agent="", cwd="", prompt_file=""):
+    """Substitute {prompt_file} {cwd} {agent} in a custom harness command.
+
+    str.replace, deliberately not str.format: a real harness command carries
+    braces of its own (a curl with a JSON body, an awk program), and .format
+    would raise KeyError on them -- the agent would simply never start, with
+    the failure a hundred lines away from the template that caused it.
+
+    Every substituted value is shell-quoted because the result is run through
+    the shell. The TEMPLATE itself is not: it is a command line by definition,
+    and it comes from whoever ran `tickets join` for this agent.
+    """
+    out = template
+    for name, value in (("{prompt_file}", prompt_file), ("{cwd}", cwd), ("{agent}", agent)):
+        if name in out:
+            out = out.replace(name, shlex.quote(value or ""))
+    return out
+
+
+def _render_prompt_file(board, owner, kind="", text=""):
+    """Write this agent's prompt to a fresh temp file; return (path, cleanup).
+
+    A file, not an argv string: a worker prompt is thousands of characters of
+    briefs and ticket context, and pasting that into a command line is how you
+    meet ARG_MAX on a long board. The file is mode 0600 and removed by the
+    cleanup callable, which never raises -- a harness run must not fail because
+    the prompt file was already gone.
+    """
+    import tempfile
+
+    if not text:
+        ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="")
+        text = _safe(lambda: prompt_text(ns, board), "") or ""
+    fd, path = tempfile.mkstemp(prefix="tickets-prompt-%s-" % re.sub(r"[^A-Za-z0-9_.-]", "_", owner)[:32],
+                                suffix=".txt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+    except OSError:
+        os.close(fd)
+        raise
+
+    def cleanup():
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    return path, cleanup
+
+
+def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False,
+                cmd_template="", prompt_expr=""):
+    """The headless command a spawned worker runs. Model comes from --model or
+    the workforce record (`tickets join --model`). Spawned workers run without
+    permission prompts by default: nobody is there to answer them, and the
+    blast radius is the agent's own worktree and branch (--safe for acceptEdits).
+
+    `cmd_template` (from `join --cmd` / `spawn --cmd`) overrides the built-in
+    line for ANY harness, so bringing your own agent is not a second code path:
+    the watcher runs one string either way. `prompt_expr` replaces the shell
+    expression that produces the prompt -- `harness check` passes a literal
+    probe prompt through it so the probe exercises the real command shape.
+    """
+    # The workforce record is writable by any agent, so the model name is quoted
+    # before it reaches `watch`, which runs this string through the shell.
+    model = shlex.quote(model or load_workforce(board).get(owner, {}).get("model", "") or "")
+    model = "" if model == "''" else model
+    if cmd_template:
+        # Placeholders are expanded per run by the watcher (a fresh prompt file
+        # each time), so the template is returned as written.
+        return cmd_template
+    if tool == "custom":
+        # Without a template there is nothing to run, and the fall-through below
+        # would launch a binary literally named "custom".
+        sys.exit("%s is registered as a custom harness with no command; "
+                 "re-register it: tickets join %s --harness custom --cmd '<shell template>'" % (owner, owner))
+    prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
+        master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
+    prompt = prompt_expr or '"$(%s)"' % prompt
+    if tool == "claude":
+        flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
+                else "--permission-mode %s" % permission_mode)
+        return 'claude -p %s %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
+    if tool == "codex":
+        # Codex CLI headless: exec mode; unattended needs the bypass flag (no one
+        # can answer approvals), --safe keeps the workspace-write sandbox instead.
+        mode = ("--dangerously-bypass-approvals-and-sandbox" if permission_mode == "bypassPermissions"
+                else "-s workspace-write")
+        return 'codex exec --skip-git-repo-check %s%s %s' % (mode, (" -m %s" % model) if model else "", prompt)
+    if tool == "cursor":
+        # Cursor CLI (`agent`): runs any model Cursor offers (gpt-5.5-high, claude-fable-5-1-thinking-high, ...)
+        force = "--force" if permission_mode == "bypassPermissions" else ""
+        return 'agent -p --output-format text %s%s %s' % (force, (" --model %s" % model) if model else "", prompt)
+    if tool == "cursor+claude":
+        # Fable through Cursor first; if that run errors, the same prompt through the
+        # Claude CLI (opus). One identity, two engines -- the master never goes dark.
+        first = _worker_cmd(board, owner, model or "claude-fable-5-1-thinking-high", permission_mode, "cursor",
+                            master, prompt_expr=prompt_expr)
+        second = _worker_cmd(board, owner, "opus", permission_mode, "claude", master, prompt_expr=prompt_expr)
+        return "%s || %s" % (first, second)
+    # Any other executable, named directly: it is the command, and it reads the
+    # prompt itself. Kept for the pre-BYOA `spawn --tool ./my-runner` form.
+    return tool
+
+
+def _inherit_settings(root, wt):
+    """Copy the project's .claude settings into a new worktree so permission
+    allow-lists and hooks are the same there (a worktree does not inherit the
+    root checkout's .claude/ directory)."""
+    import shutil
+    src = os.path.join(root, ".claude")
+    dst = os.path.join(wt, ".claude")
+    if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
+        return []
+    copied = []
+    os.makedirs(dst, exist_ok=True)
+    for name in ("settings.json", "settings.local.json"):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.isfile(s) and not os.path.exists(d):
+            shutil.copy2(s, d)
+            copied.append(name)
+    return copied
+
+
+def _stop_file(board, owner):
+    return os.path.join(agents_dir(board), owner + ".watch.stop")
+
+
+def cmd_spawn(a, board):
+    """Bring up a persistent worker: register it, give it a worktree, and start a
+    detached watcher that launches the tool (with the chosen model) whenever the
+    board has work for it. --stop asks the watcher to exit at its next poll;
+    --list shows who is running. The watcher lives until stopped, logout or
+    reboot; `tickets guide` shows how to make it a login item."""
+    import subprocess
+
+    root = os.path.dirname(board)
+    if a.list:
+        wf = load_workforce(board)
+        print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+            "agent", "watcher", "harness", "model", "check", "seen", "worktree"))
+        for r in sorted(load_agents(board), key=lambda r: r["owner"]):
+            pids = _live_watch_pids(r["owner"], board=board)
+            wc = len(pids)
+            wlabel = ("pid %d" % pids[0]) if wc == 1 else ("%d pids" % wc if wc else "-")
+            if wc > 1:
+                wlabel += " !!"
+            entry = wf.get(r["owner"], {})
+            print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+                r["owner"][:14], wlabel,
+                (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                (entry.get("model") or "-")[:8],
+                _harness_check_label(r.get("harness_check")),
+                (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
+                (r.get("worktree") or "").replace(os.path.expanduser("~"), "~")))
+        return
+    if not a.name:
+        sys.exit("spawn needs a name (or --list)")
+    owner = a.name
+    if a.stop:
+        import signal
+
+        pids = _live_watch_pids(owner)
+        if not pids:
+            print("no running watcher for %s" % owner)
+            return
+        try:
+            with open(_stop_file(board, owner), "w") as f:
+                f.write(now())
+        except OSError:
+            pass
+        stopped = 0
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped += 1
+            except ProcessLookupError:
+                pass
+        print("stopped %d watcher(s) for %s (pids %s)" % (
+            stopped, owner, ", ".join(str(p) for p in pids)))
+        post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
+        return
+    ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
+                            harness=getattr(a, "harness", "") or "",
+                            cmd_template=getattr(a, "cmd_template", "") or "",
+                            model=a.model, best_for=a.best_for or "")
+    _silent(lambda: cmd_join(ns, board))
+    # --tool/--harness no longer defaults to "claude" in the parser: an absent
+    # flag must mean "use what `tickets join` registered for this agent",
+    # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
+    harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
+                                       getattr(a, "cmd_template", ""))
+    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
+    if not os.path.isdir(wt):
+        base = a.base or _trunk()
+        r = subprocess.run(["git", "-C", root, "worktree", "add", "-q", wt, "-b", owner, base],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            r = subprocess.run(["git", "-C", root, "worktree", "add", "-q", wt, owner], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
+        print("worktree %s (branch %s)" % (wt, owner))
+    if a.brief:
+        bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False, by=whoami())
+        _silent(lambda: cmd_brief(bn, board))
+    inherited = _inherit_settings(root, wt)
+    if inherited:
+        print("inherited project settings into the worktree: %s" % ", ".join(inherited))
+    if a.master:
+        prev = current_master(board) or {}
+        with open(master_state_path(board), "w") as f:
+            json.dump({"owner": owner, "since": now(), "cos": prev.get("cos", "")}, f)
+        _master_log(board, "%s spawned as persistent master (planner)" % owner, by=whoami())
+    if a.cos:
+        prev = current_master(board) or {}
+        if not prev.get("owner"):
+            sys.exit("no master yet; spawn or take the master seat first")
+        prev["cos"] = owner
+        with open(master_state_path(board), "w") as f:
+            json.dump(prev, f)
+        _master_log(board, "%s spawned as persistent chief of staff (review/unblock/merge)" % owner, by=whoami())
+    live = _live_watch_pids(owner, board=board)
+    if live:
+        print("watcher for %s already running (%d process(es), pids %s); --stop first" % (
+            owner, len(live), ", ".join(str(p) for p in live)))
+        return
+    _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
+    try:
+        os.unlink(_stop_file(board, owner))
+    except OSError:
+        pass
+    mode = "acceptEdits" if a.safe else "bypassPermissions"
+    kind = "cos" if a.cos else ("master" if a.master else "")
+    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, harness, master=kind, cmd_template=cmd_template)
+    argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
+            "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
+            "--prompt-kind", kind,
+            "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
+    # T-243: strip Git's LOCATION vars before handing the parent's environment
+    # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
+    # cascades into every agent this launches. _clean_git_env is deliberately
+    # narrow: GIT_AUTHOR_*/GIT_COMMITTER_* survive, because this is the
+    # fleet-launch env and stripping identity here would be a T-238-class
+    # attribution loss (T-259 defect 3).
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    log_path = os.path.join(agents_dir(board), owner + ".watch.log")
+    with open(log_path, "a") as lf:
+        subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    import time as _time
+    _time.sleep(1.0)
+    pid = _watcher_pid(board, owner)
+    model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
+    print("watcher for %s started%s; harness=%s; model=%s; log %s" % (
+        owner, (" (pid %d)" % pid) if pid else "", harness, model, log_path))
+    print("cmd: %s" % cmd)
+    post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
+                 % (owner, harness, model))
+
+
+HARNESS_PROBE_PROMPT = "reply OK"
+HARNESS_CHECK_TIMEOUT = 60
+
+
+def _harness_check_label(check):
+    """One column's worth of the last `harness check`, for `spawn --list`."""
+    if not check:
+        return "-"
+    age = hours_since(check.get("at", ""))
+    ms = check.get("latency_ms")
+    return "%s %s" % ("ok" if check.get("ok") else "FAIL",
+                      ("%.1fs" % (ms / 1000.0)) if isinstance(ms, (int, float)) else
+                      ((fmt_hours(age) + " ago") if age is not None else ""))
+
+
+def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HARNESS_CHECK_TIMEOUT):
+    """Run the agent's harness on a trivial prompt and report what happened.
+
+    Returns the record stored on the agent: harness, cmd, ok, exit, latency_ms,
+    output (head), at. The probe runs the REAL command shape -- same binary,
+    same flags, same template -- with only the prompt swapped, because the
+    failure this is for ("that harness is not installed / not logged in / the
+    template is wrong") lives in the command, not in the model's answer.
+
+    `ok` is exit status only. Whether the model actually said OK is reported in
+    `replied`, and deliberately does not gate `ok`: a harness that answers a
+    trivial prompt with a preamble is working, and a check that called that a
+    failure would take a live agent out of the fleet.
+    """
+    import subprocess
+    import time as _time
+
+    harness, cmd_template = harness_of(board, owner, harness, cmd)
+    cwd = cwd or (_agent_rec(board, owner) or {}).get("worktree") or os.path.dirname(board)
+    if not os.path.isdir(cwd):
+        cwd = os.path.dirname(board)
+    prompt_file, cleanup = "", None
+    if cmd_template:
+        if "{prompt_file}" in cmd_template:
+            prompt_file, cleanup = _render_prompt_file(board, owner, text=HARNESS_PROBE_PROMPT)
+        run_cmd = _expand_harness_cmd(cmd_template, agent=owner, cwd=cwd, prompt_file=prompt_file)
+    else:
+        run_cmd = _worker_cmd(board, owner, model, "bypassPermissions", harness,
+                              prompt_expr=shlex.quote(HARNESS_PROBE_PROMPT))
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    started = _time.time()
+    out, rc, timed_out = "", None, False
+    try:
+        r = subprocess.run(run_cmd, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=timeout)
+        rc, out = r.returncode, ((r.stdout or "") + (r.stderr or ""))
+    except subprocess.TimeoutExpired as e:
+        timed_out, rc = True, 124
+        out = "".join(x.decode("utf-8", "replace") if isinstance(x, bytes) else (x or "")
+                      for x in (e.stdout, e.stderr))
+    except OSError as e:
+        rc, out = 127, str(e)
+    finally:
+        if cleanup:
+            cleanup()
+    latency_ms = int((_time.time() - started) * 1000)
+    out = out.strip()
+    return {"harness": harness, "cmd": run_cmd, "ok": rc == 0, "exit": rc, "timed_out": timed_out,
+            "latency_ms": latency_ms, "replied": "ok" in out.lower()[:400],
+            "output": out[:400], "at": now()}
+
+
+def cmd_harness(a, board):
+    """`tickets harness check <name>` / `tickets harness list`.
+
+    check: prove the agent's harness actually runs before a watcher spends a
+    poll interval discovering it does not. The result is written to the agent
+    record so `spawn --list` and the master can see who is really reachable.
+    """
+    if a.harness_cmd == "list":
+        wf = load_workforce(board)
+        names = sorted(set(list(wf) + [r["owner"] for r in load_agents(board)]))
+        if not names:
+            print("no agents registered yet -- tickets join <name> --harness ...")
+            return
+        print("%-16s %-12s %-14s %s" % ("agent", "harness", "check", "cmd"))
+        for n in names:
+            e = wf.get(n, {}) or {}
+            rec = _agent_rec(board, n) or {}
+            print("%-16s %-12s %-14s %s" % (
+                n[:16], (e.get("harness") or e.get("tool") or "claude")[:12],
+                _harness_check_label(rec.get("harness_check")),
+                e.get("cmd") or "(built-in)"))
+        return
+    owner = a.name or whoami()
+    if owner.startswith("agent-"):
+        sys.exit("harness check needs an agent name: tickets harness check <name>")
+    harness, cmd_template = harness_of(board, owner, a.harness, a.cmd_template)
+    print("checking %s: harness=%s%s" % (owner, harness, (" cmd=%s" % cmd_template) if cmd_template else ""))
+    res = harness_probe(board, owner, a.harness, a.cmd_template, a.model, a.cwd, a.timeout)
+    _safe(lambda: _agent_set(board, owner, harness_check=res), None)
+    print("  cmd:      %s" % res["cmd"])
+    print("  exit:     %s%s" % (res["exit"], " (TIMEOUT after %ds)" % a.timeout if res["timed_out"] else ""))
+    print("  latency:  %.1fs" % (res["latency_ms"] / 1000.0))
+    print("  replied:  %s" % ("saw 'OK' in the output" if res["replied"] else "no 'OK' in the first 400 chars"))
+    if res["output"]:
+        print("  output:   %s" % res["output"].splitlines()[0][:160])
+    print("%s: %s" % (owner, "harness OK" if res["ok"] else "HARNESS FAILED"))
+    if not res["ok"]:
+        sys.exit(1)
+
+
+UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Ticket board</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
+header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:linear-gradient(180deg,#12151c 0%,#0c0e12 100%);border-bottom:1px solid var(--line)}
+.brand{display:flex;flex-direction:column;gap:1px;min-width:140px}
+.brand .prod{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.brand h1{font-size:16px;margin:0;font-weight:650}
+.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;background:var(--chip);border:1px solid var(--line);font-size:12px}
+.chip b{font-weight:650}
+.chip.master{border-color:color-mix(in srgb,var(--acc) 45%,var(--line))}
+.chip.cos{border-color:color-mix(in srgb,var(--review) 45%,var(--line))}
+.sprint{display:flex;flex-direction:column;gap:3px;min-width:180px;flex:1}
+.sprint .row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--mute)}
+.bar{height:6px;background:#1b1f28;border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--acc)}
+.pulse{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:650}
+.pulse i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.pulse.warn i{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 25%,transparent)}
+.pulse.bad i{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 25%,transparent)}
+#clock{margin-left:auto;font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
+.mission{margin:0 16px;border-bottom:1px solid var(--line)}
+.mission summary{cursor:pointer;list-style:none;padding:8px 0;color:var(--mute);font-size:12px;display:flex;gap:8px;align-items:baseline}
+.mission summary::-webkit-details-marker{display:none}
+.mission summary .k{letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--fg)}
+.mission summary .one{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
+.mission pre{margin:0 0 10px;white-space:pre-wrap;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--mute)}
+nav.tabs{display:flex;gap:4px;padding:8px 16px 0;border-bottom:1px solid var(--line)}
+nav.tabs button{appearance:none;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--mute);padding:8px 12px;font:13px/1 inherit;font-weight:650;cursor:pointer}
+nav.tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
+main{flex:1;min-height:0;padding:14px 16px 18px;overflow:auto}
+.pane{display:none;height:100%}
+body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-tab=messages] #pane-messages{display:flex;flex-direction:column;gap:12px}
+.kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
+@media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
+.col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
+.col h2{margin:0;padding:10px 12px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
+.col h2 .n{font-variant-numeric:tabular-nums;color:var(--mute)}
+.col.blocked h2{color:var(--blocked)}.col.ready h2{color:var(--ready)}.col.flight h2{color:var(--flight)}.col.review h2{color:var(--review)}
+.col .list{padding:0 8px 10px;display:flex;flex-direction:column;gap:8px}
+.card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.card.stale-warn{border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+.card.stale-bad{border-color:color-mix(in srgb,var(--bad) 70%,var(--line));background:color-mix(in srgb,var(--bad) 8%,#10141b)}
+.card-top{display:flex;gap:8px;align-items:center;font:11px/1 ui-monospace,Menlo,monospace}
+.card-top .id{font-weight:700;color:var(--acc)}
+.pri{color:var(--mute)}.card-title{font-weight:600;font-size:13px}
+.card-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--mute);font-size:12px}
+.wait{font-size:11px;color:var(--warn)}
+.empty{color:var(--mute);font-size:12px;padding:8px}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.mute{color:var(--mute)}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.who{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.av{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--acc);color:#fff;font-size:9px;font-weight:700;flex:none}
+.agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.agent{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.agent.head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.agent .st{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px;color:var(--mute)}
+.stats b{display:block;color:var(--fg);font-size:14px}
+.mention{color:var(--acc);font-weight:600;background:var(--chip);border-radius:4px;padding:0 3px}
+.msgs{display:flex;flex-direction:column;gap:8px;padding-bottom:8px}
+.m{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
+.m .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-bottom:4px}
+.tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;border:1px solid var(--line);color:var(--mute)}
+#composer{position:sticky;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px;padding:10px}
+#composer textarea{width:100%;resize:vertical;min-height:56px;font:13px/1.4 inherit;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+#composer select,#composer button,#composer input{font:13px inherit;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+#composer button{background:var(--acc);color:#fff;border-color:var(--acc);cursor:pointer;font-weight:600}
+#composer button:disabled{opacity:.5;cursor:default}
+#composerRow{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+#mentionBar{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;min-height:22px}
+.mchip{cursor:pointer;border:1px solid var(--line);background:var(--chip);border-radius:99px;padding:1px 9px;font-size:12px}
+.mchip:hover{border-color:var(--acc)}
+#composerMsg{font-size:12px;margin-top:4px;min-height:14px}
+.pitch-lede{color:var(--mute);font-size:12px;max-width:720px}
+.pitch-lede b{color:var(--fg)}
+.next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+.next-step .lbl{font-weight:700;color:var(--acc);white-space:nowrap}
+.next-step .msg{flex:1;min-width:160px}
+.next-step .cmd{font:12px/1.35 ui-monospace,Menlo,monospace;color:var(--mute);white-space:nowrap}
+.next-step.unreachable{background:color-mix(in srgb,var(--bad) 14%,var(--card));border-bottom-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
+.next-step.unreachable .lbl{color:var(--bad)}
+.onboard{margin:0 16px;padding:10px 0 12px;border-bottom:1px solid var(--line)}
+.onboard summary{cursor:pointer;list-style:none;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700;display:flex;gap:8px;align-items:center}
+.onboard summary::-webkit-details-marker{display:none}
+.onboard .ob-body{margin-top:8px}
+.ob-steps{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:12px}
+.ob-step{display:inline-flex;align-items:center;gap:5px;color:var(--mute);flex-wrap:wrap}
+.ob-step.done{color:var(--fg)}
+.ob-step i{width:14px;height:14px;border-radius:3px;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-style:normal;flex:none}
+.ob-step.done i{background:var(--ok);border-color:var(--ok);color:#fff}
+.empty-board{background:var(--card);border:1px dashed var(--line);border-radius:14px;padding:20px 18px;max-width:720px;margin-bottom:12px}
+.empty-board p{margin:0 0 10px;color:var(--mute);font-size:13px;line-height:1.55}
+.empty-board b{color:var(--fg)}
+.empty-board .cta{margin-top:14px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
+.col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
+.stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
+.hero-eyebrow{margin:0 0 6px;font-size:12px;color:var(--mute);font-weight:650}
+.promise-strip{display:flex;gap:10px 14px;align-items:baseline;padding:6px 16px;border-bottom:1px solid var(--line);font-size:13px}
+.promise-strip .lbl{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--mute)}
+.promise-strip .msg{color:var(--mute)}
+.chip.promise{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
+body[data-tab=board] .promise-chips{display:none}
+.promise-hero{display:flex;gap:32px;align-items:flex-end;padding:2px 0 12px;border-bottom:1px solid var(--line)}
+.promise-card{display:flex;flex-direction:column;gap:2px;min-width:132px;background:transparent;border:0;padding:0}
+.promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
+.promise-card .v{font-size:32px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.05}
+.promise-card .h{font-size:11px;color:var(--mute)}
+.promise-panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.promise-panel h2{margin:0 0 4px;font-size:13px}
+.promise-panel summary{cursor:pointer;list-style:none;font-size:13px;font-weight:650}
+.promise-panel summary::-webkit-details-marker{display:none}
+.turns-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.subh{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:8px 0 4px}
+.promise-table{width:100%;border-collapse:collapse;font-size:13px}
+.promise-table th,.promise-table td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+.promise-table .num{text-align:right;font-variant-numeric:tabular-nums}
+.usage-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
+.usage-card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:10px}
+.usage-card .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.usage-card .v{font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}
+.pitch{background:radial-gradient(1200px 400px at 50% 0%,#2a7a4c 0%,#14532d 55%,#0f3d24 100%);
+  border:2px solid #0a2a18;border-radius:18px;min-height:460px;display:flex;flex-direction:column;
+  position:relative;overflow:hidden;box-shadow:inset 0 0 0 2px rgba(255,255,255,.06)}
+.pitch:before{content:"";position:absolute;left:50%;top:50%;width:88px;height:88px;margin:-44px 0 0 -44px;
+  border:2px solid rgba(255,255,255,.18);border-radius:50%;pointer-events:none}
+.band{flex:1;display:flex;flex-direction:column;justify-content:center;padding:10px 14px;border-top:1px dashed rgba(255,255,255,.16);min-height:88px}
+.band:first-child{border-top:0}
+.band .lbl{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.55);font-weight:700;margin-bottom:8px}
+.band .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center}
+.player{width:72px;display:flex;flex-direction:column;align-items:center;gap:4px;color:#f4f7f2}
+.player .av{width:36px;height:36px;font-size:12px;background:#f4f7f2;color:#14532d}
+.player.keeper .av{background:var(--warn);color:#1a1204}
+.player.cover .av{background:var(--acc)}
+.player.ghost{opacity:.7}
+.player.ghost .av{background:transparent;border:2px dashed rgba(255,255,255,.55);color:#fff}
+.player .nm{font-size:11px;font-weight:650;text-align:center;max-width:80px;overflow:hidden;text-overflow:ellipsis}
+.player .cov{font-size:10px;color:rgba(255,255,255,.7);text-align:center}
+.bench{display:flex;gap:10px;flex-wrap:wrap;padding:8px 2px}
+.bench .player .av{background:#2a3344;color:#d5dbe6}
+@media(max-width:700px){.pitch{min-height:560px}.player{width:64px}}
+@media(max-width:600px){
+  header.cmd{flex-direction:column;align-items:stretch}
+  #clock{margin-left:0}
+  .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
+  .ob-steps{flex-direction:column;align-items:flex-start}
+  .kanban{grid-template-columns:1fr}
+  .promise-hero{flex-wrap:wrap;gap:16px}
+  .turns-grid{grid-template-columns:1fr}
+  nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  .agents{grid-template-columns:1fr}
+  .sprint{min-width:0}
+}
+</style></head><body data-tab="board">
+<header class="cmd">
+  <div class="brand"><span class="prod">tickets</span><h1 id="title">Ticket board</h1></div>
+  <div class="chips" id="chips"></div>
+  <div class="chips promise-chips" id="promiseChips">
+    <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
+    <span class="chip promise" id="hdrYield"><b>yield@cost</b> <span id="hdrYieldVal">—</span></span>
+  </div>
+  <div class="sprint" id="sprint"></div>
+  <div class="pulse" id="pulse"><i></i><span>clean</span></div>
+  <div id="clock"></div>
+</header>
+<details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
+<div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
+<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
+<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
+  <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
+<nav class="tabs">
+  <button type="button" data-tab-btn="board" class="on">Board</button>
+  <button type="button" data-tab-btn="agents">Agents</button>
+  <button type="button" data-tab-btn="messages">Messages</button>
+</nav>
+<main>
+<div class="pane" id="pane-board">
+  <div id="emptyBoard" class="empty-board" hidden></div>
+  <section id="objectivePromise" data-fold="objective">
+    <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
+    <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."><!-- V1 MUST: home median turns + yield@cost; T-344 worst-10 is NICE only -->
+      <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Lower is better · unknown is not zero</div></article>
+      <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
+    </div>
+  </section>
+  <div class="kanban">
+    <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
+    <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
+    <section class="col flight"><h2 title="Tickets actively being worked right now">In flight <span class="n" id="n-flight">0</span><span class="hint">claimed and in progress</span></h2><div class="list" id="col-flight"></div></section>
+    <section class="col review"><h2 title="Finished work waiting for master to merge to main">Review <span class="n" id="n-review">0</span><span class="hint">submitted, awaiting merge</span></h2><div class="list" id="col-review"></div></section>
+  </div>
+  <details class="promise-panel" id="turnsPanel">
+    <summary>Turns efficiency</summary>
+    <small id="turnsSummary" class="mute"></small>
+    <div class="turns-grid"><div><h3 class="subh">Worst tickets (watch runs)</h3><table class="promise-table" id="turnsWorst"></table></div><div><h3 class="subh">Per-agent median</h3><table class="promise-table" id="turnsAgents"></table></div></div>
+  </details>
+</div>
+<div class="pane" id="pane-agents">
+  <p class="pitch-lede" id="coverageLede"><b>Total Football.</b> Positions are coverage, not identity — any agent can take any shirt, including master. Enrolled roles are a hint. The empty shirts are uncovered work.</p>
+  <div class="pitch" id="pitch">
+    <div class="band" data-band="attack"><div class="lbl">Attack · ready / uncovered</div><div class="row" id="band-attack"></div></div>
+    <div class="band" data-band="mid"><div class="lbl">Midfield · in flight</div><div class="row" id="band-mid"></div></div>
+    <div class="band" data-band="back"><div class="lbl">Defense · review</div><div class="row" id="band-back"></div></div>
+    <div class="band" data-band="keep"><div class="lbl">Keeper · master / CoS</div><div class="row" id="band-keep"></div></div>
+  </div>
+  <div class="mute" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px">Bench · idle or down</div>
+  <div class="bench" id="band-bench"></div>
+  <section class="promise-panel" id="usagePanel">
+    <h2>Usage / cost</h2>
+    <small id="usageHonesty" class="mute">Harness-reported only. Not reported by harness stays — never a made-up $0.</small>
+    <div class="usage-cards" id="usageCards"></div>
+    <table class="promise-table" id="usageAgents"></table>
+  </section>
+  <div class="agents" id="agents"></div>
+</div>
+<div class="pane" id="pane-messages">
+  <div class="msgs" id="msgs"></div>
+  <section id="composer">
+    <div id="composerRow">
+      <label class="who"><small>from</small> <select id="cFrom"></select></label>
+      <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
+      <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+    </div>
+    <textarea id="cText" placeholder="Message the board. Type @ to tag an agent (e.g. @cursor) -- mentions reach that agent even if 'to' is someone else."></textarea>
+    <div id="mentionBar"></div>
+    <div id="composerRow" style="margin-top:8px"><button id="cSend">Post</button><small id="composerMsg"></small></div>
+  </section>
+</div>
+</main>
+<script>
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
+// Server sends timestamps as raw ISO-8601 UTC; render in whatever timezone
+// this browser is actually in, not the server's.
+const fmtLocal=iso=>{if(!iso)return '-';const d=new Date(iso);return isNaN(d)?String(iso):d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
+function initials(name){const s=String(name||'?').split(/[-_ ]/).filter(Boolean);
+  return ((s[0]||'?')[0]+(s.length>1?s[1][0]:(s[0]||'?')[1]||'')).toUpperCase()}
+function who(name){if(!name)return '';return '<span class="who"><span class="av">'+esc(initials(name))+'</span>'+esc(name)+'</span>'}
+function mentionText(text){
+  return esc(text).split(/(```[\s\S]*?```|`[^`]*`)/g).map((part,i)=>i%2
+    ?part
+    :part.replace(/(^|[^\w@])@([A-Za-z][A-Za-z0-9_-]{0,47})/g,
+      (m,pre,handle)=>pre+'<span class="mention">@'+handle+'</span>')
+  ).join('')
+}
+function missionLine(goals){
+  const raw=String(goals||'').trim();
+  if(!raw)return '(no MASTER.md yet -- tickets master init)';
+  const lines=raw.split(/\n/).map(l=>l.trim()).filter(Boolean);
+  const first=lines.find(l=>!/^(OBJECTIVE|MISSION|CEO MEMO|SPRINT PLAN)\b/i.test(l))||lines[0];
+  return first.replace(/^[#>*\-]+\s*/,'').slice(0,180);
+}
+function staleClass(t){
+  if(t.since_update==null)return '';
+  if(t.since_update>1.5)return 'stale-bad';
+  if(t.since_update>0.75)return 'stale-warn';
+  return '';
+}
+function card(t,extra){
+  const waiting=(t.waiting||[]).length?'<div class="wait">waiting on '+esc((t.waiting||[]).join(', '))+'</div>':'';
+  const owner=t.owner?who(t.owner):'<span class="mute">unassigned</span>';
+  const pri=t.priority!=null?'<span class="pri">P'+esc(t.priority)+'</span>':'';
+  const age=t.since_update!=null?'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>':'';
+  return '<article class="card '+staleClass(t)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+(extra||'')+'</article>';
+}
+function fillCol(id,items,html){
+  document.getElementById('n-'+id).textContent=items.length;
+  document.getElementById('col-'+id).innerHTML=items.length?html:('<div class="empty">none</div>');
+}
+const dash=x=>x==null?'—':String(x);
+function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(n).toFixed(4):Number(n).toFixed(2)))}
+function fmtMedian(p){return(!p||p.median_turns==null)?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0)}
+function fmtYield(p){return(!p||p.yield_per_usd==null)?'—':(Number(p.yield_per_usd).toFixed(2)+' per $')}
+function setTxt(id,v){const el=document.getElementById(id);if(el)el.textContent=v}
+function renderPromise(p){
+  const med=fmtMedian(p),yld=fmtYield(p);
+  setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);
+  setTxt('heroYieldVal',yld);setTxt('hdrYieldVal',yld);
+  const yh=document.getElementById('heroYieldHint');
+  if(!yh)return;
+  if(!p||p.yield_per_usd==null)yh.textContent=(p&&p.n_unmeasured_cost)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';
+  else yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
+}
+function renderTurns(t){
+  const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
+  const row=cells=>'<tr>'+cells.map(c=>'<td>'+c+'</td>').join('')+'</tr>';
+  if(!t||t.v!==1){sum.textContent='';worst.innerHTML=row(['—','','','']);agents.innerHTML=row(['—','','','']);return;}
+  const agg=t.aggregates||{},measured=(t.tickets||[]).filter(r=>r.turns!=null).sort((a,b)=>b.turns-a.turns||(a.ticket>b.ticket?1:-1)).slice(0,10);
+  sum.textContent='measured '+((agg.n)||0)+' ticket(s); unmeasured '+((agg.n_unmeasured)||0)+' (no run_end — typically backfill)';
+  worst.innerHTML='<tr><th>ticket</th><th>owner</th><th class="num">turns</th><th>outcome</th></tr>'+(measured.length?measured.map(r=>row([esc(r.ticket),esc(r.owner||'—'),'<span class="num">'+r.turns+'</span>',esc(r.outcome||'-')])).join(''):row(['—','','','']));
+  const by=agg.by_agent||[];
+  agents.innerHTML='<tr><th>agent</th><th class="num">n</th><th class="num">median</th><th class="num">mean</th></tr>'+(by.length?by.map(r=>row([esc(r.agent),'<span class="num">'+r.n+'</span>','<span class="num">'+dash(r.median)+'</span>','<span class="num">'+dash(r.mean)+'</span>'])).join(''):row(['—','','','']));
+}
+function renderUsage(u){
+  const cards=document.getElementById('usageCards'),tbl=document.getElementById('usageAgents');
+  const cell=(k,v)=>'<div class="usage-card"><div class="k">'+esc(k)+'</div><div class="v">'+v+'</div></div>';
+  if(!u){cards.innerHTML=cell('Cost','—');tbl.innerHTML='';return;}
+  cards.innerHTML=cell('Cost',money(u.cost_usd))+cell('Tokens in',dash(u.tokens_in))+cell('Tokens out',dash(u.tokens_out))+cell('Runs with cost',String(u.n_runs_with_cost||0))+cell('Runs unmeasured',String(u.n_runs_unmeasured||0));
+  const by=u.by_agent||[];
+  tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
+}
+function playerChip(name,cover,kind){
+  return '<div class="player '+(kind||'cover')+'"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span><span class="cov">'+esc(cover||'')+'</span></div>';
+}
+function renderPitch(d){
+  const placed=new Set();
+  const keep=[],back=[],mid=[],attack=[],bench=[];
+  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(playerChip(name,cover,kind))};
+  add(keep,d.master,'master','keeper');
+  add(keep,d.cos,'CoS','keeper');
+  (d.review||[]).forEach(t=>add(back,t.owner,t.id));
+  (d.in_flight||[]).forEach(t=>add(mid,t.owner,t.id));
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  ready.forEach(t=>{if(t.owner)add(attack,t.owner,t.id);else attack.push(playerChip(t.id,'uncovered','ghost'))});
+  (d.agents||[]).forEach(a=>{
+    if(placed.has(a.name))return;
+    const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any shirt';
+    bench.push(playerChip(a.name,(a.state==='DOWN'?'down · ':'idle · ')+hint,a.state==='DOWN'?'ghost':''));
+  });
+  const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
+  put('band-keep',keep.join(''),'no keeper');
+  put('band-back',back.join(''),'nobody covering review');
+  put('band-mid',mid.join(''),'nobody in flight');
+  put('band-attack',attack.join(''),'no uncovered work');
+  put('band-bench',bench.join(''),'everyone is on the pitch');
+}
+function setTab(name){
+  document.body.dataset.tab=name;
+  try{localStorage.setItem('tickets-ui-tab',name)}catch(e){}
+  document.querySelectorAll('[data-tab-btn]').forEach(b=>b.classList.toggle('on',b.dataset.tabBtn===name));
+}
+document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
+try{const saved=localStorage.getItem('tickets-ui-tab');if(saved)setTab(saved)}catch(e){}
+let AGENTS=[];
+function loadAgentPickers(){
+  const from=document.getElementById('cFrom'),to=document.getElementById('cTo');
+  const savedFrom=localStorage.getItem('tickets-ui-from')||'';
+  const prevFrom=from.value||savedFrom, prevTo=to.value;
+  from.innerHTML='<option value="">(pick agent)</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  to.innerHTML='<option value="">everyone</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  if(AGENTS.includes(prevFrom))from.value=prevFrom;
+  if(AGENTS.includes(prevTo))to.value=prevTo;
+}
+function mentionQueryAt(text,caret){
+  const upto=text.slice(0,caret);const m=upto.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
+  return m?m[1]:null;
+}
+function renderMentionBar(){
+  const ta=document.getElementById('cText'),bar=document.getElementById('mentionBar');
+  const q=mentionQueryAt(ta.value,ta.selectionStart||0);
+  if(q===null){bar.innerHTML='';return}
+  const ql=q.toLowerCase();
+  const matches=AGENTS.filter(a=>a.toLowerCase().startsWith(ql)).slice(0,8);
+  bar.innerHTML=(matches.length?matches:AGENTS.slice(0,8)).map(a=>'<span class="mchip" data-agent="'+esc(a)+'">@'+esc(a)+'</span>').join('')
+    || '<small class="mute">no known agents yet</small>';
+}
+function insertMention(agent){
+  const ta=document.getElementById('cText');const caret=ta.selectionStart||0;
+  const before=ta.value.slice(0,caret),after=ta.value.slice(caret);
+  const m=before.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
+  const start=m?caret-m[1].length:caret;
+  ta.value=ta.value.slice(0,start)+agent+' '+after;
+  const pos=start+agent.length+1;ta.focus();ta.setSelectionRange(pos,pos);
+  renderMentionBar();
+}
+document.getElementById('mentionBar').addEventListener('click',e=>{
+  const el=e.target.closest('.mchip');if(el)insertMention(el.dataset.agent);
+});
+document.getElementById('cText').addEventListener('input',renderMentionBar);
+document.getElementById('cText').addEventListener('click',renderMentionBar);
+document.getElementById('cText').addEventListener('keyup',e=>{if(e.key!=='Enter')renderMentionBar()});
+document.getElementById('cSend').addEventListener('click',async()=>{
+  const from=document.getElementById('cFrom').value.trim();
+  const text=document.getElementById('cText').value.trim();
+  const to=document.getElementById('cTo').value.trim();
+  const re=document.getElementById('cRe').value.trim();
+  const btn=document.getElementById('cSend'),msg=document.getElementById('composerMsg');
+  if(!from){msg.className='bad';msg.textContent='pick who you are posting as';return}
+  if(!text){msg.className='bad';msg.textContent='message is empty';return}
+  localStorage.setItem('tickets-ui-from',from);
+  btn.disabled=true;msg.className='';msg.textContent='posting…';
+  try{
+    const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({from,text,to,re})});
+    const out=await r.json();
+    if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
+      document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';load()}
+    else{msg.className='bad';msg.textContent='error: '+(out.error||r.status)}
+  }catch(e){msg.className='bad';msg.textContent='error: '+e}
+  finally{btn.disabled=false}
+});
+function tickClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}
+let snapshotFails=0;
+function unreachableNextStep(msg,cmd){
+  return{kind:'unreachable',label:'Board unavailable',message:msg,cmd:cmd||''};
+}
+async function load(){
+  let d;
+  try{
+    const r=await fetch('/board.json?'+Date.now());
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    d=await r.json();
+  }catch(e){
+    snapshotFails++;
+    renderNextStep(unreachableNextStep(
+      snapshotFails>2?'Cannot reach the board server — is `tickets ui` still running? ('+e+')'
+        :'Board unreachable — retrying… ('+e+')',
+      'tickets ui'));
+    return;
+  }
+  if(d.error){
+    snapshotFails++;
+    renderNextStep(d.next_step||unreachableNextStep(
+      'Board snapshot failed — '+d.error+(snapshotFails>2?' (still failing; check TICKETS_DIR and board files)':''),
+      'tickets ui --json'));
+    d.counts=d.counts||{total:0,done:0};
+  }else snapshotFails=0;
+  document.getElementById('title').textContent=d.project||'Atman';
+  const counts=d.counts||{total:0,done:0};
+  document.getElementById('chips').innerHTML=
+    '<span class="chip master"><b>master</b> '+esc(d.master||'nobody')+'</span>'+
+    '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
+    '<span class="chip"><b>'+esc(counts.done)+'</b>/'+esc(counts.total)+' done</span>';
+  const s=d.sprint;
+  document.getElementById('sprint').innerHTML=s
+    ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
+    :'<div class="row"><span>no active sprint</span></div><div class="bar"><i style="width:0"></i></div>';
+  const crit=(d.health||[]).filter(x=>x.sev==='CRIT').length;
+  const warn=(d.health||[]).filter(x=>x.sev==='WARN').length;
+  const pulse=document.getElementById('pulse');
+  pulse.className='pulse'+(crit?' bad':warn?' warn':'');
+  pulse.innerHTML='<i></i><span>'+(crit?'CRIT '+crit:warn?'WARN '+warn:'clean')+'</span>';
+  tickClock();
+  const goals=d.goals||'(no MASTER.md yet -- tickets master init)';
+  document.getElementById('goals').textContent=goals;
+  document.getElementById('missionOne').textContent=missionLine(goals);
+  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length);
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  fillCol('blocked',blocked,blocked.map(t=>card(t)).join(''));
+  fillCol('ready',ready,ready.map(t=>card(t)).join(''));
+  fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
+  fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
+  renderEmptyBoard(d);
+  if(!d.error)renderNextStep(d.next_step);
+  renderOnboarding(d.onboarding);
+  renderPromise(d.promise);
+  renderTurns(d.turns);
+  renderUsage(d.usage);
+  renderPitch(d);
+  AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
+  const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
+  document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
+    const u=utilBy[a.name]||{};
+    const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
+      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
+      '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
+      '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — a proxy for productive turns">Turns</span></div>'+
+      '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
+      '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div></article>';
+  }).join('')||'<div class="empty">no agents checked in</div>';
+  const thread=(d.messages||[]).slice().reverse();
+  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtLocal(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
+    ||'<div class="empty">no messages yet</div>';
+}
+function renderOnboarding(ob){
+  // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
+  const steps=[
+    ['initialized','Board ready','tickets quickstart --agent <you>'],
+    ['first_ticket','Work on the board','tickets quickstart'],
+    ['first_agent','You registered','tickets quickstart --agent <you>'],
+    ['first_review','First review submitted','tickets review <id> --notes "..."'],
+    ['first_merge','First merge','tickets done <id> --notes "..."'],
+    ['objective_set','Objective set','tickets objective "..."']
+  ];
+  const done=steps.filter(s=>ob&&ob[s[0]]).length;
+  document.getElementById('obProgress').textContent=done+'/'+steps.length;
+  document.getElementById('obSteps').innerHTML=steps.map(s=>{
+    const ok=ob&&ob[s[0]];
+    return '<span class="ob-step'+(ok?' done':'')+'"><i>'+(ok?'✓':'')+'</i><span>'+esc(s[1])+'</span><span class="mute mono">'+esc(s[2])+'</span></span>';
+  }).join('');
+}
+function renderNextStep(ns){
+  const el=document.getElementById('nextStep');
+  if(!ns||!ns.message){el.hidden=true;el.className='next-step';return}
+  el.hidden=false;
+  el.className='next-step'+(ns.kind==='unreachable'?' unreachable':'');
+  el.innerHTML='<span class="lbl">'+esc(ns.label||'Next')+'</span><span class="msg">'+esc(ns.message)+'</span>'+
+    (ns.cmd?'<span class="cmd">'+esc(ns.cmd)+'</span>':'');
+}
+function renderEmptyBoard(d){
+  const el=document.getElementById('emptyBoard');
+  const empty=d.empty_board||!(d.counts&&d.counts.total);
+  el.hidden=!empty;
+  if(!empty)return;
+  el.innerHTML='<p><b>Welcome to Atman.</b> This board coordinates a team of agents on shared work.</p>'+
+    '<p>Tickets are the unit of work — agents claim one at a time, post updates, and submit for review.</p>'+
+    '<p>The master merges finished work; dependencies keep agents from starting too early.</p>'+
+    '<p>Everyone reads the same board state — messages, tickets, and agents live here.</p>'+
+    '<p>New here? Seed a sample board and claim your first ticket in one command.</p>'+
+    '<div class="cta">tickets quickstart --agent &lt;you&gt; &nbsp;·&nbsp; tickets guide &nbsp;·&nbsp; README.md</div>';
+}
+load();setInterval(load,5000);setInterval(tickClock,1000);
+</script></body></html>"""
+
+
+def _onboarding_checklist(board, tickets):
+    """First-run checklist ticks for the UI.
+
+    Display labels/cmds in UI_HTML match T-322 quickstart + README
+    (opus-console/t322-quickstart); keys here are the board-state probes.
+    """
+    initialized = os.path.isfile(master_path(board)) or os.path.isfile(os.path.join(board, "roles.json"))
+    agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
+    workforce = load_workforce(board)
+    return {
+        "initialized": initialized,
+        "first_ticket": len(tickets) > 0,
+        "first_agent": bool(agents or workforce),
+        "first_review": any(t.get("status") in ("review", "done") for t in tickets),
+        "first_merge": any(t.get("status") == "done" for t in tickets),
+        "objective_set": bool((load_objective(board) or {}).get("text")),
+    }
+
+
+def _next_step_hint(board, tickets, done_ids):
+    """One-line guidance for the persistent next-step strip."""
+    if not tickets:
+        return {"kind": "start", "label": "Get started",
+                "message": "Board is empty — run quickstart to seed your first tickets.",
+                "cmd": "tickets quickstart --agent <you>"}
+    blocked = [t for t in tickets if t.get("status") == "blocked"]
+    if blocked:
+        t = blocked[0]
+        return {"kind": "unblock", "label": "Unblock",
+                "message": "%s is blocked — read why and clear the blocker." % t["id"],
+                "cmd": "tickets show %s" % t["id"]}
+    review = [t for t in tickets if t.get("status") == "review"]
+    if review:
+        return {"kind": "merge", "label": "Review queue",
+                "message": "%d ticket(s) waiting for master to merge." % len(review),
+                "cmd": "tickets done %s --notes \"...\"" % review[0]["id"]}
+    agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
+    workforce = load_workforce(board)
+    if not (agents or workforce):
+        return {"kind": "spawn", "label": "Spawn an agent",
+                "message": "No agents on the board yet — register one to claim work.",
+                "cmd": "tickets join <name> --roles backend"}
+    ready = [t for t in tickets if t.get("status") == "open"
+             and all(d in done_ids for d in t.get("deps", []))]
+    unowned = [t for t in ready if not t.get("owner")]
+    if unowned:
+        return {"kind": "route", "label": "Route work",
+                "message": "Ready tickets are unowned — claim or assign them.",
+                "cmd": "tickets next"}
+    return {"kind": "ok", "label": "On track",
+            "message": "Workers are moving — post updates every 45 minutes.",
+            "cmd": "tickets update <id> \"...\""}
+
+
+def _turns_mod():
+    try:
+        from ticket_board.turns import build_turns_report, load_trajectory_events
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.turns import build_turns_report, load_trajectory_events
+    return build_turns_report, load_trajectory_events
+
+
+def _empty_turns_snapshot():
+    return {
+        "v": 1,
+        "tickets": [],
+        "aggregates": {
+            "mean": None, "median": None, "n": 0, "n_unmeasured": 0,
+            "by_agent": [], "by_model": [], "by_role": [], "by_priority": [],
+        },
+    }
+
+
+def _turns_snapshot(board, tickets):
+    """Frozen `tickets turns --json` for the console (T-372 / T-344)."""
+    build_turns_report, load_trajectory_events = _turns_mod()
+    return build_turns_report(
+        load_trajectory_events(board),
+        tickets=tickets,
+        workforce=load_workforce(board),
+        messages=load_messages(board, include_archives=True),
+    )
+
+
+def _empty_usage_snapshot():
+    return {
+        "cost_usd": None, "tokens_in": None, "tokens_out": None,
+        "n_runs_with_cost": 0, "n_runs_unmeasured": 0, "by_agent": [],
+    }
+
+
+def _usage_snapshot(events):
+    """Harness-reported usage only. Unknown is omitted, never defaulted to 0."""
+    by = {}
+    n_cost = n_uncost = 0
+    cost_sum = 0.0
+    tin = tout = 0
+    have_cost = have_tin = have_tout = False
+    for e in events or []:
+        if e.get("kind") != "run_end":
+            continue
+        agent = e.get("agent") or ""
+        rec = by.setdefault(agent, {
+            "agent": agent, "cost_usd": None, "tokens_in": None, "tokens_out": None,
+            "n_runs_with_cost": 0, "n_runs_unmeasured": 0,
+        })
+        c = e.get("cost_usd")
+        if isinstance(c, (int, float)):
+            have_cost = True
+            cost_sum += float(c)
+            n_cost += 1
+            rec["n_runs_with_cost"] += 1
+            rec["cost_usd"] = round((rec["cost_usd"] or 0.0) + float(c), 6)
+        else:
+            n_uncost += 1
+            rec["n_runs_unmeasured"] += 1
+        if isinstance(e.get("tokens_in"), int):
+            have_tin = True
+            tin += e["tokens_in"]
+            rec["tokens_in"] = (rec["tokens_in"] or 0) + e["tokens_in"]
+        if isinstance(e.get("tokens_out"), int):
+            have_tout = True
+            tout += e["tokens_out"]
+            rec["tokens_out"] = (rec["tokens_out"] or 0) + e["tokens_out"]
+    return {
+        "cost_usd": round(cost_sum, 6) if have_cost else None,
+        "tokens_in": tin if have_tin else None,
+        "tokens_out": tout if have_tout else None,
+        "n_runs_with_cost": n_cost,
+        "n_runs_unmeasured": n_uncost,
+        "by_agent": [by[k] for k in sorted(by) if k],
+    }
+
+
+def _ticket_costs(events):
+    out = {}
+    for e in events or []:
+        if e.get("kind") != "run_end":
+            continue
+        tid = e.get("ticket")
+        c = e.get("cost_usd")
+        if not tid or not isinstance(c, (int, float)):
+            continue
+        out[tid] = out.get(tid, 0.0) + float(c)
+    return out
+
+
+def _promise_hero(turns, tickets, events):
+    """CEO home hero: median turns + yield@cost. Unknown is never 0."""
+    agg = (turns or {}).get("aggregates") or {}
+    costs = _ticket_costs(events)
+    idx = {t.get("id"): t for t in (tickets or []) if t.get("id")}
+    done_with_cost = 0
+    done_no_cost = 0
+    cost_for_done = 0.0
+    for row in (turns or {}).get("tickets") or []:
+        tid = row.get("ticket")
+        outcome = row.get("outcome")
+        st = (idx.get(tid) or {}).get("status")
+        if outcome not in ("done", "merge") and st != "done":
+            continue
+        if tid in costs:
+            done_with_cost += 1
+            cost_for_done += costs[tid]
+        else:
+            done_no_cost += 1
+    yield_per_usd = None
+    if done_with_cost and cost_for_done > 0:
+        yield_per_usd = round(done_with_cost / cost_for_done, 4)
+    return {
+        "median_turns": agg.get("median"),
+        "n_turns": agg.get("n") or 0,
+        "n_unmeasured_turns": agg.get("n_unmeasured") or 0,
+        "yield_per_usd": yield_per_usd,
+        "done_with_cost": done_with_cost,
+        "cost_usd": round(cost_for_done, 6) if done_with_cost else None,
+        "n_unmeasured_cost": done_no_cost,
+    }
+
+
+def _coverage_snapshot(master, cos, open_rows, in_flight, review, agents):
+    """Total Football coverage: empty shirts = uncovered ready work."""
+    uncovered = [{"id": t["id"], "title": t.get("title", "")}
+                 for t in (open_rows or [])
+                 if t.get("status") != "BLOCKED" and not t.get("waiting") and not t.get("owner")]
+    return {
+        "uncovered_ready": uncovered,
+        "in_flight": [{"id": t["id"], "owner": t.get("owner", "")} for t in (in_flight or [])],
+        "review": [{"id": t["id"], "owner": t.get("owner", "")} for t in (review or [])],
+        "keeper": ([{"name": master, "role": "master"}] if master else []) + (
+            [{"name": cos, "role": "cos"}] if cos else []),
+        "bench": [{"name": a["name"], "state": a.get("state", "")}
+                  for a in (agents or []) if a.get("name")],
+    }
+
+
+def _empty_promise_hero():
+    return {
+        "median_turns": None, "n_turns": 0, "n_unmeasured_turns": 0,
+        "yield_per_usd": None, "done_with_cost": 0, "cost_usd": None,
+        "n_unmeasured_cost": 0,
+    }
+
+
+def board_snapshot(board, messages=40):
+    """Everything the UI shows, as plain data. Read-only."""
+    tickets = load_all(board)
+    cur = active_sprint(board)
+    m = current_master(board) or {}
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    counts = {"total": len(tickets), "done": len(done)}
+    sprint = None
+    if cur:
+        mine = [t for t in tickets if t.get("sprint") == cur["id"]]
+        d, n, c, b = progress(mine)
+        sprint = {"id": cur["id"], "goal": cur.get("goal", ""), "done": d, "total": n, "in_flight": c, "blocked": b,
+                  "review": len([t for t in mine if t["status"] == "review"])}
+    rows, burn = utilization(board, tickets, hours=24)
+    agents = {r["owner"]: r for r in load_agents(board)}
+    wf = load_workforce(board)
+    roles = load_roles(board)
+    out_agents = []
+    for r in rows:
+        rec = agents.get(r["agent"], {})
+        out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
+                           "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
+                           "watcher": _watcher_count(r["agent"], board) > 0,
+                           "watcher_count": _watcher_count(r["agent"], board),
+                           "roles": roles.get(r["agent"]) or []})
+    out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
+    goals = ""
+    try:
+        with open(master_path(board)) as f:
+            md = f.read()
+        import re as _re
+        picked = []
+        for head in ("CEO memo", "Mission", "Sprint plan"):
+            mm = _re.search(r"^## [^\n]*%s[^\n]*\n(.*?)(?=^## |\Z)" % _re.escape(head), md, _re.S | _re.M)
+            if mm:
+                picked.append("%s\n%s" % (head.upper(), mm.group(1).strip()[:1800]))
+        goals = "\n\n".join(picked)
+    except OSError:
+        pass
+    obj = _safe(lambda: load_objective(board), {})
+    if obj:
+        goals = "OBJECTIVE%s\n%s\n\n%s" % (" (met)" if obj.get("done") else "", obj.get("text", ""), goals)
+    util_rows = [r for r in rows if r["state"] != "DOWN"]
+    in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
+                  "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
+                  "waiting": [d for d in t.get("deps", []) if d not in done]}
+                 for t in tickets if t["status"] == "claimed"]
+    review = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
+               "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", "")}
+              for t in tickets if t["status"] == "review"]
+    open_rows = [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2),
+                  "title": t["title"], "role": t.get("role", ""), "owner": t.get("owner", ""),
+                  "waiting": [d for d in t.get("deps", []) if d not in done]}
+                 for t in tickets if t["status"] in ("open", "blocked")]
+    turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
+    events = _safe(lambda: _turns_mod()[1](board), [])
+    usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
+    promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
+    return {
+        "project": os.path.basename(os.path.dirname(board)), "generated": now(),
+        "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
+        "goals": goals,
+        "util": sorted(util_rows, key=lambda r: (-r["done"], r["agent"])),
+        "in_flight": in_flight,
+        "review": review,
+        "open": open_rows,
+        "agents": out_agents,
+        "health": [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12],
+        # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
+        # so the UI can render it in whatever timezone the viewer's browser is
+        # actually in -- truncating/reformatting it here would bake in UTC.
+        "messages": [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
+                      "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or []}
+                     for x in load_messages(board)[-messages:]][::-1],
+        "onboarding": _onboarding_checklist(board, tickets),
+        "next_step": _next_step_hint(board, tickets, done),
+        "empty_board": counts["total"] == 0,
+        "turns": turns,
+        "usage": usage,
+        "promise": promise,
+        "coverage": _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
+                                       open_rows, in_flight, review, out_agents),
+    }
+
+
+def cmd_ui(a, board):
+    """Local status UI: serves an auto-refreshing page, /board.json, and a
+    composer POST at /msg that posts through post_message() -- same board,
+    same messages.jsonl, no second store."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    if a.json:
+        print(json.dumps(board_snapshot(board), indent=2))
+        return
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/board.json"):
+                body = json.dumps(_safe(lambda: board_snapshot(board), {
+                    "error": "snapshot failed",
+                    "counts": {"total": 0, "done": 0},
+                    "next_step": {"kind": "unreachable", "label": "Snapshot failed",
+                                  "message": "Could not read the board — check TICKETS_DIR and board files.",
+                                  "cmd": "tickets ui --json"},
+                })).encode()
+                ctype = "application/json"
+            else:
+                body = UI_HTML.encode()
+                ctype = "text/html; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if not self.path.startswith("/msg"):
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                sender = str(payload.get("from") or "").strip()
+                text = str(payload.get("text") or "").strip()
+                to = str(payload.get("to") or "").strip()
+                re_ = str(payload.get("re") or "").strip()
+                if not sender or not text:
+                    raise ValueError("from and text are required")
+                rec = post_message(board, sender, text, to, re_)
+                status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
+            except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
+                status, out = 400, {"ok": False, "error": str(e)}
+            body = json.dumps(out).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    srv = HTTPServer((a.host, a.port), H)
+    print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via tickets msg)" % (a.host, a.port))
+    if a.open:
+        import subprocess
+        subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+QUICKSTART_MARKER = "quickstart.json"
+
+QUICKSTART_TICKETS = [
+    {"key": "schema", "title": "Sample: design the data model",
+     "role": "backend", "priority": 1,
+     "body": "A sample ticket created by `tickets quickstart`.\n\n"
+             "It has no dependencies, so it is the one `tickets next` hands out first.\n"
+             "Work it like a real ticket: claim it, post an update, then send it to review.\n"
+             "Delete the samples whenever you like: tickets quickstart --remove"},
+    {"key": "api", "title": "Sample: build the API on top of the model",
+     "role": "backend", "priority": 2, "deps": ["schema"],
+     "body": "A sample ticket that DEPENDS on the first one.\n\n"
+             "`tickets next` will not offer it until the schema ticket is done -- that is\n"
+             "the dependency graph doing its job, not the board being empty."},
+    {"key": "ui", "title": "Sample: put a screen on the API",
+     "role": "console", "priority": 2, "deps": ["api"],
+     "body": "The third sample, two hops down the chain.\n\n"
+             "Run `tickets graph` to see all three and what is blocking what."},
+]
+
+
+def _quickstart_state(board):
+    """What a previous quickstart made here, or None. Makes the command idempotent."""
+    path = os.path.join(board, QUICKSTART_MARKER)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return None
+
+
+def _quickstart_save(board, state):
+    path = os.path.join(board, QUICKSTART_MARKER)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _quickstart_alive(board, state):
+    """The sample ids from a previous run that still exist (a user may have deleted them)."""
+    if not state:
+        return []
+    have = set(t["id"] for t in load_all(board))
+    return [tid for tid in state.get("tickets", []) if tid in have]
+
+
+def _quickstart_harness():
+    """Which agent harness this machine can actually launch, best first.
+
+    Print-only: T-314's `tickets harness check` is the real probe. Quickstart
+    only names a harness so it can print a spawn line; it never starts one.
+    Returns (name, argv-prefix) or (None, None).
+    """
+    import shutil
+    for name, argv in (("claude", ["claude", "-p"]),
+                       ("codex", ["codex", "exec"]),
+                       ("cursor-agent", ["cursor-agent", "-p"])):
+        if shutil.which(name):
+            return name, argv
+    return None, None
+
+
+def cmd_quickstart(a, board):
+    """Zero to a first ticket claimed by a real agent. Non-interactive, idempotent."""
+    if a.remove:
+        state = _quickstart_state(board)
+        alive = _quickstart_alive(board, state)
+        for tid in alive:
+            try:
+                os.unlink(ticket_path(board, tid))
+            except OSError:
+                pass
+        try:
+            os.unlink(os.path.join(board, QUICKSTART_MARKER))
+        except OSError:
+            pass
+        print("removed %d sample ticket(s)%s" % (
+            len(alive), (" (%s)" % ", ".join(alive)) if alive else ""))
+        if state and state.get("epic"):
+            print("epic %s left in place (it may hold your own work now)" % state["epic"])
+        return
+
+    # 1. Bind before writing anything -- the same T-263 condition `init` enforces,
+    # through the same primitives, so there is one guard and not a second copy
+    # of it that can drift.  Asking only "is there a board?" is not enough: when
+    # an ancestor project already has one, the ambient resolution finds it and
+    # quickstart would cheerfully populate SOMEONE ELSE'S board.
+    explicit = bool(getattr(a, "board", None))
+    target, why = _init_resolve_board(a)
+    if not explicit and not _same_board(target, board):
+        print("board: %s" % target)
+        print("  resolved from %s" % why)
+        print("  ambient:      %s" % board)
+        sys.exit(_init_refusal(target, board))
+
+    if not os.path.isdir(target):
+        # Mirror `tickets init`'s own arguments. The quickstart regression test
+        # runs this path on a fresh repo, so a new init flag fails loudly there
+        # rather than silently at a user's first command.
+        init_args = argparse.Namespace(
+            board=getattr(a, "board", None), track=False, force=False)
+        cmd_init(init_args, board)
+        print("")
+    board = target
+
+    print("board: %s" % board)
+
+    # 2. sample epic + three tickets with a real dependency chain, created once
+    state = _quickstart_state(board)
+    alive = _quickstart_alive(board, state)
+    if alive:
+        print("samples: already here (%s) -- not creating them again" % ", ".join(alive))
+        epic_id = (state or {}).get("epic", "")
+    else:
+        epic = _alloc(epics_dir(board), "E", 3, {
+            "title": "Sample epic: a first slice end to end",
+            "body": "Created by `tickets quickstart` so the board is not empty on day one.\n"
+                    "Remove the samples with `tickets quickstart --remove`.",
+            "status": "open", "created": now(), "updated": now(),
+        })
+        epic_id = epic["id"]
+        keymap, made = {}, []
+        for spec in QUICKSTART_TICKETS:
+            t = create(board, spec["title"], spec["body"], spec.get("role", ""),
+                       [], spec.get("priority", 2), epic_id, "", [])
+            keymap[spec["key"]] = t["id"]
+            made.append(t)
+        for spec, t in zip(QUICKSTART_TICKETS, made):
+            deps = [keymap[d] for d in spec.get("deps", []) if d in keymap]
+            if deps:
+                set_deps(board, t["id"], deps)
+        _quickstart_save(board, {"epic": epic_id,
+                                 "tickets": [t["id"] for t in made],
+                                 "created": now()})
+        print("epic:  %s  %s" % (epic_id, epic["title"]))
+        for spec, t in zip(QUICKSTART_TICKETS, made):
+            dep = spec.get("deps") or []
+            print("  %s  %-42s %s" % (
+                t["id"], t["title"][:42],
+                ("after %s" % keymap[dep[0]]) if dep else "ready now"))
+
+    # 3. register whoever is running this, so `next` has someone to hand work to
+    agent = a.agent or os.environ.get("TICKET_AGENT") or whoami()
+    if agent and not agent.startswith("agent-"):
+        # T-314 grew --harness/--cmd; pin every field cmd_join reads so a new
+        # join flag fails this Namespace in tests instead of at first-run.
+        join_args = argparse.Namespace(
+            name=agent, roles=a.roles, tool="", model="",
+            can=None, cost=None, best_for="", harness="", cmd_template="")
+        # cmd_join prints a full worker briefing; quickstart has its own ending,
+        # so keep the one line that matters and drop the rest.
+        import io, contextlib
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                cmd_join(join_args, board)
+        except SystemExit:
+            print("agent: could not register %r automatically" % agent)
+            print("       run: tickets join <name> --roles backend")
+        else:
+            joined = [ln for ln in buf.getvalue().splitlines() if ln.startswith("joined as ")]
+            print(joined[0] if joined else "agent: %s" % agent)
+    else:
+        agent = ""
+        print("agent: none registered (set TICKET_AGENT, or: tickets join <name> --roles backend)")
+
+    # 4. optionally put a real worker on it
+    if a.with_agent:
+        _quickstart_spawn(a, board, a.with_agent)
+
+    _quickstart_next_steps(board, agent)
+
+
+def _quickstart_spawn(a, board, name):
+    harness, argv = _quickstart_harness()
+    if not harness:
+        print("")
+        print("--with-agent: no agent harness found on PATH (looked for claude, codex, cursor-agent).")
+        print("  Install one, or start a worker by hand:  TICKET_AGENT=%s tickets next" % name)
+        return
+    print("")
+    print("worker: %s will run as %s" % (harness, name))
+    print("  tickets spawn %s --tool %s" % (name, harness))
+    print("  (not launched for you -- quickstart never starts a background process without asking;")
+    print("   run the line above, or: TICKET_AGENT=%s %s \"$(tickets prompt)\")" % (name, " ".join(argv)))
+
+
+def _quickstart_next_steps(board, agent):
+    ident = ("TICKET_AGENT=%s " % agent) if agent else ""
+    print("")
+    print("The three commands that matter:")
+    print("  %stickets next                      claim the next ready ticket" % ident)
+    print("  %stickets update <id> \"...\"         say where you are, at least every 45 min" % ident)
+    print("  %stickets review <id> --notes \"...\" hand it back with evidence" % ident)
+    print("")
+    print("See it: tickets ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
+    print("Learn it: tickets guide   |   docs/first-session.md   |   README.md")
+
+
+def cmd_guide(a, board):
+    print(GUIDE)
+
+
+# ---- hooks: wire a tool so the board reaches the agent every turn ----------
+
+INBOX_HOOK_CMD = (
+    'PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; '
+    '[ -n "$TICKET_AGENT" ] && tickets inbox --keep --limit 8 2>/dev/null | sed "s/^/[board] /" || true'
+)
+
+CURSOR_HOOK = r'''#!/usr/bin/env python3
+"""Cursor hook installed by `tickets hooks cursor`: surface new board messages.
+Reads the hook event JSON on stdin, writes {additional_context, user_message}
+on stdout. Keeps its own watermark so `tickets inbox` read-state is untouched.
+Identity comes from $TICKET_AGENT (defaults to the name given at install)."""
+import json, os, sys
+from pathlib import Path
+
+AGENT = os.environ.get("TICKET_AGENT", "%(agent)s")
+BOARD = Path(os.environ.get("TICKETS_DIR", %(board)r))
+STATE = Path(__file__).resolve().parent / "state" / ("board-%%s.json" %% AGENT)
+
+def main():
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        event = {}
+    path = BOARD / "messages.jsonl"
+    if not path.is_file():
+        print("{}"); return 0
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    last = ""
+    if STATE.exists():
+        try: last = json.loads(STATE.read_text()).get("last_at", "")
+        except ValueError: pass
+    new = []
+    for ln in path.read_text().splitlines():
+        try: m = json.loads(ln)
+        except ValueError: continue
+        if (m.get("at") or "") <= last: continue
+        to = m.get("to") or ""
+        if to not in ("", "all", "everyone", AGENT): continue
+        if m.get("from") == AGENT and to in ("", "all", "everyone"): continue
+        new.append(m)
+    out = {}
+    if new:
+        lines = ["Ticket board: %%d new message(s) for %%s. Reply with `tickets msg`." %% (len(new), AGENT)]
+        for m in new[-12:]:
+            lines.append("- %%s %%s -> %%s%%s: %%s" %% (m.get("at","?")[5:16], m.get("from","?"), m.get("to") or "everyone",
+                         (" [%%s]" %% m["re"]) if m.get("re") else "", (m.get("text") or "")[:220]))
+        out["additional_context"] = "\n".join(lines)[:3500]
+        out["user_message"] = "%%d new ticket-board message(s) for %%s" %% (len(new), AGENT)
+        STATE.write_text(json.dumps({"last_at": new[-1].get("at", last)}))
+    print(json.dumps(out)); return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def cmd_hooks(a, board):
+    """Install board hooks for a tool: claude (global settings.json) or cursor
+    (project .cursor/hooks). Codex has no hooks; AGENTS.md carries the protocol."""
+    root = os.path.dirname(board)
+    script = os.path.realpath(__file__)
+    def ours(entry):
+        for hk in entry.get("hooks", []) if isinstance(entry, dict) else []:
+            cmd = str(hk.get("command", ""))
+            if script in cmd or "tickets.py" in cmd or cmd == INBOX_HOOK_CMD or "tickets inbox --keep" in cmd:
+                return True
+        return False
+    if a.tool == "claude":
+        path = os.path.expanduser(getattr(a, "settings", "") or "~/.claude/settings.json")
+        try:
+            with open(path) as f:
+                s = json.load(f)
+        except (IOError, ValueError):
+            s = {}
+        hooks = s.setdefault("hooks", {})
+        ss = hooks.setdefault("SessionStart", [])
+        ss[:] = [h for h in ss if not ours(h)]
+        ss.append({"matcher": "startup|resume|clear|compact",
+                   "hooks": [{"type": "command", "command": "%s board" % script, "timeout": 10}]})
+        ups = hooks.setdefault("UserPromptSubmit", [])
+        ups[:] = [h for h in ups if not ours(h)]
+        ups.append({"hooks": [{"type": "command", "command": INBOX_HOOK_CMD, "timeout": 10}]})
+        # Keep a turn alive while the agent still has board work. Loop-guarded
+        # (stop_hook_active) and rate-capped; --no-stop removes it.
+        st = hooks.setdefault("Stop", [])
+        st[:] = [h for h in st if not ours(h)]
+        if getattr(a, "stop", True):
+            st.append({"hooks": [{"type": "command", "command": "%s stop-hook" % script, "timeout": 15}]})
+        if not st:
+            hooks.pop("Stop", None)
+        allow = s.setdefault("permissions", {}).setdefault("allow", [])
+        for p in ("Bash(tickets:*)", "Bash(%s:*)" % script):
+            if p not in allow:
+                allow.append(p)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(s, f, indent=2)
+        os.replace(tmp, path)
+        print("Claude Code hooks in %s: SessionStart -> board; UserPromptSubmit -> inbox; Stop -> %s."
+              % (path, "keep working while board work remains" if getattr(a, "stop", True) else "off"))
+        print("Launch sessions as: TICKET_AGENT=<name> claude")
+        return
+    if a.tool == "codex":
+        hp = os.path.expanduser(getattr(a, "hooks_file", "") or "~/.codex/hooks.json")
+        agent = a.agent or whoami()
+        if agent.startswith("agent-"):
+            sys.exit("codex hooks need --agent <name> (or TICKET_AGENT)")
+        wt = os.path.abspath(a.worktree) if getattr(a, "worktree", "") else ""
+        try:
+            with open(hp) as f:
+                cfg = json.load(f)
+        except (IOError, ValueError):
+            cfg = {}
+        hooks = cfg.setdefault("hooks", {})
+        cmd = "%s codex-hook --agent %s%s" % (script, agent, (" --worktree %s" % wt) if wt else "")
+        for ev in ("SessionStart", "UserPromptSubmit"):
+            lst = hooks.setdefault(ev, [])
+            # replace only our own earlier entry for this agent; keep everything else
+            lst[:] = [e for e in lst if not ("codex-hook --agent %s" % agent) in json.dumps(e)]
+            lst.append({"hooks": [{"type": "command", "command": cmd, "timeout": 5,
+                                   "statusMessage": "Checking the ticket board",
+                                   "additionalContextLimit": 2000}]})
+        os.makedirs(os.path.dirname(hp) or ".", exist_ok=True)
+        tmp = hp + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, hp)
+        print("Codex hooks in %s for %s%s: SessionStart + UserPromptSubmit -> board context. "
+              "Trust it with /hooks in Codex; AGENTS.md carries the rules." % (hp, agent, (" (scoped to %s)" % wt) if wt else ""))
+        return
+    if a.tool == "cursor":
+        hdir = os.path.join(root, ".cursor", "hooks")
+        os.makedirs(hdir, exist_ok=True)
+        sp = os.path.join(hdir, "tickets-board.py")
+        if os.path.exists(sp) and not a.force:
+            print("%s exists; --force to overwrite" % sp)
+        else:
+            with open(sp, "w") as f:
+                f.write(CURSOR_HOOK % {"agent": a.agent or "cursor", "board": board})
+            os.chmod(sp, 0o755)
+        hp = os.path.join(root, ".cursor", "hooks.json")
+        try:
+            with open(hp) as f:
+                cfg = json.load(f)
+        except (IOError, ValueError):
+            cfg = {"version": 1, "hooks": {}}
+        entry = {"command": ".cursor/hooks/tickets-board.py", "timeout": 15}
+        for ev in ("sessionStart", "beforeSubmitPrompt", "stop"):
+            lst = cfg.setdefault("hooks", {}).setdefault(ev, [])
+            if not any("tickets-board" in json.dumps(x) for x in lst):
+                lst.append(dict(entry, **({"loop_limit": 2} if ev == "stop" else {})))
+        with open(hp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        print("Cursor: %s + %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings; "
+              "set TICKET_AGENT in the shell Cursor starts from." % (os.path.relpath(hp, root), os.path.relpath(sp, root)))
+        return
+
+
+def cmd_mine(a, board):
+    owner = whoami(a.owner)
+    tickets = load_all(board)
+    mine = [t for t in tickets if t.get("status") == "claimed" and t.get("owner") == owner]
+    if not mine:
+        print("no claimed tickets for %s" % owner)
+        return
+    for t in mine:
+        print(line(t, tickets))
+
+
+def cmd_init(a, board):
+    # `board` is the AMBIENT resolution (board_dir()): where every later
+    # `tickets` command from this cwd will go.  `target` is resolved
+    # independently, from cwd alone.  T-263: they used to be the same value by
+    # construction, so init could report success and write somewhere else.
+    target, why = _init_resolve_board(a)
+    explicit = bool(getattr(a, "board", None))
+
+    # Acceptance 3 -- "which board am I about to write to" is answered BEFORE
+    # the first write, never after it.
+    print("board: %s" % target)
+    print("  resolved from %s" % why)
+    if not _same_board(target, board):
+        print("  ambient:      %s" % board)
+
+    # Acceptance 1 -- create AND bind, or fail loudly. Never success-then-
+    # resolve-elsewhere.
+    if not explicit and not _same_board(target, board):
+        sys.exit(_init_refusal(target, board))
+
+    board = target
+    root = os.path.dirname(board)
+    os.makedirs(board, exist_ok=True)
+    written = []
+
+    rules_dir = os.path.join(root, ".cursor", "rules")
+    os.makedirs(rules_dir, exist_ok=True)
+    rule = os.path.join(rules_dir, "tickets.mdc")
+    with open(rule, "w") as f:
+        f.write(CURSOR_RULE)
+    written.append(rule)
+
+    agents = os.path.join(root, "AGENTS.md")
+    existing = ""
+    if os.path.exists(agents):
+        with open(agents) as f:
+            existing = f.read()
+    if "Shared ticket board" not in existing:
+        with open(agents, "a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            if existing:
+                f.write("\n")
+            f.write(PROTOCOL)
+        written.append(agents)
+    else:
+        written.append(agents + " (already had it, left alone)")
+
+    gitignore = os.path.join(root, ".gitignore")
+    if not a.track:
+        body = ""
+        if os.path.exists(gitignore):
+            with open(gitignore) as f:
+                body = f.read()
+        if ".tickets/" not in body:
+            with open(gitignore, "a") as f:
+                if body and not body.endswith("\n"):
+                    f.write("\n")
+                f.write(".tickets/\n")
+            written.append(gitignore)
+
+    if not os.path.exists(master_path(board)):
+        with open(master_path(board), "w") as f:
+            f.write(MASTER_TEMPLATE)
+        written.append(master_path(board))
+
+    for w in written:
+        print("wrote: %s" % w)
+
+    # Acceptance 1 again, after the fact: VERIFY the bind with the real
+    # resolver rather than asserting it. An init that wrote files but did not
+    # bind is exactly the failure this ticket exists to stop.
+    bound = board_dir(discover_children=True)
+    if _same_board(bound, board):
+        print("bound: `tickets` run from %s resolves to this board." % os.getcwd())
+    elif explicit:
+        print("\nNOT BOUND: you asked for --board %s, but `tickets` run from %s "
+              "still resolves to %s.\n  To use the board you just wrote:  "
+              "export TICKETS_DIR=%s" % (board, os.getcwd(), bound, board))
+    else:
+        sys.exit(
+            "INIT WROTE THE BOARD BUT IT IS NOT BOUND: wrote %s, yet `tickets` "
+            "from %s still resolves to %s. Refusing to report success (T-263)."
+            % (board, os.getcwd(), bound))
+    print("\nClaude Code picks this up from its global SessionStart hook.")
+    print("Codex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.")
+
+
+PROTOCOL = """## Shared ticket board
+
+Work here is coordinated through a ticket board that Claude Code, Codex and
+Cursor all share. It lives in `.tickets/` and is driven only through the
+`tickets` CLI -- never edit files in `.tickets/` by hand, or atomic claiming
+breaks and two agents will do the same work.
+
+Run `tickets board` for the current state, or `tickets graph` to see the whole
+dependency tree with each node's status and owner.
+
+**Connect first** (once per session; `tickets connect` prints the long form):
+
+    export TICKET_AGENT=<your-unique-name>     # claude-opus, codex, grok ...
+    tickets join $TICKET_AGENT --roles backend --can docker,browser --cost high
+    tickets master                             # briefing + health
+    tickets inbox                              # messages addressed to you
+
+**Rules for every agent**
+
+1. Claim before you work (`tickets next`). Never work without a ticket; never
+   edit `.tickets/` by hand. Hold one ticket at a time.
+2. Finish what you claim. If you cannot, `tickets block --reason` or
+   `tickets reopen` -- never go silent.
+3. You may create, split, re-wire and assign tickets. Extending the graph is
+   expected. Anyone can become master with `tickets master take`.
+4. Work on your own git worktree and branch, never on main. Commit as you go.
+   `tickets review` and `tickets done` refuse from main or with uncommitted files.
+5. Post `tickets update <id> "..."` at least every 45 minutes and at every
+   milestone. Longer silence is treated as a timeout and the ticket may be
+   reopened for someone else.
+6. When finished, submit -- do not close: `tickets review <id> --notes "paths
+   touched, tests run, decisions dependents must match"` (branch@sha is added
+   automatically; `--pr N` if you opened one). The MASTER reviews, merges to
+   main and closes it with `tickets done`. Claim your next ticket right away.
+7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
+   receive tickets whose needs you registered with `--can`. Expensive agents
+   are steered to priority-1 work, cheap agents to routine work.
+8. Stuck? Say so at once: `tickets msg "stuck: <what, tried, need>" --to <master>
+   --re <id>` and `tickets update <id> "stuck: ..."`; `tickets block` if you
+   cannot continue. The master's job is to unblock you. Never wait silently.
+
+Statuses: TO DO -> IN PROGRESS -> IN REVIEW -> DONE, or BLOCKED. Set them with
+`tickets status <id> todo|in-progress|review|blocked|done` or the dedicated
+commands below; `tickets list` shows the label on every line.
+
+**The loop**
+
+    tickets next                          # claims -> IN PROGRESS; prints handoffs + timing
+    tickets update T-002 "..."            # progress, every 45 min
+    tickets msg "question" --to claude-opus --re T-002
+    tickets review T-002 --notes "..."    # -> IN REVIEW; master is messaged
+    tickets who                           # where everyone is: worktree, branch, ticket
+
+`tickets next` prints the ticket body, briefing paths, every note on direct
+dependencies, and the latest note on earlier ancestors. Only one agent can
+ever hold a ticket.
+
+**Epics and sprints.** Tickets carry `epic` (E-001) and `sprint` (S-01).
+`tickets next` prefers the active sprint. `tickets epic list` / `tickets
+sprint show` give progress bars; `tickets sprint close S-01 --carry S-02`
+rolls unfinished work forward.
+
+The `--notes` text on `done` is shown to whoever picks up a dependent ticket.
+Write what the next agent needs -- file paths, names, decisions they must match
+-- not a summary of your effort.
+
+**As the planner**, create the whole dependency graph in one shot. `deps` may
+reference a `key` from the same plan or an existing `T-` id:
+
+    tickets plan <<'EOF'
+    [{"key":"api","title":"Build REST API","role":"backend","body":"details","deps":[]},
+     {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
+    EOF
+
+Tickets whose dependencies are unfinished stay invisible to `tickets next`
+until those dependencies are marked done, so workers cannot start too early.
+
+**Adding work to a graph that already exists.** Any agent can extend the graph
+mid-run -- this is normal, not a last resort:
+
+    tickets create "Add rate limiting" --deps T-002
+    tickets create "DB migration" --blocks T-002
+    tickets dep T-004 --after T-003
+    tickets dep T-004 --drop T-003
+"""
+
+CURSOR_RULE = """---
+description: Shared ticket board used to coordinate work with other AI agents
+alwaysApply: true
+---
+
+""" + PROTOCOL
+
+
+class _LoudArgumentParser(argparse.ArgumentParser):
+    """argparse's default error() writes to stderr only and exits 2. A caller
+    that reads just stdout (a hook, a pipe through tail, a skim) sees an empty
+    string and can reasonably conclude nothing went wrong -- worse, when the
+    rejected argument is free text like a --notes value, the "unrecognized
+    arguments" message ECHOES THAT TEXT BACK, so it reads exactly like the
+    caller's own note succeeding. (T-246: this masked two silent no-op
+    `tickets reopen --notes ...` calls for a full pass before anyone noticed.)
+    Make the failure impossible to miss: still argparse's own usage+error on
+    stderr, but with an explicit NO CHANGE WAS MADE as the trailing line, so
+    the tail of the output is the warning rather than the caller's own text.
+    add_subparsers() propagates this class to every subparser by default
+    (parser_class defaults to type(self)), so this covers all of them."""
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(2, "%(prog)s: error: %(message)s\n%(prog)s: NO CHANGE WAS MADE\n" % {
+            "prog": self.prog, "message": message,
+        })
+
+
+def _release_commit():
+    """Resolved release commit from release.json, or None if uninstalled."""
+    root = os.path.dirname(os.path.realpath(__file__))
+    manifest = os.path.join(root, "release.json")
+    if not os.path.isfile(manifest):
+        return None
+    try:
+        with open(manifest) as source:
+            release = json.load(source)
+        commit = release.get("commit")
+        return str(commit).strip() if commit else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def release_status():
+    """Report installed provenance without discovering or touching a board.
+
+    Checks size before hashing content: an untampered file's size matches
+    the manifest's recorded size for it, and that comparison is a single
+    stat() call instead of reading and sha256-ing the whole file. Content
+    is only ever hashed when a file's size does not match -- which is also
+    exactly when we already know it drifted, so this is never a speculative
+    cost, only a confirming one. A manifest written before this field
+    existed (bare hash string instead of {"sha256", "size"}) falls back to
+    always hashing, matching the old behavior exactly.
+    """
+    import hashlib
+    root = os.path.dirname(os.path.realpath(__file__))
+    manifest = os.path.join(root, "release.json")
+    if not os.path.isfile(manifest):
+        return "tickets (uninstalled checkout; no pinned release)"
+    try:
+        with open(manifest) as source:
+            release = json.load(source)
+        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
+            path = os.path.join(root, name)
+            recorded = release["files"][name]
+            expected_sha, expected_size = (
+                (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
+                else (recorded, None))
+            if expected_size is not None and os.stat(path).st_size == expected_size:
+                continue
+            with open(path, "rb") as source:
+                actual = hashlib.sha256(source.read()).hexdigest()
+            if actual != expected_sha:
+                return "tickets DRIFTED release %s (%s)" % (release["commit"], name)
+        return "tickets commit %s (verified release)" % release["commit"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return "tickets INVALID release provenance"
+
+
+# Backward-compatible alias: scripts/tests may still import the old name.
+release_version = release_status
+
+
+def main():
+    status = release_status()
+    p = _LoudArgumentParser(prog="tickets", description=__doc__.split("\n")[0],
+                           epilog=status)
+    p.add_argument("--version", action="version", version=status)
+    sub = p.add_subparsers(dest="cmd")
+
+    c = sub.add_parser("create", help="create one ticket")
+    c.add_argument("title")
+    c.add_argument("--body", "-b", default="")
+    c.add_argument("--role", "-r", default="")
+    c.add_argument("--deps", "-d", default="", help="wait for these tickets")
+    c.add_argument("--blocks", "-B", default="", help="insert upstream of these tickets")
+    c.add_argument("--priority", "-p", type=int, default=2, help="1=critical/hard, 2=normal, 3=routine")
+    c.add_argument("--epic", "-e", default="")
+    c.add_argument("--sprint", "-s", default=None, help="S-01; default: active sprint if --in-sprint")
+    c.add_argument("--in-sprint", action="store_true", help="tag with the active sprint")
+    c.add_argument("--needs", default="", help="capabilities required: docker,browser,own-machine")
+    c.set_defaults(fn=cmd_create)
+
+    c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, priority")
+    c.add_argument("id")
+    c.add_argument("--epic", default=None)
+    c.add_argument("--sprint", default=None)
+    c.add_argument("--role", default=None)
+    c.add_argument("--owner", default=None, help="hard-assign (claims on their behalf)")
+    c.add_argument("--needs", default=None)
+    c.add_argument("--priority", type=int, default=None)
+    c.add_argument("--title", default="")
+    c.add_argument("--by", default="")
+    c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
+    c.set_defaults(fn=cmd_assign)
+
+    c = sub.add_parser("epic", help="epics: create | list | show | done")
+    es = c.add_subparsers(dest="epic_cmd")
+    x = es.add_parser("create"); x.add_argument("title"); x.add_argument("--body", "-b", default="")
+    es.add_parser("list")
+    x = es.add_parser("show"); x.add_argument("id")
+    x = es.add_parser("done"); x.add_argument("id")
+    c.set_defaults(fn=cmd_epic, epic_cmd="list")
+
+    c = sub.add_parser("sprint", help="sprints: create | start | add | show | close | list")
+    ss = c.add_subparsers(dest="sprint_cmd")
+    x = ss.add_parser("create"); x.add_argument("goal"); x.add_argument("--start", default="")
+    x.add_argument("--end", default=""); x.add_argument("--activate", action="store_true")
+    x.add_argument("--close-previous", action="store_true")
+    x = ss.add_parser("start"); x.add_argument("id"); x.add_argument("--close-previous", action="store_true")
+    x = ss.add_parser("add"); x.add_argument("id"); x.add_argument("tickets", help="T-001,T-002")
+    x = ss.add_parser("show"); x.add_argument("id", nargs="?", default="")
+    x = ss.add_parser("close"); x.add_argument("id"); x.add_argument("--carry", default="", help="move unfinished to this sprint")
+    ss.add_parser("list")
+    c.set_defaults(fn=cmd_sprint, sprint_cmd="list")
+
+    c = sub.add_parser("master", help="master node: brief | take | release | log | init")
+    ms = c.add_subparsers(dest="master_cmd")
+    ms.add_parser("brief")
+    x = ms.add_parser("take"); x.add_argument("--owner", "-o")
+    x = ms.add_parser("release"); x.add_argument("--owner", "-o")
+    x = ms.add_parser("log"); x.add_argument("text"); x.add_argument("--owner", "-o")
+    x = ms.add_parser("cos", help="set/show the chief of staff (review, unblock, merge)"); x.add_argument("text", nargs="?", default=""); x.add_argument("--owner", "-o")
+    x = ms.add_parser("init"); x.add_argument("--force", action="store_true")
+    c.set_defaults(fn=cmd_master, master_cmd="brief", owner=None, force=False)
+
+    c = sub.add_parser("join", help="register this agent: name, roles, capabilities, cost")
+    c.add_argument("name", nargs="?", default="")
+    c.add_argument("--roles", default=None, help="backend,console")
+    c.add_argument("--can", default=None, help="docker,browser,own-machine,gpu")
+    c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
+    c.add_argument("--harness", default="",
+                   help="claude | codex | cursor | cursor+claude | custom | custom:<cmd> | <executable>")
+    c.add_argument("--tool", default="", help="original spelling of --harness")
+    # dest is cmd_template, not cmd: `sub = p.add_subparsers(dest="cmd")` above
+    # means main() dispatches on a.cmd, and a --cmd flag would overwrite the
+    # subcommand name with the harness template (or with "" when absent, which
+    # sends every `join` straight to print_help).
+    c.add_argument("--cmd", dest="cmd_template", default="",
+                   help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
+    c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
+    c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
+    c.set_defaults(fn=cmd_join)
+
+    c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
+    c.add_argument("name", nargs="?", default="")
+    c.add_argument("--owner", "-o", default="", help="who is performing the retire (default: TICKET_AGENT)")
+    c.set_defaults(fn=cmd_retire)
+
+    c = sub.add_parser("harness", help="BYOA: check or list the harness that actually runs each agent")
+    hs = c.add_subparsers(dest="harness_cmd")
+    x = hs.add_parser("check", help="run the agent's harness on a trivial prompt under a time cap")
+    x.add_argument("name", nargs="?", default="")
+    x.add_argument("--harness", default="", help="override the registered harness for this check")
+    x.add_argument("--cmd", dest="cmd_template", default="", help="override the registered command template")
+    x.add_argument("--model", default="")
+    x.add_argument("--cwd", default="", help="run the probe here (default: the agent's worktree)")
+    x.add_argument("--timeout", type=int, default=HARNESS_CHECK_TIMEOUT, help="seconds (default 60)")
+    hs.add_parser("list", help="every registered agent, its harness and its last check")
+    c.set_defaults(fn=cmd_harness, harness_cmd="list", name="", harness="", cmd_template="", model="", cwd="",
+                   timeout=HARNESS_CHECK_TIMEOUT)
+
+    c = sub.add_parser("route", help="master: suggest an owner for every open ticket by model/roles/capabilities/cost")
+    c.add_argument("--claim", action="store_true", help="hard-assign the ready ones (claims on their behalf)")
+    c.add_argument("--redo", action="store_true", help="recompute tickets that already have a suggestion")
+    c.add_argument("--only", nargs="*", help="restrict to these agents")
+    c.add_argument("--shadow", action="store_true",
+                   help="T-315: print rule vs learned/prior pick; do not assign")
+    c.add_argument("--report", action="store_true",
+                   help="with --shadow: agreement rate and realized turns")
+    c.add_argument("--by", choices=["turns", "cost"], default="turns",
+                   help="with --shadow: rank learned pick by turns then cost (default) or cost then turns")
+    c.add_argument("--json", action="store_true",
+                   help="with --shadow: print additive JSON (T-315/T-415 shape)")
+    c.add_argument("--score", action="store_true",
+                   help="with --shadow: retrospective shadow-vs-actual scorecard (read-only)")
+    c.add_argument("--era-by-time", action="store_true",
+                   help="with --shadow --score: fall back to wall-clock era when release_sha absent (prints warning)")
+    c.add_argument("--write-scorecard", nargs="?", const="docs/turns-scorecard.md",
+                   metavar="PATH",
+                   help="with --shadow --score: also write markdown scorecard (default docs/turns-scorecard.md)")
+    c.add_argument("--apply", action="store_true",
+                   help="unimplemented (T-315); exits non-zero")
+    c.set_defaults(fn=cmd_route)
+
+    c = sub.add_parser("connect", help="print how any agent connects to this board")
+    c.set_defaults(fn=cmd_connect)
+
+    c = sub.add_parser("pending", help="exit 0 if there is work for the agent (messages, held or ready ticket)")
+    c.add_argument("--agent", default="")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_pending)
+
+    c = sub.add_parser("prompt", help="print the standard worker (or --master) prompt for a headless run")
+    c.add_argument("--agent", default="")
+    c.add_argument("--master", action="store_true", help="the master/planner loop (or full master loop if no cos)")
+    c.add_argument("--cos", action="store_true", help="the chief-of-staff loop: review, unblock, merge")
+    c.add_argument("--extra", default="", help="extra instructions appended to the prompt")
+    c.set_defaults(fn=cmd_prompt)
+
+    c = sub.add_parser("stop-hook", help="Claude Code Stop hook: block the stop while board work remains")
+    c.set_defaults(fn=cmd_stop_hook)
+
+    c = sub.add_parser("objective", help="set/show/close the standing objective the master drives toward")
+    c.add_argument("text", nargs="?", default="")
+    c.add_argument("--done", default=None, metavar="EVIDENCE", help="mark the objective met, with evidence")
+    c.add_argument("--by", default="")
+    c.set_defaults(fn=cmd_objective)
+
+    c = sub.add_parser("drive", help="set the objective and spawn the master seat with a heartbeat")
+    c.add_argument("text", nargs="?", default="")
+    c.add_argument("--by", "--as", dest="by", default="", help="agent name for the master seat (default TICKET_AGENT)")
+    c.add_argument("--heartbeat", type=int, default=30, help="minutes between objective wake-ups")
+    c.add_argument("--every", type=int, default=60, help="seconds between board polls")
+    c.add_argument("--harness", "--tool", dest="tool", default="",
+                   help="claude | codex | cursor | cursor+claude | custom:<cmd> (default: the registered harness)")
+    c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
+    c.add_argument("--model", default="")
+    c.add_argument("--restart", action="store_true", help="stop an existing watcher for this seat first")
+    c.set_defaults(fn=cmd_drive)
+
+    c = sub.add_parser("watch", help="poll the board and launch a worker when there is work for the agent")
+    c.add_argument("--agent", default="")
+    c.add_argument("--every", type=int, default=60, help="seconds between polls")
+    c.add_argument("--heartbeat", type=int, default=0,
+                   help="master seat only: also wake every N minutes to drive the objective (0 = off)")
+    c.add_argument("--exec", default="", help="command to run (default: headless claude with `tickets prompt`); "
+                                              "{prompt_file} {cwd} {agent} are expanded per run")
+    c.add_argument("--prompt-kind", dest="prompt_kind", default="", choices=("", "master", "cos"),
+                   help="which prompt to write to {prompt_file} (default: the worker prompt)")
+    c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
+    c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
+    c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
+    c.add_argument("--max-runs", type=int, default=0)
+    c.add_argument("--run-timeout", type=int, default=90, help="minutes per run before it is killed (0 = none)")
+    c.add_argument("--beat-every", type=int, default=0,
+                   help="seconds between in-run heartbeats (0 = TICKETS_RUN_HEARTBEAT_SECS, default 30)")
+    c.add_argument("--once", action="store_true", help="check once; exit 0 if work, 1 if not")
+    c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--verbose", action="store_true")
+    c.set_defaults(fn=cmd_watch)
+
+    c = sub.add_parser("codex-hook", help="(hook body) Codex SessionStart/UserPromptSubmit board context")
+    c.add_argument("--agent", required=True)
+    c.add_argument("--worktree", default="")
+    c.set_defaults(fn=cmd_codex_hook)
+
+    c = sub.add_parser("boot", help="every startup step: join, hooks, check-in, briefing (idempotent)")
+    c.add_argument("--agent", default="")
+    c.add_argument("--tool", default="", help="claude | codex | cursor (installs that tool's hooks)")
+    c.add_argument("--harness", default="", help="harness to register for this agent (see `tickets join --harness`)")
+    c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
+    c.add_argument("--roles", default=None)
+    c.add_argument("--can", default=None)
+    c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
+    c.add_argument("--model", default="")
+    c.add_argument("--worktree", default="", help="codex: scope the hook to this worktree")
+    c.add_argument("--settings", default="", help="claude: settings.json to write (default ~/.claude/settings.json)")
+    c.add_argument("--hooks-file", default="", help="codex: hooks.json to write (default ~/.codex/hooks.json)")
+    c.add_argument("--watch", action="store_true", help="continue into the watch loop")
+    c.add_argument("--every", type=int, default=60)
+    c.add_argument("--exec", default="")
+    c.add_argument("--cwd", default="")
+    c.add_argument("--run-timeout", type=int, default=90)
+    c.set_defaults(fn=cmd_boot)
+
+    c = sub.add_parser("spawn", help="start a persistent worker: register, worktree, detached watcher (model per agent)")
+    c.add_argument("name", nargs="?", default="")
+    c.add_argument("--model", default="", help="claude: opus | sonnet | haiku (or a full model id); codex: its model name")
+    c.add_argument("--harness", default="",
+                   help="claude | codex | cursor | cursor+claude | custom:<cmd> | <executable>; "
+                        "default: whatever `tickets join` registered for this agent")
+    c.add_argument("--tool", default="", help="original spelling of --harness")
+    c.add_argument("--cmd", dest="cmd_template", default="",
+                   help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
+    c.add_argument("--roles", default=None)
+    c.add_argument("--can", default=None)
+    c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
+    c.add_argument("--best-for", default="")
+    c.add_argument("--brief", default="", help="standing context for this worker")
+    c.add_argument("--worktree", default="", help="default .worktrees/<name>")
+    c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
+    c.add_argument("--every", type=int, default=60)
+    c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--heartbeat", type=int, default=0,
+                   help="with --master: also wake every N minutes to drive the objective (0 = off)")
+    c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
+    c.add_argument("--master", action="store_true",
+                   help="spawn the board master/planner (scope, routing by complexity, escalations)")
+    c.add_argument("--cos", action="store_true",
+                   help="spawn the chief of staff (review, unblock, merge) under the current master")
+    c.add_argument("--exec", default="", help="override the worker command entirely")
+    c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
+    c.add_argument("--list", action="store_true")
+    c.set_defaults(fn=cmd_spawn)
+
+    c = sub.add_parser("ui", help="local command board: http://localhost:8765 (auto-refresh + composer)")
+    c.add_argument("--port", type=int, default=8765)
+    c.add_argument("--host", default="127.0.0.1")
+    c.add_argument("--open", action="store_true", help="open it in the browser")
+    c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
+    c.set_defaults(fn=cmd_ui)
+
+    c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
+    c.add_argument("--agent", help="register under this name (default: $TICKET_AGENT)")
+    c.add_argument("--roles", default="backend", help="roles for that agent (default: backend)")
+    c.add_argument("--with-agent", metavar="NAME", help="also print how to put a real worker on the board")
+    c.add_argument("--board", help="initialise this board directory explicitly")
+    c.add_argument("--remove", action="store_true", help="delete the sample tickets this created")
+    c.set_defaults(fn=cmd_quickstart)
+
+    c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
+    c.set_defaults(fn=cmd_guide)
+
+    c = sub.add_parser("brief", help="give an agent or a ticket context (shown on claim, in prompt, in boot)")
+    c.add_argument("agent", nargs="?", default="")
+    c.add_argument("text", nargs="?", default="")
+    c.add_argument("--ticket", default="", help="attach to a ticket instead (owner is messaged)")
+    c.add_argument("--file", default="", help="replace the agent brief from a file")
+    c.add_argument("--show", action="store_true")
+    c.add_argument("--by", default="")
+    c.set_defaults(fn=cmd_brief)
+
+    c = sub.add_parser("util", help="per-agent throughput, cycle time, load and sprint burn")
+    c.add_argument("--hours", type=int, default=24)
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_util)
+
+    c = sub.add_parser("dash", help="master dashboard, refreshing in place (Ctrl-C to leave)")
+    c.add_argument("--every", type=int, default=10)
+    c.add_argument("--messages", type=int, default=6)
+    c.add_argument("--once", action="store_true")
+    c.set_defaults(fn=cmd_dash)
+
+    c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex")
+    c.add_argument("tool", choices=("claude", "cursor", "codex"))
+    c.add_argument("--agent", default="", help="agent name baked into the hook (codex/cursor)")
+    c.add_argument("--worktree", default="", help="codex: only fire inside this worktree")
+    c.add_argument("--settings", default="", help="claude: settings.json path (default ~/.claude/settings.json)")
+    c.add_argument("--hooks-file", default="", help="codex: hooks.json path (default ~/.codex/hooks.json)")
+    c.add_argument("--no-stop", dest="stop", action="store_false", help="claude: do not install the Stop hook")
+    c.add_argument("--force", action="store_true")
+    c.set_defaults(fn=cmd_hooks, stop=True)
+
+    c = sub.add_parser("here", help="check in: record my worktree, branch and ticket")
+    c.add_argument("--owner", "-o")
+    c.add_argument("--note", default="")
+    c.set_defaults(fn=cmd_here)
+
+    c = sub.add_parser("who", help="where every agent is working")
+    c.add_argument("--no-liveness", action="store_true",
+                   help="skip the transcript reads and show locations only")
+    c.set_defaults(fn=cmd_who)
+
+    c = sub.add_parser("msg", help="post to the message board")
+    c.add_argument("text")
+    c.add_argument("--to", default="", help="agent name, or omit for everyone")
+    c.add_argument("--re", default="", help="ticket id this is about")
+    c.add_argument("--owner", "-o")
+    c.set_defaults(fn=cmd_msg)
+
+    c = sub.add_parser("inbox", help="unread messages for me")
+    c.add_argument("--all", action="store_true", help="full history")
+    c.add_argument("--limit", type=int, default=40)
+    c.add_argument("--keep", action="store_true", help="do not mark as read")
+    c.add_argument("--owner", "-o")
+    c.set_defaults(fn=cmd_inbox)
+
+    c = sub.add_parser("trajectories", aliases=["traj"],
+                       help="the team trajectory log: query | export | backfill")
+    c.add_argument("--ticket", "-t", default="", help="only this ticket")
+    c.add_argument("--agent", "-a", default="", help="only this agent")
+    c.add_argument("--kind", "-k", default="",
+                   help="run_start,run_end,claim,update,review,done,reopen,block,msg,merge")
+    c.add_argument("--since", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--until", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--limit", type=int, default=200, help="show the last N; 0 = all")
+    c.add_argument("--summary", action="store_true",
+                   help="per-ticket runs/turns/updates/messages/reopens")
+    c.add_argument("--json", action="store_true")
+    ts = c.add_subparsers(dest="traj_cmd")
+    x = ts.add_parser("export", help="write the filtered events to a file")
+    x.add_argument("--out", required=True, help="destination .jsonl")
+    x = ts.add_parser("backfill",
+                      help="synthesise claim/update/review/done from tickets already on the board")
+    x.add_argument("--dry-run", action="store_true", dest="dry_run")
+    c.set_defaults(fn=cmd_trajectories, traj_cmd="list", out="", dry_run=False)
+
+    c = sub.add_parser("turns",
+                       help="watch-run turns per ticket (T-312); --json is frozen for the optimizer")
+    c.add_argument("--ticket", "-t", default="", help="only this ticket")
+    c.add_argument("--agent", "-a", default="", help="only events from this agent")
+    c.add_argument("--model", default="", help="only this model")
+    c.add_argument("--epic", default="", help="only this epic")
+    c.add_argument("--since", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--until", default="", help="ISO timestamp, inclusive")
+    c.add_argument("--json", action="store_true", dest="json",
+                   help="frozen shape: tickets[] + aggregates mean/median")
+    c.set_defaults(fn=cmd_turns)
+
+    c = sub.add_parser("review", help="submit finished work for the master to review + merge")
+    c.add_argument("id")
+    c.add_argument("--notes", "-n", default="", help="what to look at: paths, tests run, decisions")
+    c.add_argument("--pr", default="", help="PR number or URL if you opened one")
+    c.add_argument("--owner", "-o")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
+    c.add_argument("--force", action="store_true")
+    c.set_defaults(fn=cmd_review)
+
+    c = sub.add_parser("sync", help="agent: merge main into my branch now (do this before review)")
+    c.add_argument("--artifact", default="", metavar="DIR",
+                   help="tree the deliverable is in, when it is not this checkout")
+    c.add_argument("--force", action="store_true")
+    c.set_defaults(fn=cmd_sync)
+
+    c = sub.add_parser("merge", help="master: integrate pinned review SHAs -> test -> FF main -> close by ancestry")
+    c.add_argument("branches", nargs="*", help="branches to merge; default = branches in the review queue")
+    c.add_argument("--artifact", default="", metavar="DIR",
+                   help="repo to integrate in, when the deliverable does not live in the "
+                        "board's own repo; only tickets pinned to THAT repo are eligible")
+    c.add_argument("--push", action="store_true", help="push main to origin after fast-forward")
+    c.add_argument("--no-test", action="store_true", help="merge even if tests fail (not recommended)")
+    c.add_argument("--ours", action="append", default=[], metavar="BRANCH",
+                   help="request -X ours for this branch (also requires --discard-code)")
+    c.add_argument("--discard-code", action="store_true",
+                   help="allow blanket -X ours; refused without this flag (T-079)")
+    c.add_argument("--force-master", action="store_true",
+                   help="break-glass: merge even if caller is not master.json owner")
+    c.add_argument("--force", action="store_true")
+    c.add_argument("--owner", "-o")
+    c.set_defaults(fn=cmd_merge)
+
+    c = sub.add_parser("limit", help="record that an agent hit a usage limit (or --clear)")
+    c.add_argument("agent", nargs="?", default="")
+    c.add_argument("--until", default="", help='e.g. "2026-09-06 14:00" or "in 5h"')
+    c.add_argument("--note", default="")
+    c.add_argument("--clear", action="store_true")
+    c.set_defaults(fn=cmd_limit)
+
+    c = sub.add_parser("limits", help="who is limited: records, silence, and per-agent live state")
+    c.add_argument("--hours", type=int, default=24)
+    c.add_argument("--raw-scan", action="store_true",
+                   help="also print the old substring hit-count scan (not evidence; see the label)")
+    c.add_argument("--verbose", action="store_true")
+    c.set_defaults(fn=cmd_limits)
+
+    c = sub.add_parser("status", help="set status: todo | in-progress | review | blocked | done")
+    c.add_argument("id")
+    c.add_argument("status")
+    c.add_argument("--notes", "-n", default="")
+    c.add_argument("--owner", "-o")
+    c.add_argument("--pr", default="")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
+    c.add_argument("--force", action="store_true")
+    c.set_defaults(fn=cmd_status)
+
+    c = sub.add_parser("update", help="progress update on a ticket you hold (alias of note)")
+    c.add_argument("id")
+    c.add_argument("text")
+    c.add_argument("--by", default="")
+    c.set_defaults(fn=cmd_note)
+
+    c = sub.add_parser("dep", help="rewire an existing ticket's dependencies")
+    c.add_argument("id")
+    c.add_argument("--after", "-a", default="", help="also wait for these")
+    c.add_argument("--drop", "-x", default="", help="stop waiting for these")
+    c.set_defaults(fn=cmd_dep)
+
+    c = sub.add_parser("graph", help="show the dependency graph with statuses")
+    c.set_defaults(fn=cmd_graph)
+
+    c = sub.add_parser("map", help="sprint -> epic -> tickets, with deps; the whole board")
+    c.add_argument("--all", action="store_true", help="include done tickets and closed sprints")
+    c.set_defaults(fn=cmd_map)
+
+    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin")
+    c.set_defaults(fn=cmd_plan)
+
+    c = sub.add_parser("list", help="list tickets")
+    c.add_argument("--status", choices=STATUSES)
+    c.add_argument("--role")
+    c.add_argument("--owner")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_list)
+
+    c = sub.add_parser("board", help="compact board summary (used by the hook)")
+    c.add_argument("--all", action="store_true", help="include done tickets")
+    c.add_argument("--quiet", "-q", action="store_true", help="omit the protocol hint")
+    c.set_defaults(fn=cmd_board)
+
+    c = sub.add_parser("show", help="show one ticket in full")
+    c.add_argument("id")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_show)
+
+    c = sub.add_parser("next", help="atomically claim the next available ticket")
+    c.add_argument("--role", "-r", help="role or comma-separated roles")
+    c.add_argument("--owner", "-o")
+    c.add_argument("--another", action="store_true", help="claim even though I already hold one")
+    c.set_defaults(fn=cmd_next)
+
+    c = sub.add_parser("claim", help="atomically claim a specific ticket")
+    c.add_argument("id")
+    c.add_argument("--owner", "-o")
+    c.set_defaults(fn=cmd_claim)
+
+    c = sub.add_parser("done", help="mark a ticket done")
+    c.add_argument("id")
+    c.add_argument("--notes", "-n", default="", help="handoff text for dependent tickets")
+    c.add_argument("--no-notes", action="store_true", help="allow empty handoff")
+    c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
+    c.add_argument("--force", action="store_true", help="skip the branch/clean-tree rule")
+    c.set_defaults(fn=cmd_done)
+
+    c = sub.add_parser("repin", help="correct a review pin to name the repo the artifact is in")
+    c.add_argument("id")
+    c.add_argument("--artifact", required=True, metavar="DIR",
+                   help="checkout the deliverable is in; its CURRENT HEAD becomes the pin")
+    c.add_argument("--notes", "-n", default="", help="why the pin was wrong")
+    c.add_argument("--owner", "-o")
+    c.add_argument("--force", action="store_true", help="allow a dirty artifact tree")
+    c.set_defaults(fn=cmd_repin)
+
+    c = sub.add_parser("block", help="mark a ticket blocked")
+    c.add_argument("id")
+    c.add_argument("--reason", "--notes", "-n", dest="reason", required=True,
+                    help="why it's blocked (--notes accepted as an alias -- same shape as done/review)")
+    c.set_defaults(fn=cmd_block)
+
+    c = sub.add_parser("note", help="add a note to a ticket")
+    c.add_argument("id")
+    c.add_argument("text")
+    c.add_argument("--by", default="")
+    c.set_defaults(fn=cmd_note)
+
+    c = sub.add_parser("reopen", help="release a claimed ticket back to open")
+    c.add_argument("id")
+    c.add_argument("--notes", "-n", default="",
+                   help="why it's being reopened (required for IN REVIEW / review_at)")
+    c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
+    c.set_defaults(fn=cmd_reopen)
+
+    c = sub.add_parser(
+        "clear",
+        help="FIXTURE ONLY: delete T-*.json on a .fixture-board (never live)",
+    )
+    c.add_argument(
+        "--yes",
+        action="store_true",
+        help="required confirmation for clearing a fixture board",
+    )
+    c.set_defaults(fn=cmd_clear)
+
+    c = sub.add_parser(
+        "board-backup",
+        help="backup tickets/roles/coordination (fixture board by default)",
+    )
+    c.add_argument("--out", required=True, help="output .tgz path")
+    c.add_argument(
+        "--i-understand-live",
+        action="store_true",
+        help="allow backing up a non-fixture board (still redacts note text)",
+    )
+    c.set_defaults(fn=cmd_board_backup)
+
+    c = sub.add_parser(
+        "board-restore",
+        help="restore a backup into a fixture destination board",
+    )
+    c.add_argument("--archive", required=True, help="input .tgz from board-backup")
+    c.add_argument("--dest", required=True, help="destination board directory")
+    c.add_argument(
+        "--i-understand-live",
+        action="store_true",
+        help="allow restore into a non-fixture destination (discouraged)",
+    )
+    c.set_defaults(fn=cmd_board_restore)
+
+    c = sub.add_parser("where", help="print the board directory")
+    c.set_defaults(fn=cmd_where)
+
+    c = sub.add_parser("context", help="print the shared briefing file")
+    c.set_defaults(fn=cmd_context)
+
+    c = sub.add_parser("mine", help="list tickets claimed by this agent")
+    c.add_argument("--owner", "-o")
+    c.set_defaults(fn=cmd_mine)
+
+    c = sub.add_parser("init", help="install the board protocol into this project")
+    c.add_argument("--track", action="store_true", help="commit the board to git instead of gitignoring it")
+    c.add_argument("--board", metavar="DIR", help="write the board HERE instead of the "
+                   "directory init resolves from cwd -- the explicit escape hatch for "
+                   "the case init would otherwise refuse (T-263)")
+    c.set_defaults(fn=cmd_init)
+
+    # Optional extension (identity / role / handover / pulse) installed beside
+    # this file by tools/tickets/install.py; the core CLI must not depend on it.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        from ticket_coordination import register
+    except ImportError:
+        register = None
+    if register:
+        register(sub, globals())
+
+    a = p.parse_args()
+    if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
+        print("WARNING: %s -- see 'tickets --version'" % status, file=sys.stderr)
+    if not a.cmd:
+        p.print_help()
+        return
+    discover = a.cmd != "board"
+    board = board_dir(discover_children=discover)
+    if a.cmd not in (
+        "create",
+        "plan",
+        "where",
+        "init",
+        "quickstart",
+        "join",
+        "epic",
+        "sprint",
+        "master",
+        "connect",
+        "board-restore",
+    ):
+        if not os.path.isdir(board):
+            if a.cmd == "board":
+                return
+            sys.exit("no board at %s (create a ticket first)" % board)
+    # board-restore uses --dest, not the discovered board
+    if a.cmd == "board-restore":
+        a.fn(a, board)
+        return
+    a.fn(a, board)
+
+
+if __name__ == "__main__":
+    main()

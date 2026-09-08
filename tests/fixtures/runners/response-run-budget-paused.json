@@ -1,0 +1,22 @@
+{
+  "id": "run_00000004",
+  "recipient_agent_id": "agt_backend01",
+  "session_id": "ses_a1b2c3d4",
+  "wake_job_id": "wjb_00000001",
+  "ticket_claim": "DEMO-14",
+  "state": "paused",
+  "terminal_reason": "Turn budget reached (10/10). Paused for operator resume.",
+  "budget": {
+    "max_hops": 3,
+    "max_turns": 10,
+    "max_seconds": 900,
+    "hops_used": 1,
+    "turns_used": 10,
+    "seconds_used": 480
+  },
+  "needs_approval": false,
+  "started_at": "2026-09-06T14:35:00Z",
+  "ended_at": null,
+  "created_at": "2026-09-06T14:32:00Z",
+  "version": 3
+}

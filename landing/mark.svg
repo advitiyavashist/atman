@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="title desc">
+  <title id="title">atman</title>
+  <desc id="desc">Five formation dots. Total Football constellation — seats on a pitch, not a graph.</desc>
+  <circle cx="10.0" cy="7.8" r="3.35" fill="#14161b"/>
+  <circle cx="22.4" cy="8.8" r="3.35" fill="#14161b"/>
+  <circle cx="6.6" cy="17.6" r="3.35" fill="#14161b"/>
+  <circle cx="25.4" cy="18.2" r="3.35" fill="#14161b"/>
+  <circle cx="16.0" cy="24.6" r="3.35" fill="#14161b"/>
+</svg>

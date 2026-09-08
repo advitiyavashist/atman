@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": "capacity_exhausted",
+    "status": 409,
+    "message": "backend-1 already holds its maximum of 1 active ticket.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "max_active_tickets": 1,
+      "active_tickets": 1,
+      "current_ticket": "DEMO-13"
+    }
+  }
+}

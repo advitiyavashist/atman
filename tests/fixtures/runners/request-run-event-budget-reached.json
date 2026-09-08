@@ -1,0 +1,16 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "expected_version": 4,
+  "event": "budget_reached",
+  "session_id": "ses_a1b2c3d4",
+  "ticket_claim": "DEMO-14",
+  "reason": "Turn budget reached (10/10). Paused for operator resume.",
+  "budget": {
+    "max_hops": 3,
+    "max_turns": 10,
+    "max_seconds": 900,
+    "hops_used": 1,
+    "turns_used": 10,
+    "seconds_used": 480
+  }
+}

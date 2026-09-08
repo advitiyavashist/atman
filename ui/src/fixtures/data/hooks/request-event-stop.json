@@ -1,0 +1,12 @@
+{
+  "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "event": {
+    "event_id": "hev_0000000000000003",
+    "agent_id": "agt_backend01",
+    "session_id": "ses_a1b2c3d4",
+    "kind": "stop",
+    "occurred_at": "2026-09-06T14:40:00Z",
+    "cwd": "/repos/demo/.worktrees/backend-1",
+    "note": null
+  }
+}

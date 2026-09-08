@@ -1,0 +1,53 @@
+{
+  "items": [
+    {
+      "id": "agt_backend01",
+      "project_id": "prj_demo0001",
+      "name": "backend-1",
+      "role": "backend",
+      "capabilities": [
+        "python",
+        "pytest"
+      ],
+      "state": "revoked",
+      "connection_mode": "managed",
+      "runtime": {
+        "adapter": "claude_code",
+        "version": "2.1.0",
+        "unsupported_capabilities": []
+      },
+      "capacity": {
+        "max_active_tickets": 1,
+        "active_tickets": 1
+      },
+      "current_ticket": "DEMO-13",
+      "session": {
+        "session_id": "ses_a1b2c3d4",
+        "agent_id": "agt_backend01",
+        "acquired_at": "2026-09-06T14:30:00Z",
+        "expires_at": "2026-09-06T15:00:00Z",
+        "version": 2,
+        "revoked_at": "2026-09-06T14:40:00Z",
+        "revocation_note": "Session unreachable for 12m; work preserved, operator revoked the lease before reassignment."
+      },
+      "worktree": "/repos/demo/.worktrees/backend-1",
+      "hook_health": {
+        "config_installed": true,
+        "server_received": true,
+        "response_delivered": true,
+        "session_adopted": true,
+        "last_error": null
+      },
+      "last_heartbeat_at": "2026-09-06T14:35:00Z",
+      "last_progress_at": "2026-09-06T14:32:00Z",
+      "version": 7,
+      "created_at": "2026-09-06T14:30:00Z"
+    }
+  ],
+  "stream": {
+    "state": "live",
+    "snapshot_version": 12,
+    "as_of": "2026-09-06T14:35:00Z",
+    "last_event_id": "evt_000000000042_a1b2c3"
+  }
+}

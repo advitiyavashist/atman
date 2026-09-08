@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "id": "wjb_00000001",
+      "message_id": "msg_00000005",
+      "recipient_agent_id": "agt_backend01",
+      "delivery_id": "dlv_00000003",
+      "ticket_id": "DEMO-14",
+      "state": "leased",
+      "dedupe_key": "msg_00000005:agt_backend01",
+      "attempts": 1,
+      "lease_expires_at": "2026-09-06T14:40:00Z",
+      "created_at": "2026-09-06T14:32:00Z"
+    }
+  ],
+  "poll_after_seconds": 0
+}

@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "invalid_state_transition",
+    "status": 422,
+    "message": "A run cannot report 'started' before its runtime session exists and its claim succeeded.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "from": "pending",
+      "event": "started"
+    }
+  }
+}

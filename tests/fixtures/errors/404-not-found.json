@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "not_found",
+    "status": 404,
+    "message": "No such ticket in this project.",
+    "request_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+    "details": {
+      "ticket_id": "DEMO-99"
+    }
+  }
+}
