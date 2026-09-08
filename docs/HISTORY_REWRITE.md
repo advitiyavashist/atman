@@ -152,17 +152,31 @@ until `main` is replaced **and** other refs are deleted.
 
 ## 3. CLEAN evidence (rewritten history)
 
-Filled after the isolated orphan re-scan. See the dated block at the
-bottom of this file once the orphan branch exists.
+Isolated re-scan of `cursor/t522-orphan-main-9059` on 2026-09-08.
+Method: `git bundle create` of that ref only, then `git clone` the
+bundle (543 objects / 1.01 MiB pack — not the 3832-object source pack).
 
-Expected CLEAN bar:
+| Check | Result |
+|---|---|
+| Reachable commits | **1** |
+| gitleaks 8.24.2 | **0 leaks** (1 commit scanned, ~3.44 MB) |
+| trufflehog 3.88.27 | **0 verified, 0 unverified** (722 chunks) |
+| `kavana` string in reachable history | **absent** |
+| `/Users/<real-handle>/` | **absent** (only `/Users/someone` test placeholder + this doc naming it) |
+| Deleted internal paths (`HANDOFF.md`, `INTEGRATION.md`, `CROSS_REPO_PINS.md`, `LIVE_CLI.md`, `implementation-plan.json`, `messaging-plan.json`, `ACCEPT.md`, `e010-artifact-map.md`) | **absent** from `git rev-list --objects` |
+| Secret filenames (`.env`, `modal.toml`, `*.pem`, `credentials.json`) | **absent** |
 
-- gitleaks: 0
-- trufflehog: 0 verified / 0 unverified
-- no `/Users/<real-handle>/` (placeholder `/Users/<operator>` and
-  `/Users/someone` test strings are allowed)
-- deleted internal paths from the table above are **absent**
-- commit count on the replacement branch: **1**
+**CLEAN.** The replacement history meets the bar. GitHub `origin/main`
+is not yet replaced; see the runbook. After force-push, repeat the
+scan against a fresh `git clone --single-branch --branch main` of
+GitHub — local clones of this workspace still contain dirty objects
+via other refs.
+
+The orphan SHA at the first isolated scan was
+`8a051fdc7cfad1e684f72111d6d9da7b5e5d816e`. Recreating the orphan
+after this CLEAN block lands will produce a **new** SHA with the
+same properties (still 1 commit, same scanners). Compare trees, not
+the old orphan SHA, before force-push.
 
 ## 4. Mac operator runbook — replace `origin/main`
 
@@ -281,5 +295,6 @@ change GitHub visibility and does not force-push `main`.
 
 ## CLEAN re-scan (orphan isolate)
 
-Placeholder — replaced in the same PR once the isolated orphan clone is
-scanned.
+See section 3. Repeat after the Mac operator force-pushes `main` and
+deletes leftover branches. A CLEAN orphan branch is not a CLEAN GitHub
+object store while other refs still point at the old graph.
