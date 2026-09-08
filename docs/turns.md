@@ -20,11 +20,15 @@ Broadcasts without `--re` never increment. The FLAG is `bound_write` on
 `run_end` (and matching `run_id` or `(agent, run_no)` on the write events),
 not a grep of message text for `idle:`. Missing `bound_write` does not
 default to "count" when a pairing key exists *and writes carry that key
-type*. A `run_no`-only `run_end` whose trajectory has no write events
-bearing `run_no` is unpairable (historical writers never stamped it) and
-takes the pre-T-425 count path — decided from the log, not a date. Only
-events with neither `run_id` nor `run_no` (pre-T-425) still count every
-completed run. No backfill of existing jsonl.
+type*. A `run_no`-only `run_end` is unpairable (historical writers never
+stamped it) and takes the pre-T-425 count path only when no
+`run_no`-bearing write in that trajectory is at or before that
+`run_end`'s `at` (T-500: time-aware, not trajectory-wide). A later
+stamped write must not drop earlier runs. Decided from the log, not a
+date. Only events with neither `run_id` nor `run_no` (pre-T-425) still
+count every completed run. No backfill of existing jsonl. Do not invert
+the FLAG by requiring a write under the `run_end`'s own `(agent,
+run_no)` — an idle run has none and must stay uncounted (T-425).
 
 A **ticket's turns** are those productive runs from the first `claim` to the
 final `done` (or `merge`). A `reopen` does not reset the counter: later runs

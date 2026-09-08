@@ -6,11 +6,11 @@ recorded a bound-ticket write (claim, update, review, done, block, reopen,
 or msg --re that ticket). Pairing key is `run_id` if present, else
 `(agent, run_no)`. Fail-exit, timeout, and session-limit with no write stay
 in jsonl but do not count. Only events with neither `run_id` nor `run_no`
-(pre-T-425) still count every `run_end`. A `run_no`-only `run_end` whose
-trajectory has no write events bearing `run_no` is unpairable (writers
-never stamped that key) and takes the same legacy count path — decided
-from the log, not a date. Backfill never recorded runs, so `turns` is
-JSON null — never 0.
+(pre-T-425) still count every `run_end`. A `run_no`-only `run_end` is unpairable — and takes the same
+legacy count path — only when no `run_no`-bearing write in that
+trajectory is at or before that `run_end`'s `at` (T-500: not
+trajectory-wide). Decided from the log, not a date. Backfill never
+recorded runs, so `turns` is JSON null — never 0.
 
 `--json` shape is frozen here and in docs/turns.md. The optimizer (T-313)
 reads it; do not rename keys.
@@ -215,27 +215,53 @@ def _event_flag_keys(e):
     return keys
 
 
-def _writes_carry_run_no(writes_by_key):
-    return any(k[0] == "no" for k in writes_by_key)
+def _run_no_write_at_or_before(end, evs):
+    """True if some bound write bearing run_no is at or before this run_end.
+
+    T-500: the FLAG's unpairable test is time-aware, not trajectory-wide.
+    A later stamped write must not pull earlier run_no-only ends into FLAG.
+    Missing stamps fall back to log order (oldest-first): a write after this
+    run_end in the list does not qualify. Do not require the write to bear
+    this run_end's own (agent, run_no) — an idle run has none (T-425).
+    """
+    end_at = end.get("at")
+    seen_end = False
+    tid = end.get("ticket")
+    for e in evs:
+        if e is end:
+            seen_end = True
+        if not _is_bound_write(e, tid):
+            continue
+        if _as_run_no(e.get("run_no")) is None:
+            continue
+        write_at = e.get("at")
+        if end_at and write_at:
+            if write_at <= end_at:
+                return True
+            continue
+        if not seen_end:
+            return True
+    return False
 
 
-def _run_is_productive(end, writes_by_key):
+def _run_is_productive(end, writes_by_key, evs):
     """FLAG: increment iff THAT run wrote the bound ticket.
 
     Exit=1 / timed_out / session-limit with zero writes is idle (HB87/HB88).
     No content grep. Broadcasts without --re never increment.
     Missing bound_write must not default to "count" when a pairing key exists
-    and that key type appears on writes. A run_no-only run_end is unpairable
-    when no write in this trajectory carries run_no (historical log: writers
-    never stamped it) — then take the pre-T-425 count path, not idle.
+    and that key type appears on writes *at or before this run_end*. A
+    run_no-only run_end is unpairable when no run_no-bearing write is at or
+    before its `at` (historical writers never stamped it yet) — then take
+    the pre-T-425 count path, not idle.
     """
     if end.get("bound_write"):
         return True
     key = _end_flag_key(end)
     if not key:
         return True  # pre-T-425 jsonl: neither run_id nor run_no
-    if key[0] == "no" and not _writes_carry_run_no(writes_by_key):
-        return True  # unpairable era: key cannot match any write
+    if key[0] == "no" and not _run_no_write_at_or_before(end, evs):
+        return True  # unpairable era at this timestamp: key cannot match
     tid = end.get("ticket")
     return any(_is_bound_write(w, tid) for w in writes_by_key.get(key) or [])
 
@@ -258,7 +284,7 @@ def _measured_turns(evs):
         if e.get("kind") != "run_end":
             continue
         saw_run = True
-        if _run_is_productive(e, writes_by_key):
+        if _run_is_productive(e, writes_by_key, evs):
             n += 1
     if not saw_run or n == 0:
         return None

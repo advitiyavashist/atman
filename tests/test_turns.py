@@ -308,6 +308,49 @@ def test_cursor_shaped_write_on_run_no_counts_second_turn():
     assert by["T-001"]["turns"] == 2
 
 
+def test_straddling_cutover_keeps_pre_stamp_run():
+    """T-500: later run_no-stamped write must not drop earlier unpairable runs.
+
+    Reproducer that FAILS on 2dcaa71 (trajectory-wide FLAG). Truncated to
+    run 1 alone scores 1; the full two-run ticket must score 2, not 1.
+    """
+    run1 = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "at": "2026-09-08T00:00:00Z"},
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo",
+         "at": "2026-09-08T00:00:30Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "exit": 0, "at": "2026-09-08T00:01:00Z"},
+    ]
+    run2 = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "at": "2026-09-08T00:02:00Z"},
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "at": "2026-09-08T00:02:30Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "exit": 0, "bound_write": True,
+         "at": "2026-09-08T00:03:00Z"},
+    ]
+    by1 = {r["ticket"]: r for r in build_turns_report(run1)["tickets"]}
+    assert by1["T-001"]["turns"] == 1
+    by = {r["ticket"]: r for r in build_turns_report(run1 + run2)["tickets"]}
+    assert by["T-001"]["turns"] == 2
+
+
+def test_idle_after_run_no_stamp_still_dropped():
+    """T-500 must not invert FLAG: idle run with no write under its key stays 1."""
+    evs = [
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "at": "2026-09-08T00:00:30Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "exit": 0, "at": "2026-09-08T00:01:00Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "exit": 0, "at": "2026-09-08T00:02:00Z"},
+    ]
+    by = {r["ticket"]: r for r in build_turns_report(evs)["tickets"]}
+    assert by["T-001"]["turns"] == 1
+
+
 def test_run_no_without_write_is_unpairable_legacy_count():
     """No write bears run_no: run_no-only ends cannot pair — legacy count, not idle."""
     evs = [
