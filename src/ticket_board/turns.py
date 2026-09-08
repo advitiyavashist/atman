@@ -6,8 +6,11 @@ recorded a bound-ticket write (claim, update, review, done, block, reopen,
 or msg --re that ticket). Pairing key is `run_id` if present, else
 `(agent, run_no)`. Fail-exit, timeout, and session-limit with no write stay
 in jsonl but do not count. Only events with neither `run_id` nor `run_no`
-(pre-T-425) still count every `run_end`. Backfill never recorded runs, so
-`turns` is JSON null — never 0.
+(pre-T-425) still count every `run_end`. A `run_no`-only `run_end` whose
+trajectory has no write events bearing `run_no` is unpairable (writers
+never stamped that key) and takes the same legacy count path — decided
+from the log, not a date. Backfill never recorded runs, so `turns` is
+JSON null — never 0.
 
 `--json` shape is frozen here and in docs/turns.md. The optimizer (T-313)
 reads it; do not rename keys.
@@ -212,18 +215,27 @@ def _event_flag_keys(e):
     return keys
 
 
+def _writes_carry_run_no(writes_by_key):
+    return any(k[0] == "no" for k in writes_by_key)
+
+
 def _run_is_productive(end, writes_by_key):
     """FLAG: increment iff THAT run wrote the bound ticket.
 
     Exit=1 / timed_out / session-limit with zero writes is idle (HB87/HB88).
     No content grep. Broadcasts without --re never increment.
-    Missing bound_write does not default to count when a pairing key exists.
+    Missing bound_write must not default to "count" when a pairing key exists
+    and that key type appears on writes. A run_no-only run_end is unpairable
+    when no write in this trajectory carries run_no (historical log: writers
+    never stamped it) — then take the pre-T-425 count path, not idle.
     """
     if end.get("bound_write"):
         return True
     key = _end_flag_key(end)
     if not key:
         return True  # pre-T-425 jsonl: neither run_id nor run_no
+    if key[0] == "no" and not _writes_carry_run_no(writes_by_key):
+        return True  # unpairable era: key cannot match any write
     tid = end.get("ticket")
     return any(_is_bound_write(w, tid) for w in writes_by_key.get(key) or [])
 
