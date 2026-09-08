@@ -5253,7 +5253,9 @@ def fmt_local(iso):
         dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone().strftime("%m-%d %H:%M")
+        local = dt.astimezone()
+        zone = local.tzname() or local.strftime("%z")
+        return ("%s %s" % (local.strftime("%m-%d %H:%M"), zone)).strip()
     except (ValueError, TypeError, AttributeError):
         return str(iso)[5:16].replace("T", " ")
 
@@ -7730,9 +7732,13 @@ body[data-tab=board] .promise-chips{display:none}
 <script>
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
-// Server sends timestamps as raw ISO-8601 UTC; render in whatever timezone
-// this browser is actually in, not the server's.
-const fmtLocal=iso=>{if(!iso)return '-';const d=new Date(iso);return isNaN(d)?String(iso):d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
+// Server sends timestamps as raw ISO-8601 UTC. Render in whatever timezone
+// this browser is actually in — no explicit timeZone option, so Intl uses
+// the host local zone. A missing offset is treated as UTC, not already-local.
+const parseUtc=iso=>{const s=String(iso||'').trim();return /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(s)?s.replace(' ','T')+'Z':s};
+const fmtLocal=iso=>{if(!iso)return '-';const d=new Date(parseUtc(iso));return isNaN(d)?String(iso):d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'});};
+const fmtRel=iso=>{const d=new Date(parseUtc(iso));if(isNaN(d))return '';const ms=Date.now()-d.getTime(),abs=Math.abs(ms),m=Math.round(abs/6e4),h=Math.round(abs/36e5),day=Math.round(abs/864e5);const u=m<1?'just now':m<60?m+'m':h<48?h+'h':day+'d';return u==='just now'?u:(ms>=0?u+' ago':'in '+u);};
+const fmtWhen=iso=>{const a=fmtLocal(iso);if(!iso||a==='-'||a===String(iso))return a;const r=fmtRel(iso);return r?r+' · '+a:a};
 function initials(name){const s=String(name||'?').split(/[-_ ]/).filter(Boolean);
   return ((s[0]||'?')[0]+(s.length>1?s[1][0]:(s[0]||'?')[1]||'')).toUpperCase()}
 function who(name){if(!name)return '';return '<span class="who"><span class="av">'+esc(initials(name))+'</span>'+esc(name)+'</span>'}
@@ -7960,7 +7966,7 @@ async function load(){
       '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div></article>';
   }).join('')||'<div class="empty">no agents checked in</div>';
   const thread=(d.messages||[]).slice().reverse();
-  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtLocal(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
+  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
     ||'<div class="empty">no messages yet</div>';
 }
 function renderOnboarding(ob){

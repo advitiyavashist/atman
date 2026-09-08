@@ -72,6 +72,10 @@ describe("Messages, reading a live board", () => {
     await user.click(screen.getByTestId("channel-chn_work0001"));
     await waitFor(() => expect(screen.getByTestId(`message-${ROOT_MESSAGE.id}`)).toBeInTheDocument());
     expect(screen.getByText("Can you take the paging bug on DEMO-14?")).toBeInTheDocument();
+    const messageTime = screen.getByTestId(`message-time-${ROOT_MESSAGE.id}`);
+    expect(messageTime).toHaveAttribute("dateTime", ROOT_MESSAGE.created_at);
+    expect(messageTime.textContent).not.toMatch(/T\d{2}:\d{2}:\d{2}Z/);
+    expect(messageTime.textContent).toMatch(/ago|just now|in /);
 
     expect(
       harness.calls().some((c) => c.method === "GET" && c.path === "/messages"),

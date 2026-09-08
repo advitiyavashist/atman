@@ -5,7 +5,7 @@ import { useMutation } from "../state/useMutation";
 import { ConnectionBanner } from "../components/ConnectionBanner";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { EmptyStateView } from "../components/EmptyStateView";
-import { agentStateLabel, formatDateTime, hookOnlyNote, pendingWriteCopy } from "../copy";
+import { agentStateLabel, formatDateTime, formatWhen, hookOnlyNote, pendingWriteCopy } from "../copy";
 import type { Agent, AgentListResponse, HookHealth } from "../types";
 
 /**
@@ -169,10 +169,10 @@ export function Agents({ onConnect }: { onConnect: () => void }) {
               <dd>{agent.current_ticket ?? "None"}</dd>
               <dt>Heartbeat</dt>
               <dd data-testid={`heartbeat-${agent.id}`}>
-                {agent.last_heartbeat_at ? formatDateTime(agent.last_heartbeat_at) : "Never"}
+                {agent.last_heartbeat_at ? formatWhen(agent.last_heartbeat_at) : "Never"}
               </dd>
               <dt>Last progress</dt>
-              <dd>{agent.last_progress_at ? formatDateTime(agent.last_progress_at) : "None yet"}</dd>
+              <dd>{agent.last_progress_at ? formatWhen(agent.last_progress_at) : "None yet"}</dd>
               <dt>Session lease</dt>
               <dd data-testid={`lease-${agent.id}`}>
                 {agent.session

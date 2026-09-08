@@ -37,9 +37,34 @@ def test_ui_html_formats_message_times_client_side():
     src = TOOL.read_text()
     assert "UI_HTML" in src
     assert "fmtLocal" in src
-    assert "fmtLocal(m.at)" in src
-    # toLocaleString/toLocaleTimeString with no explicit timeZone option
-    # renders in the host (browser) local timezone -- that's the mechanism,
-    # so make sure it is actually there and not, e.g., a UTC-fixed formatter.
+    assert "fmtWhen(m.at)" in src
+    # toLocaleString with no explicit timeZone option renders in the host
+    # (browser) local timezone -- that's the mechanism, so make sure it is
+    # actually there and not, e.g., a UTC-fixed formatter. A short zone
+    # label (SGT, PDT) is included so a UTC wall clock is never mistaken
+    # for already-local.
     assert "toLocaleString" in src
+    assert "timeZoneName" in src
     assert "toUTCString" not in src
+    assert "timeZone:" not in src
+    assert "Asia/Singapore" not in src
+
+
+def test_fmt_local_converts_utc_to_viewer_timezone():
+    """CLI inbox/msg display follows the same rule: stored UTC, shown local."""
+    import importlib.util
+    import os
+    import time
+
+    os.environ["TZ"] = "Asia/Singapore"
+    time.tzset()
+    spec = importlib.util.spec_from_file_location("tickets_local_time", TOOL)
+    tk = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tk)
+    shown = tk.fmt_local("2026-09-06T14:32:00Z")
+    # 14:32 UTC is 22:32 in Singapore. Must not echo the UTC hour or a Z suffix.
+    assert "22:32" in shown, shown
+    assert "14:32" not in shown, shown
+    assert not shown.endswith("Z"), shown
+    naive = tk.fmt_local("2026-09-06T14:32:00")
+    assert "22:32" in naive, naive

@@ -3,7 +3,7 @@ import { useResource } from "../state/useResource";
 import { ConnectionBanner } from "../components/ConnectionBanner";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { EmptyStateView } from "../components/EmptyStateView";
-import { formatDateTime } from "../copy";
+import { formatWhen } from "../copy";
 import type { ActivityResponse } from "../types";
 
 export function Activity() {
@@ -39,7 +39,10 @@ export function Activity() {
                       re-derive it from the action code. */}
                   <strong>{event.summary}</strong>
                   <small>
-                    {event.actor.display_name} · {formatDateTime(event.occurred_at)}
+                    {event.actor.display_name} ·{" "}
+                    <time dateTime={event.occurred_at} data-testid={`activity-time-${event.id}`}>
+                      {formatWhen(event.occurred_at)}
+                    </time>
                   </small>
                 </div>
                 <span className="spacer" />

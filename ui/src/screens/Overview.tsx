@@ -3,7 +3,7 @@ import { useResource } from "../state/useResource";
 import { ConnectionBanner } from "../components/ConnectionBanner";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { EmptyStateView } from "../components/EmptyStateView";
-import { formatDateTime } from "../copy";
+import { formatDateTime, formatWhen } from "../copy";
 import type { OverviewResponse } from "../types";
 import type { View } from "../components/NavBar";
 
@@ -89,7 +89,7 @@ export function Overview({
                     <small>
                       {item.acknowledged_by
                         ? `Acknowledged by ${item.acknowledged_by.display_name}`
-                        : `Raised ${formatDateTime(item.raised_at)}`}
+                        : `Raised ${formatWhen(item.raised_at)}`}
                     </small>
                   </div>
                   <span className="spacer" />
@@ -145,7 +145,7 @@ export function Overview({
                     </strong>
                     <small>
                       {review.submitted_by.display_name} · {review.evidence.sha.slice(0, 7)} ·{" "}
-                      {formatDateTime(review.decided_at ?? review.submitted_at)}
+                      {formatWhen(review.decided_at ?? review.submitted_at)}
                     </small>
                   </div>
                 </div>

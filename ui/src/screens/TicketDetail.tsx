@@ -6,7 +6,7 @@ import { useBoard } from "../state/BoardProvider";
 import { useResource } from "../state/useResource";
 import { useMutation } from "../state/useMutation";
 import { supersededNote } from "../errorCopy";
-import { assignmentStateLabel, dependencyWaitingLabel, formatDateTime, pendingWriteCopy } from "../copy";
+import { assignmentStateLabel, dependencyWaitingLabel, formatWhen, pendingWriteCopy } from "../copy";
 import type { Review, TicketAction, TicketDetailResponse } from "../types";
 
 const ACTION_LABEL: Record<TicketAction, string> = {
@@ -97,7 +97,7 @@ function ReviewDecision({
       {decide.error && <ErrorNotice error={decide.error} onReload={onDone} />}
       {decide.phase === "succeeded" && decide.result && (
         <p className="notice" role="status" data-testid="decision-result">
-          Review {decide.result.state} · recorded {formatDateTime(decide.result.decided_at ?? review.submitted_at)}
+          Review {decide.result.state} · recorded {formatWhen(decide.result.decided_at ?? review.submitted_at)}
         </p>
       )}
 
@@ -265,7 +265,11 @@ export function TicketDetail({ ticketId, onClose }: { ticketId: string; onClose:
                   {r.state} by {r.submitted_by.display_name}
                 </strong>
                 <small>
-                  {formatDateTime(r.submitted_at)} · {r.evidence.sha.slice(0, 7)}
+                  <time dateTime={r.submitted_at} data-testid={`review-time-${r.id}`}>
+                    {formatWhen(r.submitted_at)}
+                  </time>
+                  {" · "}
+                  {r.evidence.sha.slice(0, 7)}
                   {r.decision_notes ? ` · ${r.decision_notes}` : ""}
                 </small>
               </div>
@@ -289,6 +293,11 @@ export function TicketDetail({ ticketId, onClose }: { ticketId: string; onClose:
                     </span>
                   )}
                 </strong>
+                <small>
+                  <time dateTime={u.created_at} data-testid={`update-time-${u.id}`}>
+                    {formatWhen(u.created_at)}
+                  </time>
+                </small>
                 <small>{u.body}</small>
                 {u.superseded && <small>{supersededNote}</small>}
               </div>
