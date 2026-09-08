@@ -8,6 +8,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from test_wakeup import board, pending, run, stop  # noqa: F401
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
@@ -178,6 +180,7 @@ def test_review_tasks_cos_once_then_inbox_clears_repeat_wake(board):
     recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
     cos_mail = next(m for m in recs if m.get("to") == "cos-x" and "ready for review" in m.get("text", ""))
     assert cos_mail.get("kind") == "task"
+    assert cos_mail.get("source") == "review"
     master_mail = next(m for m in recs if m.get("to") == "planner" and "ready for review" in m.get("text", ""))
     assert master_mail.get("kind") != "task"
     rc, p = pending(board, "planner")
@@ -188,6 +191,59 @@ def test_review_tasks_cos_once_then_inbox_clears_repeat_wake(board):
     assert "review_queue" in p, p
     assert p.get("pending") is False and rc == 1, p
     assert not p.get("task_messages")
+
+
+@pytest.mark.parametrize("terminal_flag", ["--blocked", "--done", "--replaced"])
+def test_terminal_objective_review_does_not_run_cos_then_explicit_task_runs_once(
+        board, tmp_path, terminal_flag):
+    run(board, "master", "take", agent="planner")
+    run(board, "master", "cos", "cos-x", agent="planner")
+    run(board, "join", "cos-x", "--roles", "review")
+    run(board, "objective", "Ship V1", "--exit", "launch gate passes", agent="planner")
+    run(board, "objective", terminal_flag, "objective stopped", agent="planner")
+    time.sleep(1.1)
+    _submit_docs_review(board)
+
+    rc, p = pending(board, "cos-x")
+    assert rc == 1 and p.get("pending") is False, p
+    assert p.get("review_queue") and not p.get("task_messages"), p
+    recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    review_mail = next(m for m in recs if m.get("to") == "cos-x" and "ready for review" in m.get("text", ""))
+    assert review_mail.get("source") == "review"
+    assert review_mail.get("kind") != "task"
+
+    marker = tmp_path / (terminal_flag.lstrip("-") + ".ran")
+    idle = run(board, "watch", "--agent", "cos-x", "--once",
+               "--exec", "touch %s" % marker, agent="cos-x")
+    assert idle.returncode == 1 and not marker.exists(), idle.stderr + idle.stdout
+
+    run(board, "msg", "Unblock the named launch issue", "--to", "cos-x", "--task", agent="planner")
+    rc, p = pending(board, "cos-x")
+    assert rc == 0 and p.get("wake_reason") == "task_messages", p
+    woke = run(board, "watch", "--agent", "cos-x", "--once",
+               "--exec", "touch %s" % marker, agent="cos-x")
+    assert woke.returncode == 0 and marker.exists(), woke.stderr + woke.stdout
+    events = [json.loads(ln) for ln in (board / "trajectories.jsonl").read_text().splitlines()]
+    starts = [e for e in events if e.get("kind") == "run_start" and e.get("agent") == "cos-x"]
+    assert len(starts) == 1
+
+
+def test_active_review_queued_before_objective_blocks_does_not_wake_later(board):
+    run(board, "master", "take", agent="planner")
+    run(board, "master", "cos", "cos-x", agent="planner")
+    run(board, "join", "cos-x", "--roles", "review")
+    run(board, "objective", "Ship V1", "--exit", "launch gate passes", agent="planner")
+    time.sleep(1.1)
+    _submit_docs_review(board)
+    recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    review_mail = next(m for m in recs if m.get("to") == "cos-x" and "ready for review" in m.get("text", ""))
+    assert review_mail.get("kind") == "task" and review_mail.get("source") == "review"
+    assert pending(board, "cos-x")[0] == 0
+
+    run(board, "objective", "--blocked", "launch is paused", agent="planner")
+    rc, p = pending(board, "cos-x")
+    assert rc == 1 and p.get("pending") is False, p
+    assert p.get("review_queue") and not p.get("task_messages"), p
 
 
 def test_spawn_cos_defaults_persistent_with_max_runs_oneshot(board):

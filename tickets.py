@@ -803,12 +803,21 @@ def _notify_review_submitted(board, author, tid, text, master_state=None):
     master_name = (m or {}).get("owner") or ""
     cos_name = (m or {}).get("cos") or ""
     body = "%s ready for review: %s" % (tid, text)
+    obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+    # Reviews advance an active objective, but a terminal objective is an
+    # explicit stop boundary. Keep the durable notification while withholding
+    # its automatic task wake. `source=review` also lets the pending gate catch
+    # a review queued while active if the objective becomes terminal before a
+    # persistent seat polls it.
+    review_kind = "" if obj_state in ("blocked", "achieved", "replaced") else "task"
     if cos_name:
-        post_message(board, author, body, to=cos_name, re=tid, kind="task")
+        post_message(board, author, body, to=cos_name, re=tid,
+                     kind=review_kind, source="review")
         if master_name and master_name != cos_name:
-            post_message(board, author, body, to=master_name, re=tid)
+            post_message(board, author, body, to=master_name, re=tid, source="review")
     else:
-        post_message(board, author, body, to=master_name, re=tid, kind="task")
+        post_message(board, author, body, to=master_name, re=tid,
+                     kind=review_kind, source="review")
     return master_name, cos_name
 
 
@@ -5435,7 +5444,7 @@ def resolve_to_and_mentions(text, to=""):
     return to, mentions
 
 
-def post_message(board, sender, text, to="", re="", kind="", task=False):
+def post_message(board, sender, text, to="", re="", kind="", task=False, source=""):
     _rotate_messages_if_big(board)
     to, mentions = resolve_to_and_mentions(text, to)
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
@@ -5446,6 +5455,8 @@ def post_message(board, sender, text, to="", re="", kind="", task=False):
         rec["kind"] = "task"
     elif kind and kind != "message":
         rec["kind"] = kind
+    if source:
+        rec["source"] = source
     line_ = json.dumps(rec) + "\n"
     # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
     fd = os.open(messages_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
@@ -6509,11 +6520,13 @@ def pending_work(board, owner):
     if rec.get("limit"):
         out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
         return out
+    obj = _safe(lambda: load_objective(board), {})
+    obj_state = objective_state(obj)
     msgs = _safe(lambda: unread(board, owner), [])
     direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
     if direct:
         out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
-        tasks = [fmt_msg(m) for m in direct if _message_wakes(m)]
+        tasks = [fmt_msg(m) for m in direct if _message_wakes(m, obj_state)]
         if tasks:
             out["task_messages"] = tasks[-5:]
     elif msgs:
@@ -6559,7 +6572,6 @@ def pending_work(board, owner):
     # or a standing seat such as an optimizer) is woken every N minutes even
     # when nothing else is pending, so it keeps working its brief toward the
     # objective instead of going quiet. Opt-in per seat; off for plain workers.
-    obj = _safe(lambda: load_objective(board), {})
     every = int(rec.get("drive_every") or 0)
     # Heartbeat wakes only an active objective that has a measurable exit.
     if (obj and objective_state(obj) == "active" and objective_exit_ok(obj)
@@ -6570,8 +6582,10 @@ def pending_work(board, owner):
     return out
 
 
-def _message_wakes(m):
+def _message_wakes(m, obj_state=""):
     """Explicit task / stuck / blocked mail wakes a model; ACKs and ordinary DMs do not."""
+    if m.get("source") == "review" and obj_state in ("blocked", "achieved", "replaced"):
+        return False
     if m.get("kind") == "task" or m.get("task"):
         return True
     text = str(m.get("text") or "").strip().lower()
