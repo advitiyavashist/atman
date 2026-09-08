@@ -13,6 +13,9 @@ describe("Agents, reading a live board", () => {
     renderLive(<Agents onConnect={() => {}} />, boardFetch({ "GET /agents": agentsPopulated }));
     await waitFor(() => expect(screen.getAllByText("Heartbeat").length).toBeGreaterThan(0));
     expect(screen.getAllByText("Last progress").length).toBeGreaterThan(0);
+    const heartbeat = screen.getByTestId(`heartbeat-${agentsPopulated.items[0].id}`);
+    expect(heartbeat.textContent).not.toMatch(/T\d{2}:\d{2}:\d{2}Z/);
+    expect(heartbeat.textContent).toMatch(/ago|just now|in /);
   });
 
   it("notes that a hook-only agent cannot be woken by a message", async () => {

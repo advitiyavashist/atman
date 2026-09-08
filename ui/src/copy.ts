@@ -83,16 +83,76 @@ export const pendingWriteCopy = "Sending… nothing has changed on the board yet
 export const queuedNotWorkingNote =
   "Reserved, not started — the agent has not claimed it yet.";
 
-export function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+/**
+ * Optional overrides for tests. Production call sites omit these so Intl
+ * uses the browser/OS local timezone — never a baked-in IANA zone, and
+ * never UTC unless that is actually the viewer's zone.
+ */
+export type FormatTimeOptions = {
+  timeZone?: string;
+  now?: number;
+};
+
+/**
+ * Parse a board timestamp. Stored values are UTC; a missing offset must not
+ * be read as already-local (that is how a Singapore viewer ends up staring
+ * at 14:32 when the clock on the wall says 22:32).
+ */
+export function parseBoardTime(iso: string): Date | null {
+  const raw = String(iso ?? "").trim();
+  if (!raw) return null;
+  const parseable = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?$/.test(raw)
+    ? raw.replace(" ", "T") + "Z"
+    : raw;
+  const d = new Date(parseable);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
-export function formatDateTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+function localDateOptions(
+  extra: Intl.DateTimeFormatOptions,
+  timeZone?: string,
+): Intl.DateTimeFormatOptions {
+  // Omitting `timeZone` is the point: Intl then uses the host local zone.
+  return timeZone ? { ...extra, timeZone } : extra;
+}
+
+export function formatTime(iso: string, options?: FormatTimeOptions): string {
+  const d = parseBoardTime(iso);
+  if (!d) return iso;
+  return d.toLocaleTimeString(undefined, localDateOptions(
+    { hour: "2-digit", minute: "2-digit", timeZoneName: "short" },
+    options?.timeZone,
+  ));
+}
+
+export function formatDateTime(iso: string, options?: FormatTimeOptions): string {
+  const d = parseBoardTime(iso);
+  if (!d) return iso;
+  return d.toLocaleString(undefined, localDateOptions(
+    { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" },
+    options?.timeZone,
+  ));
+}
+
+export function formatRelative(iso: string, options?: FormatTimeOptions): string {
+  const d = parseBoardTime(iso);
+  if (!d) return iso;
+  const now = options?.now ?? Date.now();
+  const delta = now - d.getTime();
+  const abs = Math.abs(delta);
+  const mins = Math.round(abs / 60_000);
+  const hours = Math.round(abs / 3_600_000);
+  const days = Math.round(abs / 86_400_000);
+  if (mins < 1) return "just now";
+  const unit = mins < 60 ? `${mins}m` : hours < 48 ? `${hours}h` : `${days}d`;
+  return delta >= 0 ? `${unit} ago` : `in ${unit}`;
+}
+
+/** Relative + absolute local wall time. The string to put on event rows. */
+export function formatWhen(iso: string, options?: FormatTimeOptions): string {
+  const absolute = formatDateTime(iso, options);
+  if (absolute === iso) return iso;
+  return `${formatRelative(iso, options)} · ${absolute}`;
 }
 
 export const hookOnlyNote =

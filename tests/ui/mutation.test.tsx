@@ -21,6 +21,9 @@ describe("the rules that keep a write from looking like it landed when it did no
 
     await waitFor(() => expect(screen.getByTestId("pinned-sha")).toBeInTheDocument());
     expect(screen.getByTestId("pinned-sha")).toHaveTextContent(pending.evidence.sha);
+    const reviewTime = screen.getByTestId(`review-time-${pending.id}`);
+    expect(reviewTime).toHaveAttribute("dateTime", pending.submitted_at);
+    expect(reviewTime.textContent).not.toMatch(/T\d{2}:\d{2}:\d{2}Z/);
     // There is no SHA input anywhere: the operator accepts the artifact shown.
     expect(screen.queryByLabelText(/evidence sha/i)).not.toBeInTheDocument();
 
@@ -121,6 +124,10 @@ describe("the rules that keep a write from looking like it landed when it did no
     // Both halves: it is in the trail, and it changed nothing.
     expect(screen.getByText(/no longer owns the ticket/)).toBeInTheDocument();
     expect(screen.getByText(/did not change ticket state/)).toBeInTheDocument();
+    const noteTime = screen.getByTestId("update-time-upd_00000002");
+    expect(noteTime).toHaveAttribute("dateTime", "2026-09-06T14:35:00Z");
+    expect(noteTime.textContent).not.toMatch(/T\d{2}:\d{2}:\d{2}Z/);
+    expect(noteTime.textContent).toMatch(/ago|just now|in /);
   });
 
   it("says agent-only actions belong to the agent instead of offering a button that cannot work", async () => {
