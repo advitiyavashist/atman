@@ -38,6 +38,13 @@ remove dirty commits.
 
 ## 3. Visibility
 
-Leave the GitHub repository **private** until the owner (Advitiya) and
-CTO toggle it public. A green tree-scrub PR is not a visibility change.
-T-522 does not flip public.
+Leftover dirty remote branches were deleted on 2026-09-08 (receipt:
+[VISIBILITY_FLIP.md](VISIBILITY_FLIP.md)). `origin/main` is the CLEAN
+orphan `abfcdae` (1 commit). The Cloud Agent **could not** flip GitHub
+visibility (GitHub App token `403`). Advitiya still has to run:
+
+```sh
+gh repo edit advitiyavashist/atman --visibility public --accept-visibility-change-consequences
+```
+
+A green tree-scrub PR is not a visibility change.

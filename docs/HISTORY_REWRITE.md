@@ -4,10 +4,9 @@ This document is the public-prep history cutover for `advitiyavashist/atman`.
 It records the full-history residual scan, the replacement orphan snapshot,
 CLEAN evidence after rewrite, and the exact force-push runbook.
 
-**Visibility stays private.** Advitiya / CTO flip GitHub visibility in a
-separate step after this cutover is done and they are satisfied. This work
-does not change repo visibility and must not be treated as permission to
-flip public.
+**Visibility is still private** after leftover-ref deletion: the follow-up
+agent got `403` on `gh repo edit --visibility public` (GitHub App token).
+Advitiya must flip it. Receipt: [VISIBILITY_FLIP.md](VISIBILITY_FLIP.md).
 
 Related: tip-only scrub already merged as PR #16 (`0bce0de`, T-362 / T-366).
 That PR did **not** rewrite history. `docs/PUBLIC_PREP.md` is the short
@@ -278,23 +277,30 @@ test ! -e docs/CROSS_REPO_PINS.md
 
 ### 4.7 Visibility (separate, owner-only)
 
+Leftover-ref deletion + isolated re-scan completed 2026-09-08. See
+`docs/VISIBILITY_FLIP.md`. `origin/main` is `abfcdae` (1 commit). Remote
+heads are `main` + the two T-522 evidence branches. Tags: none.
+
+The follow-up Cloud Agent ran the owner command and got **403**
+(`Resource not accessible by integration` — GitHub App tokens cannot
+change visibility). Advitiya still has to flip it:
+
 ```sh
-# DO NOT run this as part of T-522.
-# gh repo edit advitiyavashist/atman --visibility public
+gh repo edit advitiyavashist/atman --visibility public --accept-visibility-change-consequences
+gh repo view advitiyavashist/atman --json visibility
 ```
 
-HOLD until Advitiya / CTO explicitly flip visibility after CLEAN verify
-and leftover-ref deletion.
+## 5. Why the first Cloud Agent did not force-push `main`
 
-## 5. Why this Cloud Agent did not force-push `main`
-
-The replacement orphan is pushed as
-`cursor/t522-orphan-main-9059`. Rewriting `origin/main` is an owner
-operation with irreversible collaboration cost. This agent does not
-change GitHub visibility and does not force-push `main`.
+The replacement orphan was first pushed as
+`cursor/t522-orphan-main-9059`. Rewriting `origin/main` was an owner
+operation. A later step force-pushed `origin/main` to `abfcdae` (do not
+repeat). Follow-up work deleted leftover dirty heads and re-scanned;
+it did **not** force-push `main` again.
 
 ## CLEAN re-scan (orphan isolate)
 
-See section 3. Repeat after the Mac operator force-pushes `main` and
-deletes leftover branches. A CLEAN orphan branch is not a CLEAN GitHub
-object store while other refs still point at the old graph.
+See section 3 and `docs/VISIBILITY_FLIP.md`. After leftover-ref
+deletion, GitHub advertises only `main` + the two T-522 evidence
+branches. Local clones of older workspaces may still contain dirty
+objects until they `fetch --prune` and reset.
