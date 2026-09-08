@@ -1,161 +1,25 @@
 """T-276 command-board UI + T-221 composer: /msg posts through post_message(),
 same messages.jsonl, no second store. Snapshot keys stay stable."""
-import atexit
 import json
-import os
-import signal
-import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 
 import pytest
 
 from test_wakeup import board, run  # noqa: F401
+from ui_server_harness import UiServer, _free_port, make_ui_server_fixture, port_is_dead
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
+ui_server = make_ui_server_fixture("t276-probe")
 
 SNAPSHOT_KEYS = (
     "project", "generated", "master", "cos", "counts", "sprint", "burn",
     "goals", "util", "in_flight", "review", "open", "agents", "health", "messages",
 )
-
-_ACTIVE_SERVERS: list["_Server"] = []
-
-
-def _free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _board_marker(board):
-    marker = "t276-probe-%s" % uuid.uuid4().hex[:12]
-    run(board, "join", marker, agent=marker)
-    return marker
-
-
-def _wait_up(port, marker, timeout=10):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:%d/board.json" % port, timeout=1) as r:
-                d = json.loads(r.read())
-            agents = [a.get("name") for a in d.get("agents") or []]
-            if marker in agents:
-                return True
-            raise RuntimeError(
-                "foreign tickets ui on port %d: /board.json is up but missing probe agent '%s' (agents=%s)"
-                % (port, marker, agents)
-            )
-        except RuntimeError:
-            raise
-        except (urllib.error.URLError, ConnectionError, json.JSONDecodeError, KeyError, TimeoutError, OSError):
-            time.sleep(0.1)
-    return False
-
-
-class _Server:
-    def __init__(self, board):
-        self.board = board
-        self._stopped = False
-        self.marker = _board_marker(board)
-        self.port = _free_port()
-        env = dict(os.environ, TICKETS_DIR=str(board))
-        self.proc = subprocess.Popen(
-            [sys.executable, str(TOOL), "ui", "--port", str(self.port), "--host", "127.0.0.1"],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
-        _ACTIVE_SERVERS.append(self)
-        try:
-            if not _wait_up(self.port, self.marker):
-                raise RuntimeError("tickets ui never came up on port %d" % self.port)
-        except Exception:
-            self.stop()
-            raise
-
-    def get(self, path="/board.json", raw=False):
-        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.port, path), timeout=5) as r:
-            body = r.read()
-            return body if raw else json.loads(body)
-
-    def post(self, path, payload):
-        req = urllib.request.Request(
-            "http://127.0.0.1:%d%s" % (self.port, path),
-            data=json.dumps(payload).encode(), method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5) as r:
-                return r.status, json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read())
-
-    def stop(self):
-        if self._stopped:
-            return
-        self._stopped = True
-        proc = getattr(self, "proc", None)
-        if proc is None or proc.poll() is not None:
-            try:
-                _ACTIVE_SERVERS.remove(self)
-            except ValueError:
-                pass
-            return
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                proc.kill()
-            proc.wait(timeout=2)
-        try:
-            _ACTIVE_SERVERS.remove(self)
-        except ValueError:
-            pass
-
-
-def _stop_all_servers():
-    for srv in list(_ACTIVE_SERVERS):
-        srv.stop()
-
-
-atexit.register(_stop_all_servers)
-
-
-def pytest_sessionfinish(session, exitstatus):
-    _stop_all_servers()
-
-
-@pytest.fixture(autouse=True)
-def _reap_leftover_ui_servers():
-    yield
-    _stop_all_servers()
-
-
-@pytest.fixture
-def ui_server(board):
-    srv = _Server(board)
-    try:
-        yield srv
-    finally:
-        srv.stop()
 
 
 def test_ui_html_is_command_board_not_spreadsheet(board):
@@ -211,8 +75,11 @@ def test_board_json_keeps_snapshot_keys_and_feeds_mentions(board, ui_server):
 
 def test_wait_up_rejects_foreign_server_on_same_port(board, monkeypatch):
     """Mutation (b): a stray ui on our port must fail at _wait_up, not at content asserts."""
+    import os
+    import signal
+
     foreign_repo = board.parent.parent / "foreign-repo"
-    foreign_repo.mkdir()
+    foreign_repo.mkdir(exist_ok=True)
     subprocess.run(["git", "init", "-q", str(foreign_repo)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(foreign_repo), "commit", "-q", "--allow-empty", "-m", "init"],
                    check=True, env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
@@ -236,10 +103,9 @@ def test_wait_up_rejects_foreign_server_on_same_port(board, monkeypatch):
                 break
             except (urllib.error.URLError, ConnectionError):
                 time.sleep(0.1)
-        marker = _board_marker(board)
-        monkeypatch.setattr("test_t276_ui._free_port", lambda: port)
+        monkeypatch.setattr("ui_server_harness._free_port", lambda: port)
         with pytest.raises(RuntimeError, match="foreign tickets ui"):
-            _Server(board)
+            UiServer(board, probe_prefix="t276-probe")
     finally:
         try:
             os.killpg(os.getpgid(stray.pid), signal.SIGTERM)
@@ -248,25 +114,20 @@ def test_wait_up_rejects_foreign_server_on_same_port(board, monkeypatch):
         stray.wait(timeout=5)
 
 
-def test_fixture_stops_server_after_assertion_failure(board):
-    """Covers the no-teardown gap: fixture finalizer must stop ui even if the body raises."""
-    srv = None
-    port = None
-    try:
-        srv = _Server(board)
-        port = srv.port
-        assert srv.get() is not None
+def test_fixture_stops_server_after_assertion_failure(board, ui_server):
+    """Covers the no-teardown gap: ui_server fixture finalizer must stop ui on body failure."""
+    from ui_server_harness import FIXTURE_TEETH_PORT_FILE
+
+    FIXTURE_TEETH_PORT_FILE.write_text(str(ui_server.port))
+    with pytest.raises(AssertionError, match="simulated test failure"):
         raise AssertionError("simulated test failure")
-    except AssertionError:
-        pass
-    finally:
-        if srv is not None:
-            srv.stop()
-    deadline = time.time() + 3
-    while time.time() < deadline:
-        try:
-            urllib.request.urlopen("http://127.0.0.1:%d/board.json" % port, timeout=0.2)
-        except (urllib.error.URLError, ConnectionError):
-            return
-        time.sleep(0.05)
-    raise AssertionError("port %d still serving after stop()" % port)
+
+
+def test_fixture_stops_server_after_assertion_failure_teeth(board):
+    """Runs after the failing test above: fixture finalizer must have stopped the port."""
+    from ui_server_harness import FIXTURE_TEETH_PORT_FILE
+
+    assert FIXTURE_TEETH_PORT_FILE.exists(), "fixture teeth port file missing"
+    port = int(FIXTURE_TEETH_PORT_FILE.read_text().strip())
+    FIXTURE_TEETH_PORT_FILE.unlink(missing_ok=True)
+    assert port_is_dead(port), "port %d still serving after ui_server fixture teardown" % port

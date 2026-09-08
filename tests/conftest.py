@@ -13,8 +13,19 @@ if str(SRC) not in sys.path:
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
-from tmp_path_reaper import pytest_sessionfinish  # noqa: E402,F401
+from tmp_path_reaper import reap_green_basetemp  # noqa: E402
+from ui_server_harness import reap_stale_ui_servers, stop_all_ui_servers  # noqa: E402
 from watch_reaper import SESSION_ROOTS, reap_watchers_under  # noqa: E402
+
+
+def pytest_sessionstart(session):
+    reap_stale_ui_servers()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    stop_all_ui_servers()
+    reap_green_basetemp(session, exitstatus)
 
 
 @pytest.fixture(autouse=True)
