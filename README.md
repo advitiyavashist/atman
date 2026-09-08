@@ -48,6 +48,11 @@ Watch it live with `tickets ui` (read-only, auto-refreshing, on
 [docs/first-session.md](docs/first-session.md) for a real captured first
 session, command by command.
 
+Taking the **master** seat (Claude / Cursor / Codex as the board
+coordinator): [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md)
+— folders, install, first commands, role-context briefs, what not to
+expect. Index: [docs/onboarding/README.md](docs/onboarding/README.md).
+
 ## The model
 
 - **Ticket** `T-001`: title, body, `role`, `priority` (1 hard .. 3 routine),
@@ -167,10 +172,13 @@ commit:
 | `agents/`, `roles.json`, `workforce.json` | who exists, what they can do |
 | `messages.jsonl` | append-only message log |
 | `MASTER.md` | master context and the decision log |
-| `briefs/<agent>.md` | per-agent brief, shown first on every claim that agent makes |
+| `briefs/_shared.md`, `briefs/roles/<role>.md`, `briefs/<agent>.md` | standing context injected on watch/spawn (E-013); not a shared-memory brain |
 
 `tickets init` gitignores the board by default (`--track` to commit it
-instead). Board location resolves in this order: `$TICKETS_DIR`, the nearest
+instead). Hand-written memory (`MASTER.md`, `briefs/`) should still be
+tracked — see [docs/handoff-contract.md](docs/handoff-contract.md) and the
+folder map in [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md).
+Board location resolves in this order: `$TICKETS_DIR`, the nearest
 ancestor with a live board, the git worktree root, then cwd — see
 [docs/board-resolution.md](docs/board-resolution.md).
 
