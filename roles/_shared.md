@@ -9,9 +9,9 @@ share one board-canonical store:
 Repo-root `roles/` and `$TICKETS_ROLES_DIR` are **not** read on inject.
 
 Role files are markdown context for a seat. They are **not** a shared-memory
-product and they do not persist conversation. Team knowledge is
-`docs/knowledge/` — pin a doc into this store; do not add a second inject
-root.
+product and they do not persist conversation. KB v0 is board docs +
+tracked `docs/knowledge/` + this brief store (E-013). Do not auto-sync
+the catalog here.
 
 - One ticket at a time. Own worktree. Board-only comms (`tickets msg`).
 - If blocked: say so early (`stuck:`). Do not wait silently.

@@ -1,7 +1,8 @@
-"""Team knowledge: docs/knowledge/ index + pin into the existing brief inject.
+"""KB v0: index tracked docs/knowledge/. Inject is E-013 briefs only.
 
-Not a shared-memory product. Pin writes a pointer into .tickets/briefs/;
-watch/spawn already inject that store (T-529 / T-530). Local pytest only.
+CEO/PM lock: board docs + tracked docs + .tickets/briefs/ (shared/roles/agent).
+Not a shared-memory brain, vector DB, or auto-sync role KB.
+Local pytest only.
 """
 
 import json
@@ -29,18 +30,15 @@ def write_kb(root, name, text):
 
 
 def sample_doc(doc_id="house-style", title="House style", tags="docs, backend",
-               body="Prefer short sentences. No new APIs.", pin=""):
-    pin_line = ("pin: %s\n" % pin) if pin else ""
+               body="Prefer short sentences. No new APIs."):
     return (
         "---\n"
         "id: %s\n"
         "title: %s\n"
         "tags: [%s]\n"
-        "seats: [docs]\n"
-        "%s"
         "---\n\n"
         "# %s\n\n"
-        "%s\n" % (doc_id, title, tags, pin_line, title, body)
+        "%s\n" % (doc_id, title, tags, title, body)
     )
 
 
@@ -100,6 +98,7 @@ def test_knowledge_missing_tree_is_honest(board, tmp_path):
 
 
 def test_knowledge_is_not_auto_injected(board, tmp_path):
+    """Catalog is not inject. No auto-sync into briefs/roles."""
     kb = tmp_path / "knowledge"
     write_kb(kb, "house-style.md", sample_doc(body="KB-AUTO-LEAK"))
     assert run(board, "join", "alice", "--roles", "backend").returncode == 0
@@ -108,97 +107,35 @@ def test_knowledge_is_not_auto_injected(board, tmp_path):
     assert "KB-AUTO-LEAK" not in r.stdout
     assert "Knowledge [house-style]" not in r.stdout
     assert not (board / "knowledge").exists()
+    assert not (board / "briefs" / "roles" / "backend.md").exists()
 
 
-def test_knowledge_pin_role_reaches_prompt(board, tmp_path):
+def test_e013_brief_is_the_inject_path(board, tmp_path):
+    """Standing knowledge reaches a prompt only through tickets brief (E-013)."""
     kb = tmp_path / "knowledge"
-    write_kb(kb, "house-style.md", sample_doc(
-        pin="Prefer short sentences.", body="KB-PIN-BODY"))
+    write_kb(kb, "house-style.md", sample_doc(body="KB-CATALOG-ONLY"))
     assert run(board, "join", "alice", "--roles", "backend").returncode == 0
-    r = run(board, "knowledge", "pin", "house-style", "--role", "backend",
-            env=_kb_env(kb), agent="master")
+    r = run(board, "brief", "--role", "backend",
+            "House rule: one file per change.", agent="master")
     assert r.returncode == 0, r.stderr + r.stdout
     path = board / "briefs" / "roles" / "backend.md"
-    assert path.is_file()
-    text = path.read_text()
-    assert "Knowledge [house-style]:" in text
-    assert "docs/knowledge/house-style.md" in text
-    assert "Prefer short sentences." in text
-    assert "KB-PIN-BODY" not in text
-    assert not (board / "knowledge").exists()
-
-    shown = run(board, "brief", "--role", "backend", "--show")
-    assert "Knowledge [house-style]:" in shown.stdout
-
+    assert "one file per change" in path.read_text()
     prompt = run(board, "prompt", "--agent", "alice", env=_kb_env(kb))
     assert prompt.returncode == 0, prompt.stderr
-    assert "Knowledge [house-style]:" in prompt.stdout
-    assert "Prefer short sentences." in prompt.stdout
+    assert "one file per change" in prompt.stdout
     assert str(path) in prompt.stdout
-    assert "KB-PIN-BODY" not in prompt.stdout
+    assert "KB-CATALOG-ONLY" not in prompt.stdout
+    assert not (board / "knowledge").exists()
 
 
-def test_knowledge_pin_shared_and_agent(board, tmp_path):
-    kb = tmp_path / "knowledge"
-    write_kb(kb, "memory.md", sample_doc("memory", "Memory lock", "memory",
-                                         "Board docs only.", pin="Memory is briefs."))
-    run(board, "join", "scribe", "--roles", "docs")
-    shared = run(board, "knowledge", "pin", "memory", "--shared", env=_kb_env(kb))
-    assert shared.returncode == 0, shared.stderr + shared.stdout
-    assert "Knowledge [memory]:" in (board / "briefs" / "_shared.md").read_text()
-
-    agent = run(board, "knowledge", "pin", "memory", "--agent", "scribe",
-                env=_kb_env(kb))
-    assert agent.returncode == 0, agent.stderr + agent.stdout
-    assert "Knowledge [memory]:" in (board / "briefs" / "scribe.md").read_text()
-
-    prompt = run(board, "prompt", "--agent", "scribe")
-    assert "Knowledge [memory]:" in prompt.stdout
-    assert "Memory is briefs." in prompt.stdout
-
-
-def test_knowledge_pin_is_idempotent(board, tmp_path):
+def test_knowledge_pin_does_not_exist(board, tmp_path):
     kb = tmp_path / "knowledge"
     write_kb(kb, "house-style.md", sample_doc())
-    first = run(board, "knowledge", "pin", "house-style", "--role", "docs",
-                env=_kb_env(kb))
-    assert first.returncode == 0, first.stderr
-    second = run(board, "knowledge", "pin", "house-style", "--role", "docs",
-                 env=_kb_env(kb))
-    assert second.returncode == 0, second.stderr
-    assert "already pinned" in second.stdout
-    text = (board / "briefs" / "roles" / "docs.md").read_text()
-    assert text.count("Knowledge [house-style]:") == 1
-
-
-def test_knowledge_pin_needs_exactly_one_target(board, tmp_path):
-    kb = tmp_path / "knowledge"
-    write_kb(kb, "house-style.md", sample_doc())
-    none = run(board, "knowledge", "pin", "house-style", env=_kb_env(kb))
-    assert none.returncode != 0
-    both = run(board, "knowledge", "pin", "house-style", "--role", "docs",
-               "--shared", env=_kb_env(kb))
-    assert both.returncode != 0
-    combo = run(board, "knowledge", "pin", "house-style", "--role", "docs",
-                "--agent", "alice", env=_kb_env(kb))
-    assert combo.returncode != 0
-
-
-def test_knowledge_pin_rejects_shared_as_role(board, tmp_path):
-    kb = tmp_path / "knowledge"
-    write_kb(kb, "house-style.md", sample_doc())
-    r = run(board, "knowledge", "pin", "house-style", "--role", "_shared",
+    r = run(board, "knowledge", "pin", "house-style", "--role", "backend",
             env=_kb_env(kb))
     assert r.returncode != 0
-    assert not (board / "briefs" / "roles" / "_shared.md").exists()
-
-
-def test_knowledge_pin_missing_doc(board, tmp_path):
-    kb = tmp_path / "knowledge"
-    kb.mkdir()
-    r = run(board, "knowledge", "pin", "ghost", "--role", "docs", env=_kb_env(kb))
-    assert r.returncode != 0
-    assert "no knowledge doc" in (r.stderr + r.stdout)
+    assert "NO CHANGE WAS MADE" in (r.stderr + r.stdout)
+    assert not (board / "briefs" / "roles").exists()
 
 
 def test_kb_alias_lists(board, tmp_path):

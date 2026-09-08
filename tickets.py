@@ -6364,10 +6364,10 @@ def cmd_brief(a, board):
     post_message(board, who, "brief updated for %s: %s" % (a.agent, (a.text or a.file)[:160]), to=a.agent)
 
 
-# Team knowledge: repo-tracked docs/knowledge/. Search / show / pin into the
-# existing brief inject path. Not a shared-memory product, not a board store.
+# Team knowledge v0 (CEO/PM lock): board docs + tracked docs + .tickets/briefs/
+# (shared/roles/agent). Same E-013 inject. Not a shared-memory brain, vector
+# DB, or auto-sync role KB. This verb only indexes docs/knowledge/.
 _KNOWLEDGE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-KNOWLEDGE_PIN_LIMIT = 400
 
 
 def knowledge_root(board=None):
@@ -6412,7 +6412,7 @@ def _parse_knowledge_frontmatter(text):
         key, val = line.split(":", 1)
         key = key.strip().lower()
         val = val.strip()
-        if key in ("tags", "seats"):
+        if key == "tags":
             val = val.strip("[]")
             meta[key] = [x.strip().strip("'\"") for x in val.split(",") if x.strip()]
         else:
@@ -6448,8 +6448,6 @@ def _knowledge_docs(root):
                 "id": slug,
                 "title": (meta.get("title") or slug).strip(),
                 "tags": list(meta.get("tags") or []),
-                "seats": list(meta.get("seats") or []),
-                "pin": (meta.get("pin") or "").strip(),
                 "path": path,
                 "rel": rel.replace("\\", "/"),
                 "body": body,
@@ -6465,21 +6463,6 @@ def _knowledge_docs(root):
     return unique
 
 
-def _knowledge_excerpt(doc, limit=KNOWLEDGE_PIN_LIMIT):
-    text = (doc.get("pin") or "").strip()
-    if not text:
-        for para in (doc.get("body") or "").split("\n\n"):
-            line = " ".join(para.strip().split())
-            if line and not line.startswith("#"):
-                text = line
-                break
-    if not text:
-        text = doc.get("title") or doc.get("id") or ""
-    if len(text) > limit:
-        text = text[:limit].rstrip() + "…"
-    return text
-
-
 def _find_knowledge_doc(root, slug):
     if not _KNOWLEDGE_SLUG_RE.match(slug or ""):
         return None
@@ -6489,20 +6472,8 @@ def _find_knowledge_doc(root, slug):
     return None
 
 
-def _knowledge_pin_line(doc):
-    tags = ", ".join(doc.get("tags") or [])
-    rel = "docs/knowledge/" + doc["rel"]
-    excerpt = _knowledge_excerpt(doc)
-    line = "- Knowledge [%s]: %s — %s" % (doc["id"], rel, doc["title"])
-    if tags:
-        line += " (tags: %s)" % tags
-    if excerpt:
-        line += "\n  %s" % excerpt
-    return line + "\n"
-
-
 def cmd_knowledge(a, board):
-    """List / show team docs, or pin one into the existing brief inject path."""
+    """Index tracked team docs. Inject is E-013 briefs — this does not write them."""
     root = knowledge_root(board)
     sub = getattr(a, "knowledge_cmd", None) or "list"
     tag = (getattr(a, "tag", "") or "").strip()
@@ -6516,7 +6487,7 @@ def cmd_knowledge(a, board):
         if tag:
             docs = [d for d in docs if tag in (d.get("tags") or [])]
         if getattr(a, "json", False):
-            payload = [{k: d[k] for k in ("id", "title", "tags", "seats", "path", "rel")}
+            payload = [{k: d[k] for k in ("id", "title", "tags", "path", "rel")}
                        for d in docs]
             print(json.dumps(payload, indent=2))
             return
@@ -6528,7 +6499,7 @@ def cmd_knowledge(a, board):
             print("%-16s %-36s [%s]  docs/knowledge/%s" % (
                 d["id"], d["title"][:36], tags, d["rel"]))
         print("")
-        print("%d doc(s)  pin with: tickets knowledge pin <id> --role <lane>" % len(docs))
+        print("%d doc(s)  standing inject is tickets brief / .tickets/briefs/ (E-013)" % len(docs))
         return
     if sub == "show":
         slug = (getattr(a, "slug", "") or "").strip()
@@ -6543,55 +6514,7 @@ def cmd_knowledge(a, board):
         print(doc["body"].rstrip())
         print()
         return
-    if sub == "pin":
-        slug = (getattr(a, "slug", "") or "").strip()
-        role = (getattr(a, "role", "") or "").strip()
-        agent = (getattr(a, "agent", "") or "").strip()
-        shared = bool(getattr(a, "shared", False))
-        targets = int(bool(role)) + int(bool(agent)) + int(shared)
-        if targets != 1:
-            sys.exit("pin needs exactly one of --role, --agent, or --shared")
-        if not slug:
-            sys.exit("knowledge pin needs a doc id")
-        if not _KNOWLEDGE_SLUG_RE.match(slug):
-            sys.exit("knowledge slug %r is not a safe name" % slug)
-        if not os.path.isdir(board):
-            sys.exit("pin needs a board (briefs live there)")
-        doc = _find_knowledge_doc(root, slug)
-        if not doc:
-            sys.exit("no knowledge doc %r under %s" % (slug, root))
-        if role:
-            path = role_brief_path(board, _safe_role_slug(role))
-        elif shared:
-            path = shared_brief_path(board)
-        else:
-            path = brief_path(board, agent)
-        marker = "Knowledge [%s]:" % doc["id"]
-        existing = ""
-        if os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    existing = f.read()
-            except OSError:
-                existing = ""
-        if marker in existing:
-            print("already pinned [%s] in %s" % (doc["id"], path))
-            return
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            if not existing:
-                if role:
-                    f.write("# Role brief for %s\n\n" % role)
-                elif shared:
-                    f.write("# Shared seat context\n\n")
-                else:
-                    f.write("# Brief for %s\n\n" % agent)
-            f.write(_knowledge_pin_line(doc))
-        print("pinned %s into %s" % (doc["id"], path))
-        return
-    sys.exit("knowledge: list | show <id> | pin <id> --role|--agent|--shared")
+    sys.exit("knowledge: list | show <id>  (inject is tickets brief, not this verb)")
 
 
 def utilization(board, tickets=None, hours=24, live=None):
@@ -9780,7 +9703,7 @@ def main():
     c.set_defaults(fn=cmd_context)
 
     c = sub.add_parser("knowledge", aliases=["kb"],
-                       help="team knowledge docs: list | show | pin into briefs (not a memory brain)")
+                       help="index tracked team docs (list | show); inject is E-013 briefs, not this verb")
     c.add_argument("--tag", default="", help="filter list by tag")
     c.add_argument("--json", action="store_true")
     ks = c.add_subparsers(dest="knowledge_cmd")
@@ -9789,11 +9712,6 @@ def main():
     x.add_argument("--json", action="store_true")
     x = ks.add_parser("show", help="print one doc")
     x.add_argument("slug")
-    x = ks.add_parser("pin", help="append a pointer to an existing brief (T-529 inject)")
-    x.add_argument("slug")
-    x.add_argument("--role", default="", help="pin into .tickets/briefs/roles/<role>.md")
-    x.add_argument("--agent", default="", help="pin into .tickets/briefs/<agent>.md")
-    x.add_argument("--shared", action="store_true", help="pin into .tickets/briefs/_shared.md")
     c.set_defaults(fn=cmd_knowledge, slug="")
 
     c = sub.add_parser("mine", help="list tickets claimed by this agent")

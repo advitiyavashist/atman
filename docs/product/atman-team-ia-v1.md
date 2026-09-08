@@ -71,7 +71,7 @@ Confirm destructive actions. **No silent auto-promote.** Where the product is ad
 | Turns / efficiency | Fewest-turns objective; no fake telemetry wall. |
 | Onboarding | Empty / next / checklist. First-run path, not a fifth primary pane. |
 | Team seats | A view of Team, not a separate product. Spare dark seats; formation-dots as constellation / presence only. |
-| Knowledge | Team docs (`docs/knowledge/`), searchable and pin-able into briefs. Not a memory pane, not a graph-doc product. |
+| Knowledge | KB v0 = board docs + tracked docs + briefs (E-013). Not a memory pane, vector DB, or auto-sync role KB. |
 
 ---
 

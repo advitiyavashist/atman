@@ -19,7 +19,7 @@ out to be a deliberate safety feature working correctly.
     next        atomically claim the next available ticket
     block       mark blocked, with a reason
     context     print the shared briefing file
-    knowledge   team docs under docs/knowledge/: list | show | pin into a brief
+    knowledge   index tracked docs under docs/knowledge/: list | show (inject is brief)
     board       compact summary; `map` for the sprint/epic tree
 
 ## Where the flags actually live

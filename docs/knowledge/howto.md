@@ -2,26 +2,22 @@
 id: howto
 title: Add a doc, tag it, how seats see it
 tags: [howto, operator]
-seats: [master]
 ---
 
 # Add a doc, tag it, how seats see it
 
-Operator path. No new store. The file you write here is the source of
-truth; the brief is only a pointer.
+Operator path for KB v0. No new store. No auto-sync into role briefs.
 
-## 1. Add a doc
+## 1. Add a tracked doc
 
-Create a markdown file under `docs/knowledge/` (one extra folder is fine:
-`docs/knowledge/ops/oncall.md`). Frontmatter is required for a stable id
-and tags:
+Create markdown under `docs/knowledge/` (one extra folder is fine:
+`docs/knowledge/ops/oncall.md`). Frontmatter gives a stable id and tags:
 
 ```markdown
 ---
 id: oncall
 title: Who to wake
 tags: [ops, master]
-seats: [master]
 ---
 
 # Who to wake
@@ -29,28 +25,24 @@ seats: [master]
 …
 ```
 
-- `id` — slug seats and `tickets knowledge show` use. `[A-Za-z0-9][A-Za-z0-9_.-]*`
+- `id` — slug for `tickets knowledge show`. `[A-Za-z0-9][A-Za-z0-9_.-]*`
 - `title` — one line for the index
-- `tags` — comma or `[a, b]` list. Filter with `tickets knowledge --tag ops`
-- `seats` — hint only (who this is *for*). Inject still follows **roles**,
-  not this field. Pin the doc to the lane that should see it.
-- `pin` — optional one-line excerpt used when pinning (otherwise the first
-  paragraph is used, capped)
+- `tags` — comma or `[a, b]` list. Filter with `tickets knowledge --tag ops`.
+  Tags are an index, not a routing table.
 
-Commit the file. The tree is repo-tracked on purpose: team knowledge
-survives a board clear. Briefs are the standing inject; this tree is the
-catalog.
+Commit the file. Tracked docs survive a board clear. Board docs and
+briefs are the other two slices of KB v0 — see [memory.md](memory.md).
 
 ## 2. Tag it
 
-Tags are the index. Prefer few, stable words: `backend`, `docs`, `ops`,
-`product`, `master`, `inject`. Do not invent a taxonomy product.
+Prefer few, stable words: `backend`, `docs`, `ops`, `product`, `master`.
+Do not invent a taxonomy product. Do not embed.
 
 ```sh
 tickets knowledge --tag ops
 ```
 
-`rg` over this folder works too. There is no graph and no embedding step.
+`rg` over this folder works too.
 
 ## 3. How seats see it
 
@@ -58,32 +50,29 @@ Seats do **not** get the whole tree on every wake. Context is the bill.
 
 | Path | What the seat sees | When to use it |
 |---|---|---|
-| `tickets knowledge` / `show <id>` | Index or one doc, on demand | The seat knows it needs a fact |
-| `tickets knowledge pin <id> --role <lane>` | A short pointer inside `.tickets/briefs/roles/<lane>.md` | Standing lane knowledge |
-| `pin <id> --shared` | Pointer in `.tickets/briefs/_shared.md` | Every seat, keep it short |
-| `pin <id> --agent <name>` | Pointer in `.tickets/briefs/<name>.md` | One worker |
-| `tickets brief --role <lane> --file …` | You wrote the brief yourself | When a pointer is not enough |
+| `tickets knowledge` / `show <id>` | Index or one tracked doc, on demand | Occasional fact |
+| Open the markdown | Same file | Same |
+| `tickets brief --role <lane> "…"` or `--file` | Standing text in `.tickets/briefs/roles/<lane>.md` | Lane must see it every wake |
+| Edit `.tickets/briefs/_shared.md` | Every seat (E-013) | House rules; keep it short |
+| `tickets brief <agent> "…"` | `.tickets/briefs/<agent>.md` | One worker |
 
-Watch / spawn / `tickets prompt` inject those brief files in the order
-already documented in the [master how-to](../onboarding/master-howto.md)
-(E-013). A pin is an append to that file. A missing pin is silence, not a
-fallback to this tree.
+Watch / spawn / `tickets prompt` inject **only** those brief files
+([master how-to](../onboarding/master-howto.md), E-013). A tracked doc
+is not a fallback. Tags do not auto-copy into a role brief.
 
 Check what inject will see (run bare):
 
 ```sh
-tickets knowledge pin memory --role backend
+tickets brief --role backend "One file per change. Do not hold review."
 tickets brief --role backend --show
 tickets prompt --agent alice          # after alice joined --roles backend
 ```
-
-Unpin by editing the brief (delete the `Knowledge [id]:` line). There is
-no `knowledge unpin` and no latent copy.
 
 ## What not to do
 
 - Do not dump the catalog into `_shared.md`.
 - Do not create `.tickets/knowledge/` or a second inject root.
+- Do not auto-sync this tree into `briefs/roles/` by tag or schedule.
+- Do not add a vector DB or embedding step.
 - Do not add this tree to the three-file master onboarding path
-  (`MASTER.md`, `HANDOFF.md`, `tickets map`). Pull a doc when the work
-  needs it; do not grow the first-read budget.
+  (`MASTER.md`, `HANDOFF.md`, `tickets map`).
