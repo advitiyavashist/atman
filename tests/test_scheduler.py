@@ -67,7 +67,8 @@ def _finish_with_turns(tid, agent, model, n_turns, day, reopens=0):
         evs.append(_event("run_start", tid, agent, model,
                           "%sT10:%02d:00Z" % (day, i + 1), run_no=i + 1))
         evs.append(_event("run_end", tid, agent, model,
-                          "%sT11:%02d:00Z" % (day, i + 1), run_no=i + 1, exit=0))
+                          "%sT11:%02d:00Z" % (day, i + 1), run_no=i + 1, exit=0,
+                          bound_write=True))
     for i in range(reopens):
         evs.append(_event("reopen", tid, agent, model, "%sT12:%02d:00Z" % (day, i),
                           outcome="reopened"))

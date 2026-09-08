@@ -62,7 +62,8 @@ def _finish_with_turns(tid, agent, model, n_turns, day, sha=None, release_sha=No
         evs.append(_event("run_start", tid, agent, model,
                           "%sT10:%02d:00Z" % (day, i + 1), run_no=i + 1, **extra))
         evs.append(_event("run_end", tid, agent, model,
-                          "%sT11:%02d:00Z" % (day, i + 1), run_no=i + 1, exit=0, **extra))
+                          "%sT11:%02d:00Z" % (day, i + 1), run_no=i + 1, exit=0,
+                          bound_write=True, **extra))
     evs.append(_event("done", tid, agent, model, "%sT13:00:00Z" % day, outcome="done", **extra))
     return evs
 

@@ -1,12 +1,13 @@
 """T-312: turns-to-done aggregator.
 
 A TURN is one completed watch run (`run_start` -> `run_end`) that wrote
-the bound ticket. T-425: a run increments `turns` only when THAT `run_id`
+the bound ticket. T-425/T-481: a run increments `turns` only when THAT run
 recorded a bound-ticket write (claim, update, review, done, block, reopen,
-or msg --re that ticket). Fail-exit, timeout, and session-limit with no
-write stay in jsonl but do not count. Events with no `run_id` (pre-T-425)
-still count every `run_end`. Backfill never recorded runs, so `turns` is
-JSON null — never 0.
+or msg --re that ticket). Pairing key is `run_id` if present, else
+`(agent, run_no)`. Fail-exit, timeout, and session-limit with no write stay
+in jsonl but do not count. Only events with neither `run_id` nor `run_no`
+(pre-T-425) still count every `run_end`. Backfill never recorded runs, so
+`turns` is JSON null — never 0.
 
 `--json` shape is frozen here and in docs/turns.md. The optimizer (T-313)
 reads it; do not rename keys.
@@ -175,19 +176,56 @@ def _is_bound_write(e, ticket):
     return kind in _BOUND_WRITE_KINDS or kind == "msg"
 
 
-def _run_is_productive(end, writes_by_rid):
-    """T-425 FLAG: increment iff THAT run_id wrote the bound ticket.
+def _as_run_no(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _end_flag_key(end):
+    """T-481: run_id if present, else (agent, run_no). None = pre-T-425."""
+    rid = end.get("run_id")
+    if rid:
+        return ("id", rid)
+    run_no = _as_run_no(end.get("run_no"))
+    agent = end.get("agent")
+    if agent and run_no is not None:
+        return ("no", agent, run_no)
+    return None
+
+
+def _event_flag_keys(e):
+    """Index a write under every key a run_end might use to find it."""
+    keys = []
+    rid = e.get("run_id")
+    if rid:
+        keys.append(("id", rid))
+    run_no = _as_run_no(e.get("run_no"))
+    agent = e.get("agent")
+    if agent and run_no is not None:
+        keys.append(("no", agent, run_no))
+    return keys
+
+
+def _run_is_productive(end, writes_by_key):
+    """FLAG: increment iff THAT run wrote the bound ticket.
 
     Exit=1 / timed_out / session-limit with zero writes is idle (HB87/HB88).
     No content grep. Broadcasts without --re never increment.
+    Missing bound_write does not default to count when a pairing key exists.
     """
     if end.get("bound_write"):
         return True
-    rid = end.get("run_id")
-    if not rid:
-        return True  # pre-T-425 jsonl: every completed run counted
+    key = _end_flag_key(end)
+    if not key:
+        return True  # pre-T-425 jsonl: neither run_id nor run_no
     tid = end.get("ticket")
-    return any(_is_bound_write(w, tid) for w in writes_by_rid.get(rid) or [])
+    return any(_is_bound_write(w, tid) for w in writes_by_key.get(key) or [])
 
 
 def _measured_turns(evs):
@@ -197,18 +235,18 @@ def _measured_turns(evs):
     runs wrote the bound ticket, `turns` stays null so n_measured does not
     rise.
     """
-    writes_by_rid = {}
+    writes_by_key = {}
     saw_run = False
     n = 0
     for e in evs:
-        rid = e.get("run_id")
-        if rid and _is_bound_write(e, e.get("ticket")):
-            writes_by_rid.setdefault(rid, []).append(e)
+        if _is_bound_write(e, e.get("ticket")):
+            for key in _event_flag_keys(e):
+                writes_by_key.setdefault(key, []).append(e)
     for e in evs:
         if e.get("kind") != "run_end":
             continue
         saw_run = True
-        if _run_is_productive(e, writes_by_rid):
+        if _run_is_productive(e, writes_by_key):
             n += 1
     if not saw_run or n == 0:
         return None

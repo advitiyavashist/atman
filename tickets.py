@@ -4355,27 +4355,45 @@ def traj_event(board, kind, agent="", ticket=None, **fields):
         if v == "" or v == [] or v == {}:
             continue
         rec[k] = v
-    # T-425: stamp the watch run so writes attribute to THAT run_id, not a
-    # time window. Omitted when the process is not inside a watch child.
+    # T-425/T-481: stamp the watch run so writes attribute to THAT run_id
+    # (or agent+run_no on Cursor-harness rows). Omitted outside a watch child.
     if "run_id" not in rec:
         rid = (os.environ.get("TICKETS_RUN_ID") or "").strip()
         if rid:
             rec["run_id"] = rid
+    if "run_no" not in rec:
+        raw_no = (os.environ.get("TICKETS_RUN_NO") or "").strip()
+        if raw_no:
+            try:
+                rec["run_no"] = int(raw_no)
+            except ValueError:
+                pass
     return traj_write(board, rec)
 
 
 _BOUND_WRITE_KINDS = ("claim", "update", "review", "done", "block", "reopen")
 
 
-def _run_had_bound_write(board, run_id, ticket):
-    """True when THIS run_id wrote a bound-ticket event (no idle: grep)."""
-    if not run_id or not ticket:
+def _run_had_bound_write(board, run_id, ticket, agent=None, run_no=None):
+    """True when THIS run wrote a bound-ticket event (no idle: grep).
+
+    Pairing key is run_id if present, else (agent, run_no) for Cursor-harness
+    rows that carry run_no only.
+    """
+    if not ticket:
+        return False
+    if not run_id and (not agent or run_no is None):
         return False
     for e in _safe(lambda: load_trajectories(board), []) or []:
-        if e.get("run_id") != run_id or e.get("ticket") != ticket:
+        if e.get("ticket") != ticket:
             continue
         kind = e.get("kind")
-        if kind in _BOUND_WRITE_KINDS or kind == "msg":
+        if kind not in _BOUND_WRITE_KINDS and kind != "msg":
+            continue
+        if run_id and e.get("run_id") == run_id:
+            return True
+        if (not e.get("run_id") and agent and run_no is not None
+                and e.get("agent") == agent and e.get("run_no") == run_no):
             return True
     return False
 
@@ -6815,6 +6833,7 @@ def cmd_watch(a, board):
                     owner, runs,
                     hashlib.sha1(("%s:%d:%s" % (owner, runs, run_started)).encode()).hexdigest()[:12])
                 env["TICKETS_RUN_ID"] = run_id
+                env["TICKETS_RUN_NO"] = str(runs)
                 release_sha = _release_commit()
                 _safe(lambda rid=run_id, ht=held_ticket, rs=release_sha: traj_event(
                     board, "run_start", agent=owner, ticket=ht, run_no=runs,
@@ -6825,7 +6844,8 @@ def cmd_watch(a, board):
                     if cleanup:
                         cleanup()
                     rc = 0
-                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    bound = _run_had_bound_write(
+                        board, run_id, held_ticket, agent=owner, run_no=runs)
                     _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
                         board, "run_end", agent=owner, ticket=ht, run_no=runs,
                         run_id=rid, trigger=sorted(p), harness_cmd=harness,
@@ -6864,7 +6884,8 @@ def cmd_watch(a, board):
                         run_started, ended)
                     if usage_error:
                         log("%s run %d usage not recorded: %s" % (now(), runs, usage_error))
-                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    bound = _run_had_bound_write(
+                        board, run_id, held_ticket, agent=owner, run_no=runs)
                     _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
                         board, "run_end", agent=owner, ticket=ht,
                         run_no=runs, run_id=rid, trigger=sorted(p),

@@ -10,15 +10,18 @@ what a turn is and the `--json` shape. Do not rename keys.
 is a `run_start` followed by its `run_end`. Incomplete starts (no `run_end`)
 do not count.
 
-T-425: a `run_start`/`run_end` pair increments `turns` only when THAT
-`run_id` recorded a bound-ticket write (claim, update, review, done, block,
-reopen, or `msg --re` that ticket). Idle pulses, session-limit fails, and
-generic `exit=1`/`timed_out` with no ticket write stay in jsonl but do not
-increment (HB87/HB88: no OR-nonzero). Broadcasts without `--re` never
-increment. The FLAG is `bound_write` on `run_end` (and matching `run_id` on
-the write events), not a grep of message text for `idle:`. Pre-T-425 events
-with no `run_id` still count every completed run. No backfill of existing
-jsonl.
+T-425/T-481: a `run_start`/`run_end` pair increments `turns` only when THAT
+run recorded a bound-ticket write (claim, update, review, done, block,
+reopen, or `msg --re` that ticket). The pairing key is `run_id` when present,
+else `(agent, run_no)` (Cursor-harness rows often carry `run_no` only). Idle
+pulses, session-limit fails, and generic `exit=1`/`timed_out` with no ticket
+write stay in jsonl but do not increment (HB87/HB88: no OR-nonzero).
+Broadcasts without `--re` never increment. The FLAG is `bound_write` on
+`run_end` (and matching `run_id` or `(agent, run_no)` on the write events),
+not a grep of message text for `idle:`. Missing `bound_write` does not
+default to "count" when a pairing key exists. Only events with neither
+`run_id` nor `run_no` (pre-T-425) still count every completed run. No
+backfill of existing jsonl.
 
 A **ticket's turns** are those productive runs from the first `claim` to the
 final `done` (or `merge`). A `reopen` does not reset the counter: later runs
