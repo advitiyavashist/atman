@@ -1,16 +1,22 @@
 """Advitiya PRIORITY agent chats: per-seat / 1:1 threads on the existing
 `tickets msg` log — no second store, no shared-memory brain.
 """
+import atexit
 import importlib.util
 import json
 import os
 import re
+import signal
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
+
+import pytest
 
 _TESTS = Path(__file__).resolve().parent
 if str(_TESTS) not in sys.path:
@@ -18,29 +24,60 @@ if str(_TESTS) not in sys.path:
 
 from test_wakeup import TOOL, board, run  # noqa: E402,F401
 
+_ACTIVE_SERVERS: list["_Server"] = []
 
-def _wait_up(port, timeout=10):
+
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _board_marker(board):
+    marker = "t546-probe-%s" % uuid.uuid4().hex[:12]
+    run(board, "join", marker, agent=marker)
+    return marker
+
+
+def _wait_up(port, marker, timeout=10):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            urllib.request.urlopen("http://127.0.0.1:%d/board.json" % port, timeout=1)
-            return True
-        except (urllib.error.URLError, ConnectionError):
+            with urllib.request.urlopen("http://127.0.0.1:%d/board.json" % port, timeout=1) as r:
+                d = json.loads(r.read())
+            agents = [a.get("name") for a in d.get("agents") or []]
+            if marker in agents:
+                return True
+            raise RuntimeError(
+                "foreign tickets ui on port %d: /board.json is up but missing probe agent '%s' (agents=%s)"
+                % (port, marker, agents)
+            )
+        except RuntimeError:
+            raise
+        except (urllib.error.URLError, ConnectionError, json.JSONDecodeError, KeyError, TimeoutError, OSError):
             time.sleep(0.1)
     return False
 
 
 class _Server:
-    def __init__(self, board, port):
-        self.port = port
+    def __init__(self, board):
+        self.board = board
+        self._stopped = False
+        self.marker = _board_marker(board)
+        self.port = _free_port()
         env = dict(os.environ, TICKETS_DIR=str(board))
         self.proc = subprocess.Popen(
-            [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1"],
+            [sys.executable, str(TOOL), "ui", "--port", str(self.port), "--host", "127.0.0.1"],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
         )
-        if not _wait_up(port):
+        _ACTIVE_SERVERS.append(self)
+        try:
+            if not _wait_up(self.port, self.marker):
+                raise RuntimeError("tickets ui never came up on port %d" % self.port)
+        except Exception:
             self.stop()
-            raise RuntimeError("tickets ui never came up")
+            raise
 
     def get(self, path="/board.json", raw=False):
         with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.port, path), timeout=5) as r:
@@ -60,11 +97,62 @@ class _Server:
             return e.code, json.loads(e.read())
 
     def stop(self):
-        self.proc.terminate()
+        if self._stopped:
+            return
+        self._stopped = True
+        proc = getattr(self, "proc", None)
+        if proc is None or proc.poll() is not None:
+            try:
+                _ACTIVE_SERVERS.remove(self)
+            except ValueError:
+                pass
+            return
         try:
-            self.proc.wait(timeout=5)
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+            proc.wait(timeout=2)
+        try:
+            _ACTIVE_SERVERS.remove(self)
+        except ValueError:
+            pass
+
+
+def _stop_all_servers():
+    for srv in list(_ACTIVE_SERVERS):
+        srv.stop()
+
+
+atexit.register(_stop_all_servers)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _stop_all_servers()
+
+
+@pytest.fixture(autouse=True)
+def _reap_leftover_ui_servers():
+    yield
+    _stop_all_servers()
+
+
+@pytest.fixture
+def ui_server(board):
+    srv = _Server(board)
+    try:
+        yield srv
+    finally:
+        srv.stop()
 
 
 def _tickets():
@@ -193,28 +281,24 @@ def test_ui_html_has_seat_thread_ia_without_football():
     assert "fmtWhen(m.at)" in ui
 
 
-def test_msg_api_to_seat_is_the_same_jsonl(board):
+def test_msg_api_to_seat_is_the_same_jsonl(board, ui_server):
     run(board, "join", "cursor", agent="cursor")
     run(board, "join", "alice", agent="alice")
-    srv = _Server(board, 18771)
-    try:
-        status, out = srv.post("/msg", {
-            "from": "alice", "text": "seat scoped via composer", "to": "cursor",
-        })
-        assert status == 200 and out["ok"], out
-        page = srv.get("/", raw=True).decode()
-        assert 'id="chatRail"' in page
-        assert "data-seat-chat" in page
-        all_msgs = srv.get("/board.json")
-        assert any(m["text"] == "seat scoped via composer" for m in all_msgs["messages"])
-        scoped = srv.get("/board.json?seat=cursor")
-        assert scoped.get("seat") == "cursor"
-        assert any(m["text"] == "seat scoped via composer" for m in scoped["messages"])
-        board_only = srv.get("/board.json?seat=")
-        # empty seat query is the unfiltered snapshot
-        assert "seat" not in board_only or board_only.get("seat") in ("", None)
-    finally:
-        srv.stop()
+    status, out = ui_server.post("/msg", {
+        "from": "alice", "text": "seat scoped via composer", "to": "cursor",
+    })
+    assert status == 200 and out["ok"], out
+    page = ui_server.get("/", raw=True).decode()
+    assert 'id="chatRail"' in page
+    assert "data-seat-chat" in page
+    all_msgs = ui_server.get("/board.json")
+    assert any(m["text"] == "seat scoped via composer" for m in all_msgs["messages"])
+    scoped = ui_server.get("/board.json?seat=cursor")
+    assert scoped.get("seat") == "cursor"
+    assert any(m["text"] == "seat scoped via composer" for m in scoped["messages"])
+    board_only = ui_server.get("/board.json?seat=")
+    # empty seat query is the unfiltered snapshot
+    assert "seat" not in board_only or board_only.get("seat") in ("", None)
 
     live = (board / "messages.jsonl").read_text()
     assert "seat scoped via composer" in live
@@ -261,3 +345,41 @@ def test_ceo_pm_lock_seat_chat_writes_only_messages_jsonl(board):
     assert "Not a shared-memory brain" in ia or "not a shared-memory brain" in ia.lower()
     assert "vector DB" in ia
     assert ".tickets/briefs/" in ia
+
+
+def test_wait_up_rejects_foreign_server_on_same_port(board, monkeypatch):
+    """Mutation (b): a stray ui on our port must fail at _wait_up, not at content asserts."""
+    foreign_repo = board.parent.parent / "foreign-repo-t546"
+    foreign_repo.mkdir(exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(foreign_repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(foreign_repo), "commit", "-q", "--allow-empty", "-m", "init"],
+                   check=True, env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                                        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
+    fb = foreign_repo / ".tickets"
+    run(fb, "create", "foreign", "--role", "backend", cwd=foreign_repo)
+    port = _free_port()
+    stray = subprocess.Popen(
+        [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1"],
+        env=dict(os.environ, TICKETS_DIR=str(fb)),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen("http://127.0.0.1:%d/board.json" % port, timeout=1)
+                break
+            except (urllib.error.URLError, ConnectionError):
+                time.sleep(0.1)
+        monkeypatch.setattr("test_agent_scoped_chat._free_port", lambda: port)
+        with pytest.raises(RuntimeError, match="foreign tickets ui"):
+            _Server(board)
+    finally:
+        try:
+            os.killpg(os.getpgid(stray.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            stray.terminate()
+        stray.wait(timeout=5)
