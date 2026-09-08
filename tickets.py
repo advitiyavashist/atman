@@ -2797,6 +2797,27 @@ def _split_cmdline(cmd):
         return (cmd or "").split()
 
 
+_RELEASE_TICKETS_RE = re.compile(
+    r"/tickets-releases/[0-9a-f]{40}/tickets\.py(?:\s|$)"
+)
+
+
+def _is_python_interpreter(tok):
+    """True when `tok` is a python interpreter argv token (ps shape)."""
+    base = os.path.basename(tok or "")
+    return base == "python" or base.startswith("python")
+
+
+def _is_legitimate_watch_script(tok):
+    """True when `tok` points at a real tickets.py, not a grep/search needle."""
+    path = os.path.expanduser(tok or "")
+    if _RELEASE_TICKETS_RE.search(path + " "):
+        return True
+    if path.endswith("/.claude/tools/tickets.py"):
+        return True
+    return os.path.isabs(path) and os.path.basename(path) == "tickets.py"
+
+
 def _watch_cmd_agent(cmd):
     """The --agent name if `cmd` is a `tickets ... watch` loop, else ''.
 
@@ -2810,6 +2831,11 @@ def _watch_cmd_agent(cmd):
     of the tool is asking: the first argv token named `tickets.py` whose next
     token is the `watch` subcommand. Scanning left to right means the real
     script token always wins over anything quoted inside `--exec`.
+
+    T-562: a bare `tickets.py` token inside a grep/search argv (e.g.
+    `grep -n tickets.py watch --agent optimizer`) must not count -- require
+    a python interpreter immediately before the script token, or a path under
+    tickets-releases/<sha>/, the ~/.claude/tools shim, or an absolute checkout.
     """
     argv = _split_cmdline(cmd)
     for i, tok in enumerate(argv):
@@ -2818,7 +2844,9 @@ def _watch_cmd_agent(cmd):
         rest = argv[i + 1:]
         if not rest or rest[0] != "watch":
             continue
-        return _argv_flag_value(rest, "--agent")
+        prev = argv[i - 1] if i > 0 else ""
+        if _is_python_interpreter(prev) or _is_legitimate_watch_script(tok):
+            return _argv_flag_value(rest, "--agent")
     return ""
 
 
