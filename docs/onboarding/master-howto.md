@@ -179,7 +179,7 @@ not store conversation and it is not a memory product.
 |---|---|---|
 | `.tickets/briefs/_shared.md` | every seat | edit the file |
 | `.tickets/briefs/roles/<role>.md` | seats whose `join --roles` include `<role>` | `tickets brief --role <role> "…"` or `--file` |
-| `.tickets/briefs/<agent>.md` | that agent only | `tickets brief <agent> "…"` or `--file` |
+| `.tickets/briefs/<agent>.md` | that **worker** on `tickets prompt` / claim | `tickets brief <agent> "…"` or `--file` |
 
 **Path lock:** inject reads only those paths. Repo-root `roles/` and
 `$TICKETS_ROLES_DIR` are **not** sources. `roles/_shared.md` and
@@ -203,12 +203,14 @@ EOF
 tickets brief --role backend "Implementation and wiring. Ship change + tests. Do not hold review."
 tickets brief --role docs "Docs and operator guides. Do not take backend tickets."
 
-# Per-agent standing brief (optional; shown on every claim / prompt)
-tickets brief boss "You are master. Do not claim feature tickets."
+# Per-agent standing brief (optional). Injected on the *worker* prompt and
+# listed first on a claim. Master/cos prompts do not include this file —
+# use _shared.md + roles, or spawn --brief, for those seats.
+tickets brief scribe "House style: short sentences. No new APIs."
 
 # Confirm what inject will see (run bare — do not pipe tickets through head/tail)
 tickets brief --role backend --show
-tickets prompt --agent boss
+tickets prompt --master --agent boss     # master / drive prompt + role context
 ```
 
 `tickets brief --role` **appends** a timestamped line. `--file` **replaces**
@@ -258,6 +260,7 @@ tickets join smoke --roles docs \
 
 tickets harness check smoke
 # verdict is exit status only. "replied: no OK" is fine for this stub.
+tickets prompt --agent smoke             # worker prompt: _shared + docs role, not backend
 
 # One-shot wake (cron form). Needs something pending in this agent's lane.
 tickets create "Dry inject check" --role docs
@@ -378,6 +381,11 @@ point two live seats at the same tree.
 **Paid smoke.** `harness check` and `watch` run the **real** command.
 A Claude/Codex check burns a real call. Use the dry harness in Step 5.
 
+**`tickets prompt` is the worker prompt.** `master take` does not flip it.
+Use `--master` or `--cos` to preview those seats. A watcher spawned without
+`--master` will run the worker loop even if that agent is the current
+master.
+
 **`done` / `review` refuse from `main` and refuse a dirty tree.** Work on
 the agent's branch. Notes are required (`--no-notes` only if there is
 genuinely nothing to hand off).
@@ -410,7 +418,8 @@ One renderer. Built-in CLIs and `{prompt_file}` get the same text.
 2. `.tickets/briefs/roles/<role>.md` for each role in `roles.json` for that
    agent, in listed order (skip `_shared`, skip dupes, skip missing files)
 
-**Then, workers only:**
+**Then, workers only** (`tickets prompt`, or watch/spawn without `--master` /
+`--cos`):
 
 3. Standing brief `.tickets/briefs/<agent>.md`
 4. Heartbeat / standing-seat block, if `drive_every` is set and an
@@ -418,13 +427,18 @@ One renderer. Built-in CLIs and `{prompt_file}` get the same text.
 5. Ticket context notes (`tickets brief --ticket <id>`) on held tickets
 6. Any extra text the caller passed
 
-**Then, master / planner / cos:**
+**Then, master / planner / cos** (`tickets prompt --master` / `--cos`, or
+`spawn --master` / `--cos`):
 
 3. Drive block (objective + status + "advance the plan or log why not"),
    if an objective is open
 4. Master vs planner prompt (planner if a cos exists and this seat is not
    the cos)
 5. Cos prompt is the master prompt, rewritten for review/unblock/merge
+
+`tickets master take` records who holds the seat. It does **not** change
+what `tickets prompt` prints. Unattended master wakes must use
+`spawn --master` or `tickets prompt --master`.
 
 Truncation: role files and agent briefs cap at 6000 characters each, then
 `...(role context truncated; read the file)`.
@@ -449,7 +463,7 @@ over, track memory and ignore state (pattern in Footguns).
 | `.tickets/CONTEXT.md` | optional claim-time briefing | track if you use it |
 | `.tickets/briefs/_shared.md` | every-seat context | **track** |
 | `.tickets/briefs/roles/<role>.md` | lane context (E-013 inject) | **track** |
-| `.tickets/briefs/<agent>.md` | per-agent standing brief | **track** |
+| `.tickets/briefs/<agent>.md` | per-agent standing brief (worker prompt / claim) | **track** |
 | `.tickets/AGENT-HANDLES.md` | spawn/resume ids | **track** |
 | `.tickets/AUTOMATION-BUDGET.md` | spend cap notes | track if present |
 | `HANDOFF.md` (repo root) | what is true about the work | **track** |
@@ -481,7 +495,8 @@ tickets merge               # integration worktree → tests → ff main
 tickets spawn --list        # watchers
 tickets spawn <name> --stop
 tickets brief --role docs --show
-tickets prompt --agent boss
+tickets prompt --master --agent boss
+tickets prompt --agent smoke
 ```
 
 Worker loop and merge rules stay in the [README](../../README.md). Verbs
