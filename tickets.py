@@ -6132,6 +6132,70 @@ def agent_brief(board, owner, limit=6000):
     return text if len(text) <= limit else text[:limit] + "\n...(brief truncated; read the file)"
 
 
+# T-529 / E-013: framework-first seat markdown on watch/spawn. Not a memory product.
+ROLE_CONTEXT_LIMIT = 6000
+_ROLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def role_search_dirs(board=None):
+    """Where roles/<name>.md is read. First existing file wins.
+
+    1. $TICKETS_ROLES_DIR — explicit BYO pack
+    2. <project>/roles — local update next to the board
+    3. <this file>/roles — framework defaults
+    """
+    dirs = []
+    override = (os.environ.get("TICKETS_ROLES_DIR") or "").strip()
+    if override:
+        dirs.append(os.path.abspath(override))
+    if board:
+        dirs.append(os.path.join(os.path.dirname(os.path.abspath(board)), "roles"))
+    dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "roles"))
+    out = []
+    for d in dirs:
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def _read_role_file(name, board=None, limit=ROLE_CONTEXT_LIMIT):
+    """Return (path, text) for roles/<name>.md, or (None, "")."""
+    if name != "_shared" and not _ROLE_NAME_RE.match(name or ""):
+        return None, ""
+    fn = "_shared.md" if name == "_shared" else (name + ".md")
+    for d in role_search_dirs(board):
+        path = os.path.join(d, fn)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read().strip()
+        except OSError:
+            continue
+        if not text:
+            continue
+        if len(text) > limit:
+            text = text[:limit] + "\n...(role context truncated; read the file)"
+        return path, text
+    return None, ""
+
+
+def role_context(board, owner, explicit=None, limit=ROLE_CONTEXT_LIMIT):
+    """Seat markdown injected on watch/spawn. Not a shared-memory product."""
+    names = ["_shared"]
+    mapped = roles_for(board, owner, explicit)
+    if mapped:
+        for r in mapped:
+            if r and r != "_shared" and r not in names:
+                names.append(r)
+    parts = []
+    for name in names:
+        path, text = _read_role_file(name, board, limit=limit)
+        if path and text:
+            parts.append("Role context (%s):\n%s" % (path, text))
+    return "\n\n".join(parts)
+
+
 def ticket_context(board, owner):
     """Context notes attached to the agent's held ticket(s)."""
     out = []
@@ -6158,10 +6222,16 @@ def prompt_text(a, board):
     m = current_master(board)
     master = (m["owner"] if m else "the master")
     cos = (m or {}).get("cos") or ""
+    role_ctx = role_context(board, owner)
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
-        return cos_prompt_text(owner, board, os.path.dirname(board), a.extra or "")
+        extra = a.extra or ""
+        if role_ctx:
+            extra = role_ctx + ("\n\n" + extra if extra else "")
+        return cos_prompt_text(owner, board, os.path.dirname(board), extra)
     if getattr(a, "master", False):
         extra = a.extra or ""
+        if role_ctx:
+            extra = role_ctx + ("\n\n" + extra if extra else "")
         obj = _safe(lambda: load_objective(board), {})
         if obj and not obj.get("done"):
             _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
@@ -6172,6 +6242,8 @@ def prompt_text(a, board):
                                          extra=extra)
         return MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
     parts = []
+    if role_ctx:
+        parts.append(role_ctx)
     brief = agent_brief(board, owner)
     if brief:
         parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
