@@ -6132,71 +6132,37 @@ def agent_brief(board, owner, limit=6000):
     return text if len(text) <= limit else text[:limit] + "\n...(brief truncated; read the file)"
 
 
-# T-529 / E-013: framework-first seat markdown on watch/spawn. Not a memory product.
+# T-529 / E-013: board-canonical role context on watch/spawn. Not a memory product.
+# Store (pm-atman-role-context-v1 / T-530): .tickets/briefs/_shared.md and
+# .tickets/briefs/roles/<role>.md. Inject does not read repo-root roles/.
 ROLE_CONTEXT_LIMIT = 6000
-_ROLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_ROLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 def shared_brief_path(board):
-    """T-529/T-530 contract: {board}/briefs/_shared.md."""
+    """Board-canonical store: {board}/briefs/_shared.md."""
     return os.path.join(os.path.abspath(board), "briefs", "_shared.md")
 
 
 def role_brief_path(board, role):
-    """T-529/T-530 contract: {board}/briefs/roles/<role>.md. None if unsafe."""
+    """Board-canonical store: {board}/briefs/roles/<role>.md. None if unsafe."""
     if role == "_shared" or not _ROLE_NAME_RE.match(role or ""):
         return None
     return os.path.join(os.path.abspath(board), "briefs", "roles", role + ".md")
 
 
-def role_search_dirs(board=None):
-    """Directory fallbacks after the board brief files. First existing file wins.
-
-    1. $TICKETS_ROLES_DIR — explicit BYO pack
-    2. <project>/roles — local update next to the board
-    3. <this file>/roles — framework defaults
-    """
-    dirs = []
-    override = (os.environ.get("TICKETS_ROLES_DIR") or "").strip()
-    if override:
-        dirs.append(os.path.abspath(override))
-    if board:
-        dirs.append(os.path.join(os.path.dirname(os.path.abspath(board)), "roles"))
-    dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "roles"))
-    out = []
-    for d in dirs:
-        if d not in out:
-            out.append(d)
-    return out
-
-
 def _role_file_candidates(name, board=None):
-    """Ordered paths for one role file. Board briefs (T-530 write) beat framework."""
-    if name != "_shared" and not _ROLE_NAME_RE.match(name or ""):
+    """Only the board-canonical brief store. No repo-root roles/, no TICKETS_ROLES_DIR."""
+    if not board:
         return []
-    fn = "_shared.md" if name == "_shared" else (name + ".md")
-    paths = []
-    override = (os.environ.get("TICKETS_ROLES_DIR") or "").strip()
-    if override:
-        paths.append(os.path.join(os.path.abspath(override), fn))
-    if board:
-        if name == "_shared":
-            paths.append(shared_brief_path(board))
-        else:
-            p = role_brief_path(board, name)
-            if p:
-                paths.append(p)
-        paths.append(os.path.join(os.path.dirname(os.path.abspath(board)), "roles", fn))
-    paths.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "roles", fn))
-    out = []
-    for p in paths:
-        if p not in out:
-            out.append(p)
-    return out
+    if name == "_shared":
+        return [shared_brief_path(board)]
+    p = role_brief_path(board, name)
+    return [p] if p else []
 
 
 def _read_role_file(name, board=None, limit=ROLE_CONTEXT_LIMIT):
-    """Return (path, text) for roles/<name>.md, or (None, "")."""
+    """Return (path, text) from .tickets/briefs/, or (None, "")."""
     for path in _role_file_candidates(name, board):
         if not os.path.isfile(path):
             continue
@@ -6214,7 +6180,7 @@ def _read_role_file(name, board=None, limit=ROLE_CONTEXT_LIMIT):
 
 
 def role_context(board, owner, explicit=None, limit=ROLE_CONTEXT_LIMIT):
-    """Seat markdown injected on watch/spawn. Not a shared-memory product."""
+    """Seat markdown injected on watch/spawn from .tickets/briefs/. Not a shared-memory product."""
     names = ["_shared"]
     mapped = roles_for(board, owner, explicit)
     if mapped:
