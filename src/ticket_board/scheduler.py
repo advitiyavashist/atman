@@ -685,6 +685,9 @@ def _clean_git_env(environ=None):
     return {k: v for k, v in source.items() if k not in _GIT_LOCATION_VARS}
 
 
+_atman_repo_env_warned = False
+
+
 def _scheduler_repo_root():
     """Repo root for the checkout that owns scheduler.py (never cwd).
 
@@ -693,6 +696,13 @@ def _scheduler_repo_root():
     back to an explicit atman checkout via TICKETS_ATMAN_REPO; absent that,
     return None so callers skip git entirely instead of running it in a
     non-repo (T-537).
+
+    A path with a .git dir proves gitness, not atman-ness (T-540): pointing
+    TICKETS_ATMAN_REPO at some other repo made every sha resolve unknown
+    silently, indistinguishable from the var being unset. Require the
+    candidate to actually contain FLAG_PIN or T522_ROOT_PIN before trusting
+    it; if the var is set but unusable, warn once to stderr and return None
+    so the misconfiguration is loud instead of a silent zero.
     """
     here = os.path.dirname(os.path.abspath(__file__))
     root = here
@@ -704,8 +714,19 @@ def _scheduler_repo_root():
             break
         root = parent
     env_root = os.environ.get(_ATMAN_REPO_ENV, "").strip()
-    if env_root and os.path.exists(os.path.join(env_root, ".git")):
+    if not env_root or not os.path.exists(os.path.join(env_root, ".git")):
+        return None
+    if _sha_exists_in_repo(FLAG_PIN, env_root) or _sha_exists_in_repo(T522_ROOT_PIN, env_root):
         return env_root
+    global _atman_repo_env_warned
+    if not _atman_repo_env_warned:
+        _atman_repo_env_warned = True
+        print(
+            "warning: %s=%s is a git repo but not an atman checkout "
+            "(neither FLAG_PIN nor T522_ROOT_PIN found) -- era resolution "
+            "will return unknown" % (_ATMAN_REPO_ENV, env_root),
+            file=sys.stderr,
+        )
     return None
 
 
