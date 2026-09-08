@@ -1,8 +1,23 @@
 # Messages that move work
 
 V1 scope amendment, requested by user 2026-09-06. This replaces the earlier
-deferral of automatic launching. Design and assignments only so far; no runtime
-wake service has been installed. Delivery remains in standalone tickets repo.
+deferral of automatic launching. The local `tickets ui` + `tickets watch` path
+is implemented. The managed server runner described later in this document is
+still a contract rather than a deployed service.
+
+## Local V1 launch path
+
+The dashboard sends a same-origin JSON message with `kind=task`. That durable
+task makes `tickets pending` actionable for its recipient. A local watcher can
+then start one bounded harness run, which reads `tickets inbox`, claims or
+continues its assigned ticket, and posts an acknowledgement. Reading the inbox
+moves the dashboard receipt from pending to acknowledged; the reply follows the
+same receipt path back to its recipient.
+
+The launch acceptance test runs this whole path on an isolated board with a
+deterministic harness: task POST, actionable wake, exactly one run, bound ticket
+update, reply, and both acknowledgement transitions. V1 local messaging is
+agent-addressed; named channels remain part of the managed-service contract.
 
 ## What happens when you send
 
