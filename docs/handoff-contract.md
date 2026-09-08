@@ -1,6 +1,6 @@
 # The handoff contract
 
-The goal is total football: **any agent can take any position, including
+The goal is one team: **any agent can take any seat, including
 master, and be productive from one read.** No agent is special, no context is
 private, and no handover depends on a conversation that happened to still be
 in someone's window.

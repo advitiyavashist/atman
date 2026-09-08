@@ -37,7 +37,7 @@ Each seat shows: status, quota / limit, utilization (real numbers only), lane / 
 
 Copy (brand lock): **Who’s present. What’s uncovered.** Empty seat: **Open seat — uncovered work.** Coverage: **Coverage by work, not fixed role.**
 
-Empty seats = **uncovered work**. That is the point of the view. Roles flex; do not pin a seat to a permanent persona. Spare dark seat cards + lanes. Quiet formation-dots as constellation / presence only — never a literal pitch, goals, or grass.
+Empty seats = **uncovered work**. That is the point of the view. Roles flex; do not pin a seat to a permanent persona. Spare dark seat cards + lanes. Quiet formation-dots as constellation / **self ↔ whole** — never a literal pitch, goals, or grass. No Om / mandala kitsch.
 
 ### 3. Work
 

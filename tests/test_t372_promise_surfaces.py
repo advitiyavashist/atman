@@ -106,6 +106,7 @@ def test_team_seats_follow_brand_lock():
     assert "Who’s present. What’s uncovered." in ui
     assert "Coverage by work, not fixed role." in ui
     assert "Open seat — uncovered work." in ui
+    assert "self ↔ whole" in ui
     assert "renderSeats" in ui
     assert 'id="seats"' in ui
     assert "lane-ready" in ui and "lane-operator" in ui
@@ -114,6 +115,7 @@ def test_team_seats_follow_brand_lock():
         "keeper", "shirts", "midfield", "Attack ·", "Defense ·",
         "on the pitch", "class=\"pitch\"", "renderPitch", "playerChip",
         "#2a7a4c", "#14532d", "band-keep", "band-attack",
+        "mandala", "awakening",
     )
     for word in banned:
         assert word not in ui, "retired sports copy still in console: %s" % word

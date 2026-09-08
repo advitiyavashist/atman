@@ -36,11 +36,11 @@ Do not invent a product URL in this file.
 
 ### A — Formation dots (recommended)
 
-3–5 dots in a loose constellation. At 16–32px it must read as **presence / the whole**, not a flowchart. Fluid spacing. Works on dark `#0c0e12`. Never a literal pitch, goals, or grass.
+3–5 dots in a loose constellation. At 16–32px it must read as **self ↔ whole**, not a flowchart. Fluid spacing. Works on dark `#0c0e12`. Never a literal pitch, goals, or grass.
 
 ### B — Open ring / continuum A (alternate)
 
-Abstract open ring: self ↔ team, no lettermark clutter. Keep it geometric. Avoid Om / mandala vibes.
+Abstract open ring: self ↔ whole, no lettermark clutter. Keep it geometric. Avoid Om / mandala vibes.
 
 ### C — Linked seats (fallback only)
 
@@ -68,7 +68,7 @@ See [atman-tokens.md](atman-tokens.md). Dark command-board roots. Status color i
 
 ## 4. Tone rules
 
-**Use:** teammates, seats, lanes, coverage, next step, handoff, intervene, objective, roster, BYOA, fewest turns.
+**Use:** teammates, seats, lanes, coverage, next step, handoff, intervene, objective, roster, BYOA, fewest turns, self ↔ whole.
 
 **Ban:** DAG, nodes, edges, orchestration framework, "multi-agent SDK", fake telemetry walls, Purview / compliance / shield / enforce chrome, spiritual kitsch, pitch, field, football, Total Football, keeper, shirts, sports formation.
 

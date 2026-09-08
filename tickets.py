@@ -7574,7 +7574,8 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 #composerMsg{font-size:12px;margin-top:4px;min-height:14px}
 .seats-head{display:flex;gap:12px;align-items:flex-start;max-width:760px}
 .seats-head .mark{flex:none;width:22px;height:22px;margin-top:2px}
-.seats-title{margin:0 0 4px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:650}
+.seats-title{margin:0 0 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:650}
+.seats-vibe{margin:0 0 6px;font-size:11px;letter-spacing:.12em;color:var(--mute)}
 .seats-lede{color:var(--mute);font-size:12px;margin:0;max-width:720px}
 .seats-lede b{color:var(--fg)}
 .next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
@@ -7699,7 +7700,7 @@ body[data-tab=board] .promise-chips{display:none}
 </div>
 <div class="pane" id="pane-agents">
   <div class="seats-head">
-    <svg class="mark" viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
+    <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="constellation — self to whole">
       <circle cx="10" cy="7.8" r="3.35" fill="#e8e6e1"/>
       <circle cx="22.4" cy="8.8" r="3.35" fill="#e8e6e1"/>
       <circle cx="6.6" cy="17.6" r="3.35" fill="#e8e6e1"/>
@@ -7708,6 +7709,7 @@ body[data-tab=board] .promise-chips{display:none}
     </svg>
     <div>
       <h2 class="seats-title">Team</h2>
+      <p class="seats-vibe">self ↔ whole</p>
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
     </div>
   </div>
