@@ -31,6 +31,14 @@ configuration of its own.
 
 ## Register a harness
 
+`tickets join` without `--harness` prints `harness=claude (default)`. That is a
+**label** on the workforce record. Join does not start Claude, spawn a watcher,
+or run any command. A dry BYOA plug (`join`, then `tickets next` in your own
+shell) is finished at that point. The label is read only when `tickets watch` or
+`tickets spawn` starts a process; if you omit `--harness` there too, *that* is
+when the Claude CLI would launch. To register a custom runner before anyone
+spawns, pass `--harness` at join:
+
 ```sh
 tickets join qwen --roles docs \
   --harness custom --cmd '/tmp/byoa2/echo-agent.sh {prompt_file} {cwd} {agent}'
