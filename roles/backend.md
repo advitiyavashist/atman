@@ -1,5 +1,7 @@
 # backend
 
+Template only. The inject/update store is `.tickets/briefs/roles/backend.md`.
+
 Lane: backend. Implementation and wiring — not review, not acceptance.
 
 - Take tickets with `role=backend` (or unscoped).
