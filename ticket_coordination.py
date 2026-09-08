@@ -57,8 +57,16 @@ def take(state, role, actor, expected, reason, context):
         raise ValueError(
             f"Role holder changed: expected {expected}, found {holder}; reread role first"
         )
+    inherited = old.get("context", "")
+    if not context.strip():
+        # A role that already carries context keeps it. Requiring a fresh
+        # context on every takeover meant the first agent to claim a seeded
+        # role DESTROYED the description of the role it was claiming -- the
+        # opposite of what the requirement is for. A reason is still mandatory,
+        # so a takeover is still justified; only the re-typing is optional.
+        context = inherited
     if not reason.strip() or not context.strip():
-        raise ValueError("Takeover requires a reason and context document path")
+        raise ValueError("Takeover requires a reason, and a context for a role that has none")
     record = {"role": role, "holder": actor, "since": stamp(), "context": context}
     state["roles"][role] = record
     state["history"].append(record | {"previous_holder": holder, "reason": reason})
