@@ -556,11 +556,51 @@ claimant check runs only on the unapproved path: when an operator HAS approved
 a directory, that approval is the authority and a stale runner lease must not
 override it.
 
+## T-496: two residuals cos-opus executed against T-485 itself
+
+Same pattern as T-485 on T-192: found by running the merged code, neither
+declared by T-485's author.
+
+**C3 — a case-variant path evaded the claimant scan.** `/w/C3/x` and
+`/w/c3/x` were two different segment lists, so two agents could each hold a
+runner lease against what darwin's default, case-insensitive filesystem
+treats as ONE directory — no filesystem access needed and no symlink to
+create, just the shift key. This is the same limit `worktrees.py` already
+declares for symlinks, only cheaper, and it is the same argument that
+promoted A3 (relative vs absolute, above) from a declared limit to a
+blocker-tier fix. `overlaps` now casefolds before comparing segments;
+`contains` does NOT, and must not — see the module's own asymmetry
+reasoning: `overlaps` answers "is this checkout free?", where the loose
+answer is a REFUSAL, so folding case is the safe direction even on a
+case-sensitive filesystem; `contains` answers "may this runner run here?",
+where the loose answer is a GRANT, so it stays case-sensitive.
+
+**C9 — the enrolment door is still blind to runner leases.** This is
+declared-by-design, not a bug: `create_enrollment` deliberately does not
+call `find_worktree_claimant`, only `find_worktree_occupant`, because the
+enrolment question is "what did an operator approve" and a stale runner
+lease must not veto the operator's authority (the same reasoning A1, above,
+relies on). The undocumented consequence: an operator can enrol an agent
+into a directory a *runner lease* already occupies, even though the
+registry's stated purpose is to refuse a directory "that is, contains, or
+sits inside a checkout another agent already occupies." Concretely — c9-a
+(no operator worktree) registers `/w/c9` and holds it by lease; the operator
+then enrols c9-b WITH `worktree=/w/c9`, which is accepted 201; c9-b
+registers `/w/c9` and gets a lease too. Two agents now hold `/w/c9`. No code
+change here: making `create_enrollment` refuse on a runner lease would
+reverse the design A1 just established. Left as a known gap for whoever
+picks up an operator-facing warning on the enrolment response — that would
+be a new field on the frozen `CreateEnrollmentResponse`, a contract change
+outside this ticket's scope.
+
 ### Still open after this
 
 Symlinks. Unchanged from T-192 and unchanged by anything here: two different
 absolute paths can name one directory and this comparison will not see it.
 Closing it needs a resolver where the checkouts actually live.
 
+C9 above: the enrolment route still does not warn an operator who approves a
+directory a runner lease already holds.
+
 `POST /enrollments` request_id replay is T-474 WONT-amend (fail-as-duplicate-name,
-no second `code`). Same-identity re-enrol is still T-405.
+no second `code`). Same-identity re-enrol is still T-405. Neither is touched.

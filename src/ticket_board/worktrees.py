@@ -53,6 +53,19 @@ checkout free?", where the loose answer is the REFUSING answer: if `/w/a` and
 `w/a` might name one directory, the registry should decline to hand the second
 one out. Tightening it there would turn a refusal into a grant, which is the
 wrong direction for that question.
+
+CASE IS THE SAME LIMIT AS THE DECLARED SYMLINK ONE, AND CHEAPER (T-496,
+cos-opus C3). `/w/C3/x` and `/w/c3/x` are two different segment lists, so two
+agents could hold live leases on what darwin's default case-insensitive
+filesystem treats as ONE directory -- no filesystem access needed, no symlink
+to create, just the shift key. That is exactly the argument that promoted A3
+from a declared limit to a blocker-tier fix, and it applies unchanged here.
+`overlaps` now casefolds before comparing segments, for the same reason it
+tolerates the absolute/relative mismatch: the loose answer there is a
+REFUSAL, which is the safe side of "is this checkout free?" even on a
+case-SENSITIVE filesystem, where a genuine `/w/C3` and `/w/c3` pair would be
+two directories wrongly folded into one. `contains` does NOT get this fold --
+"may this runner run here?" must not GRANT on a guess.
 """
 
 import posixpath
@@ -76,8 +89,11 @@ def normalize(path):
     return collapsed.rstrip("/")
 
 
-def _segments(path):
-    return [part for part in normalize(path).split("/") if part not in ("", ".")]
+def _segments(path, *, casefold=False):
+    parts = [part for part in normalize(path).split("/") if part not in ("", ".")]
+    if casefold:
+        return [part.casefold() for part in parts]
+    return parts
 
 
 def is_absolute(path):
@@ -146,9 +162,13 @@ def overlaps(a, b):
     paths are the same directory, and when either contains the other, because
     an agent working in a parent checkout is working in every child of it.
     Compared segment by segment so a shared name PREFIX (`/w/agent` vs
-    `/w/agent-2`) is correctly two different directories.
+    `/w/agent-2`) is correctly two different directories. Casefolded (T-496,
+    cos-opus C3): a case-insensitive filesystem -- darwin's default, which is
+    what this fleet runs on -- treats `/w/C3/x` and `/w/c3/x` as one
+    directory, and the loose answer here is the REFUSING one, so folding case
+    is the same direction as tolerating the absolute/relative mismatch above.
     """
-    left, right = _segments(a), _segments(b)
+    left, right = _segments(a, casefold=True), _segments(b, casefold=True)
     if not left or not right:
         return False
     shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
