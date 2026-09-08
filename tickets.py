@@ -598,7 +598,8 @@ def _alloc(directory, prefix, width, record):
         return record
 
 
-def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None):
+def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None,
+           external=""):
     return _alloc(board, "T", 3, {
         "title": title,
         "body": body,
@@ -610,6 +611,7 @@ def create(board, title, body="", role="", deps=None, priority=2, epic="", sprin
         "sprint": sprint,
         "needs": needs or [],
         "owner": "",
+        "external": external,
         "created": now(),
         "updated": now(),
         "notes": [],
@@ -1318,6 +1320,8 @@ def line(t, tickets=None):
         bits.append("/".join(tags))
     if t.get("role"):
         bits.append("role=" + t["role"])
+    if t.get("external"):
+        bits.append("ext=" + t["external"])
     if t.get("needs"):
         bits.append("needs " + ",".join(t["needs"]))
     if t.get("owner"):
@@ -1452,7 +1456,7 @@ def cmd_create(a, board):
     cur = active_sprint(board)
     sprint = a.sprint if a.sprint is not None else (cur["id"] if cur and a.in_sprint else "")
     t = create(board, a.title, a.body or "", a.role or "", deps, a.priority,
-               a.epic or "", sprint, _ids(a.needs))
+               a.epic or "", sprint, _ids(a.needs), external=a.external or "")
     pending = {}
     for other in blocks:
         o = load(board, other)
@@ -1516,7 +1520,8 @@ def cmd_plan(a, board):
     for it in items:
         t = create(board, it["title"], it.get("body", ""), it.get("role", defaults.get("role", "")),
                    [], it.get("priority", 2), it.get("epic", defaults.get("epic", "")),
-                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [])
+                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [],
+                   external=it.get("external", ""))
         if it.get("key"):
             keymap[it["key"]] = t["id"]
         made.append(t)
@@ -1554,6 +1559,8 @@ def cmd_list(a, board):
         tickets = [t for t in tickets if t.get("role") in wanted]
     if a.owner:
         tickets = [t for t in tickets if t.get("owner") == a.owner]
+    if a.external:
+        tickets = [t for t in tickets if t.get("external") == a.external]
     if a.json:
         print(json.dumps(tickets, indent=2))
         return
@@ -1680,6 +1687,8 @@ def cmd_map(a, board):
             bits.append("@" + t["owner"])
         if t.get("role"):
             bits.append(t["role"])
+        if t.get("external"):
+            bits.append("ext=" + t["external"])
         if t.get("needs"):
             bits.append("needs " + ",".join(t["needs"]))
         waiting = [d for d in t.get("deps", []) if d not in done]
@@ -3493,7 +3502,7 @@ def _ensure(board, kind, ref):
 
 
 def cmd_assign(a, board):
-    """Modify an existing ticket: epic, sprint, role, owner, priority, title."""
+    """Modify an existing ticket: epic, sprint, role, owner, priority, title, external."""
     t = load(board, a.id)
     changed = []
     if a.epic is not None:
@@ -3513,6 +3522,9 @@ def cmd_assign(a, board):
     if a.title:
         t["title"] = a.title
         changed.append("title")
+    if getattr(a, "external", None) is not None:
+        t["external"] = a.external
+        changed.append("external=%s" % (a.external or "(none)"))
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
@@ -9044,9 +9056,12 @@ def main():
     c.add_argument("--sprint", "-s", default=None, help="S-01; default: active sprint if --in-sprint")
     c.add_argument("--in-sprint", action="store_true", help="tag with the active sprint")
     c.add_argument("--needs", default="", help="capabilities required: docker,browser,own-machine")
+    c.add_argument("--external", default="", help="tracker id this ticket mirrors, e.g. "
+                   "MED-748 or a GitHub issue URL; free text, blank if board-only")
     c.set_defaults(fn=cmd_create)
 
-    c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, priority")
+    c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, "
+                       "priority, external")
     c.add_argument("id")
     c.add_argument("--epic", default=None)
     c.add_argument("--sprint", default=None)
@@ -9055,6 +9070,7 @@ def main():
     c.add_argument("--needs", default=None)
     c.add_argument("--priority", type=int, default=None)
     c.add_argument("--title", default="")
+    c.add_argument("--external", default=None, help="tracker id this ticket mirrors")
     c.add_argument("--by", default="")
     c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
     c.set_defaults(fn=cmd_assign)
@@ -9447,6 +9463,7 @@ def main():
     c.add_argument("--status", choices=STATUSES)
     c.add_argument("--role")
     c.add_argument("--owner")
+    c.add_argument("--external", help="only tickets mirroring this tracker id (exact match)")
     c.add_argument("--json", action="store_true")
     c.set_defaults(fn=cmd_list)
 

@@ -29,8 +29,13 @@ Several verbs put things where you would not look for them:
   `--status`. For a note use `note`; for status use `reopen` / `block` / `done`.
 - **`assign <id> --owner <agent>`** — owner is a FLAG. `assign` takes exactly
   one positional. It also carries `--priority`, `--role`, `--epic`, `--sprint`,
-  `--title` and `--notes`, so **re-ranking priority IS possible** — it is just
-  not under `update`.
+  `--title`, `--external` and `--notes`, so **re-ranking priority IS
+  possible** — it is just not under `update`.
+- **`external`** — a free-text tracker id (Jira, GitHub, or blank) lives on
+  every ticket. Set it at creation (`create --external MED-748`, or the
+  `external` key in a `plan` JSON item), change it later with `assign
+  --external`, and find it again with `list --external MED-748`. It shows in
+  `show`, `list`, `map` and `board` output as `ext=...`.
 - **`done <id> --notes "..."`** — the notes are REQUIRED (pass `--no-notes` only
   if there is genuinely nothing to hand off).
 
