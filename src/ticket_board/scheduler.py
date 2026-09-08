@@ -13,6 +13,8 @@ UNMEASURED, never 0 and never summed into medians.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from collections import defaultdict
 from statistics import median
@@ -40,6 +42,17 @@ ERA_POST = "post-FLAG"
 ERA_UNKNOWN = "unknown"
 _PRE_FLAG_PIN_PREFIXES = ("8f513fe", "1c8335b", "21ca63c")
 _POST_FLAG_PIN_PREFIXES = (FLAG_PIN, FLAG_FEATURE_PIN)
+_GIT_LOCATION_VARS = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+)
+_sha_post_flag_cache = {}
 
 DOCS_TEST_ROLES = ("docs", "documentation", "qa", "verification", "acceptance",
                    "test", "tests")
@@ -543,8 +556,70 @@ def _run_start_release_sha(ev):
     return str(ev.get("release_sha") or "").strip()
 
 
+def _clean_git_env(environ=None):
+    """Drop inherited Git location overrides (T-243); pair with explicit cwd."""
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items() if k not in _GIT_LOCATION_VARS}
+
+
+def _scheduler_repo_root():
+    """Repo root for the checkout that owns scheduler.py (never cwd)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = here
+    while True:
+        if os.path.exists(os.path.join(root, ".git")):
+            return root
+        parent = os.path.dirname(root)
+        if parent == root:
+            break
+        root = parent
+    return here
+
+
+def _git_run(*args, cwd, env=None):
+    try:
+        return subprocess.run(
+            list(args),
+            cwd=cwd,
+            env=_clean_git_env(env),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _sha_exists_in_repo(sha, repo_root):
+    r = _git_run("git", "rev-parse", "--verify", "%s^{commit}" % sha, cwd=repo_root)
+    return r is not None and r.returncode == 0
+
+
+def _git_is_ancestor(ancestor, descendant, repo_root):
+    r = _git_run(
+        "git", "merge-base", "--is-ancestor", ancestor, descendant, cwd=repo_root)
+    return r is not None and r.returncode == 0
+
+
+def clear_sha_post_flag_cache():
+    """Test helper: drop per-sha era classification cache."""
+    _sha_post_flag_cache.clear()
+
+
+def _sha_is_post_flag_ancestry(sha):
+    """Resolve era via git ancestry when the prefix table is silent."""
+    repo = _scheduler_repo_root()
+    if not _sha_exists_in_repo(sha, repo):
+        return None
+    if _git_is_ancestor(FLAG_PIN, sha, repo):
+        return True
+    if _git_is_ancestor(sha, FLAG_PIN, repo):
+        return False
+    return None
+
+
 def _sha_is_post_flag(sha):
-    """True/False when the pin is in the known live-release history; else None."""
+    """True/False when the pin is known; else None (prefix table, then ancestry)."""
     s = (sha or "").lower().strip()
     if not s:
         return None
@@ -552,7 +627,11 @@ def _sha_is_post_flag(sha):
         return True
     if any(s.startswith(p) for p in _PRE_FLAG_PIN_PREFIXES):
         return False
-    return None
+    if s in _sha_post_flag_cache:
+        return _sha_post_flag_cache[s]
+    result = _sha_is_post_flag_ancestry(s)
+    _sha_post_flag_cache[s] = result
+    return result
 
 
 def row_era(evs, era_by_time=False):
@@ -714,6 +793,16 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
     n_pre = sum(1 for r in rows if r["era"] == ERA_PRE)
     n_post = sum(1 for r in rows if r["era"] == ERA_POST)
     n_unknown = sum(1 for r in rows if r["era"] == ERA_UNKNOWN)
+    sha_classes = {}
+    for tid, evs in grouped.items():
+        sha = _run_start_release_sha(_first_bound_run_start(evs))
+        if not sha or sha in sha_classes:
+            continue
+        sha_classes[sha] = _sha_is_post_flag(sha)
+    n_distinct = len(sha_classes)
+    n_sha_post = sum(1 for v in sha_classes.values() if v is True)
+    n_sha_pre = sum(1 for v in sha_classes.values() if v is False)
+    n_sha_unresolved = sum(1 for v in sha_classes.values() if v is None)
     scored_eras = {r["era"] for r in rows} - {ERA_UNKNOWN}
     mixed = len(scored_eras) > 1
     rate = None if (compared < 2 or mixed or n_unknown > 0) else (agree_n / compared)
@@ -727,6 +816,12 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
         "n_unknown": n_unknown,
         "mixed_eras": mixed,
         "era_by_time": era_by_time,
+        "release_sha_resolution": {
+            "distinct": n_distinct,
+            "post": n_sha_post,
+            "pre": n_sha_pre,
+            "unresolved": n_sha_unresolved,
+        },
     }
 
 
@@ -735,6 +830,14 @@ def render_score_table(rep):
     if rep.get("era_by_time"):
         lines.append(
             "WARNING: --era-by-time fallback active; rows without release_sha use wall-clock, not CLI pin.")
+    res = rep.get("release_sha_resolution") or {}
+    lines.append(
+        "release_sha resolution: %d distinct shas, %d post / %d pre / %d unresolved" % (
+            int(res.get("distinct") or 0),
+            int(res.get("post") or 0),
+            int(res.get("pre") or 0),
+            int(res.get("unresolved") or 0),
+        ))
     n = int(rep.get("n") or 0)
     n_agree = int(rep.get("n_agree") or 0)
     n_pre = int(rep.get("n_pre") or 0)
