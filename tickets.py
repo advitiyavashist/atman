@@ -4355,27 +4355,45 @@ def traj_event(board, kind, agent="", ticket=None, **fields):
         if v == "" or v == [] or v == {}:
             continue
         rec[k] = v
-    # T-425: stamp the watch run so writes attribute to THAT run_id, not a
-    # time window. Omitted when the process is not inside a watch child.
+    # T-425/T-481: stamp the watch run so writes attribute to THAT run_id
+    # (or agent+run_no on Cursor-harness rows). Omitted outside a watch child.
     if "run_id" not in rec:
         rid = (os.environ.get("TICKETS_RUN_ID") or "").strip()
         if rid:
             rec["run_id"] = rid
+    if "run_no" not in rec:
+        raw_no = (os.environ.get("TICKETS_RUN_NO") or "").strip()
+        if raw_no:
+            try:
+                rec["run_no"] = int(raw_no)
+            except ValueError:
+                pass
     return traj_write(board, rec)
 
 
 _BOUND_WRITE_KINDS = ("claim", "update", "review", "done", "block", "reopen")
 
 
-def _run_had_bound_write(board, run_id, ticket):
-    """True when THIS run_id wrote a bound-ticket event (no idle: grep)."""
-    if not run_id or not ticket:
+def _run_had_bound_write(board, run_id, ticket, agent=None, run_no=None):
+    """True when THIS run wrote a bound-ticket event (no idle: grep).
+
+    Pairing key is run_id if present, else (agent, run_no) for Cursor-harness
+    rows that carry run_no only.
+    """
+    if not ticket:
+        return False
+    if not run_id and (not agent or run_no is None):
         return False
     for e in _safe(lambda: load_trajectories(board), []) or []:
-        if e.get("run_id") != run_id or e.get("ticket") != ticket:
+        if e.get("ticket") != ticket:
             continue
         kind = e.get("kind")
-        if kind in _BOUND_WRITE_KINDS or kind == "msg":
+        if kind not in _BOUND_WRITE_KINDS and kind != "msg":
+            continue
+        if run_id and e.get("run_id") == run_id:
+            return True
+        if (not e.get("run_id") and agent and run_no is not None
+                and e.get("agent") == agent and e.get("run_no") == run_no):
             return True
     return False
 
@@ -5432,34 +5450,28 @@ def _traj_line(e):
     return " ".join(bits) + ("  " + " ".join(extra) if extra else "")
 
 
+def _prices_mod():
+    try:
+        from ticket_board import prices as mod
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import prices as mod
+    return mod
+
+
 def _traj_summary(events):
     """The numbers this log exists for: turns-to-done per ticket."""
+    prices = _prices_mod()
+    table = prices.load_price_table()
     by_ticket = {}
     for e in events:
         tid = e.get("ticket")
         if not tid:
             continue
-        s = by_ticket.setdefault(tid, {"runs": 0, "updates": 0, "msgs": 0,
-                                       "reopens": 0, "agents": set(), "outcome": "",
-                                       "turns": 0, "cost_usd": 0.0, "cost_known": False})
-        k = e.get("kind")
-        if k == "run_end":
-            s["runs"] += 1
-            if isinstance(e.get("turns"), int):
-                s["turns"] += e["turns"]
-            if isinstance(e.get("cost_usd"), (int, float)):
-                s["cost_usd"] += e["cost_usd"]
-                s["cost_known"] = True
-        elif k == "update":
-            s["updates"] += 1
-        elif k == "msg":
-            s["msgs"] += 1
-        elif k == "reopen":
-            s["reopens"] += 1
-        if k in ("done", "merge", "review", "block"):
-            s["outcome"] = e.get("outcome") or k
-        if e.get("agent"):
-            s["agents"].add(e["agent"])
+        s = by_ticket.setdefault(tid, prices.traj_summary_bucket())
+        prices.traj_summary_add_event(s, e, table=table)
     return by_ticket
 
 
@@ -5511,10 +5523,7 @@ def cmd_trajectories(a, board):
             "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
             "agents / outcome"))
         for tid, s in sorted(_traj_summary(sel).items()):
-            # '-' is not $0.00: no harness on this board reports a cost unless
-            # the operator asked for a JSON output format, and a zero would
-            # read as a free ticket (T-396 null-not-zero).
-            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            cost = _prices_mod().traj_summary_cost_cell(s)
             print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
                 tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
                 s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",
@@ -5698,21 +5707,23 @@ def cmd_route(a, board):
     if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False) or getattr(a, "score", False):
         return _scheduler_cmd()(
             a, board, load_all, load_workforce, load_roles, load_agents,
-            score_agent, traj_event)
+            score_agent, traj_event, DEFAULT_ROLES)
+    from ticket_board.scheduler import (
+        DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, format_excluded, _candidate_names)
     tickets = load_all(board)
     wf = load_workforce(board)
     roles = load_roles(board)
     agents = dict((r["owner"], r) for r in load_agents(board))
-    names = sorted(set(list(wf) + [n for n in roles if roles[n]]))
-    if a.only:
-        names = [n for n in names if n in a.only]
-    # exclude agents that are out on a limit
-    names = [n for n in names if not agents.get(n, {}).get("limit")]
+    alive_within = int(getattr(a, "alive_within", None) or DEFAULT_ALIVE_WITHIN_MIN)
     done = set(t["id"] for t in tickets if t["status"] == "done")
     load_ = {}
     for t in tickets:
         if t["status"] == "claimed":
             load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    names, excluded = filter_eligible(
+        _candidate_names(wf, roles, only=a.only), wf, roles, agents, load_, DEFAULT_ROLES,
+        alive_within_min=alive_within)
+    print(format_excluded(excluded))
     ready_first = sorted(
         [t for t in tickets if t["status"] == "open" and (not t.get("suggested") or a.redo)],
         key=lambda t: (0 if all(d in done for d in t.get("deps", [])) else 1, t.get("priority", 2), t["id"]))
@@ -7061,6 +7072,7 @@ def cmd_watch(a, board):
                     owner, runs,
                     hashlib.sha1(("%s:%d:%s" % (owner, runs, run_started)).encode()).hexdigest()[:12])
                 env["TICKETS_RUN_ID"] = run_id
+                env["TICKETS_RUN_NO"] = str(runs)
                 release_sha = _release_commit()
                 _safe(lambda rid=run_id, ht=held_ticket, rs=release_sha: traj_event(
                     board, "run_start", agent=owner, ticket=ht, run_no=runs,
@@ -7071,7 +7083,8 @@ def cmd_watch(a, board):
                     if cleanup:
                         cleanup()
                     rc = 0
-                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    bound = _run_had_bound_write(
+                        board, run_id, held_ticket, agent=owner, run_no=runs)
                     _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
                         board, "run_end", agent=owner, ticket=ht, run_no=runs,
                         run_id=rid, trigger=sorted(p), harness_cmd=harness,
@@ -7110,7 +7123,8 @@ def cmd_watch(a, board):
                         run_started, ended)
                     if usage_error:
                         log("%s run %d usage not recorded: %s" % (now(), runs, usage_error))
-                    bound = _run_had_bound_write(board, run_id, held_ticket)
+                    bound = _run_had_bound_write(
+                        board, run_id, held_ticket, agent=owner, run_no=runs)
                     _safe(lambda rid=run_id, ht=held_ticket, bw=bound: traj_event(
                         board, "run_end", agent=owner, ticket=ht,
                         run_no=runs, run_id=rid, trigger=sorted(p),
@@ -9506,6 +9520,8 @@ def main():
     c.add_argument("--write-scorecard", nargs="?", const="docs/turns-scorecard.md",
                    metavar="PATH",
                    help="with --shadow --score: also write markdown scorecard (default docs/turns-scorecard.md)")
+    c.add_argument("--alive-within", type=int, default=90,
+                   help="exclude seats with no heartbeat/here/run within N minutes (default 90)")
     c.add_argument("--apply", action="store_true",
                    help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)

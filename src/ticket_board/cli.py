@@ -3040,32 +3040,17 @@ def _traj_line(e):
 
 def _traj_summary(events):
     """The numbers this log exists for: turns-to-done per ticket."""
+    from ticket_board.prices import (
+        load_price_table, traj_summary_add_event, traj_summary_bucket,
+    )
+    table = load_price_table()
     by_ticket = {}
     for e in events:
         tid = e.get("ticket")
         if not tid:
             continue
-        s = by_ticket.setdefault(tid, {"runs": 0, "updates": 0, "msgs": 0,
-                                       "reopens": 0, "agents": set(), "outcome": "",
-                                       "turns": 0, "cost_usd": 0.0, "cost_known": False})
-        k = e.get("kind")
-        if k == "run_end":
-            s["runs"] += 1
-            if isinstance(e.get("turns"), int):
-                s["turns"] += e["turns"]
-            if isinstance(e.get("cost_usd"), (int, float)):
-                s["cost_usd"] += e["cost_usd"]
-                s["cost_known"] = True
-        elif k == "update":
-            s["updates"] += 1
-        elif k == "msg":
-            s["msgs"] += 1
-        elif k == "reopen":
-            s["reopens"] += 1
-        if k in ("done", "merge", "review", "block"):
-            s["outcome"] = e.get("outcome") or k
-        if e.get("agent"):
-            s["agents"].add(e["agent"])
+        s = by_ticket.setdefault(tid, traj_summary_bucket())
+        traj_summary_add_event(s, e, table=table)
     return by_ticket
 
 
@@ -3117,10 +3102,8 @@ def cmd_trajectories(a, board):
             "ticket", "runs", "turns", "upd", "msgs", "reopens", "cost",
             "agents / outcome"))
         for tid, s in sorted(_traj_summary(sel).items()):
-            # '-' is not $0.00: no harness on this board reports a cost unless
-            # the operator asked for a JSON output format, and a zero would
-            # read as a free ticket (T-396 null-not-zero).
-            cost = ("$%.4f" % s["cost_usd"]) if s["cost_known"] else "-"
+            from ticket_board.prices import traj_summary_cost_cell
+            cost = traj_summary_cost_cell(s)
             print("%-8s %5d %8s %5d %5d %8d %10s  %s %s" % (
                 tid, s["runs"], (s["turns"] or "-"), s["updates"], s["msgs"],
                 s["reopens"], cost, ",".join(sorted(s["agents"])) or "-",
@@ -3264,21 +3247,23 @@ def cmd_route(a, board):
     if getattr(a, "apply", False) or getattr(a, "shadow", False) or getattr(a, "report", False) or getattr(a, "score", False):
         return _scheduler_cmd()(
             a, board, load_all, load_workforce, load_roles, load_agents,
-            score_agent, traj_event)
+            score_agent, traj_event, DEFAULT_ROLES)
+    from ticket_board.scheduler import (
+        DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, format_excluded, _candidate_names)
     tickets = load_all(board)
     wf = load_workforce(board)
     roles = load_roles(board)
     agents = dict((r["owner"], r) for r in load_agents(board))
-    names = sorted(set(list(wf) + [n for n in roles if roles[n]]))
-    if a.only:
-        names = [n for n in names if n in a.only]
-    # exclude agents that are out on a limit
-    names = [n for n in names if not agents.get(n, {}).get("limit")]
+    alive_within = int(getattr(a, "alive_within", None) or DEFAULT_ALIVE_WITHIN_MIN)
     done = set(t["id"] for t in tickets if t["status"] == "done")
     load_ = {}
     for t in tickets:
         if t["status"] == "claimed":
             load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    names, excluded = filter_eligible(
+        _candidate_names(wf, roles, only=a.only), wf, roles, agents, load_, DEFAULT_ROLES,
+        alive_within_min=alive_within)
+    print(format_excluded(excluded))
     ready_first = sorted(
         [t for t in tickets if t["status"] == "open" and (not t.get("suggested") or a.redo)],
         key=lambda t: (0 if all(d in done for d in t.get("deps", [])) else 1, t.get("priority", 2), t["id"]))
@@ -3762,6 +3747,8 @@ def main():
     c.add_argument("--write-scorecard", nargs="?", const="docs/turns-scorecard.md",
                    metavar="PATH",
                    help="with --shadow --score: also write markdown scorecard (default docs/turns-scorecard.md)")
+    c.add_argument("--alive-within", type=int, default=90,
+                   help="exclude seats with no heartbeat/here/run within N minutes (default 90)")
     c.add_argument("--apply", action="store_true",
                    help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)

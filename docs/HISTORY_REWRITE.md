@@ -67,8 +67,8 @@ are reproduced here.
 
 OpenAI-like `sk-` hits: **494**, all in
 `tests/fixtures/claude_hooks/prompt_with_secret.json`, classified
-**placeholder** (`sk-live_aaaaaaaaaaaaaaaa` — used to prove the adapter
-redacts). No raw secret is pasted here.
+**placeholder** (a synthetic OpenAI-shaped token used only to prove the
+adapter redacts; this document does not repeat it). No raw secret is pasted here.
 
 `modal.toml` / “modal token” hits: **189**, all the `.gitignore` line that
 *ignores* `modal.toml`. Not a credential.

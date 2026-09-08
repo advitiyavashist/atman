@@ -259,3 +259,160 @@ def test_other_seat_write_same_minute_does_not_credit():
     report = build_turns_report(evs)
     by = {r["ticket"]: r for r in report["tickets"]}
     assert by["T-001"]["turns"] is None
+
+
+def test_cursor_shaped_run_no_idle_stays_one():
+    """T-481: Cursor rows (run_no, no run_id, no bound_write). Idle pulses stay 1."""
+    evs = [
+        {"kind": "claim", "ticket": "T-001", "agent": "cursor-demo", "run_no": 1,
+         "at": "2026-09-08T00:00:00Z"},
+        {"kind": "run_start", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "at": "2026-09-08T00:00:00Z"},
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo", "run_no": 1,
+         "at": "2026-09-08T00:00:01Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "exit": 0, "at": "2026-09-08T00:01:00Z"},
+        {"kind": "review", "ticket": "T-001", "agent": "cursor-demo", "run_no": 1,
+         "at": "2026-09-08T00:01:01Z"},
+        {"kind": "run_start", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "at": "2026-09-08T00:02:00Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "exit": 0, "at": "2026-09-08T00:02:01Z"},
+        {"kind": "run_start", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 3, "at": "2026-09-08T00:03:00Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 3, "exit": 0, "at": "2026-09-08T00:03:01Z"},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] == 1
+    assert report["aggregates"]["n"] == 1
+    assert report["v"] == 1
+    assert tuple(report["tickets"][0].keys()) == ROW_KEYS
+
+
+def test_cursor_shaped_write_on_run_no_counts_second_turn():
+    """T-481: a bound write stamped with that run_no increments; idle does not."""
+    evs = [
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo", "run_no": 1},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "exit": 0},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "exit": 0},
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo", "run_no": 3},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 3, "exit": 0},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] == 2
+
+
+def test_straddling_cutover_keeps_pre_stamp_run():
+    """T-500: later run_no-stamped write must not drop earlier unpairable runs.
+
+    Reproducer that FAILS on 2dcaa71 (trajectory-wide FLAG). Truncated to
+    run 1 alone scores 1; the full two-run ticket must score 2, not 1.
+    """
+    run1 = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "at": "2026-09-08T00:00:00Z"},
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo",
+         "at": "2026-09-08T00:00:30Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "exit": 0, "at": "2026-09-08T00:01:00Z"},
+    ]
+    run2 = [
+        {"kind": "run_start", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "at": "2026-09-08T00:02:00Z"},
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "at": "2026-09-08T00:02:30Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "exit": 0, "bound_write": True,
+         "at": "2026-09-08T00:03:00Z"},
+    ]
+    by1 = {r["ticket"]: r for r in build_turns_report(run1)["tickets"]}
+    assert by1["T-001"]["turns"] == 1
+    by = {r["ticket"]: r for r in build_turns_report(run1 + run2)["tickets"]}
+    assert by["T-001"]["turns"] == 2
+
+
+def test_idle_after_run_no_stamp_still_dropped():
+    """T-500 must not invert FLAG: idle run with no write under its key stays 1."""
+    evs = [
+        {"kind": "update", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "at": "2026-09-08T00:00:30Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "exit": 0, "at": "2026-09-08T00:01:00Z"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 2, "exit": 0, "at": "2026-09-08T00:02:00Z"},
+    ]
+    by = {r["ticket"]: r for r in build_turns_report(evs)["tickets"]}
+    assert by["T-001"]["turns"] == 1
+
+
+def test_run_no_without_write_is_unpairable_legacy_count():
+    """No write bears run_no: run_no-only ends cannot pair — legacy count, not idle."""
+    evs = [
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 48, "exit": 0},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 49, "exit": 0},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] == 2
+
+
+def test_historical_writes_without_run_no_are_unpairable_legacy_count():
+    """Live-log shape: bound writes exist but none carry run_no — do not zero the ticket."""
+    evs = [
+        {"kind": "claim", "ticket": "T-192", "agent": "opus-authz",
+         "at": "2026-09-07T00:00:00Z"},
+        {"kind": "update", "ticket": "T-192", "agent": "opus-authz",
+         "at": "2026-09-07T00:00:01Z"},
+        {"kind": "run_end", "ticket": "T-192", "agent": "opus-authz",
+         "run_no": 1, "exit": 0, "at": "2026-09-07T00:01:00Z"},
+        {"kind": "review", "ticket": "T-192", "agent": "opus-authz",
+         "at": "2026-09-07T00:01:05Z"},
+        {"kind": "run_end", "ticket": "T-192", "agent": "opus-authz",
+         "run_no": 2, "exit": 0, "at": "2026-09-07T00:02:00Z"},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-192"]["turns"] == 2
+
+
+def test_run_id_flag_still_drops_idle_when_writes_lack_run_no():
+    """run_id pairing still applies; unpairable fallback is run_no-only ends."""
+    evs = [
+        {"kind": "update", "ticket": "T-001", "agent": "alice", "run_id": "r-work"},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r-work",
+         "run_no": 1, "exit": 0},
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "run_id": "r-idle",
+         "run_no": 2, "exit": 0},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] == 1
+
+
+def test_neither_run_id_nor_run_no_still_counts_completed_run():
+    """Pre-T-425 jsonl: no pairing key -> every run_end still counts."""
+    evs = [
+        {"kind": "run_end", "ticket": "T-001", "agent": "alice", "exit": 0},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] == 1
+
+
+def test_other_agent_same_run_no_does_not_credit():
+    evs = [
+        {"kind": "update", "ticket": "T-001", "agent": "bob", "run_no": 1},
+        {"kind": "run_end", "ticket": "T-001", "agent": "cursor-demo",
+         "run_no": 1, "exit": 0},
+    ]
+    report = build_turns_report(evs)
+    by = {r["ticket"]: r for r in report["tickets"]}
+    assert by["T-001"]["turns"] is None

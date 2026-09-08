@@ -1,12 +1,16 @@
 """T-312: turns-to-done aggregator.
 
 A TURN is one completed watch run (`run_start` -> `run_end`) that wrote
-the bound ticket. T-425: a run increments `turns` only when THAT `run_id`
+the bound ticket. T-425/T-481: a run increments `turns` only when THAT run
 recorded a bound-ticket write (claim, update, review, done, block, reopen,
-or msg --re that ticket). Fail-exit, timeout, and session-limit with no
-write stay in jsonl but do not count. Events with no `run_id` (pre-T-425)
-still count every `run_end`. Backfill never recorded runs, so `turns` is
-JSON null — never 0.
+or msg --re that ticket). Pairing key is `run_id` if present, else
+`(agent, run_no)`. Fail-exit, timeout, and session-limit with no write stay
+in jsonl but do not count. Only events with neither `run_id` nor `run_no`
+(pre-T-425) still count every `run_end`. A `run_no`-only `run_end` is unpairable — and takes the same
+legacy count path — only when no `run_no`-bearing write in that
+trajectory is at or before that `run_end`'s `at` (T-500: not
+trajectory-wide). Decided from the log, not a date. Backfill never
+recorded runs, so `turns` is JSON null — never 0.
 
 `--json` shape is frozen here and in docs/turns.md. The optimizer (T-313)
 reads it; do not rename keys.
@@ -20,6 +24,8 @@ import os
 import sys
 from datetime import datetime, timezone
 from statistics import mean, median
+
+from ticket_board.prices import estimate_run_end_cost, fmt_cost_cell, ticket_cost_fields
 
 TURNS_JSON_V = 1
 
@@ -92,7 +98,13 @@ def _stuck_count(messages, ticket):
     return n
 
 
-def _filter_events(events, ticket="", agent="", since="", until=""):
+def _filter_events(events, ticket="", agent="", since="", until="",
+                   epic="", ticket_index=None):
+    """Filter trajectory events. --agent/--since/--until/--epic narrow sel;
+    --epic excludes unbound runs (no ticket => no epic). --model is applied
+    separately: ticket rows use the resolved ticket model; per-run cost
+    aggregates use each run_end's own model."""
+    idx = ticket_index or {}
     out = []
     for e in events:
         if ticket and e.get("ticket") != ticket:
@@ -104,6 +116,12 @@ def _filter_events(events, ticket="", agent="", since="", until=""):
             continue
         if until and at > until:
             continue
+        if epic:
+            tid = e.get("ticket")
+            if not tid:
+                continue
+            if (idx.get(tid) or {}).get("epic") != epic:
+                continue
         out.append(e)
     return out
 
@@ -175,19 +193,91 @@ def _is_bound_write(e, ticket):
     return kind in _BOUND_WRITE_KINDS or kind == "msg"
 
 
-def _run_is_productive(end, writes_by_rid):
-    """T-425 FLAG: increment iff THAT run_id wrote the bound ticket.
+def _as_run_no(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _end_flag_key(end):
+    """T-481: run_id if present, else (agent, run_no). None = pre-T-425."""
+    rid = end.get("run_id")
+    if rid:
+        return ("id", rid)
+    run_no = _as_run_no(end.get("run_no"))
+    agent = end.get("agent")
+    if agent and run_no is not None:
+        return ("no", agent, run_no)
+    return None
+
+
+def _event_flag_keys(e):
+    """Index a write under every key a run_end might use to find it."""
+    keys = []
+    rid = e.get("run_id")
+    if rid:
+        keys.append(("id", rid))
+    run_no = _as_run_no(e.get("run_no"))
+    agent = e.get("agent")
+    if agent and run_no is not None:
+        keys.append(("no", agent, run_no))
+    return keys
+
+
+def _run_no_write_at_or_before(end, evs):
+    """True if some bound write bearing run_no is at or before this run_end.
+
+    T-500: the FLAG's unpairable test is time-aware, not trajectory-wide.
+    A later stamped write must not pull earlier run_no-only ends into FLAG.
+    Missing stamps fall back to log order (oldest-first): a write after this
+    run_end in the list does not qualify. Do not require the write to bear
+    this run_end's own (agent, run_no) — an idle run has none (T-425).
+    """
+    end_at = end.get("at")
+    seen_end = False
+    tid = end.get("ticket")
+    for e in evs:
+        if e is end:
+            seen_end = True
+        if not _is_bound_write(e, tid):
+            continue
+        if _as_run_no(e.get("run_no")) is None:
+            continue
+        write_at = e.get("at")
+        if end_at and write_at:
+            if write_at <= end_at:
+                return True
+            continue
+        if not seen_end:
+            return True
+    return False
+
+
+def _run_is_productive(end, writes_by_key, evs):
+    """FLAG: increment iff THAT run wrote the bound ticket.
 
     Exit=1 / timed_out / session-limit with zero writes is idle (HB87/HB88).
     No content grep. Broadcasts without --re never increment.
+    Missing bound_write must not default to "count" when a pairing key exists
+    and that key type appears on writes *at or before this run_end*. A
+    run_no-only run_end is unpairable when no run_no-bearing write is at or
+    before its `at` (historical writers never stamped it yet) — then take
+    the pre-T-425 count path, not idle.
     """
     if end.get("bound_write"):
         return True
-    rid = end.get("run_id")
-    if not rid:
-        return True  # pre-T-425 jsonl: every completed run counted
+    key = _end_flag_key(end)
+    if not key:
+        return True  # pre-T-425 jsonl: neither run_id nor run_no
+    if key[0] == "no" and not _run_no_write_at_or_before(end, evs):
+        return True  # unpairable era at this timestamp: key cannot match
     tid = end.get("ticket")
-    return any(_is_bound_write(w, tid) for w in writes_by_rid.get(rid) or [])
+    return any(_is_bound_write(w, tid) for w in writes_by_key.get(key) or [])
 
 
 def _measured_turns(evs):
@@ -197,18 +287,18 @@ def _measured_turns(evs):
     runs wrote the bound ticket, `turns` stays null so n_measured does not
     rise.
     """
-    writes_by_rid = {}
+    writes_by_key = {}
     saw_run = False
     n = 0
     for e in evs:
-        rid = e.get("run_id")
-        if rid and _is_bound_write(e, e.get("ticket")):
-            writes_by_rid.setdefault(rid, []).append(e)
+        if _is_bound_write(e, e.get("ticket")):
+            for key in _event_flag_keys(e):
+                writes_by_key.setdefault(key, []).append(e)
     for e in evs:
         if e.get("kind") != "run_end":
             continue
         saw_run = True
-        if _run_is_productive(e, writes_by_rid):
+        if _run_is_productive(e, writes_by_key, evs):
             n += 1
     if not saw_run or n == 0:
         return None
@@ -276,16 +366,19 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
     workforce = workforce or {}
     messages = messages or []
     idx = _ticket_index(tickets)
-    sel = _filter_events(events, ticket=ticket, agent=agent, since=since, until=until)
+    sel = _filter_events(
+        events, ticket=ticket, agent=agent, since=since, until=until,
+        epic=epic, ticket_index=idx)
     rows = []
     for tid, evs in sorted(_group(sel).items()):
         t = idx.get(tid) or {}
-        if epic and t.get("epic") != epic:
-            continue
         owner = _owner(evs, t)
         mdl = _model(evs, owner, workforce)
         if model and mdl != model:
             continue
+        harness_cost = _measured_cost(evs)
+        cost_usd, cost_usd_est, cost_source, cost_price_as_of = ticket_cost_fields(
+            evs, harness_cost)
         row = {
             "ticket": tid,
             "owner": owner,
@@ -295,7 +388,10 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "reopens": sum(1 for e in evs if e.get("kind") == "reopen"),
             "stuck": _stuck_count(messages, tid),
             "outcome": _outcome(evs, t),
-            "cost_usd": _measured_cost(evs),
+            "cost_usd": cost_usd,
+            "cost_usd_est": cost_usd_est,
+            "cost_source": cost_source,
+            "cost_price_as_of": cost_price_as_of,
             "tokens_in": _measured_tokens(evs, "tokens_in"),
             "tokens_out": _measured_tokens(evs, "tokens_out"),
         }
@@ -311,6 +407,11 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
     cost_agg = _agg(costed)
     cost_agg["total"] = round(sum(costed), 6) if costed else None
     cost_agg["n_unmeasured"] = sum(1 for r in rows if r["cost_usd"] is None)
+    ested = [r["cost_usd_est"] for r in rows if r.get("cost_usd_est") is not None]
+    cost_est_agg = _agg(ested)
+    cost_est_agg["total"] = round(sum(ested), 6) if ested else None
+    cost_est_agg["n_unmeasured"] = sum(
+        1 for r in rows if r.get("cost_usd_est") is None and r.get("cost_usd") is None)
 
     def group_agg(keyfn, label):
         buckets = {}
@@ -328,17 +429,17 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
-    def cost_group(keyfn, label):
+    def cost_group(keyfn, label, field="cost_usd"):
         """Same shape as group_agg, over cost instead of turns. Kept separate
         because a row can be measured for one and unmeasured for the other."""
         buckets = {}
         for r in rows:
-            if r["cost_usd"] is None:
+            if r.get(field) is None:
                 continue
             k = keyfn(r)
             if k is None or k == "":
                 continue
-            buckets.setdefault(k, []).append(r["cost_usd"])
+            buckets.setdefault(k, []).append(r[field])
         out = []
         for k in sorted(buckets, key=lambda x: (str(type(x)), str(x))):
             rec = _agg(buckets[k])
@@ -347,9 +448,109 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
-    public_rows = [{k: r[k] for k in ROW_KEYS} for r in rows]
+    def cost_est_by_run_model(events, run_model=""):
+        """Per-run estimates grouped by the run_end model, not the ticket row."""
+        buckets = {}
+        for e in events:
+            if e.get("kind") != "run_end":
+                continue
+            m = e.get("model")
+            if run_model and m != run_model:
+                continue
+            est, _, _ = estimate_run_end_cost(e)
+            if est is None:
+                continue
+            if not m:
+                continue
+            buckets.setdefault(m, []).append(est)
+        out = []
+        for k in sorted(buckets, key=lambda x: (str(type(x)), str(x))):
+            rec = _agg(buckets[k])
+            rec["total"] = round(sum(buckets[k]), 6)
+            rec["model"] = k
+            out.append(rec)
+        return out
+
+    def cost_est_unbound(events, run_model=""):
+        """Token spend on run_ends not bound to any ticket (e.g. review-lane runs)."""
+        by_agent = {}
+        all_ests = []
+        for e in events:
+            if e.get("kind") != "run_end":
+                continue
+            if e.get("ticket"):
+                continue
+            m = e.get("model")
+            if run_model and m != run_model:
+                continue
+            est, _, _ = estimate_run_end_cost(e)
+            if est is None:
+                continue
+            all_ests.append(est)
+            key = (e.get("agent"), e.get("model"))
+            by_agent.setdefault(key, []).append(est)
+        out_by_agent = []
+        for key in sorted(by_agent, key=lambda x: (str(x[0] or ""), str(x[1] or ""))):
+            vals = by_agent[key]
+            agent, model = key
+            out_by_agent.append({
+                "agent": agent,
+                "model": model,
+                "n": len(vals),
+                "total": round(sum(vals), 6),
+            })
+        out = {
+            "n": len(all_ests),
+            "total": round(sum(all_ests), 6) if all_ests else None,
+            "by_agent": out_by_agent,
+        }
+        if epic:
+            out["excluded"] = "unbound runs carry no epic"
+        return out
+
+    def _report_scope():
+        filters = {k: v for k, v in (
+            ("ticket", ticket), ("agent", agent), ("model", model),
+            ("epic", epic), ("since", since), ("until", until),
+        ) if v}
+        fields = {
+            "tickets": {
+                "denominator": "ticket",
+                "model_axis": "resolved ticket model (events/workforce)",
+            },
+            "cost_est": {
+                "denominator": "ticket",
+                "model_axis": "resolved ticket model",
+            },
+            "cost_est_by_run_model": {
+                "denominator": "run",
+                "model_axis": "run_end model",
+            },
+            "cost_est_unbound": {
+                "denominator": "run",
+                "model_axis": "run_end model",
+            },
+        }
+        if epic:
+            fields["cost_est_unbound"]["excluded"] = (
+                "unbound runs carry no epic")
+        return {"filters": filters, "fields": fields}
+
+    public_rows = []
+    for r in rows:
+        pub = {k: r[k] for k in ROW_KEYS}
+        if r.get("cost_usd_est") is not None:
+            pub["cost_usd_est"] = r["cost_usd_est"]
+        if r.get("cost_source"):
+            pub["cost_source"] = r["cost_source"]
+        if r.get("cost_price_as_of"):
+            pub["cost_price_as_of"] = r["cost_price_as_of"]
+        public_rows.append(pub)
+    by_run_model = cost_est_by_run_model(sel, run_model=model)
+    unbound = cost_est_unbound(sel, run_model=model)
     return {
         "v": TURNS_JSON_V,
+        "scope": _report_scope(),
         "tickets": public_rows,
         "aggregates": {
             "mean": overall["mean"],
@@ -363,6 +564,11 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "cost": cost_agg,
             "cost_by_agent": cost_group(lambda r: r.get("owner"), "agent"),
             "cost_by_model": cost_group(lambda r: r.get("model"), "model"),
+            "cost_est": cost_est_agg,
+            "cost_est_by_agent": cost_group(
+                lambda r: r.get("owner"), "agent", field="cost_usd_est"),
+            "cost_est_by_run_model": by_run_model,
+            "cost_est_unbound": unbound,
         },
     }
 
@@ -378,9 +584,9 @@ def _fmt_wall(seconds):
     return "%.1fd" % (h / 24.0)
 
 
-def _fmt_cost(usd):
+def _fmt_cost(usd, est_usd=None):
     """'-' means UNMEASURED, and it is not $0.00. See _measured_cost."""
-    return "-" if usd is None else ("$%.4f" % usd)
+    return fmt_cost_cell(usd, est_usd)
 
 
 def _fmt_tokens(n):
@@ -406,7 +612,7 @@ def render_turns_table(report):
             (r.get("model") or "-")[:12],
             "-" if turns is None else str(turns),
             _fmt_wall(r.get("wall_clock_s")),
-            _fmt_cost(r.get("cost_usd")),
+            _fmt_cost(r.get("cost_usd"), r.get("cost_usd_est")),
             _fmt_tokens(r.get("tokens_in")),
             _fmt_tokens(r.get("tokens_out")),
             int(r.get("reopens") or 0),
@@ -443,8 +649,13 @@ def render_turns_table(report):
         cost.get("n") or 0, cost.get("n_unmeasured") or 0,
         _fmt_cost(cost.get("total")), _fmt_cost(cost.get("mean")),
         _fmt_cost(cost.get("median"))))
-    lines.append("'-' is UNMEASURED, not $0.00: a harness reports a cost only when it was "
-                 "asked for a JSON output format, and no cost is ever estimated.")
+    lines.append("'-' is UNMEASURED, not $0.00. Harness cost needs a JSON output format; "
+                 "'est' is a list-price token estimate (T-480), never written to jsonl.")
+    cost_est = agg.get("cost_est") or {}
+    if (cost_est.get("n") or 0) > 0:
+        lines.append("cost est (list price) measured %d ticket(s); unmeasured %d  total %s" % (
+            cost_est.get("n") or 0, cost_est.get("n_unmeasured") or 0,
+            _fmt_cost(None, cost_est.get("total"))))
 
     def dump_cost(title, rows, key):
         if not rows:

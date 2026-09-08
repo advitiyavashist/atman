@@ -30,7 +30,12 @@ from ticket_board.turns import (
 
 MIN_SUPPORT = 5
 MIN_COMPARE = 3
+DEFAULT_ALIVE_WITHIN_MIN = 90
 APPLY_MSG = "tickets route --apply is unimplemented (T-315: shadow only; nothing is assigned)"
+
+_ACTIVITY_KINDS = frozenset((
+    "run_start", "run_end", "claim", "update", "review", "done", "msg", "merge",
+))
 
 # T-425 FLAG landed on atman main as db6229d (feature sha 705dd05). Rows whose
 # bound run_start pin is before that commit still count idle IN-REVIEW wakes.
@@ -231,12 +236,116 @@ def _all_cost_unmeasured(ranked):
     return bool(ranked) and all((r.get("n_cost") or 0) == 0 for r in ranked)
 
 
-def _agent_names(workforce, roles, only=None, agents=None):
+def _parse_iso(ts):
+    from datetime import datetime, timezone
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def _minutes_between(older, newer):
+    try:
+        return (_parse_iso(newer) - _parse_iso(older)).total_seconds() / 60.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _now_iso():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _last_activity_at(agent, events=None, agents=None, before_at=None):
+    """Last heartbeat/here/run-class event for `agent` (trajectory or agents.seen)."""
+    if events is not None:
+        best = ""
+        for e in events:
+            if (e.get("agent") or "") != agent:
+                continue
+            at = e.get("at") or ""
+            if before_at and at >= before_at:
+                continue
+            if e.get("kind") not in _ACTIVITY_KINDS:
+                continue
+            if at > best:
+                best = at
+        return best or None
+    seen = ((agents or {}).get(agent) or {}).get("seen")
+    return seen or None
+
+
+def _agent_limited(agent, agents, at=None):
+    lim = ((agents or {}).get(agent) or {}).get("limit")
+    if not lim:
+        return False
+    if not at:
+        return True
+    lim_at = lim.get("at") or ""
+    until = lim.get("until") or ""
+    if lim_at and lim_at > at:
+        return False
+    if until and until <= at:
+        return False
+    return True
+
+
+def _is_dormant(agent, alive_within_min, at, events=None, agents=None):
+    last = _last_activity_at(agent, events=events, agents=agents, before_at=at)
+    if not last:
+        return True
+    return _minutes_between(last, at) > alive_within_min
+
+
+def _candidate_names(workforce, roles, only=None):
     names = sorted(set(list(workforce or {}) + [n for n in (roles or {}) if roles[n]]))
     if only:
         names = [n for n in names if n in only]
-    agents = agents or {}
-    return [n for n in names if not (agents.get(n) or {}).get("limit")]
+    return names
+
+
+def filter_eligible(names, workforce, roles, agents, load_, default_roles,
+                    at=None, events=None, alive_within_min=DEFAULT_ALIVE_WITHIN_MIN):
+    """Eligibility gate shared by route, route --shadow and prior_pick (T-484)."""
+    counts = {"limit": 0, "dormant": 0, "unregistered": 0, "busy": 0}
+    eligible = []
+    workforce = workforce or {}
+    roles = roles or {}
+    default_roles = default_roles or {}
+    ref_at = at or _now_iso()
+    for n in names:
+        if _agent_limited(n, agents, at=at):
+            counts["limit"] += 1
+            continue
+        if n not in workforce:
+            counts["unregistered"] += 1
+            continue
+        if (load_ or {}).get(n, 0) > 0:
+            counts["busy"] += 1
+            continue
+        if _is_dormant(n, alive_within_min, ref_at, events=events, agents=agents):
+            counts["dormant"] += 1
+            continue
+        eligible.append(n)
+    counts["total"] = sum(counts[k] for k in ("limit", "dormant", "unregistered", "busy"))
+    return eligible, counts
+
+
+def format_excluded(counts):
+    return "excluded %d (limit %d, dormant %d, unregistered %d, busy %d)" % (
+        counts.get("total") or 0,
+        counts.get("limit") or 0,
+        counts.get("dormant") or 0,
+        counts.get("unregistered") or 0,
+        counts.get("busy") or 0,
+    )
+
+
+def _agent_names(workforce, roles, only=None, agents=None, load_=None,
+                 default_roles=None, at=None, events=None,
+                 alive_within_min=DEFAULT_ALIVE_WITHIN_MIN):
+    names = _candidate_names(workforce, roles, only=only)
+    eligible, counts = filter_eligible(
+        names, workforce, roles, agents or {}, load_ or {}, default_roles,
+        at=at, events=events, alive_within_min=alive_within_min)
+    return eligible, counts
 
 
 def rule_pick(board, ticket, names, workforce, roles, score_agent, load_):
@@ -730,24 +839,52 @@ def _median_or_null(nums):
 
 
 def shadow_pick_at_claim(board, ticket, events, before_at, names, workforce, roles,
-                         score_agent, tickets):
+                         score_agent, tickets, agents=None, default_roles=None,
+                         alive_within_min=DEFAULT_ALIVE_WITHIN_MIN):
     """Shadow learned/prior pick using only records strictly before claim."""
     pre = _events_before(events, before_at)
     estimates = build_estimates(pre, tickets=tickets, workforce=workforce)
     load_ = _historical_claimed_load(pre, before_at)
-    d = decide_ticket(board, ticket, estimates, names, workforce, roles,
+    eligible, _ = filter_eligible(
+        names, workforce, roles, agents or {}, load_, default_roles,
+        at=before_at, events=events, alive_within_min=alive_within_min)
+    d = decide_ticket(board, ticket, estimates, eligible, workforce, roles,
                       score_agent, load_)
     return d.get("learned_agent"), d
 
 
+def _agreement_stats(rows):
+    """Agreement over rows with a shadow pick; live-candidate subset (T-484)."""
+    compared = [r for r in rows if r.get("shadow")]
+    non_pick = len(rows) - len(compared)
+    agree_n = sum(1 for r in compared if r.get("agree"))
+    live_rows = [r for r in compared if r.get("shadow_live")]
+    agree_live = sum(1 for r in live_rows if r.get("agree"))
+    n_compared = len(compared)
+    n_live = len(live_rows)
+    rate = None if n_compared < 2 else (agree_n / n_compared)
+    rate_live = None if n_live < 2 else (agree_live / n_live)
+    return {
+        "n_compared": n_compared,
+        "n_non_pick": non_pick,
+        "n_agree": agree_n,
+        "agreement_rate": rate,
+        "n_live_subset": n_live,
+        "n_agree_live_subset": agree_live,
+        "agreement_rate_live_subset": rate_live,
+    }
+
+
 def score_shadow(events, tickets, workforce, roles, board, score_agent, names=None,
-                 agents=None, era_by_time=False):
+                 agents=None, era_by_time=False, default_roles=None,
+                 alive_within_min=DEFAULT_ALIVE_WITHIN_MIN):
     """Retrospective shadow-vs-actual scorecard (T-416). Observational only."""
     tickets = tickets or []
     workforce = workforce or {}
     roles = roles or {}
     agents = agents or {}
-    names = names or _agent_names(workforce, roles, agents=agents)
+    if names is None:
+        names = _candidate_names(workforce, roles)
     idx = _ticket_index(tickets)
     grouped = _group_events(events)
     rows = []
@@ -762,8 +899,12 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
             continue
         actual = _owner(evs, t)
         shadow, decision = shadow_pick_at_claim(
-            board, t, events, claim_at, names, workforce, roles, score_agent, tickets)
+            board, t, events, claim_at, names, workforce, roles, score_agent, tickets,
+            agents=agents, default_roles=default_roles, alive_within_min=alive_within_min)
         agree = bool(actual and shadow and actual == shadow)
+        shadow_live = bool(
+            shadow and not _is_dormant(shadow, alive_within_min, claim_at,
+                                       events=events, agents=agents))
         role, band = _role(t), priority_band(t)
         pre = _events_before(events, claim_at)
         actual_nums = _comparable_turns(pre, tickets, workforce, actual, role, band, claim_at)
@@ -779,6 +920,7 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
             "claim_at": claim_at,
             "actual": actual,
             "shadow": shadow,
+            "shadow_live": shadow_live,
             "source": decision.get("source"),
             "agree": agree,
             "realized_turns": realized,
@@ -788,8 +930,7 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
             "shadow_n": shadow_n,
             "era": era,
         })
-    compared = len(rows)
-    agree_n = sum(1 for r in rows if r["agree"])
+    stats = _agreement_stats(rows)
     n_pre = sum(1 for r in rows if r["era"] == ERA_PRE)
     n_post = sum(1 for r in rows if r["era"] == ERA_POST)
     n_unknown = sum(1 for r in rows if r["era"] == ERA_UNKNOWN)
@@ -805,12 +946,21 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
     n_sha_unresolved = sum(1 for v in sha_classes.values() if v is None)
     scored_eras = {r["era"] for r in rows} - {ERA_UNKNOWN}
     mixed = len(scored_eras) > 1
-    rate = None if (compared < 2 or mixed or n_unknown > 0) else (agree_n / compared)
-    return {
+    rate = stats["agreement_rate"]
+    if mixed or stats["n_compared"] < 2 or n_unknown > 0:
+        rate = None
+    rate_live = stats["agreement_rate_live_subset"]
+    if mixed or stats["n_live_subset"] < 2 or n_unknown > 0:
+        rate_live = None
+    rep = {
         "rows": rows,
-        "n": compared,
+        "n": stats["n_compared"],
+        "n_non_pick": stats["n_non_pick"],
         "agreement_rate": rate,
-        "n_agree": agree_n,
+        "n_agree": stats["n_agree"],
+        "n_live_subset": stats["n_live_subset"],
+        "n_agree_live_subset": stats["n_agree_live_subset"],
+        "agreement_rate_live_subset": rate_live,
         "n_pre": n_pre,
         "n_post": n_post,
         "n_unknown": n_unknown,
@@ -823,6 +973,12 @@ def score_shadow(events, tickets, workforce, roles, board, score_agent, names=No
             "unresolved": n_sha_unresolved,
         },
     }
+    if mixed:
+        for era in (ERA_PRE, ERA_POST):
+            subset = [r for r in rows if r.get("era") == era]
+            if subset:
+                rep["era_%s" % era] = _agreement_stats(subset)
+    return rep
 
 
 def render_score_table(rep):
@@ -844,20 +1000,31 @@ def render_score_table(rep):
     n_post = int(rep.get("n_post") or 0)
     n_unknown = int(rep.get("n_unknown") or 0)
     mixed = bool(rep.get("mixed_eras"))
+    n_non_pick = int(rep.get("n_non_pick") or 0)
+    if n_non_pick:
+        lines.append("non-pick rows (excluded from agreement): %d" % n_non_pick)
     by = {ERA_PRE: [], ERA_POST: [], ERA_UNKNOWN: []}
     for r in rep.get("rows") or []:
         by.setdefault(r.get("era") or ERA_UNKNOWN, []).append(r)
     for era in (ERA_PRE, ERA_POST, ERA_UNKNOWN):
         subset = by.get(era) or []
-        agree = sum(1 for r in subset if r.get("agree"))
+        era_stats = _agreement_stats(subset)
         if era == ERA_UNKNOWN:
             lines.append("agreement %s: n/a (n=%d, excluded from pct)" % (era, len(subset)))
         else:
-            lines.append(format_agreement_line(agree, len(subset), label=era))
+            lines.append(format_agreement_line(
+                era_stats["n_agree"], era_stats["n_compared"], label=era))
+            lines.append(format_agreement_line(
+                era_stats["n_agree_live_subset"], era_stats["n_live_subset"],
+                label="%s live-candidates" % era))
     lines.append("era counts: %s=%d  %s=%d  %s=%d (unknown never mixed into pct)" % (
         ERA_PRE, n_pre, ERA_POST, n_post, ERA_UNKNOWN, n_unknown))
     if not mixed and n_unknown == 0 and n:
         lines.append(format_agreement_line(n_agree, n))
+        lines.append(format_agreement_line(
+            int(rep.get("n_agree_live_subset") or 0),
+            int(rep.get("n_live_subset") or 0),
+            label="live-candidates"))
     lines.append("%-8s %-8s %-14s %-14s %-5s %5s %12s %12s %5s %-9s" % (
         "ticket", "role", "actual", "shadow", "agree", "turns",
         "actual_med", "shadow_med", "src", "flag"))
@@ -902,19 +1069,42 @@ def render_scorecard_doc(rep, generated_at):
         "never one silent pct. Small *n* on disagreement medians is",
         "`-` when either side has fewer than %d comparable finished tickets." % MIN_COMPARE,
         "Turns come from the same `_measured_turns` / `tickets turns --json`",
-        "source as T-416 (T-425 idle FLAG is not reimplemented here). No cost",
-        "axis until T-403 lands.",
+        "source as T-416 (T-425 idle FLAG is not reimplemented here). Cost",
+        "estimates (T-480) are available via `tickets turns --json` (`cost_usd_est`,",
+        "labelled `est` in tables); shadow ranking still uses harness `cost_usd` only.",
         "",
     ]
     return "\n".join(lines)
 
 
+def build_score_json(rep, excluded=None):
+    """Frozen --json for `tickets route --shadow --score` (T-445 D5 / T-484)."""
+    out = {
+        "v": 1,
+        "n": rep.get("n") or 0,
+        "n_agree": rep.get("n_agree") or 0,
+        "agreement_rate": rep.get("agreement_rate"),
+        "n_non_pick": rep.get("n_non_pick") or 0,
+        "n_live_subset": rep.get("n_live_subset") or 0,
+        "n_agree_live_subset": rep.get("n_agree_live_subset") or 0,
+        "agreement_rate_live_subset": rep.get("agreement_rate_live_subset"),
+        "n_pre": rep.get("n_pre") or 0,
+        "n_post": rep.get("n_post") or 0,
+        "mixed_eras": bool(rep.get("mixed_eras")),
+        "rows": rep.get("rows") or [],
+    }
+    if excluded:
+        out["excluded"] = excluded
+    return out
+
+
 def cmd_route_shadow(a, board, load_all, load_workforce, load_roles, load_agents,
-                     score_agent, traj_event):
+                     score_agent, traj_event, default_roles=None):
     """Print-only shadow route. `--apply` exits non-zero."""
     if getattr(a, "apply", False):
         print(APPLY_MSG, file=sys.stderr)
         sys.exit(1)
+    alive_within = int(getattr(a, "alive_within", None) or DEFAULT_ALIVE_WITHIN_MIN)
     try:
         events = load_trajectory_events(board)
     except TrajectoryParseError as exc:
@@ -923,16 +1113,24 @@ def cmd_route_shadow(a, board, load_all, load_workforce, load_roles, load_agents
     workforce = load_workforce(board)
     roles = load_roles(board)
     agents = dict((r["owner"], r) for r in load_agents(board))
-    names = _agent_names(workforce, roles, only=getattr(a, "only", None), agents=agents)
+    load_ = claimed_load(tickets)
+    names, excluded = _agent_names(
+        workforce, roles, only=getattr(a, "only", None), agents=agents, load_=load_,
+        default_roles=default_roles, alive_within_min=alive_within)
     rank_by = getattr(a, "by", None) or "turns"
     if rank_by not in ("turns", "cost"):
         rank_by = "turns"
     if getattr(a, "score", False):
         rep = score_shadow(events, tickets, workforce, roles, board, score_agent,
                            names=names, agents=agents,
-                           era_by_time=bool(getattr(a, "era_by_time", False)))
-        text = render_score_table(rep)
-        print(text)
+                           era_by_time=bool(getattr(a, "era_by_time", False)),
+                           default_roles=default_roles,
+                           alive_within_min=alive_within)
+        if getattr(a, "json", False):
+            print(json.dumps(build_score_json(rep), indent=2, sort_keys=True))
+        else:
+            text = render_score_table(rep)
+            print(text)
         doc_path = getattr(a, "write_scorecard", None)
         if doc_path is not None:
             a.scorecard_doc = doc_path
@@ -947,11 +1145,13 @@ def cmd_route_shadow(a, board, load_all, load_workforce, load_roles, load_agents
         print(render_report(report_shadow(events, tickets=tickets, workforce=workforce)))
         return
     ready = ready_tickets(tickets)
-    load_ = claimed_load(tickets)
     decisions = [decide_ticket(board, t, estimates, names, workforce, roles,
                                score_agent, load_, rank_by=rank_by) for t in ready]
     if getattr(a, "json", False):
-        print(json.dumps(build_shadow_json(decisions, estimates), indent=2, sort_keys=True))
+        payload = build_shadow_json(decisions, estimates)
+        payload["excluded"] = excluded
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
+        print(format_excluded(excluded))
         print(render_shadow_table(decisions, estimates))
     _write_shadow_events(board, decisions, traj_event)

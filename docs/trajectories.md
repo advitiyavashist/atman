@@ -164,7 +164,9 @@ tickets trajectories export --out /tmp/traj.jsonl   # same filters apply
 `--summary` is the turns view: per ticket, `runs` (watch runs that reached
 `run_end` — the board's own turn count), `turns` (what the harness itself
 reported, `-` when it reported none), updates, messages, reopens, the agents
-involved and the outcome.
+involved and the outcome. The `cost` column is harness-reported when present;
+otherwise a list-price token estimate labelled `est` (T-480, read-time only —
+never written to jsonl). `-` means unmeasured, not $0.00.
 
 ## Backfill
 

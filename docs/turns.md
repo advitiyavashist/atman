@@ -10,15 +10,25 @@ what a turn is and the `--json` shape. Do not rename keys.
 is a `run_start` followed by its `run_end`. Incomplete starts (no `run_end`)
 do not count.
 
-T-425: a `run_start`/`run_end` pair increments `turns` only when THAT
-`run_id` recorded a bound-ticket write (claim, update, review, done, block,
-reopen, or `msg --re` that ticket). Idle pulses, session-limit fails, and
-generic `exit=1`/`timed_out` with no ticket write stay in jsonl but do not
-increment (HB87/HB88: no OR-nonzero). Broadcasts without `--re` never
-increment. The FLAG is `bound_write` on `run_end` (and matching `run_id` on
-the write events), not a grep of message text for `idle:`. Pre-T-425 events
-with no `run_id` still count every completed run. No backfill of existing
-jsonl.
+T-425/T-481: a `run_start`/`run_end` pair increments `turns` only when THAT
+run recorded a bound-ticket write (claim, update, review, done, block,
+reopen, or `msg --re` that ticket). The pairing key is `run_id` when present,
+else `(agent, run_no)` (Cursor-harness rows often carry `run_no` only). Idle
+pulses, session-limit fails, and generic `exit=1`/`timed_out` with no ticket
+write stay in jsonl but do not increment (HB87/HB88: no OR-nonzero).
+Broadcasts without `--re` never increment. The FLAG is `bound_write` on
+`run_end` (and matching `run_id` or `(agent, run_no)` on the write events),
+not a grep of message text for `idle:`. Missing `bound_write` does not
+default to "count" when a pairing key exists *and writes carry that key
+type*. A `run_no`-only `run_end` is unpairable (historical writers never
+stamped it) and takes the pre-T-425 count path only when no
+`run_no`-bearing write in that trajectory is at or before that
+`run_end`'s `at` (T-500: time-aware, not trajectory-wide). A later
+stamped write must not drop earlier runs. Decided from the log, not a
+date. Only events with neither `run_id` nor `run_no` (pre-T-425) still
+count every completed run. No backfill of existing jsonl. Do not invert
+the FLAG by requiring a write under the `run_end`'s own `(agent,
+run_no)` — an idle run has none and must stay uncounted (T-425).
 
 A **ticket's turns** are those productive runs from the first `claim` to the
 final `done` (or `merge`). A `reopen` does not reset the counter: later runs
@@ -56,8 +66,11 @@ reopens, stuck, outcome.
 - **reopens** — `reopen` events
 - **stuck** — messages whose text starts with `stuck` and `--re` that ticket
 - **outcome** — last of done / merge / review / block / reopen, else ticket status
-- **cost** — summed `cost_usd` over the ticket's `run_end` events, or `-` / `null`
-  if no run reported one (T-396)
+- **cost** — summed harness `cost_usd` over the ticket's `run_end` events, or
+  `-` / `null` if no run reported one (T-396). When tokens and a priced model
+  exist but harness cost is absent, `cost_usd_est` carries a list-price estimate
+  (labelled `est` in the table; `cost_source: "estimate"`) — never written to
+  jsonl (T-480).
 - **tok in / tok out** — summed `tokens_in` / `tokens_out`, same rule
 
 ### Cost is measured separately from turns
@@ -115,9 +128,23 @@ Row keys are exactly: `ticket`, `owner`, `model`, `turns`, `wall_clock_s`,
 tickets from mean/median; `n_unmeasured` counts them.
 
 T-396 added `cost_usd`, `tokens_in`, `tokens_out` and the three `cost*`
-aggregates. The addition is **additive**: `v` stays `1`, no existing key was
-renamed, removed or reordered, and the pre-existing keys above are still
-present on every row.
+aggregates. T-480 adds optional `cost_usd_est`, `cost_source`, and
+`cost_price_as_of` on rows that have tokens but no harness cost, plus
+`aggregates.cost_est*` (list-price estimates from `src/ticket_board/prices.json`;
+not a bill and not fed into T-415 ranking until T-470). T-499 renames
+`cost_est_by_model` → `cost_est_by_run_model` (per-run, not per-ticket row) and
+adds `cost_est_unbound` `{n, total, by_agent:[{agent, model, n, total}]}` for
+token-carrying `run_end` rows with no ticket. **`cost_est` is per-ticket;
+`cost_est_by_run_model` is per-run; they are not a decomposition of each other.**
+T-506: `--epic` narrows events (unbound runs excluded — they carry no epic);
+`cost_est_unbound` reports `n=0` with `excluded: unbound runs carry no epic`.
+`--model` filters ticket rows on the **resolved ticket model** and per-run
+aggregates on the **run_end model** (two axes). A top-level `scope` block names
+the filter and denominator each field used. Unfiltered:
+`cost_est.total + cost_est_unbound.total == sum(cost_est_by_run_model.total)`.
+T-470 must quote coverage with `n` attached (today ~4% of tickets / ~6% of runs
+on live data). The addition is **additive**: `v` stays `1`, and the pre-existing
+row keys above are still present on every row.
 
 Console (T-372): home hero reads `aggregates.median`; the turns-efficiency
 panel shows worst-10 + per-agent medians from this same object. Do not
