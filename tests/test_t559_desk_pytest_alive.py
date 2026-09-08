@@ -28,7 +28,7 @@ import pytest
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 
 LIVE_HARNESS = (
-    "/Users/kavana/Downloads/atman/.worktrees/desk-cursor-fable/.venv/bin/python "
+    "/Users/<operator>/Downloads/atman/.worktrees/desk-cursor-fable/.venv/bin/python "
     "-m pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude"
 )
 LIVE_PYTEST_BIN = (
@@ -36,9 +36,9 @@ LIVE_PYTEST_BIN = (
 )
 AGENT_PROMPT_BLOB = (
     "/opt/homebrew/bin/python3 "
-    "/Users/kavana/.claude/tools/tickets-releases/"
+    "/Users/<operator>/.claude/tools/tickets-releases/"
     "b738f1dcc1824dc0a3d3434e318b2e6612998227/tickets.py watch "
-    "--agent optimizer --every 60 --cwd /Users/kavana/Downloads/steer "
+    "--agent optimizer --every 60 --cwd /Users/<operator>/Downloads/steer "
     "--exec claude -p "
     '"wait for pytest -x --ignore=.worktrees then spawn --stop"'
 )
@@ -71,7 +71,7 @@ def test_cwd_is_not_consulted(tk):
 
 @pytest.mark.parametrize("cmd", [
     AGENT_PROMPT_BLOB,
-    "/usr/bin/python3 /Users/kavana/.claude/tools/tickets.py watch "
+    "/usr/bin/python3 /Users/<operator>/.claude/tools/tickets.py watch "
     "--agent cursor-demo --exec 'pytest -x --ignore=.worktrees'",
     "grep -E '[p]ytest.*-x.*--ignore=\\.worktrees'",
     "/usr/bin/python3 /some/agent.py -p 'run pytest -x --ignore=.worktrees'",
