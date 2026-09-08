@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import make_wake_job  # noqa: F401
+from tests.runner_helpers import make_wake_job  # noqa: F401
 from ticket_board.runners import ApiError
 from ticket_board.storage.errors import InvalidStateTransition
 

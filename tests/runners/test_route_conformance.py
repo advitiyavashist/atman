@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import make_wake_job  # noqa: F401
+from tests.runner_helpers import make_wake_job  # noqa: F401
 
 jsonschema = pytest.importorskip("jsonschema")
 yaml = pytest.importorskip("yaml")

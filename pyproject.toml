@@ -28,3 +28,6 @@ where = ["src"]
 # multiplies that across parallel lanes until the volume fills (T-413/T-414).
 tmp_path_retention_policy = "failed"
 tmp_path_retention_count = 1
+# Repo root on sys.path so tests/runner_helpers.py is importable as
+# tests.runner_helpers when several test dirs are collected together (T-544).
+pythonpath = [".", "src"]

@@ -30,7 +30,7 @@ import time
 
 import pytest
 
-from conftest import FakeLauncher, make_wake_job
+from tests.runner_helpers import FakeLauncher, make_wake_job
 from ticket_board.runners import Supervisor
 from ticket_board.storage import BoardStore
 
