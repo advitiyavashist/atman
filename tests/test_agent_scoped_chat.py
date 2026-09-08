@@ -1,19 +1,16 @@
 """Advitiya PRIORITY agent chats: per-seat / 1:1 threads on the existing
 `tickets msg` log — no second store, no shared-memory brain.
 """
-import atexit
 import importlib.util
 import json
 import os
 import re
 import signal
-import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 
 import pytest
@@ -23,136 +20,9 @@ if str(_TESTS) not in sys.path:
     sys.path.insert(0, str(_TESTS))
 
 from test_wakeup import TOOL, board, run  # noqa: E402,F401
+from ui_server_harness import UiServer, _free_port, make_ui_server_fixture
 
-_ACTIVE_SERVERS: list["_Server"] = []
-
-
-def _free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _board_marker(board):
-    marker = "t546-probe-%s" % uuid.uuid4().hex[:12]
-    run(board, "join", marker, agent=marker)
-    return marker
-
-
-def _wait_up(port, marker, timeout=10):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:%d/board.json" % port, timeout=1) as r:
-                d = json.loads(r.read())
-            agents = [a.get("name") for a in d.get("agents") or []]
-            if marker in agents:
-                return True
-            raise RuntimeError(
-                "foreign tickets ui on port %d: /board.json is up but missing probe agent '%s' (agents=%s)"
-                % (port, marker, agents)
-            )
-        except RuntimeError:
-            raise
-        except (urllib.error.URLError, ConnectionError, json.JSONDecodeError, KeyError, TimeoutError, OSError):
-            time.sleep(0.1)
-    return False
-
-
-class _Server:
-    def __init__(self, board):
-        self.board = board
-        self._stopped = False
-        self.marker = _board_marker(board)
-        self.port = _free_port()
-        env = dict(os.environ, TICKETS_DIR=str(board))
-        self.proc = subprocess.Popen(
-            [sys.executable, str(TOOL), "ui", "--port", str(self.port), "--host", "127.0.0.1"],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            start_new_session=True,
-        )
-        _ACTIVE_SERVERS.append(self)
-        try:
-            if not _wait_up(self.port, self.marker):
-                raise RuntimeError("tickets ui never came up on port %d" % self.port)
-        except Exception:
-            self.stop()
-            raise
-
-    def get(self, path="/board.json", raw=False):
-        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.port, path), timeout=5) as r:
-            body = r.read()
-            return body if raw else json.loads(body)
-
-    def post(self, path, payload):
-        req = urllib.request.Request(
-            "http://127.0.0.1:%d%s" % (self.port, path),
-            data=json.dumps(payload).encode(), method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5) as r:
-                return r.status, json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read())
-
-    def stop(self):
-        if self._stopped:
-            return
-        self._stopped = True
-        proc = getattr(self, "proc", None)
-        if proc is None or proc.poll() is not None:
-            try:
-                _ACTIVE_SERVERS.remove(self)
-            except ValueError:
-                pass
-            return
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                proc.kill()
-            proc.wait(timeout=2)
-        try:
-            _ACTIVE_SERVERS.remove(self)
-        except ValueError:
-            pass
-
-
-def _stop_all_servers():
-    for srv in list(_ACTIVE_SERVERS):
-        srv.stop()
-
-
-atexit.register(_stop_all_servers)
-
-
-def pytest_sessionfinish(session, exitstatus):
-    _stop_all_servers()
-
-
-@pytest.fixture(autouse=True)
-def _reap_leftover_ui_servers():
-    yield
-    _stop_all_servers()
-
-
-@pytest.fixture
-def ui_server(board):
-    srv = _Server(board)
-    try:
-        yield srv
-    finally:
-        srv.stop()
+ui_server = make_ui_server_fixture("t546-probe")
 
 
 def _tickets():
@@ -374,9 +244,9 @@ def test_wait_up_rejects_foreign_server_on_same_port(board, monkeypatch):
                 break
             except (urllib.error.URLError, ConnectionError):
                 time.sleep(0.1)
-        monkeypatch.setattr("test_agent_scoped_chat._free_port", lambda: port)
+        monkeypatch.setattr("ui_server_harness._free_port", lambda: port)
         with pytest.raises(RuntimeError, match="foreign tickets ui"):
-            _Server(board)
+            UiServer(board, probe_prefix="t546-probe")
     finally:
         try:
             os.killpg(os.getpgid(stray.pid), signal.SIGTERM)
