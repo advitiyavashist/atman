@@ -270,16 +270,17 @@ if __name__ == "__main__":
 PY
 chmod +x /tmp/atman-dry-harness.py
 
-tickets join smoke --roles docs \
+tickets join smoke --roles backend \
   --harness custom \
   --cmd '/tmp/atman-dry-harness.py {prompt_file} {cwd} {agent}'
 
 tickets harness check smoke
 # verdict is exit status only. "replied: no OK" is fine for this stub.
-tickets prompt --agent smoke             # worker prompt: _shared + docs role, not backend
+tickets prompt --agent smoke             # worker prompt: _shared + backend role
 
 # One-shot wake (cron form). Needs something pending in this agent's lane.
-tickets create "Dry inject check" --role docs
+# After quickstart the sample tickets are already role=backend — skip create.
+tickets create "Dry inject check" --role backend
 tickets watch --agent smoke --every 5 --max-runs 1 --run-timeout 1 \
   --cwd . \
   --exec '/tmp/atman-dry-harness.py {prompt_file} {cwd} {agent}'
@@ -361,10 +362,12 @@ launcher. Your clone can be newer or dirtier. Always `tickets --version`
 and `readlink -f $(which tickets)` in the session that will spawn workers.
 Watchers put `~/.local/bin` at the **front** of `PATH`.
 
-**Role mismatch.** A worker joined `--roles docs` will not be handed
-`role=backend` tickets, and will not get `.tickets/briefs/roles/backend.md`
-in the prompt. `tickets route` / `tickets next` follow `roles.json` from
-`join`/`spawn`, not the ticket title.
+**Role mismatch.** `tickets quickstart` seeds `role=backend` sample tickets
+and registers you with `--roles backend`. A BYOA seat joined `--roles docs`
+will not be handed those tickets and will not get
+`.tickets/briefs/roles/backend.md` in the prompt. `tickets route` /
+`tickets next` follow `roles.json` from `join`/`spawn`, not the ticket title.
+See [byoa.md](../byoa.md) — register the same lane you intend to work.
 
 **Empty role brief honesty.** No file → no "Role context (…/roles/x.md)"
 block. Inject does not fall back to `roles/backend.md` in the repo. If you

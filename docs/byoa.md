@@ -31,13 +31,19 @@ configuration of its own.
 
 ## Register a harness
 
+Match the lane you want to work. After `tickets quickstart`, the sample tickets
+are `role=backend`, so register `--roles backend` (same as
+[first-session.md](first-session.md) and the worker loop in README.md). A
+`docs` seat is fine once the board has `role=docs` work — see the footgun in
+[onboarding/master-howto.md](onboarding/master-howto.md).
+
 ```sh
-tickets join qwen --roles docs \
+tickets join qwen --roles backend \
   --harness custom --cmd '/tmp/byoa2/echo-agent.sh {prompt_file} {cwd} {agent}'
 ```
 
 ```
-joined as qwen  roles=['docs']  can=-  cost=medium  harness=custom
+joined as qwen  roles=['backend']  can=-  cost=medium  harness=custom
 cmd: /tmp/byoa2/echo-agent.sh {prompt_file} {cwd} {agent}
 board: /tmp/byoa2/repo/.tickets
 ```
@@ -68,7 +74,7 @@ tickets join qwen --roles backend \
 A Python script -- the prompt as a path, so it can read it in pieces:
 
 ```sh
-tickets join scripted --roles docs \
+tickets join scripted --roles backend \
   --harness custom --cmd 'python3 ~/agents/my_agent.py --prompt {prompt_file} --cwd {cwd}'
 ```
 
