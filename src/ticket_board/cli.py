@@ -2824,7 +2824,11 @@ def cmd_context(a, board):
 def cmd_here(a, board):
     """Manually check in: where am I working, on what."""
     owner = whoami(a.owner)
-    rec = checkin(board, owner, None, a.note or "")
+    has_claimed = any(
+        t.get("status") == "claimed" and t.get("owner") == owner
+        for t in load_all(board)
+    )
+    rec = checkin(board, owner, None if has_claimed else "", a.note or "")
     print("%s @ %s" % (owner, rec["worktree"] or rec["cwd"]))
     print("  branch %s@%s%s" % (rec["branch"] or "?", rec["sha"] or "?",
                                "  (%d uncommitted)" % rec["dirty"] if rec["dirty"] else ""))

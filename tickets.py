@@ -1148,6 +1148,31 @@ def _current_ticket(board, owner):
     return review[0]["id"]
 
 
+def _watch_bind_ticket(board, owner):
+    """Ticket id for watch run_start/run_end pairing.
+
+    T-543: after `tickets here` with mine empty clears agent.json ticket=,
+    do not re-bind an IN REVIEW id from a board scan. T-425: when review
+    submit left ticket= on the agent record, idle pulses still pair to it.
+    """
+    for t in load_all(board):
+        if t.get("status") == "claimed" and t.get("owner") == owner:
+            return t["id"]
+    rec = _agent_rec(board, owner) or {}
+    tid = rec.get("ticket") or ""
+    if not tid:
+        return ""
+    try:
+        with open(ticket_path(board, tid)) as f:
+            t = json.load(f)
+    except (IOError, ValueError):
+        return ""
+    if isinstance(t, dict) and t.get("owner") == owner and t.get("status") in (
+            "claimed", "review", "blocked"):
+        return tid
+    return ""
+
+
 def load_agents(board):
     return _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else []
 
@@ -4189,7 +4214,12 @@ def cmd_context(a, board):
 def cmd_here(a, board):
     """Manually check in: where am I working, on what."""
     owner = whoami(a.owner)
-    rec = checkin(board, owner, None, a.note or "")
+    has_claimed = any(
+        t.get("status") == "claimed" and t.get("owner") == owner
+        for t in load_all(board)
+    )
+    # T-543: mine empty -> clear stale IN REVIEW bind; keep cwd/branch/sha.
+    rec = checkin(board, owner, None if has_claimed else "", a.note or "")
     print("%s @ %s" % (owner, rec["worktree"] or rec["cwd"]))
     print("  branch %s@%s%s" % (rec["branch"] or "?", rec["sha"] or "?",
                                "  (%d uncommitted)" % rec["dirty"] if rec["dirty"] else ""))
@@ -7164,9 +7194,9 @@ def cmd_watch(a, board):
                 # are message text and ticket titles, and neither belongs in
                 # the trajectory log (T-311 privacy rule).
                 run_started = now()
-                # After T-439 drop, bind claimed|review via _current_ticket — do
-                # not fall back to raw agent.json ticket= (that rebinds stale ids).
-                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _current_ticket(board, owner) or None
+                # After T-439 drop, bind via holding or agent.json ticket= left
+                # by review submit — not a board scan that ignores here-empty.
+                held_ticket = (p.get("holding") or [""])[0].split(" ")[0] or _watch_bind_ticket(board, owner) or None
                 # T-425 FLAG: writes in the child stamp this id; aggregator
                 # credits THAT run_id, not a time window (two seats, one ticket).
                 run_id = "r-%s-%d-%s" % (
