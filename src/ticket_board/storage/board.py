@@ -22,12 +22,14 @@ import hashlib
 import json
 import threading
 
+from .. import worktrees
 from . import ids
 from .db import connect, read_txn, write_txn
 from .errors import (
     CapacityExhausted,
     DependencyCycle,
     DependencyUnmet,
+    ForbiddenScope,
     InvalidReviewEvidence,
     InvalidStateTransition,
     MalformedRequest,
@@ -286,6 +288,149 @@ class BoardStore(MessagingMixin):
                         subject_type="agent", subject_id=aid,
                         summary="registered agent {}".format(name))
         return self.get_agent(aid)
+
+    # ---------------------------------------------------------- T-192 presets
+
+    def set_agent_preset(self, project_id, agent_id, preset, *,
+                         permission_policy, runtime_profile,
+                         allowlisted_worktree=None, at=None):
+        """Record the profile an OPERATOR approved for this agent.
+
+        Written once at enrolment, by the operator-scoped route. It is the
+        authority the runner registration is later checked against, which is
+        why it lives in its own row rather than on the mutable `agents` record
+        an agent's own check-ins keep rewriting.
+        """
+        with write_txn(self.conn) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO agent_presets (agent_id, project_id, preset,"
+                " permission_policy, allowlisted_worktree, runtime_profile, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (agent_id, project_id, preset, permission_policy,
+                 allowlisted_worktree, runtime_profile, at or ids.now()),
+            )
+            self._audit(conn, project_id, SYSTEM_ACTOR, "agent.preset",
+                        subject_type="agent", subject_id=agent_id,
+                        summary="approved {} preset ({})".format(
+                            preset, permission_policy))
+        return self.get_agent_preset(agent_id, project_id)
+
+    def get_agent_preset(self, agent_id, project_id=None):
+        """The approved profile, or None for an agent enrolled before T-192.
+
+        None is not "no restrictions" -- every caller has to decide what an
+        unknown profile means, and the runner route treats it as the default
+        preset rather than as permission to do anything.
+        """
+        with read_txn(self.conn) as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_presets WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        if project_id is not None and row["project_id"] != project_id:
+            raise ForbiddenScope(project_id, agent_id)
+        return {
+            "agent_id": row["agent_id"],
+            "project_id": row["project_id"],
+            "preset": row["preset"],
+            "permission_policy": row["permission_policy"],
+            "allowlisted_worktree": row["allowlisted_worktree"],
+            "runtime_profile": row["runtime_profile"],
+            "created_at": row["created_at"],
+        }
+
+    def find_agent_by_name(self, project_id, name):
+        """Names are UNIQUE(project_id, name); this is the read side of that.
+
+        Used so the route can report a duplicate name as a duplicate name
+        rather than letting a later check answer a different question about
+        the same request.
+        """
+        with read_txn(self.conn) as conn:
+            row = conn.execute(
+                "SELECT id, name, state FROM agents WHERE project_id = ? AND name = ?",
+                (project_id, name),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def find_worktree_occupant(self, project_id, worktree, *, exclude_agent_id=None):
+        """The agent already occupying `worktree`, or None.
+
+        Scans rather than indexes on purpose: the question is containment, not
+        equality, so no index could answer it and the agent count per project
+        is small (tens). Revoked agents are skipped, which is what gives an
+        operator a way to free a checkout -- see the T-192 review notes.
+        """
+        needle = worktrees.normalize(worktree)
+        if not needle:
+            return None
+        with read_txn(self.conn) as conn:
+            rows = conn.execute(
+                "SELECT id, name, state, worktree FROM agents"
+                " WHERE project_id = ? AND worktree IS NOT NULL AND worktree != ''",
+                (project_id,),
+            ).fetchall()
+        for row in rows:
+            if exclude_agent_id is not None and row["id"] == exclude_agent_id:
+                continue
+            if row["state"] == "revoked":
+                continue
+            if worktrees.overlaps(needle, row["worktree"]):
+                return {"id": row["id"], "name": row["name"],
+                        "state": row["state"], "worktree": row["worktree"]}
+        return None
+
+    def find_worktree_claimant(self, project_id, worktree, *, exclude_agent_id=None,
+                               at=None):
+        """Who holds `worktree` -- by ENROLMENT or by a live runner lease.
+
+        T-485/A1. `find_worktree_occupant` scans `agents.worktree`, which is
+        the OPERATOR's field: it is only ever written by the enrolment route.
+        That is the right authority for "may this agent be enrolled here", but
+        it is blind to the other door. When an operator omits `worktree` (it is
+        OPTIONAL in the frozen CreateEnrollmentRequest) the agent's row stays
+        NULL, and the directory the runner asks for at registration lands on
+        the RUNNER LEASE instead. So a checkout claimed that way was invisible
+        to every subsequent check, and a second agent could claim it by asking.
+
+        Live means the lease has not expired and the agent is not revoked --
+        the same "revoking frees the checkout" lever `find_worktree_occupant`
+        gives an operator, since there is no delete-agent route. An expired
+        lease holds nothing: the runner is gone and the directory is free.
+
+        Deliberately a SEPARATE method rather than a widening of
+        `find_worktree_occupant`. The enrolment route's question is about what
+        an operator approved and should not start refusing on what a runner
+        asked for; only the registration path needs the union.
+        """
+        occupant = self.find_worktree_occupant(
+            project_id, worktree, exclude_agent_id=exclude_agent_id)
+        if occupant is not None:
+            return occupant
+        needle = worktrees.normalize(worktree)
+        if not needle:
+            return None
+        now = at or ids.now()
+        with read_txn(self.conn) as conn:
+            rows = conn.execute(
+                "SELECT l.agent_id AS id, a.name AS name, a.state AS state,"
+                " l.allowlisted_worktree AS worktree"
+                " FROM runner_leases l JOIN agents a ON a.id = l.agent_id"
+                " WHERE l.project_id = ? AND l.expires_at > ?"
+                " AND l.allowlisted_worktree IS NOT NULL"
+                " AND l.allowlisted_worktree != ''",
+                (project_id, now),
+            ).fetchall()
+        for row in rows:
+            if exclude_agent_id is not None and row["id"] == exclude_agent_id:
+                continue
+            if row["state"] == "revoked":
+                continue
+            if worktrees.overlaps(needle, row["worktree"]):
+                return {"id": row["id"], "name": row["name"],
+                        "state": row["state"], "worktree": row["worktree"]}
+        return None
 
     def get_agent(self, agent_id, project_id=None):
         """`project_id` is optional so trusted internal callers -- callers

@@ -1336,7 +1336,8 @@ class MessagingMixin:
     def acquire_runner_lease(self, project_id, runner_id, agent_id, expires_at, *,
                              allowlisted_worktree, runtime_profile="claude-code-default",
                              permission_policy="prompt", expected_epoch=None,
-                             budget=None, at=None, request_id=None):
+                             budget=None, at=None, request_id=None,
+                             worktree_source=None):
         _assert_member(permission_policy, {"prompt", "allowlist", "deny_all"},
                        "permission_policy")
         body = {
@@ -1397,9 +1398,17 @@ class MessagingMixin:
                 )
             else:
                 raise RunAlreadyActive(agent_id, row["runner_id"], row["epoch"])
+            # T-485/A1: `worktree_source` says whether the allowlisted
+            # directory on this lease is one an OPERATOR approved at enrolment
+            # or one the RUNNER asked for and was not refused. It is a label,
+            # not a permission -- it changes nothing that is stored and is
+            # deliberately kept out of `body`, which is the replay dedupe key.
+            summary = "runner lease acquired"
+            if worktree_source is not None:
+                summary += " (worktree {}-supplied)".format(worktree_source)
             self._audit(conn, project_id, self.SYSTEM_ACTOR, "runner_lease.acquire",
                         subject_type="run", subject_id=agent_id,
-                        request_id=request_id, summary="runner lease acquired")
+                        request_id=request_id, summary=summary)
             result = self._serialize_runner_lease(
                 conn.execute(
                     "SELECT * FROM runner_leases WHERE agent_id = ?", (agent_id,)

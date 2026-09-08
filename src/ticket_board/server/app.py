@@ -29,6 +29,7 @@ import sqlite3
 import time
 import traceback
 
+from .. import presets, worktrees
 from ..storage import BoardStore, ids
 from ..storage.db import write_txn
 from . import hooks, master, validate, views
@@ -811,6 +812,52 @@ class BoardServer:
         capabilities = validate.string_list(body, "capabilities", max_length=40)
         worktree = validate.text(body, "worktree", max_length=300, required=False)
 
+        # T-192: the operator's `role` selects an ENFORCED preset. Resolved
+        # before the agent row exists so a preset that cannot be honoured
+        # fails the request instead of leaving a half-created agent behind.
+        #
+        # T-485/A2: a role that NEARLY names a preset is refused here rather
+        # than falling through to the default. `Reviewer` now resolves to the
+        # reviewer preset (case is a typo, not a different role); `reviewers`
+        # is refused, because defaulting it would hand the operator's intended
+        # deny_all reviewer an `allowlist` writer instead, silently.
+        try:
+            preset = presets.resolve(role)
+        except presets.AmbiguousRole as ambiguous:
+            raise MalformedRequest(
+                "role={} is not a permission preset, but it is close enough to"
+                " {} that defaulting it could grant more than you meant. Use"
+                " {} exactly, or a role name that is not a near miss of it."
+                .format(ambiguous.role, ambiguous.preset, ambiguous.preset),
+                {"rejected_fields": ["role"]},
+            )
+
+        # A name collision is reported AS a name collision. The worktree check
+        # below would otherwise fire first on a retried create -- same name,
+        # same worktree -- and answer "somebody else is working there", which
+        # is both confusing and untrue when the occupant is the very agent
+        # this request already created.
+        if self.store.find_agent_by_name(ctx.project_id, name) is not None:
+            raise MalformedRequest(
+                "An agent named {} already exists in this project.".format(name),
+                {"rejected_fields": ["agent_name"]},
+            )
+
+        # T-192 (19:15Z acceptance): the live-checkout registry. Identity plus
+        # path containment cannot tell "a clone someone is working in" from
+        # "an ordinary project the operator wants to enrol"; the board knows
+        # which checkouts are occupied and that is the signal used here.
+        # Checked BEFORE create_agent so a refusal creates nothing.
+        if worktree:
+            occupant = self.store.find_worktree_occupant(ctx.project_id, worktree)
+            if occupant is not None:
+                raise MalformedRequest(
+                    "Agent {} is already working in {}; enrol this agent in a"
+                    " directory no other agent occupies.".format(
+                        occupant["name"], occupant["worktree"]),
+                    {"rejected_fields": ["worktree"]},
+                )
+
         try:
             agent = self.store.create_agent(
                 ctx.project_id, name, role=role, capabilities=capabilities,
@@ -829,6 +876,17 @@ class BoardServer:
                 "UPDATE agents SET worktree = ? WHERE id = ?", (worktree, agent["id"])
             )
             agent = self.store.get_agent(agent["id"])
+
+        # The approved profile is recorded from the OPERATOR's request. It is
+        # what register_runner is later checked against, so it must be written
+        # before any credential exists for this agent -- a runner must never be
+        # able to register in the window before its own limits are on disk.
+        self.store.set_agent_preset(
+            ctx.project_id, agent["id"], preset,
+            permission_policy=presets.policy_for(preset),
+            runtime_profile=presets.profile_for(preset),
+            allowlisted_worktree=worktree or None,
+        )
 
         enrollment = self.credentials.create_enrollment(ctx.project_id, agent["id"])
         return Response(201, {
@@ -1063,17 +1121,148 @@ class BoardServer:
         expected_epoch = None
         if body.get("expected_epoch") is not None:
             expected_epoch = validate.integer(body, "expected_epoch", minimum=0)
+
+        requested_worktree = validate.text(body, "allowlisted_worktree",
+                                           max_length=300)
+        requested_policy = None
+        if body.get("permission_policy") is not None:
+            requested_policy = validate.enum(
+                body, "permission_policy", ("prompt", "allowlist", "deny_all"))
+
+        # T-192, AND THIS IS THE POINT OF THE TICKET. Before this, both of the
+        # fields below were taken from the runner's own request body, with
+        # permission_policy DEFAULTING TO `prompt` -- the broadest value. The
+        # runner is the agent, so an agent could declare its own permission
+        # policy and allowlist any directory it liked, including another
+        # agent's checkout. The frozen contract's own description of this
+        # field says "nothing here grants an agent broader permissions than
+        # the operator configured"; the code did not hold that up.
+        #
+        # The authority is the preset an operator approved at enrolment. An
+        # agent enrolled before T-192 has no row, and that is read as the
+        # default preset rather than as permission to do anything.
+        approved = self.store.get_agent_preset(ctx.principal.agent_id,
+                                               ctx.project_id)
+        if approved is None:
+            preset = presets.DEFAULT_PRESET
+            approved = {
+                "preset": preset,
+                "permission_policy": presets.policy_for(preset),
+                "runtime_profile": presets.profile_for(preset),
+                "allowlisted_worktree": None,
+            }
+
+        # THE RULE IS MIN(requested, approved), NOT "approved wins".
+        #
+        # A runner asking for MORE than the operator approved is REFUSED, not
+        # silently clamped: quietly narrowing would leave a supervisor
+        # believing it holds permissions it does not, and the mismatch would
+        # surface later as an unexplained denial deep in a run. "Diagnose
+        # inherited broad grants" means saying so here, at registration.
+        #
+        # A runner asking for LESS keeps its own narrower choice. Overriding
+        # that with the preset would mean this route WIDENS a supervisor that
+        # voluntarily gave up permissions -- the exact opposite of the job,
+        # and caught by test_the_permission_policy_comes_from_the_lease_not_
+        # the_supervisor rather than reasoned about after the fact.
+        #
+        # An ABSENT field inherits the approved policy. The old default here
+        # was `prompt`, the broadest value, which is how the escalation was
+        # reachable without asking for anything at all.
+        if requested_policy is None:
+            effective_policy = approved["permission_policy"]
+        elif presets.is_broader(requested_policy, approved["permission_policy"]):
+            raise ForbiddenScope(
+                "The {} preset approved for this agent allows"
+                " permission_policy={}; this runner asked for {}. Re-enrol the"
+                " agent under a different role to change what it may hold.".format(
+                    approved["preset"], approved["permission_policy"],
+                    requested_policy))
+        else:
+            effective_policy = requested_policy
+
+        # An allowlisted worktree the operator did not approve is the same
+        # escalation wearing a different hat: it is the directory the runtime
+        # is permitted to touch.
+        # Containment, not overlap. `overlaps` is symmetric -- correct for
+        # "is this checkout free?", wrong here: a runner allowlisted for
+        # /w/agent-1 that asks for / overlaps its approved path and would pass
+        # a symmetric test while asking for strictly more. It must be INSIDE.
+        #
+        # T-485/A3: the comparison also refuses a RELATIVE requested path
+        # against an absolute approved one. `_segments` used to drop the
+        # leading empty part, so `/w/a` and `w/a` compared equal and a runner
+        # approved for `/w/a` could register `w/a/src` -- which the launcher
+        # then hands to the child as a `cwd` resolved against the SUPERVISOR's
+        # working directory, i.e. a directory that was never inside the
+        # approved one. Cheaper than the symlink hole and it needs no
+        # filesystem access. `refusal_reason` is used rather than a bare
+        # `contains` so the 403 says which of the reasons it was.
+        allowed_worktree = approved["allowlisted_worktree"]
+        if allowed_worktree:
+            reason = worktrees.refusal_reason(allowed_worktree,
+                                              requested_worktree)
+            if reason is not None:
+                raise ForbiddenScope(
+                    "This agent is allowlisted for {}; the requested worktree"
+                    " {} {}.".format(allowed_worktree, requested_worktree,
+                                     reason))
+        else:
+            # T-485/A1: THE OTHER DOOR. `worktree` is OPTIONAL in the frozen
+            # CreateEnrollmentRequest, so when the operator omits it there is
+            # no approved directory and the branch above used to be skipped
+            # ENTIRELY -- not "only the policy is enforced", but the runner's
+            # own string honoured and recorded as an allowlist. cos-opus
+            # executed it: a directory the enrolment registry had refused to a
+            # second agent thirty seconds earlier was handed to that agent
+            # through this route.
+            #
+            # There is nowhere in the frozen RunnerLease to say "this came
+            # from the runner, not the operator" -- adding a field would be a
+            # contract change -- so the value still lands in
+            # `allowlisted_worktree` and the shape is untouched. What changes
+            # is that it must now survive the same two checks the enrolment
+            # route applies before it is trusted: it must name a real absolute
+            # directory, and it must not be a checkout somebody else holds.
+            # The provenance is recorded where it does fit, the audit trail.
+            reason = worktrees.unusable_reason(requested_worktree)
+            if reason is not None:
+                raise ForbiddenScope(
+                    "No operator-approved worktree exists for this agent, so"
+                    " the directory this runner asked for is the only one on"
+                    " offer, and it {}. Re-enrol the agent with a `worktree`,"
+                    " or register an absolute path.".format(reason))
+            claimant = self.store.find_worktree_claimant(
+                ctx.project_id, requested_worktree,
+                exclude_agent_id=ctx.principal.agent_id)
+            if claimant is not None:
+                raise ForbiddenScope(
+                    "Agent {} already holds {}; this agent has no"
+                    " operator-approved worktree, so it may not claim a"
+                    " checkout another agent occupies.".format(
+                        claimant["name"], claimant["worktree"]))
+
         lease = self.store.acquire_runner_lease(
             ctx.project_id, runner_id, ctx.principal.agent_id,
             in_seconds(self.runner_lease_seconds),
-            allowlisted_worktree=validate.text(body, "allowlisted_worktree",
-                                               max_length=300),
+            # The approved worktree wins when there is one. The runner may
+            # narrow within it (a subdirectory is still contained), but the
+            # value that lands on the lease is never wider than the operator's.
+            # Verified above to sit inside the operator's directory when there
+            # is one, so a runner may narrow to a subdirectory but never widen.
+            allowlisted_worktree=requested_worktree,
+            # T-485/A1. The frozen lease shape cannot carry provenance, so it
+            # goes in the audit summary: a reader of the trail can tell a
+            # directory an operator approved from one a runner asked for and
+            # was merely not refused.
+            worktree_source=("operator" if allowed_worktree else "runner"),
+            # runtime_profile is a label, not a permission, so the runner's
+            # own value is kept when it sends one; the preset only supplies a
+            # default. Nothing is enforced on it and nothing should be.
             runtime_profile=validate.text(body, "runtime_profile", max_length=60,
                                           required=False,
-                                          default="claude-code-default"),
-            permission_policy=validate.enum(
-                body, "permission_policy", ("prompt", "allowlist", "deny_all"),
-                required=False, default="prompt"),
+                                          default=approved["runtime_profile"]),
+            permission_policy=effective_policy,
             expected_epoch=expected_epoch,
             request_id=request_id,
         )

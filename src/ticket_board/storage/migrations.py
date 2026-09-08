@@ -179,6 +179,19 @@ CREATE TABLE IF NOT EXISTS runner_leases (
 CREATE INDEX IF NOT EXISTS idx_runner_leases_project
     ON runner_leases(project_id, expires_at);
 
+CREATE TABLE IF NOT EXISTS agent_presets (
+    agent_id             TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    project_id           TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    preset               TEXT NOT NULL CHECK (preset IN ('worker', 'reviewer', 'master')),
+    permission_policy    TEXT NOT NULL
+                         CHECK (permission_policy IN ('prompt', 'allowlist', 'deny_all')),
+    allowlisted_worktree TEXT,
+    runtime_profile      TEXT NOT NULL,
+    created_at           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_presets_project
+    ON agent_presets(project_id);
+
 CREATE TRIGGER IF NOT EXISTS messages_body_immutable
 BEFORE UPDATE OF body, author, channel_id, causation_id ON messages
 BEGIN

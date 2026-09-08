@@ -283,6 +283,26 @@ number is the highest existing plus one.
   anywhere in this lane.** The concurrency evidence is an eight-way HTTP claim
   race on one machine that yields exactly one owner; that is a correctness claim,
   not a throughput one.
+- **Worktree containment is lexical, so a symlink defeats it (T-192).** The
+  paths compared are operator-supplied strings for directories the server does
+  not own and which frequently do not exist yet — the isolated worktree is
+  about to be created. Resolving them would mean touching the filesystem on a
+  caller's behalf and would still answer the wrong question for a path that is
+  not there. Two different paths naming one directory through a symlink are not
+  detected. Closing this needs a resolver running where the checkouts actually
+  live, which is the adapter, not the server.
+- **`POST /enrollments` is not idempotent on `request_id` (T-192).** A retry is
+  a 400 naming the duplicate agent name — the same as before T-192, not a
+  regression, but the ticket asked for idempotent create and this is not it.
+  True replay would have to return the enrollment `code` a second time, and the
+  contract says that code is "returned exactly once here and never again", so
+  making this route idempotent is a contract question rather than an
+  implementation one.
+- **A preset is recorded at enrolment and never updated (T-192).** Changing what
+  an agent may hold means enrolling a new identity, because same-identity
+  re-enrolment is T-405 and does not exist yet. An agent enrolled before T-192
+  has no preset row at all and is read as the default `worker` preset — never as
+  permission to do anything.
 - **Loopback only.** `serve()` refuses a non-loopback bind unless the caller
   passes `allow_remote=True`, because this build has no remote operator
   authentication to bind to. There is no TLS termination here.
@@ -374,3 +394,172 @@ spent its code and cannot be made retryable, but it leaves as a contract-shaped
 400 naming the field rather than an unhandled 500.
 
 Reproduce: plant any one of these by hand and run `pytest tests/server -q`.
+
+## Permission presets: who decides what an agent may hold (T-192)
+
+Before T-192, `POST /runners/register` read `permission_policy` and
+`allowlisted_worktree` straight out of the runner's own request body, and
+defaulted the policy to `prompt` — the broadest value in the enum. The runner
+*is* the agent, so an agent chose its own permissions and could allowlist any
+directory, including another agent's checkout. The frozen contract's own
+description of that field says "nothing here grants an agent broader
+permissions than the operator configured"; the code did not hold it up.
+
+**No contract change was needed to fix it**, and that is worth stating plainly
+because "presets" sounds like a new schema. There is no `PermissionPreset` in
+the T-178 contract and no preset field on `CreateEnrollmentRequest` — but the
+enforcement vocabulary is already frozen under other names. `RunnerLease` and
+`RegisterRunnerRequest` carry `permission_policy`, `allowlisted_worktree`,
+`runtime_profile`, `concurrency` and `budget`; `CreateEnrollmentRequest`
+carries `role`. A preset is a server-side mapping from the operator's `role`
+onto those fields. No new route, no new field, and no third credential — the
+T-224 ruling is untouched: an operator session creates, an agent token
+registers.
+
+### The rule is min(requested, approved)
+
+| runner asks for | approved preset allows | result |
+|---|---|---|
+| nothing | anything | the approved policy is used |
+| narrower (`deny_all` under `allowlist`) | `allowlist` | the runner's narrower choice is kept |
+| equal | equal | used |
+| broader (`prompt` under `allowlist`) | `allowlist` | **403 `forbidden_scope`**, naming both values |
+
+Broader is refused rather than silently clamped. Quietly narrowing would leave
+a supervisor believing it holds permissions it does not, and the mismatch
+would surface later as an unexplained denial deep inside a run.
+
+Narrower is *kept*, not overridden. An earlier draft of this change forced the
+approved policy onto every lease, which meant the board **widened** a
+supervisor that had voluntarily dropped to `deny_all`. `tests/runners/
+test_supervisor.py::test_the_permission_policy_comes_from_the_lease_not_the_supervisor`
+is what caught it.
+
+`RunnerClient.register` and `Supervisor` no longer default `permission_policy`
+to `prompt`; they send nothing unless a caller chooses a value. That default
+was the actual escalation path — nobody had to *ask* for the broadest policy,
+every registration declared it.
+
+### Preset table
+
+| role (exact match) | permission_policy | notes |
+|---|---|---|
+| `worker` | `allowlist` | writes, confined to its allowlisted worktree |
+| `reviewer` | `deny_all` | reads and judges; cannot "fix" what it assesses |
+| `master` | `allowlist` | routing authority is not runtime privilege |
+| anything else | `allowlist` (default `worker`) | every live board role lands here |
+
+The match is **exact, not a substring test**. `role` is free-form, and sniffing
+it would mean a role named `code-review-tooling` silently acquiring reviewer
+permissions. No preset grants `prompt`: it is unbounded-with-a-human, and an
+unattended overnight agent has nobody watching.
+
+### Worktree confinement is directional
+
+The registry check ("is this checkout free?") is **symmetric** — a parent and a
+child of an occupied path both collide, because an agent working in a parent is
+working in every child. The runner check ("may this runner run here?") is
+**directional** — the requested path must be *inside* the approved one. A
+symmetric test there would let a runner allowlisted for `/w/agent-1` ask for
+`/` and pass, because a parent does overlap its child.
+
+Containment is lexical and compares path *segments*, so `/w/agent` and
+`/w/agent-2` are correctly different directories. It does not resolve symlinks
+— see Honest limits.
+
+### The live-checkout registry
+
+`POST /enrollments` refuses a worktree that is, contains, or sits inside a
+checkout another non-revoked agent occupies. This is the T-192 19:15Z
+acceptance case: the adapter's git-identity + containment guard allows a
+worktree of a *clone* of a board checkout, and no git-identity test can fix it,
+because a clone is genuinely a distinct repository and enrolling ordinary
+clones is the feature. Occupancy is a signal only the board has.
+
+Checked **before** `create_agent`, so a refusal creates nothing. A duplicate
+name is checked before *that*, so a retried create is reported as the name
+collision it is rather than as "somebody else is working in your worktree" —
+where the somebody else is the agent's own row.
+
+Revoking an agent's session lease sets `agents.state = 'revoked'` and releases
+its checkout. That is the only way to free a directory, since there is no
+delete-agent route.
+
+## T-485: the three T-192 residuals cos-opus executed
+
+T-192 shipped an enforced-preset floor and cos-opus's verdict pass found three
+ways through it. All three are closed here. None needed a contract change: no
+new route, no new field on any frozen schema, no new credential.
+
+**A3 — relative paths passed the containment floor.** `worktrees._segments`
+drops empty parts, so `/w/a3` and `w/a3` compared equal and a runner
+allowlisted for the absolute directory could register the relative one.
+`ClaudeLauncher.start` does `Path(spec.worktree)` and hands it to the child as
+`cwd`, so a relative value resolves against the SUPERVISOR process's working
+directory — a directory nobody approved. This is cheaper than the symlink
+limit T-192 declared: it needs no filesystem access and the runner supplies
+the string. `contains` now also compares absoluteness, and refuses a `..`
+segment that `normpath` could not fold away. Both are narrowings.
+
+`overlaps` deliberately keeps the loose comparison. It answers "is this
+checkout free?", where the loose answer is the REFUSING one; making the two
+functions consistent would look like a cleanup and would turn that refusal
+into a grant. Pinned by a test that asserts the asymmetry on purpose.
+
+**A2 — a near-miss role name silently widened.** `resolve()` is exact-match,
+which is right, but the fallback for a miss was `DEFAULT_PRESET` = `worker`,
+which is BROADER than `reviewer`. `Reviewer`, `REVIEWER` and `reviewer ` all
+fell through and were GRANTED `allowlist` where `reviewer` is refused
+`deny_all`. The lookup key is now stripped and casefolded (a capitalisation
+slip is the same role typed by a human), and a role that still misses but is a
+prefix relative of a preset — `reviewers`, `review`, `worker-2` — is REFUSED
+with a 400 naming the preset it nearly matched, never resolved to the default.
+
+This is not the substring heuristic T-192 argued against, inverted or
+otherwise: that one GRANTS on a fuzzy match, this one REFUSES on one, and a
+compound role like `code-review-tooling` or `backend-reviewer-support` still
+gets the default because it is nobody's prefix. The cost, stated: a role
+genuinely named `worker-2` is now refused and has to be renamed. That refusal
+is loud, names the collision and changes no permissions.
+
+**A1 — the other door.** `worktree` is OPTIONAL in the frozen
+`CreateEnrollmentRequest`. When an operator omitted it, `approved
+["allowlisted_worktree"]` was None and the containment branch was skipped
+ENTIRELY — not "only the policy is enforced", which is how T-192's notes
+phrased it, but the runner's own string honoured and recorded as an allowlist.
+cos-opus executed the consequence: a directory the enrolment registry had just
+refused to a second agent was handed to that agent through this route.
+
+The frozen `RunnerLease` has one worktree field and nowhere to say where the
+value came from, so the response shape is untouched and the value still lands
+in `allowlisted_worktree`. What changed is that it must now survive the same
+checks the enrolment route applies before it is trusted: an absolute path with
+no `..`, and no directory another agent already holds. Provenance goes to the
+audit trail, which is where a label with no permission attached belongs —
+`runner_lease.acquire` now records `worktree operator-supplied` or
+`worktree runner-supplied`.
+
+`find_worktree_claimant` scans live runner leases as well as `agents.worktree`,
+and this is scope beyond the literal ticket, deliberately. The enrolment
+registry only sees `agents.worktree`, which is written by the operator route
+alone; two agents that both enrol WITHOUT a worktree — the exact configuration
+A1 is about — are invisible to it, so the agents-only check would close half a
+door. Live means the lease has not expired and the agent is not revoked: a
+crashed supervisor must not leak a directory forever, and revocation stays the
+operator's lever, the same one T-192's judgement call (c) established.
+
+It is a SEPARATE method rather than a widening of `find_worktree_occupant`,
+because the enrolment route's question is about what an operator approved and
+must not start refusing on what some runner asked for. For the same reason the
+claimant check runs only on the unapproved path: when an operator HAS approved
+a directory, that approval is the authority and a stale runner lease must not
+override it.
+
+### Still open after this
+
+Symlinks. Unchanged from T-192 and unchanged by anything here: two different
+absolute paths can name one directory and this comparison will not see it.
+Closing it needs a resolver where the checkouts actually live.
+
+`POST /enrollments` is still not idempotent on `request_id` (T-474), and
+same-identity re-enrol is still T-405. Neither is touched.

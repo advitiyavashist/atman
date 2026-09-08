@@ -119,18 +119,32 @@ class RunnerClient:
     # ---------------------------------------------------------------- routes
 
     def register(self, runner_id: str, agent_id: str, worktree: str, *,
-                 runtime_profile: str = "claude-code-default",
-                 permission_policy: str = "prompt",
+                 runtime_profile: Optional[str] = None,
+                 permission_policy: Optional[str] = None,
                  expected_epoch: Optional[int] = None,
                  rid: Optional[str] = None) -> Dict[str, Any]:
+        """Take the runner lease.
+
+        T-192: `permission_policy` and `runtime_profile` DEFAULT TO NOT BEING
+        SENT AT ALL. They used to default to `"prompt"` and
+        `"claude-code-default"`, so every supervisor declared the broadest
+        permission policy on every registration without anyone choosing it --
+        an inherited broad grant in the most literal sense, and the board
+        honoured it. Sending nothing means "give me what the operator approved
+        for this agent". An explicit value is still allowed and is still
+        enforced server-side: it may narrow the approved policy, never widen
+        it (403 `forbidden_scope`).
+        """
         body: Dict[str, Any] = {
             "request_id": rid or request_id(),
             "runner_id": runner_id,
             "agent_id": agent_id,
             "allowlisted_worktree": worktree,
-            "runtime_profile": runtime_profile,
-            "permission_policy": permission_policy,
         }
+        if runtime_profile is not None:
+            body["runtime_profile"] = runtime_profile
+        if permission_policy is not None:
+            body["permission_policy"] = permission_policy
         if expected_epoch is not None:
             body["expected_epoch"] = expected_epoch
         return self._ok(*self._call("POST", "/runners/register", body=body))

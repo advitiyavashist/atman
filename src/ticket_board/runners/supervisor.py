@@ -75,8 +75,11 @@ class Supervisor:
     def __init__(self, client: RunnerClient, *, agent_id: str, session_id: str,
                  worktree: Path, state_dir: Path,
                  launcher=None, prompt_builder=None,
-                 permission_policy: str = "prompt",
-                 runtime_profile: str = "claude-code-default",
+                 # T-192: None means "whatever the operator approved for this
+                 # agent". The old defaults declared the broadest policy on
+                 # every registration without anyone deciding to.
+                 permission_policy: Optional[str] = None,
+                 runtime_profile: Optional[str] = None,
                  budget: Optional[Dict[str, int]] = None,
                  clock: Callable[[], float] = time.monotonic):
         self.client = client
