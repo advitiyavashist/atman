@@ -5,11 +5,66 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-from test_t276 import _Server
-from test_wakeup import TOOL, board, run  # noqa: F401
+_TESTS = Path(__file__).resolve().parent
+if str(_TESTS) not in sys.path:
+    sys.path.insert(0, str(_TESTS))
+
+from test_wakeup import TOOL, board, run  # noqa: E402,F401
+
+
+def _wait_up(port, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen("http://127.0.0.1:%d/board.json" % port, timeout=1)
+            return True
+        except (urllib.error.URLError, ConnectionError):
+            time.sleep(0.1)
+    return False
+
+
+class _Server:
+    def __init__(self, board, port):
+        self.port = port
+        env = dict(os.environ, TICKETS_DIR=str(board))
+        self.proc = subprocess.Popen(
+            [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        if not _wait_up(port):
+            self.stop()
+            raise RuntimeError("tickets ui never came up")
+
+    def get(self, path="/board.json", raw=False):
+        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.port, path), timeout=5) as r:
+            body = r.read()
+            return body if raw else json.loads(body)
+
+    def post(self, path, payload):
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d%s" % (self.port, path),
+            data=json.dumps(payload).encode(), method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
 
 
 def _tickets():
@@ -118,7 +173,7 @@ def test_ui_html_has_seat_thread_ia_without_football():
     for marker in (
         'id="chatRail"', 'id="chatHead"', "openSeatChat", "involvesSeat",
         "isBoardBroadcast", "visibleMessages", "seat_threads",
-        "data-seat-chat", "data-testid=\"thread-board\"",
+        "data-seat-chat", "it.id||'board'",
         "class=\"intervene\"", ">Msg<", ">Work<",
         "tickets msg --to", "Not a shared-memory brain",
         "Channel-wide", "1:1 with this BYOA seat",
