@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from test_wakeup import board, pending, run, stop  # noqa: F401
@@ -91,11 +92,25 @@ def test_task_flag_and_task_prefix_wake(board):
     rc, p = pending(board, "bob")
     assert rc == 0 and p.get("pending") is True, p
     assert p.get("task_messages") and p.get("wake_reason") == "task_messages"
+    recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    task_rec = next(m for m in recs if "please review the diff" in m.get("text", ""))
+    assert task_rec.get("kind") == "task"
+    assert task_rec.get("task") is not True
     run(board, "inbox", agent="bob")
     time.sleep(1.1)
     run(board, "msg", "task: take T-001", "--to", "bob", agent="alice")
     rc, p = pending(board, "bob")
     assert rc == 0 and p.get("task_messages"), p
+    (board / "messages.jsonl").write_text(
+        (board / "messages.jsonl").read_text()
+        + json.dumps({
+            "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "from": "alice", "to": "bob", "re": "", "text": "legacy task flag",
+            "task": True,
+        }) + "\n")
+    rc, p = pending(board, "bob")
+    assert rc == 0 and p.get("task_messages"), p
+    assert any("legacy task flag" in t for t in p["task_messages"])
 
 
 def test_stuck_held_and_ready_assigned_still_wake(board):
@@ -169,8 +184,22 @@ def test_master_and_cos_prompts_are_one_batch(board):
     assert "Do not invent" in mp or "ask for one" in mp.lower()
     cp = run(board, "prompt", "--cos", "--agent", "cos-x").stdout
     assert "CHIEF OF STAFF" in cp
-    assert "Do not invent objectives" in cp
+    assert "Do not invent" in cp or "do not ask for, set, replace, or invent" in cp.lower()
     assert "one bounded" in cp.lower() or "ONE concrete" in cp
+    low = cp.lower()
+    assert "ask for one" not in low
+    assert "tickets objective" not in low
+    assert "--exit" not in cp
+    assert "set, replace, or invent" in low
+
+
+def test_stop_condition_names_unattended_watchers_only(board):
+    run(board, "join", "bob", "--roles", "backend")
+    p = json.loads(run(board, "pending", "--agent", "bob", "--json").stdout)
+    sc = (p.get("stop_condition") or "").lower()
+    assert "unattended" in sc and "watch" in sc
+    assert "one model run" in sc
+    assert "interactive" in sc and "codex" in sc and "claude" in sc
 
 
 # ---- 4. watchers: default one model run; persist is explicit --------------
@@ -222,7 +251,8 @@ def test_ui_snapshot_exposes_objective_gates(board):
     assert obj.get("state") == "active"
     assert obj.get("exit_criterion") == "demo recorded"
     assert "task" in (obj.get("wake_gates") or "").lower()
-    assert "one model run" in (obj.get("stop_condition") or "").lower()
+    sc = (obj.get("stop_condition") or "").lower()
+    assert "one model run" in sc and "unattended" in sc
     html = TOOL.read_text(encoding="utf-8")
     assert 'id="promiseStripLine"' in html
     assert "wakeGates" in html or "exit_criterion" in html or "objective.state" in html

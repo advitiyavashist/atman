@@ -713,7 +713,10 @@ def load_objective(board):
 
 
 OBJECTIVE_STATES = ("active", "achieved", "blocked", "replaced")
-STOP_CONDITION = "one model run this session; restart watch to continue (--persist or --max-runs 0 to loop)"
+STOP_CONDITION = (
+    "unattended watchers only: one model run then stop; restart watch to continue "
+    "(--persist or --max-runs 0 to loop). Interactive Codex/Claude master sessions stay open."
+)
 WAKE_KEYS = frozenset({
     "holding", "suggested_for_me", "ready_in_my_lane",
     "task_messages", "stuck_messages", "drive", "forced",
@@ -5398,9 +5401,10 @@ def post_message(board, sender, text, to="", re="", kind="", task=False):
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
     if mentions:
         rec["mentions"] = mentions
-    if task and not kind:
-        kind = "task"
-    if kind and kind not in ("", "message"):
+    kind = (kind or "").strip()
+    if task or kind == "task":
+        rec["kind"] = "task"
+    elif kind and kind != "message":
         rec["kind"] = kind
     line_ = json.dumps(rec) + "\n"
     # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
@@ -6528,7 +6532,7 @@ def pending_work(board, owner):
 
 def _message_wakes(m):
     """Explicit task / stuck / blocked mail wakes a model; ACKs and ordinary DMs do not."""
-    if m.get("task"):
+    if m.get("kind") == "task" or m.get("task"):
         return True
     text = str(m.get("text") or "").strip().lower()
     if text.startswith(("stuck", "blocked", "task:", "task ")):
@@ -6586,6 +6590,29 @@ Ordinary messages and ACKs are notification-only and must not extend the run.
 If there is no standing objective with a measurable --exit criterion, ask for one
 (`tickets objective "<what done looks like>" --exit "<observable end>"`) and do not invent it.
 Transition the objective with `--done`/`--achieved`, `--blocked`, or `--replaced` when that is the outcome.
+Your three jobs, every wake-up:
+1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
+   grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
+   (`tickets create ... --blocks <id>`, `tickets dep`), reassign (`tickets assign <id> --owner <who>`), or
+   decide and say so. Never leave a stuck agent without a reply.
+2. REVIEW + MERGE: `tickets master` shows the REVIEW QUEUE. For each entry read the diff against main
+   (`git diff main...<branch>`), check tests ran, then `tickets merge <branch>` (runs the suite, fast-forwards
+   main, closes the ticket). If it is not mergeable, `tickets msg --to <owner> --re <id>` with what to change
+   and `tickets reopen <id>`. Push main with `git push origin main` after merges.
+3. COORDINATE: `tickets dash --once` and `tickets util` -- reopen tickets whose owner is silent > 90 min
+   (`tickets limits` first: AUTH means /login is needed, not a wait), `tickets route` new tickets,
+   keep one ticket per agent, spawn or brief workers when lanes are empty (`tickets spawn <name> --model ...`).
+   Log every non-obvious call: `tickets master log "..."`. Post a short status pulse with `tickets msg`.
+Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
+{extra}"""
+
+COS_PROMPT = """You are {agent}, the CHIEF OF STAFF of the shared ticket board at {board} (repo {root}).
+TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
+This run: pick ONE concrete outcome (one unblock, one merge batch, or one routing act) and stop.
+Ordinary messages and ACKs are notification-only and must not extend the run.
+Read the current standing objective as context only. Do not ask for, set, replace, or invent an objective;
+escalate those decisions to the master with `tickets msg --to <master>`.
+The master planner sets scope and routes by complexity; you review, unblock and merge.
 Your three jobs, every wake-up:
 1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
    grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
@@ -6724,12 +6751,7 @@ def cmd_drive(a, board):
 
 
 def cos_prompt_text(agent, board, root, extra):
-    return MASTER_PROMPT.replace("the MASTER of", "the CHIEF OF STAFF of").replace(
-        "Your three jobs, every wake-up:",
-        "The master planner sets scope and routes by complexity; you review, unblock and merge. "
-        "Do not invent objectives. One bounded outcome this run, then stop. "
-        "Escalate scope or vision questions to the planner with `tickets msg --to <master>`. "
-        "Your three jobs, every wake-up:").format(agent=agent, board=board, root=root, extra=extra)
+    return COS_PROMPT.format(agent=agent, board=board, root=root, extra=extra)
 
 
 def cmd_pending(a, board):
