@@ -3,7 +3,7 @@
 The T-486 (e) helper used `pgrep -f 'desk-cursor-fable/.venv/bin/python -m
 pytest'` and a cwd==desk-WT gate. Live desk merge pid 51475 is
 `pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude` and
-chdirs into /tmp/pytest-of-kavana mid-run, so both gates read CLEAR while the
+chdirs into /tmp/pytest-of-operator mid-run, so both gates read CLEAR while the
 suite is still alive (killed opus-verify waiter 71007). Contiguous pgrep
 `pytest -x --ignore=.worktrees` is empty because -q/-p sit between pytest
 and -x. `ps aux` regex `[p]ytest.*-x.*--ignore=\\.worktrees` matches agent
@@ -27,20 +27,22 @@ import pytest
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 
+DESK_VENV = "/repo/atman/.worktrees/desk-cursor-fable/.venv/bin/python"
+RELEASE_SHIM = (
+    "/tmp/tickets-releases/b738f1dcc1824dc0a3d3434e318b2e6612998227/tickets.py"
+)
 LIVE_HARNESS = (
-    "/Users/kavana/Downloads/atman/.worktrees/desk-cursor-fable/.venv/bin/python "
-    "-m pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude"
+    DESK_VENV
+    + " -m pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude"
 )
 LIVE_PYTEST_BIN = (
     "pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude"
 )
 AGENT_PROMPT_BLOB = (
     "/opt/homebrew/bin/python3 "
-    "/Users/kavana/.claude/tools/tickets-releases/"
-    "b738f1dcc1824dc0a3d3434e318b2e6612998227/tickets.py watch "
-    "--agent optimizer --every 60 --cwd /Users/kavana/Downloads/steer "
-    "--exec claude -p "
-    '"wait for pytest -x --ignore=.worktrees then spawn --stop"'
+    + RELEASE_SHIM
+    + " watch --agent optimizer --every 60 --cwd /repo/steer "
+    '--exec claude -p "wait for pytest -x --ignore=.worktrees then spawn --stop"'
 )
 
 
@@ -71,7 +73,7 @@ def test_cwd_is_not_consulted(tk):
 
 @pytest.mark.parametrize("cmd", [
     AGENT_PROMPT_BLOB,
-    "/usr/bin/python3 /Users/kavana/.claude/tools/tickets.py watch "
+    "/usr/bin/python3 /tmp/tickets.py watch "
     "--agent cursor-demo --exec 'pytest -x --ignore=.worktrees'",
     "grep -E '[p]ytest.*-x.*--ignore=\\.worktrees'",
     "/usr/bin/python3 /some/agent.py -p 'run pytest -x --ignore=.worktrees'",
@@ -135,7 +137,7 @@ def _popen(args, cwd, started):
 
 def test_fake_pytest_in_tmp_worktree_is_alive(tk, tmp_path, started):
     """Isolated ACCEPT: fake pytest whose cwd is a tmp worktree still ALIVE."""
-    wt = tmp_path / "pytest-of-kavana" / "worktree"
+    wt = tmp_path / "pytest-of-operator" / "worktree"
     wt.mkdir(parents=True)
     script = _sleeper(tmp_path / "pytest")
     p = _popen(
