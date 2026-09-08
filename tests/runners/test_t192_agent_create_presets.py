@@ -23,7 +23,7 @@ import uuid
 
 import pytest
 
-from conftest import enroll, in_process_opener, rid  # noqa: F401
+from tests.runner_helpers import enroll, in_process_opener, rid  # noqa: F401
 
 from ticket_board.runners import RunnerClient  # noqa: E402
 from ticket_board.runners.client import ApiError  # noqa: E402

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import enroll, in_process_opener, make_wake_job, rid  # noqa: F401
+from tests.runner_helpers import enroll, in_process_opener, make_wake_job, rid  # noqa: F401
 from ticket_board.runners import ApiError, RunnerClient
 
 

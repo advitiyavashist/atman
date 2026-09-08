@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from conftest import FakeLauncher, FakeProcess, enroll, in_process_opener, make_wake_job
+from tests.runner_helpers import FakeLauncher, FakeProcess, enroll, in_process_opener, make_wake_job
 from ticket_board.runners import (
     ApiError,
     RunnerClient,
