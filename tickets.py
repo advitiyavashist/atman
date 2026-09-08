@@ -2635,7 +2635,8 @@ CODEX_SCAN_FILES = int(os.environ.get("TICKETS_CODEX_SCAN_FILES") or 60)
 # a raw scan of a transcript, which is how the old cmd_limits scan came to
 # report every healthy codex session as limited (every turn writes a
 # `rate_limits` telemetry block).
-CLI_LIMIT_STRINGS = ("session limit", "usage limit", "hit your limit", "limit reached",
+CLI_LIMIT_STRINGS = ("session limit", "usage limit", "hit your limit", "weekly limit",
+                     "limit reached",
                      "actionrequirederror", "quota exceeded", "out of credits",
                      "429", "rate limit")
 CLI_AUTH_STRINGS = ("authentication_error", "token has been revoked", "please run /login",
@@ -6660,6 +6661,51 @@ def actionable(pending):
     return any(k in WAKE_KEYS for k in pending)
 
 
+def _watch_trigger_fingerprint(board, owner, pending):
+    """Stable identity of what would start a watch run (T-561 retrigger guard).
+
+    Uses message ids and ticket ids, not the human-readable strings pending_work
+    prints -- those can differ in formatting while the underlying mail is the same.
+    """
+    parts = []
+    if pending.get("messages_to_me"):
+        msgs = _safe(lambda: unread(board, owner), []) or []
+        direct = [m for m in msgs
+                  if m.get("to") == owner or owner in (m.get("mentions") or [])]
+        parts.extend("msg:" + _msg_id(m) for m in direct[-5:])
+    for key in ("holding", "suggested_for_me", "ready_in_my_lane", "review_queue"):
+        if key in pending:
+            for item in pending[key]:
+                parts.append("%s:%s" % (key, item.split(" ")[0]))
+    if pending.get("stuck_messages"):
+        parts.extend("stuck:" + s[:80] for s in pending["stuck_messages"])
+    if pending.get("health_crit"):
+        parts.extend("health:" + s[:80] for s in pending["health_crit"])
+    if pending.get("drive"):
+        parts.append("drive:" + json.dumps(pending["drive"], sort_keys=True))
+    return tuple(sorted(parts)) if parts else None
+
+
+def _watch_note_limit_from_log(board, owner, log_slice):
+    """Record limit when the child exits before tickets inbox (T-561).
+
+    pending_work already suppresses wake on rec['limit']; this is the lever for
+    weekly-limit exits that never reach inbox.
+    """
+    if not log_slice or not _looks_limited(log_slice):
+        return
+    if (_agent_rec(board, owner) or {}).get("limit"):
+        return
+    import re as _re
+    note = _first_match(log_slice, CLI_LIMIT_STRINGS) or "usage limit"
+    until = ""
+    m = _re.search(r"resets?\s+([^\n\r\.]{3,40})", log_slice, _re.I)
+    if m:
+        until = m.group(1).strip()
+    lim = {"at": now(), "until": until, "note": note}
+    _agent_update(board, owner, lambda rec: rec.update({"limit": lim}))
+
+
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
 TICKET_AGENT is already set in your environment; run `tickets ...` commands plainly (no env prefix).
 Rules: one ticket at a time; own git worktree, never main; `tickets sync` before `tickets review`;
@@ -8236,6 +8282,7 @@ def cmd_watch(a, board):
             pass
 
     runs = failures = 0
+    skipped_trigger = None
     try:
         if not a.once:
             print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, every, cwd, cmd))
@@ -8254,7 +8301,12 @@ def cmd_watch(a, board):
             force = bool(getattr(a, "force", False))
             if force and not actionable(p):
                 p = dict(p or {}, forced=True)
-            if actionable(p):
+            trigger_fp = _watch_trigger_fingerprint(board, owner, p) if actionable(p) else None
+            if actionable(p) and skipped_trigger is not None and trigger_fp == skipped_trigger:
+                log("%s skip retrigger on unchanged trigger after exit!=0" % now())
+                if a.verbose:
+                    print("%s skip retrigger (same unread trigger)" % now())
+            elif actionable(p):
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
                 print("%s work found (%s) wake=%s stop=%s -> run %d" % (
@@ -8370,6 +8422,12 @@ def cmd_watch(a, board):
                             lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))
                     log("%s run %d exit %s" % (now(), runs, rc))
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
+                    run_slice = _read_run_slice(log_path, log_before)
+                    _safe(lambda rs=run_slice: _watch_note_limit_from_log(board, owner, rs), None)
+                if rc not in (0, None):
+                    skipped_trigger = trigger_fp
+                else:
+                    skipped_trigger = None
                 failures = failures + 1 if rc not in (0, None) else 0
                 if max_runs and runs >= max_runs:
                     print("max-runs reached")
