@@ -8712,8 +8712,8 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 @media(max-width:700px){.seat{min-width:108px}.chat-layout{flex-direction:column}.chat-rail{max-width:none;flex-direction:row;flex-wrap:wrap}}
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
-  .conn{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;margin-left:0}
-  #lastUpdated{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .conn{display:grid;grid-template-columns:auto auto auto;justify-content:start;margin-left:0}
+  #lastUpdated{display:none}
   #clock{grid-column:1/-1;margin-left:0}
   .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
   .next-step .cmd{white-space:normal;overflow-wrap:anywhere}
