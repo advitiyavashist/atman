@@ -69,6 +69,16 @@ describe("App shell", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("uses the atman wordmark and formation-dots, not Steer caret chrome", async () => {
+    const { ui } = appWith(routes);
+    const { container } = render(ui);
+    await waitFor(() => expect(screen.getByTestId("count-ready")).toBeInTheDocument());
+    expect(container.querySelector(".wordmark")?.textContent).toBe("atman");
+    expect(container.querySelectorAll("a.brand circle").length).toBeGreaterThanOrEqual(5);
+    expect(container.textContent).not.toMatch(/↗ Ticket Board/);
+    expect(container.textContent).not.toMatch(/Ticket Board/);
+  });
+
   it("never asserts sub-50ms latency or a beats-Presidio claim anywhere in the shell", async () => {
     const { ui } = appWith(routes);
     const { container } = render(ui);

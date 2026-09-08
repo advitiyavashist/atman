@@ -84,8 +84,9 @@ def test_promise_chips_strip_on_home_objective():
     assert "fmtMedian" in ui and "fmtYield" in ui
     assert "hdrMedianVal" in ui
     assert "stripMedianVal" not in ui
-    # Craft bar: numbers once on home (hero); chips hide on Board.
-    assert "body[data-tab=board] .promise-chips{display:none}" in ui
+    # T-571: chips stay above the fold on every tab, including Work.
+    assert "body[data-tab=board] .promise-chips{display:none}" not in ui
+    assert 'id="promiseChips"' in ui[ui.index("<header"):ui.index("</header>")]
 
 
 def test_promise_hero_copy_nits():
@@ -106,7 +107,7 @@ def test_team_seats_follow_brand_lock():
     assert "Who’s present. What’s uncovered." in ui
     assert "Coverage by work, not fixed role." in ui
     assert "Open seat — uncovered work." in ui
-    assert "self ↔ whole" in ui
+    assert "self ↔ whole" not in ui
     assert "renderSeats" in ui
     assert 'id="seats"' in ui
     assert "lane-ready" in ui and "lane-operator" in ui

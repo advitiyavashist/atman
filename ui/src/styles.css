@@ -1,18 +1,17 @@
-/* Design tokens per docs/interface-v1.md "Interface and taste": quiet charcoal
-   surfaces, off-white text, blue for the primary action, amber for attention,
-   green only for verified success. Light mode is first-class. */
+/* Atman dark tokens (docs/brand/atman-tokens.md). Light mode stays an operator toggle. */
 :root {
   color-scheme: dark;
-  --bg: #101317;
-  --panel: #191e25;
-  --panel-2: #12161c;
-  --text: #eef1f6;
-  --muted: #9ba9bd;
-  --line: #303947;
-  --blue: #8ab4ff;
-  --amber: #edbd70;
-  --green: #7bd88f;
-  --red: #f28b82;
+  --bg: #0c0e12;
+  --panel: #141820;
+  --panel-2: #10141b;
+  --text: #e8e6e1;
+  --muted: #8a8d96;
+  --line: #22262e;
+  --blue: #5b8def;
+  --amber: #e0a53d;
+  --green: #3dbe7a;
+  --red: #e85d4c;
+  --live: #3ee8c5;
   --radius: 10px;
 }
 body.light {
@@ -63,7 +62,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
 }
-.brand { font-size: 18px; font-weight: 650; letter-spacing: -0.4px; }
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: inherit;
+  text-decoration: none;
+}
+.brand .mark { display: block; flex: none; color: var(--text); }
+.wordmark {
+  font: 650 16px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  letter-spacing: 0.22em;
+  text-transform: lowercase;
+}
 .fixture-badge {
   font: 11px/1 ui-monospace, monospace;
   color: var(--amber);
@@ -172,8 +183,45 @@ td button.link {
 
 .table-wrap { overflow-x: auto; }
 
-.empty-state { padding: 40px 12px; text-align: center; color: var(--muted); }
+.empty-state { padding: 24px 12px; text-align: center; color: var(--muted); }
 .empty-state h2 { color: var(--text); font-size: 17px; margin: 0 0 6px; }
+
+.day-one {
+  background: var(--panel);
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  padding: 20px 18px;
+  max-width: 720px;
+  margin: 12px 0 18px;
+}
+.day-one .empty-kicker {
+  margin: 0 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+.day-one p { margin: 0 0 10px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.day-one strong { color: var(--text); }
+.empty-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.empty-steps li { display: flex; gap: 10px; align-items: flex-start; }
+.empty-steps .n {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+.day-one .cta { margin-top: 6px; font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--blue); }
+.day-one .empty-intervene { margin-top: 14px; }
 
 details.evidence { margin-top: 6px; }
 details.evidence summary { cursor: pointer; color: var(--muted); font-size: 13px; }

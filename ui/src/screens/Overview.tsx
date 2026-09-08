@@ -3,6 +3,7 @@ import { useResource } from "../state/useResource";
 import { ConnectionBanner } from "../components/ConnectionBanner";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { EmptyStateView } from "../components/EmptyStateView";
+import { DayOnePath } from "../components/DayOnePath";
 import { formatDateTime, formatWhen } from "../copy";
 import type { OverviewResponse } from "../types";
 import type { View } from "../components/NavBar";
@@ -55,7 +56,10 @@ export function Overview({
       {overview.error && <ErrorNotice error={overview.error} onRetry={overview.refetch} onReload={overview.refetch} />}
 
       {isEmpty ? (
-        <EmptyStateView empty={data.empty_state!} onPrimaryAction={() => onNavigate("tickets")} />
+        <>
+          <DayOnePath />
+          <EmptyStateView empty={data.empty_state!} onPrimaryAction={() => onNavigate("tickets")} />
+        </>
       ) : (
         <>
           <div className="metrics">

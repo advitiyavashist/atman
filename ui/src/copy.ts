@@ -22,6 +22,22 @@ export const ticketStateLabel: Record<TicketState, string> = {
   blocked: "Blocked",
 };
 
+/** 24h completions on a seat — not lifetime done, not harness turns. */
+export const done24hLabel = "Done (24h)";
+
+export const dayOneLede = "Work · Team · Objective — then intervene when a seat needs you.";
+
+export const DAY_ONE_STEPS = [
+  { key: "work", title: "Work", body: "seed the board and claim a first ticket.", cmd: "tickets quickstart --agent <you>" },
+  { key: "team", title: "Team", body: "plug a second harness. Coverage by work, not a fixed role.", cmd: "tickets join … --harness" },
+  { key: "objective", title: "Objective", body: "name what the team finishes.", cmd: 'tickets objective "…"' },
+] as const;
+
+export const dayOneHonesty = "Median turns and yield@cost stay — until a done ticket reports.";
+
+export const dayOneIntervene =
+  "Intervene is always available — Msg a seat, route, or unblock.";
+
 // A reservation is never "Working" — it has not been claimed yet.
 export const assignmentStateLabel: Record<AssignmentState, string> = {
   queued: "Queued — waiting for agent",
