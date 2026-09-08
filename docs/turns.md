@@ -136,6 +136,12 @@ not a bill and not fed into T-415 ranking until T-470). T-499 renames
 adds `cost_est_unbound` `{n, total, by_agent:[{agent, model, n, total}]}` for
 token-carrying `run_end` rows with no ticket. **`cost_est` is per-ticket;
 `cost_est_by_run_model` is per-run; they are not a decomposition of each other.**
+T-506: `--epic` narrows events (unbound runs excluded — they carry no epic);
+`cost_est_unbound` reports `n=0` with `excluded: unbound runs carry no epic`.
+`--model` filters ticket rows on the **resolved ticket model** and per-run
+aggregates on the **run_end model** (two axes). A top-level `scope` block names
+the filter and denominator each field used. Unfiltered:
+`cost_est.total + cost_est_unbound.total == sum(cost_est_by_run_model.total)`.
 T-470 must quote coverage with `n` attached (today ~4% of tickets / ~6% of runs
 on live data). The addition is **additive**: `v` stays `1`, and the pre-existing
 row keys above are still present on every row.

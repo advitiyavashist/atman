@@ -98,7 +98,13 @@ def _stuck_count(messages, ticket):
     return n
 
 
-def _filter_events(events, ticket="", agent="", since="", until=""):
+def _filter_events(events, ticket="", agent="", since="", until="",
+                   epic="", ticket_index=None):
+    """Filter trajectory events. --agent/--since/--until/--epic narrow sel;
+    --epic excludes unbound runs (no ticket => no epic). --model is applied
+    separately: ticket rows use the resolved ticket model; per-run cost
+    aggregates use each run_end's own model."""
+    idx = ticket_index or {}
     out = []
     for e in events:
         if ticket and e.get("ticket") != ticket:
@@ -110,6 +116,12 @@ def _filter_events(events, ticket="", agent="", since="", until=""):
             continue
         if until and at > until:
             continue
+        if epic:
+            tid = e.get("ticket")
+            if not tid:
+                continue
+            if (idx.get(tid) or {}).get("epic") != epic:
+                continue
         out.append(e)
     return out
 
@@ -354,12 +366,12 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
     workforce = workforce or {}
     messages = messages or []
     idx = _ticket_index(tickets)
-    sel = _filter_events(events, ticket=ticket, agent=agent, since=since, until=until)
+    sel = _filter_events(
+        events, ticket=ticket, agent=agent, since=since, until=until,
+        epic=epic, ticket_index=idx)
     rows = []
     for tid, evs in sorted(_group(sel).items()):
         t = idx.get(tid) or {}
-        if epic and t.get("epic") != epic:
-            continue
         owner = _owner(evs, t)
         mdl = _model(evs, owner, workforce)
         if model and mdl != model:
@@ -436,16 +448,18 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
-    def cost_est_by_run_model(events):
+    def cost_est_by_run_model(events, run_model=""):
         """Per-run estimates grouped by the run_end model, not the ticket row."""
         buckets = {}
         for e in events:
             if e.get("kind") != "run_end":
                 continue
+            m = e.get("model")
+            if run_model and m != run_model:
+                continue
             est, _, _ = estimate_run_end_cost(e)
             if est is None:
                 continue
-            m = e.get("model")
             if not m:
                 continue
             buckets.setdefault(m, []).append(est)
@@ -457,7 +471,7 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
-    def cost_est_unbound(events):
+    def cost_est_unbound(events, run_model=""):
         """Token spend on run_ends not bound to any ticket (e.g. review-lane runs)."""
         by_agent = {}
         all_ests = []
@@ -465,6 +479,9 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             if e.get("kind") != "run_end":
                 continue
             if e.get("ticket"):
+                continue
+            m = e.get("model")
+            if run_model and m != run_model:
                 continue
             est, _, _ = estimate_run_end_cost(e)
             if est is None:
@@ -482,11 +499,42 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
                 "n": len(vals),
                 "total": round(sum(vals), 6),
             })
-        return {
+        out = {
             "n": len(all_ests),
             "total": round(sum(all_ests), 6) if all_ests else None,
             "by_agent": out_by_agent,
         }
+        if epic:
+            out["excluded"] = "unbound runs carry no epic"
+        return out
+
+    def _report_scope():
+        filters = {k: v for k, v in (
+            ("ticket", ticket), ("agent", agent), ("model", model),
+            ("epic", epic), ("since", since), ("until", until),
+        ) if v}
+        fields = {
+            "tickets": {
+                "denominator": "ticket",
+                "model_axis": "resolved ticket model (events/workforce)",
+            },
+            "cost_est": {
+                "denominator": "ticket",
+                "model_axis": "resolved ticket model",
+            },
+            "cost_est_by_run_model": {
+                "denominator": "run",
+                "model_axis": "run_end model",
+            },
+            "cost_est_unbound": {
+                "denominator": "run",
+                "model_axis": "run_end model",
+            },
+        }
+        if epic:
+            fields["cost_est_unbound"]["excluded"] = (
+                "unbound runs carry no epic")
+        return {"filters": filters, "fields": fields}
 
     public_rows = []
     for r in rows:
@@ -498,8 +546,11 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
         if r.get("cost_price_as_of"):
             pub["cost_price_as_of"] = r["cost_price_as_of"]
         public_rows.append(pub)
+    by_run_model = cost_est_by_run_model(sel, run_model=model)
+    unbound = cost_est_unbound(sel, run_model=model)
     return {
         "v": TURNS_JSON_V,
+        "scope": _report_scope(),
         "tickets": public_rows,
         "aggregates": {
             "mean": overall["mean"],
@@ -516,8 +567,8 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "cost_est": cost_est_agg,
             "cost_est_by_agent": cost_group(
                 lambda r: r.get("owner"), "agent", field="cost_usd_est"),
-            "cost_est_by_run_model": cost_est_by_run_model(sel),
-            "cost_est_unbound": cost_est_unbound(sel),
+            "cost_est_by_run_model": by_run_model,
+            "cost_est_unbound": unbound,
         },
     }
 
