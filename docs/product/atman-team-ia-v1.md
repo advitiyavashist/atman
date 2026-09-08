@@ -17,6 +17,8 @@ Roles are fluid: seats cover lanes; identity is not a permanent persona.
 
 Related: [brand direction v1](../brand/atman-brand-direction-v1.md).
 
+**CEO/PM PRIORITY lock (Advitiya agent chats):** a per-agent chat is a seat-scoped thread on the existing `tickets msg` / inbox surface (`messages.jsonl`). Store and read only the board, docs, and `.tickets/briefs/` (standing context). Not a shared-memory brain, not a vector DB, not a second chat store. IA stays Objective · Team · Work · Intervene. No pitch chrome.
+
 ---
 
 ## Primary surfaces (first-class)
@@ -33,7 +35,7 @@ Standing mission from `board_snapshot` (`goals` / `tickets objective`).
 
 Seats / cards, not a workforce table-as-identity.
 
-Each seat shows: status, quota / limit, utilization (real numbers only), lane / coverage.
+Each seat shows: status, quota / limit, utilization (real numbers only), lane / coverage. Intervene **Msg** opens that seat’s agent-scoped thread (same `tickets msg --to` log).
 
 Copy (brand lock): **Who’s present. What’s uncovered.** Empty seat: **Open seat — uncovered work.** Coverage: **Coverage by work, not fixed role.**
 
@@ -57,7 +59,7 @@ Operator actions on a seat or a card:
 | unblock | clear a blocker the operator can clear |
 | reassign | move a claim |
 | nudge | wake / remind a seat |
-| msg | talk to a seat or the board |
+| msg | talk to a seat (agent-scoped 1:1 thread) or the board |
 
 Confirm destructive actions. **No silent auto-promote.** Where the product is advisory only, say so on the control (honesty strip), do not dress it as a command that fired.
 
@@ -67,7 +69,7 @@ Confirm destructive actions. **No silent auto-promote.** Where the product is ad
 
 | Surface | Notes |
 |---|---|
-| Messages | Thread from `board_snapshot.messages`. Keep; do not make it the home. |
+| Messages | Thread from `board_snapshot.messages` (same `tickets msg` log). Board (everyone) plus per-seat 1:1 threads for BYOA seats. Keep; do not make it the home. Advitiya PRIORITY agent chats. |
 | Turns / efficiency | Fewest-turns objective; no fake telemetry wall. |
 | Onboarding | Empty / next / checklist. First-run path, not a fifth primary pane. |
 | Team seats | A view of Team, not a separate product. Spare dark seats; formation-dots as constellation / presence only. |

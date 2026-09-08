@@ -5041,6 +5041,88 @@ def _addressed_to(msg, owner):
     return to == target or target in mentions
 
 
+def is_board_broadcast(msg):
+    """Channel-wide mail: a bystander would see it (empty --to, @everyone/@all).
+
+    Advitiya PRIORITY agent chats: directed `--to` / named @mentions are seat
+    threads, not this board channel. Same messages.jsonl either way.
+    """
+    to = (msg.get("to") or "").strip().lower()
+    mentions = {h.lower() for h in (msg.get("mentions") or [])}
+    if to in _MENTION_BROADCAST or mentions & _MENTION_BROADCAST:
+        return True
+    return not to and not mentions
+
+
+def message_involves_seat(msg, seat):
+    """True if *msg* belongs in the agent-scoped (1:1) thread for *seat*.
+
+    Extends `tickets msg` / inbox — no second chat store, no shared-memory
+    brain. A seat's own board broadcasts stay on the Board thread.
+    """
+    target = (seat or "").strip().lower()
+    if not target:
+        return False
+    to = (msg.get("to") or "").strip().lower()
+    frm = (msg.get("from") or "").strip().lower()
+    mentions = {h.lower() for h in (msg.get("mentions") or [])}
+    if to == target or target in mentions:
+        return True
+    return frm == target and not is_board_broadcast(msg)
+
+
+def filter_messages_for_scope(msgs, seat=""):
+    """seat='' → Board (everyone) thread; seat=name → that BYOA seat's thread."""
+    if not (seat or "").strip():
+        return [m for m in msgs if is_board_broadcast(m)]
+    return [m for m in msgs if message_involves_seat(m, seat)]
+
+
+def seat_thread_summaries(messages, seat_names):
+    """Rail summaries from the existing message log. Counts are for this window."""
+    board_msgs = filter_messages_for_scope(messages, "")
+    last_b = board_msgs[-1] if board_msgs else {}
+    seats = []
+    seen = set()
+    for name in seat_names or []:
+        name = (name or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        scoped = filter_messages_for_scope(messages, name)
+        last = scoped[-1] if scoped else {}
+        seats.append({
+            "name": name,
+            "kind": "seat",
+            "n": len(scoped),
+            "last_at": last.get("at", ""),
+            "preview": (last.get("text") or "")[:80],
+        })
+    return {
+        "board": {
+            "kind": "board",
+            "label": "Board",
+            "n": len(board_msgs),
+            "last_at": last_b.get("at", ""),
+            "preview": (last_b.get("text") or "")[:80],
+        },
+        "seats": seats,
+    }
+
+
+def board_snapshot_for_request(board, seat="", messages=40):
+    """board_snapshot plus optional ?seat= filter. Same store, scoped view."""
+    snap = board_snapshot(board, messages=messages)
+    seat = (seat or "").strip()
+    if not seat:
+        return snap
+    scoped = dict(snap)
+    scoped["messages"] = [m for m in snap["messages"] if message_involves_seat(m, seat)]
+    scoped["seat"] = seat
+    return scoped
+
+
 def _visible_after_join(msgs, owner, joined):
     """Hide BROADCAST history from before this agent existed -- never directed mail.
 
@@ -5276,7 +5358,20 @@ def cmd_msg(a, board):
 
 def cmd_inbox(a, board):
     owner = whoami(a.owner)
+    seat = (getattr(a, "seat", None) or "").strip()
     scan = None
+    if seat:
+        # Advitiya PRIORITY agent chats: read one seat thread without touching
+        # the viewer's inbox watermark — this is a scoped history view.
+        msgs = filter_messages_for_scope(
+            load_messages(board, include_archives=True), seat)[-a.limit:]
+        if not msgs:
+            print("no messages in %s's seat thread (tickets msg \"text\" --to %s)" % (seat, seat))
+            return
+        print("seat thread · %s (%d) — same messages.jsonl as tickets msg --to" % (seat, len(msgs)))
+        for m in msgs:
+            print(fmt_msg(m))
+        return
     if a.all:
         msgs = load_messages(board, include_archives=True)[-a.limit:]
         if not msgs:
@@ -7796,7 +7891,20 @@ body[data-tab=board] .promise-chips{display:none}
 .seat.ghost{border-style:dashed}
 .seat.ghost .av{background:transparent;border:1px dashed var(--mute);color:var(--mute)}
 .seat.idle .av{background:var(--chip);color:var(--mute)}
-@media(max-width:700px){.seat{min-width:108px}}
+.seat[data-seat-chat]{cursor:pointer}
+.intervene{appearance:none;background:transparent;border:1px solid var(--intervene);color:var(--intervene);border-radius:6px;padding:2px 8px;font:11px/1.2 inherit;font-weight:650;cursor:pointer;align-self:flex-start}
+.intervene:hover{background:color-mix(in srgb,var(--intervene) 16%,transparent)}
+.intervene:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+.chat-layout{display:flex;gap:12px;align-items:stretch;min-height:0;flex:1}
+.chat-rail{min-width:168px;max-width:220px;display:flex;flex-direction:column;gap:4px}
+.chat-rail .seats-title{margin:0 0 4px}
+.chat-rail button.thread{appearance:none;display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:12px/1.3 inherit;cursor:pointer}
+.chat-rail button.thread.on{border-color:var(--acc);color:var(--fg)}
+.chat-rail button.thread .n{color:var(--mute);font-variant-numeric:tabular-nums}
+.chat-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
+.chat-head .seats-title{margin:0 0 2px}
+#cTo:disabled{opacity:.7}
+@media(max-width:700px){.seat{min-width:108px}.chat-layout{flex-direction:column}.chat-rail{max-width:none;flex-direction:row;flex-wrap:wrap}}
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
   #clock{margin-left:0}
@@ -7827,7 +7935,7 @@ body[data-tab=board] .promise-chips{display:none}
 <details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/6</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs">
-  <button type="button" data-tab-btn="board" class="on">Board</button>
+  <button type="button" data-tab-btn="board" class="on">Work</button>
   <button type="button" data-tab-btn="agents">Team</button>
   <button type="button" data-tab-btn="messages">Messages</button>
 </nav>
@@ -7866,6 +7974,7 @@ body[data-tab=board] .promise-chips{display:none}
       <h2 class="seats-title">Team</h2>
       <p class="seats-vibe">self ↔ whole</p>
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
+      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — same <span class="mono">tickets msg --to</span>. Standing context is <span class="mono">.tickets/briefs/</span>, not a shared-memory brain or vector DB.</p>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -7884,17 +7993,23 @@ body[data-tab=board] .promise-chips{display:none}
   <div class="agents" id="agents"></div>
 </div>
 <div class="pane" id="pane-messages">
-  <div class="msgs" id="msgs"></div>
-  <section id="composer">
-    <div id="composerRow">
-      <label class="who"><small>from</small> <select id="cFrom"></select></label>
-      <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
-      <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+  <div class="chat-layout">
+    <nav class="chat-rail" id="chatRail" aria-label="Threads"></nav>
+    <div class="chat-main">
+      <div class="chat-head" id="chatHead"></div>
+      <div class="msgs" id="msgs"></div>
+      <section id="composer">
+        <div id="composerRow">
+          <label class="who"><small>from</small> <select id="cFrom"></select></label>
+          <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
+          <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+        </div>
+        <textarea id="cText" placeholder="Message the board or a seat. Type @ to tag an agent (e.g. @cursor) -- mentions reach that agent even if 'to' is someone else."></textarea>
+        <div id="mentionBar"></div>
+        <div id="composerRow" style="margin-top:8px"><button id="cSend">Post</button><small id="composerMsg"></small></div>
+      </section>
     </div>
-    <textarea id="cText" placeholder="Message the board. Type @ to tag an agent (e.g. @cursor) -- mentions reach that agent even if 'to' is someone else."></textarea>
-    <div id="mentionBar"></div>
-    <div id="composerRow" style="margin-top:8px"><button id="cSend">Post</button><small id="composerMsg"></small></div>
-  </section>
+  </div>
 </div>
 </main>
 <script>
@@ -7935,7 +8050,8 @@ function card(t,extra){
   const owner=t.owner?who(t.owner):'<span class="mute">unassigned</span>';
   const pri=t.priority!=null?'<span class="pri">P'+esc(t.priority)+'</span>':'';
   const age=t.since_update!=null?'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>':'';
-  return '<article class="card '+staleClass(t)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+(extra||'')+'</article>';
+  const msg=t.owner?'<button type="button" class="intervene" data-seat-chat="'+esc(t.owner)+'" data-testid="card-msg-'+esc(t.id)+'">Msg</button>':'';
+  return '<article class="card '+staleClass(t)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+msg+(extra||'')+'</article>';
 }
 function fillCol(id,items,html){
   document.getElementById('n-'+id).textContent=items.length;
@@ -7974,7 +8090,9 @@ function renderUsage(u){
   tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
 }
 function seatChip(name,cover,kind){
-  return '<article class="seat '+(kind||'cover')+'"><div class="top"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span></div><span class="cov">'+esc(cover||'')+'</span></article>';
+  const chat=kind==='ghost'?'':' data-seat-chat="'+esc(name)+'"';
+  const act=kind==='ghost'?'':'<button type="button" class="intervene" data-seat-chat="'+esc(name)+'">Msg</button>';
+  return '<article class="seat '+(kind||'cover')+'"'+chat+'><div class="top"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span></div><span class="cov">'+esc(cover||'')+'</span>'+act+'</article>';
 }
 function renderSeats(d){
   const placed=new Set();
@@ -8010,6 +8128,68 @@ function setTab(name){
 document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
 try{const saved=localStorage.getItem('tickets-ui-tab');if(saved)setTab(saved)}catch(e){}
 let AGENTS=[];
+let THREAD_SEAT='';
+try{THREAD_SEAT=localStorage.getItem('tickets-ui-seat')||''}catch(e){}
+const BROADCAST=new Set(['','all','everyone']);
+function isBoardBroadcast(m){
+  const to=String(m.to||'').trim().toLowerCase();
+  const mentions=(m.mentions||[]).map(h=>String(h).toLowerCase());
+  if(BROADCAST.has(to)||mentions.some(h=>h==='everyone'||h==='all'))return true;
+  return !to && mentions.length===0;
+}
+function involvesSeat(m,seat){
+  const t=String(seat||'').trim().toLowerCase();
+  if(!t)return false;
+  const to=String(m.to||'').trim().toLowerCase();
+  const frm=String(m.from||'').trim().toLowerCase();
+  const mentions=(m.mentions||[]).map(h=>String(h).toLowerCase());
+  if(to===t||mentions.indexOf(t)>=0)return true;
+  return frm===t && !isBoardBroadcast(m);
+}
+function visibleMessages(msgs){
+  return THREAD_SEAT?msgs.filter(m=>involvesSeat(m,THREAD_SEAT)):msgs.filter(isBoardBroadcast);
+}
+function openSeatChat(seat){
+  THREAD_SEAT=seat||'';
+  try{localStorage.setItem('tickets-ui-seat',THREAD_SEAT)}catch(e){}
+  setTab('messages');
+  loadAgentPickers();
+  renderChatHead();
+  const rail=document.getElementById('chatRail');
+  if(rail)rail.querySelectorAll('button.thread').forEach(b=>b.classList.toggle('on',(b.dataset.seatChat||'')===THREAD_SEAT));
+}
+function renderChatHead(){
+  const el=document.getElementById('chatHead');
+  if(!el)return;
+  if(THREAD_SEAT){
+    el.innerHTML='<h2 class="seats-title">Seat · '+esc(THREAD_SEAT)+'</h2>'+
+      '<p class="seats-lede">1:1 with this BYOA seat. Chat is <span class="mono">tickets msg --to '+esc(THREAD_SEAT)+'</span>. Standing context is <span class="mono">.tickets/briefs/</span>. Not a shared-memory brain or vector DB.</p>';
+  }else{
+    el.innerHTML='<h2 class="seats-title">Board</h2>'+
+      '<p class="seats-lede">Channel-wide. Directed seat mail lives on that seat’s thread.</p>';
+  }
+  const to=document.getElementById('cTo');
+  if(to){to.disabled=!!THREAD_SEAT;if(THREAD_SEAT)to.value=THREAD_SEAT}
+}
+function renderChatRail(d){
+  const rail=document.getElementById('chatRail');
+  if(!rail)return;
+  const threads=d.seat_threads||{board:{n:0,label:'Board'},seats:[]};
+  const board=threads.board||{n:0,label:'Board'};
+  const seats=threads.seats||[];
+  const items=[{id:'',label:board.label||'Board',n:board.n||0}].concat(seats.map(s=>({id:s.name,label:s.name,n:s.n||0})));
+  rail.innerHTML='<p class="seats-title">Threads</p>'+items.map(it=>{
+    const on=((THREAD_SEAT||'')===(it.id||''))?' on':'';
+    return '<button type="button" class="thread'+on+'" data-seat-chat="'+esc(it.id)+'" data-testid="thread-'+(it.id||'board')+'"><span>'+esc(it.label)+'</span><span class="n">'+esc(it.n)+'</span></button>';
+  }).join('');
+}
+function ensureToOption(name){
+  const to=document.getElementById('cTo');
+  if(!to||!name)return;
+  if(![...to.options].some(o=>o.value===name)){
+    const o=document.createElement('option');o.value=name;o.textContent=name;to.appendChild(o);
+  }
+}
 function loadAgentPickers(){
   const from=document.getElementById('cFrom'),to=document.getElementById('cTo');
   const savedFrom=localStorage.getItem('tickets-ui-from')||'';
@@ -8017,8 +8197,16 @@ function loadAgentPickers(){
   from.innerHTML='<option value="">(pick agent)</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
   to.innerHTML='<option value="">everyone</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
   if(AGENTS.includes(prevFrom))from.value=prevFrom;
-  if(AGENTS.includes(prevTo))to.value=prevTo;
+  if(THREAD_SEAT){ensureToOption(THREAD_SEAT);to.value=THREAD_SEAT;to.disabled=true}
+  else{to.disabled=false;if(AGENTS.includes(prevTo))to.value=prevTo}
 }
+document.addEventListener('click',e=>{
+  const btn=e.target.closest('[data-seat-chat]');
+  if(!btn||btn.closest('#composer'))return;
+  e.preventDefault();
+  openSeatChat(btn.dataset.seatChat||'');
+  load();
+});
 function mentionQueryAt(text,caret){
   const upto=text.slice(0,caret);const m=upto.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
   return m?m[1]:null;
@@ -8062,7 +8250,8 @@ document.getElementById('cSend').addEventListener('click',async()=>{
       body:JSON.stringify({from,text,to,re})});
     const out=await r.json();
     if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
-      document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';load()}
+      document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';
+      if(to)openSeatChat(to);load()}
     else{msg.className='bad';msg.textContent='error: '+(out.error||r.status)}
   }catch(e){msg.className='bad';msg.textContent='error: '+e}
   finally{btn.disabled=false}
@@ -8126,6 +8315,7 @@ async function load(){
   renderUsage(d.usage);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
+  renderChatRail(d);renderChatHead();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
     const u=utilBy[a.name]||{};
@@ -8135,11 +8325,12 @@ async function load(){
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — a proxy for productive turns">Turns</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
-      '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div></article>';
+      '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div>'+
+      '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
   }).join('')||'<div class="empty">no agents checked in</div>';
-  const thread=(d.messages||[]).slice().reverse();
+  const thread=visibleMessages(d.messages||[]).slice().reverse();
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
-    ||'<div class="empty">no messages yet</div>';
+    ||'<div class="empty">'+(THREAD_SEAT?'No messages with this seat yet.':'no messages yet')+'</div>';
 }
 function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
@@ -8447,6 +8638,21 @@ def board_snapshot(board, messages=40):
     events = _safe(lambda: _turns_mod()[1](board), [])
     usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
     promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
+    raw_msgs = [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
+                 "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or []}
+                for x in load_messages(board)[-messages:]]
+    seat_names = []
+    seen_seats = set()
+    def _add_seat(name):
+        name = (name or "").strip()
+        key = name.lower()
+        if name and key not in seen_seats:
+            seen_seats.add(key)
+            seat_names.append(name)
+    for a in out_agents:
+        _add_seat(a.get("name"))
+    _add_seat(m.get("owner", ""))
+    _add_seat(m.get("cos", ""))
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -8460,9 +8666,9 @@ def board_snapshot(board, messages=40):
         # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
         # so the UI can render it in whatever timezone the viewer's browser is
         # actually in -- truncating/reformatting it here would bake in UTC.
-        "messages": [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
-                      "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or []}
-                     for x in load_messages(board)[-messages:]][::-1],
+        "messages": raw_msgs[::-1],
+        # Advitiya PRIORITY agent chats: per-seat thread rail from the same log.
+        "seat_threads": seat_thread_summaries(raw_msgs, seat_names),
         "onboarding": _onboarding_checklist(board, tickets),
         "next_step": _next_step_hint(board, tickets, done),
         "empty_board": counts["total"] == 0,
@@ -8477,7 +8683,8 @@ def board_snapshot(board, messages=40):
 def cmd_ui(a, board):
     """Local status UI: serves an auto-refreshing page, /board.json, and a
     composer POST at /msg that posts through post_message() -- same board,
-    same messages.jsonl, no second store."""
+    same messages.jsonl, no second store. /board.json?seat=<name> filters
+    messages to that agent-scoped thread (Advitiya PRIORITY agent chats)."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     if a.json:
@@ -8487,7 +8694,9 @@ def cmd_ui(a, board):
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.startswith("/board.json"):
-                body = json.dumps(_safe(lambda: board_snapshot(board), {
+                from urllib.parse import parse_qs, urlparse
+                seat = (parse_qs(urlparse(self.path).query).get("seat") or [""])[0]
+                body = json.dumps(_safe(lambda: board_snapshot_for_request(board, seat=seat), {
                     "error": "snapshot failed",
                     "counts": {"total": 0, "done": 0},
                     "next_step": {"kind": "unreachable", "label": "Snapshot failed",
@@ -9472,15 +9681,17 @@ def main():
                    help="skip the transcript reads and show locations only")
     c.set_defaults(fn=cmd_who)
 
-    c = sub.add_parser("msg", help="post to the message board")
+    c = sub.add_parser("msg", help="post to the board or a seat thread")
     c.add_argument("text")
-    c.add_argument("--to", default="", help="agent name, or omit for everyone")
+    c.add_argument("--to", default="", help="seat / agent name, or omit for everyone")
     c.add_argument("--re", default="", help="ticket id this is about")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_msg)
 
     c = sub.add_parser("inbox", help="unread messages for me")
     c.add_argument("--all", action="store_true", help="full history")
+    c.add_argument("--seat", default="",
+                   help="only this agent's seat thread (same messages.jsonl; does not mark read)")
     c.add_argument("--limit", type=int, default=40)
     c.add_argument("--keep", action="store_true", help="do not mark as read")
     c.add_argument("--owner", "-o")
