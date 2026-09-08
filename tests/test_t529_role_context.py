@@ -68,6 +68,20 @@ def test_tickets_roles_dir_byo_pack(board, tmp_path):
     assert "Lane: backend" not in r.stdout
 
 
+def test_board_brief_files_are_the_same_inject_source(board):
+    """T-530 writes .tickets/briefs/; watch/spawn inject must read that store."""
+    assert run(board, "join", "alice", "--roles", "backend").returncode == 0
+    briefs = board / "briefs"
+    (briefs / "roles").mkdir(parents=True)
+    (briefs / "_shared.md").write_text("T529-BOARD-SHARED\n")
+    (briefs / "roles" / "backend.md").write_text("T529-BOARD-BACKEND\n")
+    r = run(board, "prompt", "--agent", "alice")
+    assert r.returncode == 0, r.stderr
+    assert "T529-BOARD-SHARED" in r.stdout
+    assert "T529-BOARD-BACKEND" in r.stdout
+    assert "Lane: backend" not in r.stdout  # board file wins over framework
+
+
 def test_unsafe_role_name_is_not_read(board, tmp_path):
     tk = _tickets()
     secret = tmp_path / "secret.md"
