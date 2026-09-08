@@ -11,6 +11,7 @@ import { MasterPanel } from "./screens/MasterPanel";
 import { BoardProvider, useBoard } from "./state/BoardProvider";
 import { resolveSession, type BoardSession, type SessionResolution } from "./session";
 import { recoveredGapCopy } from "./copy";
+import { FormationMark } from "./components/FormationMark";
 
 function currentViewFromHash(): View {
   const hash = window.location.hash.replace("#", "");
@@ -67,7 +68,8 @@ function BoardShell({ session }: { session: BoardSession }) {
     <>
       <header className="app-header">
         <a className="brand" href="#overview">
-          ↗ Ticket Board
+          <FormationMark />
+          <span className="wordmark">atman</span>
         </a>
         <span className="tag" data-testid="board-label">
           {session.boardLabel}
