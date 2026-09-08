@@ -161,7 +161,7 @@ bundle (543 objects / 1.01 MiB pack — not the 3832-object source pack).
 | Reachable commits | **1** |
 | gitleaks 8.24.2 | **0 leaks** (1 commit scanned, ~3.44 MB) |
 | trufflehog 3.88.27 | **0 verified, 0 unverified** (722 chunks) |
-| `kavana` string in reachable history | **absent** |
+| Operator macOS home handle in reachable history | **absent** |
 | `/Users/<real-handle>/` | **absent** (only `/Users/someone` test placeholder + this doc naming it) |
 | Deleted internal paths (`HANDOFF.md`, `INTEGRATION.md`, `CROSS_REPO_PINS.md`, `LIVE_CLI.md`, `implementation-plan.json`, `messaging-plan.json`, `ACCEPT.md`, `e010-artifact-map.md`) | **absent** from `git rev-list --objects` |
 | Secret filenames (`.env`, `modal.toml`, `*.pem`, `credentials.json`) | **absent** |
