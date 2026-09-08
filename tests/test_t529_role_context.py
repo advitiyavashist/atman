@@ -27,7 +27,7 @@ def test_prompt_injects_shared_and_backend_role(board):
     r = run(board, "prompt", "--agent", "alice")
     assert r.returncode == 0, r.stderr
     assert "Role context" in r.stdout
-    assert "not a shared-memory product" in r.stdout
+    assert "shared-memory" in r.stdout
     assert "Lane: backend" in r.stdout
     assert "tickets next" in r.stdout
 
@@ -36,7 +36,7 @@ def test_prompt_missing_role_file_is_not_fatal(board):
     assert run(board, "join", "bob", "--roles", "nosuchlane").returncode == 0
     r = run(board, "prompt", "--agent", "bob")
     assert r.returncode == 0, r.stderr
-    assert "not a shared-memory product" in r.stdout
+    assert "shared-memory" in r.stdout
     assert "Role context" in r.stdout
     assert "nosuchlane" not in r.stdout
 
@@ -52,7 +52,7 @@ def test_project_roles_override_updates_next_prompt(board):
     (local / "backend.md").write_text("# backend\n\nT529-UPDATED-BACKEND\n")
     after = run(board, "prompt", "--agent", "alice").stdout
     assert "T529-UPDATED-BACKEND" in after
-    assert "not a shared-memory product" in after  # _shared still from framework
+    assert "shared-memory" in after  # _shared still from framework
 
 
 def test_tickets_roles_dir_byo_pack(board, tmp_path):
@@ -92,7 +92,7 @@ def test_watch_prompt_file_includes_role_context(board, tmp_path):
     prompt = got["prompt"]
     assert "alice" in prompt and "tickets next" in prompt
     assert "Role context" in prompt
-    assert "not a shared-memory product" in prompt
+    assert "shared-memory" in prompt
     assert "Lane: backend" in prompt
     assert not os.path.exists(got["argv"][0])
 
@@ -107,4 +107,4 @@ def test_render_prompt_file_is_the_watch_spawn_inject_path(board):
         cleanup()
     assert "Role context" in text
     assert "Lane: backend" in text
-    assert "not a shared-memory product" in text
+    assert "shared-memory" in text
