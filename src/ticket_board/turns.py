@@ -25,7 +25,7 @@ import sys
 from datetime import datetime, timezone
 from statistics import mean, median
 
-from ticket_board.prices import fmt_cost_cell, ticket_cost_fields
+from ticket_board.prices import estimate_run_end_cost, fmt_cost_cell, ticket_cost_fields
 
 TURNS_JSON_V = 1
 
@@ -436,6 +436,27 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             out.append(rec)
         return out
 
+    def cost_est_by_run_model(events):
+        """Per-run estimates grouped by the run_end model, not the ticket row."""
+        buckets = {}
+        for e in events:
+            if e.get("kind") != "run_end":
+                continue
+            est, _, _ = estimate_run_end_cost(e)
+            if est is None:
+                continue
+            m = e.get("model")
+            if not m:
+                continue
+            buckets.setdefault(m, []).append(est)
+        out = []
+        for k in sorted(buckets, key=lambda x: (str(type(x)), str(x))):
+            rec = _agg(buckets[k])
+            rec["total"] = round(sum(buckets[k]), 6)
+            rec["model"] = k
+            out.append(rec)
+        return out
+
     public_rows = []
     for r in rows:
         pub = {k: r[k] for k in ROW_KEYS}
@@ -464,8 +485,7 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "cost_est": cost_est_agg,
             "cost_est_by_agent": cost_group(
                 lambda r: r.get("owner"), "agent", field="cost_usd_est"),
-            "cost_est_by_model": cost_group(
-                lambda r: r.get("model"), "model", field="cost_usd_est"),
+            "cost_est_by_model": cost_est_by_run_model(sel),
         },
     }
 

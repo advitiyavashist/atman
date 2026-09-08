@@ -8,17 +8,35 @@
       "cache_read_per_mtok": 0.5,
       "cache_write_per_mtok": 6.25,
       "source": "https://platform.claude.com/docs/en/about-claude/pricing",
-      "as_of": "2026-09-01",
-      "vendor_model": "Claude Opus 5 / Opus 4.8–4.5"
+      "as_of": "2026-09-08",
+      "vendor_model": "Claude Opus 5"
     },
     "sonnet": {
+      "input_per_mtok": 2.0,
+      "output_per_mtok": 10.0,
+      "cache_read_per_mtok": 0.2,
+      "cache_write_per_mtok": 2.5,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-09-08",
+      "vendor_model": "Claude Sonnet 5"
+    },
+    "sonnet-4.6": {
       "input_per_mtok": 3.0,
       "output_per_mtok": 15.0,
       "cache_read_per_mtok": 0.3,
       "cache_write_per_mtok": 3.75,
       "source": "https://platform.claude.com/docs/en/about-claude/pricing",
-      "as_of": "2026-09-01",
-      "vendor_model": "Claude Sonnet 5 (from 2026-09-01) / Sonnet 4.6–4.5"
+      "as_of": "2026-09-08",
+      "vendor_model": "Claude Sonnet 4.6"
+    },
+    "sonnet-4.5": {
+      "input_per_mtok": 3.0,
+      "output_per_mtok": 15.0,
+      "cache_read_per_mtok": 0.3,
+      "cache_write_per_mtok": 3.75,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-09-08",
+      "vendor_model": "Claude Sonnet 4.5"
     }
   }
 }

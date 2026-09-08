@@ -51,7 +51,7 @@ def test_zero_tokens_is_not_zero_dollars():
 def test_known_model_with_tokens_gets_estimate():
     ev = _run_end("T-1", "opus", tokens_in=1_000_000, tokens_out=0)
     cost, source, as_of = estimate_run_end_cost(ev)
-    assert cost == 5.0 and source == "estimate" and as_of == "2026-09-01"
+    assert cost == 5.0 and source == "estimate" and as_of == "2026-09-08"
 
 
 def test_unknown_model_stays_unmeasured():
@@ -123,7 +123,7 @@ def test_turns_table_labels_est(worked):
     _write_events(b / "trajectories.jsonl", evs)
     r = run(b, "turns", agent="alice", cwd=repo)
     assert " est" in r.stdout
-    assert "$3.0000 est" in r.stdout
+    assert "$2.0000 est" in r.stdout
 
 
 def test_both_copies_render_same_est_summary(worked, tmp_path):
@@ -155,3 +155,33 @@ def test_price_table_rows_have_public_citations():
     for name, row in doc["models"].items():
         assert row.get("source", "").startswith("https://"), name
         assert row.get("as_of"), name
+
+
+def test_sonnet_rows_are_per_vendor_model():
+    doc = load_price_table()
+    models = doc["models"]
+    assert "sonnet" in models and "sonnet-4.6" in models and "sonnet-4.5" in models
+    assert models["sonnet"]["input_per_mtok"] == 2.0
+    assert models["sonnet-4.6"]["input_per_mtok"] == 3.0
+    assert models["sonnet-4.5"]["input_per_mtok"] == 3.0
+    for key in ("sonnet", "sonnet-4.6", "sonnet-4.5"):
+        vm = models[key]["vendor_model"]
+        assert vm.count("/") == 0, "one vendor model per row: %s" % key
+
+
+def test_cost_est_by_model_groups_by_run_model_not_row_model():
+    evs = [
+        {"v": 1, "at": "2026-09-08T01:00:00Z", "kind": "claim", "ticket": "T-910",
+         "agent": "alice"},
+        _run_end("T-910", "sonnet", tokens_in=1_000_000, tokens_out=0),
+        {"v": 1, "at": "2026-09-08T02:00:00Z", "kind": "update", "ticket": "T-910",
+         "agent": "cos-opus", "model": "opus", "notes_len": 10},
+    ]
+    rep = build_turns_report(evs, tickets=[{"id": "T-910", "status": "claimed"}])
+    row = rep["tickets"][0]
+    assert row["model"] == "opus"
+    assert row["cost_usd_est"] == pytest.approx(2.0, rel=1e-3)
+    by_model = rep["aggregates"]["cost_est_by_model"]
+    assert len(by_model) == 1
+    assert by_model[0]["model"] == "sonnet"
+    assert by_model[0]["total"] == pytest.approx(2.0, rel=1e-3)
