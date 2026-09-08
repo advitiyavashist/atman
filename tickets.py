@@ -6195,6 +6195,28 @@ def role_context(board, owner, explicit=None, limit=ROLE_CONTEXT_LIMIT):
     return "\n\n".join(parts)
 
 
+def _safe_role_slug(role):
+    """CLI guard for `brief --role`. Same names as role_brief_path; exits on bad input."""
+    name = (role or "").strip()
+    if role_brief_path(".", name):
+        return name
+    if not name:
+        sys.exit("brief --role needs a role name")
+    if name == "_shared":
+        sys.exit("brief --role _shared refused; shared baseline is briefs/_shared.md")
+    sys.exit("brief --role %r is not a safe role name" % role)
+
+
+def _read_brief_file(path, limit=6000):
+    """Read one board brief file (the T-529 inject source; no other store)."""
+    try:
+        with open(path) as f:
+            text = f.read().strip()
+    except OSError:
+        return ""
+    return text if len(text) <= limit else text[:limit] + "\n...(brief truncated; read the file)"
+
+
 def ticket_context(board, owner):
     """Context notes attached to the agent's held ticket(s)."""
     out = []
@@ -6261,12 +6283,44 @@ def prompt_text(a, board):
 
 
 def cmd_brief(a, board):
-    """Give an agent (or a ticket) context. Shown on every claim, in `tickets
-    prompt`, and in `boot`. Appends with a timestamp; --file replaces from a file;
-    --show prints; --ticket attaches to a ticket instead of an agent."""
+    """Give an agent, a role, or a ticket context. Agent and ticket briefs are
+    shown on every claim, in `tickets prompt`, and in `boot`. `--role` updates
+    the T-529 inject source at .tickets/briefs/roles/<role>.md (watch/spawn
+    reads the same path). Appends with a timestamp; --file replaces from a
+    file; --show prints. Exactly one target: agent name, --role, or --ticket."""
     who = whoami(a.by)
-    if a.ticket and not a.text and a.agent:
-        a.text, a.agent = a.agent, ""  # `brief --ticket T-1 "text"`: first positional is the text
+    role = getattr(a, "role", "") or ""
+    if role and a.ticket:
+        sys.exit("brief: use --role or --ticket, not both")
+    if role and a.agent and a.text:
+        sys.exit("brief: use --role or an agent name, not both")
+    if (role or a.ticket) and not a.text and a.agent:
+        a.text, a.agent = a.agent, ""  # `brief --role backend "text"` / `--ticket T-1 "text"`
+    if role and a.agent:
+        sys.exit("brief: use --role or an agent name, not both")
+    if role:
+        slug = _safe_role_slug(role)
+        path = role_brief_path(board, slug)
+        if a.show:
+            print(_read_brief_file(path) or "(no role brief for %s)" % slug)
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if a.file:
+            with open(a.file) as f:
+                body = f.read()
+            with open(path, "w") as f:
+                f.write(body if body.endswith("\n") else body + "\n")
+            print("brief for role %s replaced from %s" % (slug, a.file))
+        elif a.text:
+            exists = os.path.exists(path)
+            with open(path, "a") as f:
+                if not exists:
+                    f.write("# Role brief for %s\n\n" % slug)
+                f.write("- %s [%s] %s\n" % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), who, a.text))
+            print("added to %s" % path)
+        else:
+            sys.exit("give context text, --file, or --show")
+        return
     if a.ticket:
         t = load(board, a.ticket)
         if a.show:
@@ -6284,7 +6338,7 @@ def cmd_brief(a, board):
         print("context attached to %s%s" % (t["id"], (" (owner %s messaged)" % t["owner"]) if t.get("owner") else ""))
         return
     if not a.agent:
-        sys.exit("brief needs an agent name or --ticket")
+        sys.exit("brief needs an agent name, --role, or --ticket")
     path = brief_path(board, a.agent)
     if a.show:
         print(agent_brief(board, a.agent) or "(no brief for %s)" % a.agent)
@@ -7274,7 +7328,8 @@ def cmd_spawn(a, board):
             sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
         print("worktree %s (branch %s)" % (wt, owner))
     if a.brief:
-        bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False, by=whoami())
+        bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
+                                role="", by=whoami())
         _silent(lambda: cmd_brief(bn, board))
     inherited = _inherit_settings(root, wt)
     if inherited:
@@ -9197,11 +9252,13 @@ def main():
     c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
     c.set_defaults(fn=cmd_guide)
 
-    c = sub.add_parser("brief", help="give an agent or a ticket context (shown on claim, in prompt, in boot)")
+    c = sub.add_parser("brief", help="give an agent, role, or ticket context (shown on claim, in prompt, in boot)")
     c.add_argument("agent", nargs="?", default="")
     c.add_argument("text", nargs="?", default="")
+    c.add_argument("--role", default="",
+                   help="update role standing context at .tickets/briefs/roles/<role>.md (T-529 inject source)")
     c.add_argument("--ticket", default="", help="attach to a ticket instead (owner is messaged)")
-    c.add_argument("--file", default="", help="replace the agent brief from a file")
+    c.add_argument("--file", default="", help="replace the agent or role brief from a file")
     c.add_argument("--show", action="store_true")
     c.add_argument("--by", default="")
     c.set_defaults(fn=cmd_brief)
