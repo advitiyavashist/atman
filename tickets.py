@@ -7821,7 +7821,7 @@ body[data-tab=board] .promise-chips{display:none}
       <h2 class="seats-title">Team</h2>
       <p class="seats-vibe">self ↔ whole</p>
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
-      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — same <span class="mono">tickets msg --to</span>, not a shared-memory brain.</p>
+      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — same <span class="mono">tickets msg --to</span>. Standing context is <span class="mono">.tickets/briefs/</span>, not a shared-memory brain or vector DB.</p>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -8010,7 +8010,7 @@ function renderChatHead(){
   if(!el)return;
   if(THREAD_SEAT){
     el.innerHTML='<h2 class="seats-title">Seat · '+esc(THREAD_SEAT)+'</h2>'+
-      '<p class="seats-lede">1:1 with this BYOA seat. Same log as <span class="mono">tickets msg --to '+esc(THREAD_SEAT)+'</span>. Not a shared-memory brain.</p>';
+      '<p class="seats-lede">1:1 with this BYOA seat. Chat is <span class="mono">tickets msg --to '+esc(THREAD_SEAT)+'</span>. Standing context is <span class="mono">.tickets/briefs/</span>. Not a shared-memory brain or vector DB.</p>';
   }else{
     el.innerHTML='<h2 class="seats-title">Board</h2>'+
       '<p class="seats-lede">Channel-wide. Directed seat mail lives on that seat’s thread.</p>';

@@ -176,6 +176,7 @@ def test_ui_html_has_seat_thread_ia_without_football():
         "data-seat-chat", "it.id||'board'",
         "class=\"intervene\"", ">Msg<", ">Work<",
         "tickets msg --to", "Not a shared-memory brain",
+        "vector DB", ".tickets/briefs/",
         "Channel-wide", "1:1 with this BYOA seat",
         "Intervene ·",
     ):
@@ -229,3 +230,34 @@ def test_inbox_seat_survives_join_broadcasts(board):
     out = run(board, "inbox", "--seat", "cursor").stdout
     assert "joined the board" not in out
     assert "no messages in cursor's seat thread" in out
+
+
+def test_ceo_pm_lock_seat_chat_writes_only_messages_jsonl(board):
+    """CEO/PM PRIORITY lock: chat stays on msg/inbox. No brain, no vector store."""
+    run(board, "join", "cursor", agent="cursor")
+    (board / "briefs").mkdir(exist_ok=True)
+    brief = board / "briefs" / "cursor.md"
+    brief.write_text("standing: review the backend lane\n")
+    before_brief = brief.read_text()
+    before_names = set(p.name for p in board.iterdir())
+
+    run(board, "msg", "lock: stay on this seat", "--to", "cursor", agent="alice")
+    listed = run(board, "inbox", "--seat", "cursor")
+    assert listed.returncode == 0
+    assert "lock: stay on this seat" in listed.stdout
+
+    assert (board / "messages.jsonl").is_file()
+    recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    assert any(r.get("to") == "cursor" and "lock: stay on this seat" in r.get("text", "") for r in recs)
+    assert brief.read_text() == before_brief, "seat chat must not write .tickets/briefs/"
+    created = set(p.name for p in board.iterdir()) - before_names
+    assert not created.intersection({
+        "memory.jsonl", "brain.json", "vectors.json", "embeddings.jsonl", "chroma",
+    })
+    for banned in ("chroma", "faiss", "pinecone", "vector.db", "shared-memory"):
+        assert not (board / banned).exists()
+    ia = (TOOL.parent / "docs" / "product" / "atman-team-ia-v1.md").read_text()
+    assert "CEO/PM PRIORITY lock" in ia
+    assert "Not a shared-memory brain" in ia or "not a shared-memory brain" in ia.lower()
+    assert "vector DB" in ia
+    assert ".tickets/briefs/" in ia
