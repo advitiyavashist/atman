@@ -24,7 +24,11 @@ model router.
 5. Role context is markdown injected on watch/spawn. Repo-root `roles/` is a
    **template only**. Inject reads `.tickets/briefs/` and nowhere else.
    KB v0 is board docs + tracked docs + those briefs — same E-013 contract.
-   [docs/knowledge/](../knowledge/README.md). Not a vector DB or auto-sync.
+   [docs/knowledge/](../knowledge/README.md). Standing files. Not a memory
+   product.
+6. Open `tickets ui` → <http://127.0.0.1:8765>. On the board, **`—` means
+   unknown** (not measured yet) — it is not zero. Median turns / yield@cost
+   stay `—` until a done ticket reports.
 
 ---
 
@@ -229,7 +233,7 @@ Add / tag / how seats see it: [knowledge/howto.md](../knowledge/howto.md).
 
 ```sh
 tickets knowledge                     # index of tracked docs
-tickets knowledge show memory
+tickets knowledge show kb-lock
 tickets brief --role backend --show   # what inject will actually send
 ```
 
@@ -369,10 +373,10 @@ block. Inject does not fall back to `roles/backend.md` in the repo. If you
 wanted house rules in every backend wake, you forgot to seed
 `.tickets/briefs/roles/backend.md`.
 
-**Default gitignore vs handoff memory.** `tickets init` (no `--track`)
+**Default gitignore vs standing files.** `tickets init` (no `--track`)
 appends `.tickets/` — a trailing-slash ignore. Git does not descend, so
 `!.tickets/MASTER.md` does nothing. Live JSON should stay local; hand-written
-memory must be tracked. Use this pattern (see the handoff contract):
+standing files must be tracked. Use this pattern (see the handoff contract):
 
 ```gitignore
 .tickets/*
@@ -466,7 +470,7 @@ Truncation: role files and agent briefs cap at 6000 characters each, then
 ### Folder map — tracked vs local
 
 Default `init` gitignores all of `.tickets/`. For a board you will hand
-over, track memory and ignore state (pattern in Footguns).
+over, track standing files and ignore state (pattern in Footguns).
 
 | Path | What | Typical git |
 |---|---|---|
@@ -517,7 +521,7 @@ tickets spawn --list        # watchers
 tickets spawn <name> --stop
 tickets brief --role docs --show
 tickets knowledge
-tickets knowledge show memory
+tickets knowledge show kb-lock
 tickets prompt --master --agent boss
 tickets prompt --agent smoke
 ```

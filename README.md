@@ -1,10 +1,15 @@
-# tickets
+# Atman
+
+Finish more work at least cost — in the fewest turns.
 
 Atman is a runtime for teams of AI coding agents: bring the agents you already
 use — Claude Code, Codex, Cursor, a local model, your own harness — and it owns
-the objective, the shared state, the task graph, the messaging, the scheduling
+the objective, the shared state, the work queue, the messaging, the scheduling
 and the verification. `tickets` is its control plane: one Python file, standard
 library only, no server, no database, no network.
+
+**See it:** `tickets ui` → <http://127.0.0.1:8765>. The hero is median turns
+and yield@cost. Values stay `—` until a done ticket reports (unknown ≠ 0).
 
 It exists because a swarm of agents fails in predictable ways: two agents do the
 same work, work starts before its prerequisite exists, an agent dies on a usage
@@ -39,29 +44,28 @@ tickets review T-001 --notes "what I did, what I ran, what I decided"
 tickets quickstart --remove             # delete the samples when you are done
 ```
 
-Ask for the second ticket and you will be told `no ticket ready`. That is the
-dependency graph working, not the board being broken — `T-002` is waiting on
-`T-001`. Run `tickets graph` to see the chain.
+Open the board: `tickets ui` → <http://127.0.0.1:8765> (read-only,
+auto-refresh). Median turns and yield@cost stay `—` until a done ticket
+reports. Then read [docs/first-session.md](docs/first-session.md) for a real
+captured first session, command by command.
 
-Watch it live with `tickets ui` (read-only, auto-refreshing, on
-<http://127.0.0.1:8765>), and read
-[docs/first-session.md](docs/first-session.md) for a real captured first
-session, command by command.
+Ask for the second ticket and you will be told `no ticket ready`. That is
+waiting-on working, not the board being broken — `T-002` waits on `T-001`.
 
 Taking the **master** seat (Claude / Cursor / Codex as the board
 coordinator): [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md)
 — folders, install, first commands, role-context briefs, what not to
 expect. Index: [docs/onboarding/README.md](docs/onboarding/README.md).
-Team knowledge (KB v0 = board docs + tracked docs + briefs; E-013 inject,
-not a memory brain):
+Team knowledge — **Standing files. Not a memory product.** KB v0 = board
+docs + tracked docs + briefs (E-013 inject):
 [docs/knowledge/README.md](docs/knowledge/README.md).
 
 ## The model
 
 - **Ticket** `T-001`: title, body, `role`, `priority` (1 hard .. 3 routine),
-  `deps` (a DAG — cycles and dangling ids are refused), `epic`, `sprint`,
-  `needs` (capabilities such as `docker`, `browser`, `own-machine`), owner,
-  notes, timings.
+  `deps` (ticket ids this work waits on; cycles and dangling ids refused),
+  `epic`, `sprint`, `needs` (capabilities such as `docker`, `browser`,
+  `own-machine`), owner, notes, timings.
 - **Status**: `TO DO -> IN PROGRESS -> IN REVIEW -> DONE`, or `BLOCKED`.
 - **Epic** `E-001`, **Sprint** `S-01` (one active; `next` prefers it).
 - **Agent**: `TICKET_AGENT=name`; registered with roles, capabilities, cost
@@ -157,10 +161,10 @@ tickets plan <<'EOF'
  {"key":"ui","title":"Login UI","role":"console","deps":["api"]}
 ]}
 EOF
-tickets create "DB migration" --blocks T-002     # insert a node upstream of existing work
-tickets dep T-004 --after T-003                  # rewire
-tickets map                                      # sprint -> epic -> tickets, with deps
-tickets graph                                    # dependency tree with status per node
+tickets create "DB migration" --blocks T-002     # new work T-002 must wait on
+tickets dep T-004 --after T-003                  # set waiting-on
+tickets map                                      # sprint -> epic -> tickets
+tickets graph                                    # who waits on whom, with status
 ```
 
 ## Where the data lives
@@ -182,9 +186,9 @@ KB v0 is board docs + tracked docs
 E-013 inject. Not a shared-memory brain, vector DB, or auto-sync role KB.
 
 `tickets init` gitignores the board by default (`--track` to commit it
-instead). Hand-written memory (`MASTER.md`, `briefs/`) should still be
-tracked — see [docs/handoff-contract.md](docs/handoff-contract.md) and the
-folder map in [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md).
+instead). Standing files (`MASTER.md`, `briefs/`) should still be tracked —
+see [docs/handoff-contract.md](docs/handoff-contract.md) and the folder map
+in [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md).
 Board location resolves in this order: `$TICKETS_DIR`, the nearest
 ancestor with a live board, the git worktree root, then cwd — see
 [docs/board-resolution.md](docs/board-resolution.md).

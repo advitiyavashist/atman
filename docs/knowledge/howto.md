@@ -31,7 +31,7 @@ tags: [ops, master]
   Tags are an index, not a routing table.
 
 Commit the file. Tracked docs survive a board clear. Board docs and
-briefs are the other two slices of KB v0 — see [memory.md](memory.md).
+briefs are the other two slices of KB v0 — see [kb-lock.md](kb-lock.md).
 
 ## 2. Tag it
 
