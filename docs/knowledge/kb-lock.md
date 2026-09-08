@@ -1,13 +1,15 @@
 ---
-id: memory
+id: kb-lock
 title: KB v0 lock
-tags: [memory, product, master]
+tags: [knowledge, product, master]
 ---
 
 # KB v0 lock
 
-Atman remembers as a team, not as a mind. The seat (Atman) and the whole
-(Brahman) share **files the next reader can open**.
+**Standing files. Not a memory product.**
+
+The team shares **files the next reader can open** — board docs, tracked
+docs, and briefs. That is KB v0. Nothing else.
 
 ## In (KB v0)
 
@@ -27,7 +29,7 @@ are not a second inject root.
 
 ## Out
 
-- Shared-memory brain, Om store, latent "what we learned Tuesday"
+- Shared-memory brain, latent "what we learned Tuesday"
 - Vector DB, embeddings, graph-doc product
 - Auto-sync role KB (copying this tree into briefs on a schedule or by tag)
 - Modal, or any remote memory service

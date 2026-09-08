@@ -134,6 +134,9 @@ tickets ui                                                   # watch it live
 tickets guide                                                # connect claude / codex / cursor
 ```
 
+After `tickets ui`: median turns / yield stay `—` until a done ticket reports
+(unknown ≠ 0).
+
 Then read the worker loop and master loop sections of
 [README.md](../README.md), and `tickets connect` for wiring a real agent to the
 board.

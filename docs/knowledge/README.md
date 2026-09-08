@@ -6,8 +6,7 @@ tags: [knowledge, index, onboarding]
 
 # Team knowledge
 
-Atman is the seat. Brahman is the whole that seat works inside. A seat
-reads what the whole already wrote.
+**Standing files. Not a memory product.**
 
 ## KB v0 lock (CEO / PM)
 
@@ -26,7 +25,7 @@ the live mission.
 
 **Not v0 (do not build):**
 
-- A shared-memory brain / Om store / latent mind
+- A shared-memory brain / latent mind / “what we learned Tuesday” store
 - A vector DB, embeddings, or graph-doc index
 - Auto-sync from this tree into role briefs (no `knowledge pin`, no
   tag→role dump, no second inject root)
@@ -37,7 +36,7 @@ the live mission.
 | If you are… | Read |
 |---|---|
 | Adding a doc, tagging it, how seats see it | [howto.md](howto.md) |
-| What is in vs out of KB v0 | [memory.md](memory.md) |
+| What is in vs out of KB v0 | [kb-lock.md](kb-lock.md) |
 | How text reaches a prompt | [inject.md](inject.md) |
 
 Index (also `tickets knowledge`):
@@ -46,12 +45,12 @@ Index (also `tickets knowledge`):
 |---|---|---|
 | knowledge | This page | knowledge, index, onboarding |
 | howto | Add a doc, tag it, how seats see it | howto, operator |
-| memory | KB v0 lock | memory, product, master |
+| kb-lock | KB v0 lock | knowledge, product, master |
 | inject | E-013 inject contract | inject, briefs |
 
 ```sh
 tickets knowledge                 # list tracked docs (optional --tag backend)
-tickets knowledge show memory
+tickets knowledge show kb-lock
 tickets brief --role backend "…"  # standing inject — same as E-013
 tickets brief --role backend --show
 tickets prompt --agent alice
