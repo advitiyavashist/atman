@@ -291,13 +291,14 @@ number is the highest existing plus one.
   not there. Two different paths naming one directory through a symlink are not
   detected. Closing this needs a resolver running where the checkouts actually
   live, which is the adapter, not the server.
-- **`POST /enrollments` is not idempotent on `request_id` (T-192).** A retry is
-  a 400 naming the duplicate agent name — the same as before T-192, not a
-  regression, but the ticket asked for idempotent create and this is not it.
-  True replay would have to return the enrollment `code` a second time, and the
-  contract says that code is "returned exactly once here and never again", so
-  making this route idempotent is a contract question rather than an
-  implementation one.
+- **`POST /enrollments` is not idempotent on `request_id` (T-474 WONT-amend).**
+  A retry is a 400 naming the duplicate agent name, with no `code` in the body.
+  True replay would have to return that one-time secret a second time, which
+  the frozen CreateEnrollmentResponse forbids ("returned exactly once here and
+  never again"). T-192 asked for idempotent create; T-474 closed that as
+  WONT-amend rather than filing an OpenAPI change. Pinned by
+  `tests/server/test_t474_enrollment_replay.py`. Same-identity re-enrol stays
+  T-405.
 - **A preset is recorded at enrolment and never updated (T-192).** Changing what
   an agent may hold means enrolling a new identity, because same-identity
   re-enrolment is T-405 and does not exist yet. An agent enrolled before T-192
@@ -561,5 +562,5 @@ Symlinks. Unchanged from T-192 and unchanged by anything here: two different
 absolute paths can name one directory and this comparison will not see it.
 Closing it needs a resolver where the checkouts actually live.
 
-`POST /enrollments` is still not idempotent on `request_id` (T-474), and
-same-identity re-enrol is still T-405. Neither is touched.
+`POST /enrollments` request_id replay is T-474 WONT-amend (fail-as-duplicate-name,
+no second `code`). Same-identity re-enrol is still T-405.
