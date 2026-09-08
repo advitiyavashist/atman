@@ -2850,6 +2850,135 @@ def _watch_cmd_agent(cmd):
     return ""
 
 
+def _is_python_interp(tok):
+    base = os.path.basename((tok or "").rstrip("/")).lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    return base == "python" or base.startswith("python")
+
+
+def _is_pytest_argv(argv):
+    """True if this process IS pytest, not an agent whose prompt quotes it.
+
+    T-559 / HB205: `ps aux` regex `[p]ytest.*-x.*--ignore=\\.worktrees` matches
+    AGENT PROMPTS that quote the desk harness tokens (live: optimizer pid 5983,
+    cursor-demo leftover 25662). Those processes are `tickets.py watch` /
+    `claude` / `agent`, not pytest -- so a full-line grep never clears after
+    the real harness exits. Identify pytest by the invocation PREFIX only:
+    argv[0] basename `pytest`, `python -m pytest`, or `python /path/pytest`.
+    A later `pytest` token inside `--exec` / `--prompt` does not count. A
+    `tickets.py watch` loop is never pytest.
+    """
+    argv = list(argv or [])
+    if not argv:
+        return False
+    for i, tok in enumerate(argv):
+        base = os.path.basename(tok.rstrip("/"))
+        if base == "tickets.py" and i + 1 < len(argv) and argv[i + 1] == "watch":
+            return False
+    head = os.path.basename(argv[0].rstrip("/"))
+    if head in ("pytest", "pytest.exe"):
+        return True
+    if not _is_python_interp(argv[0]):
+        return False
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "-m":
+            return i + 1 < len(argv) and argv[i + 1] in ("pytest", "pytest.exe")
+        if tok in ("-c", "--"):
+            return False
+        if tok.startswith("-"):
+            if tok in ("-W", "-X") and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 2
+                continue
+            i += 1
+            continue
+        return os.path.basename(tok.rstrip("/")) in ("pytest", "pytest.exe")
+    return False
+
+
+def _argv_has_ignore_worktrees(argv):
+    for i, tok in enumerate(argv):
+        if tok == "--ignore=.worktrees":
+            return True
+        if tok == "--ignore" and i + 1 < len(argv) and argv[i + 1] == ".worktrees":
+            return True
+        if tok.startswith("--ignore=") and tok.split("=", 1)[1] == ".worktrees":
+            return True
+    return False
+
+
+def _is_desk_merge_pytest_cmd(cmd):
+    """True if `cmd` is the desk merge pytest harness (T-559).
+
+    ACCEPT: argv tokens pytest AND -x AND --ignore=.worktrees (any order,
+    with gaps). Live counterexample 10:03Z pid 51475:
+    `pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude`
+    -- contiguous pgrep `pytest -x --ignore=.worktrees` is empty. Never
+    cwd (51475 chdirs into /tmp/pytest-of-kavana mid-run; a cwd==desk-WT
+    gate reads CLEAR while the suite is still alive). Never the full
+    `ps aux` line. QUIET-BOX / T-486 (e) `desk_pytest_alive` /
+    `desk_merge_alive` must call `_desk_pytest_alive`, not cwd and not
+    `pgrep -f 'desk-cursor-fable/.venv/bin/python -m pytest'`.
+    """
+    argv = _split_cmdline(cmd)
+    if not _is_pytest_argv(argv):
+        return False
+    return "-x" in argv and _argv_has_ignore_worktrees(argv)
+
+
+def _desk_pytest_pids(extra_pids=()):
+    """Pids of desk-merge-shaped pytest processes, plus any still-alive extra.
+
+    Extra pids are the ACCEPT "or the pid" fallback (T-554 waiter also
+    checked `ps -p 51475`). Never filters on cwd. Does not spawn --stop.
+    """
+    import subprocess
+
+    extra = set()
+    for p in extra_pids or ():
+        try:
+            extra.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    out = [p for p in extra if _pid_alive(p)]
+    try:
+        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
+                           capture_output=True, text=True)
+    except OSError:
+        return sorted(set(out))
+    me = os.getpid()
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == me:
+            continue
+        if pid in extra:
+            continue
+        if _is_desk_merge_pytest_cmd(parts[1]) and _pid_alive(pid):
+            out.append(pid)
+    return sorted(set(out))
+
+
+def _desk_pytest_alive(extra_pids=()):
+    """True if a desk-merge pytest is running (or an extra pid is still alive).
+
+    Replacement for the T-486 (e) / QUIET-BOX `desk_pytest_alive` helper.
+    False-ALIVE (another seat's merge-shaped pytest) is safer than false-CLEAR
+    mid-desk-merge. Never spawn --stop a live seat from this predicate.
+    """
+    return bool(_desk_pytest_pids(extra_pids=extra_pids))
+
+
 def _has_child_process(pid):
     """True if `pid` has at least one live child. Ground truth for "is this
     watcher mid-run" on loops that predate the T-237 agents/<name>.run
