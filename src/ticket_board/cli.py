@@ -1438,6 +1438,15 @@ def _may_set_reservation(board, who):
     return who in ((m.get("owner") or ""), (m.get("cos") or ""))
 
 
+def _next_refusal_parts(ready_all, roles, owner, steal_id, board):
+    """T-558 F2: leftover ready tickets are role-miss or reservation, not one bucket."""
+    role_filtered = _filter_ready(ready_all, roles)
+    role_ok = [t for t in role_filtered if can_do(board, owner, t)]
+    role_miss = [t for t in ready_all if t not in role_filtered]
+    reserved_miss = [t for t in role_ok if _reservation_blocks(t, owner, steal_id)]
+    return role_miss, reserved_miss
+
+
 def cmd_next(a, board):
     owner = whoami(a.owner)
     roles = roles_for(board, owner, a.role)
@@ -1502,12 +1511,17 @@ def cmd_next(a, board):
             len(cannot), "; ".join("%s needs %s" % (t["id"], ",".join(t["needs"])) for t in cannot)))
         print("register with: tickets join %s --can %s" % (owner, ",".join(sorted(set(
             n for t in cannot for n in t["needs"])))))
-    others = [t for t in ready_all if t not in ready]
-    if roles is not None and others:
-        print(
-            "no ticket for roles %s; %d ready for other roles: %s"
-            % (roles, len(others), ", ".join(t["id"] for t in others))
-        )
+    role_miss, reserved_miss = _next_refusal_parts(
+        ready_all, roles, owner, steal_id, board)
+    parts = []
+    if role_miss:
+        parts.append("%d ready for other roles: %s" % (
+            len(role_miss), ", ".join(t["id"] for t in role_miss)))
+    if reserved_miss:
+        parts.append("%d reserved for other agents: %s" % (
+            len(reserved_miss), ", ".join(t["id"] for t in reserved_miss)))
+    if roles is not None and parts:
+        print("no ticket for roles %s; %s" % (roles, "; ".join(parts)))
         sys.exit(1)
     cyc = find_cycle(tickets)
     if cyc:
@@ -2300,8 +2314,15 @@ def cmd_reserve(a, board):
         return
     if not _may_set_reservation(board, who):
         sys.exit("tickets reserve --for is master/planner/optimizer only (anyone may --drop)")
+    if t.get("status") != "open":
+        sys.exit("%s is %s; reserve only open tickets" % (t["id"], t.get("status") or "?"))
+    unknown = not _agent_rec(board, target)
     t["reserved_for"] = target
-    t["notes"].append({"by": who, "at": now(), "text": "reserve: for %s" % target})
+    note = "reserve: for %s" % target
+    if unknown:
+        note += " (unknown agent; warning)"
+        print("warning: %r is not a registered agent; reservation still set" % target)
+    t["notes"].append({"by": who, "at": now(), "text": note})
     save(board, t)
     print("%s: reserved for %s" % (t["id"], target))
 
