@@ -6364,6 +6364,236 @@ def cmd_brief(a, board):
     post_message(board, who, "brief updated for %s: %s" % (a.agent, (a.text or a.file)[:160]), to=a.agent)
 
 
+# Team knowledge: repo-tracked docs/knowledge/. Search / show / pin into the
+# existing brief inject path. Not a shared-memory product, not a board store.
+_KNOWLEDGE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+KNOWLEDGE_PIN_LIMIT = 400
+
+
+def knowledge_root(board=None):
+    """Repo-tracked team docs. $TICKETS_KNOWLEDGE_DIR wins (tests). No .tickets/knowledge/."""
+    env = (os.environ.get("TICKETS_KNOWLEDGE_DIR") or "").strip()
+    if env:
+        return os.path.abspath(env)
+    cands = []
+    here = _init_cwd_worktree_root()
+    if here:
+        cands.append(os.path.join(here, "docs", "knowledge"))
+    main = _repo_root()
+    if main:
+        p = os.path.join(main, "docs", "knowledge")
+        if p not in cands:
+            cands.append(p)
+    if board:
+        p = os.path.join(os.path.dirname(os.path.abspath(board)), "docs", "knowledge")
+        if p not in cands:
+            cands.append(p)
+    for p in cands:
+        if os.path.isdir(p):
+            return os.path.abspath(p)
+    if cands:
+        return os.path.abspath(cands[0])
+    return os.path.abspath(os.path.join(os.getcwd(), "docs", "knowledge"))
+
+
+def _parse_knowledge_frontmatter(text):
+    """Minimal YAML-ish header. Stdlib only; unknown keys kept as strings."""
+    meta, body = {}, text
+    if not text.startswith("---"):
+        return meta, body
+    end = text.find("\n---", 3)
+    if end < 0:
+        return meta, body
+    raw = text[3:end].strip()
+    body = text[end + 4:].lstrip("\n")
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip().lower()
+        val = val.strip()
+        if key in ("tags", "seats"):
+            val = val.strip("[]")
+            meta[key] = [x.strip().strip("'\"") for x in val.split(",") if x.strip()]
+        else:
+            meta[key] = val.strip("'\"")
+    return meta, body
+
+
+def _knowledge_docs(root):
+    """Markdown under the knowledge tree. Paths must stay inside root."""
+    root = os.path.realpath(root)
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in sorted(filenames):
+            if not name.endswith(".md") or name.startswith("."):
+                continue
+            path = os.path.realpath(os.path.join(dirpath, name))
+            if path != root and not path.startswith(root + os.sep):
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            meta, body = _parse_knowledge_frontmatter(text)
+            rel = os.path.relpath(path, root)
+            slug = (meta.get("id") or os.path.splitext(os.path.basename(path))[0]).strip()
+            if not _KNOWLEDGE_SLUG_RE.match(slug):
+                continue
+            out.append({
+                "id": slug,
+                "title": (meta.get("title") or slug).strip(),
+                "tags": list(meta.get("tags") or []),
+                "seats": list(meta.get("seats") or []),
+                "pin": (meta.get("pin") or "").strip(),
+                "path": path,
+                "rel": rel.replace("\\", "/"),
+                "body": body,
+            })
+    out.sort(key=lambda d: d["rel"])
+    seen = {}
+    unique = []
+    for d in out:
+        if d["id"] in seen:
+            continue
+        seen[d["id"]] = True
+        unique.append(d)
+    return unique
+
+
+def _knowledge_excerpt(doc, limit=KNOWLEDGE_PIN_LIMIT):
+    text = (doc.get("pin") or "").strip()
+    if not text:
+        for para in (doc.get("body") or "").split("\n\n"):
+            line = " ".join(para.strip().split())
+            if line and not line.startswith("#"):
+                text = line
+                break
+    if not text:
+        text = doc.get("title") or doc.get("id") or ""
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
+def _find_knowledge_doc(root, slug):
+    if not _KNOWLEDGE_SLUG_RE.match(slug or ""):
+        return None
+    for d in _knowledge_docs(root):
+        if d["id"] == slug:
+            return d
+    return None
+
+
+def _knowledge_pin_line(doc):
+    tags = ", ".join(doc.get("tags") or [])
+    rel = "docs/knowledge/" + doc["rel"]
+    excerpt = _knowledge_excerpt(doc)
+    line = "- Knowledge [%s]: %s — %s" % (doc["id"], rel, doc["title"])
+    if tags:
+        line += " (tags: %s)" % tags
+    if excerpt:
+        line += "\n  %s" % excerpt
+    return line + "\n"
+
+
+def cmd_knowledge(a, board):
+    """List / show team docs, or pin one into the existing brief inject path."""
+    root = knowledge_root(board)
+    sub = getattr(a, "knowledge_cmd", None) or "list"
+    tag = (getattr(a, "tag", "") or "").strip()
+    if sub == "list":
+        if not os.path.isdir(root):
+            print("no team knowledge tree at %s" % root)
+            print("expected docs/knowledge/ (repo-tracked markdown). "
+                  "See docs/knowledge/README.md")
+            return
+        docs = _knowledge_docs(root)
+        if tag:
+            docs = [d for d in docs if tag in (d.get("tags") or [])]
+        if getattr(a, "json", False):
+            payload = [{k: d[k] for k in ("id", "title", "tags", "seats", "path", "rel")}
+                       for d in docs]
+            print(json.dumps(payload, indent=2))
+            return
+        if not docs:
+            print("no knowledge docs%s at %s" % ((" tagged %s" % tag) if tag else "", root))
+            return
+        for d in docs:
+            tags = ",".join(d["tags"]) if d["tags"] else "-"
+            print("%-16s %-36s [%s]  docs/knowledge/%s" % (
+                d["id"], d["title"][:36], tags, d["rel"]))
+        print("")
+        print("%d doc(s)  pin with: tickets knowledge pin <id> --role <lane>" % len(docs))
+        return
+    if sub == "show":
+        slug = (getattr(a, "slug", "") or "").strip()
+        if not slug:
+            sys.exit("knowledge show needs a doc id")
+        if not _KNOWLEDGE_SLUG_RE.match(slug):
+            sys.exit("knowledge slug %r is not a safe name" % slug)
+        doc = _find_knowledge_doc(root, slug)
+        if not doc:
+            sys.exit("no knowledge doc %r under %s" % (slug, root))
+        print("# %s" % doc["path"])
+        print(doc["body"].rstrip())
+        print()
+        return
+    if sub == "pin":
+        slug = (getattr(a, "slug", "") or "").strip()
+        role = (getattr(a, "role", "") or "").strip()
+        agent = (getattr(a, "agent", "") or "").strip()
+        shared = bool(getattr(a, "shared", False))
+        targets = int(bool(role)) + int(bool(agent)) + int(shared)
+        if targets != 1:
+            sys.exit("pin needs exactly one of --role, --agent, or --shared")
+        if not slug:
+            sys.exit("knowledge pin needs a doc id")
+        if not _KNOWLEDGE_SLUG_RE.match(slug):
+            sys.exit("knowledge slug %r is not a safe name" % slug)
+        if not os.path.isdir(board):
+            sys.exit("pin needs a board (briefs live there)")
+        doc = _find_knowledge_doc(root, slug)
+        if not doc:
+            sys.exit("no knowledge doc %r under %s" % (slug, root))
+        if role:
+            path = role_brief_path(board, _safe_role_slug(role))
+        elif shared:
+            path = shared_brief_path(board)
+        else:
+            path = brief_path(board, agent)
+        marker = "Knowledge [%s]:" % doc["id"]
+        existing = ""
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    existing = f.read()
+            except OSError:
+                existing = ""
+        if marker in existing:
+            print("already pinned [%s] in %s" % (doc["id"], path))
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            if not existing:
+                if role:
+                    f.write("# Role brief for %s\n\n" % role)
+                elif shared:
+                    f.write("# Shared seat context\n\n")
+                else:
+                    f.write("# Brief for %s\n\n" % agent)
+            f.write(_knowledge_pin_line(doc))
+        print("pinned %s into %s" % (doc["id"], path))
+        return
+    sys.exit("knowledge: list | show <id> | pin <id> --role|--agent|--shared")
+
+
 def utilization(board, tickets=None, hours=24, live=None):
     """Per-agent throughput and load over the window, plus sprint burn."""
     tickets = tickets if tickets is not None else load_all(board)
@@ -9549,6 +9779,23 @@ def main():
     c = sub.add_parser("context", help="print the shared briefing file")
     c.set_defaults(fn=cmd_context)
 
+    c = sub.add_parser("knowledge", aliases=["kb"],
+                       help="team knowledge docs: list | show | pin into briefs (not a memory brain)")
+    c.add_argument("--tag", default="", help="filter list by tag")
+    c.add_argument("--json", action="store_true")
+    ks = c.add_subparsers(dest="knowledge_cmd")
+    x = ks.add_parser("list", help="index the docs/knowledge tree")
+    x.add_argument("--tag", default="", help="filter list by tag")
+    x.add_argument("--json", action="store_true")
+    x = ks.add_parser("show", help="print one doc")
+    x.add_argument("slug")
+    x = ks.add_parser("pin", help="append a pointer to an existing brief (T-529 inject)")
+    x.add_argument("slug")
+    x.add_argument("--role", default="", help="pin into .tickets/briefs/roles/<role>.md")
+    x.add_argument("--agent", default="", help="pin into .tickets/briefs/<agent>.md")
+    x.add_argument("--shared", action="store_true", help="pin into .tickets/briefs/_shared.md")
+    c.set_defaults(fn=cmd_knowledge, slug="")
+
     c = sub.add_parser("mine", help="list tickets claimed by this agent")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_mine)
@@ -9590,6 +9837,8 @@ def main():
         "master",
         "connect",
         "board-restore",
+        "knowledge",
+        "kb",
     ):
         if not os.path.isdir(board):
             if a.cmd == "board":

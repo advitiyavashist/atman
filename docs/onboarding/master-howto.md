@@ -23,6 +23,8 @@ model router.
    / `tickets watch` real workers.
 5. Role context is markdown injected on watch/spawn. Repo-root `roles/` is a
    **template only**. Inject reads `.tickets/briefs/` and nowhere else.
+   Team knowledge is [docs/knowledge/](../knowledge/README.md) — pin into
+   a brief; do not expect a second inject root.
 
 ---
 
@@ -220,6 +222,18 @@ Exactly one target: agent name, `--role`, or `--ticket`.
 Missing role file is not an error. That lane simply has no extra paragraph.
 Do not treat silence as "it loaded the template."
 
+Team knowledge (house docs beyond the standing brief) is
+[docs/knowledge/](../knowledge/README.md). It is **not** a memory product
+and it is **not** a fourth onboarding file. Add / tag / how seats see it:
+[knowledge/howto.md](../knowledge/howto.md). Pin a doc into the brief this
+step already injects:
+
+```sh
+tickets knowledge                     # index
+tickets knowledge show memory
+tickets knowledge pin memory --role backend
+```
+
 ---
 
 ## Step 5 — Dry smoke (no paid burn)
@@ -316,7 +330,9 @@ Details: `tickets guide`, [connect-claude.md](../connect-claude.md).
 
 - **A shared-memory brain.** Briefs are standing markdown. They do not
   persist chat, tool traces, or "what we learned last Tuesday."
+  `docs/knowledge/` is team docs you search and pin — same lock.
 - **Repo-root `roles/` on inject.** E-013 path lock. Templates only.
+  `docs/knowledge/` is also not read on inject unless you pin it.
 - **The runtime to drive the model's inner loop.** It hands a prompt file
   and a cwd. Reasoning, tools, retries, and stop are the harness.
 - **Parsed harness stdout.** Only exit code (backoff / `harness check`).
@@ -427,6 +443,10 @@ One renderer. Built-in CLIs and `{prompt_file}` get the same text.
 5. Ticket context notes (`tickets brief --ticket <id>`) on held tickets
 6. Any extra text the caller passed
 
+Pinned team knowledge is **inside** those brief files (a `Knowledge [id]:`
+line), not a new inject step. Catalog: [docs/knowledge/](../knowledge/README.md).
+`tickets knowledge show` is on-demand; it does not enter the prompt.
+
 **Then, master / planner / cos** (`tickets prompt --master` / `--cos`, or
 `spawn --master` / `--cos`):
 
@@ -469,6 +489,7 @@ over, track memory and ignore state (pattern in Footguns).
 | `HANDOFF.md` (repo root) | what is true about the work | **track** |
 | `docs/handoffs/AGENT_CONTEXT.md` | extra claim briefing (if used) | track if present |
 | `roles/*.md` (repo root) | templates only; **not injected** | tracked in this repo |
+| `docs/knowledge/` | team docs (search / pin into briefs) | **track** |
 | `.worktrees/<agent>/` | that agent's git worktree + branch | local (git worktree) |
 | `AGENTS.md`, `.cursor/rules/tickets.mdc` | protocol for Codex / Cursor | track |
 
@@ -495,6 +516,8 @@ tickets merge               # integration worktree → tests → ff main
 tickets spawn --list        # watchers
 tickets spawn <name> --stop
 tickets brief --role docs --show
+tickets knowledge
+tickets knowledge pin memory --role docs
 tickets prompt --master --agent boss
 tickets prompt --agent smoke
 ```
