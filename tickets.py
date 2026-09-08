@@ -5708,8 +5708,15 @@ def cmd_route(a, board):
         return _scheduler_cmd()(
             a, board, load_all, load_workforce, load_roles, load_agents,
             score_agent, traj_event, DEFAULT_ROLES)
-    from ticket_board.scheduler import (
-        DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, format_excluded, _candidate_names)
+    try:
+        from ticket_board.scheduler import (
+            DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, format_excluded, _candidate_names)
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.scheduler import (
+            DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, format_excluded, _candidate_names)
     tickets = load_all(board)
     wf = load_workforce(board)
     roles = load_roles(board)
