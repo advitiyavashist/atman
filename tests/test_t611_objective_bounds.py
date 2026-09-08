@@ -145,15 +145,23 @@ def _submit_docs_review(board):
     return repo
 
 
-def test_review_queue_alone_does_not_wake_master(board):
+def test_review_without_cos_task_wakes_master_once(board):
     run(board, "master", "take", agent="boss")
     _submit_docs_review(board)
+    time.sleep(1.1)
+    rc, p = pending(board, "boss")
+    assert rc == 0 and p.get("pending") is True, p
+    assert p.get("wake_reason") == "task_messages"
+    assert "review_queue" in p
+    recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    mail = next(m for m in recs if m.get("to") == "boss" and "ready for review" in m.get("text", ""))
+    assert mail.get("kind") == "task"
+    run(board, "inbox", agent="boss")
+    time.sleep(1.1)
     rc, p = pending(board, "boss")
     assert "review_queue" in p, p
     assert p.get("pending") is False and rc == 1, p
-    recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
-    mail = next(m for m in recs if m.get("to") == "boss" and "ready for review" in m.get("text", ""))
-    assert mail.get("kind") != "task"
+    assert not p.get("task_messages")
 
 
 def test_review_tasks_cos_once_then_inbox_clears_repeat_wake(board):

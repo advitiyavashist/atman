@@ -793,11 +793,11 @@ def current_master(board):
 
 
 def _notify_review_submitted(board, author, tid, text, master_state=None):
-    """Task-wake current CoS once; master copy stays notification-only.
+    """Wake the reviewer once via kind=task; static review_queue is not a wake key.
 
-    Static review_queue is still recorded on pending() for both seats but is
-    not itself a wake key. After the CoS reads inbox, the task is consumed
-    and review_queue alone must not re-wake.
+    With a CoS: task the CoS, notification-only copy to master.
+    With no CoS: task the master so an unattended master does not sleep through
+    the review. After inbox read, review_queue alone must not re-wake.
     """
     m = master_state if master_state is not None else (current_master(board) or {})
     master_name = (m or {}).get("owner") or ""
@@ -808,7 +808,7 @@ def _notify_review_submitted(board, author, tid, text, master_state=None):
         if master_name and master_name != cos_name:
             post_message(board, author, body, to=master_name, re=tid)
     else:
-        post_message(board, author, body, to=master_name, re=tid)
+        post_message(board, author, body, to=master_name, re=tid, kind="task")
     return master_name, cos_name
 
 
