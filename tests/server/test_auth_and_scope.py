@@ -173,9 +173,32 @@ def test_a_wrong_method_on_a_known_route_is_also_404(operator):
 
 
 def test_other_lanes_routes_say_who_owns_them(operator):
+    """T-187 is still stubbed on origin/main@8346c38; keep the owner_ticket guard.
+
+    The original T-502 rewrite (2a411d6) replaced this with a /runners/jobs
+    assertion because a T-187 merge on old main had already moved the guard.
+    That merge is not on the post-T-522 lineage. Dropping this test now would
+    leave /messages unguarded while it is still `_not_this_lane("T-187")`.
+    Re-apply 2a411d6 when T-187 is re-rooted onto this main.
+    """
     response = operator.get("/messages")
     assert response.status == 404
     assert response.json()["error"]["details"]["owner_ticket"] == "T-187"
+
+
+def test_the_runner_routes_are_no_longer_stubs(enrolled):
+    """T-188 landed; GET /runners/jobs is not an owner_ticket stub.
+
+    A bare GET without runner_id is 400 malformed_request with
+    rejected_fields=["runner_id"], not 404 owner_ticket T-188. This is the
+    live shape the original T-502 rewrite asserted; kept as its own test so
+    the still-correct T-187 /messages guard above is not deleted.
+    """
+    response = enrolled["client"].get("/runners/jobs")
+    assert response.status == 400
+    payload = response.json()["error"]
+    assert payload["code"] == "malformed_request"
+    assert payload["details"]["rejected_fields"] == ["runner_id"]
 
 
 def test_an_unexpected_failure_becomes_a_response_not_a_dropped_connection(
