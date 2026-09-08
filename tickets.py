@@ -9971,7 +9971,7 @@ def _onboarding_checklist(board, tickets):
     names.update(workforce)
     return {
         "initialized": initialized,
-        "first_ticket": len(tickets) > 0,
+        "first_ticket": any(t.get("claimed_at") for t in tickets),
         "first_agent": bool(names),
         "second_harness": len(names) >= 2,
         "first_review": any(t.get("status") in ("review", "done") for t in tickets),

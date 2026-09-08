@@ -94,8 +94,22 @@ def test_next_step_spawn_when_no_agents(board):
     r = run(board, "ui", "--json")
     d = json.loads(r.stdout)
     assert d["next_step"]["kind"] == "spawn"
-    assert d["onboarding"]["first_ticket"] is True
+    assert d["onboarding"]["first_ticket"] is False
     assert d["onboarding"]["first_agent"] is False
+
+
+def test_first_ticket_ticks_after_claim_not_create(board):
+    """T-505: first_ticket probe matches hint — claim via next, not ticket existence."""
+    run(board, "master", "take", agent="boss")
+    run(board, "master", "init", agent="boss")
+    run(board, "join", "worker", "--roles", "backend")
+    run(board, "create", "hello", agent="boss")
+    before = json.loads(run(board, "ui", "--json").stdout)
+    assert before["onboarding"]["first_ticket"] is False
+    claimed = run(board, "next", agent="worker")
+    assert claimed.returncode == 0, claimed.stderr
+    after = json.loads(run(board, "ui", "--json").stdout)
+    assert after["onboarding"]["first_ticket"] is True
 
 
 def test_snapshot_error_payload_has_next_step():
