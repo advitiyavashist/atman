@@ -267,7 +267,16 @@ def test_the_permission_policy_comes_from_the_lease_not_the_supervisor(
 
 def test_two_agents_on_one_board_do_not_see_each_others_work(
         server, project, operator, agent, client, tmp_path):
-    """Two sessions, two supervisors, one board -- and no crosstalk."""
+    """Two sessions, two supervisors, one board -- and no crosstalk.
+
+    T-485 gave the two supervisors a directory each. They shared `tmp_path`
+    before, which was incidental to what this test asserts -- message
+    isolation -- but is now refused at registration: neither agent has an
+    operator-approved worktree, so the second one is claiming a checkout the
+    first already holds, which is the T-485/A1 case. The assertions below are
+    unchanged; if anything two directories is the more faithful setup for a
+    test named "do not see each other's work".
+    """
     other = enroll(server, project, operator, name="runner-2")
     other_client = RunnerClient("http://board.test", project["id"],
                                 other["token"],
@@ -275,11 +284,14 @@ def test_two_agents_on_one_board_do_not_see_each_others_work(
     mine = make_wake_job(server, project, agent["agent_id"], body="mine")
     theirs = make_wake_job(server, project, other["agent_id"], body="theirs")
 
+    wt_a, wt_b = tmp_path / "wt-a", tmp_path / "wt-b"
+    wt_a.mkdir()
+    wt_b.mkdir()
     a = Supervisor(client, agent_id=agent["agent_id"],
-                   session_id=agent["session_id"], worktree=tmp_path,
+                   session_id=agent["session_id"], worktree=wt_a,
                    state_dir=tmp_path / "a", launcher=FakeLauncher())
     b = Supervisor(other_client, agent_id=other["agent_id"],
-                   session_id=other["session_id"], worktree=tmp_path,
+                   session_id=other["session_id"], worktree=wt_b,
                    state_dir=tmp_path / "b", launcher=FakeLauncher())
     a.register()
     b.register()

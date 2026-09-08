@@ -381,6 +381,57 @@ class BoardStore(MessagingMixin):
                         "state": row["state"], "worktree": row["worktree"]}
         return None
 
+    def find_worktree_claimant(self, project_id, worktree, *, exclude_agent_id=None,
+                               at=None):
+        """Who holds `worktree` -- by ENROLMENT or by a live runner lease.
+
+        T-485/A1. `find_worktree_occupant` scans `agents.worktree`, which is
+        the OPERATOR's field: it is only ever written by the enrolment route.
+        That is the right authority for "may this agent be enrolled here", but
+        it is blind to the other door. When an operator omits `worktree` (it is
+        OPTIONAL in the frozen CreateEnrollmentRequest) the agent's row stays
+        NULL, and the directory the runner asks for at registration lands on
+        the RUNNER LEASE instead. So a checkout claimed that way was invisible
+        to every subsequent check, and a second agent could claim it by asking.
+
+        Live means the lease has not expired and the agent is not revoked --
+        the same "revoking frees the checkout" lever `find_worktree_occupant`
+        gives an operator, since there is no delete-agent route. An expired
+        lease holds nothing: the runner is gone and the directory is free.
+
+        Deliberately a SEPARATE method rather than a widening of
+        `find_worktree_occupant`. The enrolment route's question is about what
+        an operator approved and should not start refusing on what a runner
+        asked for; only the registration path needs the union.
+        """
+        occupant = self.find_worktree_occupant(
+            project_id, worktree, exclude_agent_id=exclude_agent_id)
+        if occupant is not None:
+            return occupant
+        needle = worktrees.normalize(worktree)
+        if not needle:
+            return None
+        now = at or ids.now()
+        with read_txn(self.conn) as conn:
+            rows = conn.execute(
+                "SELECT l.agent_id AS id, a.name AS name, a.state AS state,"
+                " l.allowlisted_worktree AS worktree"
+                " FROM runner_leases l JOIN agents a ON a.id = l.agent_id"
+                " WHERE l.project_id = ? AND l.expires_at > ?"
+                " AND l.allowlisted_worktree IS NOT NULL"
+                " AND l.allowlisted_worktree != ''",
+                (project_id, now),
+            ).fetchall()
+        for row in rows:
+            if exclude_agent_id is not None and row["id"] == exclude_agent_id:
+                continue
+            if row["state"] == "revoked":
+                continue
+            if worktrees.overlaps(needle, row["worktree"]):
+                return {"id": row["id"], "name": row["name"],
+                        "state": row["state"], "worktree": row["worktree"]}
+        return None
+
     def get_agent(self, agent_id, project_id=None):
         """`project_id` is optional so trusted internal callers -- callers
         that already minted or verified `agent_id` within the project they

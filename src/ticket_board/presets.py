@@ -22,6 +22,34 @@ because of a substring. So the mapping is exact: a role that is literally
 gets the default. There is no partial matching and no case where an
 unrecognised role widens anything.
 
+WHAT EXACT MATCHING GOT WRONG, AND THE FIX THAT DOES NOT REINTRODUCE THE
+HEURISTIC (T-485, cos-opus A2). Exact matching is right; the FALLBACK for a
+near miss was not. `Reviewer`, `REVIEWER`, `reviewer ` and `reviewers` all
+missed the table and fell to DEFAULT_PRESET, which is `worker` -- and `worker`
+is BROADER than the `reviewer` the operator was plainly reaching for. An
+operator typing `Reviewer` got a runner GRANTED `allowlist` where `reviewer`
+is refused `deny_all`, with no signal on either route. So a capitalisation
+slip silently turned a read-only reviewer into a writer.
+
+The repair is two narrowings, neither of which is a substring test:
+
+  1. The lookup key is `strip()` + `casefold()`. `Reviewer` and `reviewer ` are
+     the SAME ROLE typed by a human, not different roles, so they resolve to
+     the reviewer preset instead of missing. This adds no new matches beyond
+     case and surrounding whitespace.
+
+  2. A role that still misses but is a PREFIX RELATIVE of a preset name --
+     `reviewers`, `review`, `master-2` -- is REFUSED with a 400 that names the
+     preset it nearly matched. It is never resolved to the default. This is
+     the opposite of the substring heuristic in the paragraph above: that one
+     GRANTS on a fuzzy match, this one REFUSES on one. `code-review-tooling`
+     still gets the default, because it is a prefix relative of nothing.
+
+The cost, stated rather than discovered: a role genuinely named `worker-2`
+is now refused and the operator has to pick another name. That refusal is
+loud, names the collision and changes no permissions -- which is the side to
+err on when the alternative is a silent widening.
+
 WHY THE DEFAULT IS `worker` AND NOT THE STRICTEST PRESET. Fail-closed is the
 right instinct, but defaulting unknown roles to `deny_all` would mean every
 role the board actually uses today (backend, infra, console, ...) enrols
@@ -80,14 +108,70 @@ PRESETS = {
 }
 
 
-def resolve(role):
-    """The preset name for an operator-chosen `role`. Never raises.
+class AmbiguousRole(ValueError):
+    """A role that nearly names a preset. Carries which one, for the 400.
 
-    Exact match only -- see the module docstring on why this is not a
-    substring test. An unknown or missing role gets DEFAULT_PRESET.
+    Raised rather than returned because there is no safe value to return: the
+    caller wanted a preset, the only honest answers are "this one" or "say
+    what you meant", and any third answer is the silent widening this class
+    exists to prevent.
     """
-    if isinstance(role, str) and role in PRESETS:
-        return role
+
+    def __init__(self, role, preset):
+        self.role = role
+        self.preset = preset
+        super().__init__(
+            "role {!r} is not a preset but is a near miss of {!r}".format(
+                role, preset))
+
+
+def canonical_role(role):
+    """The lookup key for a role: surrounding whitespace and case removed.
+
+    Nothing else. This is not normalisation into which more can be folded
+    later -- every character that survives here still has to match a preset
+    name exactly.
+    """
+    if not isinstance(role, str):
+        return ""
+    return role.strip().casefold()
+
+
+def near_miss(role):
+    """The preset this role nearly names, or None. See the docstring above.
+
+    Prefix in EITHER direction, because both are typos an operator makes:
+    `reviewers` (a preset with something appended) and `review` (a preset with
+    the end missing). Checked only after the exact lookup has already failed,
+    so a real preset name never reaches here.
+    """
+    text = canonical_role(role)
+    if not text or text in PRESETS:
+        return None
+    for name in PRESETS:
+        if text.startswith(name) or name.startswith(text):
+            return name
+    return None
+
+
+def resolve(role):
+    """The preset name for an operator-chosen `role`.
+
+    Exact match on the canonical form -- see the module docstring on why this
+    is not a substring test, and on why a near miss is refused rather than
+    defaulted. An unrecognised role that is nobody's near miss gets
+    DEFAULT_PRESET.
+
+    Raises AmbiguousRole for a near miss. That is a behaviour change from the
+    first cut of this module, which never raised and answered `worker` to
+    everything.
+    """
+    text = canonical_role(role)
+    if text in PRESETS:
+        return text
+    missed = near_miss(role)
+    if missed is not None:
+        raise AmbiguousRole(role, missed)
     return DEFAULT_PRESET
 
 

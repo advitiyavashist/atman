@@ -815,7 +815,22 @@ class BoardServer:
         # T-192: the operator's `role` selects an ENFORCED preset. Resolved
         # before the agent row exists so a preset that cannot be honoured
         # fails the request instead of leaving a half-created agent behind.
-        preset = presets.resolve(role)
+        #
+        # T-485/A2: a role that NEARLY names a preset is refused here rather
+        # than falling through to the default. `Reviewer` now resolves to the
+        # reviewer preset (case is a typo, not a different role); `reviewers`
+        # is refused, because defaulting it would hand the operator's intended
+        # deny_all reviewer an `allowlist` writer instead, silently.
+        try:
+            preset = presets.resolve(role)
+        except presets.AmbiguousRole as ambiguous:
+            raise MalformedRequest(
+                "role={} is not a permission preset, but it is close enough to"
+                " {} that defaulting it could grant more than you meant. Use"
+                " {} exactly, or a role name that is not a near miss of it."
+                .format(ambiguous.role, ambiguous.preset, ambiguous.preset),
+                {"rejected_fields": ["role"]},
+            )
 
         # A name collision is reported AS a name collision. The worktree check
         # below would otherwise fire first on a retried create -- same name,
@@ -1173,12 +1188,59 @@ class BoardServer:
         # "is this checkout free?", wrong here: a runner allowlisted for
         # /w/agent-1 that asks for / overlaps its approved path and would pass
         # a symmetric test while asking for strictly more. It must be INSIDE.
+        #
+        # T-485/A3: the comparison also refuses a RELATIVE requested path
+        # against an absolute approved one. `_segments` used to drop the
+        # leading empty part, so `/w/a` and `w/a` compared equal and a runner
+        # approved for `/w/a` could register `w/a/src` -- which the launcher
+        # then hands to the child as a `cwd` resolved against the SUPERVISOR's
+        # working directory, i.e. a directory that was never inside the
+        # approved one. Cheaper than the symlink hole and it needs no
+        # filesystem access. `refusal_reason` is used rather than a bare
+        # `contains` so the 403 says which of the reasons it was.
         allowed_worktree = approved["allowlisted_worktree"]
-        if allowed_worktree and not worktrees.contains(allowed_worktree,
-                                                       requested_worktree):
-            raise ForbiddenScope(
-                "This agent is allowlisted for {}; this runner asked to run in"
-                " {}.".format(allowed_worktree, requested_worktree))
+        if allowed_worktree:
+            reason = worktrees.refusal_reason(allowed_worktree,
+                                              requested_worktree)
+            if reason is not None:
+                raise ForbiddenScope(
+                    "This agent is allowlisted for {}; the requested worktree"
+                    " {} {}.".format(allowed_worktree, requested_worktree,
+                                     reason))
+        else:
+            # T-485/A1: THE OTHER DOOR. `worktree` is OPTIONAL in the frozen
+            # CreateEnrollmentRequest, so when the operator omits it there is
+            # no approved directory and the branch above used to be skipped
+            # ENTIRELY -- not "only the policy is enforced", but the runner's
+            # own string honoured and recorded as an allowlist. cos-opus
+            # executed it: a directory the enrolment registry had refused to a
+            # second agent thirty seconds earlier was handed to that agent
+            # through this route.
+            #
+            # There is nowhere in the frozen RunnerLease to say "this came
+            # from the runner, not the operator" -- adding a field would be a
+            # contract change -- so the value still lands in
+            # `allowlisted_worktree` and the shape is untouched. What changes
+            # is that it must now survive the same two checks the enrolment
+            # route applies before it is trusted: it must name a real absolute
+            # directory, and it must not be a checkout somebody else holds.
+            # The provenance is recorded where it does fit, the audit trail.
+            reason = worktrees.unusable_reason(requested_worktree)
+            if reason is not None:
+                raise ForbiddenScope(
+                    "No operator-approved worktree exists for this agent, so"
+                    " the directory this runner asked for is the only one on"
+                    " offer, and it {}. Re-enrol the agent with a `worktree`,"
+                    " or register an absolute path.".format(reason))
+            claimant = self.store.find_worktree_claimant(
+                ctx.project_id, requested_worktree,
+                exclude_agent_id=ctx.principal.agent_id)
+            if claimant is not None:
+                raise ForbiddenScope(
+                    "Agent {} already holds {}; this agent has no"
+                    " operator-approved worktree, so it may not claim a"
+                    " checkout another agent occupies.".format(
+                        claimant["name"], claimant["worktree"]))
 
         lease = self.store.acquire_runner_lease(
             ctx.project_id, runner_id, ctx.principal.agent_id,
@@ -1189,6 +1251,11 @@ class BoardServer:
             # Verified above to sit inside the operator's directory when there
             # is one, so a runner may narrow to a subdirectory but never widen.
             allowlisted_worktree=requested_worktree,
+            # T-485/A1. The frozen lease shape cannot carry provenance, so it
+            # goes in the audit summary: a reader of the trail can tell a
+            # directory an operator approved from one a runner asked for and
+            # was merely not refused.
+            worktree_source=("operator" if allowed_worktree else "runner"),
             # runtime_profile is a label, not a permission, so the runner's
             # own value is kept when it sends one; the preset only supplies a
             # default. Nothing is enforced on it and nothing should be.
