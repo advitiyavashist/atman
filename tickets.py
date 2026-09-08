@@ -598,7 +598,8 @@ def _alloc(directory, prefix, width, record):
         return record
 
 
-def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None):
+def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None,
+           plan_key=""):
     return _alloc(board, "T", 3, {
         "title": title,
         "body": body,
@@ -610,6 +611,11 @@ def create(board, title, body="", role="", deps=None, priority=2, epic="", sprin
         "sprint": sprint,
         "needs": needs or [],
         "owner": "",
+        # the `key` a `plan` JSON item used to name this ticket for that
+        # invocation's own --deps resolution. Persisted (T-016) so a LATER
+        # `plan` call can depend on this ticket by the same key instead of
+        # needing its id -- plan keys used to be scoped to one invocation.
+        "plan_key": plan_key,
         "created": now(),
         "updated": now(),
         "notes": [],
@@ -1516,20 +1522,32 @@ def cmd_plan(a, board):
     for it in items:
         t = create(board, it["title"], it.get("body", ""), it.get("role", defaults.get("role", "")),
                    [], it.get("priority", 2), it.get("epic", defaults.get("epic", "")),
-                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [])
+                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [],
+                   plan_key=it.get("key", ""))
         if it.get("key"):
             keymap[it["key"]] = t["id"]
         made.append(t)
     existing = set(x["id"] for x in load_all(board))
+    # Keys are only unique WITHIN one `plan` call, but a ticket's `plan_key`
+    # is persisted (see `create`), so a LATER `plan` invocation can still
+    # depend on an earlier one's key -- not just its id. First ticket to
+    # claim a key wins if it is ever reused across separate `plan` calls.
+    persisted_keys = {}
+    for x in load_all(board):
+        pk = x.get("plan_key")
+        if pk and pk not in persisted_keys:
+            persisted_keys[pk] = x["id"]
     pending = {}
     for it, t in zip(items, made):
         deps = []
         for d in it.get("deps", []) or []:
-            rid = keymap.get(d, d)
+            rid = keymap.get(d) or persisted_keys.get(d) or d
             if rid not in existing:
                 for x in made:
                     os.unlink(ticket_path(board, x["id"]))
-                sys.exit("plan references unknown ticket %r (no such key or id)" % d)
+                sys.exit("plan references unknown ticket %r (not a ticket id, not this "
+                         "invocation's key, and no earlier `plan` ticket recorded that "
+                         "key either)" % d)
             deps.append(rid)
         if deps:
             pending[t["id"]] = deps
