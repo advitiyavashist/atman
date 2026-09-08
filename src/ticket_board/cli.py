@@ -988,6 +988,8 @@ def line(t, tickets=None):
         bits.append("needs " + ",".join(t["needs"]))
     if t.get("owner"):
         bits.append("owner=" + t["owner"])
+    if (t.get("reserved_for") or "").strip():
+        bits.append("reserved: " + t["reserved_for"].strip())
     if t.get("deps"):
         if tickets is not None:
             done = set(x["id"] for x in tickets if x["status"] == "done")
@@ -1406,6 +1408,27 @@ def _filter_ready(ready, roles):
     return [t for t in ready if t.get("role") in ("",) or t.get("role") in roles]
 
 
+def _reserved_agent(t):
+    return (t.get("reserved_for") or "").strip()
+
+
+def _reservation_blocks(t, owner, steal_id=""):
+    """T-552: next skips tickets reserved for someone else unless --steal."""
+    who = _reserved_agent(t)
+    if not who or who == owner:
+        return False
+    if steal_id and t.get("id") == steal_id:
+        return False
+    return True
+
+
+def _may_set_reservation(board, who):
+    if who in ("optimizer", "planner"):
+        return True
+    m = current_master(board) or {}
+    return who in ((m.get("owner") or ""), (m.get("cos") or ""))
+
+
 def cmd_next(a, board):
     owner = whoami(a.owner)
     roles = roles_for(board, owner, a.role)
@@ -1422,8 +1445,10 @@ def cmd_next(a, board):
               "more, or pass --another if you really want to work two in parallel."
               % ", ".join(t["id"] for t in held))
         sys.exit(1)
+    steal_id = (getattr(a, "steal", None) or "").strip()
     ready_all = unblocked(board, tickets)
     ready = [t for t in _filter_ready(ready_all, roles) if can_do(board, owner, t)]
+    ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -1434,8 +1459,10 @@ def cmd_next(a, board):
         # routine tickets first, so the master's budget stretches further
         cost_key = p if rank == 2 else (-p if rank == 0 else 0)
         needs_key = 0 if t.get("needs") else 1  # a ticket only I can do comes first
+        steal_key = 0 if steal_id and t["id"] == steal_id else 1
+        reserved_key = 0 if _reserved_agent(t) == owner else 1
         mine_key = 0 if t.get("suggested") == owner else (2 if t.get("suggested") else 1)
-        return (mine_key, 0 if cur_id and t.get("sprint") == cur_id else 1, needs_key, cost_key, p, t["id"])
+        return (steal_key, reserved_key, mine_key, 0 if cur_id and t.get("sprint") == cur_id else 1, needs_key, cost_key, p, t["id"])
 
     ready.sort(key=order)
     for t in ready:
@@ -2239,6 +2266,37 @@ def cmd_assign(a, board):
     print("%s: %s" % (t["id"], ", ".join(changed)))
 
 
+def cmd_reserve(a, board):
+    """Reserve an open ticket for an agent without claiming (T-552).
+
+    Status stays TO DO; no wait-turns. Master/planner/optimizer may --for;
+    anyone may --drop. tickets next --steal <id> and assign --owner override.
+    """
+    t = load(board, a.id)
+    who = whoami(getattr(a, "owner", "") or "")
+    drop = bool(getattr(a, "drop", False))
+    target = (getattr(a, "for_agent", None) or "").strip()
+    if drop and target:
+        sys.exit("tickets reserve: use --for <agent> or --drop, not both")
+    if not drop and not target:
+        sys.exit("tickets reserve <id> --for <agent>  (or --drop)")
+    if drop:
+        prev = _reserved_agent(t)
+        if not prev:
+            sys.exit("%s is not reserved" % t["id"])
+        t.pop("reserved_for", None)
+        t["notes"].append({"by": who, "at": now(), "text": "reserve: dropped %s" % prev})
+        save(board, t)
+        print("%s: reservation dropped (was %s)" % (t["id"], prev))
+        return
+    if not _may_set_reservation(board, who):
+        sys.exit("tickets reserve --for is master/planner/optimizer only (anyone may --drop)")
+    t["reserved_for"] = target
+    t["notes"].append({"by": who, "at": now(), "text": "reserve: for %s" % target})
+    save(board, t)
+    print("%s: reserved for %s" % (t["id"], target))
+
+
 # ---- epics --------------------------------------------------------------
 
 def cmd_epic(a, board):
@@ -2627,6 +2685,24 @@ def health(board, tickets):
         if r.get("branch") in ("main", "master") and hours_since(r.get("seen", "")) < 24:
             out.append(("WARN", "%s is working on %s (rule 4)" % (r["owner"], r["branch"]),
                         "git worktree add .worktrees/%s -b %s-work" % (r["owner"], r["owner"])))
+    ready_ids = set(t["id"] for t in unblocked(board, tickets))
+    agents_by = dict((r.get("owner"), r) for r in load_agents(board))
+    for t in tickets:
+        who = _reserved_agent(t)
+        if not who or t.get("status") != "open" or t["id"] not in ready_ids:
+            continue
+        rec = agents_by.get(who) or {}
+        reason = ""
+        if rec.get("limit"):
+            reason = "limited"
+        elif not rec.get("seen"):
+            reason = "no heartbeat"
+        elif hours_since(rec.get("seen", "")) > 1.5:
+            reason = "silent %s" % fmt_hours(hours_since(rec["seen"]))
+        if reason:
+            out.append(("WARN", "%s is READY and reserved for %s who is down/limited (%s)" % (
+                t["id"], who, reason),
+                "tickets reserve %s --drop" % t["id"]))
     if not active_sprint(board):
         out.append(("INFO", "no active sprint", "tickets sprint create \"goal\" --activate"))
     loose = [t["id"] for t in tickets if not t.get("epic") and t["status"] != "done"]
@@ -3264,9 +3340,21 @@ def cmd_route(a, board):
         _candidate_names(wf, roles, only=a.only), wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=alive_within)
     print(format_excluded(excluded))
+    def _deps_done(t):
+        return all(d in done for d in t.get("deps", []))
+
+    def _needs_route(t):
+        if t["status"] != "open":
+            return False
+        if a.redo:
+            return True
+        if _deps_done(t):
+            return not t.get("suggested")
+        return not _reserved_agent(t)
+
     ready_first = sorted(
-        [t for t in tickets if t["status"] == "open" and (not t.get("suggested") or a.redo)],
-        key=lambda t: (0 if all(d in done for d in t.get("deps", [])) else 1, t.get("priority", 2), t["id"]))
+        [t for t in tickets if _needs_route(t)],
+        key=lambda t: (0 if _deps_done(t) else 1, t.get("priority", 2), t["id"]))
     print("%-6s %-3s %-44s %-14s %s" % ("ticket", "pri", "title", "suggested", "why"))
     changed = 0
     for t in ready_first:
@@ -3281,11 +3369,15 @@ def cmd_route(a, board):
                 best, best_s = n, s
                 why = "%s %s" % (e.get("model") or e.get("tool") or "", e.get("cost", ""))
         if best:
-            t["suggested"] = best
+            if _deps_done(t):
+                t["suggested"] = best
+            else:
+                t["reserved_for"] = best
+                why = ("reserved  " + why).strip()
             save(board, t)
             changed += 1
             load_[best] = load_.get(best, 0) + 0.5  # soft-count suggestions too
-            if a.claim and t["status"] == "open" and all(d in done for d in t.get("deps", [])):
+            if a.claim and t["status"] == "open" and _deps_done(t):
                 got = try_claim(board, t["id"], best)
                 if got:
                     t = got
@@ -3295,6 +3387,7 @@ def cmd_route(a, board):
     if changed:
         _master_log(board, "route: suggested owners for %d tickets%s" % (changed, " and claimed ready ones" if a.claim else ""))
     print("\nAgents pull with `tickets next`; their suggested tickets come first. "
+          "Dep-blocked tickets get reserved_for instead of a note. "
           "`tickets route --claim` hard-assigns the ready ones.")
 
 
@@ -3684,6 +3777,13 @@ def main():
     c.add_argument("--by", default="")
     c.set_defaults(fn=cmd_assign)
 
+    c = sub.add_parser("reserve", help="reserve a ticket for an agent without claiming it")
+    c.add_argument("id")
+    c.add_argument("--for", dest="for_agent", default="", help="agent who should claim it when it is ready")
+    c.add_argument("--drop", action="store_true", help="clear reserved_for (anyone)")
+    c.add_argument("--owner", "-o", default="")
+    c.set_defaults(fn=cmd_reserve)
+
     c = sub.add_parser("epic", help="epics: create | list | show | done")
     es = c.add_subparsers(dest="epic_cmd")
     x = es.add_parser("create"); x.add_argument("title"); x.add_argument("--body", "-b", default="")
@@ -3899,6 +3999,8 @@ def main():
     c.add_argument("--role", "-r", help="role or comma-separated roles")
     c.add_argument("--owner", "-o")
     c.add_argument("--another", action="store_true", help="claim even though I already hold one")
+    c.add_argument("--steal", default="", metavar="ID",
+                   help="claim this ticket even if reserved_for someone else")
     c.set_defaults(fn=cmd_next)
 
     c = sub.add_parser("claim", help="atomically claim a specific ticket")
