@@ -11,6 +11,7 @@ import atexit
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -63,7 +64,60 @@ def _child_pids(pid):
     return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
 
 
+# --- T-538: the reaper must never shoot its own runner ---------------------
+# reap_watchers_under() kills whatever integer it finds in a *.watch.pid file
+# under the fixture root. That file is written by the code under test, and
+# tickets.py's watch_idle_reexec writes str(os.getpid()) into it -- which,
+# when the helper is called in-process by a test, is the PYTEST PROCESS'S OWN
+# PID. The teardown then SIGTERMs the runner and the run dies exit 143 after
+# however many dots had been flushed, with no F/E and no summary line, which
+# reads to a merge as a code failure. Refuse self and every ancestor: a real
+# leaked watch loop is always a DESCENDANT or an orphan reparented to 1, never
+# the process doing the reaping, so nothing legitimate is spared by this.
+_SELF_CHAIN: set[int] | None = None
+
+
+def _self_and_ancestors():
+    """This pid plus every ancestor pid, so the reaper cannot kill its runner."""
+    global _SELF_CHAIN
+    if _SELF_CHAIN is not None and os.getpid() in _SELF_CHAIN:
+        return _SELF_CHAIN
+    chain, pid = set(), os.getpid()
+    for _ in range(64):
+        if pid <= 1:
+            break
+        chain.add(pid)
+        try:
+            out = subprocess.run(["ps", "-p", str(pid), "-o", "ppid="],
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            break
+        nxt = out.stdout.strip()
+        if not nxt.isdigit():
+            break
+        pid = int(nxt)
+    chain.add(os.getpid())
+    _SELF_CHAIN = chain
+    return chain
+
+
+def would_kill_self(pid):
+    """True when `pid` is this process or one of its ancestors."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    return pid in _self_and_ancestors()
+# --- end T-538 -------------------------------------------------------------
+
+
 def kill_pid_tree(pid, wait_s=1.0):
+    if would_kill_self(pid):
+        # T-538: self or an ancestor. Silently skipping this would hide a real
+        # bug in whatever planted the pid, so say so on stderr and move on.
+        print("watch_reaper: refusing to kill pid %s (this runner or its ancestor)"
+              % pid, file=sys.stderr)
+        return
     for child in _child_pids(pid):
         kill_pid_tree(child, wait_s=0.2)
     try:
