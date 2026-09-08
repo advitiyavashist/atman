@@ -2788,6 +2788,68 @@ def _argv_flag_value(argv, flag):
     return ""
 
 
+def _split_cmdline(cmd):
+    """ps prints an unquoted command line; split it without dying on a stray
+    quote inside an --exec value."""
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return (cmd or "").split()
+
+
+def _watch_cmd_agent(cmd):
+    """The --agent name if `cmd` is a `tickets ... watch` loop, else ''.
+
+    T-554: matching used to be `realpath(__file__) in cmd`, i.e. the release
+    that happens to be INVOKING us. Every release recut then made the whole
+    running fleet invisible at once -- loops still executing an older
+    `tickets-releases/<sha>/tickets.py` (or the `~/.claude/tools/tickets.py`
+    shim) matched nothing, so `spawn <seat> --stop` printed "no running
+    watcher" and the very next `spawn <seat>` started a DUPLICATE loop beside
+    the live one. A watch loop is identified by what it IS, not by which copy
+    of the tool is asking: the first argv token named `tickets.py` whose next
+    token is the `watch` subcommand. Scanning left to right means the real
+    script token always wins over anything quoted inside `--exec`.
+    """
+    argv = _split_cmdline(cmd)
+    for i, tok in enumerate(argv):
+        if os.path.basename(tok) != "tickets.py":
+            continue
+        rest = argv[i + 1:]
+        if not rest or rest[0] != "watch":
+            continue
+        return _argv_flag_value(rest, "--agent")
+    return ""
+
+
+def _has_child_process(pid):
+    """True if `pid` has at least one live child. Ground truth for "is this
+    watcher mid-run" on loops that predate the T-237 agents/<name>.run
+    heartbeat and therefore write no run file at all."""
+    import subprocess
+
+    if not pid:
+        return False
+    try:
+        r = subprocess.run(["pgrep", "-P", str(int(pid))], capture_output=True, text=True)
+    except (OSError, ValueError):
+        return False
+    return bool((r.stdout or "").strip())
+
+
+def _watcher_run_active(board, owner, pid):
+    """True if this watcher is inside a run (a child session is executing).
+
+    The T-237 run file is authoritative when it belongs to this pid; its
+    ABSENCE proves nothing, because a loop on a pre-T-237 release never writes
+    one -- so fall back to the process table rather than reporting "idle".
+    """
+    rec = _read_run(board, owner) if board else {}
+    if rec.get("pid") == pid and ("active" in rec):
+        return bool(rec.get("active"))
+    return _has_child_process(pid)
+
+
 def _live_watch_pids(owner=None, board=None):
     """Live `tickets watch --agent <name>` processes from the OS process table.
 
@@ -2798,7 +2860,6 @@ def _live_watch_pids(owner=None, board=None):
     """
     import subprocess
 
-    tool = _tickets_tool_path()
     repo = os.path.realpath(os.path.dirname(board)) if board else None
     out = []
     try:
@@ -2818,14 +2879,14 @@ def _live_watch_pids(owner=None, board=None):
         except ValueError:
             continue
         cmd = parts[1]
-        if pid == me or tool not in cmd:
+        if pid == me or "tickets.py" not in cmd:
             continue
-        if " watch" not in cmd and not cmd.rstrip().endswith(" watch"):
+        agent = _watch_cmd_agent(cmd)
+        if not agent:
             continue
-        argv = shlex.split(cmd)
-        agent = _argv_flag_value(argv, "--agent")
         if owner is not None and agent != owner:
             continue
+        argv = _split_cmdline(cmd)
         if repo:
             watch_cwd = _argv_flag_value(argv, "--cwd")
             if not watch_cwd:
@@ -7686,6 +7747,7 @@ def cmd_spawn(a, board):
         if not pids:
             print("no running watcher for %s" % owner)
             return
+        busy = [p for p in pids if _watcher_run_active(board, owner, p)]
         try:
             with open(_stop_file(board, owner), "w") as f:
                 f.write(now())
@@ -7700,6 +7762,13 @@ def cmd_spawn(a, board):
                 pass
         print("stopped %d watcher(s) for %s (pids %s)" % (
             stopped, owner, ", ".join(str(p) for p in pids)))
+        if busy:
+            # SIGTERM asks; a loop inside a run exits at its next boundary. The
+            # duplicate guard in the start path below only sees a pid that has
+            # actually gone, so say so rather than let the operator spawn into
+            # a still-live loop (T-554).
+            print("mid-run: %s -- wait for the pid(s) to exit before `tickets spawn %s`" % (
+                ", ".join(str(p) for p in busy), owner))
         post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
         return
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
