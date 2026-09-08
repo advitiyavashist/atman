@@ -6364,6 +6364,159 @@ def cmd_brief(a, board):
     post_message(board, who, "brief updated for %s: %s" % (a.agent, (a.text or a.file)[:160]), to=a.agent)
 
 
+# Team knowledge v0 (CEO/PM lock): board docs + tracked docs + .tickets/briefs/
+# (shared/roles/agent). Same E-013 inject. Not a shared-memory brain, vector
+# DB, or auto-sync role KB. This verb only indexes docs/knowledge/.
+_KNOWLEDGE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def knowledge_root(board=None):
+    """Repo-tracked team docs. $TICKETS_KNOWLEDGE_DIR wins (tests). No .tickets/knowledge/."""
+    env = (os.environ.get("TICKETS_KNOWLEDGE_DIR") or "").strip()
+    if env:
+        return os.path.abspath(env)
+    cands = []
+    here = _init_cwd_worktree_root()
+    if here:
+        cands.append(os.path.join(here, "docs", "knowledge"))
+    main = _repo_root()
+    if main:
+        p = os.path.join(main, "docs", "knowledge")
+        if p not in cands:
+            cands.append(p)
+    if board:
+        p = os.path.join(os.path.dirname(os.path.abspath(board)), "docs", "knowledge")
+        if p not in cands:
+            cands.append(p)
+    for p in cands:
+        if os.path.isdir(p):
+            return os.path.abspath(p)
+    if cands:
+        return os.path.abspath(cands[0])
+    return os.path.abspath(os.path.join(os.getcwd(), "docs", "knowledge"))
+
+
+def _parse_knowledge_frontmatter(text):
+    """Minimal YAML-ish header. Stdlib only; unknown keys kept as strings."""
+    meta, body = {}, text
+    if not text.startswith("---"):
+        return meta, body
+    end = text.find("\n---", 3)
+    if end < 0:
+        return meta, body
+    raw = text[3:end].strip()
+    body = text[end + 4:].lstrip("\n")
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip().lower()
+        val = val.strip()
+        if key == "tags":
+            val = val.strip("[]")
+            meta[key] = [x.strip().strip("'\"") for x in val.split(",") if x.strip()]
+        else:
+            meta[key] = val.strip("'\"")
+    return meta, body
+
+
+def _knowledge_docs(root):
+    """Markdown under the knowledge tree. Paths must stay inside root."""
+    root = os.path.realpath(root)
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in sorted(filenames):
+            if not name.endswith(".md") or name.startswith("."):
+                continue
+            path = os.path.realpath(os.path.join(dirpath, name))
+            if path != root and not path.startswith(root + os.sep):
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            meta, body = _parse_knowledge_frontmatter(text)
+            rel = os.path.relpath(path, root)
+            slug = (meta.get("id") or os.path.splitext(os.path.basename(path))[0]).strip()
+            if not _KNOWLEDGE_SLUG_RE.match(slug):
+                continue
+            out.append({
+                "id": slug,
+                "title": (meta.get("title") or slug).strip(),
+                "tags": list(meta.get("tags") or []),
+                "path": path,
+                "rel": rel.replace("\\", "/"),
+                "body": body,
+            })
+    out.sort(key=lambda d: d["rel"])
+    seen = {}
+    unique = []
+    for d in out:
+        if d["id"] in seen:
+            continue
+        seen[d["id"]] = True
+        unique.append(d)
+    return unique
+
+
+def _find_knowledge_doc(root, slug):
+    if not _KNOWLEDGE_SLUG_RE.match(slug or ""):
+        return None
+    for d in _knowledge_docs(root):
+        if d["id"] == slug:
+            return d
+    return None
+
+
+def cmd_knowledge(a, board):
+    """Index tracked team docs. Inject is E-013 briefs — this does not write them."""
+    root = knowledge_root(board)
+    sub = getattr(a, "knowledge_cmd", None) or "list"
+    tag = (getattr(a, "tag", "") or "").strip()
+    if sub == "list":
+        if not os.path.isdir(root):
+            print("no team knowledge tree at %s" % root)
+            print("expected docs/knowledge/ (repo-tracked markdown). "
+                  "See docs/knowledge/README.md")
+            return
+        docs = _knowledge_docs(root)
+        if tag:
+            docs = [d for d in docs if tag in (d.get("tags") or [])]
+        if getattr(a, "json", False):
+            payload = [{k: d[k] for k in ("id", "title", "tags", "path", "rel")}
+                       for d in docs]
+            print(json.dumps(payload, indent=2))
+            return
+        if not docs:
+            print("no knowledge docs%s at %s" % ((" tagged %s" % tag) if tag else "", root))
+            return
+        for d in docs:
+            tags = ",".join(d["tags"]) if d["tags"] else "-"
+            print("%-16s %-36s [%s]  docs/knowledge/%s" % (
+                d["id"], d["title"][:36], tags, d["rel"]))
+        print("")
+        print("%d doc(s)  standing inject is tickets brief / .tickets/briefs/ (E-013)" % len(docs))
+        return
+    if sub == "show":
+        slug = (getattr(a, "slug", "") or "").strip()
+        if not slug:
+            sys.exit("knowledge show needs a doc id")
+        if not _KNOWLEDGE_SLUG_RE.match(slug):
+            sys.exit("knowledge slug %r is not a safe name" % slug)
+        doc = _find_knowledge_doc(root, slug)
+        if not doc:
+            sys.exit("no knowledge doc %r under %s" % (slug, root))
+        print("# %s" % doc["path"])
+        print(doc["body"].rstrip())
+        print()
+        return
+    sys.exit("knowledge: list | show <id>  (inject is tickets brief, not this verb)")
+
+
 def utilization(board, tickets=None, hours=24, live=None):
     """Per-agent throughput and load over the window, plus sprint burn."""
     tickets = tickets if tickets is not None else load_all(board)
@@ -9549,6 +9702,18 @@ def main():
     c = sub.add_parser("context", help="print the shared briefing file")
     c.set_defaults(fn=cmd_context)
 
+    c = sub.add_parser("knowledge", aliases=["kb"],
+                       help="index tracked team docs (list | show); inject is E-013 briefs, not this verb")
+    c.add_argument("--tag", default="", help="filter list by tag")
+    c.add_argument("--json", action="store_true")
+    ks = c.add_subparsers(dest="knowledge_cmd")
+    x = ks.add_parser("list", help="index the docs/knowledge tree")
+    x.add_argument("--tag", default="", help="filter list by tag")
+    x.add_argument("--json", action="store_true")
+    x = ks.add_parser("show", help="print one doc")
+    x.add_argument("slug")
+    c.set_defaults(fn=cmd_knowledge, slug="")
+
     c = sub.add_parser("mine", help="list tickets claimed by this agent")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_mine)
@@ -9590,6 +9755,8 @@ def main():
         "master",
         "connect",
         "board-restore",
+        "knowledge",
+        "kb",
     ):
         if not os.path.isdir(board):
             if a.cmd == "board":

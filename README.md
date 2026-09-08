@@ -52,6 +52,9 @@ Taking the **master** seat (Claude / Cursor / Codex as the board
 coordinator): [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md)
 — folders, install, first commands, role-context briefs, what not to
 expect. Index: [docs/onboarding/README.md](docs/onboarding/README.md).
+Team knowledge (KB v0 = board docs + tracked docs + briefs; E-013 inject,
+not a memory brain):
+[docs/knowledge/README.md](docs/knowledge/README.md).
 
 ## The model
 
@@ -174,6 +177,10 @@ commit:
 | `MASTER.md` | master context and the decision log |
 | `briefs/_shared.md`, `briefs/roles/<role>.md`, `briefs/<agent>.md` | standing context injected on watch/spawn (E-013); not a shared-memory brain |
 
+KB v0 is board docs + tracked docs
+([docs/knowledge/](docs/knowledge/README.md)) + those briefs — the same
+E-013 inject. Not a shared-memory brain, vector DB, or auto-sync role KB.
+
 `tickets init` gitignores the board by default (`--track` to commit it
 instead). Hand-written memory (`MASTER.md`, `briefs/`) should still be
 tracked — see [docs/handoff-contract.md](docs/handoff-contract.md) and the
@@ -186,7 +193,8 @@ ancestor with a live board, the git worktree root, then cwd — see
 
 `board` (compact, used by hooks; silent when there is no board), `list`, `show`,
 `who` (where every agent is: worktree, branch, ticket), `here`, `assign`,
-`status`, `block`, `reopen`, `note`, `limit`, `context`, `where`, `guide`.
+`status`, `block`, `reopen`, `note`, `limit`, `context`, `knowledge`, `where`,
+`guide`.
 
 ## Design notes
 

@@ -20,7 +20,10 @@ A fresh agent taking master should be operational after:
     tickets map             the live graph
 
 Plus `.tickets/briefs/_shared.md` before touching code. Nothing else unless a
-specific ticket points there. The operator walkthrough for a fresh master
+specific ticket points there. KB v0
+([docs/knowledge/](knowledge/README.md)) is board docs + tracked docs +
+those briefs (E-013) — **not** a fourth onboarding file. Pull a tracked
+doc when the work needs it. The operator walkthrough for a fresh master
 session is [onboarding/master-howto.md](onboarding/master-howto.md).
 
 **Three files is a budget, not an aspiration.** If onboarding needs a fourth,
