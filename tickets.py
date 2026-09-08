@@ -7766,16 +7766,17 @@ def cmd_harness(a, board):
         sys.exit(1)
 
 
-UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Ticket board</title>
+UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff;--live:#3ee8c5;--intervene:#e0a53d}
 *{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
 header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:linear-gradient(180deg,#12151c 0%,#0c0e12 100%);border-bottom:1px solid var(--line)}
-.brand{display:flex;flex-direction:column;gap:1px;min-width:140px}
-.brand .prod{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);font-weight:700}
-.brand h1{font-size:16px;margin:0;font-weight:650}
+.brand{display:flex;align-items:center;gap:10px;min-width:148px}
+.brand .mark{flex:none;width:22px;height:22px}
+.wordmark{font:650 16px/1.2 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:.22em;text-transform:lowercase}
+.brand h1{font-size:12px;margin:2px 0 0;font-weight:650;color:var(--mute)}
 .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;background:var(--chip);border:1px solid var(--line);font-size:12px}
 .chip b{font-weight:650}
@@ -7865,9 +7866,15 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .ob-step i{width:14px;height:14px;border-radius:3px;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-style:normal;flex:none}
 .ob-step.done i{background:var(--ok);border-color:var(--ok);color:#fff}
 .empty-board{background:var(--card);border:1px dashed var(--line);border-radius:14px;padding:20px 18px;max-width:720px;margin-bottom:12px}
+.empty-board .empty-kicker{margin:0 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
 .empty-board p{margin:0 0 10px;color:var(--mute);font-size:13px;line-height:1.55}
 .empty-board b{color:var(--fg)}
-.empty-board .cta{margin-top:14px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
+.empty-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.empty-steps li{display:flex;gap:10px;align-items:flex-start}
+.empty-steps .n{flex:none;width:22px;height:22px;border-radius:50%;background:var(--chip);border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--fg)}
+.empty-board .cta{margin-top:6px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
+.empty-board .empty-cta{margin-top:14px}
+.empty-intervene{margin-top:14px}
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
 .hero-eyebrow{margin:0 0 6px;font-size:12px;color:var(--mute);font-weight:650}
@@ -7875,7 +7882,6 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .promise-strip .lbl{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--mute)}
 .promise-strip .msg{color:var(--mute)}
 .chip.promise{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
-body[data-tab=board] .promise-chips{display:none}
 .promise-hero{display:flex;gap:32px;align-items:flex-end;padding:2px 0 12px;border-bottom:1px solid var(--line)}
 .promise-card{display:flex;flex-direction:column;gap:2px;min-width:132px;background:transparent;border:0;padding:0}
 .promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
@@ -7940,7 +7946,19 @@ body[data-tab=board] .promise-chips{display:none}
 }
 </style></head><body data-tab="board">
 <header class="cmd">
-  <div class="brand"><span class="prod">tickets</span><h1 id="title">Ticket board</h1></div>
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="atman">
+      <circle cx="10" cy="7.8" r="3.35" fill="#e8e6e1"/>
+      <circle cx="22.4" cy="8.8" r="3.35" fill="#e8e6e1"/>
+      <circle cx="6.6" cy="17.6" r="3.35" fill="#e8e6e1"/>
+      <circle cx="25.4" cy="18.2" r="3.35" fill="#e8e6e1"/>
+      <circle cx="16" cy="24.6" r="3.35" fill="#e8e6e1"/>
+    </svg>
+    <div>
+      <span class="wordmark">atman</span>
+      <h1 id="title">atman</h1>
+    </div>
+  </div>
   <div class="chips" id="chips"></div>
   <div class="chips promise-chips" id="promiseChips">
     <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
@@ -8344,7 +8362,7 @@ async function load(){
     return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
       '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
-      '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — a proxy for productive turns">Turns</span></div>'+
+      '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done(24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
       '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div>'+
       '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
@@ -8383,12 +8401,15 @@ function renderEmptyBoard(d){
   const empty=d.empty_board||!(d.counts&&d.counts.total);
   el.hidden=!empty;
   if(!empty)return;
-  el.innerHTML='<p><b>Welcome to Atman.</b> This board coordinates a team of agents on shared work.</p>'+
-    '<p>Tickets are the unit of work — agents claim one at a time, post updates, and submit for review.</p>'+
-    '<p>The master merges finished work; dependencies keep agents from starting too early.</p>'+
-    '<p>Everyone reads the same board state — messages, tickets, and agents live here.</p>'+
-    '<p>New here? Seed a sample board and claim your first ticket in one command.</p>'+
-    '<div class="cta">tickets quickstart --agent &lt;you&gt; &nbsp;·&nbsp; tickets guide &nbsp;·&nbsp; README.md</div>';
+  el.innerHTML='<p class="empty-kicker">Day one</p>'+
+    '<p><b>Three steps.</b> Then intervene when a seat needs you. Objective · Team · Work · Intervene.</p>'+
+    '<ol class="empty-steps" id="emptySteps">'+
+      '<li><span class="n">1</span><div><b>Objective</b> — name what the team finishes.<div class="cta">tickets objective "…"</div></div></li>'+
+      '<li><span class="n">2</span><div><b>Team</b> — register a seat. Coverage by work, not a fixed role.<div class="cta">tickets join &lt;you&gt; --roles backend</div></div></li>'+
+      '<li><span class="n">3</span><div><b>Work</b> — put a ticket on the board, then claim it.<div class="cta">tickets create "…" · tickets next</div></div></li>'+
+    '</ol>'+
+    '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock. No silent auto-promote.</p>'+
+    '<div class="cta empty-cta">One command: tickets quickstart --agent &lt;you&gt;</div>';
 }
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""

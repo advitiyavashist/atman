@@ -84,8 +84,9 @@ def test_promise_chips_strip_on_home_objective():
     assert "fmtMedian" in ui and "fmtYield" in ui
     assert "hdrMedianVal" in ui
     assert "stripMedianVal" not in ui
-    # Craft bar: numbers once on home (hero); chips hide on Board.
-    assert "body[data-tab=board] .promise-chips{display:none}" in ui
+    # T-571: chips stay above the fold on every tab, including Work.
+    assert "body[data-tab=board] .promise-chips{display:none}" not in ui
+    assert 'id="promiseChips"' in ui[ui.index("<header"):ui.index("</header>")]
 
 
 def test_promise_hero_copy_nits():

@@ -76,6 +76,9 @@ def test_ui_html_contains_onboarding_markers():
         "Utilization",
         "Lane",
         "waiting on a fix or dependency",
+        "emptySteps",
+        "Objective · Team · Work · Intervene",
+        "Done(24h)",
     ):
         assert marker in html, "missing UI marker: %s" % marker
 

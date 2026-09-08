@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   assignmentStateLabel,
   agentStateLabel,
+  DAY_ONE_STEPS,
   dependencyWaitingLabel,
+  done24hLabel,
   formatDateTime,
   formatRelative,
   formatTime,
@@ -35,6 +37,15 @@ describe("copy rules that are contract, not styling", () => {
   it("labels an open dependency-blocked ticket distinctly from plain open", () => {
     expect(ticketStatusLabel({ state: "open", dependency_blocked: true })).toBe("Blocked on dependency");
     expect(ticketStatusLabel({ state: "open", dependency_blocked: false })).toBe("Ready");
+  });
+
+  it("labels the 24h completion stat Done(24h), distinct from ticket Done", () => {
+    expect(done24hLabel).toBe("Done(24h)");
+    expect(ticketStatusLabel({ state: "done", dependency_blocked: false })).toBe("Done");
+  });
+
+  it("keeps the day-one path as Objective, Team, Work", () => {
+    expect(DAY_ONE_STEPS.map((s) => s.title)).toEqual(["Objective", "Team", "Work"]);
   });
 
   it("renders the stale-stream copy from the design doc verbatim in shape", () => {
