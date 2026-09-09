@@ -10113,7 +10113,7 @@ def cmd_spawn(a, board):
     if a.stop:
         import signal
 
-        pids = _live_watch_pids(owner, board=board)
+        pids = _live_watch_pids(owner)
         _mark_run_interrupted(board, owner)
         if not pids:
             # Watcher is already gone; a late heartbeat from the dead run
