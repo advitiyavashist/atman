@@ -249,5 +249,7 @@ tracked when the team needs them to survive clones; see the
 - [Team knowledge](docs/knowledge/README.md)
 - [Messages and runners](docs/messages-and-runners.md)
 - [Design notes](docs/design-notes.md)
+- [Contributing](CONTRIBUTING.md)
+- [Atman Core architecture decision](docs/architecture/ADR-001-go-core.md)
 
 Atman is MIT licensed.
