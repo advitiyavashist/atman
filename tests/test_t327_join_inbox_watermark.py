@@ -26,15 +26,30 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tickets.py"
 
 
-def _env(board):
+def _env(board, agent=""):
     e = dict(os.environ, TICKETS_DIR=str(board), HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    # Strip whatever session-id vars this test process itself happens to be
+    # sitting in (e.g. CLAUDE_CODE_SESSION_ID from an outer Claude Code
+    # session) and give this call its OWN, keyed on the actor it names.
+    # Every call in this file already passes `agent=` for exactly the actor
+    # it means to be, so that name is the right anchor: without it, every
+    # call here would share one identical session key, and a session's
+    # RECORDED identity (from `join`) deliberately outranks an explicit
+    # per-invocation TICKET_AGENT (see tests/test_identity_precedence.py) --
+    # so "join master" then "join old" then "TICKET_AGENT=master tickets
+    # msg" would post as "old", the last name that session joined as, not
+    # the name this specific call asked for. Same isolation fix as
+    # tests/test_wakeup.py's `run()`, for the same reason.
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID", "TERM_SESSION_ID"):
+        e.pop(var, None)
+    e["TICKET_SESSION_ID"] = "test-session-" + (agent or "__anonymous__")
     return e
 
 
 def run(board, *args, agent="", entry="root"):
     """Drive the board. entry='root' -> tickets.py; entry='pkg' -> ticket_board.cli."""
-    e = _env(board)
+    e = _env(board, agent=agent)
     e["TICKET_AGENT"] = agent or ""
     if entry == "pkg":
         # The packaged console script (pyproject: tickets = ticket_board.cli:main).

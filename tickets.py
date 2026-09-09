@@ -599,33 +599,56 @@ def adopt_event_session(event):
 
 
 def whoami(explicit=None, board=None):
-    """Resolve the caller's agent id.
+    """Resolve who a SINGLE COMMAND acts as.
 
-    Precedence, and the ordering is the point: an explicitly-passed --owner
-    beats an identity this session deliberately recorded, which beats the
-    ambient TICKET_AGENT env var, which beats a pid fallback.
+    Precedence: an explicitly-passed --owner beats the deliberate per-run
+    TICKET_SEAT a supervisor sets for the process it launches, which beats
+    the ambient TICKET_AGENT a shell inherits, which beats a pid fallback.
 
-    TICKET_AGENT sits BELOW the recorded identity on purpose. It is process
-    environment, so it is inherited, leaked and overwritten freely -- a spawned
-    worker that exports it can silently reassign its parent's identity, and a
-    stale value survives in a shell profile long after the agent that wrote it
-    is gone. A recorded identity is a deliberate act and should win over an
-    ambient one.
+    This deliberately does NOT consult the session's recorded identity (from
+    `tickets join`) and does NOT discover the board when none is passed --
+    `TICKET_AGENT=alice tickets msg --to bob` is the documented way to run a
+    single command as a name other than whatever this session joined as, and
+    a recorded identity outranking that explicit-for-this-invocation env var
+    would make the override silently do nothing. `board` is still accepted
+    so existing call sites that pass it do not need to change; it is unused
+    here on purpose.
+
+    Anything that needs "who is THIS SESSION" rather than "who does this one
+    command act as" -- board's own status line, a hook deciding whether to
+    stay quiet, the stop-hook holding a turn open for a seat, `msg`'s sender
+    when no --owner is given -- wants session_seat(), not this. Collapsing
+    the two into one function is the
+    T-018-regression this split exists to undo: it made a recorded identity
+    outrank an explicit per-command override, which broke exactly the
+    `TICKET_AGENT=X tickets <cmd>` pattern this docstring describes.
     """
     if explicit:
         return explicit
-    if board is None:
-        # Discover the board rather than requiring every caller to thread it
-        # through. The bare whoami() sites include the ones the editor hooks
-        # invoke, and those were the sites surfacing one session's unread mail
-        # inside another session, because they fell straight through to the
-        # inherited env var.
-        try:
-            board = board_dir()
-        except SystemExit:
-            board = None
-        except Exception:
-            board = None
+    return (os.environ.get("TICKET_SEAT")
+            or os.environ.get("TICKET_AGENT")
+            or "agent-%d" % os.getpid())
+
+
+def session_seat(board, explicit=None):
+    """Resolve who THIS SESSION is, for the surfaces that act on a seat's
+    behalf without a human naming it turn by turn: `board`'s "you:" line, an
+    `inbox --quiet-if-unidentified` hook, the stop-hook, and `msg`'s sender
+    when no --owner is given. These need the session-recorded identity (from
+    `tickets join`) precisely because nobody is passing an explicit name on
+    that particular call.
+
+    Precedence: explicit > this session's own recorded identity > TICKET_SEAT
+    > TICKET_AGENT > pid. Recorded identity sits ABOVE the env vars here,
+    unlike in whoami() -- the opposite ordering is the whole point of having
+    two functions. `join` writing a recorded identity is a deliberate act by
+    this session about itself; TICKET_AGENT is ambient and inherited. Use
+    this for "who is this session", and whoami() for "who does this one
+    command act as" -- see whoami()'s docstring for the failure that comes
+    from answering both questions with the same precedence.
+    """
+    if explicit:
+        return explicit
     if board:
         try:
             recorded = read_identity(board)
@@ -1898,7 +1921,7 @@ def cmd_board(a, board):
     # Name the seat this session is answering as. Without it a human reading a
     # window cannot tell which agent they are talking to, and mail addressed to
     # one seat gets acted on by another.
-    seat = whoami(board=board)
+    seat = session_seat(board)
     recorded = seat_confirmed(board) and read_identity(board)
     hdr.append("you: %s%s" % (seat, "" if recorded else " (UNCONFIRMED)"))
     print("  " + " | ".join(hdr))
@@ -6065,7 +6088,13 @@ def fmt_msg(m):
 
 
 def cmd_msg(a, board):
-    sender = whoami(a.owner, board=board)
+    # session_seat, not whoami: with no --owner, "who is sending this" is
+    # "who is THIS session", the same question board's "you:" line answers --
+    # a recorded `join` is the deliberate, authoritative fact, and it must
+    # outrank a stray ambient TICKET_AGENT the way it outranks one everywhere
+    # else identity is resolved (T-018's whole premise). whoami() intentionally
+    # does not make that promise; see its docstring.
+    sender = session_seat(board, a.owner)
     if a.to and a.to == sender:
         # Addressing yourself is never what anyone means, and it fails SILENTLY:
         # the message posts, the addressee's unread count rises, and the sender's
@@ -6092,7 +6121,10 @@ def cmd_msg(a, board):
 
 
 def cmd_inbox(a, board):
-    owner = whoami(a.owner, board=board)
+    # session_seat, not whoami: reading "my" inbox with no --owner is asking
+    # "who is THIS session", which is exactly the question a recorded
+    # identity answers and an ambient TICKET_AGENT does not.
+    owner = session_seat(board, a.owner)
     if getattr(a, "quiet_if_unidentified", False) and not a.owner:
         # An unidentified session must not be handed a seat's mail. Printing
         # another agent's backlog is how one seat's messages get read and acted
@@ -8283,7 +8315,7 @@ def cmd_stop_hook(a, board):
     # not. Adopt it before resolving, or a stale inherited TICKET_AGENT decides
     # who we are and we hold the turn open over another seat's work.
     adopt_event_session(event)
-    owner = whoami(board=board)
+    owner = session_seat(board)
     if not seat_confirmed(board):
         owner = ""  # never pin a turn open over a seat this session only guessed
     if (not owner or os.environ.get("TICKETS_STOP_HOOK", "").lower() in ("off", "0", "false")
