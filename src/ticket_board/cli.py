@@ -248,17 +248,18 @@ def _refuse_join_tickets_dir_shadow(board):
         return
     sys.exit(
         "REFUSING TO JOIN: nothing was written.\n"
-        "  this directory's own board: %s\n"
+        "  a .tickets directory exists here: %s\n"
         "  TICKETS_DIR=%r makes `tickets` resolve to:  %s\n"
+        "  unsetting TICKETS_DIR would resolve to:  %s\n"
         "\n"
-        "join would register a real seat on the SECOND path, not the board "
-        "sitting in this directory -- that is the T-424 defect (two agents hit "
-        "it inside half an hour). Pick one:\n"
+        "join with TICKETS_DIR set would register a real seat on the second "
+        "path, not the board you get by unsetting TICKETS_DIR -- that is the "
+        "T-424 defect (two agents hit it inside half an hour). Pick one:\n"
         "  * join the board TICKETS_DIR names (most agents want this): "
         "remove or ignore the stray %s\n"
-        "  * join the board in this directory instead: unset TICKETS_DIR, "
-        "then re-run join\n"
-        % (cwd_board, env, board, cwd_board)
+        "  * join without TICKETS_DIR instead: unset TICKETS_DIR, then re-run "
+        "join (resolves to %s)\n"
+        % (cwd_board, env, board, ambient, cwd_board, ambient)
     )
 # <unistd.h>. os.confstr_names carries no name for it on CPython, so the
 # integer is the only way to ask; guarded by try/except for every non-Darwin
