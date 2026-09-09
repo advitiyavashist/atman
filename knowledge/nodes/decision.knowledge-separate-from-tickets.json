@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "decision.knowledge-separate-from-tickets",
+  "type": "decision",
+  "title": "Knowledge is separate from ticket coordination",
+  "summary": "Tickets assign and track work; the knowledge graph stores durable facts, evidence, failures, runbooks, and skills. Tickets may reference knowledge IDs only.",
+  "tags": ["atman", "architecture", "knowledge", "tickets"],
+  "applies_to": ["all", "atman", "master", "infra"],
+  "source": {"kind": "ticket", "ref": "T-620 explicit user correction"},
+  "recorded_at": "2026-09-09T02:23:00Z",
+  "owner": "product",
+  "last_verified_at": "2026-09-09T02:23:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": null,
+  "revision": 1,
+  "data": {"boundary": "No knowledge nodes or graph edges are stored under .tickets/."}
+}

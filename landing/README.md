@@ -2,24 +2,25 @@
 
 Static page. No build step, no JavaScript, no framework.
 
-Copy follows the T-380 CEO-accepted brief (Hero / What it is / How / Metrics /
-Start / Close). `docs/product/pm-atman-landing-v1.md` lives on the Steer
-pm-work tree and was not readable from this repo.
+Copy follows the current Atman team-runtime, knowledge-layer, and Brahman
+research boundaries in the repository. The dashboard image is a checked-in
+product capture; the page does not point visitors at a machine-local demo.
 
 ## Open locally
 
-From the repository root:
+From the repository root, serve the whole checkout so the page can load the
+checked-in dashboard capture:
 
 ```sh
-python3 -m http.server 4173 --directory landing
+python3 -m http.server 4173
 ```
 
-Then open [http://127.0.0.1:4173/](http://127.0.0.1:4173/).
-
-Or open `landing/index.html` directly in a browser.
+Then open `/landing/` on the address printed by Python. This is local preview
+only.
 
 ## Deploy static
 
-Point any static host at this folder. GitHub Pages is optional (`/landing`).
+Publish the repository root and use `/landing/` as the page path so relative
+links to checked-in evidence remain valid. GitHub Pages is optional.
 
 **No custom domain is registered.** Do not invent one.

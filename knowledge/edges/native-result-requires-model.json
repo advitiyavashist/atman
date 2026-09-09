@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "native-result-requires-model", "type": "requires",
+  "from": "experiment.gliner-t613-native-t4", "to": "model.gliner-pii-base-v1",
+  "source": {"kind": "job", "ref": "fc-01M221DBPDJ6GN24EWCJJF0FQ5"}, "recorded_at": "2026-09-09T03:06:00Z",
+  "owner": "sol-gliner", "last_verified_at": "2026-09-09T03:06:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": 30
+}

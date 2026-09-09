@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "capability.shared-prompt-file",
+  "type": "agent_capability",
+  "title": "Shared prompt-file contract",
+  "summary": "Claude, Codex, Cursor, Grok, and custom harnesses receive context from the same prompt_text renderer through tickets prompt, watch, and spawn.",
+  "tags": ["agents", "harness", "prompt", "inheritance"],
+  "applies_to": ["all", "claude", "codex", "cursor", "grok", "custom"],
+  "source": {"kind": "repository", "ref": "atman:tickets.py#prompt_text"},
+  "recorded_at": "2026-09-09T02:32:00Z",
+  "owner": "atman-knowledge",
+  "last_verified_at": "2026-09-09T02:32:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 90,
+  "revision": 1,
+  "data": {"contract": ["prompt_file", "cwd", "agent"]}
+}

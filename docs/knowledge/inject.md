@@ -1,45 +1,25 @@
----
-id: inject
-title: E-013 inject contract
-tags: [inject, briefs]
----
+# Compact inheritance
 
-# How knowledge reaches a prompt
+Atman derives query terms from the current seat and held work:
 
-One renderer. Watch, spawn, and `tickets prompt` already share it. KB v0
-**is** that path. It does not add a second inject root.
+- ticket ID, title, body, role, needs, and attached context;
+- agent roles, capabilities, and harness;
+- explicit `knowledge:<id>` references.
 
-## Standing inject (E-013 — unchanged)
+It ranks matching nodes, follows one relation hop so evidence can bring its failure or runbook, deduplicates by `canonical_key`, labels stale records, and renders only summaries plus source references. `knowledge/manifest.json` sets the normal character budget. Code enforces a 6,000-character ceiling.
 
-From the [master how-to](../onboarding/master-howto.md):
+The result enters `prompt_text`, the common prompt-file contract used by Claude, Codex, Cursor, Grok, and custom harnesses through `tickets prompt`, `watch`, and `spawn`. Claude's `tickets board` SessionStart hook, Codex's native context hook, and Cursor's generated hook also request the same bounded selector. Harness-specific code does not rank knowledge.
 
-1. `.tickets/briefs/_shared.md`
-2. `.tickets/briefs/roles/<role>.md` for each of the seat's roles
-3. Workers only: `.tickets/briefs/<agent>.md`, then ticket context notes
+Resolution order is `ATMAN_KNOWLEDGE_DIR`, the seat's `tickets join --knowledge-dir`, then `knowledge/` in the current worktree. This lets agents share one graph across project boards without copying it into `.tickets/`.
 
-Write those files with `tickets brief` (agent / `--role` / `--ticket`)
-or by editing `_shared.md`. `--file` replaces; a bare line appends.
+Briefs remain operator-written standing instructions. Knowledge inheritance is task-selected evidence. Both appear in the prompt, from different stores, for different purposes.
 
-Repo-root `roles/` and `docs/knowledge/` are **not** read on inject.
-Missing file = no block. Tags on a tracked doc do not choose a lane.
-
-## Tracked docs (catalog, not inject)
+Inspect the exact output without starting a model:
 
 ```sh
-tickets knowledge --tag backend
-tickets knowledge show inject
+tickets prompt --agent alice
+tickets knowledge query "GLiNER CUDA" --agent alice --max-chars 1800
+tickets knowledge query "knowledge:failure.gliner-cpu-ort-shadow"
 ```
 
-The body stays out of the prompt until someone opens it, or until an
-operator copies what must stand into a brief.
-
-## Check
-
-```sh
-tickets brief --role backend "House rule: one file per change."
-tickets brief --role backend --show
-tickets prompt --agent alice          # after alice joined --roles backend
-```
-
-If the line is in `.tickets/briefs/roles/backend.md` and in the prompt,
-E-013 is wired. If it lives only under `docs/knowledge/`, it is catalog.
+An invalid graph fails closed with a short instruction to run `tickets knowledge validate`; malformed graph content is never injected.

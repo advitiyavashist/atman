@@ -42,7 +42,7 @@ def tk():
 
 def _release_cmd(sha, agent, cwd="/repo"):
     return ("/opt/homebrew/bin/python3 "
-            "/Users/kavana/.claude/tools/tickets-releases/%s/tickets.py watch "
+            "/Users/<operator>/.claude/tools/tickets-releases/%s/tickets.py watch "
             "--agent %s --every 60 --cwd %s "
             '--exec claude -p "$(tickets prompt)" --model opus '
             "--run-timeout 90 --prompt-kind  --heartbeat 0" % (sha, agent, cwd))
@@ -54,13 +54,13 @@ def test_two_foreign_release_paths_are_recognised(tk):
 
 
 def test_shim_path_is_recognised(tk):
-    cmd = ("/usr/bin/python3 /Users/kavana/.claude/tools/tickets.py watch "
+    cmd = ("/usr/bin/python3 /Users/<operator>/.claude/tools/tickets.py watch "
            "--agent optimizer --every 60 --cwd /repo")
     assert tk._watch_cmd_agent(cmd) == "optimizer"
 
 
 def test_repo_checkout_path_is_recognised(tk):
-    cmd = "python3 /Users/kavana/Downloads/atman/tickets.py watch --agent grok-worker --cwd /repo"
+    cmd = "python3 /Users/<operator>/Downloads/atman/tickets.py watch --agent grok-worker --cwd /repo"
     assert tk._watch_cmd_agent(cmd) == "grok-worker"
 
 
@@ -73,7 +73,7 @@ def test_neither_release_is_the_invoking_tool(tk):
 
 
 @pytest.mark.parametrize("cmd", [
-    "/usr/bin/python3 /Users/kavana/.claude/tools/tickets.py spawn cursor-modal --stop",
+    "/usr/bin/python3 /Users/<operator>/.claude/tools/tickets.py spawn cursor-modal --stop",
     "/usr/bin/python3 /some/where/tickets.py next --role backend",
     "grep -n tickets.py watch --agent optimizer",
     "/usr/bin/python3 /some/where/other.py watch --agent optimizer",

@@ -35,6 +35,13 @@ import sys
 import threading
 from datetime import datetime, timezone
 
+# Immutable releases verify every shipped byte before dispatch.  Do not add
+# interpreter-generated files under the verified package tree after that
+# check, or the next invocation would correctly report an unexpected file.
+if os.path.isfile(os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                               "release.json")):
+    sys.dont_write_bytecode = True
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -712,6 +719,40 @@ def load_objective(board):
         return {}
 
 
+OBJECTIVE_STATES = ("active", "achieved", "blocked", "replaced")
+STOP_CONDITION = (
+    "unattended watchers only: one model run then stop; restart watch to continue "
+    "(--persist or --max-runs 0 to loop). Interactive Codex/Claude master sessions stay open."
+)
+WAKE_KEYS = frozenset({
+    "holding", "suggested_for_me", "ready_in_my_lane",
+    "task_messages", "stuck_messages", "drive", "forced",
+})
+
+
+def objective_state(obj):
+    """Terminal state achieved|blocked|replaced, else active. Legacy done => achieved."""
+    if not obj:
+        return ""
+    st = obj.get("state")
+    if st in OBJECTIVE_STATES:
+        return st
+    return "achieved" if obj.get("done") else "active"
+
+
+def objective_exit_ok(obj):
+    return bool(str((obj or {}).get("exit_criterion") or "").strip())
+
+
+def objective_exit_missing(obj):
+    """True when the standing objective has no measurable exit criterion."""
+    if not obj:
+        return False
+    if "exit_missing" in obj:
+        return bool(obj.get("exit_missing"))
+    return not objective_exit_ok(obj) and objective_state(obj) == "active"
+
+
 def drive_status(board, tickets=None):
     """One-paragraph progress picture for the master's heartbeat: sprint burn,
     review queue, unowned ready work, live workers whose lane is empty."""
@@ -756,6 +797,50 @@ def current_master(board):
             return json.load(f)
     except (IOError, ValueError):
         return None
+
+
+def _notify_review_submitted(board, author, tid, text, master_state=None):
+    """Wake the reviewer once via kind=task; static review_queue is not a wake key.
+
+    With a CoS: task the CoS, notification-only copy to master.
+    With no CoS: task the master so an unattended master does not sleep through
+    the review. After inbox read, review_queue alone must not re-wake.
+    """
+    m = master_state if master_state is not None else (current_master(board) or {})
+    master_name = (m or {}).get("owner") or ""
+    cos_name = (m or {}).get("cos") or ""
+    body = "%s ready for review: %s" % (tid, text)
+    obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+    # Reviews advance an active objective, but a terminal objective is an
+    # explicit stop boundary. Keep the durable notification while withholding
+    # its automatic task wake. `source=review` also lets the pending gate catch
+    # a review queued while active if the objective becomes terminal before a
+    # persistent seat polls it.
+    review_kind = "" if obj_state in ("blocked", "achieved", "replaced") else "task"
+    if cos_name:
+        post_message(board, author, body, to=cos_name, re=tid,
+                     kind=review_kind, source="review")
+        if master_name and master_name != cos_name:
+            post_message(board, author, body, to=master_name, re=tid, source="review")
+    else:
+        post_message(board, author, body, to=master_name, re=tid,
+                     kind=review_kind, source="review")
+    return master_name, cos_name
+
+
+def spawn_watch_max_runs(cos=False, persist=False, max_runs=None):
+    """Watch --max-runs for `tickets spawn`. 0 loops until spawn --stop.
+
+    CoS is persistent by default. An explicit --max-runs (including 1 for
+    one-shot) overrides that. --persist always loops. Workers default to 1.
+    """
+    if persist:
+        return 0
+    if max_runs is not None:
+        return int(max_runs)
+    if cos:
+        return 0
+    return 1
 
 
 def hours_since(stamp):
@@ -1146,6 +1231,20 @@ def _current_ticket(board, owner):
 
     review.sort(key=_last_touch, reverse=True)
     return review[0]["id"]
+
+
+def _here_ticket(board, owner):
+    """Ticket id for tickets here (T-543 / T-551).
+
+    Stamp the claimed hold when present; otherwise clear. Never stamp an
+    IN REVIEW id whose live owner is not me (T-551), and never re-bind stale
+    IR when mine is empty (T-543).
+    """
+    claimed = [t["id"] for t in load_all(board)
+               if t.get("status") == "claimed" and t.get("owner") == owner]
+    if claimed:
+        return claimed[0]
+    return ""
 
 
 def _watch_bind_ticket(board, owner):
@@ -1595,6 +1694,16 @@ def cmd_list(a, board):
 def cmd_board(a, board):
     tickets = load_all(board)
     if not tickets:
+        # Claude's SessionStart hook calls `tickets board`. An initialized
+        # project may legitimately have no tickets yet, but its durable
+        # knowledge is still useful. Stay silent when there is no board at
+        # all so the global hook remains inert in unrelated directories.
+        if os.path.isdir(board):
+            owner = whoami()
+            if not owner.startswith("agent-"):
+                inherited = knowledge_context(board, owner, max_chars=1800)
+                if inherited:
+                    print(inherited)
         return
     counts = {}
     for t in tickets:
@@ -1624,6 +1733,11 @@ def cmd_board(a, board):
             "Shared across Claude/Codex/Cursor. `tickets next` claims one atomically; "
             "`tickets done <id> --notes \"...\"` hands off to dependents."
         )
+    owner = whoami()
+    if not owner.startswith("agent-"):
+        inherited = knowledge_context(board, owner, max_chars=1800)
+        if inherited:
+            print(inherited)
 
 
 def cmd_graph(a, board):
@@ -1788,6 +1902,15 @@ def _may_set_reservation(board, who):
     return who in ((m.get("owner") or ""), (m.get("cos") or ""))
 
 
+def _next_refusal_parts(ready_all, roles, owner, steal_id, board):
+    """T-558 F2: leftover ready tickets are role-miss or reservation, not one bucket."""
+    role_filtered = _filter_ready(ready_all, roles)
+    role_ok = [t for t in role_filtered if can_do(board, owner, t)]
+    role_miss = [t for t in ready_all if t not in role_filtered]
+    reserved_miss = [t for t in role_ok if _reservation_blocks(t, owner, steal_id)]
+    return role_miss, reserved_miss
+
+
 def cmd_next(a, board):
     owner = whoami(a.owner)
     roles = roles_for(board, owner, a.role)
@@ -1829,6 +1952,10 @@ def cmd_next(a, board):
         if got:
             checkin(board, owner, got["id"])
             print(detail(board, got, load_all(board)))
+            inherited = knowledge_context(board, owner)
+            if inherited:
+                print("")
+                print(inherited)
             warn = worktree_warning(owner)
             if warn:
                 print("")
@@ -1852,12 +1979,17 @@ def cmd_next(a, board):
             len(cannot), "; ".join("%s needs %s" % (t["id"], ",".join(t["needs"])) for t in cannot)))
         print("register with: tickets join %s --can %s" % (owner, ",".join(sorted(set(
             n for t in cannot for n in t["needs"])))))
-    others = [t for t in ready_all if t not in ready]
-    if roles is not None and others:
-        print(
-            "no ticket for roles %s; %d ready for other roles: %s"
-            % (roles, len(others), ", ".join(t["id"] for t in others))
-        )
+    role_miss, reserved_miss = _next_refusal_parts(
+        ready_all, roles, owner, steal_id, board)
+    parts = []
+    if role_miss:
+        parts.append("%d ready for other roles: %s" % (
+            len(role_miss), ", ".join(t["id"] for t in role_miss)))
+    if reserved_miss:
+        parts.append("%d reserved for other agents: %s" % (
+            len(reserved_miss), ", ".join(t["id"] for t in reserved_miss)))
+    if roles is not None and parts:
+        print("no ticket for roles %s; %s" % (roles, "; ".join(parts)))
         sys.exit(1)
     cyc = find_cycle(tickets)
     if cyc:
@@ -1951,17 +2083,22 @@ def cmd_review(a, board):
                              active_hours=_round3(tmr.get("active")),
                              pin=t.get("commit", ""),
                              **_traj_git(cwd=art)), None)
-    m = current_master(board)
-    post_message(board, author, "%s ready for review: %s" % (t["id"], text),
-                 to=(m["owner"] if m else ""), re=t["id"])
+    m = current_master(board) or {}
+    master_name, cos_name = _notify_review_submitted(board, author, t["id"], text, m)
     tm = timing(t)
     if t.get("commit"):
         print("pinned %s in %s (%s)" % (
             t["commit"], t.get("repo") or "?",
             "artifact tree %s" % t["artifact_dir"] if t.get("repo_source") == "artifact"
             else "this checkout -- pass --artifact <dir> if the deliverable is in another repo"))
-    print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
-        t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
+    if cos_name:
+        who = "CoS (%s) tasked" % cos_name
+        if master_name and master_name != cos_name:
+            who += "; master (%s) notified" % master_name
+    else:
+        who = "master%s notified" % ((" (%s)" % master_name) if master_name else "")
+    print("%s -> IN REVIEW after %s of work; %s. Claim your next ticket." % (
+        t["id"], fmt_hours(tm["active"]), who))
 
 
 def _trunk(cwd=None):
@@ -2797,6 +2934,27 @@ def _split_cmdline(cmd):
         return (cmd or "").split()
 
 
+_RELEASE_TICKETS_RE = re.compile(
+    r"/tickets-releases/[0-9a-f]{40}/tickets\.py(?:\s|$)"
+)
+
+
+def _is_python_interpreter(tok):
+    """True when `tok` is a python interpreter argv token (ps shape)."""
+    base = os.path.basename(tok or "")
+    return base == "python" or base.startswith("python")
+
+
+def _is_legitimate_watch_script(tok):
+    """True when `tok` points at a real tickets.py, not a grep/search needle."""
+    path = os.path.expanduser(tok or "")
+    if _RELEASE_TICKETS_RE.search(path + " "):
+        return True
+    if path.endswith("/.claude/tools/tickets.py"):
+        return True
+    return os.path.isabs(path) and os.path.basename(path) == "tickets.py"
+
+
 def _watch_cmd_agent(cmd):
     """The --agent name if `cmd` is a `tickets ... watch` loop, else ''.
 
@@ -2810,6 +2968,11 @@ def _watch_cmd_agent(cmd):
     of the tool is asking: the first argv token named `tickets.py` whose next
     token is the `watch` subcommand. Scanning left to right means the real
     script token always wins over anything quoted inside `--exec`.
+
+    T-562: a bare `tickets.py` token inside a grep/search argv (e.g.
+    `grep -n tickets.py watch --agent optimizer`) must not count -- require
+    a python interpreter immediately before the script token, or a path under
+    tickets-releases/<sha>/, the ~/.claude/tools shim, or an absolute checkout.
     """
     argv = _split_cmdline(cmd)
     for i, tok in enumerate(argv):
@@ -2818,8 +2981,139 @@ def _watch_cmd_agent(cmd):
         rest = argv[i + 1:]
         if not rest or rest[0] != "watch":
             continue
-        return _argv_flag_value(rest, "--agent")
+        prev = argv[i - 1] if i > 0 else ""
+        if _is_python_interpreter(prev) or _is_legitimate_watch_script(tok):
+            return _argv_flag_value(rest, "--agent")
     return ""
+
+
+def _is_python_interp(tok):
+    base = os.path.basename((tok or "").rstrip("/")).lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    return base == "python" or base.startswith("python")
+
+
+def _is_pytest_argv(argv):
+    """True if this process IS pytest, not an agent whose prompt quotes it.
+
+    T-559 / HB205: `ps aux` regex `[p]ytest.*-x.*--ignore=\\.worktrees` matches
+    AGENT PROMPTS that quote the desk harness tokens (live: optimizer pid 5983,
+    cursor-demo leftover 25662). Those processes are `tickets.py watch` /
+    `claude` / `agent`, not pytest -- so a full-line grep never clears after
+    the real harness exits. Identify pytest by the invocation PREFIX only:
+    argv[0] basename `pytest`, `python -m pytest`, or `python /path/pytest`.
+    A later `pytest` token inside `--exec` / `--prompt` does not count. A
+    `tickets.py watch` loop is never pytest.
+    """
+    argv = list(argv or [])
+    if not argv:
+        return False
+    for i, tok in enumerate(argv):
+        base = os.path.basename(tok.rstrip("/"))
+        if base == "tickets.py" and i + 1 < len(argv) and argv[i + 1] == "watch":
+            return False
+    head = os.path.basename(argv[0].rstrip("/"))
+    if head in ("pytest", "pytest.exe"):
+        return True
+    if not _is_python_interp(argv[0]):
+        return False
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "-m":
+            return i + 1 < len(argv) and argv[i + 1] in ("pytest", "pytest.exe")
+        if tok in ("-c", "--"):
+            return False
+        if tok.startswith("-"):
+            if tok in ("-W", "-X") and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 2
+                continue
+            i += 1
+            continue
+        return os.path.basename(tok.rstrip("/")) in ("pytest", "pytest.exe")
+    return False
+
+
+def _argv_has_ignore_worktrees(argv):
+    for i, tok in enumerate(argv):
+        if tok == "--ignore=.worktrees":
+            return True
+        if tok == "--ignore" and i + 1 < len(argv) and argv[i + 1] == ".worktrees":
+            return True
+        if tok.startswith("--ignore=") and tok.split("=", 1)[1] == ".worktrees":
+            return True
+    return False
+
+
+def _is_desk_merge_pytest_cmd(cmd):
+    """True if `cmd` is the desk merge pytest harness (T-559).
+
+    ACCEPT: argv tokens pytest AND -x AND --ignore=.worktrees (any order,
+    with gaps). Live counterexample 10:03Z pid 51475:
+    `pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude`
+    -- contiguous pgrep `pytest -x --ignore=.worktrees` is empty. Never
+    cwd (51475 chdirs into /tmp/pytest-of-kavana mid-run; a cwd==desk-WT
+    gate reads CLEAR while the suite is still alive). Never the full
+    `ps aux` line. QUIET-BOX / T-486 (e) `desk_pytest_alive` /
+    `desk_merge_alive` must call `_desk_pytest_alive`, not cwd and not
+    `pgrep -f 'desk-cursor-fable/.venv/bin/python -m pytest'`.
+    """
+    argv = _split_cmdline(cmd)
+    if not _is_pytest_argv(argv):
+        return False
+    return "-x" in argv and _argv_has_ignore_worktrees(argv)
+
+
+def _desk_pytest_pids(extra_pids=()):
+    """Pids of desk-merge-shaped pytest processes, plus any still-alive extra.
+
+    Extra pids are the ACCEPT "or the pid" fallback (T-554 waiter also
+    checked `ps -p 51475`). Never filters on cwd. Does not spawn --stop.
+    """
+    import subprocess
+
+    extra = set()
+    for p in extra_pids or ():
+        try:
+            extra.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    out = [p for p in extra if _pid_alive(p)]
+    try:
+        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
+                           capture_output=True, text=True)
+    except OSError:
+        return sorted(set(out))
+    me = os.getpid()
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == me:
+            continue
+        if pid in extra:
+            continue
+        if _is_desk_merge_pytest_cmd(parts[1]) and _pid_alive(pid):
+            out.append(pid)
+    return sorted(set(out))
+
+
+def _desk_pytest_alive(extra_pids=()):
+    """True if a desk-merge pytest is running (or an extra pid is still alive).
+
+    Replacement for the T-486 (e) / QUIET-BOX `desk_pytest_alive` helper.
+    False-ALIVE (another seat's merge-shaped pytest) is safer than false-CLEAR
+    mid-desk-merge. Never spawn --stop a live seat from this predicate.
+    """
+    return bool(_desk_pytest_pids(extra_pids=extra_pids))
 
 
 def _has_child_process(pid):
@@ -2850,17 +3144,14 @@ def _watcher_run_active(board, owner, pid):
     return _has_child_process(pid)
 
 
-def _live_watch_pids(owner=None, board=None):
-    """Live `tickets watch --agent <name>` processes from the OS process table.
+# One `ps` parse can be reused for every owner filter inside a board snapshot.
+_WATCH_TABLE = threading.local()
 
-    The pid file only tracks one loop per board; duplicates (interrupted pytest
-    runs, races before lock) show up here. `owner` filters to one agent name.
-    When `board` is set, only loops whose --cwd lies under that repo count
-    (spawn/list/dash). Omit `board` for fleet-wide stop of every loop for the name.
-    """
+
+def _parse_watch_table():
+    """All live `tickets watch` rows from one process-table snapshot."""
     import subprocess
 
-    repo = os.path.realpath(os.path.dirname(board)) if board else None
     out = []
     try:
         r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
@@ -2884,11 +3175,51 @@ def _live_watch_pids(owner=None, board=None):
         agent = _watch_cmd_agent(cmd)
         if not agent:
             continue
+        argv = _split_cmdline(cmd)
+        out.append({"pid": pid, "agent": agent, "cwd": _argv_flag_value(argv, "--cwd")})
+    return out
+
+
+class _shared_watch_table:
+    """Bind one process-table snapshot for nested `_live_watch_pids` calls."""
+
+    def __enter__(self):
+        self._prev_bound = getattr(_WATCH_TABLE, "bound", False)
+        self._prev_rows = getattr(_WATCH_TABLE, "rows", None)
+        _WATCH_TABLE.rows = _parse_watch_table()
+        _WATCH_TABLE.bound = True
+        return _WATCH_TABLE.rows
+
+    def __exit__(self, *exc):
+        _WATCH_TABLE.bound = self._prev_bound
+        _WATCH_TABLE.rows = self._prev_rows
+
+
+def _watch_table_rows():
+    if getattr(_WATCH_TABLE, "bound", False):
+        return _WATCH_TABLE.rows or []
+    return _parse_watch_table()
+
+
+def _live_watch_pids(owner=None, board=None):
+    """Live `tickets watch --agent <name>` processes from the OS process table.
+
+    The pid file only tracks one loop per board; duplicates (interrupted pytest
+    runs, races before lock) show up here. `owner` filters to one agent name.
+    When `board` is set, only loops whose --cwd lies under that repo count
+    (spawn/list/dash). Omit `board` for fleet-wide stop of every loop for the name.
+    Inside `_shared_watch_table`, every caller shares one `ps` snapshot.
+    """
+    repo = os.path.realpath(os.path.dirname(board)) if board else None
+    bound = getattr(_WATCH_TABLE, "bound", False)
+    out = []
+    for row in _watch_table_rows():
+        pid = row["pid"]
+        agent = row["agent"]
         if owner is not None and agent != owner:
             continue
-        argv = _split_cmdline(cmd)
         if repo:
-            watch_cwd = _argv_flag_value(argv, "--cwd")
+            watch_cwd = row.get("cwd") or ""
             if not watch_cwd:
                 continue
             try:
@@ -2897,7 +3228,7 @@ def _live_watch_pids(owner=None, board=None):
                     continue
             except OSError:
                 continue
-        if agent and _pid_alive(pid):
+        if agent and (bound or _pid_alive(pid)):
             out.append(pid)
     return sorted(set(out))
 
@@ -3681,8 +4012,15 @@ def cmd_reserve(a, board):
         return
     if not _may_set_reservation(board, who):
         sys.exit("tickets reserve --for is master/planner/optimizer only (anyone may --drop)")
+    if t.get("status") != "open":
+        sys.exit("%s is %s; reserve only open tickets" % (t["id"], t.get("status") or "?"))
+    unknown = not _agent_rec(board, target)
     t["reserved_for"] = target
-    t["notes"].append({"by": who, "at": now(), "text": "reserve: for %s" % target})
+    note = "reserve: for %s" % target
+    if unknown:
+        note += " (unknown agent; warning)"
+        print("warning: %r is not a registered agent; reservation still set" % target)
+    t["notes"].append({"by": who, "at": now(), "text": note})
     save(board, t)
     print("%s: reserved for %s" % (t["id"], target))
 
@@ -4275,12 +4613,8 @@ def cmd_context(a, board):
 def cmd_here(a, board):
     """Manually check in: where am I working, on what."""
     owner = whoami(a.owner)
-    has_claimed = any(
-        t.get("status") == "claimed" and t.get("owner") == owner
-        for t in load_all(board)
-    )
-    # T-543: mine empty -> clear stale IN REVIEW bind; keep cwd/branch/sha.
-    rec = checkin(board, owner, None if has_claimed else "", a.note or "")
+    # T-543/T-551: stamp claimed hold only; never foreign IN REVIEW binds.
+    rec = checkin(board, owner, _here_ticket(board, owner), a.note or "")
     print("%s @ %s" % (owner, rec["worktree"] or rec["cwd"]))
     print("  branch %s@%s%s" % (rec["branch"] or "?", rec["sha"] or "?",
                                "  (%d uncommitted)" % rec["dirty"] if rec["dirty"] else ""))
@@ -5136,12 +5470,19 @@ def resolve_to_and_mentions(text, to=""):
     return to, mentions
 
 
-def post_message(board, sender, text, to="", re=""):
+def post_message(board, sender, text, to="", re="", kind="", task=False, source=""):
     _rotate_messages_if_big(board)
     to, mentions = resolve_to_and_mentions(text, to)
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
     if mentions:
         rec["mentions"] = mentions
+    kind = (kind or "").strip()
+    if task or kind == "task":
+        rec["kind"] = "task"
+    elif kind and kind != "message":
+        rec["kind"] = kind
+    if source:
+        rec["source"] = source
     line_ = json.dumps(rec) + "\n"
     # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
     fd = os.open(messages_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
@@ -5298,7 +5639,7 @@ def seat_thread_summaries(messages, seat_names):
 
 def board_snapshot_for_request(board, seat="", messages=40):
     """board_snapshot plus optional ?seat= filter. Same store, scoped view."""
-    snap = board_snapshot(board, messages=messages)
+    snap = _snapshot_single_flight(board, messages=messages)
     seat = (seat or "").strip()
     if not seat:
         return snap
@@ -5537,7 +5878,8 @@ def cmd_msg(a, board):
     sender = whoami(a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
-    m = post_message(board, sender, a.text, a.to or "", a.re or "")
+    m = post_message(board, sender, a.text, a.to or "", a.re or "",
+                     task=bool(getattr(a, "task", False)))
     print("posted: " + fmt_msg(m))
 
 
@@ -6015,6 +6357,17 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    knowledge_dir = (getattr(a, "knowledge_dir", "") or "").strip()
+    if knowledge_dir:
+        knowledge_dir = os.path.abspath(os.path.expanduser(knowledge_dir))
+        if _knowledge_inside_board(knowledge_dir, board):
+            sys.exit("--knowledge-dir must live outside the ticket board: %s" % knowledge_dir)
+        if not _knowledge_graph(knowledge_dir):
+            sys.exit("--knowledge-dir needs a graph containing manifest.json: %s" % knowledge_dir)
+        _, _, knowledge_errors = _knowledge_records(knowledge_dir)
+        if knowledge_errors:
+            sys.exit("--knowledge-dir graph is invalid; run `tickets knowledge validate`: %s" %
+                     knowledge_dir)
     # Read this BEFORE checkin(), which creates the record. Only a genuinely new
     # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
     # calls straight through here) must leave delivery completely alone.
@@ -6071,6 +6424,8 @@ def cmd_join(a, board):
         entry["cost"] = a.cost
     if a.best_for:
         entry["best_for"] = a.best_for
+    if knowledge_dir:
+        entry["knowledge_dir"] = knowledge_dir
     entry.setdefault("can", [])
     entry.setdefault("cost", "medium")
     wf[owner] = entry
@@ -6089,6 +6444,8 @@ def cmd_join(a, board):
         entry.get("harness") or "claude (default)"))
     if entry.get("cmd"):
         print("cmd: %s" % entry["cmd"])
+    if entry.get("knowledge_dir"):
+        print("knowledge: %s" % entry["knowledge_dir"])
     elif harness and harness not in BUILTIN_HARNESSES:
         # A typo'd built-in name ("cluade") is indistinguishable from a
         # deliberate bare executable, so say which reading was taken rather
@@ -6204,10 +6561,15 @@ def pending_work(board, owner):
     if rec.get("limit"):
         out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
         return out
+    obj = _safe(lambda: load_objective(board), {})
+    obj_state = objective_state(obj)
     msgs = _safe(lambda: unread(board, owner), [])
     direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
     if direct:
         out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
+        tasks = [fmt_msg(m) for m in direct if _message_wakes(m, obj_state)]
+        if tasks:
+            out["task_messages"] = tasks[-5:]
     elif msgs:
         out["broadcasts"] = len(msgs)
     tickets = _safe(lambda: load_all(board), [])
@@ -6251,18 +6613,51 @@ def pending_work(board, owner):
     # or a standing seat such as an optimizer) is woken every N minutes even
     # when nothing else is pending, so it keeps working its brief toward the
     # objective instead of going quiet. Opt-in per seat; off for plain workers.
-    obj = _safe(lambda: load_objective(board), {})
     every = int(rec.get("drive_every") or 0)
-    if obj and not obj.get("done") and every > 0:
+    # Heartbeat wakes only an active objective that has a measurable exit.
+    if (obj and objective_state(obj) == "active" and objective_exit_ok(obj)
+            and every > 0):
         last = rec.get("drive_at", "")
         if not last or hours_since(last) * 60 >= every:
             out["drive"] = {"objective": obj.get("text", "")[:100], "last": last or "never"}
     return out
 
 
+def _message_wakes(m, obj_state=""):
+    """Explicit task / stuck / blocked mail wakes a model; ACKs and ordinary DMs do not."""
+    if m.get("source") == "review" and obj_state in ("blocked", "achieved", "replaced"):
+        return False
+    if m.get("kind") == "task" or m.get("task"):
+        return True
+    text = str(m.get("text") or "").strip().lower()
+    if text.startswith(("stuck", "blocked", "task:", "task ")):
+        return True
+    return False
+
+
+def wake_reason_of(pending):
+    for k in ("forced", "holding", "suggested_for_me", "ready_in_my_lane",
+              "stuck_messages", "task_messages", "drive"):
+        if pending.get(k):
+            return k
+    return "none"
+
+
+def pending_view(pending, force=False):
+    """pending_work plus why/stop, for CLI/UI. Does not change wake gates."""
+    out = dict(pending)
+    if force:
+        out["forced"] = True
+    out["wake_reason"] = wake_reason_of(out)
+    out["stop_condition"] = STOP_CONDITION
+    return out
+
+
 def actionable(pending):
-    """Broadcast-only noise or a recorded usage limit should not start a run."""
-    return bool(pending) and not (set(pending) <= {"broadcasts", "limited"})
+    """Only held/ready work, explicit task or stuck mail, force, or a valid drive."""
+    if not pending or pending.get("limited"):
+        return False
+    return any(k in WAKE_KEYS for k in pending)
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
@@ -6284,7 +6679,13 @@ Do now, in order:
 {extra}"""
 
 MASTER_PROMPT = """You are {agent}, the MASTER of the shared ticket board at {board} (repo {root}).
-TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets. Your three jobs, every wake-up:
+TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
+This run: pick ONE concrete outcome (one unblock, one merge batch, or one routing act) and stop.
+Ordinary messages and ACKs are notification-only and must not extend the run.
+If there is no standing objective with a measurable --exit criterion, ask for one
+(`tickets objective "<what done looks like>" --exit "<observable end>"`) and do not invent it.
+Transition the objective with `--done`/`--achieved`, `--blocked`, or `--replaced` when that is the outcome.
+Your three jobs, every wake-up:
 1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
    grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
    (`tickets create ... --blocks <id>`, `tickets dep`), reassign (`tickets assign <id> --owner <who>`), or
@@ -6297,12 +6698,37 @@ TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
    (`tickets limits` first: AUTH means /login is needed, not a wait), `tickets route` new tickets,
    keep one ticket per agent, spawn or brief workers when lanes are empty (`tickets spawn <name> --model ...`).
    Log every non-obvious call: `tickets master log "..."`. Post a short status pulse with `tickets msg`.
-Stop when the inbox is empty, the review queue is empty and no health item needs action.
+Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
+{extra}"""
+
+COS_PROMPT = """You are {agent}, the CHIEF OF STAFF of the shared ticket board at {board} (repo {root}).
+TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
+This run: pick ONE concrete outcome (one unblock, one merge batch, or one routing act) and stop.
+Ordinary messages and ACKs are notification-only and must not extend the run.
+Read the current standing objective as context only. Do not ask for, set, replace, or invent an objective;
+escalate those decisions to the master with `tickets msg --to <master>`.
+The master planner sets scope and routes by complexity; you review, unblock and merge.
+Your three jobs, every wake-up:
+1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
+   grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
+   (`tickets create ... --blocks <id>`, `tickets dep`), reassign (`tickets assign <id> --owner <who>`), or
+   decide and say so. Never leave a stuck agent without a reply.
+2. REVIEW + MERGE: `tickets master` shows the REVIEW QUEUE. For each entry read the diff against main
+   (`git diff main...<branch>`), check tests ran, then `tickets merge <branch>` (runs the suite, fast-forwards
+   main, closes the ticket). If it is not mergeable, `tickets msg --to <owner> --re <id>` with what to change
+   and `tickets reopen <id>`. Push main with `git push origin main` after merges.
+3. COORDINATE: `tickets dash --once` and `tickets util` -- reopen tickets whose owner is silent > 90 min
+   (`tickets limits` first: AUTH means /login is needed, not a wait), `tickets route` new tickets,
+   keep one ticket per agent, spawn or brief workers when lanes are empty (`tickets spawn <name> --model ...`).
+   Log every non-obvious call: `tickets master log "..."`. Post a short status pulse with `tickets msg`.
+Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
 {extra}"""
 
 PLANNER_PROMPT = """You are {agent}, the MASTER PLANNER of the shared ticket board at {board} (repo {root}).
 TICKET_AGENT is set; run `tickets ...` plainly. A chief of staff ({cos}) handles review, merge and day-to-day
 unblocking; you do not take feature tickets and you do not merge unless the cos is silent.
+You own objective discipline: if none is active, ask for one with --exit; plan and route only work that advances it.
+Do not invent objectives. This run: ONE concrete outcome, then stop. ACKs are notification-only.
 Your jobs, every wake-up:
 1. SCOPE + VISION: `tickets master` and `tickets dash --once`. Keep the sprint pointed at what the user wants
    (MASTER.md "CEO memo" and decision log). Split, re-scope, or cut tickets that drift; add the ones that are missing
@@ -6315,60 +6741,81 @@ Your jobs, every wake-up:
    (spend, deploy provider, default flips) get a `tickets msg` to the user's attention, not a guess.
 4. STAFFING: if a lane has ready work and no live worker, `tickets spawn <name> --model <tier> --roles ...`;
    if a worker is silent > 90 min, `tickets limits` then `tickets reopen`.
-Stop when there is nothing addressed to you, the sprint matches the vision, and every ready ticket has an owner.
+Stop after that one bounded batch. Do not keep the model awake for acknowledgements or a broad review queue alone.
 {extra}"""
 
 
-STANDING_SEAT_PROMPT = """HEARTBEAT: this seat is woken every {every} minutes whether or not anything is pending. This wake-up may be
-such a heartbeat: do the standing brief above end to end, post one short finding with numbers, and stop. The board's
+STANDING_SEAT_PROMPT = """HEARTBEAT: this seat is woken every {every} minutes only when the objective has an --exit criterion.
+Do the standing brief as one bounded batch, post one short finding with numbers, and stop. The board's
 objective, which your brief serves: {objective}"""
 
-DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; `tickets objective` to read it in full):
+DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; state={state}; `tickets objective` to read it in full):
 {objective}
+EXIT CRITERION: {exit_criterion}
 
 DRIVE STATUS now:
 {status}
 
-5. DRIVE THE OBJECTIVE (this wake-up may have been a heartbeat with nothing else pending -- that is the point):
-   compare the status above with the objective. If the sprint is done, lanes are empty, or ready work is
-   unowned, plan the next slice toward the objective NOW: `tickets plan`/`tickets create` the missing tickets,
-   `tickets route` + `tickets assign`, `tickets brief` the context, `tickets spawn` where a lane has no live
-   worker, and log the reasoning with `tickets master log`. If the objective is met, run
-   `tickets objective --done "<evidence>"` and post it. If it cannot be met without the user (spend, credentials,
-   a decision they reserved), post exactly what you need with `tickets msg` and log it; do not guess.
-   Never end a heartbeat without either advancing the plan or logging why nothing needed to change."""
+5. DRIVE THE OBJECTIVE (one bounded batch this run, then stop):
+   compare the status above with the exit criterion. Plan or route only the next slice that advances it:
+   `tickets plan`/`tickets create`, `tickets route` + `tickets assign`, `tickets brief`, `tickets spawn` if a
+   lane has no live worker, and `tickets master log`. If the criterion is met, run
+   `tickets objective --done "<evidence>"`. If blocked on the user, `tickets objective --blocked "<why>"`.
+   If a better objective replaced it, `tickets objective --replaced "<why>"`. Do not invent a new objective.
+   Stop after this batch; do not keep looping on acknowledgements or an unbounded heartbeat."""
 
 
 def cmd_objective(a, board):
     """Set, show or close the standing objective the master drives toward."""
     path = objective_path(board)
     cur = load_objective(board)
-    if a.done is not None:
+    blocked = getattr(a, "blocked", None)
+    replaced = getattr(a, "replaced", None)
+    done = a.done
+    terminals = [(blocked, "blocked"), (replaced, "replaced"), (done, "achieved")]
+    chosen = [(ev, st) for ev, st in terminals if ev is not None]
+    if len(chosen) > 1:
+        sys.exit("use only one of --done/--achieved, --blocked, --replaced")
+    if chosen:
         if not cur:
             sys.exit("no objective set")
-        cur["done"] = True
+        evidence, state = chosen[0]
+        cur["state"] = state
+        cur["done"] = state == "achieved"
         cur["done_at"] = now()
-        cur["evidence"] = a.done
+        cur["evidence"] = evidence
         with open(path, "w") as f:
             json.dump(cur, f, indent=2)
-        post_message(board, whoami(a.by), "objective met: %s -- %s" % (cur.get("text", "")[:120], a.done))
-        _master_log(board, "objective met: %s" % a.done, by=whoami(a.by))
-        print("objective marked met")
+        label = {"achieved": "met", "blocked": "blocked", "replaced": "replaced"}[state]
+        post_message(board, whoami(a.by), "objective %s: %s -- %s" % (
+            label, cur.get("text", "")[:120], evidence))
+        _master_log(board, "objective %s: %s" % (label, evidence), by=whoami(a.by))
+        print("objective marked %s" % state)
         return
     if a.text:
-        rec = {"text": a.text, "set_by": whoami(a.by), "at": now(), "done": False}
+        exit_c = (getattr(a, "exit_criterion", None) or "").strip()
+        rec = {"text": a.text, "set_by": whoami(a.by), "at": now(), "done": False,
+               "state": "active", "exit_criterion": exit_c, "exit_missing": not bool(exit_c)}
         with open(path, "w") as f:
             json.dump(rec, f, indent=2)
         post_message(board, whoami(a.by), "objective set: %s" % a.text[:200])
         _master_log(board, "objective set: %s" % a.text, by=whoami(a.by))
         print("objective set")
+        if rec["exit_missing"]:
+            print("FLAG: no measurable exit criterion; add --exit \"<observable end state>\"")
         return
     if not cur:
-        print("no objective set; `tickets objective \"<what done looks like>\"`")
+        print("no objective set; `tickets objective \"<what done looks like>\" --exit \"<observable end>\"`")
         return
-    print("OBJECTIVE%s (set by %s, %s)" % (" -- MET" if cur.get("done") else "", cur.get("set_by", "?"), cur.get("at", "")))
+    st = objective_state(cur).upper()
+    print("OBJECTIVE -- %s%s (set by %s, %s)" % (
+        st, " / MET" if st == "ACHIEVED" else "", cur.get("set_by", "?"), cur.get("at", "")))
     print(cur.get("text", ""))
-    if cur.get("done"):
+    exit_c = (cur.get("exit_criterion") or "").strip()
+    print("exit: %s" % (exit_c or "(none)"))
+    if objective_exit_missing(cur):
+        print("FLAG: no measurable exit criterion; add --exit \"<observable end state>\"")
+    if cur.get("evidence"):
         print("evidence: %s" % cur.get("evidence", ""))
     print()
     print(drive_status(board))
@@ -6379,7 +6826,8 @@ def cmd_drive(a, board):
     `tickets drive "<objective>" --as boss --tool cursor+claude --heartbeat 30`."""
     owner = whoami(a.by)
     if a.text:
-        ns = argparse.Namespace(text=a.text, done=None, by=owner)
+        ns = argparse.Namespace(text=a.text, done=None, by=owner, blocked=None, replaced=None,
+                                exit_criterion=getattr(a, "exit_criterion", None))
         cmd_objective(ns, board)
     elif not load_objective(board):
         sys.exit("give an objective: tickets drive \"<what done looks like>\"")
@@ -6398,16 +6846,13 @@ def cmd_drive(a, board):
 
 
 def cos_prompt_text(agent, board, root, extra):
-    return MASTER_PROMPT.replace("the MASTER of", "the CHIEF OF STAFF of").replace(
-        "Your three jobs, every wake-up:",
-        "The master planner sets scope and routes by complexity; you review, unblock and merge. "
-        "Escalate scope or vision questions to the planner with `tickets msg --to <master>`. "
-        "Your three jobs, every wake-up:").format(agent=agent, board=board, root=root, extra=extra)
+    return COS_PROMPT.format(agent=agent, board=board, root=root, extra=extra)
 
 
 def cmd_pending(a, board):
     owner = whoami(a.agent)
-    p = pending_work(board, owner)
+    force = bool(getattr(a, "force", False))
+    p = pending_view(pending_work(board, owner), force=force)
     if a.json:
         print(json.dumps({"agent": owner, "pending": actionable(p), **p}))
     elif p:
@@ -6544,20 +6989,20 @@ def prompt_text(a, board):
     master = (m["owner"] if m else "the master")
     cos = (m or {}).get("cos") or ""
     role_ctx = role_context(board, owner)
+    knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "")
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
-        extra = a.extra or ""
-        if role_ctx:
-            extra = role_ctx + ("\n\n" + extra if extra else "")
+        extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
         return cos_prompt_text(owner, board, os.path.dirname(board), extra)
     if getattr(a, "master", False):
-        extra = a.extra or ""
-        if role_ctx:
-            extra = role_ctx + ("\n\n" + extra if extra else "")
+        extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
         obj = _safe(lambda: load_objective(board), {})
         if obj and not obj.get("done"):
             _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
-            extra = DRIVE_PROMPT.format(objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
-                                        status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
+            extra = DRIVE_PROMPT.format(
+                objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
+                state=objective_state(obj) or "active",
+                exit_criterion=(obj.get("exit_criterion") or "(none — FLAG: add --exit)"),
+                status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
         if cos and owner != cos:
             return PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
                                          extra=extra)
@@ -6565,12 +7010,14 @@ def prompt_text(a, board):
     parts = []
     if role_ctx:
         parts.append(role_ctx)
+    if knowledge_ctx:
+        parts.append(knowledge_ctx)
     brief = agent_brief(board, owner)
     if brief:
         parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     obj = _safe(lambda: load_objective(board), {})
-    if int(rec.get("drive_every") or 0) > 0 and obj and not obj.get("done"):
+    if int(rec.get("drive_every") or 0) > 0 and obj and objective_state(obj) == "active" and objective_exit_ok(obj):
         _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
         parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
     tctx = ticket_context(board, owner)
@@ -6590,6 +7037,11 @@ def cmd_brief(a, board):
     file; --show prints. Exactly one target: agent name, --role, or --ticket."""
     who = whoami(a.by)
     role = getattr(a, "role", "") or ""
+    knowledge_id = (getattr(a, "knowledge_id", "") or "").strip()
+    if knowledge_id and not a.ticket:
+        sys.exit("brief --knowledge needs --ticket; tickets reference knowledge, they do not store it")
+    if knowledge_id and (a.text or a.file or a.agent):
+        sys.exit("brief --knowledge cannot be combined with text, --file, or an agent target")
     if role and a.ticket:
         sys.exit("brief: use --role or --ticket, not both")
     if role and a.agent and a.text:
@@ -6628,7 +7080,22 @@ def cmd_brief(a, board):
                 if n.get("kind") == "context":
                     print("- [%s] %s" % (n.get("by", "?"), n["text"]))
             return
-        text = a.text or (open(a.file).read().strip() if a.file else "")
+        if knowledge_id:
+            root = knowledge_root(board, who)
+            if _knowledge_inside_board(root, board):
+                sys.exit("knowledge graph must live outside the ticket board: %s" % root)
+            nodes, edges, errors = _knowledge_records(root) if _knowledge_graph(root) else ([], [], [])
+            if errors:
+                sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+            node_ids = {r["id"] for r in nodes}
+            if knowledge_id not in node_ids:
+                if knowledge_id in {r["id"] for r in edges}:
+                    sys.exit("knowledge references on tickets must name a node, not edge %r" %
+                             knowledge_id)
+                sys.exit("no knowledge node %r under %s" % (knowledge_id, root))
+            text = "knowledge:" + knowledge_id
+        else:
+            text = a.text or (open(a.file).read().strip() if a.file else "")
         if not text:
             sys.exit("give context text, --file, or --show")
         t["notes"].append({"by": who, "at": now(), "kind": "context", "text": text})
@@ -6662,36 +7129,416 @@ def cmd_brief(a, board):
     post_message(board, who, "brief updated for %s: %s" % (a.agent, (a.text or a.file)[:160]), to=a.agent)
 
 
-# Team knowledge v0 (CEO/PM lock): board docs + tracked docs + .tickets/briefs/
-# (shared/roles/agent). Same E-013 inject. Not a shared-memory brain, vector
-# DB, or auto-sync role KB. This verb only indexes docs/knowledge/.
+# Atman knowledge is a repo-backed graph beside, and deliberately outside, the
+# ticket board. Tickets coordinate work. Knowledge nodes preserve evidence,
+# decisions and reusable skills after a ticket is closed or a seat disappears.
+# The old Markdown catalog remains readable for backwards compatibility, but
+# only a validated graph is eligible for bounded prompt inheritance.
 _KNOWLEDGE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_KNOWLEDGE_NODE_TYPES = frozenset({
+    "project", "component", "decision", "artifact", "model_pin", "experiment",
+    "failure", "runbook", "skill", "agent_capability",
+})
+_KNOWLEDGE_EDGE_TYPES = frozenset({
+    "depends_on", "supersedes", "produced_by", "failed_because", "verified_by",
+    "applies_to", "requires",
+})
+_KNOWLEDGE_VERIFICATION = frozenset({
+    "unverified", "inferred", "observed", "verified", "superseded",
+})
+_KNOWLEDGE_VERIFY_RANK = {
+    "unverified": 0, "inferred": 1, "observed": 2, "verified": 3,
+    "superseded": -1,
+}
+_KNOWLEDGE_DEFAULT_BUDGET = 3600
+_KNOWLEDGE_MAX_BUDGET = 6000
 
 
-def knowledge_root(board=None):
-    """Repo-tracked team docs. $TICKETS_KNOWLEDGE_DIR wins (tests). No .tickets/knowledge/."""
-    env = (os.environ.get("TICKETS_KNOWLEDGE_DIR") or "").strip()
+def knowledge_root(board=None, owner=None):
+    """Repo-tracked graph. Overrides win; never place it below .tickets/."""
+    env = (os.environ.get("ATMAN_KNOWLEDGE_DIR") or
+           os.environ.get("TICKETS_KNOWLEDGE_DIR") or "").strip()
     if env:
         return os.path.abspath(env)
+    if board and owner:
+        configured = (load_workforce(board).get(owner, {}) or {}).get("knowledge_dir")
+        if configured:
+            return os.path.abspath(os.path.expanduser(configured))
     cands = []
     here = _init_cwd_worktree_root()
     if here:
-        cands.append(os.path.join(here, "docs", "knowledge"))
+        cands.append(os.path.join(here, "knowledge"))
     main = _repo_root()
     if main:
-        p = os.path.join(main, "docs", "knowledge")
+        p = os.path.join(main, "knowledge")
         if p not in cands:
             cands.append(p)
     if board:
-        p = os.path.join(os.path.dirname(os.path.abspath(board)), "docs", "knowledge")
+        p = os.path.join(os.path.dirname(os.path.abspath(board)), "knowledge")
         if p not in cands:
             cands.append(p)
+    # A checked out old release may only have the v0 Markdown catalog. Keep it
+    # readable; it is not treated as inherited graph context.
+    legacy = []
+    for base in (here, main, os.path.dirname(os.path.abspath(board)) if board else None):
+        if base:
+            p = os.path.join(base, "docs", "knowledge")
+            if p not in legacy:
+                legacy.append(p)
     for p in cands:
+        if os.path.isdir(p):
+            return os.path.abspath(p)
+    for p in legacy:
         if os.path.isdir(p):
             return os.path.abspath(p)
     if cands:
         return os.path.abspath(cands[0])
-    return os.path.abspath(os.path.join(os.getcwd(), "docs", "knowledge"))
+    return os.path.abspath(os.path.join(os.getcwd(), "knowledge"))
+
+
+def _knowledge_graph(root):
+    return os.path.isfile(os.path.join(root, "manifest.json"))
+
+
+def _knowledge_inside_board(root, board):
+    """True when a graph path would collapse durable facts into coordination."""
+    if not root or not board:
+        return False
+    try:
+        root = os.path.realpath(root)
+        board = os.path.realpath(board)
+        return os.path.commonpath([root, board]) == board
+    except (OSError, ValueError):
+        return True
+
+
+def _knowledge_path_inside_root(root, path):
+    """Reject graph files and directories whose symlinks escape `root`."""
+    try:
+        root = os.path.realpath(root)
+        path = os.path.realpath(path)
+        return os.path.commonpath([root, path]) == root
+    except (OSError, ValueError):
+        return False
+
+
+def _knowledge_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError) as exc:
+        return None, "%s: %s" % (path, exc)
+    if not isinstance(value, dict):
+        return None, "%s: top level must be an object" % path
+    return value, ""
+
+
+def _knowledge_timestamp(value):
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return stamp if stamp.tzinfo is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _knowledge_validate_record(record, kind=None):
+    """Return validation errors for one node or edge. Stdlib-only by design."""
+    errors = []
+    got_kind = record.get("kind")
+    if kind and got_kind != kind:
+        errors.append("kind must be %s" % kind)
+    if got_kind not in ("node", "edge"):
+        errors.append("kind must be node or edge")
+        return errors
+    rid = record.get("id")
+    if not isinstance(rid, str) or not _KNOWLEDGE_SLUG_RE.match(rid):
+        errors.append("id must be a safe stable slug")
+    if got_kind == "node":
+        if record.get("type") not in _KNOWLEDGE_NODE_TYPES:
+            errors.append("unknown node type %r" % record.get("type"))
+        for field in ("title", "summary", "owner"):
+            if not isinstance(record.get(field), str) or not record[field].strip():
+                errors.append("%s is required" % field)
+        for field in ("tags", "applies_to"):
+            if not isinstance(record.get(field), list) or not all(
+                    isinstance(x, str) and x.strip() for x in record.get(field, [])):
+                errors.append("%s must be a list of non-empty strings" % field)
+        revision = record.get("revision")
+        if not isinstance(revision, int) or revision < 1:
+            errors.append("revision must be an integer >= 1")
+        canonical = record.get("canonical_key")
+        if canonical is not None and (
+                not isinstance(canonical, str) or
+                not _KNOWLEDGE_SLUG_RE.match(canonical)):
+            errors.append("canonical_key must be a safe stable slug")
+    else:
+        if record.get("type") not in _KNOWLEDGE_EDGE_TYPES:
+            errors.append("unknown edge type %r" % record.get("type"))
+        for field in ("from", "to", "owner"):
+            if not isinstance(record.get(field), str) or not record[field].strip():
+                errors.append("%s is required" % field)
+        for field in ("from", "to"):
+            if isinstance(record.get(field), str) and not _KNOWLEDGE_SLUG_RE.match(record[field]):
+                errors.append("%s must be a safe node id" % field)
+    source = record.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("ref"), str) or not source["ref"].strip():
+        errors.append("source.ref is required")
+    future_cutoff = datetime.now(timezone.utc).timestamp() + 300
+    for field in ("recorded_at", "last_verified_at"):
+        stamp = _knowledge_timestamp(record.get(field))
+        if not stamp:
+            errors.append("%s must be an ISO-8601 timestamp" % field)
+        elif stamp.timestamp() > future_cutoff:
+            errors.append("%s cannot be more than 5 minutes in the future" % field)
+    if record.get("verification") not in _KNOWLEDGE_VERIFICATION:
+        errors.append("verification must be one of %s" % ", ".join(sorted(_KNOWLEDGE_VERIFICATION)))
+    confidence = record.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0 <= confidence <= 1:
+        errors.append("confidence must be between 0 and 1")
+    stale = record.get("stale_after_days")
+    if stale is not None and (not isinstance(stale, int) or isinstance(stale, bool) or stale < 1):
+        errors.append("stale_after_days must be null or an integer >= 1")
+    return errors
+
+
+def _knowledge_records(root):
+    """Load and validate graph records without ever consulting ticket files."""
+    nodes, edges, errors = [], [], []
+    manifest_path = os.path.join(root, "manifest.json")
+    if not _knowledge_path_inside_root(root, manifest_path):
+        manifest = None
+        errors.append("%s: symlink escapes the knowledge graph root" % manifest_path)
+    else:
+        manifest, manifest_error = _knowledge_json(manifest_path)
+        if manifest_error:
+            errors.append(manifest_error)
+    if manifest is not None:
+        if manifest.get("schema_version") != 1:
+            errors.append("manifest schema_version must be 1")
+        budget = manifest.get("context_budget_chars")
+        if not isinstance(budget, int) or isinstance(budget, bool) or not 500 <= budget <= _KNOWLEDGE_MAX_BUDGET:
+            errors.append("manifest context_budget_chars must be between 500 and %d" %
+                          _KNOWLEDGE_MAX_BUDGET)
+    for kind, folder in (("node", "nodes"), ("edge", "edges")):
+        for path in sorted(glob.glob(os.path.join(root, folder, "*.json"))):
+            if not _knowledge_path_inside_root(root, path):
+                errors.append("%s: symlink escapes the knowledge graph root" % path)
+                continue
+            record, error = _knowledge_json(path)
+            if error:
+                errors.append(error)
+                continue
+            found = _knowledge_validate_record(record, kind)
+            if found:
+                errors.extend("%s: %s" % (path, item) for item in found)
+                continue
+            record = dict(record)
+            record["path"] = os.path.abspath(path)
+            (nodes if kind == "node" else edges).append(record)
+    ids = set()
+    for node in nodes:
+        if node["id"] in ids:
+            errors.append("duplicate node id %s" % node["id"])
+        ids.add(node["id"])
+    edge_ids = set()
+    for edge in edges:
+        if edge["id"] in edge_ids:
+            errors.append("duplicate edge id %s" % edge["id"])
+        edge_ids.add(edge["id"])
+        if edge["from"] not in ids:
+            errors.append("edge %s references missing from node %s" % (edge["id"], edge["from"]))
+        if edge["to"] not in ids:
+            errors.append("edge %s references missing to node %s" % (edge["id"], edge["to"]))
+    return nodes, edges, errors
+
+
+def _knowledge_stale(record, at=None):
+    if record.get("verification") == "superseded":
+        return True
+    days = record.get("stale_after_days")
+    stamp = _knowledge_timestamp(record.get("last_verified_at"))
+    if not days or not stamp:
+        return False
+    at = at or datetime.now(timezone.utc)
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return (at - stamp).total_seconds() > days * 86400
+
+
+def _knowledge_strings(value):
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_knowledge_strings(item))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for item in value.values():
+            out.extend(_knowledge_strings(item))
+        return out
+    return []
+
+
+def _knowledge_terms(text):
+    stop = {"the", "and", "for", "with", "from", "this", "that", "into", "your", "you",
+            "are", "was", "were", "have", "has", "ticket", "task", "work", "agent"}
+    return {x for x in re.findall(r"[a-z0-9][a-z0-9_.-]+", (text or "").lower())
+            if len(x) > 2 and x not in stop}
+
+
+def _knowledge_refs(text):
+    """Return exact knowledge:<id> references without prefix collisions."""
+    pattern = r"(?<![A-Za-z0-9_.-])knowledge:([A-Za-z0-9][A-Za-z0-9_.-]*)(?![A-Za-z0-9_.-])"
+    return {match.lower() for match in re.findall(pattern, text or "", flags=re.IGNORECASE)}
+
+
+def _knowledge_preference(node):
+    return (_KNOWLEDGE_VERIFY_RANK.get(node.get("verification"), -2),
+            int(node.get("revision") or 0),
+            node.get("last_verified_at") or "",
+            float(node.get("confidence") or 0))
+
+
+def _knowledge_dedup(nodes):
+    """One current fact per canonical key; deterministic under concurrent files."""
+    picked = {}
+    for node in nodes:
+        key = node.get("canonical_key") or node["id"]
+        old = picked.get(key)
+        if old is None or _knowledge_preference(node) > _knowledge_preference(old):
+            picked[key] = node
+    return list(picked.values())
+
+
+def _knowledge_query(root, text="", scopes=None, max_nodes=12):
+    nodes, edges, errors = _knowledge_records(root)
+    if errors:
+        return [], [], errors
+    nodes = _knowledge_dedup(nodes)
+    by_id = {n["id"]: n for n in nodes}
+    terms = _knowledge_terms(text)
+    scopes = {str(x).lower() for x in (scopes or []) if x}
+    referenced = _knowledge_refs(text)
+    explicit = {n["id"] for n in nodes if n["id"].lower() in referenced}
+    scored = {}
+    for node in nodes:
+        fields = " ".join(_knowledge_strings({
+            "id": node.get("id"), "type": node.get("type"), "title": node.get("title"),
+            "summary": node.get("summary"), "tags": node.get("tags"),
+            "applies_to": node.get("applies_to"), "data": node.get("data", {}),
+        })).lower()
+        words = _knowledge_terms(fields)
+        score = 0
+        if node["id"] in explicit:
+            score += 1000
+        score += 12 * len(terms & words)
+        applies = {str(x).lower() for x in node.get("applies_to", [])}
+        if "all" in applies:
+            score += 2
+        score += 9 * len(scopes & applies)
+        if score:
+            scored[node["id"]] = score
+    # Bring the evidence, failure or runbook connected to a direct match. This
+    # is the useful part of a graph: a failure can carry its corrective command
+    # without copying the command into every ticket or brief.
+    direct = set(scored)
+    direct_scores = dict(scored)
+    for edge in edges:
+        if edge["from"] in direct and edge["to"] in by_id:
+            scored[edge["to"]] = max(scored.get(edge["to"], 0),
+                                     direct_scores[edge["from"]] - 1)
+        if edge["to"] in direct and edge["from"] in by_id:
+            scored[edge["from"]] = max(scored.get(edge["from"], 0),
+                                       direct_scores[edge["to"]] - 1)
+    type_bias = {"failure": 5, "runbook": 4, "skill": 3, "decision": 2,
+                 "artifact": 1, "experiment": 1}
+    ranked = sorted((by_id[nid] for nid in scored), key=lambda n: (
+        -(scored[n["id"]] + type_bias.get(n.get("type"), 0)),
+        _knowledge_stale(n), -_knowledge_preference(n)[0], n["id"]))[:max_nodes]
+    selected = {n["id"] for n in ranked}
+    selected_edges = [e for e in edges if e["from"] in selected and e["to"] in selected]
+    return ranked, selected_edges, []
+
+
+def _knowledge_budget(root, requested=None):
+    budget = requested
+    if budget is None:
+        manifest, _ = _knowledge_json(os.path.join(root, "manifest.json"))
+        budget = (manifest or {}).get("context_budget_chars", _KNOWLEDGE_DEFAULT_BUDGET)
+    try:
+        budget = int(budget)
+    except (TypeError, ValueError):
+        budget = _KNOWLEDGE_DEFAULT_BUDGET
+    return max(500, min(budget, _KNOWLEDGE_MAX_BUDGET))
+
+
+def _knowledge_render(nodes, edges, max_chars):
+    if not nodes:
+        return ""
+    relation = {}
+    for edge in edges:
+        relation.setdefault(edge["from"], []).append("%s→%s" % (edge["type"], edge["to"]))
+    lines = ["Inherited knowledge (repo-backed; open a source before changing a fact):"]
+    for node in nodes:
+        age = "STALE" if _knowledge_stale(node) else node["verification"].upper()
+        summary = (" ".join(node["title"].split()) + ": " +
+                   " ".join(node["summary"].split()))[:330]
+        source = node.get("source", {}).get("ref", "")[:170]
+        rels = ",".join(sorted(relation.get(node["id"], [])))[:170]
+        line = "- knowledge:%s [%s; confidence %.2f] %s" % (
+            node["id"], age, float(node["confidence"]), summary)
+        if rels:
+            line += " relations=" + rels
+        if source:
+            line += " source=" + source
+        lines.append(line[:620])
+    text = "\n".join(lines)
+    if len(text) <= max_chars:
+        return text
+    kept = [lines[0]]
+    marker = "\n...(knowledge budget reached; run `tickets knowledge query ...`)"
+    for line in lines[1:]:
+        candidate = "\n".join(kept + [line]) + marker
+        if len(candidate) > max_chars:
+            # A single verbose fact should still be useful under the minimum
+            # budget. Fit a visibly truncated line instead of returning only a
+            # budget notice.
+            if len(kept) == 1:
+                room = max_chars - len("\n".join(kept)) - len(marker) - 2
+                if room > 40:
+                    kept.append(line[:room - 3] + "...")
+            break
+        kept.append(line)
+    return "\n".join(kept) + marker
+
+
+def knowledge_context(board, owner, extra="", max_chars=None):
+    """Compact task/seat inheritance shared by every prompt-file harness."""
+    root = knowledge_root(board, owner)
+    if _knowledge_inside_board(root, board):
+        return "Knowledge graph configuration invalid: graph must live outside the ticket board."
+    if not _knowledge_graph(root):
+        return ""
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    wf = _safe(lambda: load_workforce(board), {}).get(owner, {}) or {}
+    roles = roles_for(board, owner) or []
+    tickets = [t for t in load_all(board)
+               if t.get("owner") == owner and t.get("status") in ("claimed", "review")]
+    chunks = [extra, " ".join(roles), " ".join(wf.get("can", [])),
+              wf.get("harness") or wf.get("tool", ""), rec.get("note", "")]
+    scopes = list(roles) + list(wf.get("can", [])) + [wf.get("harness") or wf.get("tool", "")]
+    for ticket in tickets:
+        chunks.extend([ticket.get("id", ""), ticket.get("title", ""), ticket.get("body", ""),
+                       ticket.get("role", ""), " ".join(ticket.get("needs", []))])
+        for note in ticket.get("notes", []):
+            if note.get("kind") == "context":
+                chunks.append(note.get("text", ""))
+    nodes, edges, errors = _knowledge_query(root, " ".join(chunks), scopes=scopes)
+    if errors:
+        return "Knowledge graph invalid; run `tickets knowledge validate`."
+    return _knowledge_render(nodes, edges, _knowledge_budget(root, max_chars))
 
 
 def _parse_knowledge_frontmatter(text):
@@ -6771,10 +7618,159 @@ def _find_knowledge_doc(root, slug):
 
 
 def cmd_knowledge(a, board):
-    """Index tracked team docs. Inject is E-013 briefs — this does not write them."""
-    root = knowledge_root(board)
+    """Query or author the separate repo-backed knowledge graph."""
+    root = knowledge_root(board, whoami(getattr(a, "agent", "") or ""))
+    if _knowledge_inside_board(root, board):
+        sys.exit("knowledge graph must live outside the ticket board: %s" % root)
     sub = getattr(a, "knowledge_cmd", None) or "list"
     tag = (getattr(a, "tag", "") or "").strip()
+    if _knowledge_graph(root):
+        nodes, edges, errors = _knowledge_records(root)
+        if sub == "validate":
+            if errors:
+                for error in errors:
+                    print("ERROR " + error)
+                sys.exit("knowledge graph invalid: %d error(s)" % len(errors))
+            print("knowledge graph valid: %d node(s), %d edge(s) at %s" %
+                  (len(nodes), len(edges), root))
+            return
+        # Never answer from a partial graph. A malformed record may carry the
+        # corrective runbook or superseding evidence for an otherwise valid
+        # fact; silently omitting it would turn corruption into bad advice.
+        if errors and sub in ("list", "show", "query"):
+            sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+        if sub == "list":
+            node_type = (getattr(a, "node_type", "") or "").strip()
+            stale_filter = bool(getattr(a, "stale", False))
+            rows = _knowledge_dedup(nodes)
+            if tag:
+                rows = [n for n in rows if tag in n.get("tags", [])]
+            if node_type:
+                rows = [n for n in rows if n.get("type") == node_type]
+            if stale_filter:
+                rows = [n for n in rows if _knowledge_stale(n)]
+            rows.sort(key=lambda n: (n["type"], n["id"]))
+            payload = [{
+                "id": n["id"], "type": n["type"], "title": n["title"],
+                "tags": n["tags"], "verification": n["verification"],
+                "confidence": n["confidence"], "stale": _knowledge_stale(n),
+                "source": n["source"], "path": n["path"],
+            } for n in rows]
+            if getattr(a, "json", False):
+                print(json.dumps(payload, indent=2))
+                return
+            for row in payload:
+                state = "STALE" if row["stale"] else row["verification"].upper()
+                print("%-30s %-16s %-10s %s" %
+                      (row["id"][:30], row["type"][:16], state, row["title"][:72]))
+            print("\n%d current fact(s); graph=%s" % (len(payload), root))
+            return
+        if sub == "show":
+            slug = (getattr(a, "slug", "") or "").strip()
+            if not _KNOWLEDGE_SLUG_RE.match(slug):
+                sys.exit("knowledge slug %r is not a safe name" % slug)
+            for record in nodes + edges:
+                if record["id"] == slug:
+                    payload = {k: v for k, v in record.items() if k != "path"}
+                    payload["stale"] = _knowledge_stale(record)
+                    payload["path"] = record["path"]
+                    print(json.dumps(payload, indent=2))
+                    return
+            sys.exit("no knowledge record %r under %s" % (slug, root))
+        if sub == "query":
+            query = (getattr(a, "query", "") or "").strip()
+            owner = whoami(getattr(a, "agent", "") or "")
+            scopes = list(getattr(a, "role", []) or []) + list(getattr(a, "cap", []) or [])
+            if getattr(a, "harness", ""):
+                scopes.append(a.harness)
+            if getattr(a, "ticket", ""):
+                t = load(board, a.ticket)
+                query = " ".join([query, t.get("id", ""), t.get("title", ""),
+                                  t.get("body", ""), t.get("role", ""),
+                                  " ".join(t.get("needs", []))])
+                for note in t.get("notes", []):
+                    if note.get("kind") == "context":
+                        query += " " + note.get("text", "")
+            if owner:
+                wf = load_workforce(board).get(owner, {}) or {}
+                scopes.extend(roles_for(board, owner) or [])
+                scopes.extend(wf.get("can", []))
+                scopes.append(wf.get("harness") or wf.get("tool", ""))
+                for ticket in load_all(board):
+                    if ticket.get("owner") != owner or ticket.get("status") not in ("claimed", "review"):
+                        continue
+                    query += " " + " ".join([
+                        ticket.get("id", ""), ticket.get("title", ""), ticket.get("body", ""),
+                        ticket.get("role", ""), " ".join(ticket.get("needs", [])),
+                    ])
+                    for note in ticket.get("notes", []):
+                        if note.get("kind") == "context":
+                            query += " " + note.get("text", "")
+            selected, selected_edges, query_errors = _knowledge_query(
+                root, query, scopes=scopes, max_nodes=getattr(a, "max_nodes", 12))
+            if query_errors:
+                sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+            if getattr(a, "json", False):
+                print(json.dumps({
+                    "query": query, "scopes": sorted(set(x for x in scopes if x)),
+                    "nodes": [{**{k: v for k, v in n.items() if k != "path"},
+                               "stale": _knowledge_stale(n), "path": n["path"]}
+                              for n in selected],
+                    "edges": [{k: v for k, v in e.items() if k != "path"}
+                              for e in selected_edges],
+                }, indent=2))
+                return
+            rendered = _knowledge_render(selected, selected_edges,
+                                         _knowledge_budget(root, getattr(a, "max_chars", None)))
+            print(rendered or "no relevant knowledge found")
+            return
+        if sub in ("add", "update"):
+            source_path = os.path.abspath(os.path.expanduser(a.file))
+            record, error = _knowledge_json(source_path)
+            if error:
+                sys.exit("NO CHANGE WAS MADE: " + error)
+            found = _knowledge_validate_record(record)
+            if found:
+                sys.exit("NO CHANGE WAS MADE: " + "; ".join(found))
+            folder = "nodes" if record["kind"] == "node" else "edges"
+            target = os.path.join(root, folder, record["id"] + ".json")
+            if not _knowledge_path_inside_root(root, os.path.dirname(target)):
+                sys.exit("NO CHANGE WAS MADE: knowledge destination escapes graph root")
+            current, _ = _knowledge_json(target)
+            if sub == "add" and current is not None:
+                sys.exit("NO CHANGE WAS MADE: knowledge record %s already exists" % record["id"])
+            if sub == "update" and current is None:
+                sys.exit("NO CHANGE WAS MADE: knowledge record %s does not exist" % record["id"])
+            if sub == "update" and current.get("kind") != record["kind"]:
+                sys.exit("NO CHANGE WAS MADE: kind cannot change")
+            if sub == "update" and record["kind"] == "node":
+                record["revision"] = int(current.get("revision") or 1) + 1
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            tmp = target + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(record, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp, target)
+            # Validate the full graph after a staged write. Roll back only the
+            # new bytes, preserving the old record exactly on update failure.
+            _, _, after_errors = _knowledge_records(root)
+            if after_errors:
+                if current is None:
+                    os.unlink(target)
+                else:
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(current, f, indent=2, sort_keys=True)
+                        f.write("\n")
+                    os.replace(tmp, target)
+                sys.exit("NO CHANGE WAS MADE: " + "; ".join(after_errors))
+            print("%s knowledge %s at %s" % ("added" if sub == "add" else "updated",
+                                               record["id"], target))
+            return
+        sys.exit("knowledge: list | show | query | add | update | validate")
+
+    if sub not in ("list", "show"):
+        sys.exit("no knowledge graph at %s; expected manifest.json" % root)
+    # Legacy v0 Markdown catalog: read-only, never injected.
     if sub == "list":
         if not os.path.isdir(root):
             print("no team knowledge tree at %s" % root)
@@ -6797,7 +7793,7 @@ def cmd_knowledge(a, board):
             print("%-16s %-36s [%s]  docs/knowledge/%s" % (
                 d["id"], d["title"][:36], tags, d["rel"]))
         print("")
-        print("%d doc(s)  standing inject is tickets brief / .tickets/briefs/ (E-013)" % len(docs))
+        print("%d legacy doc(s); create knowledge/manifest.json for graph inheritance" % len(docs))
         return
     if sub == "show":
         slug = (getattr(a, "slug", "") or "").strip()
@@ -6812,7 +7808,7 @@ def cmd_knowledge(a, board):
         print(doc["body"].rstrip())
         print()
         return
-    sys.exit("knowledge: list | show <id>  (inject is tickets brief, not this verb)")
+    sys.exit("knowledge: list | show <id>")
 
 
 def utilization(board, tickets=None, hours=24, live=None):
@@ -7064,6 +8060,24 @@ def _watch_lock(board, owner):
     return None
 
 
+def reclaim_stale_watch_lock(board, owner):
+    """Inspect and, when safe, reclaim one dead watch pid file."""
+    path = os.path.join(agents_dir(board), owner + ".watch.pid")
+    existed = os.path.lexists(path)
+    lock = _watch_lock(board, owner)
+    if lock is None:
+        return {"state": "live", "detail": "watcher is running"}
+    try:
+        with open(lock) as f:
+            ours = int((f.read() or "0").strip() or 0) == os.getpid()
+        if ours:
+            os.unlink(lock)
+    except (OSError, ValueError):
+        pass
+    return {"state": "reclaimed" if existed else "clear",
+            "detail": "stale watcher lock reclaimed" if existed else "no watcher lock"}
+
+
 def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
                       on_beat=None, beat_secs=None):
     """Run cmd with stdout+stderr teed into log_path, capped at cap_bytes for
@@ -7199,6 +8213,11 @@ def cmd_watch(a, board):
     import threading
     stop_event = threading.Event()
     stop = {"now": False}
+    persist = bool(getattr(a, "persist", False))
+    max_runs = int(getattr(a, "max_runs", 1) or 0)
+    if persist:
+        max_runs = 0
+    stop_cond = STOP_CONDITION if max_runs else "until spawn --stop or SIGTERM (--persist)"
 
     def _term(signum, frame):
         stop["now"] = True
@@ -7232,10 +8251,15 @@ def cmd_watch(a, board):
                 print("stop requested via tickets spawn --stop")
                 break
             p = _safe(lambda: pending_work(board, owner), {})
+            force = bool(getattr(a, "force", False))
+            if force and not actionable(p):
+                p = dict(p or {}, forced=True)
             if actionable(p):
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
-                print("%s work found (%s) -> run %d" % (now(), ", ".join(p), runs))
+                print("%s work found (%s) wake=%s stop=%s -> run %d" % (
+                    now(), ", ".join(k for k in p if k in WAKE_KEYS or k in ("messages_to_me", "review_queue")),
+                    wake_reason_of(p), stop_cond, runs))
                 run_cmd, cleanup = cmd, None
                 if templated:
                     pf = ""
@@ -7306,6 +8330,20 @@ def cmd_watch(a, board):
                     if cleanup:
                         cleanup()
                     ended = now()
+                    run_output = _read_run_slice(log_path, log_before)
+                    if harness == "cursor":
+                        run_auth_state = _classify_auth_output(rc, run_output)
+                        if run_auth_state in ("login_required", "quota") or rc == 0:
+                            previous_auth = (_agent_rec(board, owner) or {}).get("auth_check") or {}
+                            run_auth = {
+                                "state": "ready" if rc == 0 else run_auth_state,
+                                "harness": "cursor", "at": now(), "exit": rc,
+                                "detail": ("headless run succeeded" if rc == 0 else
+                                           ((run_output or "run failed").strip().splitlines()[-1][:240])),
+                                "identity": previous_auth.get("identity", "") if rc == 0 else "",
+                                "status_cmd": "agent status", "login_cmd": "agent login",
+                            }
+                            _safe(lambda ra=run_auth: _agent_set(board, owner, auth_check=ra), None)
                     # Tokens/cost for THIS run: the harness's own stdout when
                     # it was asked for a JSON format, else its session store.
                     # usage_error records "reported something unreadable",
@@ -7325,8 +8363,7 @@ def cmd_watch(a, board):
                         exit=rc, timed_out=bool(timed_out),
                         bound_write=True if bw else None,
                         duration_s=_iso_span_secs(run_started, ended),
-                        outcome=("limit" if _looks_limited(
-                            _read_run_slice(log_path, log_before)) else None),
+                        outcome=("limit" if _looks_limited(run_output) else None),
                         usage_error=usage_error, **usage), None)
                     if timed_out:
                         with open(log_path, "a") as lf:
@@ -7334,7 +8371,7 @@ def cmd_watch(a, board):
                     log("%s run %d exit %s" % (now(), runs, rc))
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
                 failures = failures + 1 if rc not in (0, None) else 0
-                if a.max_runs and runs >= a.max_runs:
+                if max_runs and runs >= max_runs:
                     print("max-runs reached")
                     break
             elif a.verbose:
@@ -7392,6 +8429,10 @@ def cmd_codex_hook(a, board):
     if p.get("broadcasts"):
         lines.append("- %d unread broadcasts: `tickets inbox`" % p["broadcasts"])
     lines.append("- Loop: tickets inbox -> tickets mine / tickets next -> work -> tickets update -> tickets sync -> tickets review")
+    used = len("\n".join(lines))
+    inherited = knowledge_context(board, owner, max_chars=max(500, 1850 - used))
+    if inherited:
+        lines.append(inherited)
     print(json.dumps({"hookSpecificOutput": {"hookEventName": name, "additionalContext": "\n".join(lines)[:1900]}}))
 
 
@@ -7449,8 +8490,9 @@ def cmd_boot(a, board):
     print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
     if a.watch:
         wn = argparse.Namespace(agent=owner, every=a.every, exec=a.exec, cwd=a.cwd or root,
-                                permission_mode="acceptEdits", allowed_tools="", max_runs=0,
-                                once=False, dry_run=False, verbose=False, run_timeout=a.run_timeout)
+                                permission_mode="acceptEdits", allowed_tools="", max_runs=1,
+                                once=False, dry_run=False, verbose=False, run_timeout=a.run_timeout,
+                                heartbeat=0, persist=False, force=False, prompt_kind="", beat_every=0)
         cmd_watch(wn, board)
 
 
@@ -7771,6 +8813,18 @@ def cmd_spawn(a, board):
                 ", ".join(str(p) for p in busy), owner))
         post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
         return
+    # Prove the headless Cursor credential before creating a watcher. This is
+    # a local status call, not a model turn. Keep it before cmd_join so a failed
+    # relaunch cannot alter the seat's roles, harness, or worktree record.
+    requested_harness = getattr(a, "harness", "") or a.tool
+    resolved_harness, _ = harness_of(board, owner, requested_harness,
+                                     getattr(a, "cmd_template", ""))
+    if resolved_harness == "cursor" and not a.exec:
+        auth = harness_auth_probe(board, owner, requested_harness)
+        _safe(lambda: _agent_set(board, owner, auth_check=auth), None)
+        if auth.get("state") != "ready":
+            _print_auth_result(owner, auth)
+            sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                             harness=getattr(a, "harness", "") or "",
                             cmd_template=getattr(a, "cmd_template", "") or "",
@@ -7828,6 +8882,13 @@ def cmd_spawn(a, board):
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
             "--prompt-kind", kind,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
+    max_runs = spawn_watch_max_runs(
+        cos=bool(a.cos), persist=bool(getattr(a, "persist", False)),
+        max_runs=getattr(a, "max_runs", None))
+    if max_runs == 0:
+        argv += ["--persist", "--max-runs", "0"]
+    else:
+        argv += ["--max-runs", str(max_runs)]
     # T-243: strip Git's LOCATION vars before handing the parent's environment
     # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
     # cascades into every agent this launches. _clean_git_env is deliberately
@@ -7844,8 +8905,9 @@ def cmd_spawn(a, board):
     _time.sleep(1.0)
     pid = _watcher_pid(board, owner)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; harness=%s; model=%s; log %s" % (
-        owner, (" (pid %d)" % pid) if pid else "", harness, model, log_path))
+    print("watcher for %s started%s; harness=%s; model=%s; persist=%s; max-runs=%s; log %s" % (
+        owner, (" (pid %d)" % pid) if pid else "", harness, model,
+        "yes" if max_runs == 0 else "no", max_runs, log_path))
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
@@ -7853,6 +8915,99 @@ def cmd_spawn(a, board):
 
 HARNESS_PROBE_PROMPT = "reply OK"
 HARNESS_CHECK_TIMEOUT = 60
+
+HARNESS_AUTH_COMMANDS = {
+    "cursor": (["agent", "status"], ["agent", "login"]),
+    "claude": (["claude", "auth", "status"], ["claude", "auth", "login"]),
+    "codex": (["codex", "login", "status"], ["codex", "login"]),
+}
+
+
+def _classify_auth_output(rc, output):
+    """Keep credentials, quota, and host failures as separate operator states."""
+    text = (output or "").strip()
+    low = text.lower()
+    if _looks_auth(text) or "authentication required" in low or "login required" in low:
+        return "login_required"
+    if _looks_limited(text):
+        return "quota"
+    if rc == 0:
+        return "ready"
+    return "unavailable"
+
+
+def harness_auth_probe(board, owner, harness="", timeout=15):
+    """Cheap credential preflight; never starts a model or consumes a turn."""
+    import subprocess
+
+    resolved, _ = harness_of(board, owner, harness, "")
+    spec = HARNESS_AUTH_COMMANDS.get(resolved)
+    if not spec:
+        return {"state": "unsupported", "harness": resolved, "at": now(),
+                "detail": "auth preflight is not defined for this harness", "login_cmd": ""}
+    status_cmd, login_cmd = spec
+    env = dict(os.environ,
+               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    try:
+        r = subprocess.run(status_cmd, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, env=env)
+        output = ((r.stdout or "") + (r.stderr or "")).strip()
+        state = _classify_auth_output(r.returncode, output)
+        rc = r.returncode
+    except FileNotFoundError:
+        state, rc, output = "unavailable", 127, "%s is not installed" % status_cmd[0]
+    except subprocess.TimeoutExpired:
+        state, rc, output = "unavailable", 124, "authentication status timed out"
+    return {"state": state, "harness": resolved, "at": now(), "exit": rc,
+            "detail": (output.splitlines()[0][:240] if output else "status returned no identity"),
+            "identity": (output.splitlines()[0][:240] if state == "ready" and output else ""),
+            "status_cmd": " ".join(status_cmd), "login_cmd": " ".join(login_cmd)}
+
+
+def _print_auth_result(owner, result):
+    labels = {"ready": "Ready", "login_required": "Login required",
+              "quota": "Usage quota reached", "unavailable": "Harness unavailable",
+              "unsupported": "Auth check unsupported"}
+    print("%s: %s" % (owner, labels.get(result.get("state"), result.get("state", "unknown"))))
+    if result.get("identity"):
+        print("  identity: %s" % result["identity"])
+    elif result.get("detail"):
+        print("  detail:   %s" % result["detail"])
+    if result.get("state") == "login_required":
+        print("  recover:  %s" % result["login_cmd"])
+        print("  verify:   tickets harness auth %s" % owner)
+
+
+def cmd_harness_auth(a, board):
+    """Show auth, optionally run the interactive login, and verify afterward."""
+    import subprocess
+
+    owner = a.name or whoami()
+    if owner.startswith("agent-"):
+        sys.exit("harness auth needs an agent name: tickets harness auth <name>")
+    if a.recover_stale:
+        recovered = reclaim_stale_watch_lock(board, owner)
+        print("watcher: %s" % recovered["detail"])
+        if recovered["state"] == "live":
+            sys.exit(2)
+    result = harness_auth_probe(board, owner, a.harness, a.timeout)
+    _safe(lambda: _agent_set(board, owner, auth_check=result), None)
+    _print_auth_result(owner, result)
+    if a.login:
+        if result.get("state") == "unsupported":
+            sys.exit("interactive login is not supported for %s" % result.get("harness"))
+        login_cmd = HARNESS_AUTH_COMMANDS[result["harness"]][1]
+        env = dict(os.environ,
+                   PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+        rc = subprocess.call(login_cmd, env=env)
+        if rc:
+            sys.exit(rc)
+        result = harness_auth_probe(board, owner, a.harness, a.timeout)
+        _safe(lambda: _agent_set(board, owner, auth_check=result), None)
+        print("verification:")
+        _print_auth_result(owner, result)
+    if result.get("state") != "ready":
+        sys.exit(1)
 
 
 def _harness_check_label(check):
@@ -7926,6 +9081,8 @@ def cmd_harness(a, board):
     poll interval discovering it does not. The result is written to the agent
     record so `spawn --list` and the master can see who is really reachable.
     """
+    if a.harness_cmd == "auth":
+        return cmd_harness_auth(a, board)
     if a.harness_cmd == "list":
         wf = load_workforce(board)
         names = sorted(set(list(wf) + [r["owner"] for r in load_agents(board)]))
@@ -7962,31 +9119,68 @@ def cmd_harness(a, board):
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{--bg:#0c0e12;--fg:#e8e6e1;--mute:#8a8d96;--line:#22262e;--card:#141820;--ok:#3dbe7a;--warn:#e0a53d;--bad:#e85d4c;--acc:#5b8def;--chip:#1c2433;--blocked:#e85d4c;--ready:#5b8def;--flight:#e0a53d;--review:#9b7dff;--live:#3ee8c5;--intervene:#e0a53d}
+:root{color-scheme:dark;--bg:#0b1416;--fg:#e6eeea;--mute:#8fa4a6;--line:#243236;--card:#121c1e;--surface:#0f191b;--chip:#182427;--acc:#c8f04a;--on-acc:#142022;--ok:#5ec7b0;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#8fa4a6;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
+body[data-theme=light]{color-scheme:light;--bg:#f3f6f4;--fg:#142022;--mute:#6a7c7f;--line:#d5ded9;--card:#fbfdfc;--surface:#eef2f0;--chip:#e8eeea;--on-acc:#142022;--ok:#187a67;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6a7c7f;--flight:#93610a;--review:#6954a5;--progress:#789396}
 *{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
-header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:linear-gradient(180deg,#12151c 0%,#0c0e12 100%);border-bottom:1px solid var(--line)}
+body.loading main{opacity:.55;pointer-events:none}
+header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:10px;min-width:148px}
+.mark{color:var(--fg)}
 .brand .mark{flex:none;width:22px;height:22px}
 .wordmark{font:650 16px/1.2 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:.22em;text-transform:lowercase}
-.brand h1{font-size:12px;margin:2px 0 0;font-weight:650;color:var(--mute);text-transform:lowercase}
 .brand .board-name{margin:2px 0 0;font-size:11px}
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.portfolio{position:relative}
+.portfolio summary{display:inline-flex;align-items:center;gap:7px;list-style:none;padding:4px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--fg);font:11px/1.3 ui-monospace,Menlo,monospace;cursor:pointer}
+.portfolio summary::-webkit-details-marker{display:none}
+.portfolio .caret{color:var(--acc);font-weight:800}
+.portfolio-menu{position:absolute;z-index:8;top:calc(100% + 7px);left:0;width:260px;padding:5px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 14px 36px color-mix(in srgb,var(--bg) 72%,transparent)}
+.product-row{display:grid;grid-template-columns:68px 1fr;gap:8px;padding:7px 9px;border-left:2px solid transparent;color:var(--mute)}
+.product-row b{color:var(--fg);font:600 11px/1.35 ui-monospace,Menlo,monospace}
+.product-row small{font-size:11px;line-height:1.35}
+.product-row.current{border-left-color:var(--acc);background:var(--surface)}
 .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;background:var(--chip);border:1px solid var(--line);font-size:12px}
 .chip b{font-weight:650}
-.chip.master{border-color:color-mix(in srgb,var(--acc) 45%,var(--line))}
-.chip.cos{border-color:color-mix(in srgb,var(--review) 45%,var(--line))}
+.chip.master,.chip.cos{border-color:var(--line)}
 .sprint{display:flex;flex-direction:column;gap:3px;min-width:180px;flex:1}
 .sprint .row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--mute)}
-.bar{height:6px;background:#1b1f28;border-radius:99px;overflow:hidden}
-.bar i{display:block;height:100%;background:var(--acc)}
-.pulse{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:650}
-.pulse i{width:8px;height:8px;border-radius:50%;background:var(--live);box-shadow:0 0 0 3px color-mix(in srgb,var(--live) 25%,transparent)}
-.pulse.warn i{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 25%,transparent)}
-.pulse.bad i{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 25%,transparent)}
-#clock{margin-left:auto;font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
-.mission{margin:0 16px;border-bottom:1px solid var(--line)}
-.mission summary{cursor:pointer;list-style:none;padding:8px 0;color:var(--mute);font-size:12px;display:flex;gap:8px;align-items:baseline}
+.sprint .row span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar{height:5px;background:var(--surface);border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--progress)}
+.health{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:650}
+.health i{width:8px;height:8px;border-radius:2px;background:var(--ok)}
+.health.warn i{background:var(--warn)}
+.health.bad i{background:var(--bad)}
+#clock{font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
+.conn{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+.conn-status{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:99px;border:1px solid var(--line)}
+.conn-status.live{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.conn-status.reconnecting{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.conn-status.offline{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
+#lastUpdated{font-size:11px;color:var(--mute)}
+#refreshBtn,#themeBtn{appearance:none;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:12px inherit;cursor:pointer}
+#refreshBtn:disabled{opacity:.5;cursor:default}
+#refreshBtn.spin{animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.attention{margin:0 16px;padding:8px 0;border-bottom:1px solid var(--line)}
+.attention summary{cursor:pointer;list-style:none;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.attention summary::-webkit-details-marker{display:none}
+.attn-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.attn-item{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--card);border:1px solid var(--line)}
+.attn-item.CRIT{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+.attn-item.WARN{border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+.epics{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px}
+.epic{min-width:180px;flex:1;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.epic .row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--mute);margin-bottom:4px}
+.epic .id{font-weight:700;color:var(--fg)}
+.tag.task{border-color:color-mix(in srgb,var(--flight) 45%,var(--line));color:var(--flight)}
+.tag.ack{border-color:color-mix(in srgb,var(--ok) 45%,var(--line));color:var(--ok)}
+.tag.pending{border-color:color-mix(in srgb,var(--warn) 45%,var(--line));color:var(--warn)}
+.tag.limit{border-color:color-mix(in srgb,var(--bad) 45%,var(--line));color:var(--bad)}
+.mission{margin:0;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:0 12px}
+.mission summary{cursor:pointer;list-style:none;padding:11px 0;color:var(--mute);font-size:12px;display:flex;gap:8px;align-items:baseline}
 .mission summary::-webkit-details-marker{display:none}
 .mission summary .k{letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--fg)}
 .mission summary .one{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
@@ -7994,9 +9188,10 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 nav.tabs{display:flex;gap:4px;padding:8px 16px 0;border-bottom:1px solid var(--line)}
 nav.tabs button{appearance:none;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--mute);padding:8px 12px;font:13px/1 inherit;font-weight:650;cursor:pointer}
 nav.tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
-main{flex:1;min-height:0;padding:14px 16px 18px;overflow:auto}
+button:focus-visible,summary:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+main{flex:1;min-width:0;min-height:0;width:100%;padding:14px 16px 18px;overflow:auto}
 .pane{display:none;height:100%}
-body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-tab=messages] #pane-messages{display:flex;flex-direction:column;gap:12px}
+body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-tab=messages] #pane-messages{display:flex;flex-direction:column;gap:12px}
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
 @media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
 .col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
@@ -8004,11 +9199,11 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .col h2 .n{font-variant-numeric:tabular-nums;color:var(--mute)}
 .col.blocked h2{color:var(--blocked)}.col.ready h2{color:var(--ready)}.col.flight h2{color:var(--flight)}.col.review h2{color:var(--review)}
 .col .list{padding:0 8px 10px;display:flex;flex-direction:column;gap:8px}
-.card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
 .card.stale-warn{border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
-.card.stale-bad{border-color:color-mix(in srgb,var(--bad) 70%,var(--line));background:color-mix(in srgb,var(--bad) 8%,#10141b)}
+.card.stale-bad{border-color:color-mix(in srgb,var(--bad) 70%,var(--line));background:color-mix(in srgb,var(--bad) 8%,var(--surface))}
 .card-top{display:flex;gap:8px;align-items:center;font:11px/1 ui-monospace,Menlo,monospace}
-.card-top .id{font-weight:700;color:var(--acc)}
+.card-top .id{font-weight:700;color:var(--fg)}
 .pri{color:var(--mute)}.card-title{font-weight:600;font-size:13px}
 .card-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--mute);font-size:12px}
 .wait{font-size:11px;color:var(--warn)}
@@ -8016,22 +9211,22 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.mute{color:var(--mute)}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .who{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
-.av{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--acc);color:#fff;font-size:9px;font-weight:700;flex:none}
+.av{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--chip);color:var(--fg);border:1px solid var(--line);font-size:9px;font-weight:700;flex:none}
 .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
 .agent{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
 .agent.head{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .agent .st{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px;color:var(--mute)}
 .stats b{display:block;color:var(--fg);font-size:14px}
-.mention{color:var(--acc);font-weight:600;background:var(--chip);border-radius:4px;padding:0 3px}
+.mention{color:var(--fg);font-weight:650;background:var(--chip);border-radius:4px;padding:0 3px}
 .msgs{display:flex;flex-direction:column;gap:8px;padding-bottom:8px}
 .m{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
 .m .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-bottom:4px}
 .tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;border:1px solid var(--line);color:var(--mute)}
 #composer{position:sticky;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px;padding:10px}
-#composer textarea{width:100%;resize:vertical;min-height:56px;font:13px/1.4 inherit;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
-#composer select,#composer button,#composer input{font:13px inherit;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
-#composer button{background:var(--acc);color:#fff;border-color:var(--acc);cursor:pointer;font-weight:600}
+#composer textarea{width:100%;resize:vertical;min-height:56px;font:13px/1.4 inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+#composer select,#composer button,#composer input{font:13px inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+#composer button{background:var(--acc);color:var(--on-acc);border-color:var(--acc);cursor:pointer;font-weight:700}
 #composer button:disabled{opacity:.5;cursor:default}
 #composerRow{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
 #mentionBar{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;min-height:22px}
@@ -8074,7 +9269,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .promise-strip{display:flex;gap:10px 14px;align-items:baseline;padding:6px 16px;border-bottom:1px solid var(--line);font-size:13px}
 .promise-strip .lbl{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--mute)}
 .promise-strip .msg{color:var(--mute)}
-.chip.promise{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
+.chip.promise{border-color:var(--line)}
 .promise-hero{display:flex;gap:32px;align-items:flex-end;padding:2px 0 12px;border-bottom:1px solid var(--line)}
 .promise-card{display:flex;flex-direction:column;gap:2px;min-width:132px;background:transparent;border:0;padding:0}
 .promise-card .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
@@ -8090,7 +9285,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .promise-table th,.promise-table td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
 .promise-table .num{text-align:right;font-variant-numeric:tabular-nums}
 .usage-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
-.usage-card{background:#10141b;border:1px solid var(--line);border-radius:10px;padding:10px}
+.usage-card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px}
 .usage-card .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
 .usage-card .v{font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}
 .seats{display:flex;flex-direction:column;gap:8px}
@@ -8100,25 +9295,22 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 .lane.ready .lbl{color:var(--ready)}
 .lane.flight .lbl{color:var(--flight)}
 .lane.review .lbl{color:var(--review)}
-.seat{min-width:120px;max-width:160px;background:#10141b;border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.seat{min-width:120px;max-width:160px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
 .seat .top{display:flex;align-items:center;gap:8px}
 .seat .av{width:22px;height:22px;font-size:9px}
 .seat .nm{font-size:12px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .seat .cov{font-size:11px;color:var(--mute)}
-.seat.operator .av{background:var(--acc)}
-.seat.cover .av{background:var(--acc)}
-.seat.cover .nm::after{content:"";display:inline-block;width:6px;height:6px;margin-left:6px;border-radius:50%;background:var(--live);vertical-align:middle}
+.seat.operator .av,.seat.cover .av{background:var(--chip)}
 .seat.ghost{border-style:dashed}
 .seat.ghost .av{background:transparent;border:1px dashed var(--mute);color:var(--mute)}
 .seat.idle .av{background:var(--chip);color:var(--mute)}
 .seat[data-seat-chat]{cursor:pointer}
-.intervene{appearance:none;background:transparent;border:1px solid var(--intervene);color:var(--intervene);border-radius:6px;padding:2px 8px;font:11px/1.2 inherit;font-weight:650;cursor:pointer;align-self:flex-start}
-.intervene:hover{background:color-mix(in srgb,var(--intervene) 16%,transparent)}
-.intervene:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+.intervene{appearance:none;background:var(--acc);border:1px solid var(--acc);color:var(--on-acc);border-radius:6px;padding:3px 9px;font:11px/1.2 inherit;font-weight:700;cursor:pointer;align-self:flex-start}
+.intervene:hover{filter:brightness(.96)}
 .chat-layout{display:flex;gap:12px;align-items:stretch;min-height:0;flex:1}
 .chat-rail{min-width:168px;max-width:220px;display:flex;flex-direction:column;gap:4px}
 .chat-rail .seats-title{margin:0 0 4px}
-.chat-rail button.thread{appearance:none;display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:#10141b;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:12px/1.3 inherit;cursor:pointer}
+.chat-rail button.thread{appearance:none;display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:12px/1.3 inherit;cursor:pointer}
 .chat-rail button.thread.on{border-color:var(--acc);color:var(--fg)}
 .chat-rail button.thread .n{color:var(--mute);font-variant-numeric:tabular-nums}
 .chat-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
@@ -8127,8 +9319,12 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
 @media(max-width:700px){.seat{min-width:108px}.chat-layout{flex-direction:column}.chat-rail{max-width:none;flex-direction:row;flex-wrap:wrap}}
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
-  #clock{margin-left:0}
+  .conn{display:grid;grid-template-columns:auto auto auto;justify-content:start;margin-left:0}
+  #lastUpdated{display:none}
+  #clock{grid-column:1/-1;margin-left:0}
   .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
+  .next-step .cmd{white-space:normal;overflow-wrap:anywhere}
+  .promise-strip .msg{max-width:100%;overflow-wrap:anywhere}
   .ob-steps{flex-direction:column;align-items:flex-start}
   .kanban{grid-template-columns:1fr}
   .promise-hero{flex-wrap:wrap;gap:16px}
@@ -8136,50 +9332,74 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   nav.tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
   .agents{grid-template-columns:1fr}
   .sprint{min-width:0}
+  .epic{min-width:100%;flex-basis:100%}
+  .portfolio-menu{position:fixed;left:12px;right:12px;top:auto;width:auto}
 }
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
 </style></head><body data-tab="board">
 <header class="cmd">
   <div class="brand">
     <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="atman">
-      <circle cx="10" cy="7.8" r="3.35" fill="#e8e6e1"/>
-      <circle cx="22.4" cy="8.8" r="3.35" fill="#e8e6e1"/>
-      <circle cx="6.6" cy="17.6" r="3.35" fill="#e8e6e1"/>
-      <circle cx="25.4" cy="18.2" r="3.35" fill="#e8e6e1"/>
-      <circle cx="16" cy="24.6" r="3.35" fill="#e8e6e1"/>
+      <circle cx="10" cy="7.8" r="3.35" fill="currentColor"/>
+      <circle cx="22.4" cy="8.8" r="3.35" fill="currentColor"/>
+      <circle cx="6.6" cy="17.6" r="3.35" fill="currentColor"/>
+      <circle cx="25.4" cy="18.2" r="3.35" fill="currentColor"/>
+      <circle cx="16" cy="24.6" r="3.35" fill="currentColor"/>
     </svg>
     <div>
       <span class="wordmark">atman</span>
-      <h1 id="title">atman</h1>
+      <h1 id="title" class="sr-only">Atman</h1>
       <p class="board-name mute" id="boardName" hidden></p>
     </div>
   </div>
+  <details class="portfolio" id="portfolioSwitch">
+    <summary aria-label="Products, current product Atman"><span class="caret" aria-hidden="true">^</span><span>Products · Atman</span></summary>
+    <div class="portfolio-menu" aria-label="Product workspaces">
+      <div class="product-row current" aria-current="page"><b>Atman</b><small>Coordinate this team</small></div>
+      <div class="product-row"><b>Brahman</b><small>Model communication · not connected</small></div>
+      <div class="product-row"><b>ATI</b><small>Experiment lab · not connected</small></div>
+      <div class="product-row"><b>steer.md</b><small>Policy for output · separate product</small></div>
+    </div>
+  </details>
   <div class="chips" id="chips"></div>
   <div class="chips promise-chips" id="promiseChips">
     <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
     <span class="chip promise" id="hdrYield"><b>yield@cost</b> <span id="hdrYieldVal">—</span></span>
   </div>
   <div class="sprint" id="sprint"></div>
-  <div class="pulse" id="pulse"><i></i><span>clean</span></div>
-  <div id="clock"></div>
+  <div class="health" id="pulse"><i></i><span>No alerts</span></div>
+  <div class="conn" id="connBar">
+    <span id="connStatus" class="conn-status live" aria-live="polite">live</span>
+    <span id="lastUpdated" class="mute">—</span>
+    <button type="button" id="refreshBtn" title="Refresh board" aria-label="Refresh board">↻</button>
+    <button type="button" id="themeBtn" title="Switch to light mode" aria-label="Switch to light mode" aria-pressed="false"><span id="themeLabel">Light mode</span></button>
+    <span id="clock"></span>
+  </div>
 </header>
-<details class="mission" id="missionBox"><summary><span class="k">Mission</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
+<details class="attention" id="attentionBox" hidden><summary>Needs attention <span id="attnCount" class="mute">0</span></summary>
+  <div class="attn-list" id="attnList"></div></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
-<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span></div>
+<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span><span id="wakeGates" hidden></span></div>
 <details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/7</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
-<nav class="tabs">
-  <button type="button" data-tab-btn="board" class="on">Work</button>
-  <button type="button" data-tab-btn="agents">Team</button>
-  <button type="button" data-tab-btn="messages">Messages</button>
+<nav class="tabs" role="tablist" aria-label="Atman workspace">
+  <button type="button" id="tab-objective" role="tab" aria-controls="pane-objective" aria-selected="false" data-tab-btn="objective">Objective</button>
+  <button type="button" id="tab-agents" role="tab" aria-controls="pane-agents" aria-selected="false" data-tab-btn="agents">Team</button>
+  <button type="button" id="tab-board" role="tab" aria-controls="pane-board" aria-selected="true" data-tab-btn="board" class="on">Work</button>
+  <button type="button" id="tab-messages" role="tab" aria-controls="pane-messages" aria-selected="false" data-tab-btn="messages">Intervene</button>
 </nav>
 <main>
-<div class="pane" id="pane-board">
+<div class="pane" id="pane-objective" role="tabpanel" aria-labelledby="tab-objective" tabindex="0">
+  <details class="mission" id="missionBox" open><summary><span class="k">Standing objective</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
+</div>
+<div class="pane" id="pane-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0">
   <div id="emptyBoard" class="empty-board" hidden></div>
+  <section id="epicsPanel" class="epics" hidden aria-label="Epic progress"></section>
   <section id="objectivePromise" data-fold="objective">
     <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
     <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."><!-- V1 MUST: home median turns + yield@cost; T-344 worst-10 is NICE only -->
       <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Lower is better · unknown is not zero</div></article>
-      <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">done tickets per USD of harness-reported cost</div></article>
+      <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">Done tickets per USD of harness-reported cost</div></article>
     </div>
   </section>
   <div class="kanban">
@@ -8194,14 +9414,14 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
     <div class="turns-grid"><div><h3 class="subh">Worst tickets (watch runs)</h3><table class="promise-table" id="turnsWorst"></table></div><div><h3 class="subh">Per-agent median</h3><table class="promise-table" id="turnsAgents"></table></div></div>
   </details>
 </div>
-<div class="pane" id="pane-agents">
+<div class="pane" id="pane-agents" role="tabpanel" aria-labelledby="tab-agents" tabindex="0">
   <div class="seats-head">
     <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="atman">
-      <circle cx="10" cy="7.8" r="3.35" fill="#e8e6e1"/>
-      <circle cx="22.4" cy="8.8" r="3.35" fill="#e8e6e1"/>
-      <circle cx="6.6" cy="17.6" r="3.35" fill="#e8e6e1"/>
-      <circle cx="25.4" cy="18.2" r="3.35" fill="#e8e6e1"/>
-      <circle cx="16" cy="24.6" r="3.35" fill="#e8e6e1"/>
+      <circle cx="10" cy="7.8" r="3.35" fill="currentColor"/>
+      <circle cx="22.4" cy="8.8" r="3.35" fill="currentColor"/>
+      <circle cx="6.6" cy="17.6" r="3.35" fill="currentColor"/>
+      <circle cx="25.4" cy="18.2" r="3.35" fill="currentColor"/>
+      <circle cx="16" cy="24.6" r="3.35" fill="currentColor"/>
     </svg>
     <div>
       <h2 class="seats-title">Team</h2>
@@ -8224,7 +9444,7 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
   </section>
   <div class="agents" id="agents"></div>
 </div>
-<div class="pane" id="pane-messages">
+<div class="pane" id="pane-messages" role="tabpanel" aria-labelledby="tab-messages" tabindex="0">
   <div class="chat-layout">
     <nav class="chat-rail" id="chatRail" aria-label="Threads"></nav>
     <div class="chat-main">
@@ -8235,8 +9455,9 @@ body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-ta
           <label class="who"><small>from</small> <select id="cFrom"></select></label>
           <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
           <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+          <label class="who"><small>type</small> <select id="cKind"><option value="message">message</option><option value="task">task</option></select></label>
         </div>
-        <textarea id="cText" placeholder="Message the board or a seat. Type @ to tag an agent (e.g. @cursor) -- mentions reach that agent even if 'to' is someone else."></textarea>
+        <textarea id="cText" aria-label="Message" placeholder="Message the board or a seat. Type @ to tag an agent."></textarea>
         <div id="mentionBar"></div>
         <div id="composerRow" style="margin-top:8px"><button id="cSend">Post</button><small id="composerMsg"></small></div>
       </section>
@@ -8294,6 +9515,18 @@ function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(
 function fmtMedian(p){return(!p||p.median_turns==null)?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0)}
 function fmtYield(p){return(!p||p.yield_per_usd==null)?'—':(Number(p.yield_per_usd).toFixed(2)+' per $')}
 function setTxt(id,v){const el=document.getElementById(id);if(el)el.textContent=v}
+function renderObjective(o){
+  const line=document.getElementById('promiseStripLine');
+  const gates=document.getElementById('wakeGates');
+  if(gates)gates.textContent=(o&&o.wake_gates)||'';
+  if(!line)return;
+  if(!o||!o.text){line.textContent='Fewest turns. Max output at least cost.';return;}
+  const bits=[(o.state||'active'), o.text];
+  if(o.exit_criterion)bits.push('exit: '+o.exit_criterion);
+  else if(o.exit_missing)bits.push('FLAG: no exit criterion');
+  if(o.stop_condition)bits.push('stop: '+o.stop_condition);
+  line.textContent=bits.join(' · ');
+}
 function renderPromise(p){
   const med=fmtMedian(p),yld=fmtYield(p);
   setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);
@@ -8356,11 +9589,28 @@ function renderSeats(d){
   put('lane-idle',idle.join(''),'no idle seats');
 }
 function setTab(name){
+  const allowed=new Set(['objective','agents','board','messages']);
+  if(!allowed.has(name))name='board';
   document.body.dataset.tab=name;
   try{localStorage.setItem('tickets-ui-tab',name)}catch(e){}
-  document.querySelectorAll('[data-tab-btn]').forEach(b=>b.classList.toggle('on',b.dataset.tabBtn===name));
+  document.querySelectorAll('[data-tab-btn]').forEach(b=>{
+    const on=b.dataset.tabBtn===name;
+    b.classList.toggle('on',on);
+    b.setAttribute('aria-selected',on?'true':'false');
+    b.tabIndex=on?0:-1;
+  });
 }
 document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
+document.querySelector('nav.tabs').addEventListener('keydown',e=>{
+  if(e.key!=='ArrowLeft'&&e.key!=='ArrowRight')return;
+  const tabs=[...document.querySelectorAll('[data-tab-btn]')];
+  const at=tabs.indexOf(document.activeElement);
+  if(at<0)return;
+  e.preventDefault();
+  const step=e.key==='ArrowRight'?1:-1;
+  const next=tabs[(at+step+tabs.length)%tabs.length];
+  setTab(next.dataset.tabBtn);next.focus();
+});
 try{const saved=localStorage.getItem('tickets-ui-tab');if(saved)setTab(saved)}catch(e){}
 let AGENTS=[];
 let THREAD_SEAT='';
@@ -8475,6 +9725,7 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   const text=document.getElementById('cText').value.trim();
   const to=document.getElementById('cTo').value.trim();
   const re=document.getElementById('cRe').value.trim();
+  const kind=document.getElementById('cKind').value.trim()||'message';
   const btn=document.getElementById('cSend'),msg=document.getElementById('composerMsg');
   if(!from){msg.className='bad';msg.textContent='pick who you are posting as';return}
   if(!text){msg.className='bad';msg.textContent='message is empty';return}
@@ -8482,7 +9733,7 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   btn.disabled=true;msg.className='';msg.textContent='posting…';
   try{
     const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({from,text,to,re})});
+      body:JSON.stringify({from,text,to,re,kind})});
     const out=await r.json();
     if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
       document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';
@@ -8493,23 +9744,37 @@ document.getElementById('cSend').addEventListener('click',async()=>{
 });
 function tickClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString()}
 let snapshotFails=0;
+let _loadCtl=null;
 function unreachableNextStep(msg,cmd){
   return{kind:'unreachable',label:'Board unavailable',message:msg,cmd:cmd||''};
 }
-async function load(){
+async function load(manual){
+  if(_loadCtl){if(!manual)return;_loadCtl.abort()}
+  const refreshBtn=document.getElementById('refreshBtn');
+  if(manual&&refreshBtn){refreshBtn.disabled=true;refreshBtn.classList.add('spin')}
+  if(firstLoad)document.body.classList.add('loading');
+  if(snapshotFails)setConn('reconnecting');
+  const ctl=new AbortController();
+  _loadCtl=ctl;
   let d;
   try{
-    const r=await fetch('/board.json?'+Date.now());
+    const r=await fetch('/board.json?'+Date.now(),{signal:ctl.signal});
     if(!r.ok)throw new Error('HTTP '+r.status);
     d=await r.json();
   }catch(e){
+    if(e&&e.name==='AbortError')return;
     snapshotFails++;
+    setConn('offline');
     renderNextStep(unreachableNextStep(
       snapshotFails>2?'Cannot reach the board server — is `tickets ui` still running? ('+e+')'
         :'Board unreachable — retrying… ('+e+')',
       'tickets ui'));
+    document.body.classList.remove('loading');
+    if(refreshBtn){refreshBtn.disabled=false;refreshBtn.classList.remove('spin')}
+    if(_loadCtl===ctl)_loadCtl=null;
     return;
   }
+  if(_loadCtl===ctl)_loadCtl=null;
   if(d.error){
     snapshotFails++;
     renderNextStep(d.next_step||unreachableNextStep(
@@ -8517,7 +9782,11 @@ async function load(){
       'tickets ui --json'));
     d.counts=d.counts||{total:0,done:0};
   }else snapshotFails=0;
-  document.getElementById('title').textContent='atman';
+  setConn('live',d.generated);
+  firstLoad=false;
+  document.body.classList.remove('loading');
+  if(refreshBtn){refreshBtn.disabled=false;refreshBtn.classList.remove('spin')}
+  document.getElementById('title').textContent='Atman';
   const boardName=document.getElementById('boardName');
   if(boardName){
     const proj=String(d.project||'').trim();
@@ -8537,8 +9806,8 @@ async function load(){
   const crit=(d.health||[]).filter(x=>x.sev==='CRIT').length;
   const warn=(d.health||[]).filter(x=>x.sev==='WARN').length;
   const pulse=document.getElementById('pulse');
-  pulse.className='pulse'+(crit?' bad':warn?' warn':'');
-  pulse.innerHTML='<i></i><span>'+(crit?'CRIT '+crit:warn?'WARN '+warn:'clean')+'</span>';
+  pulse.className='health'+(crit?' bad':warn?' warn':'');
+  pulse.innerHTML='<i></i><span>'+(crit?'Critical · '+crit:warn?'Warning · '+warn:'No alerts')+'</span>';
   tickClock();
   const goals=d.goals||'(no MASTER.md yet -- tickets master init)';
   document.getElementById('goals').textContent=goals;
@@ -8550,9 +9819,12 @@ async function load(){
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
   fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
   renderEmptyBoard(d);
+  renderAttention(d.attention);
+  renderEpics(d.epics);
   if(!d.error)renderNextStep(d.next_step);
   renderOnboarding(d.onboarding);
   renderPromise(d.promise);
+  renderObjective(d.objective);
   renderTurns(d.turns);
   renderUsage(d.usage);
   renderSeats(d);
@@ -8562,8 +9834,12 @@ async function load(){
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span></div>'+
-      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+'</div>'+
+    const auth=a.auth==='login_required'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Login required · '+esc(a.auth_login_cmd||'agent login')+'</span>':'';
+    const quota=a.auth==='quota'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Usage quota</span>':'';
+    const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
+    const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span>'+auth+quota+lim+'</div>'+
+      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
@@ -8571,7 +9847,7 @@ async function load(){
       '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
   }).join('')||'<div class="empty">no agents checked in</div>';
   const thread=visibleMessages(d.messages||[]).slice().reverse();
-  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
+  document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+deliveryTags(m)+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
     ||'<div class="empty">'+(THREAD_SEAT?'No messages with this seat yet.':'no messages yet')+'</div>';
 }
 function renderOnboarding(ob){
@@ -8615,6 +9891,66 @@ function renderEmptyBoard(d){
     '<p class="empty-honesty">Median turns and yield@cost stay — until a done ticket reports.</p>'+
     '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock.</p>';
 }
+function renderAttention(items){
+  const box=document.getElementById('attentionBox'),list=document.getElementById('attnList'),cnt=document.getElementById('attnCount');
+  const rows=items||[];
+  if(!box)return;
+  box.hidden=!rows.length;
+  if(cnt)cnt.textContent=String(rows.length);
+  if(list)list.innerHTML=rows.map(a=>'<div class="attn-item '+esc(a.sev||'')+'">'+esc(a.msg||'')+'</div>').join('');
+}
+function renderEpics(epics){
+  const el=document.getElementById('epicsPanel');
+  if(!el)return;
+  const rows=epics||[];
+  el.hidden=!rows.length;
+  el.innerHTML=rows.map(e=>{
+    const pct=Math.round(100*(e.done||0)/Math.max(1,e.total||1));
+    return '<article class="epic"><div class="row"><span><span class="id">'+esc(e.id)+'</span> '+esc(e.title||'')+'</span><span>'+e.done+'/'+e.total+'</span></div>'+
+      '<div class="bar"><i style="width:'+pct+'%"></i></div>'+
+      '<div class="row"><span class="mute">flight '+esc(e.in_flight||0)+' · review '+esc(e.review||0)+' · blocked '+esc(e.blocked||0)+'</span></div></article>';
+  }).join('');
+}
+function deliveryTags(m){
+  const tags=[];
+  if((m.kind||'message')==='task')tags.push('<span class="tag task">task</span>');
+  const d=m.delivery||{};
+  if(d.status==='broadcast')tags.push('<span class="tag">broadcast</span>');
+  else if((d.acks||[]).length){
+    const all=d.acks.every(a=>a.acked);
+    const any=d.acks.some(a=>a.acked);
+    if(all)tags.push('<span class="tag ack">acked</span>');
+    else if(any)tags.push('<span class="tag pending">partial ack</span>');
+    else tags.push('<span class="tag pending">pending</span>');
+  }
+  return tags.join(' ');
+}
+function setConn(phase,updated){
+  const st=document.getElementById('connStatus'),lu=document.getElementById('lastUpdated');
+  if(st){st.className='conn-status '+phase;st.textContent=phase==='live'?'connected':phase}
+  if(lu)lu.textContent=updated?('updated '+fmtRel(updated)+' · '+fmtLocal(updated)):'—';
+}
+let firstLoad=true;
+function updateThemeControl(){
+  const light=document.body.dataset.theme==='light';
+  const btn=document.getElementById('themeBtn'),label=document.getElementById('themeLabel');
+  const action=light?'Dark mode':'Light mode';
+  if(label)label.textContent=action;
+  if(btn){btn.setAttribute('aria-label','Switch to '+action.toLowerCase());btn.title='Switch to '+action.toLowerCase();btn.setAttribute('aria-pressed',light?'true':'false')}
+}
+try{
+  const savedTheme=localStorage.getItem('tickets-ui-theme');
+  if(savedTheme)document.body.dataset.theme=savedTheme;
+  else if(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)document.body.dataset.theme='light';
+}catch(e){}
+updateThemeControl();
+document.getElementById('themeBtn').addEventListener('click',()=>{
+  const next=document.body.dataset.theme==='light'?'':'light';
+  document.body.dataset.theme=next;
+  try{localStorage.setItem('tickets-ui-theme',next)}catch(e){}
+  updateThemeControl();
+});
+document.getElementById('refreshBtn').addEventListener('click',()=>load(true));
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
 
@@ -8832,8 +10168,147 @@ def _empty_promise_hero():
     }
 
 
+def _epics_snapshot(board, tickets):
+    """Per-epic progress for the live dashboard."""
+    out = []
+    for e in load_epics(board):
+        mine = [t for t in tickets if t.get("epic") == e["id"]]
+        if not mine:
+            continue
+        d, n, c, b = progress(mine)
+        out.append({
+            "id": e["id"], "title": e.get("title", ""),
+            "done": d, "total": n, "in_flight": c, "blocked": b,
+            "review": sum(1 for t in mine if t["status"] == "review"),
+        })
+    return out
+
+
+def _message_recipients(msg):
+    to = (msg.get("to") or "").strip()
+    mentions = msg.get("mentions") or []
+    if to:
+        return [to]
+    if mentions:
+        return list(mentions)
+    return []
+
+
+def _agent_acked_message(board, agent, msg, rec=None):
+    rec = rec if rec is not None else _agent_rec(board, agent)
+    if not rec:
+        return False
+    since = _seen_since(rec)
+    remaining = _seen_counts(rec.get("inbox_seen_ids") or [])
+    return not _is_unread(msg, since, remaining)
+
+
+def _message_delivery(board, msg, agents_by=None):
+    """Delivery/ack status for the UI composer thread."""
+    recipients = _message_recipients(msg)
+    if not recipients:
+        return {"status": "broadcast"}
+    acks = []
+    for r in recipients:
+        rec = (agents_by or {}).get(r)
+        acks.append({"agent": r, "acked": _agent_acked_message(board, r, msg, rec=rec)})
+    return {"status": "direct", "acks": acks}
+
+
+def _attention_snapshot(health_items, coverage):
+    """Blockers and items requiring operator attention."""
+    out = [{"sev": h["sev"], "msg": h["msg"]} for h in (health_items or [])]
+    for u in (coverage or {}).get("uncovered_ready", []):
+        title = (u.get("title") or "")[:72]
+        out.append({"sev": "WARN", "msg": "%s ready and unowned%s" % (
+            u.get("id", "?"), (" — " + title) if title else "")})
+    return out[:16]
+
+
+_ANALYTICS_TTL_S = 3.0
+_ANALYTICS_LOCK = threading.Lock()
+_ANALYTICS_CACHE = {}
+_SNAP_GATE = threading.Lock()
+_SNAP_SLOTS = {}
+
+
+def _file_mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _analytics_stamp(board):
+    return (_file_mtime(os.path.join(board, "trajectories.jsonl")),
+            _file_mtime(messages_path(board)))
+
+
+def _cached_turns_usage_promise(board, tickets):
+    """Reuse turns/usage/promise across a few warm UI refreshes.
+
+    Tickets, messages, and master stay uncached so leadership and mail stay live.
+    Trajectory analytics are bounded: recompute when the log mtime changes or
+    the short TTL expires.
+    """
+    import time as _time
+
+    stamp = _analytics_stamp(board)
+    key = os.path.realpath(board)
+    now_m = _time.monotonic()
+    with _ANALYTICS_LOCK:
+        hit = _ANALYTICS_CACHE.get(key)
+        if hit and hit["stamp"] == stamp and now_m - hit["at"] < _ANALYTICS_TTL_S:
+            return hit["turns"], hit["usage"], hit["promise"]
+    turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
+    events = _safe(lambda: _turns_mod()[1](board), [])
+    usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
+    promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
+    with _ANALYTICS_LOCK:
+        _ANALYTICS_CACHE[key] = {
+            "stamp": stamp, "at": now_m, "turns": turns, "usage": usage, "promise": promise,
+        }
+    return turns, usage, promise
+
+
+def _snapshot_single_flight(board, messages=40):
+    """One in-flight board_snapshot per board so overlapping HTTP refreshes share work."""
+    key = (os.path.realpath(board), int(messages))
+    with _SNAP_GATE:
+        slot = _SNAP_SLOTS.get(key)
+        if slot is None:
+            slot = {"event": threading.Event(), "snap": None, "exc": None}
+            _SNAP_SLOTS[key] = slot
+            owner = True
+        else:
+            owner = False
+    if owner:
+        try:
+            slot["snap"] = board_snapshot(board, messages=messages)
+        except Exception as exc:
+            slot["exc"] = exc
+            raise
+        finally:
+            slot["event"].set()
+            with _SNAP_GATE:
+                if _SNAP_SLOTS.get(key) is slot:
+                    _SNAP_SLOTS.pop(key, None)
+        return slot["snap"]
+    slot["event"].wait(timeout=60)
+    if slot["exc"] is not None:
+        raise slot["exc"]
+    if slot["snap"] is None:
+        return board_snapshot(board, messages=messages)
+    return slot["snap"]
+
+
 def board_snapshot(board, messages=40):
     """Everything the UI shows, as plain data. Read-only."""
+    with _shared_watch_table():
+        return _board_snapshot_body(board, messages)
+
+
+def _board_snapshot_body(board, messages=40):
     tickets = load_all(board)
     cur = active_sprint(board)
     m = current_master(board) or {}
@@ -8845,18 +10320,32 @@ def board_snapshot(board, messages=40):
         d, n, c, b = progress(mine)
         sprint = {"id": cur["id"], "goal": cur.get("goal", ""), "done": d, "total": n, "in_flight": c, "blocked": b,
                   "review": len([t for t in mine if t["status"] == "review"])}
-    rows, burn = utilization(board, tickets, hours=24)
-    agents = {r["owner"]: r for r in load_agents(board)}
+    agent_list = load_agents(board)
+    agents = {r["owner"]: r for r in agent_list}
+    live = {}
+    for rec in agent_list:
+        n = rec.get("owner") or ""
+        if not n or n.startswith("agent-"):
+            continue
+        live[n] = _safe(lambda rec=rec: agent_liveness(board, rec, agent_list), {}) or {}
+    rows, burn = utilization(board, tickets, hours=24, live=live)
     wf = load_workforce(board)
     roles = load_roles(board)
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
+        lim = rec.get("limit")
+        wc = _watcher_count(r["agent"], board)
         out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
-                           "watcher": _watcher_count(r["agent"], board) > 0,
-                           "watcher_count": _watcher_count(r["agent"], board),
-                           "roles": roles.get(r["agent"]) or []})
+                           "watcher": wc > 0,
+                           "watcher_count": wc,
+                           "roles": roles.get(r["agent"]) or [],
+                           "auth": (rec.get("auth_check") or {}).get("state", ""),
+                           "auth_detail": (rec.get("auth_check") or {}).get("detail", ""),
+                           "auth_login_cmd": (rec.get("auth_check") or {}).get("login_cmd", ""),
+                           "limit": lim,
+                           "limit_until": (lim or {}).get("until", "") if lim else ""})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
     try:
@@ -8873,7 +10362,10 @@ def board_snapshot(board, messages=40):
         pass
     obj = _safe(lambda: load_objective(board), {})
     if obj:
-        goals = "OBJECTIVE%s\n%s\n\n%s" % (" (met)" if obj.get("done") else "", obj.get("text", ""), goals)
+        st = objective_state(obj)
+        flag = " FLAG:no-exit" if objective_exit_missing(obj) else ""
+        goals = "OBJECTIVE (%s%s)\n%s\nexit: %s\n\n%s" % (
+            st, flag, obj.get("text", ""), obj.get("exit_criterion") or "(none)", goals)
     util_rows = [r for r in rows if r["state"] != "DOWN"]
     in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
                   "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
@@ -8886,13 +10378,14 @@ def board_snapshot(board, messages=40):
                   "title": t["title"], "role": t.get("role", ""), "owner": t.get("owner", ""),
                   "waiting": [d for d in t.get("deps", []) if d not in done]}
                  for t in tickets if t["status"] in ("open", "blocked")]
-    turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
-    events = _safe(lambda: _turns_mod()[1](board), [])
-    usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
-    promise = _safe(lambda: _promise_hero(turns, tickets, events), _empty_promise_hero())
-    raw_msgs = [{"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
-                 "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or []}
-                for x in load_messages(board)[-messages:]]
+    turns, usage, promise = _cached_turns_usage_promise(board, tickets)
+    raw_msgs = []
+    for x in load_messages(board)[-messages:]:
+        row = {"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
+               "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
+               "kind": x.get("kind") or "message",
+               "delivery": _message_delivery(board, x, agents_by=agents)}
+        raw_msgs.append(row)
     seat_names = []
     seen_seats = set()
     def _add_seat(name):
@@ -8905,6 +10398,9 @@ def board_snapshot(board, messages=40):
         _add_seat(a.get("name"))
     _add_seat(m.get("owner", ""))
     _add_seat(m.get("cos", ""))
+    health_items = [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12]
+    coverage = _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
+                                open_rows, in_flight, review, out_agents)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -8914,7 +10410,9 @@ def board_snapshot(board, messages=40):
         "review": review,
         "open": open_rows,
         "agents": out_agents,
-        "health": [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12],
+        "epics": _epics_snapshot(board, tickets),
+        "attention": _attention_snapshot(health_items, coverage),
+        "health": health_items,
         # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
         # so the UI can render it in whatever timezone the viewer's browser is
         # actually in -- truncating/reformatting it here would bake in UTC.
@@ -8927,9 +10425,45 @@ def board_snapshot(board, messages=40):
         "turns": turns,
         "usage": usage,
         "promise": promise,
-        "coverage": _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
-                                       open_rows, in_flight, review, out_agents),
+        "objective": {
+            "text": (obj or {}).get("text", ""),
+            "state": objective_state(obj) if obj else "",
+            "exit_criterion": (obj or {}).get("exit_criterion") or "",
+            "exit_missing": bool(obj) and objective_exit_missing(obj),
+            "wake_gates": "task messages, stuck/blocked, held tickets, ready assigned work; ACKs and ordinary DMs notify-only",
+            "stop_condition": STOP_CONDITION,
+        },
+        "coverage": coverage,
     }
+
+
+_UI_MSG_MAX_BYTES = 65536
+_UI_MSG_KINDS = frozenset(("message", "task"))
+
+
+def _ui_msg_is_json(headers):
+    raw = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    return raw == "application/json"
+
+
+def _ui_msg_origin_ok(headers):
+    """Browser writes send Origin; it must match Host (same-origin).
+
+    Local API clients (curl, urllib, tickets tests) omit Origin — that is
+    allowed once Content-Type is JSON and `from` is a registered agent.
+    A present Origin that is missing, `null`, or a different host is rejected.
+    """
+    origin = (headers.get("Origin") or "").strip()
+    if not origin:
+        return True
+    host = (headers.get("Host") or "").strip()
+    if not host or origin.lower() == "null":
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse(origin)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    return parsed.netloc.lower() == host.lower()
 
 
 def cmd_ui(a, board):
@@ -8937,7 +10471,7 @@ def cmd_ui(a, board):
     composer POST at /msg that posts through post_message() -- same board,
     same messages.jsonl, no second store. /board.json?seat=<name> filters
     messages to that agent-scoped thread (Advitiya PRIORITY agent chats)."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     if a.json:
         print(json.dumps(board_snapshot(board), indent=2))
@@ -8972,15 +10506,30 @@ def cmd_ui(a, board):
                 self.end_headers()
                 return
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = -1
+                if length < 0 or length > _UI_MSG_MAX_BYTES:
+                    raise ValueError("body exceeds %d bytes" % _UI_MSG_MAX_BYTES)
+                raw = self.rfile.read(length) if length else b"{}"
+                if not _ui_msg_is_json(self.headers):
+                    raise ValueError("Content-Type must be application/json")
+                if not _ui_msg_origin_ok(self.headers):
+                    raise ValueError("origin mismatch")
+                payload = json.loads(raw or b"{}")
                 sender = str(payload.get("from") or "").strip()
                 text = str(payload.get("text") or "").strip()
                 to = str(payload.get("to") or "").strip()
                 re_ = str(payload.get("re") or "").strip()
+                kind = str(payload.get("kind") or "message").strip() or "message"
                 if not sender or not text:
                     raise ValueError("from and text are required")
-                rec = post_message(board, sender, text, to, re_)
+                if kind not in _UI_MSG_KINDS:
+                    raise ValueError("kind must be message or task")
+                if not _agent_rec(board, sender):
+                    raise ValueError("from must be a registered agent")
+                rec = post_message(board, sender, text, to, re_, kind=kind)
                 status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
             except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
                 status, out = 400, {"ok": False, "error": str(e)}
@@ -8994,7 +10543,8 @@ def cmd_ui(a, board):
         def log_message(self, *args):
             pass
 
-    srv = HTTPServer((a.host, a.port), H)
+    srv = ThreadingHTTPServer((a.host, a.port), H)
+    srv.daemon_threads = True
     print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via tickets msg)" % (a.host, a.port))
     if a.open:
         import subprocess
@@ -9223,11 +10773,12 @@ CURSOR_HOOK = r'''#!/usr/bin/env python3
 Reads the hook event JSON on stdin, writes {additional_context, user_message}
 on stdout. Keeps its own watermark so `tickets inbox` read-state is untouched.
 Identity comes from $TICKET_AGENT (defaults to the name given at install)."""
-import json, os, sys
+import json, os, subprocess, sys
 from pathlib import Path
 
 AGENT = os.environ.get("TICKET_AGENT", "%(agent)s")
 BOARD = Path(os.environ.get("TICKETS_DIR", %(board)r))
+TICKETS = %(script)r
 STATE = Path(__file__).resolve().parent / "state" / ("board-%%s.json" %% AGENT)
 
 def main():
@@ -9236,15 +10787,13 @@ def main():
     except ValueError:
         event = {}
     path = BOARD / "messages.jsonl"
-    if not path.is_file():
-        print("{}"); return 0
     STATE.parent.mkdir(parents=True, exist_ok=True)
     last = ""
     if STATE.exists():
         try: last = json.loads(STATE.read_text()).get("last_at", "")
         except ValueError: pass
     new = []
-    for ln in path.read_text().splitlines():
+    for ln in path.read_text().splitlines() if path.is_file() else []:
         try: m = json.loads(ln)
         except ValueError: continue
         if (m.get("at") or "") <= last: continue
@@ -9253,14 +10802,26 @@ def main():
         if m.get("from") == AGENT and to in ("", "all", "everyone"): continue
         new.append(m)
     out = {}
+    lines = []
     if new:
         lines = ["Ticket board: %%d new message(s) for %%s. Reply with `tickets msg`." %% (len(new), AGENT)]
         for m in new[-12:]:
             lines.append("- %%s %%s -> %%s%%s: %%s" %% (m.get("at","?")[5:16], m.get("from","?"), m.get("to") or "everyone",
                          (" [%%s]" %% m["re"]) if m.get("re") else "", (m.get("text") or "")[:220]))
-        out["additional_context"] = "\n".join(lines)[:3500]
         out["user_message"] = "%%d new ticket-board message(s) for %%s" %% (len(new), AGENT)
         STATE.write_text(json.dumps({"last_at": new[-1].get("at", last)}))
+    if event.get("hook_event_name") in ("SessionStart", "UserPromptSubmit"):
+        env = dict(os.environ, TICKETS_DIR=str(BOARD), TICKET_AGENT=AGENT)
+        try:
+            result = subprocess.run(
+                [sys.executable, TICKETS, "knowledge", "query", "--agent", AGENT,
+                 "--max-chars", "1600"], capture_output=True, text=True, timeout=4, env=env)
+            if result.returncode == 0 and result.stdout.strip() != "no relevant knowledge found":
+                lines.append(result.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if lines:
+        out["additional_context"] = "\n".join(lines)[:3500]
     print(json.dumps(out)); return 0
 
 if __name__ == "__main__":
@@ -9269,8 +10830,7 @@ if __name__ == "__main__":
 
 
 def cmd_hooks(a, board):
-    """Install board hooks for a tool: claude (global settings.json) or cursor
-    (project .cursor/hooks). Codex has no hooks; AGENTS.md carries the protocol."""
+    """Install board and bounded-knowledge hooks for Claude, Codex, or Cursor."""
     root = os.path.dirname(board)
     script = os.path.realpath(__file__)
     def ours(entry):
@@ -9351,7 +10911,8 @@ def cmd_hooks(a, board):
             print("%s exists; --force to overwrite" % sp)
         else:
             with open(sp, "w") as f:
-                f.write(CURSOR_HOOK % {"agent": a.agent or "cursor", "board": board})
+                f.write(CURSOR_HOOK % {"agent": a.agent or "cursor", "board": board,
+                                       "script": script})
             os.chmod(sp, 0o755)
         hp = os.path.join(root, ".cursor", "hooks.json")
         try:
@@ -9602,14 +11163,10 @@ def _release_commit():
 def release_status():
     """Report installed provenance without discovering or touching a board.
 
-    Checks size before hashing content: an untampered file's size matches
-    the manifest's recorded size for it, and that comparison is a single
-    stat() call instead of reading and sha256-ing the whole file. Content
-    is only ever hashed when a file's size does not match -- which is also
-    exactly when we already know it drifted, so this is never a speculative
-    cost, only a confirming one. A manifest written before this field
-    existed (bare hash string instead of {"sha256", "size"}) falls back to
-    always hashing, matching the old behavior exactly.
+    Every manifest entry is hashed.  Size alone cannot establish integrity:
+    different bytes of the same length must never be reported as verified.
+    Package trees are also closed over the manifest so an extra importable
+    file cannot enter an otherwise pinned release.
     """
     import hashlib
     root = os.path.dirname(os.path.realpath(__file__))
@@ -9619,17 +11176,50 @@ def release_status():
     try:
         with open(manifest) as source:
             release = json.load(source)
-        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
+        files = release["files"]
+        package_roots = sorted({"/".join(name.split("/")[:2])
+                                for name in files if name.startswith("src/")
+                                and len(name.split("/")) > 2})
+        for package_root in package_roots:
+            package_path = os.path.join(root, *package_root.split("/"))
+            expected_dirs = {os.path.dirname(name) for name in files
+                             if name.startswith(package_root + "/")}
+            expected_dirs.add(package_root)
+            for directory in tuple(expected_dirs):
+                parent = os.path.dirname(directory)
+                while parent.startswith(package_root):
+                    expected_dirs.add(parent)
+                    if parent == package_root:
+                        break
+                    parent = os.path.dirname(parent)
+            if os.path.islink(package_path):
+                return "tickets DRIFTED release %s (%s)" % (
+                    release["commit"], package_root)
+            for dirpath, dirnames, filenames in os.walk(package_path):
+                for dirname in dirnames:
+                    actual_name = os.path.relpath(
+                        os.path.join(dirpath, dirname), root).replace(os.sep, "/")
+                    if actual_name not in expected_dirs or os.path.islink(
+                            os.path.join(dirpath, dirname)):
+                        return "tickets DRIFTED release %s (%s)" % (
+                            release["commit"], actual_name)
+                for filename in filenames:
+                    actual_name = os.path.relpath(
+                        os.path.join(dirpath, filename), root).replace(os.sep, "/")
+                    if actual_name not in files:
+                        return "tickets DRIFTED release %s (%s)" % (
+                            release["commit"], actual_name)
+        for name in sorted(files):
             path = os.path.join(root, name)
-            recorded = release["files"][name]
+            recorded = files[name]
             expected_sha, expected_size = (
                 (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
                 else (recorded, None))
-            if expected_size is not None and os.stat(path).st_size == expected_size:
-                continue
             with open(path, "rb") as source:
-                actual = hashlib.sha256(source.read()).hexdigest()
-            if actual != expected_sha:
+                data = source.read()
+            actual = hashlib.sha256(data).hexdigest()
+            if ((expected_size is not None and len(data) != expected_size)
+                    or actual != expected_sha):
                 return "tickets DRIFTED release %s (%s)" % (release["commit"], name)
         return "tickets commit %s (verified release)" % release["commit"]
     except (OSError, ValueError, KeyError, TypeError):
@@ -9726,6 +11316,8 @@ def main():
                    help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
+    c.add_argument("--knowledge-dir", default="",
+                   help="canonical repo-backed knowledge/ directory inherited by this seat")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
@@ -9742,9 +11334,15 @@ def main():
     x.add_argument("--model", default="")
     x.add_argument("--cwd", default="", help="run the probe here (default: the agent's worktree)")
     x.add_argument("--timeout", type=int, default=HARNESS_CHECK_TIMEOUT, help="seconds (default 60)")
+    x = hs.add_parser("auth", help="check login without a model run; optionally log in and recover a stale watch lock")
+    x.add_argument("name", nargs="?", default="")
+    x.add_argument("--harness", default="", help="override the registered harness for this check")
+    x.add_argument("--login", action="store_true", help="run the harness's interactive login, then verify identity")
+    x.add_argument("--recover-stale", action="store_true", help="atomically reclaim a dead watcher pid lock")
+    x.add_argument("--timeout", type=int, default=15)
     hs.add_parser("list", help="every registered agent, its harness and its last check")
     c.set_defaults(fn=cmd_harness, harness_cmd="list", name="", harness="", cmd_template="", model="", cwd="",
-                   timeout=HARNESS_CHECK_TIMEOUT)
+                   timeout=HARNESS_CHECK_TIMEOUT, login=False, recover_stale=False)
 
     c = sub.add_parser("route", help="master: suggest an owner for every open ticket by model/roles/capabilities/cost")
     c.add_argument("--claim", action="store_true", help="hard-assign the ready ones (claims on their behalf)")
@@ -9777,6 +11375,7 @@ def main():
     c = sub.add_parser("pending", help="exit 0 if there is work for the agent (messages, held or ready ticket)")
     c.add_argument("--agent", default="")
     c.add_argument("--json", action="store_true")
+    c.add_argument("--force", action="store_true", help="treat as actionable even without a wake gate (manual override)")
     c.set_defaults(fn=cmd_pending)
 
     c = sub.add_parser("prompt", help="print the standard worker (or --master) prompt for a headless run")
@@ -9791,12 +11390,19 @@ def main():
 
     c = sub.add_parser("objective", help="set/show/close the standing objective the master drives toward")
     c.add_argument("text", nargs="?", default="")
-    c.add_argument("--done", default=None, metavar="EVIDENCE", help="mark the objective met, with evidence")
+    c.add_argument("--exit", dest="exit_criterion", default=None, metavar="CRITERION",
+                   help="measurable exit criterion (observable end state)")
+    c.add_argument("--done", "--achieved", dest="done", default=None, metavar="EVIDENCE",
+                   help="mark the objective achieved, with evidence")
+    c.add_argument("--blocked", default=None, metavar="REASON", help="mark the objective blocked")
+    c.add_argument("--replaced", default=None, metavar="REASON", help="mark the objective replaced")
     c.add_argument("--by", default="")
     c.set_defaults(fn=cmd_objective)
 
     c = sub.add_parser("drive", help="set the objective and spawn the master seat with a heartbeat")
     c.add_argument("text", nargs="?", default="")
+    c.add_argument("--exit", dest="exit_criterion", default=None, metavar="CRITERION",
+                   help="measurable exit criterion (observable end state)")
     c.add_argument("--by", "--as", dest="by", default="", help="agent name for the master seat (default TICKET_AGENT)")
     c.add_argument("--heartbeat", type=int, default=30, help="minutes between objective wake-ups")
     c.add_argument("--every", type=int, default=60, help="seconds between board polls")
@@ -9819,7 +11425,10 @@ def main():
     c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
     c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
     c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
-    c.add_argument("--max-runs", type=int, default=0)
+    c.add_argument("--max-runs", type=int, default=1,
+                   help="model runs this session then stop (default 1; 0 = loop until --stop)")
+    c.add_argument("--persist", action="store_true", help="loop until spawn --stop / SIGTERM (sets --max-runs 0)")
+    c.add_argument("--force", action="store_true", help="run once even if wake gates are empty")
     c.add_argument("--run-timeout", type=int, default=90, help="minutes per run before it is killed (0 = none)")
     c.add_argument("--beat-every", type=int, default=0,
                    help="seconds between in-run heartbeats (0 = TICKETS_RUN_HEARTBEAT_SECS, default 30)")
@@ -9872,11 +11481,17 @@ def main():
     c.add_argument("--run-timeout", type=int, default=90)
     c.add_argument("--heartbeat", type=int, default=0,
                    help="with --master: also wake every N minutes to drive the objective (0 = off)")
+    c.add_argument("--persist", action="store_true",
+                   help="keep the watcher looping (default is one model run then stop; implied by --cos)")
+    c.add_argument("--max-runs", type=int, default=None,
+                   help="passed to watch; workers default 1; --cos defaults 0 (persist); "
+                        "pass 1 for a CoS one-shot")
     c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
     c.add_argument("--master", action="store_true",
                    help="spawn the board master/planner (scope, routing by complexity, escalations)")
     c.add_argument("--cos", action="store_true",
-                   help="spawn the chief of staff (review, unblock, merge) under the current master")
+                   help="spawn the chief of staff (review, unblock, merge) under the current master; "
+                        "persistent watcher by default (override with --max-runs 1)")
     c.add_argument("--exec", default="", help="override the worker command entirely")
     c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
     c.add_argument("--list", action="store_true")
@@ -9906,6 +11521,8 @@ def main():
     c.add_argument("--role", default="",
                    help="update role standing context at .tickets/briefs/roles/<role>.md (T-529 inject source)")
     c.add_argument("--ticket", default="", help="attach to a ticket instead (owner is messaged)")
+    c.add_argument("--knowledge", dest="knowledge_id", default="",
+                   help="attach only a knowledge:<id> reference to --ticket")
     c.add_argument("--file", default="", help="replace the agent or role brief from a file")
     c.add_argument("--show", action="store_true")
     c.add_argument("--by", default="")
@@ -9946,6 +11563,8 @@ def main():
     c.add_argument("text")
     c.add_argument("--to", default="", help="seat / agent name, or omit for everyone")
     c.add_argument("--re", default="", help="ticket id this is about")
+    c.add_argument("--task", action="store_true",
+                   help="explicit task message: wakes the addressee (ordinary DMs and ACKs do not)")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_msg)
 
@@ -10177,15 +11796,34 @@ def main():
     c.set_defaults(fn=cmd_context)
 
     c = sub.add_parser("knowledge", aliases=["kb"],
-                       help="index tracked team docs (list | show); inject is E-013 briefs, not this verb")
+                       help="query or author the separate repo-backed knowledge graph")
     c.add_argument("--tag", default="", help="filter list by tag")
+    c.add_argument("--type", dest="node_type", default="", help="filter list by node type")
+    c.add_argument("--stale", action="store_true", help="list only stale facts")
     c.add_argument("--json", action="store_true")
     ks = c.add_subparsers(dest="knowledge_cmd")
-    x = ks.add_parser("list", help="index the docs/knowledge tree")
+    x = ks.add_parser("list", help="list current graph facts")
     x.add_argument("--tag", default="", help="filter list by tag")
+    x.add_argument("--type", dest="node_type", default="", help="filter by node type")
+    x.add_argument("--stale", action="store_true", help="list only stale facts")
     x.add_argument("--json", action="store_true")
-    x = ks.add_parser("show", help="print one doc")
+    x = ks.add_parser("show", help="print one node or edge with provenance")
     x.add_argument("slug")
+    x = ks.add_parser("query", help="return a compact task-relevant subgraph")
+    x.add_argument("query", nargs="?", default="")
+    x.add_argument("--agent", default="", help="include this seat's role/harness/capabilities")
+    x.add_argument("--ticket", default="", help="include one ticket as query input; ticket is not the store")
+    x.add_argument("--role", action="append", default=[])
+    x.add_argument("--cap", action="append", default=[])
+    x.add_argument("--harness", default="")
+    x.add_argument("--max-chars", type=int, default=None)
+    x.add_argument("--max-nodes", type=int, default=12)
+    x.add_argument("--json", action="store_true")
+    x = ks.add_parser("add", help="add one validated node/edge JSON file")
+    x.add_argument("file")
+    x = ks.add_parser("update", help="replace one record and increment node revision")
+    x.add_argument("file")
+    ks.add_parser("validate", help="validate schema and graph references")
     c.set_defaults(fn=cmd_knowledge, slug="")
 
     c = sub.add_parser("mine", help="list tickets claimed by this agent")

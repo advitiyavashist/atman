@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "gliner-requires-model", "type": "requires",
+  "from": "component.steer-gliner", "to": "model.gliner-pii-base-v1",
+  "source": {"kind": "ticket", "ref": "T-613"}, "recorded_at": "2026-09-09T03:04:00Z",
+  "owner": "detection", "last_verified_at": "2026-09-09T03:04:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": 30
+}

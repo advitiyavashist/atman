@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "failure.gliner-cpu-ort-shadow",
+  "type": "failure",
+  "title": "CPU ONNX Runtime shadowed the GPU distribution",
+  "summary": "GLiNER dependencies installed CPU onnxruntime 1.29 beside onnxruntime-gpu 1.26; Python resolved the shared module to CPU providers even though the GPU provider libraries existed.",
+  "tags": ["steer", "gliner", "onnxruntime", "cuda", "failure"],
+  "applies_to": ["steer", "detection", "gpu", "modal"],
+  "source": {"kind": "job", "ref": "Modal fc-01M22147HVVS866CMCHZ40W8CQ; T-613 notes"},
+  "recorded_at": "2026-09-09T02:48:00Z",
+  "owner": "sol-gliner",
+  "last_verified_at": "2026-09-09T02:48:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {"observed_providers": ["AzureExecutionProvider", "CPUExecutionProvider"], "cpu_version": "1.29", "gpu_version": "1.26"}
+}

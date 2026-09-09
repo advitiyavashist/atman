@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "component.atman-knowledge",
+  "type": "component",
+  "title": "Atman shared knowledge graph",
+  "summary": "Local-first JSON node and edge store with provenance, verification, staleness, search, deduplication, and bounded prompt inheritance.",
+  "tags": ["atman", "knowledge", "graph", "local-first"],
+  "applies_to": ["all", "atman", "infra", "docs"],
+  "source": {"kind": "repository", "ref": "atman:knowledge/manifest.json"},
+  "recorded_at": "2026-09-09T02:30:00Z",
+  "owner": "atman-knowledge",
+  "last_verified_at": "2026-09-09T02:30:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 90,
+  "revision": 1,
+  "data": {"storage": "knowledge/nodes/*.json + knowledge/edges/*.json", "external_database": false}
+}

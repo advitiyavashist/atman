@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "knowledge-requires-boundary", "type": "requires",
+  "from": "component.atman-knowledge", "to": "decision.knowledge-separate-from-tickets",
+  "source": {"kind": "ticket", "ref": "T-620 user correction"}, "recorded_at": "2026-09-09T03:02:00Z",
+  "owner": "atman-knowledge", "last_verified_at": "2026-09-09T03:02:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": null
+}

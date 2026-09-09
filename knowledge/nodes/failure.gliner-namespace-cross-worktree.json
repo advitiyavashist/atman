@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "failure.gliner-namespace-cross-worktree",
+  "type": "failure",
+  "title": "Modal captured duplicate experiments namespace paths",
+  "summary": "The reused Python environment exposed experiments as a namespace package across sol-gliner and detection-mle worktrees, so Modal saw duplicate source mounts before creating a GPU job.",
+  "tags": ["steer", "gliner", "modal", "packaging", "failure"],
+  "applies_to": ["steer", "detection", "gpu", "modal"],
+  "source": {"kind": "ticket", "ref": "T-613 notes; fixed by sol/t613-gliner-gpu@6140ec1"},
+  "recorded_at": "2026-09-09T02:45:00Z",
+  "owner": "sol-gliner",
+  "last_verified_at": "2026-09-09T02:45:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {"gpu_job_created": false, "fix": "Make experiments a regular package with experiments/__init__.py and verify one package path."}
+}

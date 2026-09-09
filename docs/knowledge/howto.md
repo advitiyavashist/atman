@@ -1,78 +1,45 @@
----
-id: howto
-title: Add a doc, tag it, how seats see it
-tags: [howto, operator]
----
+# Author and update knowledge
 
-# Add a doc, tag it, how seats see it
-
-Operator path for KB v0. No new store. No auto-sync into role briefs.
-
-## 1. Add a tracked doc
-
-Create markdown under `docs/knowledge/` (one extra folder is fine:
-`docs/knowledge/ops/oncall.md`). Frontmatter gives a stable id and tags:
-
-```markdown
----
-id: oncall
-title: Who to wake
-tags: [ops, master]
----
-
-# Who to wake
-
-…
-```
-
-- `id` — slug for `tickets knowledge show`. `[A-Za-z0-9][A-Za-z0-9_.-]*`
-- `title` — one line for the index
-- `tags` — comma or `[a, b]` list. Filter with `tickets knowledge --tag ops`.
-  Tags are an index, not a routing table.
-
-Commit the file. Tracked docs survive a board clear. Board docs and
-briefs are the other two slices of KB v0 — see [kb-lock.md](kb-lock.md).
-
-## 2. Tag it
-
-Prefer few, stable words: `backend`, `docs`, `ops`, `product`, `master`.
-Do not invent a taxonomy product. Do not embed.
+Start by searching. This prevents another agent from recording the same diagnosis under a new name.
 
 ```sh
-tickets knowledge --tag ops
+tickets knowledge query "component failure or decision"
+tickets knowledge list --tag gliner
 ```
 
-`rg` over this folder works too.
-
-## 3. How seats see it
-
-Seats do **not** get the whole tree on every wake. Context is the bill.
-
-| Path | What the seat sees | When to use it |
-|---|---|---|
-| `tickets knowledge` / `show <id>` | Index or one tracked doc, on demand | Occasional fact |
-| Open the markdown | Same file | Same |
-| `tickets brief --role <lane> "…"` or `--file` | Standing text in `.tickets/briefs/roles/<lane>.md` | Lane must see it every wake |
-| Edit `.tickets/briefs/_shared.md` | Every seat (E-013) | House rules; keep it short |
-| `tickets brief <agent> "…"` | `.tickets/briefs/<agent>.md` | One worker |
-
-Watch / spawn / `tickets prompt` inject **only** those brief files
-([master how-to](../onboarding/master-howto.md), E-013). A tracked doc
-is not a fallback. Tags do not auto-copy into a role brief.
-
-Check what inject will see (run bare):
+Create a node or edge as JSON outside the graph, then add it through the CLI. The CLI validates required provenance, timestamps, confidence, staleness, node types, edge types, IDs, and graph references before keeping the write.
 
 ```sh
-tickets brief --role backend "One file per change. Do not hold review."
-tickets brief --role backend --show
-tickets prompt --agent alice          # after alice joined --roles backend
+tickets knowledge add /tmp/new-fact.json
+tickets knowledge validate
+git add knowledge/
+git commit -m "Record verified runtime fact"
 ```
 
-## What not to do
+To correct an existing record, keep its stable `id`, update the source and `last_verified_at`, then run:
 
-- Do not dump the catalog into `_shared.md`.
-- Do not create `.tickets/knowledge/` or a second inject root.
-- Do not auto-sync this tree into `briefs/roles/` by tag or schedule.
-- Do not add a vector DB or embedding step.
-- Do not add this tree to the three-file master onboarding path
-  (`MASTER.md`, `HANDOFF.md`, `tickets map`).
+```sh
+tickets knowledge update /tmp/corrected-fact.json
+```
+
+Node revision increments automatically. Git retains the previous version. Use `supersedes` when a new decision, artifact, or runbook replaces another record while both remain useful history.
+
+Verification means:
+
+| value | use |
+|---|---|
+| `unverified` | reported with no inspected evidence |
+| `inferred` | reasoned from sources, not directly observed |
+| `observed` | directly seen once |
+| `verified` | source and claim checked together |
+| `superseded` | retained history; always rendered stale |
+
+Never put secrets, raw prompts, customer text, credentials, or full model outputs in a node. Record a privacy-safe summary and a source reference. Tickets may include `knowledge:<id>` so the prompt renderer can inherit a fact, but `.tickets/` is not graph storage.
+
+Attach a reference without copying the fact into the ticket:
+
+```sh
+tickets brief --ticket T-123 --knowledge failure.gliner-cpu-ort-shadow
+```
+
+The ticket note stores only `knowledge:failure.gliner-cpu-ort-shadow`. The selected node, its provenance, and its related runbook still come from `knowledge/`.

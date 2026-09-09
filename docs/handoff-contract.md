@@ -19,12 +19,11 @@ A fresh agent taking master should be operational after:
     HANDOFF.md              the technical state of the actual work
     tickets map             the live graph
 
-Plus `.tickets/briefs/_shared.md` before touching code. Nothing else unless a
-specific ticket points there. KB v0
-([docs/knowledge/](knowledge/README.md)) is board docs + tracked docs +
-those briefs (E-013) — **not** a fourth onboarding file. Pull a tracked
-doc when the work needs it. The operator walkthrough for a fresh master
-session is [onboarding/master-howto.md](onboarding/master-howto.md).
+Plus `.tickets/briefs/_shared.md` before touching code. The prompt renderer may
+include a bounded task-relevant subgraph from the separate repo-backed
+[knowledge system](knowledge/README.md); this is generated context, not a fourth
+file to read in full. The operator walkthrough for a fresh master session is
+[onboarding/master-howto.md](onboarding/master-howto.md).
 
 **Three files is a budget, not an aspiration.** If onboarding needs a fourth,
 the first three are not saying enough — fix them rather than adding to the

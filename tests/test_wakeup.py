@@ -79,7 +79,10 @@ def test_pending_direct_message_and_broadcast_only(board):
     assert rc == 1 and p.get("broadcasts") == 1 and p["pending"] is False
     run(board, "msg", "bob please look", "--to", "bob", agent="alice")
     rc, p = pending(board, "bob")
-    assert rc == 0 and "messages_to_me" in p
+    assert rc == 1 and "messages_to_me" in p and p["pending"] is False
+    run(board, "msg", "task: bob please look", "--to", "bob", agent="alice")
+    rc, p = pending(board, "bob")
+    assert rc == 0 and "task_messages" in p
 
 
 def test_pending_holding_ticket(board):
@@ -378,7 +381,7 @@ def test_master_pending_keys(board):
 
 def test_spawn_lifecycle_with_stub_command(board):
     run(board, "join", "doc", "--roles", "docs")
-    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", agent="master")
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist", agent="master")
     assert r.returncode == 0, r.stderr
     assert "watcher for doc started" in r.stdout
     pid_file = board / "agents" / "doc.watch.pid"
@@ -386,7 +389,7 @@ def test_spawn_lifecycle_with_stub_command(board):
     assert pid_file.exists()
     lst = run(board, "spawn", "--list").stdout
     assert "doc" in lst and "pid" in lst
-    r2 = run(board, "spawn", "doc", "--exec", "true", agent="master")
+    r2 = run(board, "spawn", "doc", "--exec", "true", "--persist", agent="master")
     assert "already running" in r2.stdout
     r3 = run(board, "spawn", "doc", "--stop", agent="master")
     assert "stopped 1 watcher" in r3.stdout
@@ -401,7 +404,7 @@ def test_spawn_lifecycle_with_stub_command(board):
 def test_spawn_inherits_project_settings(board):
     (board.parent / ".claude").mkdir()
     (board.parent / ".claude" / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(pytest:*)"]}}))
-    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", agent="master")
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist", agent="master")
     assert "inherited project settings" in r.stdout
     inherited = json.loads((board.parent / ".worktrees" / "doc" / ".claude" / "settings.json").read_text())
     assert inherited["permissions"]["allow"] == ["Bash(pytest:*)"]
@@ -501,7 +504,7 @@ def test_master_heartbeat_drives_only_the_master_seat(board):
     run(board, "master", "take", agent="boss")
     run(board, "join", "doc", "--roles", "docs")
     run(board, "next", agent="doc")                          # T-001 claimed: nothing is ready for anyone
-    run(board, "objective", "Ship V1", agent="boss")
+    run(board, "objective", "Ship V1", "--exit", "gates green", agent="boss")
     rc, p = pending(board, "boss")
     assert "drive" not in p                                   # no heartbeat configured
     r = run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="boss")
@@ -540,7 +543,8 @@ def test_spawn_stop_stops_all_duplicate_watch_loops(board):
     env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="dup",
                HOME=str(board.parent.parent / "home"))
     cwd = str(board.parent)
-    argv = [sys.executable, str(TOOL), "watch", "--agent", "dup", "--every", "3600", "--exec", "true"]
+    argv = [sys.executable, str(TOOL), "watch", "--agent", "dup", "--every", "3600",
+            "--persist", "--exec", "true"]
     p1 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
@@ -564,7 +568,8 @@ def test_watch_sigterm_exits_within_poll_interval(board):
     env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="doc",
                HOME=str(board.parent.parent / "home"))
     proc = subprocess.Popen(
-        [sys.executable, str(TOOL), "watch", "--agent", "doc", "--every", "3600", "--exec", "true"],
+        [sys.executable, str(TOOL), "watch", "--agent", "doc", "--every", "3600",
+         "--persist", "--exec", "true"],
         env=env, cwd=str(board.parent), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)
     time.sleep(0.5)
@@ -581,7 +586,7 @@ def test_dash_health_flag_duplicate_watchers(board):
                HOME=str(board.parent.parent / "home"))
     cwd = str(board.parent)
     argv = [sys.executable, str(TOOL), "watch", "--agent", "dup", "--cwd", cwd,
-            "--every", "3600", "--exec", "true"]
+            "--every", "3600", "--persist", "--exec", "true"]
     p1 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
@@ -608,7 +613,8 @@ def test_dash_health_flag_duplicate_watchers(board):
 
 def test_spawn_passes_heartbeat_to_watch(board):
     run(board, "master", "take", agent="boss")
-    r = run(board, "spawn", "boss", "--master", "--heartbeat", "15", "--exec", "true", "--every", "5", agent="boss")
+    r = run(board, "spawn", "boss", "--master", "--heartbeat", "15", "--exec", "true",
+            "--every", "5", "--persist", agent="boss")
     assert r.returncode == 0, r.stderr
     try:
         rec = None

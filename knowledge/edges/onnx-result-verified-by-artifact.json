@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "onnx-result-verified-by-artifact", "type": "verified_by",
+  "from": "experiment.gliner-t613-onnx-t4", "to": "artifact.gliner-t613-result",
+  "source": {"kind": "repository", "ref": "steer:sol/t613-gliner-gpu@dfe88c1"}, "recorded_at": "2026-09-09T03:07:00Z",
+  "owner": "sol-gliner", "last_verified_at": "2026-09-09T03:07:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": 30
+}

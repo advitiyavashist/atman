@@ -1,0 +1,22 @@
+{
+  "kind": "node",
+  "id": "runbook.gliner-t4-runtime",
+  "type": "runbook",
+  "title": "Run GLiNER on a real T4 CUDA provider",
+  "summary": "Install GLiNER dependencies, uninstall both onnxruntime distributions, then install only onnxruntime-gpu[cuda,cudnn]==1.26.0; prove a large MatMul and heavy GLiNER nodes in the ORT profile before timing.",
+  "tags": ["steer", "gliner", "modal", "cuda", "runbook"],
+  "applies_to": ["steer", "detection", "gpu", "modal"],
+  "source": {"kind": "repository", "ref": "steer:sol/t613-gliner-gpu@373b325 experiments/gliner_modal/app.py"},
+  "recorded_at": "2026-09-09T02:53:00Z",
+  "owner": "sol-gliner",
+  "last_verified_at": "2026-09-09T02:53:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {
+    "runtime_pin": "onnxruntime-gpu[cuda,cudnn]==1.26.0",
+    "required_proof": "Synthetic MatMul CUDA node plus CUDA-assigned GLiNER MatMul/FusedMatMul nodes",
+    "command_source": "experiments/gliner_modal/cli.py cuda-onnx-spawn"
+  }
+}

@@ -119,6 +119,23 @@ qwen           pid 64905 custom    -        ok 0.8s      0m ago   /private/tmp/b
 
 Exit code is 0 on pass, 1 on fail, so `harness check` is usable in a script.
 
+For a built-in CLI, check credentials without starting a model first:
+
+```sh
+tickets harness auth cursor-seat
+# If it says Login required:
+tickets harness auth cursor-seat --login
+```
+
+The login form runs the harness's interactive login and immediately verifies
+the resulting identity. Cursor recovery prints the exact `agent login` action.
+It reports `Login required`, `Usage quota reached`, and a missing CLI as
+different states, and the dashboard shows the same state. If a machine stopped
+mid-watcher, add `--recover-stale`; it removes only a dead PID lock and refuses
+when the recorded watcher is alive. `tickets spawn` performs this cheap check
+automatically for Cursor and leaves the seat's roles, harness, and worktree
+registration unchanged when login is missing.
+
 ## Run it
 
 ```sh
