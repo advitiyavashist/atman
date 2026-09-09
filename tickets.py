@@ -1723,6 +1723,11 @@ def cmd_board(a, board):
             "Shared across Claude/Codex/Cursor. `tickets next` claims one atomically; "
             "`tickets done <id> --notes \"...\"` hands off to dependents."
         )
+    owner = whoami()
+    if not owner.startswith("agent-"):
+        inherited = knowledge_context(board, owner, max_chars=1800)
+        if inherited:
+            print(inherited)
 
 
 def cmd_graph(a, board):
@@ -1937,6 +1942,10 @@ def cmd_next(a, board):
         if got:
             checkin(board, owner, got["id"])
             print(detail(board, got, load_all(board)))
+            inherited = knowledge_context(board, owner)
+            if inherited:
+                print("")
+                print(inherited)
             warn = worktree_warning(owner)
             if warn:
                 print("")
@@ -6338,6 +6347,17 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    knowledge_dir = (getattr(a, "knowledge_dir", "") or "").strip()
+    if knowledge_dir:
+        knowledge_dir = os.path.abspath(os.path.expanduser(knowledge_dir))
+        if _knowledge_inside_board(knowledge_dir, board):
+            sys.exit("--knowledge-dir must live outside the ticket board: %s" % knowledge_dir)
+        if not _knowledge_graph(knowledge_dir):
+            sys.exit("--knowledge-dir needs a graph containing manifest.json: %s" % knowledge_dir)
+        _, _, knowledge_errors = _knowledge_records(knowledge_dir)
+        if knowledge_errors:
+            sys.exit("--knowledge-dir graph is invalid; run `tickets knowledge validate`: %s" %
+                     knowledge_dir)
     # Read this BEFORE checkin(), which creates the record. Only a genuinely new
     # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
     # calls straight through here) must leave delivery completely alone.
@@ -6394,6 +6414,8 @@ def cmd_join(a, board):
         entry["cost"] = a.cost
     if a.best_for:
         entry["best_for"] = a.best_for
+    if knowledge_dir:
+        entry["knowledge_dir"] = knowledge_dir
     entry.setdefault("can", [])
     entry.setdefault("cost", "medium")
     wf[owner] = entry
@@ -6412,6 +6434,8 @@ def cmd_join(a, board):
         entry.get("harness") or "claude (default)"))
     if entry.get("cmd"):
         print("cmd: %s" % entry["cmd"])
+    if entry.get("knowledge_dir"):
+        print("knowledge: %s" % entry["knowledge_dir"])
     elif harness and harness not in BUILTIN_HARNESSES:
         # A typo'd built-in name ("cluade") is indistinguishable from a
         # deliberate bare executable, so say which reading was taken rather
@@ -6955,15 +6979,12 @@ def prompt_text(a, board):
     master = (m["owner"] if m else "the master")
     cos = (m or {}).get("cos") or ""
     role_ctx = role_context(board, owner)
+    knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "")
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
-        extra = a.extra or ""
-        if role_ctx:
-            extra = role_ctx + ("\n\n" + extra if extra else "")
+        extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
         return cos_prompt_text(owner, board, os.path.dirname(board), extra)
     if getattr(a, "master", False):
-        extra = a.extra or ""
-        if role_ctx:
-            extra = role_ctx + ("\n\n" + extra if extra else "")
+        extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
         obj = _safe(lambda: load_objective(board), {})
         if obj and not obj.get("done"):
             _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
@@ -6979,6 +7000,8 @@ def prompt_text(a, board):
     parts = []
     if role_ctx:
         parts.append(role_ctx)
+    if knowledge_ctx:
+        parts.append(knowledge_ctx)
     brief = agent_brief(board, owner)
     if brief:
         parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
@@ -7004,6 +7027,11 @@ def cmd_brief(a, board):
     file; --show prints. Exactly one target: agent name, --role, or --ticket."""
     who = whoami(a.by)
     role = getattr(a, "role", "") or ""
+    knowledge_id = (getattr(a, "knowledge_id", "") or "").strip()
+    if knowledge_id and not a.ticket:
+        sys.exit("brief --knowledge needs --ticket; tickets reference knowledge, they do not store it")
+    if knowledge_id and (a.text or a.file or a.agent):
+        sys.exit("brief --knowledge cannot be combined with text, --file, or an agent target")
     if role and a.ticket:
         sys.exit("brief: use --role or --ticket, not both")
     if role and a.agent and a.text:
@@ -7042,7 +7070,18 @@ def cmd_brief(a, board):
                 if n.get("kind") == "context":
                     print("- [%s] %s" % (n.get("by", "?"), n["text"]))
             return
-        text = a.text or (open(a.file).read().strip() if a.file else "")
+        if knowledge_id:
+            root = knowledge_root(board, who)
+            if _knowledge_inside_board(root, board):
+                sys.exit("knowledge graph must live outside the ticket board: %s" % root)
+            nodes, edges, errors = _knowledge_records(root) if _knowledge_graph(root) else ([], [], [])
+            if errors:
+                sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+            if knowledge_id not in {r["id"] for r in nodes + edges}:
+                sys.exit("no knowledge record %r under %s" % (knowledge_id, root))
+            text = "knowledge:" + knowledge_id
+        else:
+            text = a.text or (open(a.file).read().strip() if a.file else "")
         if not text:
             sys.exit("give context text, --file, or --show")
         t["notes"].append({"by": who, "at": now(), "kind": "context", "text": text})
@@ -7076,36 +7115,383 @@ def cmd_brief(a, board):
     post_message(board, who, "brief updated for %s: %s" % (a.agent, (a.text or a.file)[:160]), to=a.agent)
 
 
-# Team knowledge v0 (CEO/PM lock): board docs + tracked docs + .tickets/briefs/
-# (shared/roles/agent). Same E-013 inject. Not a shared-memory brain, vector
-# DB, or auto-sync role KB. This verb only indexes docs/knowledge/.
+# Atman knowledge is a repo-backed graph beside, and deliberately outside, the
+# ticket board. Tickets coordinate work. Knowledge nodes preserve evidence,
+# decisions and reusable skills after a ticket is closed or a seat disappears.
+# The old Markdown catalog remains readable for backwards compatibility, but
+# only a validated graph is eligible for bounded prompt inheritance.
 _KNOWLEDGE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_KNOWLEDGE_NODE_TYPES = frozenset({
+    "project", "component", "decision", "artifact", "model_pin", "experiment",
+    "failure", "runbook", "skill", "agent_capability",
+})
+_KNOWLEDGE_EDGE_TYPES = frozenset({
+    "depends_on", "supersedes", "produced_by", "failed_because", "verified_by",
+    "applies_to", "requires",
+})
+_KNOWLEDGE_VERIFICATION = frozenset({
+    "unverified", "inferred", "observed", "verified", "superseded",
+})
+_KNOWLEDGE_VERIFY_RANK = {
+    "unverified": 0, "inferred": 1, "observed": 2, "verified": 3,
+    "superseded": -1,
+}
+_KNOWLEDGE_DEFAULT_BUDGET = 3600
+_KNOWLEDGE_MAX_BUDGET = 6000
 
 
-def knowledge_root(board=None):
-    """Repo-tracked team docs. $TICKETS_KNOWLEDGE_DIR wins (tests). No .tickets/knowledge/."""
-    env = (os.environ.get("TICKETS_KNOWLEDGE_DIR") or "").strip()
+def knowledge_root(board=None, owner=None):
+    """Repo-tracked graph. Overrides win; never place it below .tickets/."""
+    env = (os.environ.get("ATMAN_KNOWLEDGE_DIR") or
+           os.environ.get("TICKETS_KNOWLEDGE_DIR") or "").strip()
     if env:
         return os.path.abspath(env)
+    if board and owner:
+        configured = (load_workforce(board).get(owner, {}) or {}).get("knowledge_dir")
+        if configured:
+            return os.path.abspath(os.path.expanduser(configured))
     cands = []
     here = _init_cwd_worktree_root()
     if here:
-        cands.append(os.path.join(here, "docs", "knowledge"))
+        cands.append(os.path.join(here, "knowledge"))
     main = _repo_root()
     if main:
-        p = os.path.join(main, "docs", "knowledge")
+        p = os.path.join(main, "knowledge")
         if p not in cands:
             cands.append(p)
     if board:
-        p = os.path.join(os.path.dirname(os.path.abspath(board)), "docs", "knowledge")
+        p = os.path.join(os.path.dirname(os.path.abspath(board)), "knowledge")
         if p not in cands:
             cands.append(p)
+    # A checked out old release may only have the v0 Markdown catalog. Keep it
+    # readable; it is not treated as inherited graph context.
+    legacy = []
+    for base in (here, main, os.path.dirname(os.path.abspath(board)) if board else None):
+        if base:
+            p = os.path.join(base, "docs", "knowledge")
+            if p not in legacy:
+                legacy.append(p)
     for p in cands:
+        if os.path.isdir(p):
+            return os.path.abspath(p)
+    for p in legacy:
         if os.path.isdir(p):
             return os.path.abspath(p)
     if cands:
         return os.path.abspath(cands[0])
-    return os.path.abspath(os.path.join(os.getcwd(), "docs", "knowledge"))
+    return os.path.abspath(os.path.join(os.getcwd(), "knowledge"))
+
+
+def _knowledge_graph(root):
+    return os.path.isfile(os.path.join(root, "manifest.json"))
+
+
+def _knowledge_inside_board(root, board):
+    """True when a graph path would collapse durable facts into coordination."""
+    if not root or not board:
+        return False
+    try:
+        root = os.path.realpath(root)
+        board = os.path.realpath(board)
+        return os.path.commonpath([root, board]) == board
+    except (OSError, ValueError):
+        return True
+
+
+def _knowledge_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError) as exc:
+        return None, "%s: %s" % (path, exc)
+    if not isinstance(value, dict):
+        return None, "%s: top level must be an object" % path
+    return value, ""
+
+
+def _knowledge_timestamp(value):
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return stamp if stamp.tzinfo is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _knowledge_validate_record(record, kind=None):
+    """Return validation errors for one node or edge. Stdlib-only by design."""
+    errors = []
+    got_kind = record.get("kind")
+    if kind and got_kind != kind:
+        errors.append("kind must be %s" % kind)
+    if got_kind not in ("node", "edge"):
+        errors.append("kind must be node or edge")
+        return errors
+    rid = record.get("id")
+    if not isinstance(rid, str) or not _KNOWLEDGE_SLUG_RE.match(rid):
+        errors.append("id must be a safe stable slug")
+    if got_kind == "node":
+        if record.get("type") not in _KNOWLEDGE_NODE_TYPES:
+            errors.append("unknown node type %r" % record.get("type"))
+        for field in ("title", "summary", "owner"):
+            if not isinstance(record.get(field), str) or not record[field].strip():
+                errors.append("%s is required" % field)
+        for field in ("tags", "applies_to"):
+            if not isinstance(record.get(field), list) or not all(
+                    isinstance(x, str) and x.strip() for x in record.get(field, [])):
+                errors.append("%s must be a list of non-empty strings" % field)
+        revision = record.get("revision")
+        if not isinstance(revision, int) or revision < 1:
+            errors.append("revision must be an integer >= 1")
+    else:
+        if record.get("type") not in _KNOWLEDGE_EDGE_TYPES:
+            errors.append("unknown edge type %r" % record.get("type"))
+        for field in ("from", "to", "owner"):
+            if not isinstance(record.get(field), str) or not record[field].strip():
+                errors.append("%s is required" % field)
+        for field in ("from", "to"):
+            if isinstance(record.get(field), str) and not _KNOWLEDGE_SLUG_RE.match(record[field]):
+                errors.append("%s must be a safe node id" % field)
+    source = record.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("ref"), str) or not source["ref"].strip():
+        errors.append("source.ref is required")
+    for field in ("recorded_at", "last_verified_at"):
+        if not _knowledge_timestamp(record.get(field)):
+            errors.append("%s must be an ISO-8601 timestamp" % field)
+    if record.get("verification") not in _KNOWLEDGE_VERIFICATION:
+        errors.append("verification must be one of %s" % ", ".join(sorted(_KNOWLEDGE_VERIFICATION)))
+    confidence = record.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0 <= confidence <= 1:
+        errors.append("confidence must be between 0 and 1")
+    stale = record.get("stale_after_days")
+    if stale is not None and (not isinstance(stale, int) or isinstance(stale, bool) or stale < 1):
+        errors.append("stale_after_days must be null or an integer >= 1")
+    return errors
+
+
+def _knowledge_records(root):
+    """Load and validate graph records without ever consulting ticket files."""
+    nodes, edges, errors = [], [], []
+    manifest, manifest_error = _knowledge_json(os.path.join(root, "manifest.json"))
+    if manifest_error:
+        errors.append(manifest_error)
+    else:
+        if manifest.get("schema_version") != 1:
+            errors.append("manifest schema_version must be 1")
+        budget = manifest.get("context_budget_chars")
+        if not isinstance(budget, int) or isinstance(budget, bool) or not 500 <= budget <= _KNOWLEDGE_MAX_BUDGET:
+            errors.append("manifest context_budget_chars must be between 500 and %d" %
+                          _KNOWLEDGE_MAX_BUDGET)
+    for kind, folder in (("node", "nodes"), ("edge", "edges")):
+        for path in sorted(glob.glob(os.path.join(root, folder, "*.json"))):
+            record, error = _knowledge_json(path)
+            if error:
+                errors.append(error)
+                continue
+            found = _knowledge_validate_record(record, kind)
+            if found:
+                errors.extend("%s: %s" % (path, item) for item in found)
+                continue
+            record = dict(record)
+            record["path"] = os.path.abspath(path)
+            (nodes if kind == "node" else edges).append(record)
+    ids = set()
+    for node in nodes:
+        if node["id"] in ids:
+            errors.append("duplicate node id %s" % node["id"])
+        ids.add(node["id"])
+    edge_ids = set()
+    for edge in edges:
+        if edge["id"] in edge_ids:
+            errors.append("duplicate edge id %s" % edge["id"])
+        edge_ids.add(edge["id"])
+        if edge["from"] not in ids:
+            errors.append("edge %s references missing from node %s" % (edge["id"], edge["from"]))
+        if edge["to"] not in ids:
+            errors.append("edge %s references missing to node %s" % (edge["id"], edge["to"]))
+    return nodes, edges, errors
+
+
+def _knowledge_stale(record, at=None):
+    if record.get("verification") == "superseded":
+        return True
+    days = record.get("stale_after_days")
+    stamp = _knowledge_timestamp(record.get("last_verified_at"))
+    if not days or not stamp:
+        return False
+    at = at or datetime.now(timezone.utc)
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return (at - stamp).total_seconds() > days * 86400
+
+
+def _knowledge_strings(value):
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_knowledge_strings(item))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for item in value.values():
+            out.extend(_knowledge_strings(item))
+        return out
+    return []
+
+
+def _knowledge_terms(text):
+    stop = {"the", "and", "for", "with", "from", "this", "that", "into", "your", "you",
+            "are", "was", "were", "have", "has", "ticket", "task", "work", "agent"}
+    return {x for x in re.findall(r"[a-z0-9][a-z0-9_.-]+", (text or "").lower())
+            if len(x) > 2 and x not in stop}
+
+
+def _knowledge_preference(node):
+    return (_KNOWLEDGE_VERIFY_RANK.get(node.get("verification"), -2),
+            int(node.get("revision") or 0),
+            node.get("last_verified_at") or "",
+            float(node.get("confidence") or 0))
+
+
+def _knowledge_dedup(nodes):
+    """One current fact per canonical key; deterministic under concurrent files."""
+    picked = {}
+    for node in nodes:
+        key = node.get("canonical_key") or node["id"]
+        old = picked.get(key)
+        if old is None or _knowledge_preference(node) > _knowledge_preference(old):
+            picked[key] = node
+    return list(picked.values())
+
+
+def _knowledge_query(root, text="", scopes=None, max_nodes=12):
+    nodes, edges, errors = _knowledge_records(root)
+    if errors:
+        return [], [], errors
+    nodes = _knowledge_dedup(nodes)
+    by_id = {n["id"]: n for n in nodes}
+    terms = _knowledge_terms(text)
+    scopes = {str(x).lower() for x in (scopes or []) if x}
+    explicit = {n["id"] for n in nodes
+                if ("knowledge:" + n["id"]).lower() in (text or "").lower()}
+    scored = {}
+    for node in nodes:
+        fields = " ".join(_knowledge_strings({
+            "id": node.get("id"), "type": node.get("type"), "title": node.get("title"),
+            "summary": node.get("summary"), "tags": node.get("tags"),
+            "applies_to": node.get("applies_to"), "data": node.get("data", {}),
+        })).lower()
+        words = _knowledge_terms(fields)
+        score = 0
+        if node["id"] in explicit:
+            score += 1000
+        score += 12 * len(terms & words)
+        applies = {str(x).lower() for x in node.get("applies_to", [])}
+        if "all" in applies:
+            score += 2
+        score += 9 * len(scopes & applies)
+        if score:
+            scored[node["id"]] = score
+    # Bring the evidence, failure or runbook connected to a direct match. This
+    # is the useful part of a graph: a failure can carry its corrective command
+    # without copying the command into every ticket or brief.
+    direct = set(scored)
+    direct_scores = dict(scored)
+    for edge in edges:
+        if edge["from"] in direct and edge["to"] in by_id:
+            scored[edge["to"]] = max(scored.get(edge["to"], 0),
+                                     direct_scores[edge["from"]] - 1)
+        if edge["to"] in direct and edge["from"] in by_id:
+            scored[edge["from"]] = max(scored.get(edge["from"], 0),
+                                       direct_scores[edge["to"]] - 1)
+    type_bias = {"failure": 5, "runbook": 4, "skill": 3, "decision": 2,
+                 "artifact": 1, "experiment": 1}
+    ranked = sorted((by_id[nid] for nid in scored), key=lambda n: (
+        -(scored[n["id"]] + type_bias.get(n.get("type"), 0)),
+        _knowledge_stale(n), -_knowledge_preference(n)[0], n["id"]))[:max_nodes]
+    selected = {n["id"] for n in ranked}
+    selected_edges = [e for e in edges if e["from"] in selected and e["to"] in selected]
+    return ranked, selected_edges, []
+
+
+def _knowledge_budget(root, requested=None):
+    budget = requested
+    if budget is None:
+        manifest, _ = _knowledge_json(os.path.join(root, "manifest.json"))
+        budget = (manifest or {}).get("context_budget_chars", _KNOWLEDGE_DEFAULT_BUDGET)
+    try:
+        budget = int(budget)
+    except (TypeError, ValueError):
+        budget = _KNOWLEDGE_DEFAULT_BUDGET
+    return max(500, min(budget, _KNOWLEDGE_MAX_BUDGET))
+
+
+def _knowledge_render(nodes, edges, max_chars):
+    if not nodes:
+        return ""
+    relation = {}
+    for edge in edges:
+        relation.setdefault(edge["from"], []).append("%s→%s" % (edge["type"], edge["to"]))
+    lines = ["Inherited knowledge (repo-backed; open a source before changing a fact):"]
+    for node in nodes:
+        age = "STALE" if _knowledge_stale(node) else node["verification"].upper()
+        summary = (" ".join(node["title"].split()) + ": " +
+                   " ".join(node["summary"].split()))[:330]
+        source = node.get("source", {}).get("ref", "")[:170]
+        rels = ",".join(sorted(relation.get(node["id"], [])))[:170]
+        line = "- knowledge:%s [%s; confidence %.2f] %s" % (
+            node["id"], age, float(node["confidence"]), summary)
+        if rels:
+            line += " relations=" + rels
+        if source:
+            line += " source=" + source
+        lines.append(line[:620])
+    text = "\n".join(lines)
+    if len(text) <= max_chars:
+        return text
+    kept = [lines[0]]
+    marker = "\n...(knowledge budget reached; run `tickets knowledge query ...`)"
+    for line in lines[1:]:
+        candidate = "\n".join(kept + [line]) + marker
+        if len(candidate) > max_chars:
+            # A single verbose fact should still be useful under the minimum
+            # budget. Fit a visibly truncated line instead of returning only a
+            # budget notice.
+            if len(kept) == 1:
+                room = max_chars - len("\n".join(kept)) - len(marker) - 2
+                if room > 40:
+                    kept.append(line[:room - 3] + "...")
+            break
+        kept.append(line)
+    return "\n".join(kept) + marker
+
+
+def knowledge_context(board, owner, extra="", max_chars=None):
+    """Compact task/seat inheritance shared by every prompt-file harness."""
+    root = knowledge_root(board, owner)
+    if _knowledge_inside_board(root, board):
+        return "Knowledge graph configuration invalid: graph must live outside the ticket board."
+    if not _knowledge_graph(root):
+        return ""
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    wf = _safe(lambda: load_workforce(board), {}).get(owner, {}) or {}
+    roles = roles_for(board, owner) or []
+    tickets = [t for t in load_all(board)
+               if t.get("owner") == owner and t.get("status") in ("claimed", "review")]
+    chunks = [extra, " ".join(roles), " ".join(wf.get("can", [])),
+              wf.get("harness") or wf.get("tool", ""), rec.get("note", "")]
+    scopes = list(roles) + list(wf.get("can", [])) + [wf.get("harness") or wf.get("tool", "")]
+    for ticket in tickets:
+        chunks.extend([ticket.get("id", ""), ticket.get("title", ""), ticket.get("body", ""),
+                       ticket.get("role", ""), " ".join(ticket.get("needs", []))])
+        for note in ticket.get("notes", []):
+            if note.get("kind") == "context":
+                chunks.append(note.get("text", ""))
+    nodes, edges, errors = _knowledge_query(root, " ".join(chunks), scopes=scopes)
+    if errors:
+        return "Knowledge graph invalid; run `tickets knowledge validate`."
+    return _knowledge_render(nodes, edges, _knowledge_budget(root, max_chars))
 
 
 def _parse_knowledge_frontmatter(text):
@@ -7185,10 +7571,157 @@ def _find_knowledge_doc(root, slug):
 
 
 def cmd_knowledge(a, board):
-    """Index tracked team docs. Inject is E-013 briefs — this does not write them."""
-    root = knowledge_root(board)
+    """Query or author the separate repo-backed knowledge graph."""
+    root = knowledge_root(board, whoami(getattr(a, "agent", "") or ""))
+    if _knowledge_inside_board(root, board):
+        sys.exit("knowledge graph must live outside the ticket board: %s" % root)
     sub = getattr(a, "knowledge_cmd", None) or "list"
     tag = (getattr(a, "tag", "") or "").strip()
+    if _knowledge_graph(root):
+        nodes, edges, errors = _knowledge_records(root)
+        if sub == "validate":
+            if errors:
+                for error in errors:
+                    print("ERROR " + error)
+                sys.exit("knowledge graph invalid: %d error(s)" % len(errors))
+            print("knowledge graph valid: %d node(s), %d edge(s) at %s" %
+                  (len(nodes), len(edges), root))
+            return
+        # Never answer from a partial graph. A malformed record may carry the
+        # corrective runbook or superseding evidence for an otherwise valid
+        # fact; silently omitting it would turn corruption into bad advice.
+        if errors and sub in ("list", "show", "query"):
+            sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+        if sub == "list":
+            node_type = (getattr(a, "node_type", "") or "").strip()
+            stale_filter = bool(getattr(a, "stale", False))
+            rows = _knowledge_dedup(nodes)
+            if tag:
+                rows = [n for n in rows if tag in n.get("tags", [])]
+            if node_type:
+                rows = [n for n in rows if n.get("type") == node_type]
+            if stale_filter:
+                rows = [n for n in rows if _knowledge_stale(n)]
+            rows.sort(key=lambda n: (n["type"], n["id"]))
+            payload = [{
+                "id": n["id"], "type": n["type"], "title": n["title"],
+                "tags": n["tags"], "verification": n["verification"],
+                "confidence": n["confidence"], "stale": _knowledge_stale(n),
+                "source": n["source"], "path": n["path"],
+            } for n in rows]
+            if getattr(a, "json", False):
+                print(json.dumps(payload, indent=2))
+                return
+            for row in payload:
+                state = "STALE" if row["stale"] else row["verification"].upper()
+                print("%-30s %-16s %-10s %s" %
+                      (row["id"][:30], row["type"][:16], state, row["title"][:72]))
+            print("\n%d current fact(s); graph=%s" % (len(payload), root))
+            return
+        if sub == "show":
+            slug = (getattr(a, "slug", "") or "").strip()
+            if not _KNOWLEDGE_SLUG_RE.match(slug):
+                sys.exit("knowledge slug %r is not a safe name" % slug)
+            for record in nodes + edges:
+                if record["id"] == slug:
+                    payload = {k: v for k, v in record.items() if k != "path"}
+                    payload["stale"] = _knowledge_stale(record)
+                    payload["path"] = record["path"]
+                    print(json.dumps(payload, indent=2))
+                    return
+            sys.exit("no knowledge record %r under %s" % (slug, root))
+        if sub == "query":
+            query = (getattr(a, "query", "") or "").strip()
+            owner = whoami(getattr(a, "agent", "") or "")
+            scopes = list(getattr(a, "role", []) or []) + list(getattr(a, "cap", []) or [])
+            if getattr(a, "harness", ""):
+                scopes.append(a.harness)
+            if getattr(a, "ticket", ""):
+                t = load(board, a.ticket)
+                query = " ".join([query, t.get("id", ""), t.get("title", ""),
+                                  t.get("body", ""), t.get("role", ""),
+                                  " ".join(t.get("needs", []))])
+                for note in t.get("notes", []):
+                    if note.get("kind") == "context":
+                        query += " " + note.get("text", "")
+            if owner:
+                wf = load_workforce(board).get(owner, {}) or {}
+                scopes.extend(roles_for(board, owner) or [])
+                scopes.extend(wf.get("can", []))
+                scopes.append(wf.get("harness") or wf.get("tool", ""))
+                for ticket in load_all(board):
+                    if ticket.get("owner") != owner or ticket.get("status") not in ("claimed", "review"):
+                        continue
+                    query += " " + " ".join([
+                        ticket.get("id", ""), ticket.get("title", ""), ticket.get("body", ""),
+                        ticket.get("role", ""), " ".join(ticket.get("needs", [])),
+                    ])
+                    for note in ticket.get("notes", []):
+                        if note.get("kind") == "context":
+                            query += " " + note.get("text", "")
+            selected, selected_edges, query_errors = _knowledge_query(
+                root, query, scopes=scopes, max_nodes=getattr(a, "max_nodes", 12))
+            if query_errors:
+                sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+            if getattr(a, "json", False):
+                print(json.dumps({
+                    "query": query, "scopes": sorted(set(x for x in scopes if x)),
+                    "nodes": [{**{k: v for k, v in n.items() if k != "path"},
+                               "stale": _knowledge_stale(n), "path": n["path"]}
+                              for n in selected],
+                    "edges": [{k: v for k, v in e.items() if k != "path"}
+                              for e in selected_edges],
+                }, indent=2))
+                return
+            rendered = _knowledge_render(selected, selected_edges,
+                                         _knowledge_budget(root, getattr(a, "max_chars", None)))
+            print(rendered or "no relevant knowledge found")
+            return
+        if sub in ("add", "update"):
+            source_path = os.path.abspath(os.path.expanduser(a.file))
+            record, error = _knowledge_json(source_path)
+            if error:
+                sys.exit("NO CHANGE WAS MADE: " + error)
+            found = _knowledge_validate_record(record)
+            if found:
+                sys.exit("NO CHANGE WAS MADE: " + "; ".join(found))
+            folder = "nodes" if record["kind"] == "node" else "edges"
+            target = os.path.join(root, folder, record["id"] + ".json")
+            current, _ = _knowledge_json(target)
+            if sub == "add" and current is not None:
+                sys.exit("NO CHANGE WAS MADE: knowledge record %s already exists" % record["id"])
+            if sub == "update" and current is None:
+                sys.exit("NO CHANGE WAS MADE: knowledge record %s does not exist" % record["id"])
+            if sub == "update" and current.get("kind") != record["kind"]:
+                sys.exit("NO CHANGE WAS MADE: kind cannot change")
+            if sub == "update" and record["kind"] == "node":
+                record["revision"] = int(current.get("revision") or 1) + 1
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            tmp = target + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(record, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp, target)
+            # Validate the full graph after a staged write. Roll back only the
+            # new bytes, preserving the old record exactly on update failure.
+            _, _, after_errors = _knowledge_records(root)
+            if after_errors:
+                if current is None:
+                    os.unlink(target)
+                else:
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(current, f, indent=2, sort_keys=True)
+                        f.write("\n")
+                    os.replace(tmp, target)
+                sys.exit("NO CHANGE WAS MADE: " + "; ".join(after_errors))
+            print("%s knowledge %s at %s" % ("added" if sub == "add" else "updated",
+                                               record["id"], target))
+            return
+        sys.exit("knowledge: list | show | query | add | update | validate")
+
+    if sub not in ("list", "show"):
+        sys.exit("no knowledge graph at %s; expected manifest.json" % root)
+    # Legacy v0 Markdown catalog: read-only, never injected.
     if sub == "list":
         if not os.path.isdir(root):
             print("no team knowledge tree at %s" % root)
@@ -7211,7 +7744,7 @@ def cmd_knowledge(a, board):
             print("%-16s %-36s [%s]  docs/knowledge/%s" % (
                 d["id"], d["title"][:36], tags, d["rel"]))
         print("")
-        print("%d doc(s)  standing inject is tickets brief / .tickets/briefs/ (E-013)" % len(docs))
+        print("%d legacy doc(s); create knowledge/manifest.json for graph inheritance" % len(docs))
         return
     if sub == "show":
         slug = (getattr(a, "slug", "") or "").strip()
@@ -7226,7 +7759,7 @@ def cmd_knowledge(a, board):
         print(doc["body"].rstrip())
         print()
         return
-    sys.exit("knowledge: list | show <id>  (inject is tickets brief, not this verb)")
+    sys.exit("knowledge: list | show <id>")
 
 
 def utilization(board, tickets=None, hours=24, live=None):
@@ -7847,6 +8380,10 @@ def cmd_codex_hook(a, board):
     if p.get("broadcasts"):
         lines.append("- %d unread broadcasts: `tickets inbox`" % p["broadcasts"])
     lines.append("- Loop: tickets inbox -> tickets mine / tickets next -> work -> tickets update -> tickets sync -> tickets review")
+    used = len("\n".join(lines))
+    inherited = knowledge_context(board, owner, max_chars=max(500, 1850 - used))
+    if inherited:
+        lines.append(inherited)
     print(json.dumps({"hookSpecificOutput": {"hookEventName": name, "additionalContext": "\n".join(lines)[:1900]}}))
 
 
@@ -10187,11 +10724,12 @@ CURSOR_HOOK = r'''#!/usr/bin/env python3
 Reads the hook event JSON on stdin, writes {additional_context, user_message}
 on stdout. Keeps its own watermark so `tickets inbox` read-state is untouched.
 Identity comes from $TICKET_AGENT (defaults to the name given at install)."""
-import json, os, sys
+import json, os, subprocess, sys
 from pathlib import Path
 
 AGENT = os.environ.get("TICKET_AGENT", "%(agent)s")
 BOARD = Path(os.environ.get("TICKETS_DIR", %(board)r))
+TICKETS = %(script)r
 STATE = Path(__file__).resolve().parent / "state" / ("board-%%s.json" %% AGENT)
 
 def main():
@@ -10200,15 +10738,13 @@ def main():
     except ValueError:
         event = {}
     path = BOARD / "messages.jsonl"
-    if not path.is_file():
-        print("{}"); return 0
     STATE.parent.mkdir(parents=True, exist_ok=True)
     last = ""
     if STATE.exists():
         try: last = json.loads(STATE.read_text()).get("last_at", "")
         except ValueError: pass
     new = []
-    for ln in path.read_text().splitlines():
+    for ln in path.read_text().splitlines() if path.is_file() else []:
         try: m = json.loads(ln)
         except ValueError: continue
         if (m.get("at") or "") <= last: continue
@@ -10217,14 +10753,26 @@ def main():
         if m.get("from") == AGENT and to in ("", "all", "everyone"): continue
         new.append(m)
     out = {}
+    lines = []
     if new:
         lines = ["Ticket board: %%d new message(s) for %%s. Reply with `tickets msg`." %% (len(new), AGENT)]
         for m in new[-12:]:
             lines.append("- %%s %%s -> %%s%%s: %%s" %% (m.get("at","?")[5:16], m.get("from","?"), m.get("to") or "everyone",
                          (" [%%s]" %% m["re"]) if m.get("re") else "", (m.get("text") or "")[:220]))
-        out["additional_context"] = "\n".join(lines)[:3500]
         out["user_message"] = "%%d new ticket-board message(s) for %%s" %% (len(new), AGENT)
         STATE.write_text(json.dumps({"last_at": new[-1].get("at", last)}))
+    if event.get("hook_event_name") in ("SessionStart", "UserPromptSubmit"):
+        env = dict(os.environ, TICKETS_DIR=str(BOARD), TICKET_AGENT=AGENT)
+        try:
+            result = subprocess.run(
+                [sys.executable, TICKETS, "knowledge", "query", "--agent", AGENT,
+                 "--max-chars", "1600"], capture_output=True, text=True, timeout=4, env=env)
+            if result.returncode == 0 and result.stdout.strip() != "no relevant knowledge found":
+                lines.append(result.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if lines:
+        out["additional_context"] = "\n".join(lines)[:3500]
     print(json.dumps(out)); return 0
 
 if __name__ == "__main__":
@@ -10233,8 +10781,7 @@ if __name__ == "__main__":
 
 
 def cmd_hooks(a, board):
-    """Install board hooks for a tool: claude (global settings.json) or cursor
-    (project .cursor/hooks). Codex has no hooks; AGENTS.md carries the protocol."""
+    """Install board and bounded-knowledge hooks for Claude, Codex, or Cursor."""
     root = os.path.dirname(board)
     script = os.path.realpath(__file__)
     def ours(entry):
@@ -10315,7 +10862,8 @@ def cmd_hooks(a, board):
             print("%s exists; --force to overwrite" % sp)
         else:
             with open(sp, "w") as f:
-                f.write(CURSOR_HOOK % {"agent": a.agent or "cursor", "board": board})
+                f.write(CURSOR_HOOK % {"agent": a.agent or "cursor", "board": board,
+                                       "script": script})
             os.chmod(sp, 0o755)
         hp = os.path.join(root, ".cursor", "hooks.json")
         try:
@@ -10719,6 +11267,8 @@ def main():
                    help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
+    c.add_argument("--knowledge-dir", default="",
+                   help="canonical repo-backed knowledge/ directory inherited by this seat")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
@@ -10922,6 +11472,8 @@ def main():
     c.add_argument("--role", default="",
                    help="update role standing context at .tickets/briefs/roles/<role>.md (T-529 inject source)")
     c.add_argument("--ticket", default="", help="attach to a ticket instead (owner is messaged)")
+    c.add_argument("--knowledge", dest="knowledge_id", default="",
+                   help="attach only a knowledge:<id> reference to --ticket")
     c.add_argument("--file", default="", help="replace the agent or role brief from a file")
     c.add_argument("--show", action="store_true")
     c.add_argument("--by", default="")
@@ -11195,15 +11747,34 @@ def main():
     c.set_defaults(fn=cmd_context)
 
     c = sub.add_parser("knowledge", aliases=["kb"],
-                       help="index tracked team docs (list | show); inject is E-013 briefs, not this verb")
+                       help="query or author the separate repo-backed knowledge graph")
     c.add_argument("--tag", default="", help="filter list by tag")
+    c.add_argument("--type", dest="node_type", default="", help="filter list by node type")
+    c.add_argument("--stale", action="store_true", help="list only stale facts")
     c.add_argument("--json", action="store_true")
     ks = c.add_subparsers(dest="knowledge_cmd")
-    x = ks.add_parser("list", help="index the docs/knowledge tree")
+    x = ks.add_parser("list", help="list current graph facts")
     x.add_argument("--tag", default="", help="filter list by tag")
+    x.add_argument("--type", dest="node_type", default="", help="filter by node type")
+    x.add_argument("--stale", action="store_true", help="list only stale facts")
     x.add_argument("--json", action="store_true")
-    x = ks.add_parser("show", help="print one doc")
+    x = ks.add_parser("show", help="print one node or edge with provenance")
     x.add_argument("slug")
+    x = ks.add_parser("query", help="return a compact task-relevant subgraph")
+    x.add_argument("query", nargs="?", default="")
+    x.add_argument("--agent", default="", help="include this seat's role/harness/capabilities")
+    x.add_argument("--ticket", default="", help="include one ticket as query input; ticket is not the store")
+    x.add_argument("--role", action="append", default=[])
+    x.add_argument("--cap", action="append", default=[])
+    x.add_argument("--harness", default="")
+    x.add_argument("--max-chars", type=int, default=None)
+    x.add_argument("--max-nodes", type=int, default=12)
+    x.add_argument("--json", action="store_true")
+    x = ks.add_parser("add", help="add one validated node/edge JSON file")
+    x.add_argument("file")
+    x = ks.add_parser("update", help="replace one record and increment node revision")
+    x.add_argument("file")
+    ks.add_parser("validate", help="validate schema and graph references")
     c.set_defaults(fn=cmd_knowledge, slug="")
 
     c = sub.add_parser("mine", help="list tickets claimed by this agent")

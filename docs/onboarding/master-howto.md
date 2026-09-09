@@ -21,11 +21,10 @@ model router.
    `.tickets/briefs/roles/<role>.md`. Set `tickets objective`.
 4. Smoke with a **custom dry harness** (no paid model). Then `tickets spawn`
    / `tickets watch` real workers.
-5. Role context is markdown injected on watch/spawn. Repo-root `roles/` is a
-   **template only**. Inject reads `.tickets/briefs/` and nowhere else.
-   KB v0 is board docs + tracked docs + those briefs — same E-013 contract.
-   [docs/knowledge/](../knowledge/README.md). Standing files. Not a memory
-   product.
+5. Role context comes from `.tickets/briefs/`; repo-root `roles/` is a
+   **template only**. Separately, the prompt renderer selects a bounded,
+   task-relevant subgraph from repo-backed `knowledge/`. See
+   [shared knowledge](../knowledge/README.md).
 6. Open `tickets ui` → <http://127.0.0.1:8765>. On the board, **`—` means
    unknown** (not measured yet) — it is not zero. Median turns / yield@cost
    stay `—` until a done ticket reports.
@@ -226,14 +225,14 @@ Exactly one target: agent name, `--role`, or `--ticket`.
 Missing role file is not an error. That lane simply has no extra paragraph.
 Do not treat silence as "it loaded the template."
 
-KB v0 is those briefs plus board docs plus tracked
-[docs/knowledge/](../knowledge/README.md). Same E-013 inject. It is **not**
-a fourth onboarding file, a vector DB, or auto-sync into role briefs.
-Add / tag / how seats see it: [knowledge/howto.md](../knowledge/howto.md).
+Briefs are operator-written standing instructions. Durable decisions, evidence,
+failures, runbooks, and skills live in the separate repo-backed
+[knowledge graph](../knowledge/README.md). Relevant graph summaries enter the
+same prompt renderer under a strict budget; tickets may reference their IDs.
 
 ```sh
-tickets knowledge                     # index of tracked docs
-tickets knowledge show kb-lock
+tickets knowledge validate
+tickets knowledge query "current component task" --agent boss
 tickets brief --role backend --show   # what inject will actually send
 ```
 
@@ -331,12 +330,11 @@ Details: `tickets guide`, [connect-claude.md](../connect-claude.md).
 
 ## What not to expect
 
-- **A shared-memory brain.** Briefs are standing markdown. They do not
-  persist chat, tool traces, or "what we learned last Tuesday."
-  KB v0 is board docs + tracked docs + briefs — same lock. No vector DB,
-  no auto-sync role KB.
+- **A shared-memory brain.** Briefs are standing instructions and the knowledge
+  graph is reviewed evidence. Neither persists chat, raw prompts, or tool traces.
 - **Repo-root `roles/` on inject.** E-013 path lock. Templates only.
-  `docs/knowledge/` is catalog. It is not read on inject.
+  Repo-root `roles/` remains template-only. Relevant `knowledge/` summaries use
+  the separate bounded graph selector.
 - **The runtime to drive the model's inner loop.** It hands a prompt file
   and a cwd. Reasoning, tools, retries, and stop are the harness.
 - **Parsed harness stdout.** Only exit code (backoff / `harness check`).
@@ -437,19 +435,16 @@ One renderer. Built-in CLIs and `{prompt_file}` get the same text.
 1. `.tickets/briefs/_shared.md` (if non-empty)
 2. `.tickets/briefs/roles/<role>.md` for each role in `roles.json` for that
    agent, in listed order (skip `_shared`, skip dupes, skip missing files)
+3. Relevant repo-backed `knowledge/` subgraph, deduplicated and bounded
 
 **Then, workers only** (`tickets prompt`, or watch/spawn without `--master` /
 `--cos`):
 
-3. Standing brief `.tickets/briefs/<agent>.md`
-4. Heartbeat / standing-seat block, if `drive_every` is set and an
+4. Standing brief `.tickets/briefs/<agent>.md`
+5. Heartbeat / standing-seat block, if `drive_every` is set and an
    objective is open
-5. Ticket context notes (`tickets brief --ticket <id>`) on held tickets
-6. Any extra text the caller passed
-
-Tracked team docs ([docs/knowledge/](../knowledge/README.md)) are **not**
-an inject step. Standing text belongs in the brief files above
-(`tickets brief`). `tickets knowledge show` is on-demand catalog.
+6. Ticket context notes (`tickets brief --ticket <id>`) on held tickets
+7. Any extra text the caller passed
 
 **Then, master / planner / cos** (`tickets prompt --master` / `--cos`, or
 `spawn --master` / `--cos`):
@@ -493,7 +488,8 @@ over, track standing files and ignore state (pattern in Footguns).
 | `HANDOFF.md` (repo root) | what is true about the work | **track** |
 | `docs/handoffs/AGENT_CONTEXT.md` | extra claim briefing (if used) | track if present |
 | `roles/*.md` (repo root) | templates only; **not injected** | tracked in this repo |
-| `docs/knowledge/` | tracked team docs (KB v0 catalog; not injected) | **track** |
+| `knowledge/` | durable graph facts, evidence, runbooks, and skills | **track** |
+| `docs/knowledge/` | graph schema and operator documentation | **track** |
 | `.worktrees/<agent>/` | that agent's git worktree + branch | local (git worktree) |
 | `AGENTS.md`, `.cursor/rules/tickets.mdc` | protocol for Codex / Cursor | track |
 

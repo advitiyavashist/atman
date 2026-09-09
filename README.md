@@ -27,7 +27,7 @@ of:
 | Part | What Atman needs to know |
 | --- | --- |
 | Intelligence | Model or agent harness: Claude Code, Codex, Cursor, Grok, a local model, or your own runner |
-| Working context | Current objective, task, dependency handoffs, messages, and standing briefs |
+| Working context | Current objective, task, dependency handoffs, messages, standing briefs, and relevant reviewed knowledge |
 | Operating boundary | Tools, permissions, worktree, time budget, and usage quota |
 | Capability | What the seat can do, such as backend work, browser checks, Docker, or GPU jobs |
 
@@ -48,6 +48,8 @@ There is no hidden shared-memory claim.
 - A review queue and gated merge flow so submitted work does not silently become
   accepted work.
 - A local dashboard for Objective, Team, Work, Messages, and intervention.
+- A separate repo-backed graph for reviewed decisions, evidence, failures,
+  model pins, runbooks, and reusable skills.
 
 The control plane is the `tickets` CLI: one Python file, standard library only,
 with plain files under `.tickets/`. It does not require a hosted service,
@@ -61,14 +63,12 @@ Coordination and knowledge are separate parts of the system.
 messages, evidence, and review. They answer: *what should happen next, and who
 owns it?*
 
-**Team knowledge supplies context.** The current v0 is deliberately simple:
-tracked documents, board briefings, and role or agent briefs. It answers: *what
-does this agent need to know before it starts?* See
+**Team knowledge supplies context.** A local, repo-backed graph records typed
+projects, components, decisions, artifacts, model pins, experiments, failures,
+runbooks, skills, and agent capabilities with sources, verification, confidence,
+and staleness. Every harness receives the same bounded, task-relevant subgraph;
+tickets carry only `knowledge:<id>` references. See
 [Team knowledge](docs/knowledge/README.md).
-
-The next knowledge layer will map objectives, decisions, artifacts, and prior
-work so a new agent inherits the smallest useful context instead of repeating
-discovery. It remains separate from the task state machine.
 
 **Brahman is the research path, not a shipped Atman feature.** That work tests
 whether models can transfer useful state more efficiently than text alone,
@@ -193,7 +193,7 @@ diagnosis, and `tickets who` for live ownership and worktrees.
 
 ## Inspectable by design
 
-Everything lives under the project’s `.tickets/` directory:
+Coordination lives under the project’s `.tickets/` directory:
 
 | Path | Purpose |
 | --- | --- |
@@ -203,6 +203,9 @@ Everything lives under the project’s `.tickets/` directory:
 | `messages.jsonl` | Append-only team and direct messages |
 | `MASTER.md` | Objective context and durable decision log |
 | `briefs/` | Shared, role, and agent-specific standing context |
+
+Durable facts live separately under tracked `knowledge/`. Closing or clearing a
+ticket does not erase its decisions, evidence, or runbooks.
 
 `tickets init` ignores the live board by default. Standing briefings can be
 tracked when the team needs them to survive clones; see the

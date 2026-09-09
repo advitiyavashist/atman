@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "atman-depends-on-knowledge", "type": "depends_on",
+  "from": "project.atman", "to": "component.atman-knowledge",
+  "source": {"kind": "ticket", "ref": "T-620"}, "recorded_at": "2026-09-09T03:02:00Z",
+  "owner": "atman-knowledge", "last_verified_at": "2026-09-09T03:02:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": 90
+}

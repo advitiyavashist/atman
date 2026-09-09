@@ -1,0 +1,20 @@
+{
+  "kind": "node",
+  "id": "project.atman",
+  "type": "project",
+  "title": "Atman",
+  "summary": "Multi-agent management that keeps agents separable while giving each model the smallest useful inherited context.",
+  "tags": ["atman", "agents", "context", "product"],
+  "applies_to": ["all", "atman", "master", "infra"],
+  "source": {"kind": "ticket", "ref": "T-620 user product direction"},
+  "recorded_at": "2026-09-09T02:20:00Z",
+  "owner": "product",
+  "last_verified_at": "2026-09-09T02:20:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": null,
+  "revision": 1,
+  "data": {
+    "vision": "An agent is model intelligence plus the context available at this turn. Atman manages the team and delivers relevant context without merging agent identities or histories."
+  }
+}

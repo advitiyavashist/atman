@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "component.steer-gliner",
+  "type": "component",
+  "title": "Steer GLiNER detector experiment",
+  "summary": "Experimental semantic detector lane; GPU results do not change production local_rules without a separate named decision.",
+  "tags": ["steer", "gliner", "detection", "gpu"],
+  "applies_to": ["steer", "detection", "evals", "gpu"],
+  "source": {"kind": "ticket", "ref": "T-613 acceptance and no-flip rule"},
+  "recorded_at": "2026-09-09T02:40:00Z",
+  "owner": "detection",
+  "last_verified_at": "2026-09-09T02:40:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {"production_provider": "local_rules", "experimental_only": true}
+}

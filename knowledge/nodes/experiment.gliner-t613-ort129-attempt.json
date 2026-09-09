@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "experiment.gliner-t613-ort129-attempt",
+  "type": "experiment",
+  "title": "T-613 ORT 1.29 provider-proof attempt",
+  "summary": "The T4 provider-proof attempt stopped before GLiNER download because its profiled synthetic MatMul had zero CUDA nodes.",
+  "tags": ["steer", "gliner", "onnxruntime", "cuda", "experiment", "failure"],
+  "applies_to": ["steer", "detection", "gpu", "modal"],
+  "source": {"kind": "job", "ref": "Modal fc-01M20XTX9YMQQEE2ZS70X633SV; steer:detection-mle@851dc88"},
+  "recorded_at": "2026-09-09T03:01:00Z",
+  "owner": "gliner-cuda-measure",
+  "last_verified_at": "2026-09-09T03:01:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {"status": "fail_closed", "cuda_profile_nodes": 0, "gliner_downloaded": false}
+}

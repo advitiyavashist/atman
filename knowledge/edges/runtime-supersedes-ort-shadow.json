@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "runtime-supersedes-ort-shadow", "type": "supersedes",
+  "from": "runbook.gliner-t4-runtime", "to": "failure.gliner-cpu-ort-shadow",
+  "source": {"kind": "repository", "ref": "steer:sol/t613-gliner-gpu@373b325"}, "recorded_at": "2026-09-09T03:05:00Z",
+  "owner": "sol-gliner", "last_verified_at": "2026-09-09T03:05:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": 30
+}

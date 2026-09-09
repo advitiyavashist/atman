@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "namespace-failure-applies-to-gliner", "type": "applies_to",
+  "from": "failure.gliner-namespace-cross-worktree", "to": "component.steer-gliner",
+  "source": {"kind": "ticket", "ref": "T-613 notes"}, "recorded_at": "2026-09-09T03:04:00Z",
+  "owner": "sol-gliner", "last_verified_at": "2026-09-09T03:04:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": 30
+}

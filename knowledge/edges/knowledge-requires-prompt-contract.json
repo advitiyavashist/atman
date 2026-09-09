@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "knowledge-requires-prompt-contract", "type": "requires",
+  "from": "component.atman-knowledge", "to": "capability.shared-prompt-file",
+  "source": {"kind": "repository", "ref": "atman:tickets.py#prompt_text"}, "recorded_at": "2026-09-09T03:03:00Z",
+  "owner": "atman-knowledge", "last_verified_at": "2026-09-09T03:03:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": 90
+}
