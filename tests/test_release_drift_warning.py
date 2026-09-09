@@ -11,6 +11,7 @@ not just --version -- while the command still runs.
 """
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -78,7 +79,7 @@ def test_an_untampered_ordinary_command_prints_no_warning(source, tmp_path):
     assert result.stderr == ""
 
 
-def test_an_untampered_release_hashes_nothing_on_the_hot_path(source, tmp_path, monkeypatch):
+def test_an_untampered_release_hashes_every_manifest_entry(source, tmp_path, monkeypatch):
     repo, sha = source
     live = tmp_path / "tools/tickets.py"
     installer.install(repo, sha, live, activate=True)
@@ -94,7 +95,8 @@ def test_an_untampered_release_hashes_nothing_on_the_hot_path(source, tmp_path, 
 
     status = module.release_status()
     assert status == "tickets commit %s (verified release)" % sha
-    assert calls == [], "cheap size check against the manifest should skip hashing entirely"
+    manifest = json.loads((release / "release.json").read_text())
+    assert len(calls) == len(manifest["files"])
 
 
 def test_an_old_format_manifest_without_size_still_detects_drift(source, tmp_path):

@@ -129,6 +129,12 @@ def test_release_manifest_lists_every_exported_byte(source, tmp_path):
     manifest = json.loads((release / "release.json").read_text())
     expected = set(installer.export_paths(repo, sha))
     assert set(manifest["files"]) == expected
+    installed = {
+        str(path.relative_to(release))
+        for path in release.rglob("*")
+        if path.is_file() and path.name != "release.json"
+    }
+    assert installed == expected
     for rel in sorted(expected):
         path = release / rel
         assert path.is_file(), rel
@@ -145,7 +151,10 @@ def test_tampered_package_file_is_drifted(source, tmp_path):
     release = live.parent / "tickets-releases" / sha
     target = release / "src/ticket_board/prices.json"
     target.chmod(0o644)
-    target.write_text("{}\n")
+    original = target.read_text()
+    tampered = original.replace('"v": 1', '"v": 9', 1)
+    assert len(tampered) == len(original)
+    target.write_text(tampered)
 
     tickets_spec = importlib.util.spec_from_file_location(
         "tickets_release_%s" % release.name, str(release / "tickets.py"))
@@ -153,3 +162,18 @@ def test_tampered_package_file_is_drifted(source, tmp_path):
     tickets_spec.loader.exec_module(module)
     assert "DRIFTED" in module.release_status()
     assert "src/ticket_board/prices.json" in module.release_status()
+
+
+def test_unmanifested_package_file_is_drifted(source, tmp_path):
+    repo, sha = source
+    live = tmp_path / "tools/tickets.py"
+    release = installer.install(repo, sha, live, activate=False)
+    extra = release / "src/ticket_board/injected.py"
+    extra.write_text("raise RuntimeError('unmanifested code executed')\n")
+
+    tickets_spec = importlib.util.spec_from_file_location(
+        "tickets_release_%s" % release.name, str(release / "tickets.py"))
+    module = importlib.util.module_from_spec(tickets_spec)
+    tickets_spec.loader.exec_module(module)
+    assert "DRIFTED" in module.release_status()
+    assert "src/ticket_board/injected.py" in module.release_status()

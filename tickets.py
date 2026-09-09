@@ -35,6 +35,13 @@ import sys
 import threading
 from datetime import datetime, timezone
 
+# Immutable releases verify every shipped byte before dispatch.  Do not add
+# interpreter-generated files under the verified package tree after that
+# check, or the next invocation would correctly report an unexpected file.
+if os.path.isfile(os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                               "release.json")):
+    sys.dont_write_bytecode = True
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -10559,14 +10566,10 @@ def _release_commit():
 def release_status():
     """Report installed provenance without discovering or touching a board.
 
-    Checks size before hashing content: an untampered file's size matches
-    the manifest's recorded size for it, and that comparison is a single
-    stat() call instead of reading and sha256-ing the whole file. Content
-    is only ever hashed when a file's size does not match -- which is also
-    exactly when we already know it drifted, so this is never a speculative
-    cost, only a confirming one. A manifest written before this field
-    existed (bare hash string instead of {"sha256", "size"}) falls back to
-    always hashing, matching the old behavior exactly.
+    Every manifest entry is hashed.  Size alone cannot establish integrity:
+    different bytes of the same length must never be reported as verified.
+    Package trees are also closed over the manifest so an extra importable
+    file cannot enter an otherwise pinned release.
     """
     import hashlib
     root = os.path.dirname(os.path.realpath(__file__))
@@ -10576,17 +10579,50 @@ def release_status():
     try:
         with open(manifest) as source:
             release = json.load(source)
-        for name in sorted(release["files"]):
+        files = release["files"]
+        package_roots = sorted({"/".join(name.split("/")[:2])
+                                for name in files if name.startswith("src/")
+                                and len(name.split("/")) > 2})
+        for package_root in package_roots:
+            package_path = os.path.join(root, *package_root.split("/"))
+            expected_dirs = {os.path.dirname(name) for name in files
+                             if name.startswith(package_root + "/")}
+            expected_dirs.add(package_root)
+            for directory in tuple(expected_dirs):
+                parent = os.path.dirname(directory)
+                while parent.startswith(package_root):
+                    expected_dirs.add(parent)
+                    if parent == package_root:
+                        break
+                    parent = os.path.dirname(parent)
+            if os.path.islink(package_path):
+                return "tickets DRIFTED release %s (%s)" % (
+                    release["commit"], package_root)
+            for dirpath, dirnames, filenames in os.walk(package_path):
+                for dirname in dirnames:
+                    actual_name = os.path.relpath(
+                        os.path.join(dirpath, dirname), root).replace(os.sep, "/")
+                    if actual_name not in expected_dirs or os.path.islink(
+                            os.path.join(dirpath, dirname)):
+                        return "tickets DRIFTED release %s (%s)" % (
+                            release["commit"], actual_name)
+                for filename in filenames:
+                    actual_name = os.path.relpath(
+                        os.path.join(dirpath, filename), root).replace(os.sep, "/")
+                    if actual_name not in files:
+                        return "tickets DRIFTED release %s (%s)" % (
+                            release["commit"], actual_name)
+        for name in sorted(files):
             path = os.path.join(root, name)
-            recorded = release["files"][name]
+            recorded = files[name]
             expected_sha, expected_size = (
                 (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
                 else (recorded, None))
-            if expected_size is not None and os.stat(path).st_size == expected_size:
-                continue
             with open(path, "rb") as source:
-                actual = hashlib.sha256(source.read()).hexdigest()
-            if actual != expected_sha:
+                data = source.read()
+            actual = hashlib.sha256(data).hexdigest()
+            if ((expected_size is not None and len(data) != expected_size)
+                    or actual != expected_sha):
                 return "tickets DRIFTED release %s (%s)" % (release["commit"], name)
         return "tickets commit %s (verified release)" % release["commit"]
     except (OSError, ValueError, KeyError, TypeError):
