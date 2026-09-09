@@ -647,3 +647,64 @@ def test_staged_release_ships_session_adapters(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "ModuleNotFoundError" not in r.stderr
     assert "joined as persist-seat" in r.stdout
+
+
+def test_two_concurrent_register_cannot_both_win_fence_one(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    monkeypatch.delenv("TICKETS_SESSION_LEASE", raising=False)
+    sock_a = str(Path(sock_dir) / "a.sock")
+    sock_b = str(Path(sock_dir) / "b.sock")
+    Path(sock_a).touch()
+    Path(sock_b).touch()
+    sa = _adapters()
+    results = []
+
+    def one(sock):
+        record = {
+            "seat": "alice", "agent_id": "alice", "provider": "claude", "mode": "native",
+            "socket": sock, "token": "", "pid": os.getpid(), "at": "now",
+        }
+        results.append(sa.commit_endpoint(str(board), "alice", record))
+
+    t1 = threading.Thread(target=one, args=(sock_a,))
+    t2 = threading.Thread(target=one, args=(sock_b,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    oks = [r for r in results if r.get("ok")]
+    fences = [int(r["fence"]) for r in oks]
+    assert len(oks) == 1, results
+    assert fences == [1]
+    ep = sa.read_endpoint(str(board), "alice")
+    assert int(ep.get("fence") or 0) == 1
+
+
+def test_stale_delivery_after_rebind_does_not_mark_new_lease(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    first = str(Path(sock_dir) / "old.sock")
+    second = str(Path(sock_dir) / "new.sock")
+    Path(first).touch()
+    Path(second).touch()
+    monkeypatch.setenv("TICKET_SESSION_PID", str(os.getpid()))
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", first)
+    monkeypatch.delenv("TICKETS_SESSION_LEASE", raising=False)
+    sa = _adapters()
+    first_reg = sa.register_persistent(str(board), "alice", "claude", "t1")
+    assert first_reg.get("ok"), first_reg
+    old_lease = first_reg["lease_id"]
+    old_fence = int(first_reg["record"]["fence"])
+
+    def poke_and_rebind(ep, text):
+        monkeypatch.setenv("TICKETS_SESSION_LEASE", old_lease)
+        monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", second)
+        assert sa.register_persistent(str(board), "alice", "claude", "t2").get("ok")
+        return True
+
+    with mock.patch.object(sa, "_poke_claude", side_effect=poke_and_rebind):
+        label = sa.wake_seat(str(board), "alice", "hello", harness="claude", message_id="old-msg")
+    assert "stale" in label
+    ep = sa.read_endpoint(str(board), "alice")
+    assert ep["socket"] == second
+    assert ep.get("last_delivery_id") != "old-msg"
+    assert ep.get("lease_id") != old_lease

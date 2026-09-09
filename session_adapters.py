@@ -7,6 +7,7 @@ dirs 0700, files 0600). Falls back to supervised watch or the T-640 remote
 bridge when native injection is unavailable.
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -96,6 +97,39 @@ def write_endpoint(board, seat, record):
     return path
 
 
+def _seat_lock_path(board, seat):
+    return os.path.join(endpoint_dir(board), seat + ".lock")
+
+
+def acquire_seat_lock(board, seat):
+    """Exclusive per-seat lock. The lock file is created with O_EXCL once."""
+    d = endpoint_dir(board)
+    root = cache_root()
+    sessions = os.path.join(root, "sessions")
+    for p in (root, sessions, d):
+        _ensure_private_dir(p)
+    path = _seat_lock_path(board, seat)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def release_seat_lock(fd):
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def endpoint_still_live(ep):
     """Whether a stored record is still live. Does not delete it."""
     if not ep:
@@ -123,8 +157,18 @@ def commit_endpoint(board, seat, record, presented_lease=""):
 
     A live same-seat endpoint is exclusive: rebind requires the current
     lease_id, the same session fingerprint, or waiting until the record is
-    stale. Unconditional os.replace is not ownership.
+    stale. Unconditional os.replace is not ownership. Register/rebind is
+    serialized on a per-seat exclusive lock so two first binds cannot both
+    stamp fence=1.
     """
+    fd = acquire_seat_lock(board, seat)
+    try:
+        return _commit_endpoint_locked(board, seat, record, presented_lease)
+    finally:
+        release_seat_lock(fd)
+
+
+def _commit_endpoint_locked(board, seat, record, presented_lease=""):
     taken = other_seat_for_session(board, seat, record)
     if taken:
         return {"ok": False, "reason": "session already bound to %s; refuse identity crosswire" % taken}
@@ -152,15 +196,24 @@ def commit_endpoint(board, seat, record, presented_lease=""):
             "record": redact_endpoint(record)}
 
 
-def touch_endpoint(board, seat, **fields):
-    ep = read_endpoint(board, seat)
-    if not ep:
-        return None
-    ep.update(fields)
-    ep["heartbeat_epoch"] = time.time()
-    ep["heartbeat_at"] = fields.get("heartbeat_at") or ep.get("at") or ""
-    write_endpoint(board, seat, ep)
-    return ep
+def touch_endpoint(board, seat, expected_lease="", expected_fence=None, **fields):
+    """Update a live endpoint only when lease/fence still match the caller."""
+    fd = acquire_seat_lock(board, seat)
+    try:
+        ep = read_endpoint(board, seat)
+        if not ep:
+            return None
+        if expected_lease and (ep.get("lease_id") or "") != expected_lease:
+            return None
+        if expected_fence is not None and int(ep.get("fence") or 0) != int(expected_fence):
+            return None
+        ep.update(fields)
+        ep["heartbeat_epoch"] = time.time()
+        ep["heartbeat_at"] = fields.get("heartbeat_at") or ep.get("at") or ""
+        write_endpoint(board, seat, ep)
+        return ep
+    finally:
+        release_seat_lock(fd)
 
 
 def read_endpoint(board, seat):
@@ -459,6 +512,11 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     if expected and provider and expected != provider:
         remove_endpoint(board, seat)
         return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
+    lease = ep.get("lease_id") or ""
+    try:
+        fence = int(ep.get("fence") or 0)
+    except (TypeError, ValueError):
+        fence = 0
     ok = False
     if provider == "claude":
         ok = _poke_claude(ep, text)
@@ -471,7 +529,15 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     else:
         label = "unsupported provider"
     if ok:
-        touch_endpoint(board, seat, last_delivery_id=mid, last_delivery_status=label)
+        touched = touch_endpoint(
+            board, seat, expected_lease=lease, expected_fence=fence,
+            last_delivery_id=mid, last_delivery_status=label)
+        if touched is None and mid:
+            return "stale (rebound before delivery)"
+    else:
+        touch_endpoint(
+            board, seat, expected_lease=lease, expected_fence=fence,
+            last_attempt_id=mid, last_attempt_status=label)
     return label
 
 

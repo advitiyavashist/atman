@@ -6230,9 +6230,39 @@ def cmd_msg(a, board):
     if to and _message_wakes_seat(board, to, m):
         harness = (load_workforce(board).get(to, {}) or {}).get("harness") or "claude"
         sa = _session_adapters()
+        mid = _msg_id(m)
         label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
-                             message_id=_msg_id(m))
+                             message_id=mid)
         print("wake: %s -> %s" % (to, label))
+        _safe(lambda: _note_native_wake_result(board, to, label, mid), None)
+
+
+def _native_wake_succeeded(label):
+    return bool(label) and (
+        label in ("woken", "queued", "deduped") or str(label).startswith("supervised"))
+
+
+def _note_native_wake_result(board, seat, label, message_id):
+    """Failed native injection stays queued; bounded retry then supervised recovery."""
+    if _native_wake_succeeded(label):
+        def clear(rec):
+            rec.pop("adapter_failure", None)
+        _agent_update(board, seat, clear)
+        return
+    previous = ((_agent_rec(board, seat) or {}).get("adapter_failure") or {})
+    trigger = "native-wake:%s" % (message_id or "")
+    attempts = (int(previous.get("attempts") or 0) + 1
+                if previous.get("trigger") == trigger else 1)
+    retrying = attempts < LOCAL_DISPATCH_MAX_ATTEMPTS
+    if not retrying:
+        _session_adapters().remove_endpoint(board, seat)
+    _agent_set(board, seat, adapter_failure={
+        "state": "retrying" if retrying else "failed",
+        "trigger": trigger, "attempts": attempts,
+        "max_attempts": LOCAL_DISPATCH_MAX_ATTEMPTS,
+        "reason": "native wake %s" % label,
+        "at": now(),
+    })
 
 
 def cmd_inbox(a, board):

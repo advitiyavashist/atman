@@ -70,6 +70,12 @@ Installed releases export `session_adapters.py` next to `tickets.py`
 (`scripts/install_live.py` FILES + smoke `join --persistent`). A staged
 snapshot that omits it fails closed as `ModuleNotFoundError`.
 
+Register/rebind is serialized on a per-seat exclusive lock (`O_EXCL` lock
+file + `fcntl.LOCK_EX`). Delivery `touch` is a no-op unless lease_id and
+fence still match the poke; failed native injection records the attempt,
+keeps the board message queued, and after three attempts drops the native
+endpoint so supervised recovery can run.
+
 `tickets watch` finalizes an in-flight run on SIGTERM: the child is
 terminated and `active=True` is cleared (`interrupted`, rc 143) even if the
 signal arrived between `_run_begin` and `_run_end`.
