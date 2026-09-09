@@ -1,40 +1,14 @@
----
-id: kb-lock
-title: KB v0 lock
-tags: [knowledge, product, master]
----
+# Product boundary
 
-# KB v0 lock
+Atman manages multi-agent work while preserving separability. Models remain independent seats with their own sessions, permissions, worktrees, and context windows. The knowledge graph gives each seat reviewed context relevant to its current task.
 
-**Standing files. Not a memory product.**
+The ticket board and knowledge graph are separate:
 
-The team shares **files the next reader can open** — board docs, tracked
-docs, and briefs. That is KB v0. Nothing else.
+| system | owns | does not own |
+|---|---|---|
+| Ticket board | assignment, dependencies, status, messages, liveness | durable technical truth |
+| Knowledge graph | decisions, pins, evidence, failures, runbooks, skills | assignment or agent lifecycle |
 
-## In (KB v0)
+A ticket can reference `knowledge:<id>`. Closing or clearing tickets does not delete the referenced record. A knowledge entry cannot claim, unblock, merge, or close a ticket.
 
-| Slice | Where |
-|---|---|
-| Board docs | `.tickets/MASTER.md`, optional `CONTEXT.md`, repo `HANDOFF.md` |
-| Tracked docs | `docs/knowledge/` and other committed guides |
-| Briefs | `.tickets/briefs/_shared.md`, `roles/<role>.md`, `<agent>.md` |
-
-Inject is E-013: watch / spawn / `tickets prompt` read those brief
-paths and nowhere else. Repo-root `roles/` is a template. This tree is
-a catalog. Missing brief = no block.
-
-Trajectories and harness session state stay what they were (turns/cost;
-the runner's own context). They are not a knowledge product and they
-are not a second inject root.
-
-## Out
-
-- Shared-memory brain, latent "what we learned Tuesday"
-- Vector DB, embeddings, graph-doc product
-- Auto-sync role KB (copying this tree into briefs on a schedule or by tag)
-- Modal, or any remote memory service
-- A fourth file on the master onboarding path (`MASTER.md`, `HANDOFF.md`,
-  `tickets map`)
-
-Silence means the operator did not write the brief and the seat did not
-open a tracked doc. That is honest.
+V1 is repo-backed JSON with deterministic lexical search and typed edges. Add embeddings, an external database, or learned ranking only after measured scale or retrieval quality shows the local design is insufficient.

@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "experiment.gliner-t613-native-t4",
+  "type": "experiment",
+  "title": "GLiNER native PyTorch CUDA on Tesla T4",
+  "summary": "Valid native CUDA evidence: batch-1 warm p50 13.364 ms, p95 13.771 ms, cold 14.442 ms, load 3.151 s; exact spans matched 5/5. This is separate from ONNX evidence.",
+  "tags": ["steer", "gliner", "cuda", "pytorch", "latency", "evidence"],
+  "applies_to": ["steer", "detection", "evals", "gpu"],
+  "source": {"kind": "job", "ref": "Modal fc-01M221DBPDJ6GN24EWCJJF0FQ5; steer:sol/t613-gliner-gpu@dfe88c1 result JSON"},
+  "recorded_at": "2026-09-09T02:56:00Z",
+  "owner": "sol-gliner",
+  "last_verified_at": "2026-09-09T02:56:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {"device": "Tesla T4", "runtime": "pytorch_cuda", "batch_size": 1, "p50_ms": 13.364, "p95_ms": 13.771, "cold_ms": 14.442, "load_seconds": 3.151, "parity_exact_spans": "5/5"}
+}

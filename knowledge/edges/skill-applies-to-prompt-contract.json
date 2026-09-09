@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "skill-applies-to-prompt-contract", "type": "applies_to",
+  "from": "skill.shared-knowledge", "to": "capability.shared-prompt-file",
+  "source": {"kind": "skill", "ref": "atman:knowledge/skills/shared-knowledge/SKILL.md"}, "recorded_at": "2026-09-09T03:03:00Z",
+  "owner": "atman-knowledge", "last_verified_at": "2026-09-09T03:03:00Z",
+  "verification": "verified", "confidence": 1.0, "stale_after_days": 90
+}

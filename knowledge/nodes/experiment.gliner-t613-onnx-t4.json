@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "experiment.gliner-t613-onnx-t4",
+  "type": "experiment",
+  "title": "GLiNER FP32 ONNX CUDA on Tesla T4",
+  "summary": "Valid ONNX CUDA evidence: batch-1 warm p50 7.573 ms, p95 8.351 ms, cold 7.953 ms, load 3.195 s; 593/1104 profiled nodes and 68 heavy MatMul nodes ran on CUDA; exact spans matched 5/5.",
+  "tags": ["steer", "gliner", "cuda", "onnxruntime", "latency", "evidence"],
+  "applies_to": ["steer", "detection", "evals", "gpu"],
+  "source": {"kind": "job", "ref": "Modal fc-01M221DBPDJ6GN24EWCJJF0FQ5; steer:sol/t613-gliner-gpu@dfe88c1 result JSON"},
+  "recorded_at": "2026-09-09T02:58:00Z",
+  "owner": "sol-gliner",
+  "last_verified_at": "2026-09-09T02:58:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {"device": "Tesla T4", "runtime": "onnxruntime_gpu_1.26.0", "precision": "FP32", "batch_size": 1, "p50_ms": 7.573, "p95_ms": 8.351, "cold_ms": 7.953, "load_seconds": 3.195, "cuda_nodes": 593, "heavy_cuda_nodes": 68, "parity_exact_spans": "5/5", "mean_score_delta": 0.020728}
+}

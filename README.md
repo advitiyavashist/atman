@@ -56,8 +56,9 @@ Taking the **master** seat (Claude / Cursor / Codex as the board
 coordinator): [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md)
 — folders, install, first commands, role-context briefs, what not to
 expect. Index: [docs/onboarding/README.md](docs/onboarding/README.md).
-Team knowledge — **Standing files. Not a memory product.** KB v0 = board
-docs + tracked docs + briefs (E-013 inject):
+Shared knowledge is a separate repo-backed graph of decisions, pins, evidence,
+failures, runbooks, and skills. Tickets coordinate work and may reference graph
+IDs; all prompt-file harnesses inherit the same bounded relevant subgraph:
 [docs/knowledge/README.md](docs/knowledge/README.md).
 
 ## The model
@@ -169,8 +170,7 @@ tickets graph                                    # who waits on whom, with statu
 
 ## Where the data lives
 
-Everything is `.tickets/` at the repo root — plain files you can read, diff and
-commit:
+Coordination lives in `.tickets/` at the repo root:
 
 | path | what |
 | --- | --- |
@@ -179,11 +179,11 @@ commit:
 | `agents/`, `roles.json`, `workforce.json` | who exists, what they can do |
 | `messages.jsonl` | append-only message log |
 | `MASTER.md` | master context and the decision log |
-| `briefs/_shared.md`, `briefs/roles/<role>.md`, `briefs/<agent>.md` | standing context injected on watch/spawn (E-013); not a shared-memory brain |
+| `briefs/_shared.md`, `briefs/roles/<role>.md`, `briefs/<agent>.md` | operator-written standing instructions injected on watch/spawn |
 
-KB v0 is board docs + tracked docs
-([docs/knowledge/](docs/knowledge/README.md)) + those briefs — the same
-E-013 inject. Not a shared-memory brain, vector DB, or auto-sync role KB.
+Durable facts live separately under `knowledge/`: typed nodes, typed edges,
+provenance, verification, staleness, runbooks, and skills. Tickets may reference
+`knowledge:<id>`, but clearing the board does not clear knowledge.
 
 `tickets init` gitignores the board by default (`--track` to commit it
 instead). Standing files (`MASTER.md`, `briefs/`) should still be tracked —

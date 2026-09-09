@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "atman-shared-knowledge",
+  "context_budget_chars": 3600,
+  "description": "Versioned facts, evidence relationships, runbooks, and reusable agent skills. Separate from ticket coordination."
+}

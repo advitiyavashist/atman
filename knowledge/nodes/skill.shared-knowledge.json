@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "skill.shared-knowledge",
+  "type": "skill",
+  "title": "Query and maintain shared knowledge",
+  "summary": "Query verified knowledge before repeating investigation; follow sources, revalidate stale facts, and link failures to corrected runbooks.",
+  "tags": ["skill", "knowledge", "dedup", "handoff"],
+  "applies_to": ["all", "claude", "codex", "cursor", "grok", "custom"],
+  "source": {"kind": "skill", "ref": "atman:knowledge/skills/shared-knowledge/SKILL.md"},
+  "recorded_at": "2026-09-09T02:35:00Z",
+  "owner": "atman-knowledge",
+  "last_verified_at": "2026-09-09T02:35:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 90,
+  "revision": 1,
+  "data": {"entrypoint": "knowledge/skills/shared-knowledge/SKILL.md"}
+}

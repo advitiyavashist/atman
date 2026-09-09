@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "artifact.gliner-t613-result",
+  "type": "artifact",
+  "title": "T-613 CUDA latency result artifact",
+  "summary": "Canonical machine-readable result for the native and ONNX T4 arms; retain the job ID and branch commit when moving it to main.",
+  "tags": ["steer", "gliner", "artifact", "evidence"],
+  "applies_to": ["steer", "detection", "evals", "gpu"],
+  "source": {"kind": "repository", "ref": "steer:sol/t613-gliner-gpu@dfe88c1 docs/evals/t613-gliner-modal-cuda-onnx-result.json"},
+  "recorded_at": "2026-09-09T03:00:00Z",
+  "owner": "sol-gliner",
+  "last_verified_at": "2026-09-09T03:00:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {"ticket": "T-613", "commit": "dfe88c1", "job_id": "fc-01M221DBPDJ6GN24EWCJJF0FQ5"}
+}

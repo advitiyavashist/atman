@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "model.gliner-pii-base-v1",
+  "type": "model_pin",
+  "title": "Knowledgator GLiNER PII base v1.0",
+  "summary": "Pinned public GLiNER comparison model: knowledgator/gliner-pii-base-v1.0. Preserve the exact downloaded file manifest in experiment evidence.",
+  "tags": ["steer", "gliner", "model", "pii"],
+  "applies_to": ["steer", "detection", "evals", "gpu"],
+  "source": {"kind": "repository", "ref": "steer:experiments/model_benchmark/discovery.json"},
+  "recorded_at": "2026-09-09T02:42:00Z",
+  "owner": "detection",
+  "last_verified_at": "2026-09-09T02:42:00Z",
+  "verification": "observed",
+  "confidence": 0.98,
+  "stale_after_days": 30,
+  "revision": 1,
+  "data": {"model_id": "knowledgator/gliner-pii-base-v1.0", "revision": "record in each experiment artifact"}
+}

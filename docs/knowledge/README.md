@@ -1,57 +1,28 @@
----
-id: knowledge
-title: Team knowledge
-tags: [knowledge, index, onboarding]
----
+# Shared knowledge
 
-# Team knowledge
+Atman keeps durable knowledge separate from work coordination.
 
-**Standing files. Not a memory product.**
+- `.tickets/` answers who is doing what, what is blocked, and what is ready.
+- `knowledge/` answers what the team knows, why it believes it, where the evidence lives, whether it is stale, and which runbook or skill applies next.
 
-## KB v0 lock (CEO / PM)
-
-**KB v0 = board docs + tracked docs + `.tickets/briefs/` (`_shared` /
-`roles/<role>` / `<agent>`) — the same E-013 inject contract.**
-
-| Slice | Where | How a seat sees it |
-|---|---|---|
-| Board docs | `.tickets/MASTER.md`, `CONTEXT.md`, repo `HANDOFF.md` | `tickets master`, `tickets context`, claim briefing |
-| Tracked docs | `docs/knowledge/` (this tree) and other committed guides | `tickets knowledge` / `show`, or open the file |
-| Briefs | `.tickets/briefs/_shared.md`, `roles/<role>.md`, `<agent>.md` | watch / spawn / `tickets prompt` (E-013) |
-
-That is the whole product. Standing context reaches a prompt **only**
-through those brief files. Tracked docs are the catalog. Board docs are
-the live mission.
-
-**Not v0 (do not build):**
-
-- A shared-memory brain / latent mind / “what we learned Tuesday” store
-- A vector DB, embeddings, or graph-doc index
-- Auto-sync from this tree into role briefs (no `knowledge pin`, no
-  tag→role dump, no second inject root)
-
-`$TICKETS_KNOWLEDGE_DIR` overrides the tree (tests). There is no
-`.tickets/knowledge/` store.
-
-| If you are… | Read |
-|---|---|
-| Adding a doc, tagging it, how seats see it | [howto.md](howto.md) |
-| What is in vs out of KB v0 | [kb-lock.md](kb-lock.md) |
-| How text reaches a prompt | [inject.md](inject.md) |
-
-Index (also `tickets knowledge`):
-
-| id | Title | Tags |
-|---|---|---|
-| knowledge | This page | knowledge, index, onboarding |
-| howto | Add a doc, tag it, how seats see it | howto, operator |
-| kb-lock | KB v0 lock | knowledge, product, master |
-| inject | E-013 inject contract | inject, briefs |
+The knowledge layer is a repo-backed entity/relation/evidence graph. It is local-first JSON so every harness can read the same reviewed bytes and Git provides history. It does not require a vector database or hosted service.
 
 ```sh
-tickets knowledge                 # list tracked docs (optional --tag backend)
-tickets knowledge show kb-lock
-tickets brief --role backend "…"  # standing inject — same as E-013
-tickets brief --role backend --show
-tickets prompt --agent alice
+tickets knowledge validate
+tickets knowledge list --type failure
+tickets knowledge query "GLiNER T4 latency" --agent "$TICKET_AGENT"
+tickets knowledge show failure.gliner-cpu-ort-shadow
 ```
+
+`tickets prompt`, `tickets watch`, and `tickets spawn` use one renderer. It selects a compact subgraph from the held ticket, role, capabilities, harness, and explicit `knowledge:<id>` references. The default budget is 3,600 characters and the hard ceiling is 6,000. Full evidence stays in the source artifact.
+
+When the board and knowledge repository are different checkouts, register the canonical graph once per seat:
+
+```sh
+tickets join alice --roles backend --harness claude \
+  --knowledge-dir /path/to/atman/knowledge
+```
+
+The board stores only that path reference in the seat record. The graph bytes remain in the knowledge repository. `ATMAN_KNOWLEDGE_DIR` is the process-level override for CI and temporary environments.
+
+Read [howto.md](howto.md) to add or update facts, [schema.md](schema.md) for the node and edge contract, and [inject.md](inject.md) for selection and prompt behavior.

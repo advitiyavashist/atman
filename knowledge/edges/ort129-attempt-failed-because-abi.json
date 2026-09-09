@@ -1,0 +1,7 @@
+{
+  "kind": "edge", "id": "ort129-attempt-failed-because-abi", "type": "failed_because",
+  "from": "experiment.gliner-t613-ort129-attempt", "to": "failure.gliner-ort129-cuda13-abi",
+  "source": {"kind": "ticket", "ref": "T-613 historical evidence"}, "recorded_at": "2026-09-09T03:08:00Z",
+  "owner": "atman-knowledge", "last_verified_at": "2026-09-09T03:08:00Z",
+  "verification": "observed", "confidence": 0.9, "stale_after_days": 30
+}
