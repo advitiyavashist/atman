@@ -48,8 +48,9 @@ fixture; the bridge protocol itself is what is under test.
 
 ## Validation result
 
-The focused protocol and wake-policy file passes **22/22** tests. The broader
-release selection passes **188** tests covering existing wake behavior,
+The focused protocol and wake-policy file passes **22/22** tests. After syncing
+current main, the broader release selection passes **187** tests with **one
+environment-dependent skip** covering existing wake behavior,
 dashboard launch receipts, objective bounds, hook identity, message replay,
 watch retries and teardown, trajectories, cost capture, packaging, and live
 installation.
@@ -94,7 +95,9 @@ to the root/live single-file runtime installed by `./install.sh` or
 `./install.sh --live-release`. The `pyproject.toml` console script currently
 points at the smaller `src/ticket_board/cli.py` core-board implementation and
 does not expose these runtime commands. Do not use the pip entry point for this
-feature until those entry points are unified.
+feature until those entry points are unified. This scope was checked directly
+with `PYTHONPATH=src python3 -m ticket_board.cli --help`; the packaged help does
+not advertise `watch`, `spawn`, `hooks`, `ui`, wake-mode, or `remote`.
 
 Re-register a seat with `--wake-mode task-only` to restore the explicit-task
 cost boundary. `tickets spawn <seat> --stop` stops a local watcher. A remote
