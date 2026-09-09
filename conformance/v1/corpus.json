@@ -1,6 +1,6 @@
 {
   "contract_version": "atman-core/v1",
-  "oracle_revision": "3a19777f731db58db65291733d53d71a4f446207",
+  "oracle_revision": "7b49b4aa3bab82793e56d8696ab8ab9606327927",
   "description": "Portable black-box cases selected from accepted Python behavior.",
   "cases": [
     {
