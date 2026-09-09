@@ -324,9 +324,10 @@ heartbeat or external cadence separately. The policy does not select a model
 or harness.
 
 For a model session hosted elsewhere, register `--harness remote` and install
-`tickets hooks remote`. The generated manifest exposes an identity-pinned
-`pending` poll and `taskWake` prompt. A bare remote `tickets spawn` fails closed:
-queued work stays visible in the dashboard until the real bridge reconnects.
+`tickets hooks remote`. The schema-2 manifest exposes identity-pinned
+register/heartbeat/long-poll claim/start/end/release commands under one fenced
+lease. A bare remote `tickets spawn` fails closed: queued work stays visible in
+the dashboard until the real bridge reconnects.
 
 `spawn` with no `--harness` uses whatever `join` registered. Passing
 `--harness` overrides **and** re-registers; a harness switch without a new

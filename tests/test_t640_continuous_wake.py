@@ -209,6 +209,51 @@ def test_failed_adapter_leaves_visible_queue_and_restart_recovers(board, tmp_pat
     assert [e.get("exit") for e in ends] == [7, 0]
 
 
+def test_persistent_local_dispatch_retries_three_times_then_new_wake_recovers(board, tmp_path):
+    _join(board, "seat", "continuous", "custom")
+    count = tmp_path / "attempts"
+    recover = tmp_path / "recover"
+    helper = tmp_path / "bounded_retry.py"
+    helper.write_text(
+        "import os, pathlib, subprocess, sys\n"
+        "count, recover, tool = map(pathlib.Path, sys.argv[1:])\n"
+        "n = int(count.read_text()) + 1 if count.exists() else 1\n"
+        "count.write_text(str(n))\n"
+        "if not recover.exists(): raise SystemExit(7)\n"
+        "subprocess.run([sys.executable, str(tool), 'inbox'], check=True)\n"
+    )
+    command = shlex.join([sys.executable, str(helper), str(count), str(recover), str(TOOL)])
+    time.sleep(1.1)
+    run(board, "msg", "first wake", "--to", "seat", agent="sender")
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="wrong-ambient")
+    watcher = subprocess.Popen(
+        [sys.executable, str(TOOL), "watch", "--agent", "seat", "--persist",
+         "--every", "1", "--exec", command, "--cwd", str(board.parent)],
+        cwd=str(board.parent), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        def exhausted():
+            if not count.exists() or int(count.read_text()) != 3:
+                return False
+            ui = run(board, "ui", "--json", agent="sender")
+            if ui.returncode != 0:
+                return False
+            seat = next(a for a in json.loads(ui.stdout)["agents"] if a["name"] == "seat")
+            return seat["adapter_state"] == "failed" and seat["wake_pending"] is True
+        _wait_until(exhausted, timeout=15)
+        time.sleep(2.2)
+        assert int(count.read_text()) == 3, "terminal failure must not spin paid turns"
+
+        recover.touch()
+        run(board, "msg", "new wake after failure", "--to", "seat", agent="sender")
+        _wait_until(lambda: count.exists() and int(count.read_text()) == 4 and pending(board, "seat")[0] == 1,
+                    timeout=10)
+        record = json.loads((board / "agents" / "seat.json").read_text())
+        assert "adapter_failure" not in record
+    finally:
+        watcher.terminate()
+        watcher.wait(timeout=10)
+
+
 def test_spawn_defaults_follow_durable_mode_not_harness_or_title():
     mod = _module()
     assert mod.spawn_watch_max_runs("continuous") == 0
@@ -243,8 +288,12 @@ def test_remote_adapter_never_falls_back_to_a_local_model_and_queue_is_visible(b
                "--wrapper", str(wrapper), agent="master")
     assert hook.returncode == 0, hook.stderr
     manifest = json.loads(Path(str(wrapper) + ".hooks.json").read_text())
+    assert manifest["schema"] == 2
     assert manifest["adapter"]["wake_mode"] == "continuous"
-    assert "pending --agent grok-worker --json" in manifest["adapter"]["pending_command"]
+    assert manifest["adapter"]["protocol"] == "fenced-wake-v1"
+    assert "remote register --agent grok-worker" in manifest["adapter"]["register_command"]
+    assert "remote next --agent grok-worker" in manifest["adapter"]["next_command"]
+    assert "--wait 25" in manifest["adapter"]["next_command"]
 
 
 def test_ui_marks_multiple_adapter_processes_as_a_lease_conflict(board, monkeypatch):
@@ -275,76 +324,248 @@ def _events(board, kind=""):
     return [row for row in rows if not kind or row.get("kind") == kind]
 
 
-def test_mobile_master_to_fake_remote_cos_to_master_runs_once(board, tmp_path):
-    """No model/network: two persistent custom adapters exercise the mobile flow.
+def _remote(wrapper, *args):
+    env = dict(os.environ, TICKET_AGENT="wrong-ambient", TICKETS_DIR="/wrong-board")
+    result = subprocess.run([str(wrapper), "remote", *map(str, args)],
+                            capture_output=True, text=True, env=env, cwd=str(wrapper.parent))
+    stream = result.stdout if result.returncode == 0 else result.stderr
+    payload = json.loads(stream.strip().splitlines()[-1]) if stream.strip() else {}
+    return result, payload
 
-    The sender uses both --to and @mention, which must still produce one turn.
-    The fake Grok adapter posts an action back; the master adapter consumes it.
-    """
+
+def _install_remote(board, agent, prompt_kind=""):
+    wrapper = board.parent / ("tickets-" + agent)
+    args = ["hooks", "remote", "--agent", agent, "--wrapper", str(wrapper)]
+    if prompt_kind:
+        args += ["--prompt-kind", prompt_kind]
+    result = run(board, *args, agent="installer")
+    assert result.returncode == 0, result.stderr
+    return wrapper
+
+
+def test_remote_bridge_lease_is_exclusive_fenced_and_reconnects(board):
+    _join(board, "grok-worker", "continuous", "remote")
+    wrapper = _install_remote(board, "grok-worker", "cos")
+    first, lease1 = _remote(wrapper, "register", "--agent", "grok-worker",
+                            "--bridge-id", "grok-session", "--ttl", "10")
+    assert first.returncode == 0 and lease1["status"] == "online"
+    wrong_target, wrong_body = _remote(wrapper, "register", "--agent", "other-seat",
+                                        "--bridge-id", "grok-session", "--ttl", "10")
+    assert wrong_target.returncode != 0 and "wrapper identity" in wrong_body["error"]
+    duplicate, duplicate_body = _remote(wrapper, "register", "--agent", "grok-worker",
+                                         "--bridge-id", "grok-session", "--ttl", "10")
+    assert duplicate.returncode != 0 and "already registered" in duplicate_body["error"]
+    refused, conflict = _remote(wrapper, "register", "--agent", "grok-worker",
+                                "--bridge-id", "other-session", "--ttl", "10")
+    assert refused.returncode != 0 and "already online" in conflict["error"]
+    replaced, lease2 = _remote(wrapper, "register", "--agent", "grok-worker",
+                               "--bridge-id", "grok-session", "--ttl", "10", "--replace")
+    assert replaced.returncode == 0 and lease2["fence"] == lease1["fence"] + 1
+    stale, stale_body = _remote(wrapper, "heartbeat", "--agent", "grok-worker",
+                                "--lease-id", lease1["lease_id"], "--fence", lease1["fence"])
+    assert stale.returncode != 0 and "stale" in stale_body["error"]
+    live, heartbeat = _remote(wrapper, "heartbeat", "--agent", "grok-worker",
+                              "--lease-id", lease2["lease_id"], "--fence", lease2["fence"])
+    assert live.returncode == 0 and heartbeat["status"] == "online"
+
+    time.sleep(1.1)
+    run(board, "msg", "queued while bridge drops", "--to", "grok-worker", agent="sender")
+    released, _ = _remote(wrapper, "release", "--agent", "grok-worker",
+                           "--lease-id", lease2["lease_id"], "--fence", lease2["fence"])
+    assert released.returncode == 0
+    reconnected, lease3 = _remote(wrapper, "register", "--agent", "grok-worker",
+                                  "--bridge-id", "replacement", "--ttl", "10")
+    assert reconnected.returncode == 0 and lease3["fence"] > lease2["fence"]
+    _, claimed = _remote(wrapper, "next", "--agent", "grok-worker",
+                         "--lease-id", lease3["lease_id"], "--fence", lease3["fence"], "--wait", "0")
+    assert claimed["status"] == "wake"
+
+
+def test_remote_failure_retries_are_bounded_visible_and_manually_recoverable(board):
+    _join(board, "grok-worker", "continuous", "remote")
+    wrapper = _install_remote(board, "grok-worker", "cos")
+    _, lease = _remote(wrapper, "register", "--agent", "grok-worker",
+                       "--bridge-id", "grok-session", "--ttl", "20", "--max-attempts", "2")
+    time.sleep(1.1)
+    run(board, "msg", "retry this", "--to", "grok-worker", agent="sender")
+
+    _, first = _remote(wrapper, "next", "--agent", "grok-worker",
+                       "--lease-id", lease["lease_id"], "--fence", lease["fence"], "--wait", "0")
+    _remote(wrapper, "start", "--agent", "grok-worker", "--lease-id", lease["lease_id"],
+            "--fence", lease["fence"], "--claim-id", first["claim_id"])
+    _, failed_once = _remote(wrapper, "end", "--agent", "grok-worker",
+                             "--lease-id", lease["lease_id"], "--fence", lease["fence"],
+                             "--claim-id", first["claim_id"], "--exit", "7", "--reason", "gateway reset")
+    assert failed_once["status"] == "retrying" and failed_once["retry_at"]
+    time.sleep(1.1)
+
+    _, second = _remote(wrapper, "next", "--agent", "grok-worker",
+                        "--lease-id", lease["lease_id"], "--fence", lease["fence"], "--wait", "0")
+    assert second["status"] == "wake" and second["attempt"] == 2
+    _remote(wrapper, "start", "--agent", "grok-worker", "--lease-id", lease["lease_id"],
+            "--fence", lease["fence"], "--claim-id", second["claim_id"])
+    _, exhausted = _remote(wrapper, "end", "--agent", "grok-worker",
+                            "--lease-id", lease["lease_id"], "--fence", lease["fence"],
+                            "--claim-id", second["claim_id"], "--exit", "7")
+    assert exhausted["status"] == "failed" and exhausted["attempt"] == 2
+    _, still_failed = _remote(wrapper, "next", "--agent", "grok-worker",
+                              "--lease-id", lease["lease_id"], "--fence", lease["fence"], "--wait", "0")
+    assert still_failed["status"] == "failed"
+    ui = json.loads(run(board, "ui", "--json", agent="sender").stdout)
+    grok = next(a for a in ui["agents"] if a["name"] == "grok-worker")
+    assert grok["adapter_state"] == "failed" and grok["wake_pending"] is True
+    assert grok["adapter_attempts"] == 2
+
+    _, retry = _remote(wrapper, "retry", "--agent", "grok-worker",
+                       "--lease-id", lease["lease_id"], "--fence", lease["fence"])
+    assert retry["status"] == "retrying" and retry["attempts"] == 0
+    _, third = _remote(wrapper, "next", "--agent", "grok-worker",
+                       "--lease-id", lease["lease_id"], "--fence", lease["fence"], "--wait", "0")
+    assert third["status"] == "wake" and third["attempt"] == 1
+    _remote(wrapper, "start", "--agent", "grok-worker", "--lease-id", lease["lease_id"],
+            "--fence", lease["fence"], "--claim-id", third["claim_id"])
+    subprocess.run([str(wrapper), "inbox"], check=True, capture_output=True, text=True)
+    _, complete = _remote(wrapper, "end", "--agent", "grok-worker",
+                          "--lease-id", lease["lease_id"], "--fence", lease["fence"],
+                          "--claim-id", third["claim_id"], "--exit", "0")
+    assert complete["status"] == "completed" and pending(board, "grok-worker")[0] == 1
+
+
+def test_started_remote_run_requires_explicit_recovery_after_fencing(board):
+    _join(board, "grok-worker", "continuous", "remote")
+    wrapper = _install_remote(board, "grok-worker", "cos")
+    _, lease1 = _remote(wrapper, "register", "--agent", "grok-worker",
+                        "--bridge-id", "grok-session", "--ttl", "20")
+    time.sleep(1.1)
+    run(board, "msg", "recover safely", "--to", "grok-worker", agent="sender")
+    _, first = _remote(wrapper, "next", "--agent", "grok-worker",
+                       "--lease-id", lease1["lease_id"], "--fence", lease1["fence"], "--wait", "0")
+    _remote(wrapper, "start", "--agent", "grok-worker", "--lease-id", lease1["lease_id"],
+            "--fence", lease1["fence"], "--claim-id", first["claim_id"])
+    _, lease2 = _remote(wrapper, "register", "--agent", "grok-worker",
+                        "--bridge-id", "grok-session", "--ttl", "20", "--replace")
+    assert lease2["recovery_required"] is True
+    stale, stale_body = _remote(wrapper, "end", "--agent", "grok-worker",
+                                "--lease-id", lease1["lease_id"], "--fence", lease1["fence"],
+                                "--claim-id", first["claim_id"], "--exit", "0")
+    assert stale.returncode != 0 and "stale" in stale_body["error"]
+    _, blocked = _remote(wrapper, "next", "--agent", "grok-worker",
+                         "--lease-id", lease2["lease_id"], "--fence", lease2["fence"], "--wait", "0")
+    assert blocked["status"] == "recovery-required"
+    _remote(wrapper, "retry", "--agent", "grok-worker",
+            "--lease-id", lease2["lease_id"], "--fence", lease2["fence"],
+            "--claim-id", first["claim_id"])
+    _, replacement = _remote(wrapper, "next", "--agent", "grok-worker",
+                              "--lease-id", lease2["lease_id"], "--fence", lease2["fence"], "--wait", "0")
+    assert replacement["status"] == "wake" and replacement["attempt"] == 2
+    _remote(wrapper, "start", "--agent", "grok-worker", "--lease-id", lease2["lease_id"],
+            "--fence", lease2["fence"], "--claim-id", replacement["claim_id"])
+    subprocess.run([str(wrapper), "inbox"], check=True, capture_output=True, text=True)
+    _remote(wrapper, "end", "--agent", "grok-worker", "--lease-id", lease2["lease_id"],
+            "--fence", lease2["fence"], "--claim-id", replacement["claim_id"], "--exit", "0")
+    starts = [e for e in _events(board, "run_start") if e.get("agent") == "grok-worker"]
+    ends = [e for e in _events(board, "run_end") if e.get("agent") == "grok-worker"]
+    assert len(starts) == 2 and len(ends) == 2
+    assert sorted(e.get("outcome") for e in ends) == ["completed", "lease_lost"]
+
+
+def test_leadership_stuck_context_uses_same_five_by_320_bound(board):
+    run(board, "join", "master", "--roles", "leadership", agent="master")
+    _join(board, "cos", "continuous")
+    run(board, "join", "worker", "--roles", "backend", agent="worker")
+    run(board, "master", "take", agent="master")
+    run(board, "master", "cos", "cos", agent="master")
+    time.sleep(1.1)
+    for index in range(7):
+        run(board, "msg", "stuck: %d %s" % (index, "x" * 5000), "--to", "master", agent="worker")
+    queued = pending(board, "cos")[1]
+    assert len(queued["stuck_messages"]) == 5
+    assert all(len(message) <= 320 for message in queued["stuck_messages"])
+
+
+def test_mobile_master_to_remote_cos_to_master_runs_once(board):
+    """Two protocol bridges exercise mobile -> master -> Grok CoS -> master."""
     run(board, "join", "mobile-master", "--roles", "leadership",
-        "--harness", "custom", "--cmd", "cat {prompt_file} >/dev/null",
+        "--harness", "remote",
         "--wake-mode", "continuous", agent="mobile-master")
     run(board, "join", "grok-worker", "--roles", "leadership",
-        "--harness", "custom", "--cmd", "cat {prompt_file} >/dev/null",
+        "--harness", "remote",
         "--wake-mode", "continuous", agent="grok-worker")
     run(board, "master", "take", agent="mobile-master")
     run(board, "master", "cos", "grok-worker", agent="mobile-master")
+    master_wrapper = _install_remote(board, "mobile-master", "master")
+    grok_wrapper = _install_remote(board, "grok-worker", "cos")
+    _, master_lease = _remote(master_wrapper, "register", "--agent", "mobile-master",
+                              "--bridge-id", "mobile-session", "--ttl", "20")
+    _, grok_lease = _remote(grok_wrapper, "register", "--agent", "grok-worker",
+                            "--bridge-id", "grok-session", "--ttl", "20")
+    ui = run(board, "ui", "--json", agent="mobile-master")
+    assert ui.returncode == 0, ui.stderr
+    snapshot = json.loads(ui.stdout)
+    grok_ui = next(a for a in snapshot["agents"] if a["name"] == "grok-worker")
+    assert grok_ui["adapter_online"] is True and grok_ui["adapter_bridge_id"] == "grok-session"
+    assert "lease_id" not in grok_ui
 
-    receipt = tmp_path / "adapter-receipts.jsonl"
-    helper = tmp_path / "fake_remote_adapter.py"
-    helper.write_text(
-        "import json, os, subprocess, sys\n"
-        "tool, receipt = sys.argv[1:]\n"
-        "agent = os.environ['TICKET_AGENT']\n"
-        "subprocess.run([sys.executable, tool, 'inbox'], check=True)\n"
-        "with open(receipt, 'a') as f:\n"
-        " f.write(json.dumps({'agent': agent, 'cwd': os.getcwd(), 'ambient': agent}) + '\\n')\n"
-        "if agent == 'grok-worker':\n"
-        " subprocess.run([sys.executable, tool, 'msg', '@mobile-master Action: research follow-up queued', '--to', 'mobile-master'], check=True)\n"
-    )
-    command = shlex.join([sys.executable, str(helper), str(TOOL), str(receipt)])
-    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="wrong-ambient",
-               HOME=str(board.parent.parent / "home"))
-    master = subprocess.Popen(
-        [sys.executable, str(TOOL), "watch", "--agent", "mobile-master", "--persist",
-         "--every", "1", "--exec", command, "--cwd", str(board.parent)],
-        cwd=str(board.parent), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    cos = subprocess.Popen(
-        [sys.executable, str(TOOL), "watch", "--agent", "grok-worker", "--persist",
-         "--every", "1", "--exec", command, "--cwd", str(board.parent)],
-        cwd=str(board.parent), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        _wait_until(lambda: (board / "agents" / "mobile-master.watch.pid").exists()
-                    and (board / "agents" / "grok-worker.watch.pid").exists())
-        duplicate = run(board, "watch", "--agent", "grok-worker", "--once", "--dry-run",
-                        agent="grok-worker")
-        assert duplicate.returncode != 0 and "another watcher" in duplicate.stderr
+    time.sleep(1.1)
+    run(board, "msg", "@grok-worker Please follow up now", "--to", "grok-worker",
+        agent="mobile-master")
+    gate = threading.Barrier(3)
+    claims = []
 
-        time.sleep(1.1)
-        posted = run(board, "msg", "@grok-worker Please follow up now", "--to", "grok-worker",
-                     agent="mobile-master")
-        assert posted.returncode == 0, posted.stderr
-        _wait_until(lambda: receipt.exists() and len(receipt.read_text().splitlines()) >= 2)
-        # Wait past a second poll to prove neither the DM+mention nor the reply
-        # is replayed after each adapter consumed its inbox.
-        time.sleep(2.2)
-        rows = [json.loads(line) for line in receipt.read_text().splitlines()]
-        assert [r["agent"] for r in rows].count("grok-worker") == 1, rows
-        assert [r["agent"] for r in rows].count("mobile-master") == 1, rows
-        assert all(r["ambient"] == r["agent"] for r in rows)
-        assert all(r["cwd"] == str(board.parent) for r in rows)
+    def claim_grok():
+        gate.wait()
+        claims.append(_remote(grok_wrapper, "next", "--agent", "grok-worker",
+                              "--lease-id", grok_lease["lease_id"], "--fence", grok_lease["fence"],
+                              "--wait", "0", "--prompt-kind", "cos"))
 
-        starts = _events(board, "run_start")
-        ends = _events(board, "run_end")
-        assert len([e for e in starts if e.get("agent") == "grok-worker"]) == 1
-        assert len([e for e in starts if e.get("agent") == "mobile-master"]) == 1
-        assert len([e for e in ends if e.get("agent") in ("grok-worker", "mobile-master")]) == 2
-        assert all("cost_usd" not in e for e in ends), "unreported fake cost must stay unmeasured"
-        messages = [json.loads(line) for line in (board / "messages.jsonl").read_text().splitlines()]
-        assert any(m.get("from") == "grok-worker" and "Action:" in m.get("text", "")
-                   and m.get("to") == "mobile-master" for m in messages)
-    finally:
-        master.terminate()
-        cos.terminate()
-        master.wait(timeout=10)
-        cos.wait(timeout=10)
+    threads = [threading.Thread(target=claim_grok) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    gate.wait()
+    for thread in threads:
+        thread.join(timeout=10)
+    bodies = [body for result, body in claims if result.returncode == 0]
+    assert sorted(body["status"] for body in bodies) == ["busy", "wake"], bodies
+    grok_claim = next(body for body in bodies if body["status"] == "wake")
+    assert grok_claim["wake"]["wake_reason"] == "task_messages"
+    assert len(grok_claim["wake"]["task_messages"]) == 1
+    assert "CHIEF OF STAFF" in grok_claim["prompt"]
+    assert _remote(grok_wrapper, "start", "--agent", "grok-worker",
+                   "--lease-id", grok_lease["lease_id"], "--fence", grok_lease["fence"],
+                   "--claim-id", grok_claim["claim_id"])[0].returncode == 0
+    subprocess.run([str(grok_wrapper), "inbox"], check=True, capture_output=True, text=True)
+    subprocess.run([str(grok_wrapper), "msg", "@mobile-master Action: research follow-up queued",
+                    "--to", "mobile-master"], check=True, capture_output=True, text=True)
+    end_grok, _ = _remote(grok_wrapper, "end", "--agent", "grok-worker",
+                          "--lease-id", grok_lease["lease_id"], "--fence", grok_lease["fence"],
+                          "--claim-id", grok_claim["claim_id"], "--exit", "0",
+                          "--input-tokens", "120", "--output-tokens", "24", "--cost-usd", "0.0123")
+    assert end_grok.returncode == 0
+
+    _, master_claim = _remote(master_wrapper, "next", "--agent", "mobile-master",
+                              "--lease-id", master_lease["lease_id"], "--fence", master_lease["fence"],
+                              "--wait", "0", "--prompt-kind", "master")
+    assert master_claim["status"] == "wake"
+    _remote(master_wrapper, "start", "--agent", "mobile-master",
+            "--lease-id", master_lease["lease_id"], "--fence", master_lease["fence"],
+            "--claim-id", master_claim["claim_id"])
+    subprocess.run([str(master_wrapper), "inbox"], check=True, capture_output=True, text=True)
+    subprocess.run([str(master_wrapper), "msg", "ACK: action received", "--to", "grok-worker"],
+                   check=True, capture_output=True, text=True)
+    _remote(master_wrapper, "end", "--agent", "mobile-master",
+            "--lease-id", master_lease["lease_id"], "--fence", master_lease["fence"],
+            "--claim-id", master_claim["claim_id"], "--exit", "0")
+    _, quiet = _remote(grok_wrapper, "next", "--agent", "grok-worker",
+                       "--lease-id", grok_lease["lease_id"], "--fence", grok_lease["fence"],
+                       "--wait", "0")
+    assert quiet["status"] == "idle", quiet
+
+    starts = [e for e in _events(board, "run_start")
+              if e.get("agent") in ("grok-worker", "mobile-master")]
+    ends = [e for e in _events(board, "run_end")
+            if e.get("agent") in ("grok-worker", "mobile-master")]
+    assert len(starts) == 2 and len(ends) == 2
+    grok_end = next(e for e in ends if e["agent"] == "grok-worker")
+    assert grok_end["input_tokens"] == 120 and grok_end["output_tokens"] == 24
+    assert grok_end["cost_usd"] == pytest.approx(0.0123)
+    assert next(e for e in ends if e["agent"] == "mobile-master")["usage_error"] == "unreported"

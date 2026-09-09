@@ -30,9 +30,9 @@ This prevents a stale receipt from erasing a later edit.
 
 ## Generic and remote agents
 
-`remote` creates an executable identity-pinned wrapper and a JSON command
-manifest beside it. With no arguments, the wrapper prints the task-wake prompt.
-With arguments, it runs the normal ticket CLI under that one identity.
+`remote` creates an executable identity-pinned wrapper and a schema-2 JSON
+command manifest beside it. With no arguments, the wrapper prints the task-wake
+prompt. With arguments, it runs the root/live ticket CLI under that one identity.
 
 ```sh
 tickets hooks remote --agent remote-worker \
@@ -43,9 +43,10 @@ tickets-remote-worker inbox
 tickets-remote-worker msg "started" --re T-123
 ```
 
-The manifest contains ready-to-register commands for `SessionStart`, `inbox`,
-`Stop`, and `taskWake`. Each command includes `--agent remote-worker` and the
-absolute board path.
+The manifest retains hook commands for `SessionStart`, `inbox`, `Stop`, and
+`taskWake`, and adds the fenced adapter sequence: register, heartbeat,
+long-poll/atomic `next`, start, end, and release. Each command is pinned to
+`remote-worker` and the absolute board path.
 
 For the persistent Grok chief-of-staff seat:
 
@@ -55,8 +56,9 @@ tickets hooks remote --agent grok-worker \
   --wrapper "$HOME/.local/bin/tickets-grok-worker"
 ```
 
-The remote session should call `tickets-grok-worker` at startup and whenever
-the message-board wake fires. It can then use `tickets-grok-worker <command>`
-for all board work. A separate terminal may remain `TICKET_AGENT=cto`; the
-wrapper will still verify and use `grok-worker`.
-
+The remote bridge registers once, heartbeats while connected, long-polls
+`next`, and wraps each claimed model turn with `start`/`end`. It can use
+`tickets-grok-worker <command>` for the turn's board work. A separate terminal
+may remain `TICKET_AGENT=cto`; the wrapper still verifies and uses
+`grok-worker`. The smaller `pyproject.toml` console entry point does not expose
+this runtime protocol.

@@ -109,19 +109,32 @@ tickets master cos grok-worker
 tickets hooks remote --agent grok-worker --prompt-kind cos
 ```
 
-The generated identity-pinned manifest provides `pending` (durable poll) and
-`taskWake` (bounded CoS prompt) commands. A bridge on the machine that owns the
-Grok session long-polls `pending`, feeds `taskWake` to that session once, runs
-board commands through the pinned wrapper, and reconnects with the same seat
-identity. A webhook/session service can use the same two operations. If no
-bridge is connected, the dashboard says **Wake queued — adapter offline** and
-the unread message remains the queue. `tickets spawn` refuses a bare `remote`
-harness instead of silently substituting Claude, Codex, or Cursor.
+The schema-2 manifest provides the full fenced bridge sequence: `register`,
+`heartbeat`, long-poll `next`, `start`, `end`, and `release`. `next` waits and
+atomically claims one wake; `tickets pending` remains a read-only diagnostic.
+Only one unexpired bridge lease exists per seat, and every mutation checks both
+its bearer ID and monotonically increasing fence. A reconnect after expiry gets
+a higher fence. If the old run had started, the new bridge sees
+`recovery-required` and must explicitly retry instead of duplicating uncertain
+external effects.
+
+The bridge feeds the returned bounded prompt to its model session, runs board
+commands through the pinned wrapper, and reports measured tokens/cost with
+`end`. If no bridge is connected, the dashboard says **Wake queued — adapter
+offline** and the unread message remains the queue. `tickets spawn` refuses a
+bare `remote` harness instead of silently substituting Claude, Codex, or Cursor.
 
 Local and remote adapters share the same delivery rules: one watcher/bridge
 lease per seat, message-recipient dedupe, capped wake summaries (five messages,
 320 characters each), run heartbeat, and stale-lock recovery. Harness cost is
 recorded only when the harness reports it; an unreported run remains unmeasured.
+Dispatch failures use bounded backoff and end in a visible durable `failed`
+state while the wake stays queued. A manual remote retry or a new local trigger
+can resume work without an unbounded paid loop.
+
+These runtime commands are implemented in the root/live single-file CLI. The
+smaller `pyproject.toml` console entry point does not yet expose watch, hooks,
+UI, wake-mode, or remote protocol commands.
 
 ## Team interface
 

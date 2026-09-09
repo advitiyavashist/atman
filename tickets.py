@@ -820,6 +820,10 @@ WAKE_KEYS = frozenset({
 })
 WAKE_MESSAGE_LIMIT = 5
 WAKE_MESSAGE_MAX_CHARS = 320
+REMOTE_LEASE_TTL = 30
+REMOTE_MAX_ATTEMPTS = 3
+REMOTE_LONG_POLL_MAX = 30
+LOCAL_DISPATCH_MAX_ATTEMPTS = 3
 
 
 def objective_state(obj):
@@ -6891,13 +6895,13 @@ def pending_work(board, owner):
         # its own counts.
         since = _seen_since(rec)
         _rem = _seen_counts(rec.get("inbox_seen_ids"))
-        stuck = [fmt_msg(x) for x in _visible_after_join(
+        stuck = [_wake_message_summary(x) for x in _visible_after_join(
                      _safe(lambda: load_messages(board), []), owner,
                      rec.get("joined_at", ""))
                  if x.get("from") != owner and _is_unread(x, since, _rem)
                  and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
         if stuck:
-            out["stuck_messages"] = stuck[-5:]
+            out["stuck_messages"] = stuck[-WAKE_MESSAGE_LIMIT:]
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
         if crit:
             out["health_crit"] = [i[1][:80] for i in crit[:3]]
@@ -7021,6 +7025,392 @@ def _watch_trigger_fingerprint(board, owner, pending):
     if pending.get("drive"):
         parts.append("drive:" + json.dumps(pending["drive"], sort_keys=True))
     return tuple(sorted(parts)) if parts else None
+
+
+# ---- remote adapters: fenced lease, atomic wake claim, measured run --------
+
+class RemoteProtocolError(Exception):
+    pass
+
+
+def _remote_state_path(board, owner):
+    return os.path.join(board, "adapters", owner + ".json")
+
+
+def _remote_epoch():
+    return datetime.now(timezone.utc).timestamp()
+
+
+def _load_remote_state_unlocked(board, owner):
+    try:
+        with open(_remote_state_path(board, owner)) as stream:
+            state = json.load(stream)
+        return state if isinstance(state, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def load_remote_state(board, owner):
+    """Read a remote adapter state record. Invalid seat names have no state."""
+    if not HOOK_AGENT_RE.fullmatch(str(owner or "")):
+        return {}
+    return _load_remote_state_unlocked(board, owner)
+
+
+def _remote_update(board, owner, mutate):
+    """Serialize a remote lease/claim transition and publish it atomically."""
+    path = _remote_state_path(board, owner)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    result = []
+    with _AgentLock(board, owner + ".remote"):
+        state = _load_remote_state_unlocked(board, owner)
+        state.setdefault("schema", 1)
+        state.setdefault("agent", owner)
+        value = mutate(state)
+        temporary = "%s.tmp.%d.%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
+        with open(temporary, "w") as stream:
+            json.dump(state, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        result.append(value)
+    return result[0] if result else None
+
+
+def _remote_lease_online(state, at=None):
+    lease = (state or {}).get("lease") or {}
+    return bool(lease.get("id") and float(lease.get("expires_epoch") or 0) >
+                (at if at is not None else _remote_epoch()))
+
+
+def _remote_public_state(state):
+    """Remote state safe for UI/status; the bearer lease id never leaves it."""
+    state = state or {}
+    lease = state.get("lease") or {}
+    claim = state.get("claim") or {}
+    failure = state.get("failure") or {}
+    return {
+        "online": _remote_lease_online(state),
+        "bridge_id": lease.get("bridge_id", ""),
+        "fence": int(lease.get("fence") or state.get("fence") or 0),
+        "heartbeat_at": lease.get("heartbeat_at", ""),
+        "expires_at": lease.get("expires_at", ""),
+        "claim_id": claim.get("id", ""),
+        "run_id": claim.get("run_id", ""),
+        "run_state": ("recovery-required" if claim.get("recovery_required") else
+                      ("running" if claim.get("started_at") else
+                       ("claimed" if claim else ""))),
+        "attempt": int(claim.get("attempt") or failure.get("attempts") or 0),
+        "failure_state": failure.get("state", ""),
+        "failure_reason": failure.get("reason", ""),
+        "retry_at": failure.get("retry_at", ""),
+        "last_run": state.get("last_run") or {},
+    }
+
+
+def _remote_require_lease(state, lease_id, fence, renew=True):
+    lease = state.get("lease") or {}
+    if not _remote_lease_online(state):
+        raise RemoteProtocolError("adapter lease expired; register again")
+    if lease.get("id") != lease_id or int(lease.get("fence") or 0) != int(fence):
+        raise RemoteProtocolError("stale adapter lease/fence")
+    if renew:
+        ttl = int(lease.get("ttl") or REMOTE_LEASE_TTL)
+        lease["heartbeat_at"] = now()
+        lease["expires_epoch"] = _remote_epoch() + ttl
+        lease["expires_at"] = datetime.fromtimestamp(
+            lease["expires_epoch"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return lease
+
+
+def _remote_trigger_key(fingerprint):
+    if not fingerprint:
+        return ""
+    return hashlib.sha256(json.dumps(list(fingerprint), sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _remote_register(board, owner, bridge_id, ttl, max_attempts, replace=False, worktree=""):
+    ttl = max(5, min(int(ttl or REMOTE_LEASE_TTL), 300))
+    max_attempts = max(1, min(int(max_attempts or REMOTE_MAX_ATTEMPTS), 10))
+
+    def mutate(state):
+        current = state.get("lease") or {}
+        if _remote_lease_online(state):
+            if current.get("bridge_id") != bridge_id:
+                raise RemoteProtocolError("adapter already online under bridge %s" %
+                                          current.get("bridge_id", "unknown"))
+            if not replace:
+                # Register creates a bearer credential. Never disclose the
+                # existing credential to another process merely because it
+                # guessed the same human-readable bridge id. The holder uses
+                # heartbeat for renewal; deliberate same-bridge recovery must
+                # say --replace, which increments the fence and invalidates
+                # the old bearer.
+                raise RemoteProtocolError(
+                    "adapter bridge is already registered; heartbeat it or use --replace")
+        fence = int(state.get("fence") or 0) + 1
+        expiry = _remote_epoch() + ttl
+        lease = {"id": "lease_" + uuid.uuid4().hex, "bridge_id": bridge_id,
+                 "fence": fence, "ttl": ttl, "registered_at": now(),
+                 "heartbeat_at": now(), "expires_epoch": expiry,
+                 "expires_at": datetime.fromtimestamp(
+                     expiry, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "worktree": os.path.abspath(worktree) if worktree else ""}
+        state["fence"] = fence
+        state["lease"] = lease
+        state["max_attempts"] = max_attempts
+        claim = state.get("claim") or {}
+        if claim:
+            claim["fence"] = fence
+            if claim.get("started_at"):
+                # The old process may have crossed an external side-effect
+                # boundary. Require an explicit recovery choice; never run it
+                # twice merely because a network lease expired.
+                claim["recovery_required"] = True
+            else:
+                claim["delivered_at"] = ""
+        return {"status": "online", "lease_id": lease["id"], "fence": fence,
+                "expires_at": lease["expires_at"], "reused": False,
+                "recovery_required": bool(claim.get("recovery_required"))}
+
+    return _remote_update(board, owner, mutate)
+
+
+def _remote_claim_once(board, owner, lease_id, fence, prompt_kind=""):
+    pending = pending_work(board, owner)
+    fingerprint = _watch_trigger_fingerprint(board, owner, pending) if actionable(pending) else None
+    trigger_key = _remote_trigger_key(fingerprint)
+
+    def mutate(state):
+        lease = _remote_require_lease(state, lease_id, fence)
+        claim = state.get("claim") or {}
+        if claim:
+            if claim.get("recovery_required"):
+                return {"status": "recovery-required", "claim_id": claim.get("id"),
+                        "run_id": claim.get("run_id"), "fence": int(lease["fence"])}
+            if claim.get("delivered_at"):
+                return {"status": "busy", "claim_id": claim.get("id"),
+                        "run_id": claim.get("run_id"), "fence": int(lease["fence"])}
+            claim["delivered_at"] = now()
+            return {"status": "wake", "claim": dict(claim), "recovered": True}
+        if not trigger_key:
+            return {"status": "idle", "fence": int(lease["fence"])}
+        if state.get("completed_trigger") == trigger_key:
+            return {"status": "handled", "fence": int(lease["fence"])}
+        failure = state.get("failure") or {}
+        if failure.get("trigger") == trigger_key:
+            if failure.get("state") == "failed":
+                return {"status": "failed", "attempts": int(failure.get("attempts") or 0),
+                        "reason": failure.get("reason", ""), "fence": int(lease["fence"])}
+            if float(failure.get("retry_epoch") or 0) > _remote_epoch():
+                return {"status": "retrying", "attempts": int(failure.get("attempts") or 0),
+                        "retry_at": failure.get("retry_at", ""), "fence": int(lease["fence"])}
+            attempt = int(failure.get("attempts") or 0) + 1
+        else:
+            attempt = 1
+        seq = int(state.get("run_seq") or 0) + 1
+        state["run_seq"] = seq
+        held = (pending.get("holding") or [""])[0].split(" ")[0] or _watch_bind_ticket(board, owner) or ""
+        claim = {"id": "claim_" + uuid.uuid4().hex,
+                 "run_id": "rr-%s-%d-%s" % (owner, seq, uuid.uuid4().hex[:12]),
+                 "run_no": seq, "trigger": trigger_key,
+                 "trigger_keys": sorted(k for k in pending if k in WAKE_KEYS),
+                 "ticket": held, "attempt": attempt, "fence": int(lease["fence"]),
+                 "claimed_at": now(), "delivered_at": now(), "started_at": ""}
+        state["claim"] = claim
+        return {"status": "wake", "claim": dict(claim), "recovered": False}
+
+    result = _remote_update(board, owner, mutate)
+    if result.get("status") == "wake":
+        claim = result.pop("claim")
+        result.update({"claim_id": claim["id"], "run_id": claim["run_id"],
+                       "run_no": claim["run_no"], "attempt": claim["attempt"],
+                       "fence": claim["fence"], "wake": pending_view(pending)})
+        kind = prompt_kind or ("cos" if owner == (current_master(board) or {}).get("cos")
+                               else ("master" if owner == (current_master(board) or {}).get("owner") else ""))
+        result["prompt"] = prompt_text(argparse.Namespace(
+            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+    return result
+
+
+def _remote_run_start(board, owner, lease_id, fence, claim_id):
+    emitted = []
+
+    def mutate(state):
+        lease = _remote_require_lease(state, lease_id, fence)
+        claim = state.get("claim") or {}
+        if claim.get("id") != claim_id or int(claim.get("fence") or 0) != int(fence):
+            raise RemoteProtocolError("claim is absent or fenced")
+        if claim.get("recovery_required"):
+            raise RemoteProtocolError("claim needs explicit remote retry recovery")
+        if claim.get("started_at"):
+            return {"status": "running", "run_id": claim["run_id"], "idempotent": True}
+        claim["started_at"] = now()
+        emitted.append(dict(claim, bridge_id=lease.get("bridge_id", ""),
+                            worktree=lease.get("worktree", "")))
+        return {"status": "running", "run_id": claim["run_id"], "idempotent": False}
+
+    result = _remote_update(board, owner, mutate)
+    if emitted:
+        claim = emitted[0]
+        traj_event(board, "run_start", agent=owner, ticket=claim.get("ticket") or None,
+                   run_no=claim["run_no"], run_id=claim["run_id"],
+                   trigger=claim.get("trigger_keys") or [], harness_cmd="remote",
+                   worktree=claim.get("worktree") or None, release_sha=_release_commit(),
+                   bridge_id=claim.get("bridge_id"), fence=int(fence), attempt=claim.get("attempt"))
+    return result
+
+
+def _remote_run_end(board, owner, lease_id, fence, claim_id, exit_code,
+                    input_tokens=None, output_tokens=None, cost_usd=None, reason=""):
+    ended = []
+
+    def mutate(state):
+        _remote_require_lease(state, lease_id, fence)
+        previous = state.get("last_run") or {}
+        if previous.get("claim_id") == claim_id:
+            return {"status": previous.get("status", "completed"),
+                    "run_id": previous.get("run_id"), "idempotent": True}
+        claim = state.get("claim") or {}
+        if claim.get("id") != claim_id or int(claim.get("fence") or 0) != int(fence):
+            raise RemoteProtocolError("claim is absent or fenced")
+        if not claim.get("started_at"):
+            raise RemoteProtocolError("remote start must succeed before remote end")
+        attempt = int(claim.get("attempt") or 1)
+        max_attempts = int(state.get("max_attempts") or REMOTE_MAX_ATTEMPTS)
+        status = "completed"
+        if int(exit_code) == 0:
+            state["completed_trigger"] = claim.get("trigger", "")
+            state.pop("failure", None)
+        else:
+            status = "retrying" if attempt < max_attempts else "failed"
+            delay = min(2 ** max(0, attempt - 1), 30) if status == "retrying" else 0
+            retry_epoch = _remote_epoch() + delay if delay else 0
+            state["failure"] = {"state": status, "trigger": claim.get("trigger", ""),
+                                "attempts": attempt, "max_attempts": max_attempts,
+                                "reason": (reason or "remote harness exit %s" % exit_code)[:240],
+                                "retry_epoch": retry_epoch,
+                                "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else "")}
+        record = {"claim_id": claim_id, "run_id": claim.get("run_id"), "run_no": claim.get("run_no"),
+                  "ticket": claim.get("ticket", ""), "started_at": claim.get("started_at"),
+                  "ended_at": now(), "exit": int(exit_code), "status": status,
+                  "attempt": attempt, "fence": int(fence), "reason": reason[:240] if reason else ""}
+        state["last_run"] = record
+        state.pop("claim", None)
+        ended.append((record, status))
+        return {"status": status, "run_id": record["run_id"], "attempt": attempt,
+                "max_attempts": max_attempts, "idempotent": False,
+                "retry_at": (state.get("failure") or {}).get("retry_at", "")}
+
+    result = _remote_update(board, owner, mutate)
+    if ended:
+        record, status = ended[0]
+        traj_event(board, "run_end", agent=owner, ticket=record.get("ticket") or None,
+                   run_no=record.get("run_no"), run_id=record.get("run_id"),
+                   started_at=record.get("started_at"), ended_at=record.get("ended_at"),
+                   duration_s=_iso_span_secs(record.get("started_at"), record.get("ended_at")),
+                   exit=int(exit_code), outcome=status, harness_cmd="remote", fence=int(fence),
+                   attempt=record.get("attempt"), input_tokens=input_tokens,
+                   output_tokens=output_tokens, cost_usd=cost_usd,
+                   usage_error=None if any(v is not None for v in
+                                           (input_tokens, output_tokens, cost_usd)) else "unreported")
+    return result
+
+
+def cmd_remote(a, board):
+    """Fenced local-board protocol used by a remote model/session bridge."""
+    owner = _hook_agent(a.agent)
+    operation = a.remote_cmd
+    try:
+        pinned = whoami()
+        if operation != "status" and pinned != owner:
+            raise RemoteProtocolError(
+                "remote wrapper identity is %s, not requested agent %s" % (pinned, owner))
+        registered, _ = harness_of(board, owner)
+        if operation not in ("status", "release") and registered != "remote":
+            raise RemoteProtocolError(
+                "agent %s is registered for harness %s, not remote" % (owner, registered))
+        if operation == "register":
+            bridge_id = _hook_agent(a.bridge_id)
+            result = _remote_register(board, owner, bridge_id, a.ttl, a.max_attempts,
+                                      replace=a.replace, worktree=a.worktree)
+        elif operation == "heartbeat":
+            result = _remote_update(board, owner, lambda state: {
+                "status": "online", "fence": int(_remote_require_lease(
+                    state, a.lease_id, a.fence)["fence"]),
+                "expires_at": state["lease"]["expires_at"]})
+        elif operation == "next":
+            wait = max(0, min(int(a.wait or 0), REMOTE_LONG_POLL_MAX))
+            deadline = _remote_epoch() + wait
+            while True:
+                result = _remote_claim_once(board, owner, a.lease_id, a.fence,
+                                            prompt_kind=a.prompt_kind)
+                if result.get("status") not in ("idle", "handled") or _remote_epoch() >= deadline:
+                    break
+                import time as _time
+                _time.sleep(min(0.25, max(0, deadline - _remote_epoch())))
+        elif operation == "start":
+            result = _remote_run_start(board, owner, a.lease_id, a.fence, a.claim_id)
+        elif operation == "end":
+            for value, label in ((a.input_tokens, "input tokens"),
+                                 (a.output_tokens, "output tokens"), (a.cost_usd, "cost")):
+                if value is not None and value < 0:
+                    raise RemoteProtocolError("%s cannot be negative" % label)
+            result = _remote_run_end(board, owner, a.lease_id, a.fence, a.claim_id,
+                                     a.exit, input_tokens=a.input_tokens,
+                                     output_tokens=a.output_tokens, cost_usd=a.cost_usd,
+                                     reason=a.reason)
+        elif operation == "retry":
+            abandoned = []
+
+            def retry(state):
+                _remote_require_lease(state, a.lease_id, a.fence)
+                claim = state.get("claim") or {}
+                if claim and claim.get("id") != (a.claim_id or claim.get("id")):
+                    raise RemoteProtocolError("claim is absent or fenced")
+                if claim.get("started_at"):
+                    abandoned.append(dict(claim))
+                # An uncertain in-flight recovery continues the prior attempt
+                # count. A deliberate retry after a terminal failure grants a
+                # fresh bounded budget instead of failing again immediately.
+                attempts = int(claim.get("attempt") or 0) if claim else 0
+                trigger = claim.get("trigger") or (state.get("failure") or {}).get("trigger", "")
+                if claim:
+                    state.pop("claim", None)
+                state["failure"] = {"state": "retrying", "trigger": trigger,
+                                    "attempts": attempts, "max_attempts": int(
+                                        state.get("max_attempts") or REMOTE_MAX_ATTEMPTS),
+                                    "reason": "operator-authorized retry", "retry_epoch": 0,
+                                    "retry_at": ""}
+                return {"status": "retrying", "attempts": attempts}
+
+            result = _remote_update(board, owner, retry)
+            if abandoned:
+                old = abandoned[0]
+                traj_event(board, "run_end", agent=owner, ticket=old.get("ticket") or None,
+                           run_no=old.get("run_no"), run_id=old.get("run_id"),
+                           started_at=old.get("started_at"), ended_at=now(), exit=75,
+                           outcome="lease_lost", harness_cmd="remote", fence=int(a.fence))
+        elif operation == "release":
+            def release(state):
+                lease = _remote_require_lease(state, a.lease_id, a.fence, renew=False)
+                lease["expires_epoch"] = 0
+                lease["expires_at"] = now()
+                claim = state.get("claim") or {}
+                if claim and not claim.get("started_at"):
+                    claim["delivered_at"] = ""
+                return {"status": "offline", "fence": int(lease["fence"])}
+            result = _remote_update(board, owner, release)
+        elif operation == "status":
+            result = _remote_public_state(load_remote_state(board, owner))
+        else:
+            raise RemoteProtocolError("remote operation required")
+    except (RemoteProtocolError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}), file=sys.stderr)
+        raise SystemExit(2)
+    print(json.dumps(result, sort_keys=True))
 
 
 def _watch_note_limit_from_log(board, owner, log_slice):
@@ -8776,7 +9166,6 @@ def cmd_watch(a, board):
             pass
 
     runs = failures = 0
-    skipped_trigger = None
     try:
         if not a.once:
             print("watching %s for %s every %ds; wake=%s; cwd=%s; cmd=%s" % (
@@ -8808,11 +9197,22 @@ def cmd_watch(a, board):
             if force and not actionable(p):
                 p = dict(p or {}, forced=True)
             trigger_fp = _watch_trigger_fingerprint(board, owner, p) if actionable(p) else None
-            if actionable(p) and skipped_trigger is not None and trigger_fp == skipped_trigger:
-                log("%s skip retrigger on unchanged trigger after exit!=0" % now())
+            trigger_key = _remote_trigger_key(trigger_fp)
+            retry_state = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
+            same_failure = bool(trigger_key and retry_state.get("trigger") == trigger_key)
+            retry_deferred = (not a.once and same_failure and not force and
+                              (retry_state.get("state") == "failed" or
+                               float(retry_state.get("retry_epoch") or 0) > _remote_epoch()))
+            if actionable(p) and retry_deferred:
+                log("%s skip retrigger on unchanged trigger; state=%s attempts=%s retry_at=%s" % (
+                    now(), retry_state.get("state"), retry_state.get("attempts"),
+                    retry_state.get("retry_at") or "manual"))
                 if a.verbose:
-                    print("%s skip retrigger (same unread trigger)" % now())
+                    print("%s dispatch %s (attempts=%s; queued trigger unchanged)" % (
+                        now(), retry_state.get("state"), retry_state.get("attempts")))
             elif actionable(p):
+                if not same_failure:
+                    failures = 0
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
                 print("%s work found (%s) wake=%s stop=%s -> run %d" % (
@@ -8933,11 +9333,30 @@ def cmd_watch(a, board):
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
                     run_slice = _read_run_slice(log_path, log_before)
                     _safe(lambda rs=run_slice: _watch_note_limit_from_log(board, owner, rs), None)
-                if rc not in (0, None):
-                    skipped_trigger = trigger_fp
-                    log("%s skip retrigger armed for unchanged failed trigger" % now())
-                else:
-                    skipped_trigger = None
+                if not a.once and rc not in (0, None):
+                    previous = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
+                    attempts = (int(previous.get("attempts") or 0) + 1
+                                if previous.get("trigger") == trigger_key else 1)
+                    retrying = attempts < LOCAL_DISPATCH_MAX_ATTEMPTS
+                    delay = min(every * (2 ** max(0, attempts - 1)), 60) if retrying else 0
+                    retry_epoch = _remote_epoch() + delay if delay else 0
+                    failure_record = {
+                        "state": "retrying" if retrying else "failed",
+                        "trigger": trigger_key, "attempts": attempts,
+                        "max_attempts": LOCAL_DISPATCH_MAX_ATTEMPTS,
+                        "reason": "local harness exit %s" % rc,
+                        "retry_epoch": retry_epoch,
+                        "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else ""),
+                        "at": now(),
+                    }
+                    _safe(lambda fr=failure_record: _agent_set(board, owner, adapter_failure=fr), None)
+                    log("%s skip retrigger armed for unchanged failed trigger; bounded attempt %d/%d state=%s" % (
+                        now(), attempts, LOCAL_DISPATCH_MAX_ATTEMPTS, failure_record["state"]))
+                elif not a.once:
+                    def clear_failure(rec):
+                        rec.pop("adapter_failure", None)
+                    _safe(lambda: _agent_update(board, owner, clear_failure), None)
                 failures = failures + 1 if rc not in (0, None) else 0
                 if max_runs and runs >= max_runs:
                     print("max-runs reached")
@@ -10447,7 +10866,7 @@ async function load(manual){
     const auth=a.auth==='login_required'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Login required · '+esc(a.auth_login_cmd||'agent login')+'</span>':'';
     const quota=a.auth==='quota'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Usage quota</span>':'';
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
-    const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':'');
+    const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
     return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.adapter_online?' ●':'')+'</span>'+auth+quota+lim+wake+'</div>'+
       '<div class="mute mono">'+esc(a.model||'—')+' · '+esc(a.harness||'—')+' · '+esc(a.wake_mode||'task-only')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
@@ -10946,14 +11365,35 @@ def _board_snapshot_body(board, messages=40):
     for r in rows:
         rec = agents.get(r["agent"], {})
         agent_wf = wf.get(r["agent"], {}) or {}
+        harness_name = agent_wf.get("harness") or agent_wf.get("tool") or "claude"
         lim = rec.get("limit")
         wc = _watcher_count(r["agent"], board)
         wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
         wake_pending = actionable(wake)
-        adapter_online = wc == 1
-        if wc > 1:
+        remote = (_remote_public_state(load_remote_state(board, r["agent"]))
+                  if harness_name == "remote" else {})
+        local_failure = rec.get("adapter_failure") or {}
+        failure_state = remote.get("failure_state", "") or local_failure.get("state", "")
+        failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
+        adapter_online = bool(remote.get("online")) if harness_name == "remote" else wc == 1
+        watcher_count = wc + (1 if remote.get("online") else 0)
+        if wc > 1 or (harness_name == "remote" and wc > 0):
             adapter_state = "conflict"
             adapter_reason = "Multiple adapters detected; stop extras so one identity-pinned lease remains."
+            adapter_online = False
+        elif failure_state == "failed":
+            adapter_state = "failed"
+            adapter_reason = failure_reason or "Dispatch exhausted its bounded retries; work remains queued."
+        elif failure_state == "retrying":
+            adapter_state = "retrying"
+            adapter_reason = failure_reason or "Dispatch failed and is waiting for its bounded retry."
+        elif remote.get("run_state") and adapter_online:
+            adapter_state = remote["run_state"]
+            adapter_reason = "Remote run is active under fence %s." % remote.get("fence")
+        elif remote.get("run_state"):
+            adapter_state = ("recovery-required" if remote["run_state"] == "recovery-required"
+                             else "queued-offline")
+            adapter_reason = "Remote run lost its adapter lease; reconnect to recover it."
         elif wake_pending and not adapter_online:
             adapter_state = "queued-offline"
             adapter_reason = "Wake queued — adapter offline; delivery resumes when it reconnects."
@@ -10967,14 +11407,20 @@ def _board_snapshot_body(board, messages=40):
             adapter_state = "offline"
             adapter_reason = "Adapter offline; directed work will remain queued."
         out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
-                           "harness": agent_wf.get("harness") or agent_wf.get("tool") or "claude",
+                           "harness": harness_name,
                            "wake_mode": wake_mode_of(board, r["agent"], master_state=m, workforce=wf),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
                            "watcher": adapter_online,
-                           "watcher_count": wc,
+                           "watcher_count": watcher_count,
                            "adapter_online": adapter_online,
                            "adapter_state": adapter_state,
                            "adapter_reason": adapter_reason,
+                           "adapter_bridge_id": remote.get("bridge_id", ""),
+                           "adapter_fence": remote.get("fence", 0),
+                           "adapter_heartbeat_at": remote.get("heartbeat_at", ""),
+                           "adapter_run_id": remote.get("run_id", ""),
+                           "adapter_attempts": remote.get("attempt", 0) or local_failure.get("attempts", 0),
+                           "adapter_retry_at": remote.get("retry_at", "") or local_failure.get("retry_at", ""),
                            "wake_pending": wake_pending,
                            "wake_reason": wake_reason_of(wake),
                            "roles": roles.get(r["agent"]) or [],
@@ -11791,18 +12237,33 @@ exec %s \"$@\"
        shlex.quote(owner), (" --prompt-kind " + shlex.quote(prompt_kind)) if prompt_kind else "",
        shlex.quote(script))
         _atomic_hook_write(wrapper, wrapper_text, 0o700)
-        payload = {"schema": 1, "agent": owner, "board": os.path.abspath(board),
+        pinned = shlex.quote(os.path.abspath(wrapper))
+        remote_base = "%s remote" % pinned
+        payload = {"schema": 2, "agent": owner, "board": os.path.abspath(board),
                    "wrapper": os.path.abspath(wrapper), "commands": commands,
                    "adapter": {
                        "wake_mode": wake_mode_of(board, owner),
-                       "delivery": "durable-long-poll",
-                       "pending_command": "%s pending --agent %s --json" % (
-                           shlex.quote(os.path.abspath(wrapper)), shlex.quote(owner)),
-                       "dedupe": "message identity + recipient; one live adapter lease",
-                       "offline": "pending returns true; no local model is substituted",
+                       "protocol": "fenced-wake-v1",
+                       "delivery": "atomic-claim-long-poll",
+                       "register_command": "%s register --agent %s --bridge-id {bridge_id}" % (
+                           remote_base, shlex.quote(owner)),
+                       "heartbeat_command": "%s heartbeat --agent %s --lease-id {lease_id} --fence {fence}" % (
+                           remote_base, shlex.quote(owner)),
+                       "next_command": "%s next --agent %s --lease-id {lease_id} --fence {fence} --wait 25%s" % (
+                           remote_base, shlex.quote(owner),
+                           (" --prompt-kind " + shlex.quote(prompt_kind)) if prompt_kind else ""),
+                       "start_command": "%s start --agent %s --lease-id {lease_id} --fence {fence} --claim-id {claim_id}" % (
+                           remote_base, shlex.quote(owner)),
+                       "end_command": "%s end --agent %s --lease-id {lease_id} --fence {fence} --claim-id {claim_id} --exit {exit}" % (
+                           remote_base, shlex.quote(owner)),
+                       "release_command": "%s release --agent %s --lease-id {lease_id} --fence {fence}" % (
+                           remote_base, shlex.quote(owner)),
+                       "dedupe": "atomic trigger claim under one exclusive fenced bridge lease",
+                       "offline": "wake stays queued; register/reconnect before claiming it",
                    }}
         _atomic_hook_write(manifest, json.dumps(payload, indent=2, sort_keys=True) + "\n", 0o600)
         print("Remote hook wrapper for %s: %s" % (owner, wrapper))
+        print("Manifest schema 2: register one fenced bridge, long-poll next, then start/end each claimed run.")
         print("No arguments prints the %s task-wake prompt; normal ticket commands stay pinned to this identity."
               % (prompt_kind or "worker"))
         return
@@ -12287,6 +12748,44 @@ def main():
     c.add_argument("--json", action="store_true")
     c.add_argument("--force", action="store_true", help="treat as actionable even without a wake gate (manual override)")
     c.set_defaults(fn=cmd_pending)
+
+    c = sub.add_parser("remote", help="fenced bridge protocol: register | heartbeat | next | start | end | retry | release | status")
+    rs = c.add_subparsers(dest="remote_cmd")
+    x = rs.add_parser("register", help="acquire the one remote bridge lease")
+    x.add_argument("--agent", required=True)
+    x.add_argument("--bridge-id", required=True)
+    x.add_argument("--ttl", type=int, default=REMOTE_LEASE_TTL)
+    x.add_argument("--max-attempts", type=int, default=REMOTE_MAX_ATTEMPTS)
+    x.add_argument("--replace", action="store_true", help="fence an online lease with the same bridge id")
+    x.add_argument("--worktree", default="", help="remote execution working tree, for run receipts")
+    x = rs.add_parser("heartbeat", help="renew an acquired bridge lease")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x = rs.add_parser("next", help="long-poll and atomically claim one wake")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x.add_argument("--wait", type=int, default=25, help="long-poll seconds, capped at 30")
+    x.add_argument("--prompt-kind", default="", choices=("", "master", "cos"))
+    x = rs.add_parser("start", help="record that the claimed remote model turn started")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", required=True)
+    x = rs.add_parser("end", help="finish a remote turn and report measured usage")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", required=True)
+    x.add_argument("--exit", type=int, required=True)
+    x.add_argument("--input-tokens", type=int, default=None)
+    x.add_argument("--output-tokens", type=int, default=None)
+    x.add_argument("--cost-usd", type=float, default=None)
+    x.add_argument("--reason", default="")
+    x = rs.add_parser("retry", help="authorize retry after failure or uncertain lease loss")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", default="")
+    x = rs.add_parser("release", help="release the bridge lease")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x = rs.add_parser("status", help="show public adapter state without its bearer lease")
+    x.add_argument("--agent", required=True)
+    c.set_defaults(fn=cmd_remote)
 
     c = sub.add_parser("prompt", help="print the standard worker (or --master) prompt for a headless run")
     c.add_argument("--agent", default="")

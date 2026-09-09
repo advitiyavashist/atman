@@ -55,6 +55,13 @@ The control plane is the `tickets` CLI: one Python file, standard library only,
 with plain files under `.tickets/`. It does not require a hosted service,
 database, or agent SDK.
 
+Runtime commands such as `watch`, `spawn`, `hooks`, `ui`, `--wake-mode`, and
+`remote` are provided by the root/live `tickets.py` installed with
+`./install.sh` or `./install.sh --live-release`. The `pyproject.toml` console
+script still points at the smaller core-board CLI in `src/ticket_board/cli.py`;
+it does not yet provide runtime wake or remote-adapter parity. Do not use the
+pip entry point for those features.
+
 ## Context without repetition
 
 Coordination and knowledge are separate parts of the system.
