@@ -25,7 +25,8 @@ wrote: ~/demo/.gitignore
 wrote: ~/demo/.tickets/MASTER.md
 bound: `tickets` run from ~/demo resolves to this board.
 
-Claude Code picks this up from its global SessionStart hook.
+Claude Code picks this up after `tickets hooks claude --agent alice` installs
+the worktree-scoped SessionStart hook.
 Codex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.
 
 board: ~/demo/.tickets

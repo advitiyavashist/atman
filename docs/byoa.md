@@ -11,6 +11,10 @@ before being written down. The examples use a stub harness rather than a real
 model, because what is being demonstrated is the *runtime's* half of the
 contract; nothing here is illustrative of a model's behaviour.
 
+For interactive or remote harness hooks, see [hook identities](hook-identities.md).
+Those installers bake a separate board identity into each harness instead of
+depending on the launching shell.
+
 ## The contract, in one paragraph
 
 The runtime hands your harness a **prompt file**, a **working directory** and

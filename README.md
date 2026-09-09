@@ -117,6 +117,10 @@ tickets inbox
 tickets next
 ```
 
+Then install a hook with a durable per-harness identity; the generated command
+does not inherit identity from the parent shell. See
+[Hook identities](docs/hook-identities.md), including the remote-agent wrapper.
+
 The built-in runner names are `claude`, `codex`, `cursor`, and
 `cursor+claude`. A custom runner can be any command:
 

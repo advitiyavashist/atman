@@ -6316,14 +6316,15 @@ Then the loop, until `tickets next` says nothing is ready:
     tickets next
 
 Tool-specific:
-- Claude Code: `TICKET_AGENT=claude-opus claude` -- the global SessionStart hook
-  shows the board automatically; `.tickets/CONTEXT.md` is offered on each claim.
+- Claude Code: `tickets hooks claude --agent claude-opus` installs a project
+  SessionStart/inbox/Stop hook with that identity baked in.
 - Codex: reads AGENTS.md in the repo root (installed by `tickets init`);
-  launch with `TICKET_AGENT=codex codex`.
-- Cursor: reads AGENTS.md and .cursor/rules/tickets.mdc; set TICKET_AGENT in
-  the terminal you start it from, or pass `--owner cursor` on each command.
+  `tickets hooks codex --agent codex --worktree "$PWD"` adds scoped context.
+- Cursor: reads AGENTS.md and .cursor/rules/tickets.mdc; `tickets hooks cursor
+  --agent cursor --worktree "$PWD"` adds identity-pinned message hooks.
 - Anything else that can run a shell: the same commands work; `tickets` is one
-  stdlib Python file at ~/.claude/tools/tickets.py.
+  stdlib Python file at ~/.claude/tools/tickets.py. `tickets hooks remote
+  --agent <name>` creates a pinned wrapper and event-command manifest.
 
 To take coordination: `tickets master take`, then `tickets master` and act on
 the HEALTH section.
@@ -6332,7 +6333,7 @@ the HEALTH section.
 
 A session cannot be woken by a hook once its turn has ended, so use both:
 
-- Keep going while there is work (Claude Code): `tickets hooks claude` installs a
+- Keep going while there is work (Claude Code): `tickets hooks claude --agent <name>` installs a
   `Stop` hook that blocks the stop when the agent has unread messages or a
   ticket in hand (loop-guarded: one extra continuation per user turn).
 - Start when work appears, without a human: run a watcher per agent from that
@@ -8398,8 +8399,10 @@ def cmd_codex_hook(a, board):
     """Codex hook body: print board context as hookSpecificOutput.additionalContext.
 
     Scoped to --worktree via the event cwd so one install is silent elsewhere.
-    Read-only: does not acknowledge messages or touch tickets.
+    Does not acknowledge messages or touch tickets; it records the durable
+    identity check-in required by every hook path.
     """
+    owner = _hook_agent(a.agent)
     try:
         event = json.loads(sys.stdin.read() or "{}")
         if not isinstance(event, dict):
@@ -8415,7 +8418,7 @@ def cmd_codex_hook(a, board):
             os.path.relpath(os.path.realpath(cwd), os.path.realpath(a.worktree)).startswith("..") and (_ for _ in ()).throw(ValueError())
         except (ValueError, OSError):
             return
-    owner = a.agent
+    _pinned_hook_identity(board, owner)
     p = _safe(lambda: pending_work(board, owner), {})
     lines = [
         "Ticket board context (%s):" % owner,
@@ -8522,7 +8525,7 @@ Codex, Cursor, your own harness) to a board that already exists.
 
 One command does every step (join, hooks, check-in, briefing):
 
-    export TICKET_AGENT=<unique-name>          # claude-opus, claude-sonnet, codex, cursor-2 ...
+    export TICKET_AGENT=<unique-name>          # used for this one-time boot command
     cd <repo or your worktree>
     tickets boot --tool claude|codex|cursor [--roles backend] [--watch]
 
@@ -8536,12 +8539,16 @@ What `boot` guarantees, idempotently:
   4. a briefing: unread messages, held ticket, ready tickets in your lane, and the exact NEXT command
 
 Per tool, after boot:
-  Claude Code (interactive):  TICKET_AGENT=<name> claude      -- hooks do the rest each turn
+  Claude Code (interactive):  claude                          -- the project hook carries its own identity
   Claude Code (unattended):   tickets boot --tool claude --watch    (or: tickets watch --every 60)
                               runs `claude -p "$(tickets prompt)"` only when `tickets pending` says there is work
-  Codex:                      TICKET_AGENT=<name> codex        -- hook injects board context; AGENTS.md carries the rules
-  Cursor:                     open the repo/worktree; enable Hooks in settings; set TICKET_AGENT in the launching shell
-  Anything else:              `tickets prompt` prints the worker instructions; `tickets watch --exec '<your cli>'`
+  Codex:                      codex                           -- the scoped hook carries its own identity
+  Cursor:                     open the configured worktree and enable Hooks in settings
+  Anything else:              `tickets hooks remote --agent <name> --wrapper <path>` writes an identity-pinned
+                              wrapper plus SessionStart/inbox/Stop/taskWake command manifest
+
+Every generated hook pins both its board and agent. An unrelated
+`TICKET_AGENT` in the launching shell cannot change hook attribution.
 
 Safety rails (all on by default):
   - Stop hook: at most one extra continuation per user turn (stop_hook_active) and 4 per hour;
@@ -10763,29 +10770,193 @@ def cmd_guide(a, board):
 
 # ---- hooks: wire a tool so the board reaches the agent every turn ----------
 
-INBOX_HOOK_CMD = (
-    'PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; '
-    '[ -n "$TICKET_AGENT" ] && tickets inbox --keep --limit 8 2>/dev/null | sed "s/^/[board] /" || true'
-)
+HOOK_AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}\Z")
+
+
+def _hook_agent(value):
+    """Return a hook-safe, durable agent name.
+
+    Hook commands are shell strings written to another program's settings.  A
+    permissive name here would be both an attribution bug and a command
+    injection bug, so hook identities use the same alphabet as the durable
+    coordination identity extension.
+    """
+    owner = (value or "").strip()
+    if not HOOK_AGENT_RE.fullmatch(owner):
+        sys.exit("hooks need --agent with 1-101 letters, digits, dots, underscores or hyphens")
+    return owner
+
+
+def _hook_command(script, board, owner, event, extra=()):
+    """Build one command with identity and board frozen into its bytes."""
+    words = [
+        "env", "TICKET_AGENT=" + owner, "TICKETS_DIR=" + os.path.abspath(board),
+        os.path.realpath(script), "hook-run", "--agent", owner, "--event", event,
+    ] + list(extra)
+    return " ".join(shlex.quote(str(word)) for word in words)
+
+
+def _atomic_hook_write(path, content, mode=None):
+    """Install one generated hook file and retain an exact one-step rollback.
+
+    Rollback refuses if somebody edited the installed file afterwards.  This
+    keeps an old receipt from erasing a human or another tool's later change.
+    """
+    import base64
+    import tempfile
+
+    path = os.path.abspath(os.path.expanduser(path))
+    data = content.encode("utf-8") if isinstance(content, str) else content
+    before_exists = os.path.exists(path) or os.path.islink(path)
+    before = open(path, "rb").read() if before_exists else b""
+    if before_exists and before == data:
+        return False
+    previous_mode = (os.stat(path).st_mode & 0o777) if before_exists else None
+    receipt = {
+        "schema": 1,
+        "target": path,
+        "before_exists": before_exists,
+        "before_mode": previous_mode,
+        "before_b64": base64.b64encode(before).decode("ascii"),
+        "after_sha256": hashlib.sha256(data).hexdigest(),
+    }
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+
+    def replace_bytes(target, payload, target_mode):
+        fd, temporary = tempfile.mkstemp(prefix=".tickets-hook-", dir=parent)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(payload)
+                out.flush()
+                os.fsync(out.fileno())
+            os.chmod(temporary, target_mode)
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    receipt_path = path + ".tickets-rollback.json"
+    replace_bytes(receipt_path, (json.dumps(receipt, sort_keys=True) + "\n").encode("utf-8"), 0o600)
+    replace_bytes(path, data, mode if mode is not None else (previous_mode or 0o600))
+    return True
+
+
+def _rollback_hook_file(path):
+    """Restore the exact bytes replaced by the most recent hook install."""
+    import base64
+    import tempfile
+
+    path = os.path.abspath(os.path.expanduser(path))
+    receipt_path = path + ".tickets-rollback.json"
+    try:
+        receipt = json.loads(open(receipt_path).read())
+    except (IOError, ValueError):
+        sys.exit("no hook rollback receipt for %s" % path)
+    current = open(path, "rb").read() if (os.path.exists(path) or os.path.islink(path)) else b""
+    if hashlib.sha256(current).hexdigest() != receipt.get("after_sha256"):
+        sys.exit("refusing rollback: %s changed after the hook install" % path)
+    if receipt.get("before_exists"):
+        payload = base64.b64decode(receipt.get("before_b64", ""), validate=True)
+        parent = os.path.dirname(path) or "."
+        fd, temporary = tempfile.mkstemp(prefix=".tickets-hook-rollback-", dir=parent)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(payload)
+                out.flush()
+                os.fsync(out.fileno())
+            os.chmod(temporary, int(receipt.get("before_mode") or 0o600))
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    elif os.path.exists(path) or os.path.islink(path):
+        os.unlink(path)
+    os.unlink(receipt_path)
+    return path
+
+
+def _pinned_hook_identity(board, owner):
+    """Pin and persist identity before a hook reads or writes the board."""
+    import contextlib
+    import io
+
+    owner = _hook_agent(owner)
+    os.environ["TICKET_AGENT"] = owner
+    os.environ["TICKETS_DIR"] = os.path.abspath(board)
+    try:
+        from ticket_coordination import run as coordination_run
+    except ImportError:
+        sys.exit("ticket_coordination.py is missing; hook identity cannot be verified")
+    capture = io.StringIO()
+    with contextlib.redirect_stdout(capture):
+        coordination_run("identity", argparse.Namespace(), board, globals())
+    try:
+        identity = json.loads(capture.getvalue())
+    except ValueError:
+        sys.exit("hook identity verification returned invalid data")
+    if identity.get("agent_id") != owner:
+        sys.exit("hook identity mismatch: expected %s, got %s" % (owner, identity.get("agent_id")))
+    return identity
+
+
+def cmd_hook_run(a, board):
+    """Run a hook action under its baked identity, ignoring ambient identity."""
+    owner = _hook_agent(a.agent)
+    identity = _pinned_hook_identity(board, owner)
+    if a.event == "identity":
+        print(json.dumps(identity, sort_keys=True))
+        return
+    if a.event == "session-start":
+        cmd_board(argparse.Namespace(all=False, quiet=False), board)
+        return
+    if a.event == "inbox":
+        cmd_inbox(argparse.Namespace(owner=owner, seat="", all=False, limit=8, keep=True), board)
+        return
+    if a.event == "stop":
+        cmd_stop_hook(a, board)
+        return
+    if a.event == "task-wake":
+        kind = getattr(a, "prompt_kind", "") or ""
+        cmd_prompt(argparse.Namespace(agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+        return
+    sys.exit("unsupported hook event %s" % a.event)
 
 CURSOR_HOOK = r'''#!/usr/bin/env python3
 """Cursor hook installed by `tickets hooks cursor`: surface new board messages.
 Reads the hook event JSON on stdin, writes {additional_context, user_message}
 on stdout. Keeps its own watermark so `tickets inbox` read-state is untouched.
-Identity comes from $TICKET_AGENT (defaults to the name given at install)."""
-import json, os, subprocess, sys
+Identity and board are baked at install; ambient shell values are ignored."""
+import argparse, json, os, subprocess, sys
 from pathlib import Path
 
-AGENT = os.environ.get("TICKET_AGENT", "%(agent)s")
-BOARD = Path(os.environ.get("TICKETS_DIR", %(board)r))
+AGENT = %(agent)r
+BOARD = Path(%(board)r)
 TICKETS = %(script)r
 STATE = Path(__file__).resolve().parent / "state" / ("board-%%s.json" %% AGENT)
 
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--agent", required=True)
+    args = parser.parse_args()
+    if args.agent != AGENT:
+        print(json.dumps({"user_message": "Ticket board hook identity mismatch"}))
+        return 0
     try:
         event = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         event = {}
+    env = dict(os.environ, TICKETS_DIR=str(BOARD), TICKET_AGENT=AGENT)
+    lines = []
+    try:
+        verified = subprocess.run(
+            [sys.executable, TICKETS, "hook-run", "--agent", AGENT, "--event", "identity"],
+            capture_output=True, text=True, timeout=4, env=env)
+        identity = json.loads(verified.stdout) if verified.returncode == 0 else {}
+        if identity.get("agent_id") != AGENT:
+            lines.append("Ticket board identity verification failed for %%s." %% AGENT)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        lines.append("Ticket board identity verification failed for %%s." %% AGENT)
     path = BOARD / "messages.jsonl"
     STATE.parent.mkdir(parents=True, exist_ok=True)
     last = ""
@@ -10802,16 +10973,14 @@ def main():
         if m.get("from") == AGENT and to in ("", "all", "everyone"): continue
         new.append(m)
     out = {}
-    lines = []
     if new:
-        lines = ["Ticket board: %%d new message(s) for %%s. Reply with `tickets msg`." %% (len(new), AGENT)]
+        lines.append("Ticket board: %%d new message(s) for %%s. Reply with `tickets msg`." %% (len(new), AGENT))
         for m in new[-12:]:
             lines.append("- %%s %%s -> %%s%%s: %%s" %% (m.get("at","?")[5:16], m.get("from","?"), m.get("to") or "everyone",
                          (" [%%s]" %% m["re"]) if m.get("re") else "", (m.get("text") or "")[:220]))
         out["user_message"] = "%%d new ticket-board message(s) for %%s" %% (len(new), AGENT)
         STATE.write_text(json.dumps({"last_at": new[-1].get("at", last)}))
     if event.get("hook_event_name") in ("SessionStart", "UserPromptSubmit"):
-        env = dict(os.environ, TICKETS_DIR=str(BOARD), TICKET_AGENT=AGENT)
         try:
             result = subprocess.run(
                 [sys.executable, TICKETS, "knowledge", "query", "--agent", AGENT,
@@ -10830,17 +10999,32 @@ if __name__ == "__main__":
 
 
 def cmd_hooks(a, board):
-    """Install board and bounded-knowledge hooks for Claude, Codex, or Cursor."""
+    """Install identity-pinned hooks for Claude, Codex, Cursor, or a remote harness."""
     root = os.path.dirname(board)
     script = os.path.realpath(__file__)
+
+    def rollback(paths):
+        restored = []
+        for target in paths:
+            restored.append(_rollback_hook_file(target))
+        print("rolled back ticket hooks: %s" % ", ".join(restored))
+
     def ours(entry):
         for hk in entry.get("hooks", []) if isinstance(entry, dict) else []:
             cmd = str(hk.get("command", ""))
-            if script in cmd or "tickets.py" in cmd or cmd == INBOX_HOOK_CMD or "tickets inbox --keep" in cmd:
+            if (script in cmd or "tickets.py" in cmd or "tickets inbox --keep" in cmd
+                    or " hook-run --agent " in cmd):
                 return True
         return False
     if a.tool == "claude":
-        path = os.path.expanduser(getattr(a, "settings", "") or "~/.claude/settings.json")
+        owner = _hook_agent(a.agent)
+        # A project/worktree-scoped default lets two Claude terminals keep
+        # different identities. Operators can still name a global file
+        # explicitly with --settings when that is truly what they want.
+        path = os.path.expanduser(getattr(a, "settings", "") or os.path.join(os.getcwd(), ".claude", "settings.json"))
+        if getattr(a, "rollback", False):
+            rollback([path])
+            return
         try:
             with open(path) as f:
                 s = json.load(f)
@@ -10849,37 +11033,37 @@ def cmd_hooks(a, board):
         hooks = s.setdefault("hooks", {})
         ss = hooks.setdefault("SessionStart", [])
         ss[:] = [h for h in ss if not ours(h)]
+        session_cmd = _hook_command(script, board, owner, "session-start")
         ss.append({"matcher": "startup|resume|clear|compact",
-                   "hooks": [{"type": "command", "command": "%s board" % script, "timeout": 10}]})
+                   "hooks": [{"type": "command", "command": session_cmd, "timeout": 10}]})
         ups = hooks.setdefault("UserPromptSubmit", [])
         ups[:] = [h for h in ups if not ours(h)]
-        ups.append({"hooks": [{"type": "command", "command": INBOX_HOOK_CMD, "timeout": 10}]})
+        ups.append({"hooks": [{"type": "command", "command": _hook_command(
+            script, board, owner, "inbox"), "timeout": 10}]})
         # Keep a turn alive while the agent still has board work. Loop-guarded
         # (stop_hook_active) and rate-capped; --no-stop removes it.
         st = hooks.setdefault("Stop", [])
         st[:] = [h for h in st if not ours(h)]
         if getattr(a, "stop", True):
-            st.append({"hooks": [{"type": "command", "command": "%s stop-hook" % script, "timeout": 15}]})
+            st.append({"hooks": [{"type": "command", "command": _hook_command(
+                script, board, owner, "stop"), "timeout": 15}]})
         if not st:
             hooks.pop("Stop", None)
         allow = s.setdefault("permissions", {}).setdefault("allow", [])
         for p in ("Bash(tickets:*)", "Bash(%s:*)" % script):
             if p not in allow:
                 allow.append(p)
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(s, f, indent=2)
-        os.replace(tmp, path)
-        print("Claude Code hooks in %s: SessionStart -> board; UserPromptSubmit -> inbox; Stop -> %s."
-              % (path, "keep working while board work remains" if getattr(a, "stop", True) else "off"))
-        print("Launch sessions as: TICKET_AGENT=<name> claude")
+        _atomic_hook_write(path, json.dumps(s, indent=2) + "\n", 0o600)
+        print("Claude Code hooks in %s for %s: SessionStart -> board; UserPromptSubmit -> inbox; Stop -> %s."
+              % (path, owner, "keep working while board work remains" if getattr(a, "stop", True) else "off"))
+        print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
         return
     if a.tool == "codex":
         hp = os.path.expanduser(getattr(a, "hooks_file", "") or "~/.codex/hooks.json")
-        agent = a.agent or whoami()
-        if agent.startswith("agent-"):
-            sys.exit("codex hooks need --agent <name> (or TICKET_AGENT)")
+        if getattr(a, "rollback", False):
+            rollback([hp])
+            return
+        agent = _hook_agent(a.agent)
         wt = os.path.abspath(a.worktree) if getattr(a, "worktree", "") else ""
         try:
             with open(hp) as f:
@@ -10887,7 +11071,10 @@ def cmd_hooks(a, board):
         except (IOError, ValueError):
             cfg = {}
         hooks = cfg.setdefault("hooks", {})
-        cmd = "%s codex-hook --agent %s%s" % (script, agent, (" --worktree %s" % wt) if wt else "")
+        cmd = " ".join(shlex.quote(str(word)) for word in (
+            ["env", "TICKET_AGENT=" + agent, "TICKETS_DIR=" + os.path.abspath(board),
+             script, "codex-hook", "--agent", agent]
+            + (["--worktree", wt] if wt else [])))
         for ev in ("SessionStart", "UserPromptSubmit"):
             lst = hooks.setdefault(ev, [])
             # replace only our own earlier entry for this agent; keep everything else
@@ -10895,40 +11082,76 @@ def cmd_hooks(a, board):
             lst.append({"hooks": [{"type": "command", "command": cmd, "timeout": 5,
                                    "statusMessage": "Checking the ticket board",
                                    "additionalContextLimit": 2000}]})
-        os.makedirs(os.path.dirname(hp) or ".", exist_ok=True)
-        tmp = hp + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cfg, f, indent=2)
-        os.replace(tmp, hp)
+        _atomic_hook_write(hp, json.dumps(cfg, indent=2) + "\n", 0o600)
         print("Codex hooks in %s for %s%s: SessionStart + UserPromptSubmit -> board context. "
               "Trust it with /hooks in Codex; AGENTS.md carries the rules." % (hp, agent, (" (scoped to %s)" % wt) if wt else ""))
         return
     if a.tool == "cursor":
-        hdir = os.path.join(root, ".cursor", "hooks")
+        agent = _hook_agent(a.agent)
+        cursor_root = os.path.abspath(a.worktree) if getattr(a, "worktree", "") else root
+        hdir = os.path.join(cursor_root, ".cursor", "hooks")
         os.makedirs(hdir, exist_ok=True)
         sp = os.path.join(hdir, "tickets-board.py")
-        if os.path.exists(sp) and not a.force:
-            print("%s exists; --force to overwrite" % sp)
-        else:
-            with open(sp, "w") as f:
-                f.write(CURSOR_HOOK % {"agent": a.agent or "cursor", "board": board,
-                                       "script": script})
-            os.chmod(sp, 0o755)
-        hp = os.path.join(root, ".cursor", "hooks.json")
+        hp = os.path.join(cursor_root, ".cursor", "hooks.json")
+        if getattr(a, "rollback", False):
+            rollback([hp, sp])
+            return
+        rendered = CURSOR_HOOK % {"agent": agent, "board": os.path.abspath(board), "script": script}
+        existing_script = open(sp).read() if os.path.exists(sp) else ""
+        if (existing_script and "Cursor hook installed by `tickets hooks cursor`" not in existing_script
+                and not a.force):
+            sys.exit("%s is not a Ticket Board hook; pass --force only after reviewing it" % sp)
+        if not existing_script or a.force or existing_script != rendered:
+            _atomic_hook_write(sp, rendered, 0o755)
         try:
             with open(hp) as f:
                 cfg = json.load(f)
         except (IOError, ValueError):
             cfg = {"version": 1, "hooks": {}}
-        entry = {"command": ".cursor/hooks/tickets-board.py", "timeout": 15}
+        entry = {"command": "%s --agent %s" % (shlex.quote(sp), shlex.quote(agent)), "timeout": 15}
         for ev in ("sessionStart", "beforeSubmitPrompt", "stop"):
             lst = cfg.setdefault("hooks", {}).setdefault(ev, [])
-            if not any("tickets-board" in json.dumps(x) for x in lst):
-                lst.append(dict(entry, **({"loop_limit": 2} if ev == "stop" else {})))
-        with open(hp, "w") as f:
-            json.dump(cfg, f, indent=2)
-        print("Cursor: %s + %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings; "
-              "set TICKET_AGENT in the shell Cursor starts from." % (os.path.relpath(hp, root), os.path.relpath(sp, root)))
+            lst[:] = [x for x in lst if "tickets-board" not in json.dumps(x)]
+            lst.append(dict(entry, **({"loop_limit": 2} if ev == "stop" else {})))
+        _atomic_hook_write(hp, json.dumps(cfg, indent=2) + "\n", 0o600)
+        print("Cursor: %s + %s for %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings."
+              % (os.path.relpath(hp, cursor_root), os.path.relpath(sp, cursor_root), agent))
+        print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
+        return
+    if a.tool == "remote":
+        owner = _hook_agent(a.agent)
+        wrapper = os.path.expanduser(getattr(a, "wrapper", "") or ("~/.local/bin/tickets-" + owner))
+        manifest = wrapper + ".hooks.json"
+        if getattr(a, "rollback", False):
+            rollback([manifest, wrapper])
+            return
+        prompt_kind = getattr(a, "prompt_kind", "") or ""
+        commands = {
+            "identity": _hook_command(script, board, owner, "identity"),
+            "SessionStart": _hook_command(script, board, owner, "session-start"),
+            "inbox": _hook_command(script, board, owner, "inbox"),
+            "Stop": _hook_command(script, board, owner, "stop"),
+            "taskWake": _hook_command(script, board, owner, "task-wake",
+                                       ("--prompt-kind", prompt_kind) if prompt_kind else ()),
+        }
+        wrapper_text = """#!/bin/sh
+# Generated by tickets hooks remote. This identity is deliberate and local to this wrapper.
+export TICKET_AGENT=%s
+export TICKETS_DIR=%s
+if [ \"$#\" -eq 0 ]; then
+  exec %s hook-run --agent %s --event task-wake%s
+fi
+exec %s \"$@\"
+""" % (shlex.quote(owner), shlex.quote(os.path.abspath(board)), shlex.quote(script),
+       shlex.quote(owner), (" --prompt-kind " + shlex.quote(prompt_kind)) if prompt_kind else "",
+       shlex.quote(script))
+        _atomic_hook_write(wrapper, wrapper_text, 0o700)
+        payload = {"schema": 1, "agent": owner, "board": os.path.abspath(board),
+                   "wrapper": os.path.abspath(wrapper), "commands": commands}
+        _atomic_hook_write(manifest, json.dumps(payload, indent=2, sort_keys=True) + "\n", 0o600)
+        print("Remote hook wrapper for %s: %s" % (owner, wrapper))
+        print("No arguments prints the %s task-wake prompt; normal ticket commands stay pinned to this identity."
+              % (prompt_kind or "worker"))
         return
 
 
@@ -11027,7 +11250,7 @@ def cmd_init(a, board):
             "INIT WROTE THE BOARD BUT IT IS NOT BOUND: wrote %s, yet `tickets` "
             "from %s still resolves to %s. Refusing to report success (T-263)."
             % (board, os.getcwd(), bound))
-    print("\nClaude Code picks this up from its global SessionStart hook.")
+    print("\nClaude Code: install a scoped hook with `tickets hooks claude --agent <name>`.")
     print("Codex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.")
 
 
@@ -11437,6 +11660,13 @@ def main():
     c.add_argument("--verbose", action="store_true")
     c.set_defaults(fn=cmd_watch)
 
+    c = sub.add_parser("hook-run", help="(hook body) run one event under a baked agent identity")
+    c.add_argument("--agent", required=True)
+    c.add_argument("--event", required=True,
+                   choices=("identity", "session-start", "inbox", "stop", "task-wake"))
+    c.add_argument("--prompt-kind", default="", choices=("", "master", "cos"))
+    c.set_defaults(fn=cmd_hook_run)
+
     c = sub.add_parser("codex-hook", help="(hook body) Codex SessionStart/UserPromptSubmit board context")
     c.add_argument("--agent", required=True)
     c.add_argument("--worktree", default="")
@@ -11539,13 +11769,17 @@ def main():
     c.add_argument("--once", action="store_true")
     c.set_defaults(fn=cmd_dash)
 
-    c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex")
-    c.add_argument("tool", choices=("claude", "cursor", "codex"))
-    c.add_argument("--agent", default="", help="agent name baked into the hook (codex/cursor)")
-    c.add_argument("--worktree", default="", help="codex: only fire inside this worktree")
-    c.add_argument("--settings", default="", help="claude: settings.json path (default ~/.claude/settings.json)")
+    c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex | remote")
+    c.add_argument("tool", choices=("claude", "cursor", "codex", "remote"))
+    c.add_argument("--agent", default="", help="required agent name baked into every generated hook command")
+    c.add_argument("--worktree", default="", help="codex/cursor: scope hooks to this worktree")
+    c.add_argument("--settings", default="", help="claude: settings.json path (default ./.claude/settings.json)")
     c.add_argument("--hooks-file", default="", help="codex: hooks.json path (default ~/.codex/hooks.json)")
+    c.add_argument("--wrapper", default="", help="remote: identity-pinned wrapper path")
+    c.add_argument("--prompt-kind", default="", choices=("", "master", "cos"),
+                   help="remote: taskWake prompt type")
     c.add_argument("--no-stop", dest="stop", action="store_false", help="claude: do not install the Stop hook")
+    c.add_argument("--rollback", action="store_true", help="restore exact files replaced by the latest install")
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_hooks, stop=True)
 
