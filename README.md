@@ -9,6 +9,8 @@
   local models, and your own agent harnesses around one objective.
 </p>
 
+<p align="center"><strong>Finish more work at least cost — in the fewest turns.</strong></p>
+
 Give Atman an objective. It assigns ready work, carries the relevant handoff
 context, watches liveness and limits, routes messages, and holds finished work
 for review. The result is a team you can understand and recover when a model,
@@ -16,8 +18,10 @@ session, or machine stops.
 
 ![Atman dashboard showing an objective, agent team, dependency-aware work, and review queue](docs/brand/evidence/t606-atman-dark-desktop.png)
 
-The dashboard above is a checked-in product capture. The live dashboard runs
-locally with `tickets ui`; it is not a public hosted demo.
+The dashboard above is a checked-in product capture. See it live with
+`tickets ui` → <http://127.0.0.1:8765>. The hero is median turns and
+yield@cost. Values stay `—` until a done ticket reports (unknown ≠ 0). It is
+not a public hosted demo.
 
 ## What Atman manages
 
