@@ -3000,9 +3000,14 @@ def _read_run(board, owner):
         return {}
 
 
-def _run_begin(board, owner, run_no, cwd):
-    _run_beat(board, owner, pid=os.getpid(), run=run_no, cwd=cwd,
-              started=now(), active=True, rc=None, ended="")
+def _run_begin(board, owner, run_no, cwd, run_id="", ticket=""):
+    fields = dict(pid=os.getpid(), run=run_no, cwd=cwd,
+                  started=now(), active=True, rc=None, ended="")
+    if run_id:
+        fields["run_id"] = run_id
+    if ticket:
+        fields["ticket"] = ticket
+    _run_beat(board, owner, **fields)
 
 
 def _run_end(board, owner, run_no, rc):
@@ -3022,7 +3027,14 @@ def _finalize_active_watch_run(board, owner, rc=143):
     rec = _read_run(board, owner)
     if not rec.get("active"):
         return False
-    _run_beat(board, owner, active=False, interrupted=True, rc=rc, ended=now())
+    ended = now()
+    _run_beat(board, owner, active=False, interrupted=True, rc=rc, ended=ended)
+    _safe(lambda: traj_event(
+        board, "run_end", agent=owner, ticket=rec.get("ticket") or None,
+        run_no=rec.get("run"), run_id=rec.get("run_id") or None,
+        exit=rc, interrupted=True, outcome="interrupted",
+        started_at=rec.get("started") or None, ended_at=ended,
+        worktree=rec.get("cwd") or None), None)
     return True
 
 
@@ -6242,12 +6254,24 @@ def _native_wake_succeeded(label):
         label in ("woken", "queued", "deduped") or str(label).startswith("supervised"))
 
 
+def _native_injection_failed(label):
+    """Only refused/stale native injection is a local adapter failure.
+
+    Remote bridge required, no live endpoint, retained-but-offline Codex, and
+    supervised Cursor stay durable queued-offline (T-640).
+    """
+    s = str(label or "")
+    return s.startswith("refused") or s.startswith("stale (rebound")
+
+
 def _note_native_wake_result(board, seat, label, message_id):
     """Record native wake outcome. Never delete an endpoint by seat name alone."""
     if _native_wake_succeeded(label):
         def clear(rec):
             rec.pop("adapter_failure", None)
         _agent_update(board, seat, clear)
+        return
+    if not _native_injection_failed(label):
         return
     _agent_set(board, seat, adapter_failure={
         "state": "failed",
@@ -9443,7 +9467,8 @@ def cmd_watch(a, board):
                     # The whole point of T-237: something must record that this
                     # agent is alive WHILE the child runs. checkin() cannot --
                     # the next call to it is on the far side of this line.
-                    _safe(lambda: _run_begin(board, owner, runs, cwd), None)
+                    _safe(lambda: _run_begin(board, owner, runs, cwd,
+                                             run_id=run_id, ticket=held_ticket), None)
                     # Where this run's own output starts in the shared log, so
                     # the usage parse below reads THIS run's tail and not the
                     # previous run's result object (T-311: a stale JSON blob
@@ -9589,6 +9614,7 @@ def cmd_codex_hook(a, board):
         except (ValueError, OSError):
             return
     _pinned_hook_identity(board, owner)
+    _safe(lambda: _session_adapters().heartbeat_session(board, owner), None)
     p = _safe(lambda: pending_work(board, owner), {})
     lines = [
         "Ticket board context (%s):" % owner,
@@ -12829,9 +12855,14 @@ def cmd_self(a, board):
         harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
         sa = _session_adapters()
         ep, was_stale = sa.live_endpoint(board, seat)
+        stored = sa.read_endpoint(board, seat)
         if ep:
             print("persistent: yes -- seat %s native %s endpoint (pid %s, registered %s)" % (
                 seat, ep.get("provider"), ep.get("pid", "?"), ep.get("at", "?")))
+        elif stored and was_stale:
+            print("persistent: no -- seat %s native identity is retained but offline after TTL "
+                  "(reconnect with `tickets join %s --persistent` or a session heartbeat)"
+                  % (seat, seat))
         elif was_stale:
             print("persistent: no -- seat %s had a native endpoint but it went stale "
                   "(re-register with `tickets join %s --persistent`)" % (seat, seat))

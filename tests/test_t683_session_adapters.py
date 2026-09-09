@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -477,7 +478,11 @@ def test_pidless_codex_endpoint_expires_without_heartbeat(board, cache_dir, monk
         "thread": "thread-old", "pid": None, "at": "now", "heartbeat_epoch": 1})
     ep, was_stale = sa.live_endpoint(str(board), "codex-seat")
     assert ep is None and was_stale
-    assert sa.read_endpoint(str(board), "codex-seat") is None
+    retained = sa.read_endpoint(str(board), "codex-seat")
+    assert retained is not None and retained.get("thread") == "thread-old"
+    assert sa.public_adapter_state(str(board), "codex-seat", "codex", False, False)[
+        "adapter_native_online"] is False
+    assert sa.has_live_native_session(str(board), "codex-seat") is True
 
 
 def test_wake_delivery_is_deduped_by_message_id(board, cache_dir, sock_dir, monkeypatch):
@@ -555,6 +560,11 @@ def test_harness_mismatch_does_not_cross_poke(board, cache_dir, sock_dir, monkey
         "heartbeat_epoch": time.time()})
     label = sa.wake_seat(str(board), "grok-worker", "hello", harness="remote")
     assert label == "remote bridge required"
+    assert sa.read_endpoint(str(board), "grok-worker") is None
+    sa.write_endpoint(str(board), "grok-worker", {
+        "seat": "grok-worker", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "heartbeat_epoch": time.time()})
     label = sa.wake_seat(str(board), "grok-worker", "hello", harness="codex")
     assert "refused" in label
     assert "removed" in label
@@ -802,3 +812,146 @@ def test_live_endpoint_stale_cleanup_does_not_drop_rebind(board, cache_dir, sock
     assert ep is not None and not was_stale
     assert ep["socket"] == alive
     assert ep.get("lease_id") != "old-lease"
+
+
+def test_pidless_codex_reconnects_and_first_wake_keeps_thread(board, cache_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-old")
+    monkeypatch.delenv("TICKETS_SESSION_LEASE", raising=False)
+    sa = _adapters()
+    sa.write_endpoint(str(board), "codex-seat", {
+        "seat": "codex-seat", "provider": "codex", "mode": "native",
+        "thread": "thread-old", "pid": None, "at": "now", "heartbeat_epoch": 1,
+        "lease_id": "old-lease", "fence": 1})
+    with mock.patch.object(sa, "_which", return_value="/bin/codex"):
+        with mock.patch("subprocess.run") as run_mock:
+            run_mock.return_value = subprocess.CompletedProcess([], 0, "queue", "")
+            reg = sa.register_persistent(str(board), "codex-seat", "codex", "now")
+    assert reg.get("ok"), reg
+    ep, stale = sa.live_endpoint(str(board), "codex-seat")
+    assert ep is not None and not stale
+    assert ep.get("thread") == "thread-old"
+    sa.write_endpoint(str(board), "codex-seat", {
+        "seat": "codex-seat", "provider": "codex", "mode": "native",
+        "thread": "thread-old", "pid": None, "at": "now", "heartbeat_epoch": 1,
+        "lease_id": ep.get("lease_id"), "fence": int(ep.get("fence") or 1)})
+    with mock.patch("subprocess.run") as run_mock:
+        run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
+        label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex",
+                             message_id="after-idle")
+    assert label == "queued"
+    live, _ = sa.live_endpoint(str(board), "codex-seat")
+    assert live is not None
+    assert live.get("last_delivery_id") == "after-idle"
+
+
+def test_concurrent_same_message_id_pokes_once(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "once.sock")
+    Path(sock_path).touch()
+    sa = _adapters()
+    sa.write_endpoint(str(board), "bob", {
+        "seat": "bob", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "lease_id": "lease-1", "fence": 1, "heartbeat_epoch": time.time()})
+    in_poke = threading.Event()
+    proceed = threading.Event()
+    pokes = []
+
+    def slow_poke(ep, text):
+        pokes.append(1)
+        in_poke.set()
+        proceed.wait(timeout=5)
+        return True
+
+    labels = []
+
+    def one():
+        labels.append(sa.wake_seat(str(board), "bob", "hello", harness="claude",
+                                    message_id="same-mid"))
+
+    with mock.patch.object(sa, "_poke_claude", side_effect=slow_poke):
+        t1 = threading.Thread(target=one)
+        t1.start()
+        assert in_poke.wait(timeout=5)
+        t2 = threading.Thread(target=one)
+        t2.start()
+        t2.join(timeout=5)
+        proceed.set()
+        t1.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive()
+    assert pokes == [1]
+    assert labels.count("woken") == 1
+    assert labels.count("deduped") == 1
+
+
+def test_remote_and_custom_msg_stay_queued_offline(board):
+    _run(board, "join", "grok-worker", "--roles", "docs", "--harness", "remote",
+         "--wake-mode", "continuous")
+    _run(board, "join", "custom-seat", "--roles", "backend", "--harness", "custom",
+         "--cmd", "true {prompt_file}", "--wake-mode", "continuous")
+    sent = _run(board, "msg", "please stay queued", "--to", "grok-worker", "--task",
+                 agent="sender")
+    assert sent.returncode == 0, sent.stderr
+    sent2 = _run(board, "msg", "please stay queued too", "--to", "custom-seat", "--task",
+                  agent="sender")
+    assert sent2.returncode == 0, sent2.stderr
+    tk = _tickets()
+    for name in ("grok-worker", "custom-seat"):
+        rec = tk._agent_rec(str(board), name) or {}
+        assert "adapter_failure" not in rec, rec
+    snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
+    grok = next(a for a in snap["agents"] if a["name"] == "grok-worker")
+    custom = next(a for a in snap["agents"] if a["name"] == "custom-seat")
+    assert grok["adapter_state"] == "queued-offline"
+    assert custom["adapter_state"] == "queued-offline"
+
+
+def test_sigterm_child_prompt_emits_run_end(board):
+    _run(board, "join", "runner", "--roles", "backend", "--wake-mode", "continuous")
+    sent = _run(board, "msg", "held work dominates", "--to", "runner", "--task",
+                 agent="sender")
+    assert sent.returncode == 0, sent.stderr
+    cmd = "%s -c 'import sys,time; open(sys.argv[1]).read(); time.sleep(60)' {prompt_file}" % (
+        sys.executable,)
+    home = board.parent.parent / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="runner", HOME=str(home))
+    proc = subprocess.Popen(
+        [sys.executable, str(TOOL), "watch", "--agent", "runner", "--persist",
+         "--every", "1", "--exec", cmd, "--cwd", str(board.parent)],
+        cwd=str(board.parent), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    run_file = board / "agents" / "runner.run"
+    try:
+        deadline = time.time() + 15
+        rec = {}
+        while time.time() < deadline:
+            if run_file.exists():
+                rec = json.loads(run_file.read_text())
+                if rec.get("active"):
+                    break
+            time.sleep(0.1)
+        else:
+            proc.kill()
+            out = (proc.stdout.read() if proc.stdout else "") + (proc.stderr.read() if proc.stderr else "")
+            raise AssertionError("watch never started a child: %s" % out)
+        os.kill(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=10)
+        rec = json.loads(run_file.read_text())
+        assert rec.get("active") is False
+        assert rec.get("interrupted") is True
+        assert rec.get("rc") == 143
+        path = board / "trajectories.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        ends = [e for e in rows if e.get("kind") == "run_end" and e.get("agent") == "runner"]
+        starts = [e for e in rows if e.get("kind") == "run_start" and e.get("agent") == "runner"]
+        assert starts, rows
+        assert len(ends) == 1
+        assert ends[0].get("exit") == 143
+        assert ends[0].get("interrupted") is True
+        assert ends[0].get("run_id") == starts[0].get("run_id")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)

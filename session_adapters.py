@@ -356,12 +356,13 @@ def live_endpoint(board, seat):
         if not (ep.get("thread") or "").strip():
             return _drop_observed()
         if pid_ok is None and not _heartbeat_fresh(ep):
-            return _drop_observed()
+            # Keep the thread identity. TTL means not-online, not "delete the seat".
+            return None, True
     elif provider == "cursor":
         if not (ep.get("session_id") or "").strip():
             return _drop_observed()
         if pid_ok is None and not _heartbeat_fresh(ep):
-            return _drop_observed()
+            return None, True
         # Cursor resume is not an enqueue primitive; a recorded session is identity only.
         if ep.get("mode") == "native":
             ep = dict(ep)
@@ -544,55 +545,162 @@ def _poke_until(fn, ep, text, attempts=NATIVE_POKE_ATTEMPTS):
     return False
 
 
+def _endpoint_lease_fence(ep):
+    lease = (ep or {}).get("lease_id") or ""
+    try:
+        fence = int((ep or {}).get("fence") or 0)
+    except (TypeError, ValueError):
+        fence = 0
+    return lease, fence
+
+
+def heartbeat_session(board, seat, presented_lease=""):
+    """Keep-alive for a stored native identity. Does not create or steal a seat.
+
+    Codex SessionStart/UserPromptSubmit hooks call this so a PID-less thread
+    stays online while the session is actually used. A TTL-expired record
+    remains on disk but is not advertised online until a heartbeat or
+    reconnect (`join --persistent`) refreshes it.
+    """
+    presented = (presented_lease or os.environ.get("TICKETS_SESSION_LEASE") or "").strip()
+    fd = acquire_seat_lock(board, seat)
+    try:
+        ep = read_endpoint(board, seat)
+        if not ep:
+            return None
+        if presented and (ep.get("lease_id") or "") != presented:
+            return None
+        if _endpoint_pid_ok(ep.get("pid")) is False:
+            return None
+        ep["heartbeat_epoch"] = time.time()
+        ep["heartbeat_at"] = ep.get("at") or ""
+        write_endpoint(board, seat, ep)
+        return ep
+    finally:
+        release_seat_lock(fd)
+
+
+def _can_inject_retained(ep, expected):
+    """PID-less Codex identity may still be queued after TTL; do not claim online."""
+    if not ep or (ep.get("mode") or "") != "native":
+        return False
+    if (ep.get("provider") or "") != "codex":
+        return False
+    if not (ep.get("thread") or "").strip():
+        return False
+    if expected and expected != "codex":
+        return False
+    return True
+
+
+def _reserve_wake(board, seat, mid, lease, fence):
+    """Mark message_id in-flight under the seat lock before any poke."""
+    fd = acquire_seat_lock(board, seat)
+    try:
+        ep = read_endpoint(board, seat)
+        if not ep:
+            return "gone", None
+        if lease and (ep.get("lease_id") or "") != lease:
+            return "stale (rebound before delivery)", ep
+        if fence and int(ep.get("fence") or 0) != int(fence):
+            return "stale (rebound before delivery)", ep
+        if mid and ep.get("last_delivery_id") == mid:
+            return "deduped", ep
+        if mid and ep.get("last_inflight_id") == mid:
+            return "deduped", ep
+        if mid:
+            ep["last_inflight_id"] = mid
+            ep["last_inflight_epoch"] = time.time()
+            write_endpoint(board, seat, ep)
+        return "reserved", ep
+    finally:
+        release_seat_lock(fd)
+
+
+def _commit_wake(board, seat, mid, lease, fence, label, ok):
+    fd = acquire_seat_lock(board, seat)
+    try:
+        ep = read_endpoint(board, seat)
+        if not ep:
+            return "stale (rebound before delivery)" if mid else label
+        if lease and (ep.get("lease_id") or "") != lease:
+            return "stale (rebound before delivery)"
+        if fence and int(ep.get("fence") or 0) != int(fence):
+            return "stale (rebound before delivery)"
+        ep.pop("last_inflight_id", None)
+        ep.pop("last_inflight_epoch", None)
+        if ok:
+            if mid:
+                ep["last_delivery_id"] = mid
+                ep["last_delivery_status"] = label
+            ep["heartbeat_epoch"] = time.time()
+            ep["heartbeat_at"] = ep.get("at") or ""
+            write_endpoint(board, seat, ep)
+            return label
+        ep["last_attempt_id"] = mid
+        ep["last_attempt_status"] = label
+        write_endpoint(board, seat, ep)
+        if label == "refused":
+            try:
+                os.unlink(endpoint_path(board, seat))
+            except OSError:
+                pass
+        return label
+    finally:
+        release_seat_lock(fd)
+
+
 def wake_seat(board, seat, text, harness=None, message_id=""):
     """Best-effort native wake. Returns a short label; never raises."""
     expected = provider_for_harness(harness) if harness else ""
     if expected == "remote" or harness == "remote":
+        leftover = read_endpoint(board, seat)
+        if leftover:
+            lease, fence = _endpoint_lease_fence(leftover)
+            remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
         return "remote bridge required"
     ep, was_stale = live_endpoint(board, seat)
     if ep is None:
-        return "endpoint stale (removed)" if was_stale else "no live endpoint"
+        stored = read_endpoint(board, seat)
+        if _can_inject_retained(stored, expected):
+            ep = stored
+        elif stored:
+            return "no live endpoint"
+        else:
+            return "endpoint stale (removed)" if was_stale else "no live endpoint"
     mid = str(message_id or "")
-    if mid and ep.get("last_delivery_id") == mid:
-        return "deduped"
     provider = ep.get("provider") or ""
-    lease = ep.get("lease_id") or ""
-    try:
-        fence = int(ep.get("fence") or 0)
-    except (TypeError, ValueError):
-        fence = 0
+    lease, fence = _endpoint_lease_fence(ep)
     if expected and provider and expected != provider:
         remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
         return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
+    if provider == "cursor":
+        return "supervised (cursor agent -p --resume is a paid foreground run, not enqueue)"
+    if provider not in ("claude", "codex"):
+        return "unsupported provider"
+    reserved, ep = _reserve_wake(board, seat, mid, lease, fence)
+    if reserved != "reserved":
+        return reserved
+    if ep is None:
+        return "no live endpoint"
+    lease, fence = _endpoint_lease_fence(ep)
     ok = False
     if provider == "claude":
         ok = _poke_until(_poke_claude, ep, text)
         label = "woken" if ok else "refused"
-    elif provider == "codex":
+    else:
         ok = _poke_until(_poke_codex, ep, text)
         label = "queued" if ok else "refused"
-    elif provider == "cursor":
-        label = "supervised (cursor agent -p --resume is a paid foreground run, not enqueue)"
-    else:
-        label = "unsupported provider"
-    if ok:
-        touched = touch_endpoint(
-            board, seat, expected_lease=lease, expected_fence=fence,
-            last_delivery_id=mid, last_delivery_status=label)
-        if touched is None and mid:
-            return "stale (rebound before delivery)"
-    else:
-        touch_endpoint(
-            board, seat, expected_lease=lease, expected_fence=fence,
-            last_attempt_id=mid, last_attempt_status=label)
-        if label == "refused":
-            remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
-    return label
+    return _commit_wake(board, seat, mid, lease, fence, label, ok)
 
 
 def has_live_native_session(board, seat):
     ep, _ = live_endpoint(board, seat)
-    return ep is not None and ep.get("mode") == "native"
+    if ep is not None and ep.get("mode") == "native":
+        return True
+    stored = read_endpoint(board, seat)
+    # Retained PID-less Codex identity still owns the seat; do not start watch.
+    return _can_inject_retained(stored, "")
 
 
 def public_adapter_state(board, seat, harness, adapter_online, wake_pending):

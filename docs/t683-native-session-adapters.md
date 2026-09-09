@@ -38,8 +38,11 @@ missing. `tickets self` reports probe/registration status.
 
 `tickets msg --to <seat>` writes the board first, then attempts native
 injection when the message already wakes a polling seat (`_message_wakes` or
-continuous DM/@mention). `tickets watch` / `tickets spawn` refuse to double up
-on a seat with a live native endpoint.
+continuous DM/@mention). Remote/custom/no-endpoint and supervised Cursor
+outcomes stay queued-offline; only a refused or rebound native injection is
+recorded as adapter `failed`. `tickets watch` / `tickets spawn` refuse to double up
+on a seat with a live native endpoint. Wake delivery reserves `message_id`
+in-flight under the seat lock before poke so concurrent callers cannot double-inject.
 
 ## Identity
 
@@ -57,8 +60,11 @@ is still live requires the current `lease_id` (`TICKETS_SESSION_LEASE`) or the
 same session fingerprint; otherwise wait until PID death or heartbeat TTL.
 Another seat with the same transport is refused. Stale same-seat records may
 be replaced without the old lease. Unconditional `os.replace` is not
-ownership. PID-less Codex/Cursor endpoints expire after a heartbeat TTL so
-they cannot suppress supervised recovery. Ephemeral watch/retire teardown
+ownership. PID-less Codex/Cursor endpoints go **offline** after a heartbeat
+TTL and are not advertised `adapter_native_online`; the thread/session identity
+is retained so the first later poke or `join --persistent` can reconnect.
+Codex `SessionStart` / `UserPromptSubmit` hooks refresh that heartbeat.
+Ephemeral watch/retire teardown
 removes the endpoint; those seats are not shown as reachable after exit.
 
 `tickets msg` pokes only when the workforce harness maps to the endpoint
@@ -79,8 +85,9 @@ endpoint is dropped (honest `failed`, not fake `retrying`) so supervised
 recovery can run.
 
 `tickets watch` finalizes an in-flight run on SIGTERM: the child is
-terminated and `active=True` is cleared (`interrupted`, rc 143) even if the
-signal arrived between `_run_begin` and `_run_end`.
+terminated, `active=True` is cleared (`interrupted`, rc 143), and a matching
+`run_end` trajectory receipt is written even if the signal arrived between
+`_run_begin` and `_run_end`.
 
 `reachable` requires a live native endpoint, an active supervised watcher, or a
 live remote lease. `lifecycle=persistent` only means the seat is intended to
