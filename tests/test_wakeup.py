@@ -33,6 +33,15 @@ def run(board, *args, agent="", stdin="", env=None, cwd=None):
     return r
 
 
+def _wait_for_path(path, timeout=10.0, interval=0.05):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            return
+        time.sleep(interval)
+    assert path.exists()
+
+
 @pytest.fixture
 def board(tmp_path):
     repo = tmp_path / "repo"
@@ -385,8 +394,7 @@ def test_spawn_lifecycle_with_stub_command(board):
     assert r.returncode == 0, r.stderr
     assert "watcher for doc started" in r.stdout
     pid_file = board / "agents" / "doc.watch.pid"
-    time.sleep(1.5)
-    assert pid_file.exists()
+    _wait_for_path(pid_file)
     lst = run(board, "spawn", "--list").stdout
     assert "doc" in lst and "pid" in lst
     r2 = run(board, "spawn", "doc", "--exec", "true", "--persist", agent="master")
@@ -547,9 +555,8 @@ def test_spawn_stop_stops_all_duplicate_watch_loops(board):
             "--persist", "--exec", "true"]
     p1 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.5)
     pid_file = board / "agents" / "dup.watch.pid"
-    assert pid_file.exists()
+    _wait_for_path(pid_file)
     os.unlink(pid_file)  # orphan p1 from the lock file so a second loop can start
     p2 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -589,9 +596,8 @@ def test_dash_health_flag_duplicate_watchers(board):
             "--every", "3600", "--persist", "--exec", "true"]
     p1 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.5)
     pid_file = board / "agents" / "dup.watch.pid"
-    assert pid_file.exists()
+    _wait_for_path(pid_file)
     os.unlink(pid_file)
     p2 = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
