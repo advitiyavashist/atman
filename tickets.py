@@ -814,6 +814,7 @@ STOP_CONDITION = (
     "stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter."
 )
 WAKE_MODES = ("task-only", "continuous", "scheduled")
+LIFECYCLES = ("persistent", "ephemeral")
 WAKE_KEYS = frozenset({
     "holding", "suggested_for_me", "ready_in_my_lane",
     "task_messages", "stuck_messages", "drive", "forced",
@@ -956,6 +957,23 @@ def wake_mode_of(board, owner, master_state=None, workforce=None):
     if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
         return "continuous"
     return "task-only"
+
+
+def lifecycle_of(board, owner, master_state=None, workforce=None):
+    """Effective seat lifecycle, separate from wake_mode and session_id.
+
+    Explicit workforce.lifecycle wins. Otherwise the current master and CoS
+    migrate to persistent; every other seat stays ephemeral. A persistent seat
+    may still be task-only, continuous, or scheduled.
+    """
+    wf = workforce if workforce is not None else _safe(lambda: load_workforce(board), {})
+    configured = ((wf or {}).get(owner, {}) or {}).get("lifecycle")
+    if configured in LIFECYCLES:
+        return configured
+    state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+        return "persistent"
+    return "ephemeral"
 
 
 def hours_since(stamp):
@@ -2944,6 +2962,38 @@ def _run_file(board, owner):
 _RUN_BEAT_LOCK = threading.Lock()
 
 
+class _RunFileLock:
+    """Serialize one agent's run receipt across watcher and operator CLIs.
+
+    The stable sidecar is required because the receipt itself is published
+    with ``os.replace``. Locking the receipt would lock the old inode and let
+    another process enter through the replacement inode.
+    """
+
+    def __init__(self, board, owner):
+        self.path = _run_file(board, owner) + ".lock"
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - Windows keeps thread safety
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
 def _run_beat(board, owner, **fields):
     """Write the in-run heartbeat.
 
@@ -2952,7 +3002,15 @@ def _run_beat(board, owner, **fields):
     and a heartbeat thread rewriting it every few seconds would race them and
     silently drop whatever the child had just written (inbox_seen, limit,
     ticket). One watcher per agent holds the pid lock, so this file has a
-    single writer.
+    single logical writer. Operator commands such as ``spawn --stop`` are a
+    second process, so the complete receipt transaction also takes the stable
+    ``.run.lock`` sidecar below.
+
+    Updates are generation-fenced. `_run_begin(..., _new_run=True)` advances
+    `generation` and may set active=True. A late heartbeat after stop/end
+    (same or missing generation) cannot resurrect active=True once the
+    receipt is closed — including when spawn --stop already found no live
+    watcher.
     """
     try:
         os.makedirs(agents_dir(board), exist_ok=True)
@@ -2961,14 +3019,42 @@ def _run_beat(board, owner, **fields):
         # can overlap: the lock keeps a read-modify-write whole, and the tmp
         # name is per-writer so two overlapping writers cannot truncate each
         # other's scratch file and leave a spliced record on disk.
+        new_run = bool(fields.pop("_new_run", False))
         with _RUN_BEAT_LOCK:
-            rec = _read_run(board, owner)
-            rec.update(fields)
-            rec["beat"] = now()
-            tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
-            with open(tmp, "w") as f:
-                json.dump(rec, f)
-            os.replace(tmp, path)
+            # A watcher heartbeat and ``spawn --stop`` run in different
+            # processes. The generation check must share the same
+            # inter-process critical section as the read and replace or a
+            # heartbeat can publish a stale active=True snapshot after stop.
+            with _RunFileLock(board, owner):
+                rec = _read_run(board, owner)
+                try:
+                    current_gen = int(rec["generation"]) if rec.get("generation") is not None else 0
+                except (TypeError, ValueError):
+                    current_gen = 0
+                incoming_gen = fields.get("generation")
+                try:
+                    incoming_gen = int(incoming_gen) if incoming_gen is not None else None
+                except (TypeError, ValueError):
+                    incoming_gen = None
+                want_active = fields.get("active")
+                was_active = rec.get("active")
+                if new_run:
+                    fields["generation"] = current_gen + 1
+                    fields.setdefault("interrupted", False)
+                    fields.setdefault("ended", "")
+                    fields.setdefault("rc", None)
+                elif incoming_gen is not None and incoming_gen < current_gen:
+                    return
+                elif want_active is True and was_active is False:
+                    return
+                elif want_active is False and was_active is not False:
+                    fields.setdefault("generation", current_gen + 1)
+                rec.update(fields)
+                rec["beat"] = now()
+                tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+                with open(tmp, "w") as f:
+                    json.dump(rec, f)
+                os.replace(tmp, path)
     except OSError:
         pass
 
@@ -2982,13 +3068,43 @@ def _read_run(board, owner):
         return {}
 
 
-def _run_begin(board, owner, run_no, cwd):
-    _run_beat(board, owner, pid=os.getpid(), run=run_no, cwd=cwd,
-              started=now(), active=True, rc=None, ended="")
+def _run_begin(board, owner, run_no, cwd, run_id="", ticket=""):
+    fields = dict(pid=os.getpid(), run=run_no, cwd=cwd,
+                  started=now(), active=True, rc=None, ended="",
+                  _new_run=True)
+    if run_id:
+        fields["run_id"] = run_id
+    if ticket:
+        fields["ticket"] = ticket
+    _run_beat(board, owner, **fields)
 
 
 def _run_end(board, owner, run_no, rc):
     _run_beat(board, owner, run=run_no, active=False, rc=rc, ended=now())
+
+
+def _mark_run_interrupted(board, owner):
+    """Clear a recorded in-flight run after spawn --stop or a dead PID."""
+    rec = _read_run(board, owner)
+    if not rec:
+        return
+    _run_beat(board, owner, active=False, interrupted=True, ended=now())
+
+
+def _finalize_active_watch_run(board, owner, rc=143):
+    """SIGTERM/finally must not leave active=True without a run-end stamp."""
+    rec = _read_run(board, owner)
+    if not rec.get("active"):
+        return False
+    ended = now()
+    _run_beat(board, owner, active=False, interrupted=True, rc=rc, ended=ended)
+    _safe(lambda: traj_event(
+        board, "run_end", agent=owner, ticket=rec.get("ticket") or None,
+        run_no=rec.get("run"), run_id=rec.get("run_id") or None,
+        exit=rc, interrupted=True, outcome="interrupted",
+        started_at=rec.get("started") or None, ended_at=ended,
+        worktree=rec.get("cwd") or None), None)
+    return True
 
 
 # ---- ground truth per tool ---------------------------------------------
@@ -3354,6 +3470,8 @@ def _watcher_run_active(board, owner, pid):
     """
     rec = _read_run(board, owner) if board else {}
     if rec.get("pid") == pid and ("active" in rec):
+        if rec.get("active") and rec.get("pid") and not _pid_alive(rec.get("pid")):
+            return False
         return bool(rec.get("active"))
     return _has_child_process(pid)
 
@@ -4850,6 +4968,8 @@ def cmd_who(a, board):
                            {"state": "unknown", "detail": "liveness read failed",
                             "source": "none", "heuristic": True}))
         for r in agents)
+    wf = load_workforce(board)
+    sa = _session_adapters()
     print("%-14s %-9s %-8s %-30s %-20s %s" % ("agent", "state", "loop-seen", "branch@sha", "ticket", "worktree"))
     for r in sorted(agents, key=lambda r: r.get("seen", ""), reverse=True):
         tid = r.get("ticket") or ""
@@ -4883,6 +5003,21 @@ def cmd_who(a, board):
                                                         (", back %s" % lim["until"]) if lim.get("until") else ""))
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
+        entry = wf.get(r["owner"], {}) or {}
+        harness_name = entry.get("harness") or entry.get("tool") or "claude"
+        ep, _ = sa.live_endpoint(board, r["owner"])
+        life = lifecycle_of(board, r["owner"], workforce=wf)
+        native = bool(ep) and (ep or {}).get("mode") == "native"
+        watcher_on = bool(lv.get("watcher") if lv else False)
+        remote_on = False
+        if harness_name == "remote":
+            remote_on = _remote_lease_online(load_remote_state(board, r["owner"]))
+        reachable = sa.is_reachable(native_online=native, watcher_online=watcher_on,
+                                    remote_online=remote_on)
+        print("%-14s lifecycle=%s provider=%s session=%s reachable=%s" % (
+            "", life, (ep or {}).get("provider") or harness_name,
+            (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
+            "yes" if reachable else "no"))
     # collisions
     by_branch = {}
     for r in agents:
@@ -6145,10 +6280,26 @@ def fmt_msg(m):
     return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
 
 
+def _message_wakes_seat(board, seat, message):
+    """Whether a posted message should attempt a native session wake for seat."""
+    obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+    return (_message_wakes(message, obj_state)
+            or _continuous_message_wakes(board, seat, message))
+
+
+def _session_adapters():
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import session_adapters as mod
+    return mod
+
+
 def cmd_msg(a, board):
     sender = whoami(a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
+    # Board first, native wake second: the board is the source of truth.
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
                      task=bool(getattr(a, "task", False)))
     unknown = m.pop("_unregistered_implicit", None)
@@ -6156,6 +6307,95 @@ def cmd_msg(a, board):
         print("WARNING: @handle %s is not a registered agent, message broadcast."
               % unknown)
     print("posted: " + fmt_msg(m))
+    to = (m.get("to") or "").strip()
+    if to and _message_wakes_seat(board, to, m):
+        harness = (load_workforce(board).get(to, {}) or {}).get("harness") or "claude"
+        sa = _session_adapters()
+        mid = _msg_id(m)
+        label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
+                             message_id=mid)
+        print("wake: %s -> %s" % (to, label))
+        _safe(lambda: _note_native_wake_result(board, to, label, mid), None)
+
+
+def _native_wake_succeeded(label):
+    return bool(label) and (
+        label in ("woken", "queued", "deduped") or str(label).startswith("supervised"))
+
+
+def _native_injection_failed(label):
+    """Only refused/stale native injection is a local adapter failure.
+
+    Remote bridge required, no live endpoint, retained-but-offline Codex, and
+    supervised Cursor stay durable queued-offline (T-640).
+    """
+    s = str(label or "")
+    return s.startswith("refused") or s.startswith("stale (rebound")
+
+
+def _note_native_wake_result(board, seat, label, message_id):
+    """Record native wake outcome. Never delete an endpoint by seat name alone."""
+    if _native_wake_succeeded(label):
+        def clear(rec):
+            rec.pop("adapter_failure", None)
+        _agent_update(board, seat, clear)
+        return
+    if not _native_injection_failed(label):
+        return
+    harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+    provider = _session_adapters().provider_for_harness(harness) or harness
+    _agent_set(board, seat, adapter_failure={
+        "state": "failed",
+        "trigger": str(message_id or ""),
+        "reason": "native wake %s" % label,
+        "at": now(),
+        "provider": provider,
+        "harness": harness,
+    })
+
+
+def _adapter_provider(harness_name):
+    """Stable adapter identity for a workforce harness (empty for custom)."""
+    name = harness_name or ""
+    return _session_adapters().provider_for_harness(name) or name
+
+
+def _failure_provider(failure):
+    """Provider/harness stamped on a failure record; empty means legacy unscoped."""
+    failure = failure or {}
+    return failure.get("provider") or _adapter_provider(failure.get("harness") or "")
+
+
+def _local_adapter_failure(rec, harness_name):
+    """Native/watcher refusal is provider-local. Remote seats use the bridge failure only."""
+    failure = (rec or {}).get("adapter_failure") or {}
+    if not failure:
+        return {}
+    current = _adapter_provider(harness_name)
+    scoped = _failure_provider(failure)
+    if (harness_name == "remote" or current == "remote") and scoped != "remote":
+        return {}
+    if scoped and current and scoped != current:
+        return {}
+    return failure
+
+
+def _clear_adapter_failure_on_provider_change(board, owner, new_harness,
+                                             previous_harness=""):
+    """Drop leftover failure when the captured previous provider/harness changes."""
+    rec = _agent_rec(board, owner) or {}
+    if not rec.get("adapter_failure"):
+        return
+    old_key = _adapter_provider(previous_harness)
+    new_key = _adapter_provider(new_harness)
+    scoped = _failure_provider(rec.get("adapter_failure") or {})
+    same_provider = bool(old_key) and old_key == new_key
+    same_harness = bool(previous_harness) and previous_harness == new_harness
+    if (same_provider or same_harness) and (not scoped or scoped == new_key):
+        return
+    def clear(agent):
+        agent.pop("adapter_failure", None)
+    _agent_update(board, owner, clear)
 
 
 def cmd_inbox(a, board):
@@ -6711,13 +6951,41 @@ def cmd_join(a, board):
         if wake_mode not in WAKE_MODES:
             sys.exit("--wake-mode must be one of: %s" % ", ".join(WAKE_MODES))
         entry["wake_mode"] = wake_mode
+    lifecycle = getattr(a, "lifecycle", None)
+    if getattr(a, "persistent", False):
+        if lifecycle == "ephemeral":
+            sys.exit("--persistent cannot be combined with --lifecycle ephemeral")
+        lifecycle = lifecycle or "persistent"
+    if lifecycle is not None:
+        if lifecycle not in LIFECYCLES:
+            sys.exit("--lifecycle must be one of: %s" % ", ".join(LIFECYCLES))
+        entry["lifecycle"] = lifecycle
+    entry["agent_id"] = owner
     if knowledge_dir:
         entry["knowledge_dir"] = knowledge_dir
     entry.setdefault("can", [])
     entry.setdefault("cost", "medium")
     wf[owner] = entry
     save_workforce(board, wf)
+    if getattr(a, "persistent", False):
+        sa = _session_adapters()
+        reg = sa.register_persistent(board, owner, harness or entry.get("harness") or "claude", now())
+        if reg.get("ok"):
+            pid = (reg.get("record") or {}).get("pid")
+            mode = reg.get("mode") or (reg.get("record") or {}).get("mode") or "native"
+            extra = ("pid %s" % pid if pid else
+                     "no session pid published; liveness follows transport")
+            lease = reg.get("lease_id") or (reg.get("record") or {}).get("lease_id") or ""
+            if lease:
+                extra += "; lease %s" % lease
+            print("persistent: %s %s endpoint registered for %s (%s)" % (
+                mode, reg.get("provider"), owner, extra))
+        else:
+            print("persistent: %s" % reg.get("reason", "registration failed"))
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
+    if harness:
+        _safe(lambda: _clear_adapter_failure_on_provider_change(
+            board, owner, harness, prev_harness), None)
     if first_join:
         # setdefault, not update: if two joins race, the earlier stamp wins and
         # neither can move the watermark forward over unread mail.
@@ -6726,9 +6994,10 @@ def cmd_join(a, board):
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
     root = os.path.dirname(board)
-    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s" % (
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s  lifecycle=%s" % (
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
-        entry.get("harness") or "claude (default)", wake_mode_of(board, owner, workforce=wf)))
+        entry.get("harness") or "claude (default)", wake_mode_of(board, owner, workforce=wf),
+        lifecycle_of(board, owner, workforce=wf)))
     if entry.get("cmd"):
         print("cmd: %s" % entry["cmd"])
     if entry.get("knowledge_dir"):
@@ -6795,6 +7064,7 @@ def cmd_retire(a, board):
     if owner in wf:
         del wf[owner]
         save_workforce(board, wf)
+    _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
     if owner in roles:
         del roles[owner]
         os.makedirs(board, exist_ok=True)
@@ -7748,6 +8018,25 @@ def ticket_context(board, owner):
     return "\n".join(out)
 
 
+def _task_dominant_extra(board, owner):
+    """Held ticket + explicit task beat unrelated CoS review/notification traffic."""
+    pending = _safe(lambda: pending_work(board, owner), {}) or {}
+    holding = pending.get("holding") or []
+    if not holding:
+        return ""
+    tasks = pending.get("task_messages") or []
+    return (
+        "HELD WORK DOMINATES THIS RUN.\n"
+        "You currently hold: %s\n"
+        "Explicit task/DM (do this now; do not review, merge, or pulse unrelated tickets):\n%s\n"
+        "Unrelated review_queue and notification-only mail are suppressed until this held "
+        "work is finished, reviewed, or blocked."
+    ) % (
+        "; ".join(holding),
+        "\n".join(tasks) if tasks else "(continue from the held ticket notes)",
+    )
+
+
 def cmd_prompt(a, board):
     print(prompt_text(a, board))
 
@@ -7765,24 +8054,32 @@ def prompt_text(a, board):
     cos = (m or {}).get("cos") or ""
     role_ctx = role_context(board, owner)
     knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "")
+    held_first = _task_dominant_extra(board, owner)
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
         extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
-        return cos_prompt_text(owner, board, os.path.dirname(board), extra)
+        body = cos_prompt_text(owner, board, os.path.dirname(board), extra)
+        return (held_first + "\n\n" + body) if held_first else body
     if getattr(a, "master", False):
-        extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
+        rest = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
+        extra = rest
         obj = _safe(lambda: load_objective(board), {})
         if obj and not obj.get("done"):
             _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
-            extra = DRIVE_PROMPT.format(
+            drive = DRIVE_PROMPT.format(
                 objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
                 state=objective_state(obj) or "active",
                 exit_criterion=(obj.get("exit_criterion") or "(none — FLAG: add --exit)"),
-                status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
+                status=_safe(lambda: drive_status(board), ""))
+            extra = drive + ("\n" + extra if extra else "")
         if cos and owner != cos:
-            return PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
+            body = PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
                                          extra=extra)
-        return MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
+        else:
+            body = MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
+        return (held_first + "\n\n" + body) if held_first else body
     parts = []
+    if held_first:
+        parts.append(held_first)
     if role_ctx:
         parts.append(role_ctx)
     if knowledge_ctx:
@@ -8904,18 +9201,27 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
 
     beat_stop = threading.Event()
     beat_thread = None
-    if on_beat:
-        interval = beat_secs or RUN_HEARTBEAT_SECS
-
-        def beat():
-            while not beat_stop.wait(interval):
-                _safe(on_beat, None)
-
-        _safe(on_beat, None)  # stamp the start of the run, do not wait a tick
-        beat_thread = threading.Thread(target=beat, daemon=True)
-        beat_thread.start()
-
     try:
+        if on_beat:
+            interval = beat_secs or RUN_HEARTBEAT_SECS
+
+            def beat():
+                while not beat_stop.wait(interval):
+                    _safe(on_beat, None)
+
+            # Keep setup inside the InterruptedError boundary. SIGTERM is
+            # delivered to the main thread at any bytecode; wrapping this in
+            # _safe would swallow the signal handler's InterruptedError and
+            # leave the child running until its timeout.
+            try:
+                on_beat()  # stamp the start of the run, do not wait a tick
+            except InterruptedError:
+                raise
+            except Exception:
+                pass
+            beat_thread = threading.Thread(target=beat, daemon=True)
+            beat_thread.start()
+
         rc = proc.wait(timeout=timeout_s)
         timed_out = False
     except subprocess.TimeoutExpired:
@@ -8923,6 +9229,17 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
         proc.wait()
         rc = 124
         timed_out = True
+    except InterruptedError:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+        raise
     finally:
         beat_stop.set()
         # Join, do not just signal: a beat already inside its write would
@@ -9124,9 +9441,26 @@ def cmd_watch(a, board):
     # call; the message gates still decide whether any paid turn starts.
     every = min(WATCH_MIN_INTERVAL, requested_every) if wake_mode == "continuous" else max(
         WATCH_MIN_INTERVAL, requested_every)
+    # Retry/cost gates follow the enrolled seat, not argv[0]. Built-in Cursor
+    # is `agent -p` (and cursor+claude starts the same way), which _harness_of_cmd
+    # reports as custom — scoping from that would ignore the failure and relaunch.
+    workforce_rec = load_workforce(board).get(owner, {}) or {}
+    workforce_harness = (workforce_rec.get("harness") or workforce_rec.get("tool") or "").strip()
+    if not workforce_harness:
+        workforce_harness, _ = harness_of(board, owner)
     harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
+    retry_harness = workforce_harness or harness
     # Cron/--once used to bypass this lock and could overlap a persistent
     # adapter. All launch paths now share one lease per seat.
+    sa = _session_adapters()
+    if sa.has_live_native_session(board, owner) and not getattr(a, "force", False):
+        ep, _ = sa.live_endpoint(board, owner)
+        print("skip: %s has a live native session (provider=%s, pid=%s) -- "
+              "a headless watcher would double up on the seat; use watch --force to override"
+              % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
+        if lifecycle_of(board, owner) == "ephemeral":
+            sa.remove_endpoint(board, owner)
+        sys.exit(0)
     lock = _watch_lock(board, owner)
     if lock is None:
         sys.exit("another watcher for %s is already running (see %s)" % (
@@ -9198,7 +9532,8 @@ def cmd_watch(a, board):
                 p = dict(p or {}, forced=True)
             trigger_fp = _watch_trigger_fingerprint(board, owner, p) if actionable(p) else None
             trigger_key = _remote_trigger_key(trigger_fp)
-            retry_state = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
+            retry_state = _local_adapter_failure(
+                _agent_rec(board, owner) or {}, retry_harness)
             same_failure = bool(trigger_key and retry_state.get("trigger") == trigger_key)
             retry_deferred = (not a.once and same_failure and not force and
                               (retry_state.get("state") == "failed" or
@@ -9213,6 +9548,9 @@ def cmd_watch(a, board):
             elif actionable(p):
                 if not same_failure:
                     failures = 0
+                    def _clear_stale_failure(rec):
+                        rec.pop("adapter_failure", None)
+                    _safe(lambda: _agent_update(board, owner, _clear_stale_failure), None)
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
                 print("%s work found (%s) wake=%s stop=%s -> run %d" % (
@@ -9270,20 +9608,27 @@ def cmd_watch(a, board):
                     # The whole point of T-237: something must record that this
                     # agent is alive WHILE the child runs. checkin() cannot --
                     # the next call to it is on the far side of this line.
-                    _safe(lambda: _run_begin(board, owner, runs, cwd), None)
+                    _safe(lambda: _run_begin(board, owner, runs, cwd,
+                                             run_id=run_id, ticket=held_ticket), None)
                     # Where this run's own output starts in the shared log, so
                     # the usage parse below reads THIS run's tail and not the
                     # previous run's result object (T-311: a stale JSON blob
                     # would attribute one run's tokens to another).
                     log_before = _safe(lambda: os.path.getsize(log_path), 0) or 0
-                    rc, timed_out = _watch_run_capped(
-                        run_cmd, cwd, env, log_path,
-                        a.run_timeout * 60 if a.run_timeout else None,
-                        WATCH_LOG_MAX_BYTES,
-                        on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
-                                                  cwd=cwd, active=True),
-                        beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
-                    )
+                    try:
+                        rc, timed_out = _watch_run_capped(
+                            run_cmd, cwd, env, log_path,
+                            a.run_timeout * 60 if a.run_timeout else None,
+                            WATCH_LOG_MAX_BYTES,
+                            on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
+                                                      cwd=cwd, active=True),
+                            beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
+                        )
+                    except InterruptedError:
+                        _safe(lambda: _finalize_active_watch_run(board, owner), None)
+                        if cleanup:
+                            cleanup()
+                        raise
                     _safe(lambda: _run_end(board, owner, runs, rc), None)
                     if cleanup:
                         cleanup()
@@ -9349,6 +9694,8 @@ def cmd_watch(a, board):
                         "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
                             "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else ""),
                         "at": now(),
+                        "provider": _adapter_provider(retry_harness),
+                        "harness": retry_harness or "",
                     }
                     _safe(lambda fr=failure_record: _agent_set(board, owner, adapter_failure=fr), None)
                     log("%s skip retrigger armed for unchanged failed trigger; bounded attempt %d/%d state=%s" % (
@@ -9369,12 +9716,17 @@ def cmd_watch(a, board):
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
             if stop_event.wait(timeout=wait):
                 break
+    except InterruptedError:
+        pass
     finally:
+        _safe(lambda: _finalize_active_watch_run(board, owner), None)
         if lock:
             try:
                 os.unlink(lock)
             except OSError:
                 pass
+        if lifecycle_of(board, owner) == "ephemeral":
+            _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
         if not a.once:
             print("watch stopped")
 
@@ -9405,6 +9757,12 @@ def cmd_codex_hook(a, board):
         except (ValueError, OSError):
             return
     _pinned_hook_identity(board, owner)
+    _safe(lambda: _session_adapters().heartbeat_session(
+        board, owner,
+        presented_lease=(os.environ.get("TICKETS_SESSION_LEASE") or "").strip(),
+        thread=(os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID") or "").strip(),
+        session_id=(os.environ.get("CURSOR_CONVERSATION_ID")
+                    or os.environ.get("CURSOR_SESSION_ID") or "").strip()), None)
     p = _safe(lambda: pending_work(board, owner), {})
     lines = [
         "Ticket board context (%s):" % owner,
@@ -9804,7 +10162,12 @@ def cmd_spawn(a, board):
         import signal
 
         pids = _live_watch_pids(owner)
+        _mark_run_interrupted(board, owner)
         if not pids:
+            # Watcher is already gone; a late heartbeat from the dead run
+            # must not reopen the receipt. Re-apply the stop fence after the
+            # liveness check so a beat that raced the first mark stays closed.
+            _mark_run_interrupted(board, owner)
             print("no running watcher for %s" % owner)
             return
         busy = [p for p in pids if _watcher_run_active(board, owner, p)]
@@ -9888,6 +10251,13 @@ def cmd_spawn(a, board):
         with open(master_state_path(board), "w") as f:
             json.dump(prev, f)
         _master_log(board, "%s spawned as persistent chief of staff (review/unblock/merge)" % owner, by=whoami())
+    sa = _session_adapters()
+    if sa.has_live_native_session(board, owner):
+        ep, _ = sa.live_endpoint(board, owner)
+        print("skip: %s has a live native session (provider=%s, pid=%s) -- "
+              "spawn would double up on the interactive seat"
+              % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
+        return
     live = _live_watch_pids(owner, board=board)
     if live:
         print("watcher for %s already running (%d process(es), pids %s); --stop first" % (
@@ -10633,11 +11003,12 @@ function renderSeats(d){
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   (d.agents||[]).forEach(a=>{
     if(placed.has(a.name))return;
+    if(a.lifecycle==='ephemeral' && a.reachable===false)return;
     const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any lane';
     const u=utilBy[a.name]||{};
     const quota=u.util_pct!=null?' · '+Math.round(u.util_pct)+'%':'';
     const st=a.state==='DOWN'?'down':'idle';
-    idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'?'ghost':'idle'));
+    idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'||a.reachable===false?'ghost':'idle'));
   });
   const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
   put('lane-operator',operator.join(''),'no operator');
@@ -10899,8 +11270,10 @@ async function load(manual){
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.adapter_online?' ●':'')+'</span>'+auth+quota+lim+wake+'</div>'+
-      '<div class="mute mono">'+esc(a.model||'—')+' · '+esc(a.harness||'—')+' · '+esc(a.wake_mode||'task-only')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
+    const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
+    const onlineDot=(a.reachable!==false && a.adapter_online)?' ●':'';
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+auth+quota+lim+wake+'</div>'+
+      '<div class="mute mono">'+esc(a.agent_id||a.name)+' · '+esc(a.adapter_provider||a.harness||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.adapter_delivery||'offline')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
@@ -11408,42 +11781,61 @@ def _board_snapshot_body(board, messages=40):
         wake_pending = actionable(wake)
         remote = (_remote_public_state(load_remote_state(board, r["agent"]))
                   if harness_name == "remote" else {})
-        local_failure = rec.get("adapter_failure") or {}
+        sa = _session_adapters()
+        local_failure = _local_adapter_failure(rec, harness_name)
         failure_state = remote.get("failure_state", "") or local_failure.get("state", "")
         failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
-        adapter_online = bool(remote.get("online")) if harness_name == "remote" else wc == 1
-        watcher_count = wc + (1 if remote.get("online") else 0)
-        if wc > 1 or (harness_name == "remote" and wc > 0):
+        adapter_extra = sa.public_adapter_state(
+            board, r["agent"], harness_name, False, wake_pending)
+        native_online = bool(adapter_extra.get("adapter_native_online"))
+        remote_online = bool(remote.get("online")) if harness_name == "remote" else False
+        watcher_online = wc == 1
+        if wc > 1 or (harness_name == "remote" and wc > 0) or (native_online and wc > 0):
             adapter_state = "conflict"
             adapter_reason = "Multiple adapters detected; stop extras so one identity-pinned lease remains."
             adapter_online = False
-        elif failure_state == "failed":
-            adapter_state = "failed"
-            adapter_reason = failure_reason or "Dispatch exhausted its bounded retries; work remains queued."
-        elif failure_state == "retrying":
-            adapter_state = "retrying"
-            adapter_reason = failure_reason or "Dispatch failed and is waiting for its bounded retry."
-        elif remote.get("run_state") and adapter_online:
-            adapter_state = remote["run_state"]
-            adapter_reason = "Remote run is active under fence %s." % remote.get("fence")
-        elif remote.get("run_state"):
-            adapter_state = ("recovery-required" if remote["run_state"] == "recovery-required"
-                             else "queued-offline")
-            adapter_reason = "Remote run lost its adapter lease; reconnect to recover it."
-        elif wake_pending and not adapter_online:
-            adapter_state = "queued-offline"
-            adapter_reason = "Wake queued — adapter offline; delivery resumes when it reconnects."
-        elif wake_pending:
-            adapter_state = "queued"
-            adapter_reason = "Wake queued for the connected adapter."
-        elif adapter_online:
-            adapter_state = "online"
-            adapter_reason = "Adapter connected; no wake pending."
         else:
-            adapter_state = "offline"
-            adapter_reason = "Adapter offline; directed work will remain queued."
+            adapter_online = sa.is_reachable(native_online=native_online,
+                                            watcher_online=watcher_online,
+                                            remote_online=remote_online)
+            adapter_extra = sa.public_adapter_state(
+                board, r["agent"], harness_name, adapter_online, wake_pending)
+            if failure_state == "failed":
+                adapter_state = "failed"
+                adapter_reason = failure_reason or "Dispatch exhausted its bounded retries; work remains queued."
+            elif failure_state == "retrying":
+                adapter_state = "retrying"
+                adapter_reason = failure_reason or "Dispatch failed and is waiting for its bounded retry."
+            elif remote.get("run_state") and adapter_online:
+                adapter_state = remote["run_state"]
+                adapter_reason = "Remote run is active under fence %s." % remote.get("fence")
+            elif remote.get("run_state"):
+                adapter_state = ("recovery-required" if remote["run_state"] == "recovery-required"
+                                 else "queued-offline")
+                adapter_reason = "Remote run lost its adapter lease; reconnect to recover it."
+            elif wake_pending and not adapter_online:
+                adapter_state = "queued-offline"
+                adapter_reason = "Wake queued — adapter offline; delivery resumes when it reconnects."
+            elif wake_pending:
+                adapter_state = "queued"
+                adapter_reason = "Wake queued for the connected adapter."
+            elif adapter_online:
+                adapter_state = "online"
+                adapter_reason = "Adapter connected; no wake pending."
+            else:
+                adapter_state = "offline"
+                adapter_reason = "Adapter offline; directed work will remain queued."
+        watcher_count = wc + (1 if remote.get("online") else 0) + (1 if native_online else 0)
+        life = lifecycle_of(board, r["agent"], master_state=m, workforce=wf)
+        reachable = adapter_online
+        if life == "ephemeral" and not reachable and adapter_state == "offline":
+            adapter_extra["adapter_delivery"] = "exited"
         out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
                            "harness": harness_name,
+                           "agent_id": agent_wf.get("agent_id") or r["agent"],
+                           "lifecycle": life,
+                           "reachable": reachable,
+                           **adapter_extra,
                            "wake_mode": wake_mode_of(board, r["agent"], master_state=m, workforce=wf),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
                            "watcher": adapter_online,
@@ -12610,6 +13002,26 @@ def cmd_self(a, board):
     script = os.path.realpath(__file__)
     print("script: %s" % script)
     print("status: %s" % release_status())
+    seat = whoami()
+    if board and seat and not seat.startswith("agent-"):
+        harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+        sa = _session_adapters()
+        ep, was_stale = sa.live_endpoint(board, seat)
+        stored = sa.read_endpoint(board, seat)
+        if ep:
+            print("persistent: yes -- seat %s native %s endpoint (pid %s, registered %s)" % (
+                seat, ep.get("provider"), ep.get("pid", "?"), ep.get("at", "?")))
+        elif stored and was_stale:
+            print("persistent: no -- seat %s native identity is retained but offline after TTL "
+                  "(reconnect with `tickets join %s --persistent` or a session heartbeat)"
+                  % (seat, seat))
+        elif was_stale:
+            print("persistent: no -- seat %s had a native endpoint but it went stale "
+                  "(re-register with `tickets join %s --persistent`)" % (seat, seat))
+        else:
+            probe = sa.probe_provider(sa.provider_for_harness(harness))
+            print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
+                seat, probe.get("reason", "ok") if not probe.get("ok") else "transport available"))
     on_path = shutil.which("tickets")
     if on_path:
         resolved = os.path.realpath(on_path)
@@ -12720,8 +13132,12 @@ def main():
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
     c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
                    help="durable DM policy: continuous wakes on directed messages; task-only needs --task; scheduled uses heartbeat/task gates")
+    c.add_argument("--lifecycle", choices=LIFECYCLES, default=None,
+                   help="persistent seats stay known after exit; ephemeral seats are one-shot and not reachable after the session ends")
     c.add_argument("--knowledge-dir", default="",
                    help="canonical repo-backed knowledge/ directory inherited by this seat")
+    c.add_argument("--persistent", action="store_true",
+                   help="lifecycle=persistent and register this interactive session's native wake endpoint (socket/queue/resume)")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
