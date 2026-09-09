@@ -32,6 +32,8 @@ from .errors import (
     EnrollmentCodeExpired,
     EnrollmentCodeInvalid,
     ForbiddenScope,
+    InvitationCodeExpired,
+    InvitationCodeInvalid,
     NotFound,
     Unauthenticated,
 )
@@ -81,6 +83,10 @@ def operator_id():
 
 def enrollment_id():
     return "enr_" + _suffix(8)
+
+
+def invitation_id():
+    return "inv_" + _suffix(8)
 
 
 class Principal:
@@ -226,6 +232,56 @@ class CredentialStore:
         )
         return {"id": row["id"], "agent_id": row["agent_id"],
                 "project_id": row["project_id"]}
+
+    # ----------------------------------------------------------- invitations
+
+    def remember_invitation_code(self, project_id, invitation_id, code):
+        """Store the hash of an invite code minted by the record layer.
+
+        T-202 mints and returns a code but has nowhere to keep it, so the
+        exchange had nothing to verify. Only the hash is kept, here rather than
+        on the record, for the reason in `schema.py`: this is a bearer secret.
+        """
+        self.conn.execute(
+            "INSERT INTO invitation_codes (code_hash, invitation_id, project_id,"
+            " created_at) VALUES (?, ?, ?, ?)",
+            (hash_secret(code), invitation_id, project_id, now()),
+        )
+
+    def consume_invitation_code(self, project_id, code):
+        """Redeem an invite code, or raise the indistinguishable 422 pair.
+
+        Unknown, already-spent and belonging-to-another-project are one answer
+        on purpose: a stranger with a guessed code must not learn that it exists
+        somewhere else, and a second exchange must not confirm the first.
+        Expiry is the one distinguishable case, because its holder was given the
+        code legitimately and needs to know to ask for a new one.
+        """
+        if not isinstance(code, str) or not code:
+            raise InvitationCodeInvalid()
+        row = self.conn.execute(
+            "SELECT * FROM invitation_codes WHERE code_hash = ? AND project_id = ?",
+            (hash_secret(code), project_id),
+        ).fetchone()
+        if row is None or row["used_at"] is not None:
+            raise InvitationCodeInvalid()
+        invitation = self.conn.execute(
+            "SELECT * FROM invitations WHERE id = ? AND project_id = ?",
+            (row["invitation_id"], project_id),
+        ).fetchone()
+        if invitation is None or invitation["state"] != "pending":
+            raise InvitationCodeInvalid()
+        if invitation["expires_at"] <= now():
+            raise InvitationCodeExpired()
+        return {"invitation_id": row["invitation_id"], "role": invitation["role"],
+                "version": invitation["version"]}
+
+    def spend_invitation_code(self, code):
+        """Mark the code used. Called inside the exchange's transaction."""
+        self.conn.execute(
+            "UPDATE invitation_codes SET used_at = ? WHERE code_hash = ?",
+            (now(), hash_secret(code)),
+        )
 
     # -------------------------------------------------------- authentication
 

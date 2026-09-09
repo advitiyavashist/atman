@@ -4,6 +4,7 @@ Each test names the property it defends, because the failure mode for most of
 them is silent: a check that stops running still returns 200.
 """
 
+import re
 import uuid
 
 import pytest
@@ -18,6 +19,29 @@ OPERATOR_ONLY = [
                               "agent_id": "agt_00000001", "reason": "r",
                               "lease_epoch": 0, "expected_version": 1}),
 ]
+
+
+def _concrete_path(pattern):
+    """`^/messages/(?P<message_id>[^/]+)/deliveries$` -> a real, well-shaped URL.
+
+    The placeholder ids are syntactically valid for their prefix so that a
+    route which validates its path parameter reaches its own handler instead of
+    bouncing at the router -- either answer is acceptable to the caller above,
+    but reaching the handler is the stronger exercise.
+    """
+    body = pattern.lstrip("^").rstrip("$")
+    return re.sub(r"\(\?P<(\w+)>\[\^/\]\+\)",
+                  lambda m: _PLACEHOLDER_IDS.get(m.group(1), "x"), body)
+
+
+_PLACEHOLDER_IDS = {
+    "ticket_id": "DEMO-1",
+    "review_id": "rev_00000000",
+    "agent_id": "agt_00000000",
+    "channel_id": "chn_00000000",
+    "message_id": "msg_00000000",
+    "run_id": "run_00000000",
+}
 
 
 def test_no_credential_is_401(server, project):
@@ -172,18 +196,84 @@ def test_a_wrong_method_on_a_known_route_is_also_404(operator):
     assert operator.delete("/overview").status == 404
 
 
-def test_other_lanes_routes_say_who_owns_them(operator):
-    """T-187 is still stubbed on origin/main@8346c38; keep the owner_ticket guard.
+def test_no_served_route_is_still_an_unbuilt_lane_stub(operator, enrolled):
+    """Nothing this build routes may answer with a "not my lane" 404.
 
-    The original T-502 rewrite (2a411d6) replaced this with a /runners/jobs
-    assertion because a T-187 merge on old main had already moved the guard.
-    That merge is not on the post-T-522 lineage. Dropping this test now would
-    leave /messages unguarded while it is still `_not_this_lane("T-187")`.
-    Re-apply 2a411d6 when T-187 is re-rooted onto this main.
+    HISTORY, because this test used to assert the opposite and the reversal is
+    the point. While lanes were landing one at a time, `_not_this_lane` made a
+    contract-published-but-unimplemented route return a 404 carrying
+    `details.owner_ticket`, so the console could tell "not built yet" from
+    "broken". T-187 (messaging) and T-188 (runners) were the last two holders,
+    and with both landed the mechanism has no remaining caller and is gone.
+
+    The original assertion -- `/runners/jobs` is a T-188 stub -- was written on
+    T-187's branch when that was true, and it went stale the moment T-188
+    merged: the route now exists and answers 400 for a missing `runner_id`.
+    Deleting a test whose premise expired loses the guard, so it is inverted
+    instead. The property is the same one, stated for the finished build: a
+    route the server routes must actually be served. If someone reintroduces a
+    stub, or lands a new lane placeholder and forgets to replace it, this
+    fails.
+
+    It is a sweep rather than one probe because a single named route is exactly
+    what went stale here. Bodies are omitted deliberately -- most of these will
+    answer 400 or 403 and that is fine; the only thing asserted is that the
+    refusal is a real one and not a placeholder.
     """
-    response = operator.get("/messages")
-    assert response.status == 404
-    assert response.json()["error"]["details"]["owner_ticket"] == "T-187"
+    from ticket_board.server.app import _ROUTE_TABLE
+
+    # SSE: the stream is open-ended and never returns a Response to this
+    # client. Its own ACL and framing are covered by test_events_stream.py.
+    skipped = {("GET", "/events")}
+
+    checked = []
+    for method, pattern, handler, _auth, _csrf in _ROUTE_TABLE:
+        path = _concrete_path(pattern)
+        if (method, path) in skipped:
+            continue
+        for client in (operator, enrolled["client"]):
+            response = client.request(method, path)
+            details = (response.json().get("error") or {}).get("details") or {}
+            assert "owner_ticket" not in details, (
+                "{} {} (handler {}) still answers as an unbuilt-lane stub "
+                "owned by {}".format(method, path, handler,
+                                     details.get("owner_ticket")))
+        checked.append((method, path))
+
+    # Two coverage guards, and they catch different things. Raised by
+    # opus-verify reviewing this rewrite: a sweep has a vacuous-pass mode that
+    # its own teeth run cannot reach. Re-injecting a stub proves the assertion
+    # FIRES for a route the loop visits; it proves nothing about how many
+    # routes the loop visits. A later filter, prefix change, lazy registration
+    # or a different app factory in the fixture could shrink this to three
+    # routes, or zero, and it would stay green forever and look exactly like
+    # the property holding.
+    #
+    #   - equality catches an enumeration that silently drops rows, because it
+    #     is measured against the app's own table rather than a number typed
+    #     here;
+    #   - the floor catches the table ITSELF shrinking, which equality cannot
+    #     see -- both sides would fall together.
+    #
+    # Neither is redundant, and a test whose coverage is computed rather than
+    # asserted can shrink to nothing without a single red run.
+    assert len(checked) == len(_ROUTE_TABLE) - len(skipped), (
+        "swept {} of the {} routes the app declares (minus {} deliberately "
+        "skipped) -- the enumeration is dropping rows".format(
+            len(checked), len(_ROUTE_TABLE), len(skipped)))
+    assert len(checked) >= 30, (
+        "only {} routes in the whole table; this build is far smaller than "
+        "the contract, so the sweep is not evidence of anything".format(
+            len(checked)))
+    assert ("GET", "/runners/jobs") in checked
+    assert ("GET", "/messages") in checked
+
+
+def test_the_messaging_routes_are_no_longer_stubs(operator):
+    """The inverse of the test above, so the two cannot both rot silently."""
+    response = operator.get("/messages", query="channel_id=chn_00000000")
+    assert response.status != 404 or \
+        "owner_ticket" not in (response.json()["error"].get("details") or {})
 
 
 def test_the_runner_routes_are_no_longer_stubs(enrolled):

@@ -272,6 +272,7 @@ components:
         - master_lease_expired
         - run_already_active
         - request_id_reused
+        - request_id_not_replayable
         - invalid_state_transition
         - dependency_cycle
         - dependency_unmet
@@ -2632,6 +2633,14 @@ paths:
       tags: [messages]
       operationId: createInvitation
       summary: Owner/admin issues an expiring single-use invite.
+      description: |
+        `request_id` idempotency has one exception here (see `RequestId` and
+        `dependent-notes.md`): `code` is a bearer secret returned exactly
+        once, so a byte-identical replay cannot honestly reissue it. Once a
+        `request_id` has minted an invitation, replaying it with the SAME
+        body is refused 409 `request_id_not_replayable`, not re-answered
+        with the original code; replaying it with a DIFFERENT body is still
+        409 `request_id_reused`, unchanged.
       parameters: [{ $ref: '#/components/parameters/ProjectId' }]
       security: [{ operatorSession: [] }]
       requestBody:
@@ -2646,6 +2655,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CreateInvitationResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /invitations/exchange:
     post:

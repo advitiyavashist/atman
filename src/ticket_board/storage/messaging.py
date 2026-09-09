@@ -1,5 +1,6 @@
 """Messaging, delivery and runner records for the Ticket Board store."""
 
+import base64
 import json
 
 from . import ids
@@ -214,9 +215,19 @@ class MessagingMixin:
 
     def create_invitation(self, project_id, role, expires_at, *, created_by=None,
                           invitation_id=None, code=None, request_id=None):
+        """Create an invitation. `code` is for direct/offline callers only.
+
+        The API route (`server/messaging.py`) never passes `code` -- it mints
+        and hashes its own, registering it in `credentials` rather than here.
+        This method used to fabricate a throwaway code when none was given
+        and remember THAT in the replay log (T-286): a byte-identical replay
+        then served a well-formed placeholder that was never registered and
+        422'd on redemption. Minting nothing when `code` is omitted, and
+        omitting the key entirely from what gets remembered, means the replay
+        log can no longer hold a string that looks like a redeemable secret.
+        """
         _assert_member(role, PROJECT_ROLES, "role")
         iid = invitation_id or ids.invitation_id()
-        invite_code = code or ids._suffix(24)
         body = {"role": role, "expires_at": expires_at}
         with write_txn(self.conn) as conn:
             replay = self._replay(conn, project_id, request_id, "create_invitation", body)
@@ -236,7 +247,9 @@ class MessagingMixin:
             invitation = self._serialize_invitation(
                 conn.execute("SELECT * FROM invitations WHERE id = ?", (iid,)).fetchone()
             )
-            result = {"invitation": invitation, "code": invite_code}
+            result = {"invitation": invitation}
+            if code is not None:
+                result["code"] = code
             self._remember(conn, project_id, request_id, "create_invitation", body, result)
             return result
 
@@ -281,13 +294,42 @@ class MessagingMixin:
             "joined_at": row["joined_at"],
         }
 
-    def _assert_channel_visible(self, conn, project_id, channel_id, member_id):
+    def _assert_channel_visible(self, conn, project_id, channel_id, member_id,
+                                *, as_system=False):
         channel = self._channel_row(conn, project_id, channel_id)
-        if member_id is None or channel["visibility"] == "public":
-            if member_id is not None:
-                member = self._member_row(conn, project_id, member_id)
-                if member["state"] == "revoked":
-                    raise MembershipRevoked(member_id)
+        if as_system:
+            # NOT a principal, and never reachable from a credential: an
+            # internal lookup that needs the channel row in order to decide
+            # authorization itself. The one caller is the add-member handler,
+            # which reads `visibility` to choose between "any member may add"
+            # and "owner/admin only" -- it cannot ask that question through an
+            # ACL that presupposes the answer. Keeping this as its own argument
+            # is the point of the change below: "the system is asking" and "the
+            # caller has no member row" were the same value before, so making
+            # one of them fail closed would have broken the other.
+            return channel
+        if member_id is None:
+            # T-325, defence in depth. This used to return the channel here
+            # unconditionally -- a principal with NO member row was treated as
+            # "everyone", which is the opposite of the SSE filter's answer to
+            # the identical question in the same commit (events.py fails closed
+            # via _UNRESOLVED_CHANNEL). opus-authz could not reach it through
+            # the API today because all three principal-creating sites adopt a
+            # member row, so this closes a door rather than fixing a live leak:
+            # an imported board (T-213) or any future principal that skips
+            # adoption would otherwise land on the open side of it.
+            #
+            # A public channel is still readable without a member row -- that
+            # is what public means, and the system actor posts through this
+            # path -- but a private channel's membership list IS its ACL, and
+            # "no member row" cannot satisfy it.
+            if channel["visibility"] != "public":
+                raise NotChannelMember(channel_id, None)
+            return channel
+        if channel["visibility"] == "public":
+            member = self._member_row(conn, project_id, member_id)
+            if member["state"] == "revoked":
+                raise MembershipRevoked(member_id)
             return channel
         member = self._member_row(conn, project_id, member_id)
         if member["state"] == "revoked":
@@ -338,10 +380,12 @@ class MessagingMixin:
             self._remember(conn, project_id, request_id, "create_channel", body, result)
             return result
 
-    def get_channel(self, project_id, channel_id, *, member_id=None):
+    def get_channel(self, project_id, channel_id, *, member_id=None, as_system=False):
         with read_txn(self.conn) as conn:
             return self._serialize_channel(
-                conn, self._assert_channel_visible(conn, project_id, channel_id, member_id)
+                conn,
+                self._assert_channel_visible(conn, project_id, channel_id, member_id,
+                                             as_system=as_system),
             )
 
     def list_channels(self, project_id, *, member_id=None):
@@ -490,8 +534,19 @@ class MessagingMixin:
                      intent="message", thread_id=None, mentions=None,
                      ticket_id=None, causation_id=None, conversation_id=None,
                      supersedes_message_id=None, recipient_agent_ids=None,
-                     message_id=None, request_id=None):
-        """Persist a message and all outbox deliveries in one transaction."""
+                     message_id=None, request_id=None, delivery_state="queued"):
+        """Persist a message and all outbox deliveries in one transaction.
+
+        `delivery_state` is the state the outbox rows are born in. It defaults
+        to `queued`, which is what ordinary conversation wants: nobody has been
+        dispatched, and nothing is claimed to have been. `POST /messages/{id}/task`
+        (T-187) passes `sent`, because a dispatched task has to be able to reach
+        either `delivered` or `queued`-with-a-reason afterwards, and
+        `DELIVERY_TRANSITIONS` allows both of those only from `sent`. Creating
+        it as `queued` and transitioning would be illegal in both directions --
+        which is why this is a parameter rather than a second write: the message
+        and its outbox still land in one transaction.
+        """
         _assert_member(intent, MESSAGE_INTENTS, "intent")
         if not isinstance(author, dict) or "type" not in author or "id" not in author:
             raise SenderIdentityRejected()
@@ -505,6 +560,7 @@ class MessagingMixin:
             "conversation_id": conversation_id,
             "supersedes_message_id": supersedes_message_id,
             "recipient_agent_ids": list(recipients),
+            "delivery_state": delivery_state,
         }
         with write_txn(self.conn) as conn:
             replay = self._replay(conn, project_id, request_id, "send_message", body)
@@ -542,7 +598,8 @@ class MessagingMixin:
             )
             deliveries = [
                 self._serialize_delivery(
-                    self._insert_delivery(conn, project_id, mid, agent_id, now=now)
+                    self._insert_delivery(conn, project_id, mid, agent_id,
+                                          state=delivery_state, now=now)
                 )
                 for agent_id in recipients
             ]
@@ -589,42 +646,81 @@ class MessagingMixin:
             row = conn.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
             return self._serialize_thread(row)
 
+    # Chronological rails tiebreak on `rowid`, not on `id`. `ids.now()` is
+    # second-precision and message/delivery/thread ids are `secrets.choice`
+    # random, so `ORDER BY created_at, id` puts two messages posted in the same
+    # second in a *random* order -- a reply above the message it answers, and a
+    # different order on every read of the same rows. `rowid` is insertion
+    # order, which is the order the conversation actually happened in.
     def list_messages(self, project_id, channel_id, *, member_id=None, thread_id=None,
-                      limit=50):
+                      limit=50, cursor=None):
+        """One page of a channel, oldest first, with a forward cursor.
+
+        T-325/F1. This used to be `ORDER BY created_at, rowid LIMIT ?` with
+        `next_cursor` hardcoded to None, which is not "no paging" -- it is a
+        channel that silently freezes at its first `limit` messages while the
+        payload asserts there is nothing further. At the contract maximum of
+        200 that made message 201 onward unreachable through every parameter
+        the contract offers.
+
+        The cursor is a KEYSET on `(created_at, rowid)`, deliberately the same
+        composite key the ordering above is built on and not an OFFSET. An
+        offset pager would re-open the same-second hole this ordering exists to
+        close: messages posted between two page reads shift every later row by
+        one, so an offset either repeats or skips exactly the rows a busy
+        channel is producing. A keyset asks "what comes strictly after this
+        message", which stays true no matter what arrives meanwhile.
+        """
+        after = _decode_message_cursor(cursor)
         with read_txn(self.conn) as conn:
             self._assert_channel_visible(conn, project_id, channel_id, member_id)
+            where = ["project_id = ?", "channel_id = ?"]
+            params = [project_id, channel_id]
             if thread_id is not None:
-                rows = conn.execute(
-                    "SELECT * FROM messages WHERE project_id = ? AND channel_id = ?"
-                    " AND thread_id = ? ORDER BY created_at, id LIMIT ?",
-                    (project_id, channel_id, thread_id, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM messages WHERE project_id = ? AND channel_id = ?"
-                    " ORDER BY created_at, id LIMIT ?",
-                    (project_id, channel_id, limit),
-                ).fetchall()
+                where.append("thread_id = ?")
+                params.append(thread_id)
+            if after is not None:
+                # Row-value syntax ((a,b) > (?,?)) would say this in one clause,
+                # but it needs SQLite 3.15+; written out, it works everywhere
+                # and reads the same to the query planner.
+                where.append("(created_at > ? OR (created_at = ? AND rowid > ?))")
+                params.extend([after[0], after[0], after[1]])
+            # One row past the page: the only honest way to know whether a next
+            # page EXISTS. Emitting a cursor because the page came back full
+            # would hand every exactly-divisible channel a cursor to an empty
+            # page, and a client that trusts next_cursor would page forever.
+            params.append(limit + 1)
+            rows = conn.execute(
+                "SELECT rowid AS _rowid, * FROM messages WHERE " + " AND ".join(where)
+                + " ORDER BY created_at, rowid LIMIT ?",
+                tuple(params),
+            ).fetchall()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            next_cursor = (
+                _encode_message_cursor(rows[-1]["created_at"], rows[-1]["_rowid"])
+                if has_more and rows else None
+            )
             message_ids = [r["id"] for r in rows]
             if message_ids:
                 marks = ",".join("?" for _ in message_ids)
                 delivery_rows = conn.execute(
                     "SELECT * FROM deliveries WHERE project_id = ?"
-                    " AND message_id IN ({}) ORDER BY created_at, id".format(marks),
+                    " AND message_id IN ({}) ORDER BY created_at, rowid".format(marks),
                     (project_id, *message_ids),
                 ).fetchall()
             else:
                 delivery_rows = []
             thread_rows = conn.execute(
                 "SELECT * FROM threads WHERE project_id = ? AND channel_id = ?"
-                " ORDER BY updated_at, id",
+                " ORDER BY updated_at, rowid",
                 (project_id, channel_id),
             ).fetchall()
             payload = {
                 "items": [self._serialize_message(r) for r in rows],
                 "threads": [self._serialize_thread(r) for r in thread_rows],
                 "deliveries": [self._serialize_delivery(r) for r in delivery_rows],
-                "next_cursor": None,
+                "next_cursor": next_cursor,
                 "stream": self._stream_status(conn, project_id),
             }
             if not rows:
@@ -661,7 +757,7 @@ class MessagingMixin:
     def list_deliveries(self, project_id, message_id):
         rows = self.conn.execute(
             "SELECT * FROM deliveries WHERE project_id = ? AND message_id = ?"
-            " ORDER BY created_at, id",
+            " ORDER BY created_at, rowid",
             (project_id, message_id),
         ).fetchall()
         return {"items": [self._serialize_delivery(r) for r in rows]}
@@ -1498,3 +1594,43 @@ class MessagingMixin:
                     "as_of": ids.now(), "last_event_id": None}
         return {"state": "live", "snapshot_version": row["seq"],
                 "as_of": row["occurred_at"], "last_event_id": row["event_id"]}
+
+
+def _encode_message_cursor(created_at, rowid):
+    """Opaque by contract (`maxLength: 512`); the encoding is ours to change.
+
+    Deliberately the same base64-of-a-typed-pair shape as
+    `server/views.encode_cursor`, and deliberately NOT an import of it: storage
+    must not depend on the server package. The `k` tag is what stops a cursor
+    from one listing being replayed against another and quietly returning a
+    page from the wrong rail.
+    """
+    raw = json.dumps({"k": "messages", "v": [created_at, rowid]},
+                     separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_message_cursor(cursor):
+    """(created_at, rowid), or None for no cursor.
+
+    A cursor that does not decode is refused, never ignored: silently serving
+    page 1 for a corrupt cursor is exactly the defect this replaces -- a client
+    that pages sees a plausible response and loops forever.
+    """
+    if cursor is None or cursor == "":
+        return None
+    if not isinstance(cursor, str):
+        raise MalformedRequest("cursor must be a string.",
+                               {"rejected_fields": ["cursor"]})
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        parsed = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        if parsed.get("k") != "messages":
+            raise ValueError("cursor is for a different listing")
+        created_at, rowid = parsed["v"]
+        if not isinstance(created_at, str) or not isinstance(rowid, int):
+            raise ValueError("cursor payload has the wrong shape")
+    except Exception:
+        raise MalformedRequest("cursor is not valid for this listing.",
+                               {"rejected_fields": ["cursor"]})
+    return (created_at, rowid)

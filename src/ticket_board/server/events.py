@@ -77,6 +77,9 @@ def encode_frame(envelope, *, with_id=True):
     return "\n".join(lines).encode("utf-8")
 
 
+_UNRESOLVED_CHANNEL = object()
+
+
 class EventStream:
     def __init__(self, store, *, retention=SSE_RETENTION_EVENTS,
                  heartbeat_seconds=HEARTBEAT_SECONDS, poll_seconds=POLL_SECONDS):
@@ -152,14 +155,84 @@ class EventStream:
     def visible_to(self, principal, envelope, audit_row):
         """ACL filter, applied before a frame is written to the socket.
 
-        Project scope is the whole ACL in V1 because every record the stream can
-        carry is project-scoped and the credential is bound to one project. The
-        per-channel rule -- a subscriber never receives events for a channel it
-        cannot read -- arrives with the channel records themselves in T-187, and
-        this is the one place it has to be applied. It is a seam, not a
-        completed check; see docs/api-notes.md.
+        Two rules, in order of cost. Project scope is the floor and rejects
+        almost everything that should not be here. The per-channel rule -- a
+        subscriber never receives events for a channel it cannot read -- is the
+        T-187 half, and it has to be applied *here*: filtering `GET /messages`
+        alone would leave the stream as a side channel that announces private
+        traffic to everyone with a credential for the project.
+
+        The check is deliberately fail-closed. A message event whose channel
+        cannot be resolved, or whose subject has gone, is dropped rather than
+        emitted, because the failure mode of guessing wrong in the other
+        direction is a private conversation on somebody else's socket.
         """
-        return audit_row["project_id"] == principal.project_id
+        if audit_row["project_id"] != principal.project_id:
+            return False
+        channel_id = self._channel_of_event(audit_row)
+        if channel_id is None:
+            return True
+        return self._may_read_channel(principal, audit_row["project_id"],
+                                      channel_id)
+
+    def _channel_of_event(self, audit_row):
+        """The channel an event belongs to, or None if it is not channel-bound.
+
+        Only message subjects carry one. Ticket and agent events are
+        project-scoped and stay visible to every credential in the project.
+        """
+        if audit_row["subject_type"] != "message" or not audit_row["subject_id"]:
+            return None
+        row = self.store.conn.execute(
+            "SELECT channel_id FROM messages WHERE id = ?",
+            (audit_row["subject_id"],),
+        ).fetchone()
+        if row is None:
+            # The subject is gone or is not a message we can resolve. Fail
+            # closed: a sentinel the caller reads as "not visible".
+            return _UNRESOLVED_CHANNEL
+        return row["channel_id"]
+
+    def _may_read_channel(self, principal, project_id, channel_id):
+        if channel_id is _UNRESOLVED_CHANNEL:
+            return False
+        channel = self.store.conn.execute(
+            "SELECT visibility FROM channels WHERE id = ? AND project_id = ?",
+            (channel_id, project_id),
+        ).fetchone()
+        if channel is None:
+            return False
+        if channel["visibility"] == "public":
+            return True
+        member_id = self._member_id_of_principal(principal, project_id)
+        if member_id is None:
+            return False
+        return self.store.conn.execute(
+            "SELECT 1 FROM channel_members WHERE project_id = ? AND channel_id = ?"
+            " AND member_id = ?", (project_id, channel_id, member_id),
+        ).fetchone() is not None
+
+    def _member_id_of_principal(self, principal, project_id):
+        """The `mem_` id behind a credential, or None.
+
+        Duplicated in shape from `messaging._member_id_of` but not shared: that
+        one raises on a revoked membership because a *request* must be told;
+        this one only ever returns a value, because a stream filter that raises
+        would tear down the socket instead of dropping one frame.
+        """
+        if principal is None:
+            return None
+        if getattr(principal, "is_agent", False):
+            row = self.store.conn.execute(
+                "SELECT id FROM members WHERE project_id = ? AND agent_id = ?"
+                " AND state = 'active'", (project_id, principal.agent_id),
+            ).fetchone()
+        else:
+            row = self.store.conn.execute(
+                "SELECT id FROM members WHERE project_id = ? AND id = ?"
+                " AND state = 'active'", (project_id, principal.operator_id),
+            ).fetchone()
+        return row["id"] if row is not None else None
 
     # ---------------------------------------------------------------- stream
 

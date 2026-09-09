@@ -123,6 +123,63 @@ class EnrollmentCodeExpired(BoardError):
         super().__init__(_ENROLLMENT_MESSAGE, details)
 
 
+_INVITATION_MESSAGE = "That invitation code is not usable."
+
+
+class InvitationCodeInvalid(EnrollmentCodeInvalid):
+    """A bad invite code, reported under the enrollment code's frozen name.
+
+    `ErrorCode` is a closed enum and has no `invitation_code_*` member, but the
+    contract's `POST /invitations/exchange` publishes a 422. Widening the enum
+    would be a unilateral amendment to a frozen contract, and answering with
+    `malformed_request` would misreport a *credential* failure as a shape
+    failure. So the code is borrowed and the message names the real subject --
+    the same trade T-180 made for `ticket_version_conflict` on agent records.
+    Recorded for T-224's amendment list; see docs/api-notes.md.
+    """
+
+    def __init__(self, details=None):
+        BoardError.__init__(self, _INVITATION_MESSAGE, details)
+
+
+class InvitationCodeExpired(EnrollmentCodeExpired):
+    """An expired invite code. Borrowed name; see `InvitationCodeInvalid`."""
+
+    def __init__(self, details=None):
+        BoardError.__init__(self, _INVITATION_MESSAGE, details)
+
+
+class InvitationReplayRefused(BoardError):
+    """A replay of `POST /invitations` that cannot be re-answered honestly.
+
+    T-286 (planner-authorised additive amendment, freeze rule 2): `code` is a
+    bearer secret returned exactly once and never stored in plaintext, so a
+    byte-identical replay of `request_id`, once the first call has already
+    minted and registered a code, has nothing honest to return. The
+    alternative -- passing the API's minted code into the store so replay
+    could echo it -- was rejected because it would put a live bearer secret
+    in plaintext in the replay log, the exact thing hashing it in
+    `credentials` exists to prevent (T-284's finding on this defect).
+
+    `request_id_not_replayable` is its own enum member, distinct from
+    `request_id_reused` (same id, *different* body): collapsing the two would
+    leave a caller unable to tell "your retry conflicts" from "this one is
+    not replayable, mint a new invitation". See
+    `docs/contracts/dependent-notes.md` for the exception this carves out of
+    the general idempotency rule, and `docs/api-notes.md` for the write-up.
+    """
+
+    code = "request_id_not_replayable"
+    status = 409
+
+    def __init__(self, request_id):
+        super().__init__(
+            "This request_id already issued a one-time invitation code and "
+            "cannot be replayed. Issue a new invitation instead.",
+            {"request_id": request_id},
+        )
+
+
 class RateLimited(BoardError):
     code = "rate_limited"
     status = 429

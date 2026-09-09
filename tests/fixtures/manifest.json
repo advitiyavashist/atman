@@ -26,6 +26,7 @@
   "errors/409-legacy-writer-active.json": "ErrorResponse",
   "errors/409-master-lease-conflict.json": "ErrorResponse",
   "errors/409-master-lease-expired.json": "ErrorResponse",
+  "errors/409-request-id-not-replayable.json": "ErrorResponse",
   "errors/409-request-id-reused.json": "ErrorResponse",
   "errors/409-run-already-active.json": "ErrorResponse",
   "errors/409-session-lease-expired.json": "ErrorResponse",
