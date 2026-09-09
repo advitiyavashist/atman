@@ -80,10 +80,15 @@ budgeted, observed, and reviewed.
 
 Python 3.9+ and Git are the only requirements.
 
+Two paths, depending on whether you are developing the tool or running a
+pinned release on a team machine.
+
+**Development** — run straight from a checkout; edits take effect immediately:
+
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
 cd atman
-./install.sh
+./install.sh                              # symlinks repo/tickets.py -> ~/.local/bin/tickets
 export PATH="$HOME/.local/bin:$PATH"
 
 cd /path/to/your-project
@@ -100,6 +105,22 @@ tickets ui
 `quickstart` creates a local board, registers the first agent, and adds three
 sample tasks in a real dependency chain. It is safe to run twice. Remove the
 samples with `tickets quickstart --remove`.
+
+**Production** — pin a reviewed commit so every agent runs the same bytes
+(T-223 release mechanism; see `scripts/install_live.py`):
+
+```sh
+cd ~/tickets
+./install.sh --live-release --ref <sha> --activate
+# ~/.local/bin/tickets (or ~/.claude/tools/tickets.py) becomes a small launcher
+# that execs ~/.claude/tools/tickets-releases/<sha>/tickets.py
+```
+
+Check what is actually running: `tickets self` (script path, PATH entry, release
+status). `tickets --version` prints the pinned commit or flags drift.
+
+Optional, Claude Code: add a `SessionStart` hook so every session sees the
+board (see `install.sh`).
 
 `tickets ui` prints the local address for the read-only dashboard. For the full
 captured session, read [A first session](docs/first-session.md).

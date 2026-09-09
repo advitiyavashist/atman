@@ -11230,6 +11230,32 @@ def release_status():
 release_version = release_status
 
 
+def cmd_self(a, board):
+    """Print which tickets.py is executing and how it was installed."""
+    import shutil
+    script = os.path.realpath(__file__)
+    print("script: %s" % script)
+    print("status: %s" % release_status())
+    on_path = shutil.which("tickets")
+    if on_path:
+        resolved = os.path.realpath(on_path)
+        print("PATH:   %s" % on_path)
+        if resolved != on_path:
+            print("        -> %s" % resolved)
+        if resolved != script:
+            print("        running %s" % script)
+        try:
+            with open(resolved) as source:
+                launcher = source.read(512)
+            if "tickets-releases" in launcher and "execv" in launcher:
+                print("        (release launcher shim)")
+        except OSError:
+            pass
+    invoked = os.path.realpath(sys.argv[0])
+    if invoked != script and (not on_path or invoked != os.path.realpath(on_path)):
+        print("invoked: %s" % sys.argv[0])
+
+
 def main():
     status = release_status()
     p = _LoudArgumentParser(prog="tickets", description=__doc__.split("\n")[0],
@@ -11371,6 +11397,9 @@ def main():
 
     c = sub.add_parser("connect", help="print how any agent connects to this board")
     c.set_defaults(fn=cmd_connect)
+
+    c = sub.add_parser("self", help="print which tickets.py is live (script path and install kind)")
+    c.set_defaults(fn=cmd_self)
 
     c = sub.add_parser("pending", help="exit 0 if there is work for the agent (messages, held or ready ticket)")
     c.add_argument("--agent", default="")
@@ -11853,6 +11882,9 @@ def main():
     if not a.cmd:
         p.print_help()
         return
+    if a.cmd == "self":
+        cmd_self(a, None)
+        return
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
     if a.cmd not in (
@@ -11866,6 +11898,7 @@ def main():
         "sprint",
         "master",
         "connect",
+        "self",
         "board-restore",
         "knowledge",
         "kb",
