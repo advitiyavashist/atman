@@ -8740,7 +8740,24 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 # and a working directory, and reads the board afterwards. docs/byoa.md is the
 # operator-facing version of this.
 BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude")
+# Documented shell-template placeholders for custom harnesses. `harness check`
+# refuses templates with any other {name} token or without {prompt_file}.
 HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
+_HARNESS_PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
+
+
+def _harness_template_error(template):
+    """Return an error string when a custom harness template is invalid."""
+    if not template:
+        return None
+    for name in _HARNESS_PLACEHOLDER_RE.findall(template):
+        token = "{%s}" % name
+        if token not in HARNESS_PLACEHOLDERS:
+            return "unknown harness placeholder %s (allowed: %s)" % (
+                token, " ".join(HARNESS_PLACEHOLDERS))
+    if "{prompt_file}" not in template:
+        return "harness template must include {prompt_file}"
+    return None
 
 
 def _split_harness(spec):
@@ -9197,6 +9214,11 @@ def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HA
         cwd = os.path.dirname(board)
     prompt_file, cleanup = "", None
     if cmd_template:
+        template_err = _harness_template_error(cmd_template)
+        if template_err:
+            return {"harness": harness, "cmd": cmd_template, "ok": False, "exit": 1,
+                    "timed_out": False, "latency_ms": 0, "replied": False,
+                    "output": template_err, "at": now()}
         if "{prompt_file}" in cmd_template:
             prompt_file, cleanup = _render_prompt_file(board, owner, text=HARNESS_PROBE_PROMPT)
         run_cmd = _expand_harness_cmd(cmd_template, agent=owner, cwd=cwd, prompt_file=prompt_file)

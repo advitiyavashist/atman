@@ -110,6 +110,12 @@ template -- with only the prompt swapped for `reply OK`, under a 60 s cap
 (`--timeout`). The failure it exists to catch lives in the command, not in the
 model's answer: not installed, not logged in, wrong template, no network.
 
+Before running anything, `harness check` validates the template: only
+`{prompt_file}`, `{cwd}` and `{agent}` are allowed as placeholders, and
+`{prompt_file}` is required. An unknown token like `{foo}` or a template with
+no `{prompt_file}` fails immediately with the offending name in the message.
+Braces in JSON bodies and other non-placeholder text are left alone.
+
 The verdict is **exit status only**. `replied` reports separately whether the
 output contained `OK`, and deliberately does not gate the verdict: a harness
 that prefaces its answer is working, and failing it on a wording difference
