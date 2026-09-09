@@ -10488,7 +10488,7 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
         </div>
         <textarea id="cText" aria-label="Message" placeholder="Message the board or a seat. Type @ to tag an agent."></textarea>
         <div id="mentionBar"></div>
-        <div id="composerRow" style="margin-top:8px"><button id="cSend">Post</button><small id="composerMsg"></small></div>
+        <div id="composerRow" style="margin-top:8px"><button type="button" id="cSend">Post</button><small id="composerMsg"></small></div>
       </section>
     </div>
   </div>
@@ -10886,10 +10886,10 @@ function renderOnboarding(ob){
     ['initialized','Board ready','tickets quickstart --agent <you>'],
     ['first_ticket','Work on the board','tickets quickstart'],
     ['first_agent','You registered','tickets quickstart --agent <you>'],
+    ['second_harness','Second harness','tickets join <name> --harness …'],
+    ['objective_set','Objective set','tickets objective "..."'],
     ['first_review','First review submitted','tickets review <id> --notes "..."'],
     ['first_merge','First merge','tickets merge'],
-    ['second_harness','Second harness','tickets join <name> --harness …'],
-    ['objective_set','Objective set','tickets objective "..."']
   ];
   const done=steps.filter(s=>ob&&ob[s[0]]).length;
   document.getElementById('obProgress').textContent=done+'/'+steps.length;

@@ -45,7 +45,7 @@ export function Overview({
           <h1>Overview</h1>
         </div>
         <span className="spacer" />
-        <button onClick={overview.refetch} data-testid="overview-refresh">
+        <button type="button" onClick={overview.refetch} data-testid="overview-refresh">
           Refresh
         </button>
       </div>

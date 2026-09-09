@@ -40,9 +40,9 @@ MAX_PAGE_LIMIT = 200
 # than hardcode its own.
 EMPTY_STATES = {
     "overview": {
-        "headline": "No work yet. Create a ticket or import a board.",
-        "detail": None,
-        "primary_action": "New ticket",
+        "headline": "No work yet.",
+        "detail": "Work · Team · Objective — then intervene when a seat needs you.\n\nMedian turns and yield@cost stay — until a done ticket reports.",
+        "primary_action": None,
     },
     "tickets": {
         "headline": "No tickets match this filter.",

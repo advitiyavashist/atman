@@ -34,8 +34,8 @@
     "last_event_id": null
   },
   "empty_state": {
-    "headline": "No work yet. Create a ticket or import a board.",
-    "detail": null,
-    "primary_action": "New ticket"
+    "headline": "No work yet.",
+    "detail": "Work · Team · Objective — then intervene when a seat needs you.\n\nMedian turns and yield@cost stay — until a done ticket reports.",
+    "primary_action": null
   }
 }

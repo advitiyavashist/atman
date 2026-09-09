@@ -76,12 +76,13 @@ function BoardShell({ session }: { session: BoardSession }) {
         </span>
         <span className="spacer" />
         <button
+          type="button"
           aria-pressed={theme === "light"}
           onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
         >
           {theme === "dark" ? "Light mode" : "Dark mode"}
         </button>
-        <button className="primary" onClick={() => setConnectOpen(true)}>
+        <button type="button" className="primary" onClick={() => setConnectOpen(true)}>
           Connect agent
         </button>
       </header>

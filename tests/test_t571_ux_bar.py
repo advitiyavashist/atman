@@ -92,6 +92,8 @@ def test_onboard_merge_is_tickets_merge_and_second_harness():
     assert "tickets done <id>" not in ob
     assert "second_harness" in ob
     assert "tickets join <name> --harness" in ob
+    assert ob.index("['second_harness'") < ob.index("['first_review'")
+    assert ob.index("['objective_set'") < ob.index("['first_review'")
 
 
 def test_team_ledes_stay_lean():

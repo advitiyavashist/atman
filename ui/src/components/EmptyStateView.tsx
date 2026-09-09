@@ -8,7 +8,7 @@ export function EmptyStateView({ empty, onPrimaryAction }: { empty: EmptyState; 
       <h2>{empty.headline}</h2>
       {empty.detail && <p>{empty.detail}</p>}
       {empty.primary_action && (
-        <button className="primary" onClick={onPrimaryAction}>
+        <button className="primary" type="button" onClick={onPrimaryAction}>
           {empty.primary_action}
         </button>
       )}
