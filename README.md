@@ -91,7 +91,7 @@ cd atman
 ./install.sh                              # symlinks repo/tickets.py -> ~/.local/bin/tickets
 export PATH="$HOME/.local/bin:$PATH"
 
-cd /path/to/your-project
+cd /path/to/your-project                # an existing git repo (git init if not)
 tickets quickstart --agent alice --roles backend
 tickets msg "alice is online"
 tickets next
@@ -103,8 +103,10 @@ tickets ui
 ```
 
 `quickstart` creates a local board, registers the first agent, and adds three
-sample tasks in a real dependency chain. It is safe to run twice. Remove the
-samples with `tickets quickstart --remove`.
+sample tasks in a real dependency chain. It is safe to run twice. Run it inside
+an existing git repo — `git init` first if `your-project` is not one yet — so
+board-resolution reports the worktree and `tickets next` prints the worktree
+RULE. Remove the samples with `tickets quickstart --remove`.
 
 **Production** — pin a reviewed commit so every agent runs the same bytes
 (T-223 release mechanism; see `scripts/install_live.py`):
