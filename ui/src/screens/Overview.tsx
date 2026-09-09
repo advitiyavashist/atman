@@ -2,7 +2,6 @@ import { useBoard } from "../state/BoardProvider";
 import { useResource } from "../state/useResource";
 import { ConnectionBanner } from "../components/ConnectionBanner";
 import { ErrorNotice } from "../components/ErrorNotice";
-import { EmptyStateView } from "../components/EmptyStateView";
 import { DayOnePath } from "../components/DayOnePath";
 import { formatDateTime, formatWhen } from "../copy";
 import type { OverviewResponse } from "../types";
@@ -56,10 +55,7 @@ export function Overview({
       {overview.error && <ErrorNotice error={overview.error} onRetry={overview.refetch} onReload={overview.refetch} />}
 
       {isEmpty ? (
-        <>
-          <DayOnePath />
-          <EmptyStateView empty={data.empty_state!} onPrimaryAction={() => onNavigate("tickets")} />
-        </>
+        <DayOnePath />
       ) : (
         <>
           <div className="metrics">
