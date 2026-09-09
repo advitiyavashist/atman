@@ -6285,13 +6285,25 @@ def _note_native_wake_result(board, seat, label, message_id):
     })
 
 
+def _adapter_provider(harness_name):
+    """Stable adapter identity for a workforce harness (empty for custom)."""
+    name = harness_name or ""
+    return _session_adapters().provider_for_harness(name) or name
+
+
+def _failure_provider(failure):
+    """Provider/harness stamped on a failure record; empty means legacy unscoped."""
+    failure = failure or {}
+    return failure.get("provider") or _adapter_provider(failure.get("harness") or "")
+
+
 def _local_adapter_failure(rec, harness_name):
-    """Native refusal is provider-local. Remote seats use the bridge failure only."""
+    """Native/watcher refusal is provider-local. Remote seats use the bridge failure only."""
     failure = (rec or {}).get("adapter_failure") or {}
     if not failure:
         return {}
-    current = _session_adapters().provider_for_harness(harness_name) or harness_name or ""
-    scoped = failure.get("provider") or failure.get("harness") or ""
+    current = _adapter_provider(harness_name)
+    scoped = _failure_provider(failure)
     if (harness_name == "remote" or current == "remote") and scoped != "remote":
         return {}
     if scoped and current and scoped != current:
@@ -6299,12 +6311,18 @@ def _local_adapter_failure(rec, harness_name):
     return failure
 
 
-def _clear_adapter_failure_on_provider_change(board, owner, new_harness):
-    """Drop leftover native failure when the seat's provider/harness changes."""
+def _clear_adapter_failure_on_provider_change(board, owner, new_harness,
+                                             previous_harness=""):
+    """Drop leftover failure when the captured previous provider/harness changes."""
     rec = _agent_rec(board, owner) or {}
     if not rec.get("adapter_failure"):
         return
-    if _local_adapter_failure(rec, new_harness):
+    old_key = _adapter_provider(previous_harness)
+    new_key = _adapter_provider(new_harness)
+    scoped = _failure_provider(rec.get("adapter_failure") or {})
+    same_provider = bool(old_key) and old_key == new_key
+    same_harness = bool(previous_harness) and previous_harness == new_harness
+    if (same_provider or same_harness) and (not scoped or scoped == new_key):
         return
     def clear(agent):
         agent.pop("adapter_failure", None)
@@ -6898,7 +6916,7 @@ def cmd_join(a, board):
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
     if harness:
         _safe(lambda: _clear_adapter_failure_on_provider_change(
-            board, owner, harness), None)
+            board, owner, harness, prev_harness), None)
     if first_join:
         # setdefault, not update: if two joins race, the earlier stamp wins and
         # neither can move the watermark forward over unread mail.
@@ -9591,6 +9609,8 @@ def cmd_watch(a, board):
                         "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
                             "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else ""),
                         "at": now(),
+                        "provider": _adapter_provider(harness),
+                        "harness": harness or "",
                     }
                     _safe(lambda fr=failure_record: _agent_set(board, owner, adapter_failure=fr), None)
                     log("%s skip retrigger armed for unchanged failed trigger; bounded attempt %d/%d state=%s" % (

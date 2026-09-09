@@ -40,9 +40,13 @@ missing. `tickets self` reports probe/registration status.
 injection when the message already wakes a polling seat (`_message_wakes` or
 continuous DM/@mention). Remote/custom/no-endpoint and supervised Cursor
 outcomes stay queued-offline; only a refused or rebound native injection is
-recorded as adapter `failed`, scoped to that provider. Re-joining as another
-harness (including a healthy remote bridge) clears leftover native failure so
-the UI does not report `failed` for a live remote lease. `tickets watch` / `tickets spawn` refuse to double up
+recorded as adapter `failed`, scoped to that provider. Watcher exhaust
+records stamp the same provider/harness. `join` captures the previous
+workforce harness before overwrite and clears leftover (including legacy
+unscoped) failure when the provider actually changes — Claude/custom to
+Codex or Cursor, not only a remote rejoin. Re-joining as another harness
+(including a healthy remote bridge) therefore does not report `failed` for
+the new adapter. `tickets watch` / `tickets spawn` refuse to double up
 on a seat with a live native endpoint. Wake delivery reserves `message_id`
 in-flight under the seat lock before poke so concurrent callers cannot double-inject.
 

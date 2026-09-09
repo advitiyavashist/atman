@@ -1079,3 +1079,73 @@ def test_unscoped_native_failure_does_not_override_live_remote_lease(board):
     assert grok["adapter_state"] != "failed"
     assert grok["adapter_state"] in ("online", "queued")
     assert grok["adapter_bridge_id"] == "grok-live"
+
+
+def test_unscoped_watcher_failure_clears_on_codex_and_cursor_rejoin(board):
+    tk = _tickets()
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "claude")
+    tk._agent_set(str(board), "cx", adapter_failure={
+        "state": "failed",
+        "reason": "local harness exit 1",
+        "at": "now",
+    })
+    snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
+    row = next(a for a in snap["agents"] if a["name"] == "cx")
+    assert row["adapter_state"] == "failed"
+
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "codex")
+    rec = tk._agent_rec(str(board), "cx") or {}
+    assert "adapter_failure" not in rec, rec
+    snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
+    row = next(a for a in snap["agents"] if a["name"] == "cx")
+    assert row["adapter_state"] != "failed"
+
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "custom",
+         "--cmd", "true {prompt_file}")
+    tk._agent_set(str(board), "cx", adapter_failure={
+        "state": "failed",
+        "reason": "local harness exit 1",
+        "at": "now",
+    })
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "cursor")
+    rec = tk._agent_rec(str(board), "cx") or {}
+    assert "adapter_failure" not in rec, rec
+    snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
+    row = next(a for a in snap["agents"] if a["name"] == "cx")
+    assert row["adapter_state"] != "failed"
+
+
+def test_same_provider_rejoin_keeps_scoped_watcher_failure(board):
+    tk = _tickets()
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "codex")
+    tk._agent_set(str(board), "cx", adapter_failure={
+        "state": "failed",
+        "reason": "local harness exit 1",
+        "at": "now",
+        "provider": "codex",
+        "harness": "codex",
+    })
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "codex")
+    rec = tk._agent_rec(str(board), "cx") or {}
+    assert rec.get("adapter_failure", {}).get("state") == "failed"
+    assert rec.get("adapter_failure", {}).get("provider") == "codex"
+    snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
+    row = next(a for a in snap["agents"] if a["name"] == "cx")
+    assert row["adapter_state"] == "failed"
+
+
+def test_claude_scoped_failure_is_ignored_after_codex_join_without_clear(board):
+    tk = _tickets()
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "codex")
+    tk._agent_set(str(board), "cx", adapter_failure={
+        "state": "failed",
+        "reason": "native wake refused",
+        "at": "now",
+        "provider": "claude",
+        "harness": "claude",
+    })
+    snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
+    row = next(a for a in snap["agents"] if a["name"] == "cx")
+    assert row["adapter_state"] != "failed"
+    assert tk._local_adapter_failure(
+        tk._agent_rec(str(board), "cx"), "codex") == {}
