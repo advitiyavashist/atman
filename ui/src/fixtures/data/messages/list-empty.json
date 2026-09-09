@@ -11,7 +11,7 @@
   },
   "empty_state": {
     "headline": "No messages in this channel yet.",
-    "detail": null,
+    "detail": "Send when a seat should see something.\n\nReceipts show delivery state — never implied progress on tickets.",
     "primary_action": "Send"
   }
 }

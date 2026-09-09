@@ -8,7 +8,7 @@
   },
   "empty_state": {
     "headline": "No channels you can read yet.",
-    "detail": "Ask an owner to add you, or create a channel.",
+    "detail": "Ask an owner to add you, or create a channel.\n\nDelivery receipts only — no fabricated traffic.",
     "primary_action": "New channel"
   }
 }

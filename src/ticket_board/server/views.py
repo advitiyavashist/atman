@@ -19,6 +19,7 @@ import base64
 import datetime as _dt
 import json
 
+from ..screen_copy import EMPTY_STATES
 from ..storage import ids
 
 # Liveness policy. The Agent schema states the pilot defaults; they are policy
@@ -34,33 +35,6 @@ SSE_RETENTION_EVENTS = 1000
 
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 200
-
-# Server-supplied screen copy. It lives on the server so every client renders
-# the same words; the console is told to render `empty_state.headline` rather
-# than hardcode its own.
-EMPTY_STATES = {
-    "overview": {
-        "headline": "No work yet. Create a ticket or import a board.",
-        "detail": None,
-        "primary_action": "New ticket",
-    },
-    "tickets": {
-        "headline": "No tickets match this filter.",
-        "detail": "Clear the filter or create a ticket.",
-        "primary_action": "New ticket",
-    },
-    "agents": {
-        "headline": "Connect your first agent.",
-        "detail": None,
-        "primary_action": "Connect agent",
-    },
-    "activity": {
-        "headline": "No activity yet.",
-        "detail": None,
-        "primary_action": None,
-    },
-}
-
 
 def _parse(stamp):
     return _dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(

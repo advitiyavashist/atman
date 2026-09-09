@@ -10,7 +10,7 @@
   },
   "empty_state": {
     "headline": "No tickets match this filter.",
-    "detail": "Clear the filter or create a ticket.",
+    "detail": "Clear the filter or create a ticket.\n\nTurn counts stay unmeasured until tickets finish.",
     "primary_action": "New ticket"
   }
 }

@@ -597,7 +597,7 @@ export function Messages() {
       {channels.loading && !channels.data && <p data-testid="messages-loading">Reading the board…</p>}
 
       {channels.data && channels.data.empty_state && channels.data.items.length === 0 ? (
-        <EmptyStateView empty={channels.data.empty_state} onPrimaryAction={() => setCreatingChannel(true)} />
+        <EmptyStateView empty={channels.data.empty_state} icon="✉" onPrimaryAction={() => setCreatingChannel(true)} />
       ) : (
         channels.data && (
           <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
@@ -635,6 +635,7 @@ export function Messages() {
                   {messages.data && messages.data.empty_state && messages.data.items.length === 0 ? (
                     <EmptyStateView
                       empty={messages.data.empty_state}
+                      icon="✉"
                       onPrimaryAction={() => document.getElementById("composer-body")?.focus()}
                     />
                   ) : (

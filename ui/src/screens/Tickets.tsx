@@ -153,7 +153,7 @@ export function Tickets() {
       {list.loading && !data && <p data-testid="tickets-loading">Reading the board…</p>}
 
       {data && data.empty_state && data.items.length === 0 ? (
-        <EmptyStateView empty={data.empty_state} onPrimaryAction={() => setCreating(true)} />
+        <EmptyStateView empty={data.empty_state} icon="▢" onPrimaryAction={() => setCreating(true)} />
       ) : (
         data && (
           <div className="card table-wrap">

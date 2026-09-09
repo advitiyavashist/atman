@@ -8,7 +8,7 @@
   },
   "empty_state": {
     "headline": "Connect your first agent.",
-    "detail": null,
+    "detail": "Run tickets join <name> --roles … from the harness machine.\n\nSeats stay unmeasured until the first heartbeat.",
     "primary_action": "Connect agent"
   }
 }

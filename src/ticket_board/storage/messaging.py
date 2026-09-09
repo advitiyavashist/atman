@@ -411,7 +411,8 @@ class MessagingMixin:
                 "stream": self._stream_status(conn, project_id),
             }
             if not rows:
-                payload["empty_state"] = {"headline": "No channels yet."}
+                from ..screen_copy import EMPTY_STATES
+                payload["empty_state"] = dict(EMPTY_STATES["channels"])
             return payload
 
     def add_channel_member(self, project_id, channel_id, member_id, *, subscribed=True,
@@ -724,7 +725,8 @@ class MessagingMixin:
                 "stream": self._stream_status(conn, project_id),
             }
             if not rows:
-                payload["empty_state"] = {"headline": "No messages yet."}
+                from ..screen_copy import EMPTY_STATES
+                payload["empty_state"] = dict(EMPTY_STATES["messages"])
             return payload
 
     # -------------------------------------------------------------- deliveries

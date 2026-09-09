@@ -9,7 +9,7 @@
   },
   "empty_state": {
     "headline": "No activity yet.",
-    "detail": null,
+    "detail": "This filter matches no audit events.\n\nTraffic is never invented — only recorded events appear.",
     "primary_action": null
   }
 }

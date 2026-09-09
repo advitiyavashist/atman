@@ -183,8 +183,43 @@ td button.link {
 
 .table-wrap { overflow-x: auto; }
 
-.empty-state { padding: 24px 12px; text-align: center; color: var(--muted); }
-.empty-state h2 { color: var(--text); font-size: 17px; margin: 0 0 6px; }
+.empty-state.empty-block {
+  max-width: 520px;
+  margin: 12px 0 18px;
+  padding: 16px 18px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+}
+.empty-state-icon {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--muted);
+}
+.empty-state h2 {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 16px;
+  letter-spacing: -0.02em;
+}
+.empty-state-detail {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.empty-state .empty-honesty {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  opacity: 0.9;
+}
+.empty-state .primary { margin-top: 4px; }
 
 .day-one {
   background: var(--panel);

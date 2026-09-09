@@ -28,7 +28,7 @@ export function Activity() {
       {feed.loading && !data && <p data-testid="activity-loading">Reading the trail…</p>}
 
       {data && data.empty_state && data.items.length === 0 ? (
-        <EmptyStateView empty={data.empty_state} />
+        <EmptyStateView empty={data.empty_state} icon="☰" />
       ) : (
         data && (
           <section className="card">

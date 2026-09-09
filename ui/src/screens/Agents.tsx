@@ -146,7 +146,7 @@ export function Agents({ onConnect }: { onConnect: () => void }) {
       {agents.loading && !data && <p data-testid="agents-loading">Reading the board…</p>}
 
       {data && data.empty_state && data.items.length === 0 ? (
-        <EmptyStateView empty={data.empty_state} onPrimaryAction={onConnect} />
+        <EmptyStateView empty={data.empty_state} icon="◎" onPrimaryAction={onConnect} />
       ) : (
         data?.items.map((agent) => (
           <section className="card" key={agent.id} style={{ marginBottom: 14 }} data-testid={`agent-${agent.id}`}>
