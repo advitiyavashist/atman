@@ -460,8 +460,54 @@ def _board_dir_uncached(discover_children=True):
     return os.path.join(os.getcwd(), ".tickets")
 
 
-def whoami(explicit=None):
-    return explicit or os.environ.get("TICKET_AGENT") or "agent-%d" % os.getpid()
+IDENTITY_FILE = ".agent-identity"
+
+
+def _identity_path(board):
+    """Per-board identity file. Deliberately beside the board rather than in a
+    shell profile: a profile is shared by every process on the machine, so
+    agents that set their identity there overwrite each other."""
+    return os.path.join(board, IDENTITY_FILE)
+
+
+def read_identity(board):
+    try:
+        with open(_identity_path(board)) as f:
+            return (f.read() or "").strip() or None
+    except (OSError, IOError):
+        return None
+
+
+def write_identity(board, name):
+    path = _identity_path(board)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write((name or "").strip() + "\n")
+    os.replace(tmp, path)  # atomic
+    return name
+
+
+def whoami(explicit=None, board=None):
+    """Resolve the caller's agent id.
+
+    Precedence, and the ordering is the point: an explicitly-passed --owner
+    beats a deliberately-recorded per-board identity, which beats the ambient
+    TICKET_AGENT env var, which beats a pid fallback.
+
+    TICKET_AGENT sits BELOW the recorded identity on purpose. It is process
+    environment, so it is inherited, leaked and overwritten freely -- a spawned
+    worker that exports it can silently reassign its parent's identity, and a
+    stale value survives in a shell profile long after the agent that wrote it
+    is gone. A recorded identity is a deliberate act and should win over an
+    ambient one.
+    """
+    if explicit:
+        return explicit
+    if board:
+        recorded = read_identity(board)
+        if recorded:
+            return recorded
+    return os.environ.get("TICKET_AGENT") or "agent-%d" % os.getpid()
 
 
 def now():
@@ -5876,7 +5922,25 @@ def fmt_msg(m):
 
 
 def cmd_msg(a, board):
-    sender = whoami(a.owner)
+    sender = whoami(a.owner, board=board)
+    if a.to and a.to == sender:
+        # Addressing yourself is never what anyone means, and it fails SILENTLY:
+        # the message posts, the addressee's unread count rises, and the sender's
+        # own inbox hook reports it back -- which reads exactly like the other
+        # party receiving mail and not replying. A coordinator lost most of a
+        # session to this: every assignment went to its own handle, and it
+        # diagnosed the resulting silence as a dead peer, a missing wake flag and
+        # a broken hook chain in turn. Refuse it and name the identity, because
+        # the sender's own agent_id is the one thing they cannot see by looking.
+        sys.exit(
+            "RULE: --to %r is your OWN identity, so this message would go to "
+            "yourself.\n"
+            "  Your agent_id here is %r (tickets identity).\n"
+            "  Silence after a self-addressed message looks exactly like a peer "
+            "ignoring you.\n"
+            "  Either name a different addressee, or drop --to to broadcast."
+            % (a.to, sender)
+        )
     if a.re:
         load(board, a.re)  # validate the ticket exists
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
@@ -6361,9 +6425,16 @@ A session cannot be woken by a hook once its turn has ended, so use both:
 
 def cmd_join(a, board):
     _refuse_join_tickets_dir_shadow(board)
-    owner = a.name or whoami()
+    owner = a.name or whoami(board=board)
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    # Record the identity beside the board so later commands in this checkout
+    # resolve to it without depending on an env var. Joining IS the declaration
+    # of who you are, so this is the honest place to persist it -- and it means
+    # nobody has to invent a mechanism. Agents had been appending TICKET_AGENT=
+    # lines to a shared shell profile, which every process on the machine then
+    # inherited, so the last writer silently became everyone.
+    write_identity(board, owner)
     knowledge_dir = (getattr(a, "knowledge_dir", "") or "").strip()
     if knowledge_dir:
         knowledge_dir = os.path.abspath(os.path.expanduser(knowledge_dir))
