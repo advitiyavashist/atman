@@ -52,7 +52,10 @@ Codex or Cursor, not only a remote rejoin. Re-joining as another harness
 the new adapter. `tickets watch` / `tickets spawn` refuse to double up
 on a seat with a live native endpoint. Run receipts are generation-fenced:
 `spawn --stop` with no live watcher closes the receipt, and a late heartbeat
-from the dead run cannot set `active=true` again. Wake delivery reserves `message_id`
+from the dead run cannot set `active=true` again. The receipt's complete
+read/check/replace transaction holds a stable per-seat `.run.lock` using
+`flock`, so a watcher process cannot publish a stale snapshot after an
+operator process stops it. Wake delivery reserves `message_id`
 in-flight under the seat lock before poke so concurrent callers cannot double-inject.
 
 ## Identity

@@ -2962,6 +2962,38 @@ def _run_file(board, owner):
 _RUN_BEAT_LOCK = threading.Lock()
 
 
+class _RunFileLock:
+    """Serialize one agent's run receipt across watcher and operator CLIs.
+
+    The stable sidecar is required because the receipt itself is published
+    with ``os.replace``. Locking the receipt would lock the old inode and let
+    another process enter through the replacement inode.
+    """
+
+    def __init__(self, board, owner):
+        self.path = _run_file(board, owner) + ".lock"
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - Windows keeps thread safety
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
 def _run_beat(board, owner, **fields):
     """Write the in-run heartbeat.
 
@@ -2970,7 +3002,9 @@ def _run_beat(board, owner, **fields):
     and a heartbeat thread rewriting it every few seconds would race them and
     silently drop whatever the child had just written (inbox_seen, limit,
     ticket). One watcher per agent holds the pid lock, so this file has a
-    single writer.
+    single logical writer. Operator commands such as ``spawn --stop`` are a
+    second process, so the complete receipt transaction also takes the stable
+    ``.run.lock`` sidecar below.
 
     Updates are generation-fenced. `_run_begin(..., _new_run=True)` advances
     `generation` and may set active=True. A late heartbeat after stop/end
@@ -2987,35 +3021,40 @@ def _run_beat(board, owner, **fields):
         # other's scratch file and leave a spliced record on disk.
         new_run = bool(fields.pop("_new_run", False))
         with _RUN_BEAT_LOCK:
-            rec = _read_run(board, owner)
-            try:
-                current_gen = int(rec["generation"]) if rec.get("generation") is not None else 0
-            except (TypeError, ValueError):
-                current_gen = 0
-            incoming_gen = fields.get("generation")
-            try:
-                incoming_gen = int(incoming_gen) if incoming_gen is not None else None
-            except (TypeError, ValueError):
-                incoming_gen = None
-            want_active = fields.get("active")
-            was_active = rec.get("active")
-            if new_run:
-                fields["generation"] = current_gen + 1
-                fields.setdefault("interrupted", False)
-                fields.setdefault("ended", "")
-                fields.setdefault("rc", None)
-            elif incoming_gen is not None and incoming_gen < current_gen:
-                return
-            elif want_active is True and was_active is False:
-                return
-            elif want_active is False and was_active is not False:
-                fields.setdefault("generation", current_gen + 1)
-            rec.update(fields)
-            rec["beat"] = now()
-            tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
-            with open(tmp, "w") as f:
-                json.dump(rec, f)
-            os.replace(tmp, path)
+            # A watcher heartbeat and ``spawn --stop`` run in different
+            # processes. The generation check must share the same
+            # inter-process critical section as the read and replace or a
+            # heartbeat can publish a stale active=True snapshot after stop.
+            with _RunFileLock(board, owner):
+                rec = _read_run(board, owner)
+                try:
+                    current_gen = int(rec["generation"]) if rec.get("generation") is not None else 0
+                except (TypeError, ValueError):
+                    current_gen = 0
+                incoming_gen = fields.get("generation")
+                try:
+                    incoming_gen = int(incoming_gen) if incoming_gen is not None else None
+                except (TypeError, ValueError):
+                    incoming_gen = None
+                want_active = fields.get("active")
+                was_active = rec.get("active")
+                if new_run:
+                    fields["generation"] = current_gen + 1
+                    fields.setdefault("interrupted", False)
+                    fields.setdefault("ended", "")
+                    fields.setdefault("rc", None)
+                elif incoming_gen is not None and incoming_gen < current_gen:
+                    return
+                elif want_active is True and was_active is False:
+                    return
+                elif want_active is False and was_active is not False:
+                    fields.setdefault("generation", current_gen + 1)
+                rec.update(fields)
+                rec["beat"] = now()
+                tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+                with open(tmp, "w") as f:
+                    json.dump(rec, f)
+                os.replace(tmp, path)
     except OSError:
         pass
 

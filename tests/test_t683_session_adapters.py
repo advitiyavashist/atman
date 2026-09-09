@@ -632,6 +632,89 @@ def test_late_heartbeat_cannot_resurrect_stopped_run_without_live_watcher(board)
     assert rec.get("generation") == closed_gen + 1
 
 
+def test_stop_serializes_with_cross_process_late_heartbeat(board, tmp_path):
+    """A stop cannot be overwritten after another process reads old state."""
+    tk = _tickets()
+    _run(board, "join", "runner", "--roles", "backend")
+    tk._run_begin(str(board), "runner", 11, str(board.parent), run_id="r-11")
+    heartbeat_read = tmp_path / "heartbeat-read"
+    heartbeat_release = tmp_path / "heartbeat-release"
+    stop_lock_attempt = tmp_path / "stop-lock-attempt"
+
+    heartbeat_code = r"""
+import importlib.util, os, sys, time
+tool, board, read_marker, release_marker = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("tickets_heartbeat_child", tool)
+tk = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tk)
+original_read = tk._read_run
+def paused_read(board_arg, owner):
+    record = original_read(board_arg, owner)
+    open(read_marker, "w").write(str(record.get("generation")))
+    deadline = time.time() + 10
+    while not os.path.exists(release_marker):
+        if time.time() >= deadline:
+            raise RuntimeError("heartbeat release timed out")
+        time.sleep(0.01)
+    return record
+tk._read_run = paused_read
+tk._run_beat(board, "runner", pid=os.getpid(), run=11,
+             cwd=os.path.dirname(board), active=True, interrupted=True)
+"""
+    stop_code = r"""
+import fcntl, importlib.util, os, sys
+tool, board, attempt_marker = sys.argv[1:]
+original_flock = fcntl.flock
+def marked_flock(fd, operation):
+    if operation & fcntl.LOCK_EX:
+        open(attempt_marker, "w").write("attempted")
+    return original_flock(fd, operation)
+fcntl.flock = marked_flock
+spec = importlib.util.spec_from_file_location("tickets_stop_child", tool)
+tk = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tk)
+tk._mark_run_interrupted(board, "runner")
+"""
+
+    heartbeat = subprocess.Popen(
+        [sys.executable, "-c", heartbeat_code, str(TOOL), str(board),
+         str(heartbeat_read), str(heartbeat_release)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stop = None
+    try:
+        deadline = time.time() + 10
+        while not heartbeat_read.exists() and heartbeat.poll() is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert heartbeat_read.exists(), heartbeat.communicate(timeout=1)
+
+        stop = subprocess.Popen(
+            [sys.executable, "-c", stop_code, str(TOOL), str(board),
+             str(stop_lock_attempt)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.time() + 10
+        while not stop_lock_attempt.exists() and stop.poll() is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert stop_lock_attempt.exists(), stop.communicate(timeout=1)
+        assert stop.poll() is None, "stop crossed the heartbeat transaction without waiting"
+
+        heartbeat_release.touch()
+        hb_out, hb_err = heartbeat.communicate(timeout=10)
+        stop_out, stop_err = stop.communicate(timeout=10)
+        assert heartbeat.returncode == 0, hb_out + hb_err
+        assert stop.returncode == 0, stop_out + stop_err
+    finally:
+        heartbeat_release.touch(exist_ok=True)
+        for proc in (heartbeat, stop):
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+    rec = tk._read_run(str(board), "runner")
+    assert rec.get("generation") == 2
+    assert rec.get("active") is False
+    assert rec.get("interrupted") is True
+
+
 def test_staged_release_ships_session_adapters(tmp_path):
     spec = importlib.util.spec_from_file_location(
         "install_live_t683", ROOT / "scripts/install_live.py")
