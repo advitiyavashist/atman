@@ -3017,6 +3017,15 @@ def _mark_run_interrupted(board, owner):
     _run_beat(board, owner, active=False, interrupted=True, ended=now())
 
 
+def _finalize_active_watch_run(board, owner, rc=143):
+    """SIGTERM/finally must not leave active=True without a run-end stamp."""
+    rec = _read_run(board, owner)
+    if not rec.get("active"):
+        return False
+    _run_beat(board, owner, active=False, interrupted=True, rc=rc, ended=now())
+    return True
+
+
 # ---- ground truth per tool ---------------------------------------------
 
 def _claude_project_dir(cwd):
@@ -6198,6 +6207,9 @@ def _message_wakes_seat(board, seat, message):
 
 
 def _session_adapters():
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
     import session_adapters as mod
     return mod
 
@@ -6798,9 +6810,13 @@ def cmd_join(a, board):
         if reg.get("ok"):
             pid = (reg.get("record") or {}).get("pid")
             mode = reg.get("mode") or (reg.get("record") or {}).get("mode") or "native"
+            extra = ("pid %s" % pid if pid else
+                     "no session pid published; liveness follows transport")
+            lease = reg.get("lease_id") or (reg.get("record") or {}).get("lease_id") or ""
+            if lease:
+                extra += "; lease %s" % lease
             print("persistent: %s %s endpoint registered for %s (%s)" % (
-                mode, reg.get("provider"), owner,
-                "pid %s" % pid if pid else "no session pid published; liveness follows transport"))
+                mode, reg.get("provider"), owner, extra))
         else:
             print("persistent: %s" % reg.get("reason", "registration failed"))
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
@@ -9038,6 +9054,17 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
         proc.wait()
         rc = 124
         timed_out = True
+    except InterruptedError:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+        raise
     finally:
         beat_stop.set()
         # Join, do not just signal: a beat already inside its write would
@@ -9400,14 +9427,20 @@ def cmd_watch(a, board):
                     # previous run's result object (T-311: a stale JSON blob
                     # would attribute one run's tokens to another).
                     log_before = _safe(lambda: os.path.getsize(log_path), 0) or 0
-                    rc, timed_out = _watch_run_capped(
-                        run_cmd, cwd, env, log_path,
-                        a.run_timeout * 60 if a.run_timeout else None,
-                        WATCH_LOG_MAX_BYTES,
-                        on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
-                                                  cwd=cwd, active=True),
-                        beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
-                    )
+                    try:
+                        rc, timed_out = _watch_run_capped(
+                            run_cmd, cwd, env, log_path,
+                            a.run_timeout * 60 if a.run_timeout else None,
+                            WATCH_LOG_MAX_BYTES,
+                            on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
+                                                      cwd=cwd, active=True),
+                            beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
+                        )
+                    except InterruptedError:
+                        _safe(lambda: _finalize_active_watch_run(board, owner), None)
+                        if cleanup:
+                            cleanup()
+                        raise
                     _safe(lambda: _run_end(board, owner, runs, rc), None)
                     if cleanup:
                         cleanup()
@@ -9493,7 +9526,10 @@ def cmd_watch(a, board):
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
             if stop_event.wait(timeout=wait):
                 break
+    except InterruptedError:
+        pass
     finally:
+        _safe(lambda: _finalize_active_watch_run(board, owner), None)
         if lock:
             try:
                 os.unlink(lock)

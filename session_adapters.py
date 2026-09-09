@@ -96,13 +96,50 @@ def write_endpoint(board, seat, record):
     return path
 
 
-def commit_endpoint(board, seat, record):
-    """Same-seat rebind increments fence; never steal another seat's session."""
+def endpoint_still_live(ep):
+    """Whether a stored record is still live. Does not delete it."""
+    if not ep:
+        return False
+    pid_ok = _endpoint_pid_ok(ep.get("pid"))
+    if pid_ok is False:
+        return False
+    provider = ep.get("provider") or ""
+    if provider == "claude":
+        sock = ep.get("socket") or ""
+        return bool(sock and os.path.exists(sock))
+    if provider == "codex":
+        if not (ep.get("thread") or "").strip():
+            return False
+        return True if pid_ok is True else _heartbeat_fresh(ep)
+    if provider == "cursor":
+        if not (ep.get("session_id") or "").strip():
+            return False
+        return True if pid_ok is True else _heartbeat_fresh(ep)
+    return False
+
+
+def commit_endpoint(board, seat, record, presented_lease=""):
+    """Same-seat rebind increments fence; never steal another seat's session.
+
+    A live same-seat endpoint is exclusive: rebind requires the current
+    lease_id, the same session fingerprint, or waiting until the record is
+    stale. Unconditional os.replace is not ownership.
+    """
     taken = other_seat_for_session(board, seat, record)
     if taken:
         return {"ok": False, "reason": "session already bound to %s; refuse identity crosswire" % taken}
     existing = read_endpoint(board, seat)
-    if existing:
+    presented = (presented_lease or os.environ.get("TICKETS_SESSION_LEASE") or "").strip()
+    if existing and endpoint_still_live(existing):
+        same_session = bool(session_key(existing) and session_key(existing) == session_key(record))
+        holds_lease = bool(presented and presented == (existing.get("lease_id") or ""))
+        if not (holds_lease or same_session):
+            return {"ok": False, "reason": (
+                "active lease %s holds this seat; rebind with TICKETS_SESSION_LEASE "
+                "or wait for the live session to expire" % (existing.get("lease_id") or "?"))}
+        record["fence"] = int(existing.get("fence") or 0) + 1
+        record["prev_lease_id"] = existing.get("lease_id") or ""
+    elif existing:
         record["fence"] = int(existing.get("fence") or 0) + 1
         record["prev_lease_id"] = existing.get("lease_id") or ""
     else:
@@ -355,6 +392,7 @@ def register_persistent(board, seat, harness, at_iso):
     if not committed.get("ok"):
         return committed
     return {"ok": True, "provider": provider, "mode": record["mode"],
+            "lease_id": committed.get("lease_id"),
             "record": committed["record"]}
 
 
@@ -408,15 +446,18 @@ def is_reachable(native_online=False, watcher_online=False, remote_online=False)
 
 def wake_seat(board, seat, text, harness=None, message_id=""):
     """Best-effort native wake. Returns a short label; never raises."""
+    expected = provider_for_harness(harness) if harness else ""
+    if expected == "remote" or harness == "remote":
+        return "remote bridge required"
     ep, was_stale = live_endpoint(board, seat)
     if ep is None:
-        if harness == "remote":
-            return "remote bridge required"
         return "endpoint stale (removed)" if was_stale else "no live endpoint"
     mid = str(message_id or "")
     if mid and ep.get("last_delivery_id") == mid:
         return "deduped"
     provider = ep.get("provider") or ""
+    if expected and provider and expected != provider:
+        return "refused (harness %s != provider %s)" % (harness, provider)
     ok = False
     if provider == "claude":
         ok = _poke_claude(ep, text)

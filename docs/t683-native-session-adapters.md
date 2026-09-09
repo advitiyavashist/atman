@@ -52,11 +52,26 @@ Master/CoS default to persistent+continuous unless the user sets explicit
 values. Ordinary seats default ephemeral+task-only.
 
 A native session fingerprint (Claude socket, Codex thread, Cursor session id)
-binds to exactly one `agent_id`. Re-joining the same seat rebinds and increments
-the endpoint fence/lease; another seat with the same transport is refused.
-PID-less Codex/Cursor endpoints expire after a heartbeat TTL so they cannot
-suppress supervised recovery. Ephemeral watch/retire teardown removes the
-endpoint; those seats are not shown as reachable after exit.
+binds to exactly one `agent_id`. Re-joining the same seat while the endpoint
+is still live requires the current `lease_id` (`TICKETS_SESSION_LEASE`) or the
+same session fingerprint; otherwise wait until PID death or heartbeat TTL.
+Another seat with the same transport is refused. Stale same-seat records may
+be replaced without the old lease. Unconditional `os.replace` is not
+ownership. PID-less Codex/Cursor endpoints expire after a heartbeat TTL so
+they cannot suppress supervised recovery. Ephemeral watch/retire teardown
+removes the endpoint; those seats are not shown as reachable after exit.
+
+`tickets msg` pokes only when the workforce harness maps to the endpoint
+provider. A leftover Claude socket on a remote/Grok or Codex seat is never
+injected. Grok stays on the T-640 remote bridge.
+
+Installed releases export `session_adapters.py` next to `tickets.py`
+(`scripts/install_live.py` FILES + smoke `join --persistent`). A staged
+snapshot that omits it fails closed as `ModuleNotFoundError`.
+
+`tickets watch` finalizes an in-flight run on SIGTERM: the child is
+terminated and `active=True` is cleared (`interrupted`, rc 143) even if the
+signal arrived between `_run_begin` and `_run_end`.
 
 `reachable` requires a live native endpoint, an active supervised watcher, or a
 live remote lease. `lifecycle=persistent` only means the seat is intended to

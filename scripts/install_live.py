@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py")
+FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py", "session_adapters.py")
 PACKAGE_PREFIX = "src/ticket_board"
 
 
@@ -86,6 +86,13 @@ def smoke(script, sha):
         run("create", "Installer smoke fixture")
         if "Installer smoke fixture" not in run("show", "T-001"):
             raise RuntimeError("smoke failed: show did not read isolated fixture")
+        # Persistent join imports session_adapters.py from the staged snapshot.
+        # Missing that file used to crash ModuleNotFoundError outside a checkout.
+        persist = run("join", "persist-seat", "--roles", "backend", "--persistent")
+        if "ModuleNotFoundError" in persist:
+            raise RuntimeError("smoke failed: persistent join missing session_adapters.py")
+        if "joined as persist-seat" not in persist:
+            raise RuntimeError("smoke failed: persistent join did not complete")
         turns = json.loads(run("turns", "--json"))
         if turns.get("v") != 1:
             raise RuntimeError("smoke failed: turns --json missing v=1")

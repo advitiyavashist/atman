@@ -344,14 +344,20 @@ def test_rebind_replaces_same_seat_session(board, cache_dir, sock_dir, monkeypat
     monkeypatch.setenv("TICKET_SESSION_PID", str(os.getpid()))
     monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", first)
     sa = _adapters()
-    assert sa.register_persistent(str(board), "alice", "claude", "t1").get("ok")
+    first_reg = sa.register_persistent(str(board), "alice", "claude", "t1")
+    assert first_reg.get("ok")
     monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", second)
-    assert sa.register_persistent(str(board), "alice", "claude", "t2").get("ok")
+    refused = sa.register_persistent(str(board), "alice", "claude", "t2")
+    assert not refused.get("ok")
+    assert "active lease" in refused.get("reason", "")
+    monkeypatch.setenv("TICKETS_SESSION_LEASE", first_reg["lease_id"])
+    assert sa.register_persistent(str(board), "alice", "claude", "t3").get("ok")
     ep = sa.read_endpoint(str(board), "alice")
     assert ep["socket"] == second
     assert ep["agent_id"] == "alice"
     assert int(ep.get("fence") or 0) >= 2
     assert ep.get("lease_id")
+    assert ep.get("prev_lease_id") == first_reg["lease_id"]
 
 
 def test_persistent_task_only_does_not_poke_ordinary_dm(board, cache_dir, sock_dir):
@@ -536,3 +542,93 @@ def test_codex_persistent_ceo_stub_queue_shape(board, cache_dir, monkeypatch):
     assert label == "queued"
     args = run_mock.call_args[0][0]
     assert args[:4] == ["codex", "queue", "--thread", "thread-ceo"]
+
+
+def test_harness_mismatch_does_not_cross_poke(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "grok.sock")
+    inbox = FakeInbox(sock_path)
+    sa = _adapters()
+    sa.write_endpoint(str(board), "grok-worker", {
+        "seat": "grok-worker", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "heartbeat_epoch": time.time()})
+    label = sa.wake_seat(str(board), "grok-worker", "hello", harness="remote")
+    assert label == "remote bridge required"
+    label = sa.wake_seat(str(board), "grok-worker", "hello", harness="codex")
+    assert "refused" in label
+    inbox.close()
+    assert not inbox.received
+
+
+def test_stale_same_seat_rebind_does_not_need_lease(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    dead = str(Path(sock_dir) / "dead.sock")
+    alive = str(Path(sock_dir) / "alive.sock")
+    Path(dead).touch()
+    Path(alive).touch()
+    sa = _adapters()
+    sa.write_endpoint(str(board), "alice", {
+        "seat": "alice", "provider": "claude", "mode": "native",
+        "socket": dead, "token": "", "pid": 99999999, "at": "now",
+        "lease_id": "old-lease", "fence": 1, "heartbeat_epoch": time.time()})
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", alive)
+    monkeypatch.setenv("TICKET_SESSION_PID", str(os.getpid()))
+    monkeypatch.delenv("TICKETS_SESSION_LEASE", raising=False)
+    reg = sa.register_persistent(str(board), "alice", "claude", "now")
+    assert reg.get("ok"), reg
+    assert sa.read_endpoint(str(board), "alice")["socket"] == alive
+
+
+def test_sigterm_finalizes_active_watch_run(board):
+    tk = _tickets()
+    _run(board, "join", "runner", "--roles", "backend")
+    tk._run_begin(str(board), "runner", 1, str(board.parent))
+    assert tk._read_run(str(board), "runner").get("active") is True
+    assert tk._finalize_active_watch_run(str(board), "runner") is True
+    rec = tk._read_run(str(board), "runner")
+    assert rec.get("active") is False
+    assert rec.get("interrupted") is True
+    assert rec.get("rc") == 143
+    assert tk._finalize_active_watch_run(str(board), "runner") is False
+
+
+def test_staged_release_ships_session_adapters(tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "install_live_t683", ROOT / "scripts/install_live.py")
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+    repo = tmp_path / "source"
+    repo.mkdir()
+    installer.seed_fixture_repo(repo, ROOT)
+    env = dict(installer.clean_env(), GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="t@t",
+               GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="t@t")
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], env=env).decode().strip()
+
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-qm", "fixture release")
+    sha = git("rev-parse", "HEAD")
+    live = tmp_path / "tools/tickets.py"
+    release = installer.install(repo, sha, live, activate=False)
+    assert (release / "session_adapters.py").is_file()
+    assert "session_adapters.py" in json.loads((release / "release.json").read_text())["files"]
+    board = tmp_path / "board"
+    board.mkdir()
+    for name, content in (("tickets.json", "[]"), ("sprints.json", "[]"),
+                          ("roles.json", "{}"), ("agents.json", "[]")):
+        (board / name).write_text(content)
+    arbitrary = tmp_path / "elsewhere"
+    arbitrary.mkdir()
+    env = dict(installer.clean_env(), TICKETS_DIR=str(board), HOME=str(tmp_path),
+               TICKET_AGENT="installer", PYTHONNOUSERSITE="1")
+    env.pop("PYTHONPATH", None)
+    r = subprocess.run(
+        [sys.executable, "-S", str(release / "tickets.py"),
+         "join", "persist-seat", "--roles", "backend", "--persistent"],
+        cwd=str(arbitrary), env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "ModuleNotFoundError" not in r.stderr
+    assert "joined as persist-seat" in r.stdout
