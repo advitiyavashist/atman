@@ -19,8 +19,12 @@ Board location, in order of preference:
 `tickets board` does not scan children — SessionStart hooks stay silent in
 folders that are not the project. `tickets next` / `show` / `done` do.
 
-Agent identity comes from $TICKET_AGENT (set it per tool: claude, codex, cursor).
-Default roles for those names can be overridden by .tickets/roles.json.
+Agent identity is resolved per SESSION: `tickets join <name>` records it under
+.tickets/.identities/<session>, which outranks the ambient $TICKET_AGENT (an
+inherited env var, so a stale one silently answers to another agent's name).
+`tickets board` prints the resolved seat so a human can tell which agent a
+window is. Default roles for those names can be overridden by
+.tickets/roles.json.
 """
 
 import argparse
@@ -460,26 +464,77 @@ def _board_dir_uncached(discover_children=True):
     return os.path.join(os.getcwd(), ".tickets")
 
 
-IDENTITY_FILE = ".agent-identity"
+IDENTITY_FILE = ".agent-identity"   # legacy: one identity for the whole board
+IDENTITY_DIR = ".identities"        # current: one identity per agent session
+
+# Env vars that carry a per-session id, in preference order. Each coding-agent
+# harness names its own, so probe generically rather than hardcoding one -- this
+# board is shared across harnesses and an unrecognised one must degrade safely
+# rather than adopt a neighbour's identity.
+SESSION_ID_VARS = (
+    "TICKET_SESSION_ID",        # explicit override, and what tests use
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "CURSOR_SESSION_ID",
+    "TERM_SESSION_ID",          # terminal-provided; last resort
+)
 
 
-def _identity_path(board):
-    """Per-board identity file. Deliberately beside the board rather than in a
-    shell profile: a profile is shared by every process on the machine, so
-    agents that set their identity there overwrite each other."""
+def session_key():
+    """A key unique to this agent session, or None if the harness gives us none.
+
+    THIS IS THE CRUX. Identity cannot be keyed by the board, because several
+    sessions share one board -- that was the original bug in a different
+    costume. It cannot be keyed by the environment alone either, because
+    TICKET_AGENT is inherited: a session started from a shell that once held
+    another agent's value silently answers to that agent's name, and starts
+    reporting that agent's unread mail to whoever is watching.
+    """
+    for var in SESSION_ID_VARS:
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return hashlib.sha256(val.encode("utf-8")).hexdigest()[:16]
+    return None
+
+
+def _identity_path(board, key=None):
+    """Where this session's identity is recorded.
+
+    Deliberately beside the board rather than in a shell profile: a profile is
+    shared by every process on the machine, so agents setting identity there
+    overwrite each other. Keyed by session so co-resident agents don't.
+    """
+    if key:
+        return os.path.join(board, IDENTITY_DIR, key)
     return os.path.join(board, IDENTITY_FILE)
 
 
-def read_identity(board):
+def _read_file(path):
     try:
-        with open(_identity_path(board)) as f:
+        with open(path) as f:
             return (f.read() or "").strip() or None
     except (OSError, IOError):
         return None
 
 
+def read_identity(board):
+    key = session_key()
+    if key:
+        # A session-keyed record is the only unambiguous answer. If this
+        # session has none, do NOT fall back to the flat legacy file: that file
+        # belongs to whichever agent wrote it last, and adopting it is exactly
+        # the cross-session bleed this function exists to prevent.
+        return _read_file(_identity_path(board, key))
+    # No session key available at all -- the flat file is the best we have.
+    return _read_file(_identity_path(board))
+
+
 def write_identity(board, name):
-    path = _identity_path(board)
+    key = session_key()
+    path = _identity_path(board, key)
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         f.write((name or "").strip() + "\n")
@@ -491,8 +546,8 @@ def whoami(explicit=None, board=None):
     """Resolve the caller's agent id.
 
     Precedence, and the ordering is the point: an explicitly-passed --owner
-    beats a deliberately-recorded per-board identity, which beats the ambient
-    TICKET_AGENT env var, which beats a pid fallback.
+    beats an identity this session deliberately recorded, which beats the
+    ambient TICKET_AGENT env var, which beats a pid fallback.
 
     TICKET_AGENT sits BELOW the recorded identity on purpose. It is process
     environment, so it is inherited, leaked and overwritten freely -- a spawned
@@ -503,8 +558,23 @@ def whoami(explicit=None, board=None):
     """
     if explicit:
         return explicit
+    if board is None:
+        # Discover the board rather than requiring every caller to thread it
+        # through. The bare whoami() sites include the ones the editor hooks
+        # invoke, and those were the sites surfacing one session's unread mail
+        # inside another session, because they fell straight through to the
+        # inherited env var.
+        try:
+            board = board_dir()
+        except SystemExit:
+            board = None
+        except Exception:
+            board = None
     if board:
-        recorded = read_identity(board)
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
         if recorded:
             return recorded
     return os.environ.get("TICKET_AGENT") or "agent-%d" % os.getpid()
@@ -1745,7 +1815,7 @@ def cmd_board(a, board):
         # knowledge is still useful. Stay silent when there is no board at
         # all so the global hook remains inert in unrelated directories.
         if os.path.isdir(board):
-            owner = whoami()
+            owner = whoami(board=board)
             if not owner.startswith("agent-"):
                 inherited = knowledge_context(board, owner, max_chars=1800)
                 if inherited:
@@ -1767,6 +1837,11 @@ def cmd_board(a, board):
         d, n, _, _ = progress(mine)
         hdr.append("sprint %s %s" % (cur["id"], bar(d, n, 10)))
     hdr.append("master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    # Name the seat this session is answering as. Without it a human reading a
+    # window cannot tell which agent they are talking to, and mail addressed to
+    # one seat gets acted on by another.
+    seat = whoami(board=board)
+    hdr.append("you: %s%s" % (seat, "" if session_key() else " (unkeyed session)"))
     print("  " + " | ".join(hdr))
     for t in tickets:
         if t["status"] != "done" or a.all:
@@ -1779,7 +1854,7 @@ def cmd_board(a, board):
             "Shared across Claude/Codex/Cursor. `tickets next` claims one atomically; "
             "`tickets done <id> --notes \"...\"` hands off to dependents."
         )
-    owner = whoami()
+    owner = whoami(board=board)
     if not owner.startswith("agent-"):
         inherited = knowledge_context(board, owner, max_chars=1800)
         if inherited:
