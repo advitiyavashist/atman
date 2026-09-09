@@ -77,9 +77,7 @@ def test_promise_chips_stay_visible_and_turns_open_when_unknown():
     assert "yield@cost" in header
     assert "body[data-tab=board] .promise-chips{display:none}" not in ui
     board = ui[ui.index('id="pane-board"'):ui.index('id="pane-agents"')]
-    assert 'id="promiseHero"' in board
-    assert "Median turns" in board
-    assert "Yield@cost" in board
+    assert 'id="promiseHero"' not in board
     assert "turnsPanel" in ui
     assert "panel.open=true" in ui
     assert "median_turns==null" in ui and "yield_per_usd==null" in ui

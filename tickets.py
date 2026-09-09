@@ -10391,9 +10391,9 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
     </div>
   </details>
   <div class="chips" id="chips"></div>
-  <div class="chips promise-chips" id="promiseChips">
-    <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
-    <span class="chip promise" id="hdrYield"><b>yield@cost</b> <span id="hdrYieldVal">—</span></span>
+  <div class="chips promise-chips" id="promiseChips" role="region" aria-label="Fewest turns. Max output at least cost.">
+    <span class="chip promise" id="hdrMedian" title="Lower is better · unknown is not zero"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
+    <span class="chip promise" id="hdrYield" title="Done tickets per USD of harness-reported cost — unknown is not $0"><b>yield@cost</b> <span id="hdrYieldVal">—</span></span>
   </div>
   <div class="sprint" id="sprint"></div>
   <div class="health" id="pulse"><i></i><span>No alerts</span></div>
@@ -10408,7 +10408,6 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 <details class="attention" id="attentionBox" hidden><summary>Needs attention <span id="attnCount" class="mute">0</span></summary>
   <div class="attn-list" id="attnList"></div></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
-<div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span><span id="wakeGates" hidden></span></div>
 <details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/7</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs" role="tablist" aria-label="Atman workspace">
@@ -10419,18 +10418,12 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 </nav>
 <main>
 <div class="pane" id="pane-objective" role="tabpanel" aria-labelledby="tab-objective" tabindex="0">
+  <div class="promise-strip" id="promiseStrip"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span><span id="wakeGates" hidden></span></div>
   <details class="mission" id="missionBox" open><summary><span class="k">Standing objective</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
 </div>
 <div class="pane" id="pane-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0">
   <div id="emptyBoard" class="empty-board" hidden></div>
   <section id="epicsPanel" class="epics" hidden aria-label="Epic progress"></section>
-  <section id="objectivePromise" data-fold="objective">
-    <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
-    <div class="promise-hero" id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."><!-- V1 MUST: home median turns + yield@cost; T-344 worst-10 is NICE only -->
-      <article class="promise-card" id="heroMedian"><div class="k">Median turns</div><div class="v" id="heroMedianVal">—</div><div class="h" id="heroMedianHint">Lower is better · unknown is not zero</div></article>
-      <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">Done tickets per USD of harness-reported cost</div></article>
-    </div>
-  </section>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
@@ -10558,12 +10551,11 @@ function renderObjective(o){
 }
 function renderPromise(p){
   const med=fmtMedian(p),yld=fmtYield(p);
-  setTxt('heroMedianVal',med);setTxt('hdrMedianVal',med);
-  setTxt('heroYieldVal',yld);setTxt('hdrYieldVal',yld);
-  const yh=document.getElementById('heroYieldHint');
-  if(yh){
-    if(!p||p.yield_per_usd==null)yh.textContent=(p&&p.n_unmeasured_cost)?'done tickets with no harness cost — yield@cost unknown, not $0':'done tickets per USD of harness-reported cost';
-    else yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
+  setTxt('hdrMedianVal',med);setTxt('hdrYieldVal',yld);
+  const ychip=document.getElementById('hdrYield');
+  if(ychip){
+    if(!p||p.yield_per_usd==null)ychip.title=(p&&p.n_unmeasured_cost)?'done tickets with no harness cost — yield@cost unknown, not $0':'Done tickets per USD of harness-reported cost — unknown is not $0';
+    else ychip.title=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
   }
   const panel=document.getElementById('turnsPanel');
   if(panel&&(!p||p.median_turns==null)&&( !p||p.yield_per_usd==null))panel.open=true;

@@ -39,9 +39,8 @@ def _costed_fixture(dest):
 def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
     ui = _ui_html()
     for marker in (
-        "promiseHero", 'aria-label="Fewest turns. Max output at least cost."',
-        "heroEyebrow", "heroMedian", "heroYield", "Yield@cost", "Median turns",
-        "promiseStrip", "promiseChips", "objectivePromise", "hdrMedian", "hdrYield",
+        'aria-label="Fewest turns. Max output at least cost."',
+        "promiseStrip", "promiseChips", "hdrMedian", "hdrYield",
         "Fewest turns. Max output at least cost.",
         "Lower is better · unknown is not zero",
         "turnsPanel", "Turns efficiency", "turnsWorst", "turnsAgents",
@@ -60,23 +59,23 @@ def test_ui_html_keeps_t323_ia_and_adds_promise_markers():
 
 
 def test_home_hero_is_v1_must_not_t344_deferral():
-    """CEO ACCEPT: median turns + yield@cost on home (Board pane) is V1 MUST."""
+    """T-680: one promise pair is header chips; Work does not repeat a hero."""
     ui = _ui_html()
+    header = ui[ui.index("<header"):ui.index("</header>")]
     board = ui[ui.index('id="pane-board"'):ui.index('id="pane-agents"')]
-    assert 'id="promiseHero"' in board
-    assert "Median turns" in board
-    assert "Yield@cost" in board
-    assert board.index("promiseHero") < board.index("turnsPanel")
+    assert 'id="promiseChips"' in header
+    assert "median turns" in header
+    assert "yield@cost" in header
+    assert 'id="promiseHero"' not in board
     # T-344 worst-10 is NICE and collapsed; it must not be the only turns surface.
     assert "<details" in board and "Turns efficiency" in board
 
 
 def test_promise_chips_strip_on_home_objective():
-    """PM: hero + chips + Objective strip on home now; T-345 folds later."""
+    """T-680: chips above the fold; Objective strip lives on the Objective pane."""
     ui = _ui_html()
-    assert 'id="promiseStrip"' in ui
-    assert 'data-fold="objective"' in ui
-    assert 'id="objectivePromise"' in ui
+    objective = ui[ui.index('id="pane-objective"'):ui.index('id="pane-board"')]
+    assert 'id="promiseStrip"' in objective
     assert 'id="promiseChips"' in ui
     assert ">Objective<" in ui
     assert "median turns" in ui
@@ -84,21 +83,18 @@ def test_promise_chips_strip_on_home_objective():
     assert "fmtMedian" in ui and "fmtYield" in ui
     assert "hdrMedianVal" in ui
     assert "stripMedianVal" not in ui
-    # T-571: chips stay above the fold on every tab, including Work.
     assert "body[data-tab=board] .promise-chips{display:none}" not in ui
     assert 'id="promiseChips"' in ui[ui.index("<header"):ui.index("</header>")]
 
 
 def test_promise_hero_copy_nits():
-    """T-372 follow-up: eyebrow + median hint + soft a11y on #promiseHero."""
+    """T-680: honesty lives on the chip titles; no second Work hero."""
     ui = _ui_html()
     assert "Fewest turns. Max output at least cost." in ui
     assert "Lower is better · unknown is not zero" in ui
-    assert 'id="promiseHero" role="region" aria-label="Fewest turns. Max output at least cost."' in ui
+    assert 'id="promiseHero"' not in ui
+    assert "unknown is not $0" in ui
     assert "tickets turns --json" not in ui
-    # Median hint is static copy; do not overwrite it with CLI/measured text.
-    assert "heroMedianHint').textContent" not in ui
-    assert 'heroMedianHint").textContent' not in ui
 
 
 def test_team_seats_follow_brand_lock():
