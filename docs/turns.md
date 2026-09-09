@@ -30,6 +30,12 @@ count every completed run. No backfill of existing jsonl. Do not invert
 the FLAG by requiring a write under the `run_end`'s own `(agent,
 run_no)` — an idle run has none and must stay uncounted (T-425).
 
+T-478: `run_end.outcome="limit"` is that same FLAG's **label**, not a second
+turn rule. It is set only on a limit-shaped failure (nonzero exit, timeout,
+or structured Anthropic `rate_limit_error`), never because the log mentioned
+limits. Pre-fix jsonl is not rewritten — pin-filter. FLAG semantics
+unchanged.
+
 A **ticket's turns** are those productive runs from the first `claim` to the
 final `done` (or `merge`). A `reopen` does not reset the counter: later runs
 are added.

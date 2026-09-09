@@ -72,7 +72,7 @@ than filled with placeholders (T-259: unresolved must mean absent, not `"?"`).
 | kind | written by | notable fields |
 |---|---|---|
 | `run_start` | `tickets watch` | `run_no`, `trigger` (sorted pending keys), `harness_cmd`, `worktree` |
-| `run_end` | `tickets watch` | `started_at`, `ended_at`, `duration_s`, `exit`, `timed_out`, `outcome` (`limit` when the run's own log slice matched a CLI limit string), plus harness usage when reported |
+| `run_end` | `tickets watch` | `started_at`, `ended_at`, `duration_s`, `exit`, `timed_out`, `outcome` (`limit` only on a limit-shaped failure; see below), plus harness usage when reported |
 | `claim` | `try_claim` | `state_before: open`, `state_after: claimed` |
 | `update` | `tickets update` / `note` | `notes_len`, `state_after` |
 | `review` | `tickets review` | `outcome: review`, `pin`, `notes_len`, `active_hours` |
@@ -82,6 +82,30 @@ than filled with placeholders (T-259: unresolved must mean absent, not `"?"`).
 | `merge` | `tickets merge` | `pin`, `merged_as`, `trunk`, `prev_owner` |
 | `msg` | `post_message` | `to`, `text_len` |
 | `shadow_decision` | `tickets route --shadow` | print-only route: `source` (`prior`/`learned`), `rule_agent`, `learned_agent`, `n`, `n_unmeasured`; `expected_turns` omitted when unknown. Never an assign. See `docs/scheduler.md`. |
+
+### `run_end.outcome` (T-478)
+
+`outcome: "limit"` is an **exit signal**, not a text grep of the run log.
+Matching `rate limit` / `resets at` / `hit your limit` in harness prose does
+not set `limit` on an `exit=0` run. That is the r-opus-authz-1-fa4712c3d702
+class: a productive review that *discussed* session limits was labelled
+`limit` and polluted the trajectory asset T-445/T-470 read.
+
+`limit` requires a limit-shaped failure: nonzero `exit`, `timed_out`, **or**
+a structured Anthropic/Claude envelope
+`{"type":"error","error":{"type":"rate_limit_error"}}` (or `type:result` with
+the same nested `error` object). Codex `token_count.rate_limits` telemetry is
+**not** a limit (every healthy Codex turn writes it). Decision on an `exit=0`
+structured `rate_limit_error` with **no** bound-ticket write: record
+`limit` (the harness said so). An `exit=0` run **with** a bound write is
+never `limit`, structured or not.
+
+Pre-T-478 rows are **not** backfilled. Filter consumers on the T-478 pin SHA
+once this lands. `tickets limits` is unchanged. T-425 FLAG is unchanged:
+idle/limit/fail with zero bound writes still does not count a turn.
+
+Watch lives only on the live-shim `tickets.py`; `src/ticket_board/cli.py` has
+no watch loop, so this classifier is not duplicated there.
 
 `claim` is written inside `try_claim()` rather than in `cmd_next`/`cmd_claim`,
 because that function is the single point where a claim actually succeeds — a
