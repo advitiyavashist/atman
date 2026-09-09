@@ -305,11 +305,23 @@ def _init_refusal(target, ambient):
 
 
 def _join_cwd_board():
-    """Board `join` would write to if TICKETS_DIR were not set (mirrors T-263's
-    _init_resolve_board, minus the --board override join has no equivalent of)."""
+    """Board sitting in cwd's worktree root (for the isdir probe only).
+
+    Not the ambient join target -- that comes from _join_ambient_board(), which
+    uses the same board_dir() resolver with TICKETS_DIR stripped (T-494)."""
     root = _init_cwd_worktree_root()
     base = root if root is not None else os.path.realpath(os.getcwd())
     return os.path.join(base, ".tickets")
+
+
+def _join_ambient_board():
+    """Board join would resolve to with the same resolver but TICKETS_DIR unset."""
+    saved = os.environ.pop("TICKETS_DIR", None)
+    try:
+        return _board_dir_uncached()
+    finally:
+        if saved is not None:
+            os.environ["TICKETS_DIR"] = saved
 
 
 def _refuse_join_tickets_dir_shadow(board):
@@ -322,12 +334,21 @@ def _refuse_join_tickets_dir_shadow(board):
     probe seat 'zed' ended up on the live production board. `init` already
     refuses this shape (T-263); join gets the same treatment rather than a
     second, different resolution rule for the same tool.
+
+    Compare the TICKETS_DIR-resolved board (``board``) against the same
+    resolver with TICKETS_DIR stripped (T-494 C1). Do not compare against
+    _join_cwd_board(): inside a linked worktree that holds its own real
+    .tickets, that path disagrees with board_dir() even when TICKETS_DIR
+    names the board join would have used anyway.
     """
     env = os.environ.get("TICKETS_DIR")
     if not env:
         return
     cwd_board = _join_cwd_board()
-    if not os.path.isdir(cwd_board) or _same_board(cwd_board, board):
+    if not os.path.isdir(cwd_board):
+        return
+    ambient = _join_ambient_board()
+    if _same_board(board, ambient):
         return
     sys.exit(
         "REFUSING TO JOIN: nothing was written.\n"
