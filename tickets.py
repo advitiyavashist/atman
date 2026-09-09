@@ -556,6 +556,13 @@ def seat_confirmed(board):
     for automation.
     """
     try:
+        # TICKET_SEAT is set by a supervisor (watch/spawn) for a run it is
+        # launching, naming the seat that run exists to occupy. That is a
+        # deliberate assignment, not ambient inheritance, so it confirms --
+        # otherwise a spawned worker would be hidden from its own mail, since a
+        # fresh process has a new session id and no record of its own yet.
+        if os.environ.get("TICKET_SEAT"):
+            return True
         if session_key():
             return bool(read_identity(board))
         # No session key at all: a recorded flat identity is the best we get,
@@ -626,7 +633,9 @@ def whoami(explicit=None, board=None):
             recorded = None
         if recorded:
             return recorded
-    return os.environ.get("TICKET_AGENT") or "agent-%d" % os.getpid()
+    return (os.environ.get("TICKET_SEAT")
+            or os.environ.get("TICKET_AGENT")
+            or "agent-%d" % os.getpid())
 
 
 def now():
@@ -8479,7 +8488,8 @@ def cmd_watch(a, board):
     # narrow: GIT_AUTHOR_*/GIT_COMMITTER_* survive, because this is the
     # fleet-launch env and stripping identity here would be a T-238-class
     # attribution loss (T-259 defect 3).
-    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKET_SEAT=owner,
+                   TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     import threading
     stop_event = threading.Event()
@@ -9180,7 +9190,8 @@ def cmd_spawn(a, board):
     # narrow: GIT_AUTHOR_*/GIT_COMMITTER_* survive, because this is the
     # fleet-launch env and stripping identity here would be a T-238-class
     # attribution loss (T-259 defect 3).
-    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKET_SEAT=owner,
+                   TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     with open(log_path, "a") as lf:
@@ -9335,7 +9346,8 @@ def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HA
     else:
         run_cmd = _worker_cmd(board, owner, model, "bypassPermissions", harness,
                               prompt_expr=shlex.quote(HARNESS_PROBE_PROMPT))
-    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKET_SEAT=owner,
+                   TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     started = _time.time()
     out, rc, timed_out = "", None, False
