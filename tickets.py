@@ -10331,7 +10331,7 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .brand .board-name{margin:2px 0 0;font-size:11px}
 .sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .portfolio{position:relative}
-.portfolio summary{display:inline-flex;align-items:center;gap:7px;list-style:none;padding:4px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--fg);font:11px/1.3 ui-monospace,Menlo,monospace;cursor:pointer}
+.portfolio summary{display:inline-flex;align-items:center;gap:5px;list-style:none;padding:2px 4px;border:0;border-radius:7px;background:transparent;color:var(--mute);font:11px/1.3 ui-monospace,Menlo,monospace;cursor:pointer}
 .portfolio summary::-webkit-details-marker{display:none}
 .portfolio .caret{color:var(--acc);font-weight:800}
 .portfolio-menu{position:absolute;z-index:8;top:calc(100% + 7px);left:0;width:260px;padding:5px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 14px 36px color-mix(in srgb,var(--bg) 72%,transparent)}
@@ -10344,6 +10344,7 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .chip b{font-weight:650}
 .chip.master,.chip.cos{border-color:var(--line)}
 .sprint{display:flex;flex-direction:column;gap:3px;min-width:180px;flex:1}
+.sprint[hidden]{display:none}
 .sprint .row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--mute)}
 .sprint .row span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bar{height:5px;background:var(--surface);border-radius:99px;overflow:hidden}
@@ -10354,6 +10355,10 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .health.bad i{background:var(--bad)}
 #clock{font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
 .conn{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+.live-meta{position:relative}
+.live-meta>summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center}
+.live-meta>summary::-webkit-details-marker{display:none}
+.live-meta-pop{position:absolute;right:0;top:calc(100% + 6px);z-index:6;min-width:168px;padding:8px 10px;background:var(--card);border:1px solid var(--line);border-radius:8px;display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--mute);box-shadow:0 10px 24px color-mix(in srgb,var(--bg) 72%,transparent)}
 .conn-status{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:99px;border:1px solid var(--line)}
 .conn-status.live{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
 .conn-status.reconnecting{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
@@ -10391,6 +10396,10 @@ button:focus-visible,summary:focus-visible,select:focus-visible,input:focus-visi
 main{flex:1;min-width:0;min-height:0;width:100%;padding:14px 16px 18px;overflow:auto}
 .pane{display:none;height:100%}
 body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-tab=messages] #pane-messages{display:flex;flex-direction:column;gap:12px}
+body[data-empty-board][data-tab=board] .kanban,
+body[data-empty-board][data-tab=board] #objectivePromise,
+body[data-empty-board][data-tab=board] #turnsPanel,
+body[data-empty-board][data-tab=board] #onboardBox{display:none}
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
 @media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
 .col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
@@ -10453,6 +10462,9 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 .ob-step i{width:14px;height:14px;border-radius:3px;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-style:normal;flex:none}
 .ob-step.done i{background:var(--ok);border-color:var(--ok);color:#fff}
 .empty-board{background:var(--card);border:1px dashed var(--line);border-radius:14px;padding:20px 18px;max-width:720px;margin-bottom:12px}
+.empty-board.empty-secondary{padding:16px;margin:8px 0}
+.agents>.empty-board{grid-column:1/-1}
+.msgs>.empty-board{max-width:none}
 .empty-board .empty-kicker{margin:0 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
 .empty-board p{margin:0 0 10px;color:var(--mute);font-size:13px;line-height:1.55}
 .empty-board b{color:var(--fg)}
@@ -10518,9 +10530,8 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 @media(max-width:700px){.seat{min-width:108px}.chat-layout{flex-direction:column}.chat-rail{max-width:none;flex-direction:row;flex-wrap:wrap}}
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
-  .conn{display:grid;grid-template-columns:auto auto auto;justify-content:start;margin-left:0}
-  #lastUpdated{display:none}
-  #clock{grid-column:1/-1;margin-left:0}
+  .conn{display:flex;justify-content:flex-start;margin-left:0}
+  .live-meta-pop{left:0;right:auto}
   .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
   .next-step .cmd{white-space:normal;overflow-wrap:anywhere}
   .promise-strip .msg{max-width:100%;overflow-wrap:anywhere}
@@ -10568,11 +10579,17 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
   <div class="sprint" id="sprint"></div>
   <div class="health" id="pulse"><i></i><span>No alerts</span></div>
   <div class="conn" id="connBar">
-    <span id="connStatus" class="conn-status live" aria-live="polite">live</span>
-    <span id="lastUpdated" class="mute">—</span>
+    <details class="live-meta" id="liveMeta">
+      <summary aria-label="Connection and last updated">
+        <span id="connStatus" class="conn-status live" aria-live="polite">live</span>
+      </summary>
+      <div class="live-meta-pop">
+        <span id="clock"></span>
+        <span id="lastUpdated" class="mute">—</span>
+      </div>
+    </details>
     <button type="button" id="refreshBtn" title="Refresh board" aria-label="Refresh board">↻</button>
     <button type="button" id="themeBtn" title="Switch to light mode" aria-label="Switch to light mode" aria-pressed="false"><span id="themeLabel">Light mode</span></button>
-    <span id="clock"></span>
   </div>
 </header>
 <details class="attention" id="attentionBox" hidden><summary>Needs attention <span id="attnCount" class="mute">0</span></summary>
@@ -10709,6 +10726,14 @@ function fillCol(id,items,html){
   document.getElementById('n-'+id).textContent=items.length;
   document.getElementById('col-'+id).innerHTML=items.length?html:('<div class="empty">none</div>');
 }
+function emptyCraft(kicker,lead,honesty,cta){
+  const cmds=(Array.isArray(cta)?cta:[cta]).map(c=>'<div class="cta">'+c+'</div>').join('');
+  return '<div class="empty-board empty-secondary">'+
+    '<p class="empty-kicker">'+kicker+'</p>'+
+    '<p>'+lead+'</p>'+
+    '<p class="empty-honesty">'+honesty+'</p>'+
+    cmds+'</div>';
+}
 const dash=x=>x==null?'—':String(x);
 function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(n).toFixed(4):Number(n).toFixed(2)))}
 function fmtMedian(p){return(!p||p.median_turns==null)?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0)}
@@ -10736,7 +10761,11 @@ function renderPromise(p){
     else yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
   }
   const panel=document.getElementById('turnsPanel');
-  if(panel&&(!p||p.median_turns==null)&&( !p||p.yield_per_usd==null))panel.open=true;
+  const empty=document.body.hasAttribute('data-empty-board');
+  if(panel){
+    if(empty)panel.open=false;
+    else if((!p||p.median_turns==null)&&(!p||p.yield_per_usd==null))panel.open=true;
+  }
 }
 function renderTurns(t){
   const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
@@ -11000,9 +11029,11 @@ async function load(manual){
     '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
     '<span class="chip"><b>'+esc(counts.done)+'</b>/'+esc(counts.total)+' done</span>';
   const s=d.sprint;
-  document.getElementById('sprint').innerHTML=s
+  const sprintEl=document.getElementById('sprint');
+  sprintEl.hidden=!s;
+  sprintEl.innerHTML=s
     ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
-    :'<div class="row"><span>no active sprint</span></div><div class="bar"><i style="width:0"></i></div>';
+    :'';
   const crit=(d.health||[]).filter(x=>x.sev==='CRIT').length;
   const warn=(d.health||[]).filter(x=>x.sev==='WARN').length;
   const pulse=document.getElementById('pulse');
@@ -11048,10 +11079,13 @@ async function load(manual){
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
       '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div>'+
       '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
-  }).join('')||'<div class="empty">no agents checked in</div>';
+  }).join('')||emptyCraft('Team','<b>No agents checked in.</b> Plug a harness so coverage is by work, not a vacant roster.','Utilization and Done (24h) stay — until a seat heartbeats.',['tickets join &lt;name&gt; --roles … --harness','tickets quickstart --agent &lt;you&gt;']);
   const thread=visibleMessages(d.messages||[]).slice().reverse();
+  const msgEmpty=THREAD_SEAT
+    ?emptyCraft('Intervene','<b>No messages with this seat yet.</b> Msg opens the thread.','Delivery receipts only — never implied progress on tickets.','tickets msg --to '+esc(THREAD_SEAT))
+    :emptyCraft('Intervene','<b>No messages yet.</b> Post when a seat should see something.','Receipts show delivery — never implied progress on tickets.','tickets msg "text" [--to agent] [--re T-001]');
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+deliveryTags(m)+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
-    ||'<div class="empty">'+(THREAD_SEAT?'No messages with this seat yet.':'no messages yet')+'</div>';
+    ||msgEmpty;
 }
 function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
@@ -11081,7 +11115,9 @@ function renderNextStep(ns){
 }
 function renderEmptyBoard(d){
   const el=document.getElementById('emptyBoard');
-  const empty=d.empty_board||!(d.counts&&d.counts.total);
+  const empty=!!(d.empty_board||!(d.counts&&d.counts.total));
+  if(empty)document.body.setAttribute('data-empty-board','');
+  else document.body.removeAttribute('data-empty-board');
   el.hidden=!empty;
   if(!empty)return;
   el.innerHTML='<p class="empty-kicker">Day one</p>'+
