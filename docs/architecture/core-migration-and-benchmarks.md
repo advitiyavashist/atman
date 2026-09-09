@@ -41,7 +41,7 @@ does not receive features independently.
 | 4. Messages | T-646 | Channels, mentions, inbox watermarks and idempotent message-to-wake behavior pass T-640 and the language-neutral corpus for all three wake modes. |
 | 5. Runners | T-647 | Claude, Codex, Cursor, Grok, and custom adapters support user-selected continuous, task-only, and scheduled modes; leases, hook events, liveness and recovery pass deterministic fake-harness tests on macOS and Linux. |
 | 6. Service | T-652 | All 34 frozen API paths, SSE replay/heartbeat and embedded UI use the same domain services and pass OpenAPI conformance. |
-| 7. Compatibility binary | T-648 | `tickets` compatibility command and `atman` alias are the same versioned binary; platform archives, checksums and exact Python rollback are reproducible. |
+| 7. Compatibility binary | T-648 | `tickets` compatibility command and `atman` alias are the same versioned binary; platform archives and checksums reproduce; Python rollback passes writer-locked recovery, tail/checkpoint, tree-digest, sentinel and crash gates. |
 | 8. Public library | T-649 | Public Go API, package docs, examples and contributor path are reviewed; no internal implementation leaked into the API. |
 | 9. Shadow | T-650 | Copied-board differential replays show zero unexplained semantic divergence. The live board still has one writer. Rollback drill passes. |
 | 10. Alpha cutover | T-651 | Reviewer approves evidence, activates Go for a canary board, observes it, then cuts the default. Python fallback survives at least two releases. |
@@ -73,10 +73,12 @@ it is never hidden in the rewrite diff.
 ### Crash and outbox gate
 
 T-644 injects a process kill before and after every file-board protocol step:
-payload write, payload flush, manifest flush, staging-directory flush, committed
-directory rename, committed-parent flush, each state projection, checkpoint
-replacement, and compaction cleanup. After reopening, each attempted operation
-must have exactly one of two observable outcomes:
+payload write, payload flush, manifest flush, prepared-directory flush,
+same-parent committed-directory rename, committed-parent flush, each state
+projection, checkpoint replacement, and compaction cleanup. A compatibility
+adapter that uses separate staging and committed parents must additionally
+inject failure around and prove the flush of both parents. After reopening,
+each attempted operation must have exactly one of two observable outcomes:
 
 1. no committed transaction, no state change, no audit entry, and no event; or
 2. one committed transaction whose complete state, audit, stored result, and
@@ -98,23 +100,29 @@ prove snapshot fallback.
 ### Wake-mode gate
 
 T-646/T-647 run the same table for Claude, Codex, Cursor, Grok, and a fake custom
-harness. Every seat is tested under all three user-selected modes:
+harness. In every mode, explicit tasks, held or assigned work, and blocker
+escalation are actionable. A separately configured objective heartbeat is
+actionable only for an active objective with a measurable exit. Every seat is
+then tested under all three user-selected modes:
 
-- `continuous`: DM, explicit mention, task message, and assignment each wake a
-  live session immediately; an offline wake queues and delivers once on
+- `continuous`: the base gates plus a directed DM or named mention wake the
+  persistent session immediately; an offline wake queues and delivers once on
   reconnect.
-- `task-only`: assignment and `--task` start one bounded run; an ordinary DM or
-  mention remains unread without starting a model turn.
-- `scheduled`: an externally invoked cadence consumes durable ordinary DMs and
-  mentions in one bounded turn; an assignment or `--task` starts an immediate
-  run. The test supplies the cadence event because Atman does not own a cron
-  expression or next-run deadline.
+- `task-only`: only the base gates start one bounded run; an ordinary DM or
+  mention remains a notification without starting a model turn.
+- `scheduled`: the same base gates apply and the adapter remains persistent;
+  ordinary DMs and mentions remain notifications. The mode creates no clock or
+  deadline. Tests configure the separate objective heartbeat or drive polling
+  from an external scheduler when cadence behavior is required.
 
-The matrix also proves DM-plus-mention deduplication, self/broadcast suppression,
-one live session lease, identity pinning, bounded context, failure receipts,
-recovery after process death, and a mode change with queued work. Master and CoS
-receive `continuous` only as a default registration value; tests override both
-roles to the other modes and configure ordinary workers as continuous.
+The matrix also proves DM-plus-mention deduplication; suppression of ACKs,
+self-authored mail, idle-status replies, automated review copies, receipts, and
+broadcasts; and that an explicitly assigned task review still passes the base
+task gate. It also proves one live session lease, identity pinning, bounded
+context, failure receipts, recovery after process death, and a mode change with
+queued work. Master and CoS receive `continuous` only as a default registration
+value; tests override both roles to the other modes and configure ordinary
+workers as continuous.
 
 ## Performance protocol
 
@@ -217,8 +225,48 @@ compatibility filename for the same bytes through 1.x. The binary reports its
 source commit, build toolchain, contract version, and dirty state through
 `atman self`.
 
-Activation is an atomic launcher replacement. It records the prior verified
-artifact and never overwrites unknown bytes. Rollback swaps the launcher to the
-recorded Python artifact; because no live board is dual-written and the Go
-writer preserves the versioned board contract, rollback requires no reverse
-data migration.
+Activation and rollback are board transactions, not executable swaps alone.
+The stable launcher and both implementations treat the ownership sentinel as
+the write authority. A transition follows this protocol:
+
+1. Acquire the interprocess board-writer lock and prevent a new writer from
+   starting. Verify the current sentinel and immutable binary digests.
+2. When leaving Go, run Go recovery while still holding the lock: validate every
+   committed bundle in sequence, replay the complete tail into projections,
+   durably advance the checkpoint, and compute the canonical board-tree digest.
+   `committed_tail` must equal `checkpoint`; no unapplied Go transaction may
+   cross the boundary. Activation runs the equivalent Python consistency check
+   before Go first takes ownership.
+3. Write and flush an immutable transition receipt containing prior and next
+   writer, board/schema version, checkpoint and tail sequences, canonical tree
+   digest, both binary digests, and transition id. Prepare the next ownership
+   sentinel with the same values.
+4. Atomically replace the ownership sentinel and flush its parent directory.
+   This is the launcher ownership flip. The stable launcher routes only after
+   reading this record. A crash before the replace leaves the old writer
+   authoritative; a crash after it leaves the new writer authoritative.
+5. Release the lock. The selected implementation rechecks the sentinel and tree
+   digest before its first write and records the completed receipt.
+
+The old Python implementation must learn this sentinel and transaction-tail
+check before Go can be activated. It fails closed when the sentinel does not
+select Python, a committed Go sequence exceeds the checkpoint, the transition
+receipt is missing or mismatched, or the canonical tree digest differs. It must
+never ignore an unfamiliar Go journal and start writing. Go applies the
+equivalent checks when Python remains authoritative.
+
+T-648 injects a kill before and after the recovery, checkpoint flush, digest,
+receipt flush, sentinel replace, sentinel-parent flush, and first new-writer
+check. Each reopen must select exactly one writer or refuse both; it may never
+make both writable. A required regression fixture places a valid Go bundle one
+sequence beyond the materialized checkpoint and invokes both the compatible
+fallback and a pre-transition Python binary. The fallback recovers only through
+the locked transition command, and the old binary refuses because the sentinel
+still exists. Direct sentinel deletion is not a supported rollback after Go has
+owned the board.
+
+The installer records the prior verified artifact and never overwrites unknown
+bytes. A physical launcher or binary update may happen before the board
+transition, but it grants no write authority; only the locked sentinel flip
+does. Python remains packaged for at least two releases, so a verified rollback
+needs no reverse data migration after the recovery/checkpoint gate succeeds.

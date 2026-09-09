@@ -165,8 +165,13 @@ runtimes rather than one coherent contributor environment.
   subprocess/config protocol so they remain language- and platform-neutral.
 - Continuous, task-only, and scheduled wake behavior is a user-selected seat
   setting for every harness. Master and chief-of-staff roles only supply the
-  continuous default. Scheduled seats receive an externally driven cadence;
-  Atman does not add an internal clock scheduler.
+  continuous default. Scheduled uses the same task, held/assigned-work, and
+  blocker gates as task-only while keeping its adapter persistent; it does not
+  add an internal clock scheduler.
+- Go-to-Python rollback is allowed only after writer-locked Go recovery has
+  applied the committed tail, durably checkpointed it, and recorded the
+  canonical tree digest. Both launch paths fail closed on a sentinel, tail,
+  checkpoint, or digest mismatch.
 - No CGo dependency enters the default build. A pure-Go SQLite driver, if the
   SQLite adapter needs one, requires a focused ADR with binary-size,
   cross-build, migration, and license evidence.

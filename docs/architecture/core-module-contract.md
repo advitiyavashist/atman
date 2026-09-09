@@ -137,8 +137,14 @@ tells the rest of the team about it.
   contract declares byte stability. It remains the default during migration.
 - `sqlstore` preserves the frozen server schema, append-only audit behavior,
   request idempotency, and optimistic record versions.
-- Exactly one adapter owns a board at a time. The existing server-ownership
-  sentinel remains the authority switch. There is no mirrored write path.
+- Exactly one adapter owns a board at a time. The existing
+  `.server-owned.json` sentinel, extended with the writer kind, checkpoint
+  sequence, committed-tail sequence, and canonical tree digest, remains the
+  authority switch. Both Go and the compatible Python fallback verify it before
+  opening for write. Once Go has owned a board, the sentinel is never deleted:
+  an older Python binary therefore keeps its existing fail-closed behavior,
+  while the compatible fallback recognizes a verified `writer: python`
+  transition. There is no mirrored write path.
 - Import and export are explicit commands with receipts. They are not hidden
   inside `Open`.
 
@@ -197,22 +203,25 @@ are read-only until migrated explicitly.
 
 1. Acquire the one interprocess board-writer lock and recover all earlier
    committed transactions before evaluating preconditions.
-2. Allocate the next transaction sequence while holding that lock. Write
-   `.tickets/transactions/staging/<transaction-id>.tmp/` on the same filesystem.
+2. Allocate the next transaction sequence while holding that lock. Write the
+   hidden prepared directory
+   `.tickets/transactions/committed/.<sequence>-<transaction-id>.tmp/`.
    Its manifest names the sequence, preimages, after-images, tombstones,
    request digest, stored result, audit entries, outbox events, and SHA-256 of
    every payload. Paths are normalized and containment-checked before any file
    is opened.
-3. Flush every payload and the manifest, then flush the staging directory. A
+3. Flush every payload and the manifest, then flush the prepared directory. A
    missing or invalid checksum makes the transaction uncommittable.
-4. Atomically rename the complete directory to
-   `.tickets/transactions/committed/<sequence>-<transaction-id>/`, then flush
-   the committed parent directory. The rename is the live linearization point;
-   the parent flush is the durability barrier, and the service acknowledges the
-   commit only after both complete. A crash between them leaves either no
-   committed directory or the complete directory, never half of its state and
-   outbox payload. After the barrier, both are durable even when no materialized
-   file changed.
+4. Atomically rename that directory within the same `committed/` parent to
+   `<sequence>-<transaction-id>/`, then flush the parent directory. The
+   same-parent rename is deliberate: the rename is the live linearization
+   point; the parent flush is the durability barrier, and the service
+   acknowledges the commit only after both complete. A crash between them
+   leaves either no visible committed directory or the complete directory,
+   never half of its state and outbox payload. An adapter that instead uses
+   separate staging and committed parents must flush both parent directories
+   after the cross-directory rename before acknowledging; it cannot claim this
+   protocol from a destination-only flush.
 5. Apply after-images and tombstones in manifest order with content-addressed
    temporary files and atomic replacement. Replay accepts a file already equal
    to its after-image. A file matching neither the recorded preimage nor
@@ -221,7 +230,8 @@ are read-only until migrated explicitly.
    `transactions/checkpoint.json` to the applied sequence and return the result
    stored in the commit.
 
-A process killed before step 4 leaves only staging data, which recovery removes.
+A process killed before step 4 leaves only a hidden prepared directory, which
+recovery removes.
 A process killed at or after step 4 leaves an authoritative committed bundle;
 the next `Open`, CLI command, HTTP request, or subscription replays it before
 serving state. A post-commit process cannot report a normal mutation failure:
@@ -246,6 +256,14 @@ The checkpoint is canonical JSON containing schema version, applied sequence,
 snapshot tree digest, and retained event floor. It advances only after the
 entire projection is durable; it cannot be inferred from whichever state files
 happen to exist.
+
+The canonical tree digest is SHA-256 over a versioned deterministic framing of
+every schema-owned materialized relative path, file mode, byte length, and file
+content in UTF-8 bytewise path order. The schema-owned path list comes from the
+T-642 compatibility corpus. Transaction bundles, locks, temporary files,
+process ids, and logs are excluded because the checkpoint and tail authenticate
+the journal separately. Go and the compatible Python fallback share the same
+golden digest fixtures.
 
 Platforms implement durable same-filesystem replacement and directory metadata
 flush through explicit platform files. If a target cannot prove the commit
@@ -333,14 +351,18 @@ type Error struct {
 Harness adapters use a language-neutral subprocess protocol. A registration
 defines executable argv, environment allowlist, working directory, capability,
 default permission profile, event format, and a persisted per-seat wake mode.
-The available modes apply equally to Claude, Codex, Cursor, Grok, and custom
-harnesses:
+The base actionable gates apply equally to every mode: an explicit task
+(`kind=task`, `task=true`, or the accepted `task:` form), work already held by
+or assigned to the seat, or a `blocked:`/`stuck:` escalation. A separately
+configured objective heartbeat is also actionable while its objective is active
+and has a measurable exit. The available modes apply equally to Claude, Codex,
+Cursor, Grok, and custom harnesses:
 
 | Mode | Durable trigger and execution behavior |
 | --- | --- |
-| `continuous` | A direct message or explicit `@mention`, an explicit task message, or an assignment creates one immediate wake job. A leased live session takes a turn through its adapter; if offline, the job stays queued and is delivered once after reconnect. |
-| `task-only` | An assignment or message marked `--task` creates one immediate bounded run. Ordinary direct messages and mentions remain readable but do not spend a model turn. The run exits after the task turn. |
-| `scheduled` | A persistent watcher takes bounded turns only when an external cadence invokes it. Ordinary direct messages and mentions are notify-only until that turn. An assignment or message marked `--task` is explicit cost authorization and creates one immediate wake job. Atman stores the wake mode and durable reasons; it does not own a cron expression or next-run deadline. |
+| `continuous` | The base gates wake immediately. A directed DM or named `@mention` also creates one immediate wake job. A leased live session takes a turn through its persistent adapter; if offline, the job stays queued and is delivered once after reconnect. |
+| `task-only` | Only the base gates wake the seat. Ordinary direct messages and mentions remain readable notifications and do not spend a model turn. One bounded unattended run exits after the turn. |
+| `scheduled` | The same base gates wake the seat, and its adapter remains persistent. Ordinary direct messages and mentions remain notify-only. The mode creates no clock or deadline; an operator may configure the separate objective heartbeat or have an external scheduler poll the persistent adapter. |
 
 Master and chief-of-staff seats default to `continuous`; other seats default to
 `task-only`. These are registration defaults, not role checks in the scheduler.
@@ -348,7 +370,12 @@ The user may choose any mode for any seat and may change it with an audited
 configuration update. A mode change never drops already durable wake jobs.
 
 One addressed message produces at most one wake job even when it is both a DM
-and a mention. Self messages and broadcasts do not create recursive wakes.
+and a mention. Suppression has precedence over the continuous-message addition:
+an acknowledgement or idle-status reply, self-authored message, automated
+review copy, receipt, or broadcast remains notification-only. A review request
+deliberately assigned with explicit task intent is a base task, not a review
+copy. This distinction and suppression are applied before wake-job creation so
+they cannot create a recursive reply loop.
 Delivery claims one session lease, uses bounded prompt context, pins the durable
 agent identity, and records queued, dispatched, acknowledged, failed, and
 recovered receipts. If a live harness cannot accept an injected turn, its
