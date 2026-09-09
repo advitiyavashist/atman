@@ -3785,6 +3785,152 @@ alwaysApply: true
 """ + PROTOCOL
 
 
+# --- T-427: watch idle-boundary self-execv (byte-identical in tickets.py and cli.py) ---
+# A tickets-releases/<sha> dir is safe to delete only when (1) it is not the
+# live shim target and (2) no watch process is executing that dir. T-388 kept
+# 8f513fe and 1c8335b as rollback pins even after cutover. After this hop,
+# idle loops move themselves; leftover recycle tickets are only for processes
+# that never reach this boundary (stuck in a run).
+
+
+def _t427_release_dir(path):
+    real = os.path.realpath(path or "")
+    parts = real.split(os.sep)
+    try:
+        i = parts.index("tickets-releases")
+    except ValueError:
+        return ""
+    if i + 1 >= len(parts) or not parts[i + 1]:
+        return ""
+    return os.sep.join(parts[: i + 2])
+
+
+def _t427_shim_tickets(shim_path):
+    """Path the live shim execv's into, or None if unreadable, or '' if unknown."""
+    import re as _re
+    try:
+        raw = open(shim_path, "rb").read()
+    except OSError:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = ""
+    m = _re.search(r"\[sys\.executable,\s*(['\"])(.+?)\1\]", text)
+    if m:
+        return m.group(2)
+    real = os.path.realpath(shim_path)
+    if os.path.isfile(real):
+        return real
+    return ""
+
+
+def _t427_verified_sha(tickets_py):
+    """Commit sha if tickets_py is a verified release, else ''."""
+    root = os.path.dirname(os.path.realpath(tickets_py))
+    manifest = os.path.join(root, "release.json")
+    try:
+        with open(manifest) as source:
+            release = json.load(source)
+        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
+            path = os.path.join(root, name)
+            recorded = release["files"][name]
+            expected_sha, expected_size = (
+                (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
+                else (recorded, None))
+            if expected_size is not None and os.stat(path).st_size != expected_size:
+                return ""
+            with open(path, "rb") as source:
+                actual = hashlib.sha256(source.read()).hexdigest()
+            if actual != expected_sha:
+                return ""
+        return release.get("commit") or ""
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def _t427_idle_shim_path(executing_file):
+    """Shim for idle-boundary hop, or '' when hop must not run."""
+    if not _t427_release_dir(executing_file):
+        return ""
+    live = os.environ.get("TICKETS_LIVE_SHIM")
+    if live:
+        return live
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return ""
+    return os.path.expanduser("~/.claude/tools/tickets.py")
+
+
+def watch_idle_reexec(executing_file, shim_path, argv, log, pid_path=None,
+                      executable=None, execv=None):
+    """If idle and the live shim points at a different verified release, execv.
+
+    Returns False when this process should keep running. Does not return on hop.
+    Caller invokes only at the idle boundary so an in-flight child is never
+    severed. Never hops onto an unverified release. Unreadable/missing shim:
+    log once, stay put, do not busy-loop.
+    """
+    warned = watch_idle_reexec._warned
+    current = _t427_release_dir(executing_file)
+    if not current or not shim_path:
+        return False
+    target_py = _t427_shim_tickets(shim_path)
+    if target_py is None:
+        key = "unreadable:" + shim_path
+        if key not in warned:
+            warned.add(key)
+            log("release shim unreadable; staying on %s" % os.path.basename(current))
+        return False
+    if not target_py:
+        key = "missing:" + shim_path
+        if key not in warned:
+            warned.add(key)
+            log("release shim target missing; staying on %s" % os.path.basename(current))
+        return False
+    new_dir = _t427_release_dir(target_py)
+    if not new_dir:
+        key = "not-release:" + target_py
+        if key not in warned:
+            warned.add(key)
+            log("release shim is not a tickets-releases dir; staying on %s"
+                % os.path.basename(current))
+        return False
+    if os.path.dirname(current) != os.path.dirname(new_dir):
+        return False
+    if os.path.realpath(current) == os.path.realpath(new_dir):
+        return False
+    if not os.path.isfile(target_py):
+        key = "missing-py:" + target_py
+        if key not in warned:
+            warned.add(key)
+            log("release target missing; staying on %s" % os.path.basename(current))
+        return False
+    new_sha = _t427_verified_sha(target_py)
+    if not new_sha:
+        key = "unverified:" + new_dir
+        if key not in warned:
+            warned.add(key)
+            log("release %s is not a verified release; staying on %s"
+                % (os.path.basename(new_dir), os.path.basename(current)))
+        return False
+    old_sha = os.path.basename(current)
+    log("release %s -> %s, re-exec" % (old_sha, new_sha))
+    if pid_path:
+        try:
+            with open(pid_path, "w") as pf:
+                pf.write(str(os.getpid()))
+        except OSError:
+            pass
+    exe = executable or sys.executable
+    hop = execv or os.execv
+    hop(exe, [exe, os.path.realpath(shim_path)] + list(argv))
+    return False
+
+
+watch_idle_reexec._warned = set()
+# --- end T-427 ---
+
+
 def main():
     p = argparse.ArgumentParser(prog="tickets", description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd")
