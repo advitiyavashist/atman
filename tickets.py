@@ -12629,7 +12629,7 @@ def main():
         "kb",
     ):
         if not os.path.isdir(board):
-            if a.cmd == "board":
+            if a.cmd in ("board", "stop-hook"):
                 return
             sys.exit("no board at %s (create a ticket first)" % board)
     # board-restore uses --dest, not the discovered board
