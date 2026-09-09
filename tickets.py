@@ -33,6 +33,7 @@ import re
 import shlex
 import sys
 import threading
+import uuid
 from datetime import datetime, timezone
 
 # Immutable releases verify every shipped byte before dispatch.  Do not add
@@ -809,13 +810,20 @@ def load_objective(board):
 
 OBJECTIVE_STATES = ("active", "achieved", "blocked", "replaced")
 STOP_CONDITION = (
-    "unattended watchers only: one model run then stop; restart watch to continue "
-    "(--persist or --max-runs 0 to loop). Interactive Codex/Claude master sessions stay open."
+    "unattended task-only watchers run one model run then stop; continuous/scheduled adapters "
+    "stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter."
 )
+WAKE_MODES = ("task-only", "continuous", "scheduled")
 WAKE_KEYS = frozenset({
     "holding", "suggested_for_me", "ready_in_my_lane",
     "task_messages", "stuck_messages", "drive", "forced",
 })
+WAKE_MESSAGE_LIMIT = 5
+WAKE_MESSAGE_MAX_CHARS = 320
+REMOTE_LEASE_TTL = 30
+REMOTE_MAX_ATTEMPTS = 3
+REMOTE_LONG_POLL_MAX = 30
+LOCAL_DISPATCH_MAX_ATTEMPTS = 3
 
 
 def objective_state(obj):
@@ -916,19 +924,38 @@ def _notify_review_submitted(board, author, tid, text, master_state=None):
     return master_name, cos_name
 
 
-def spawn_watch_max_runs(cos=False, persist=False, max_runs=None):
+def spawn_watch_max_runs(wake_mode="task-only", persist=False, max_runs=None):
     """Watch --max-runs for `tickets spawn`. 0 loops until spawn --stop.
 
-    CoS is persistent by default. An explicit --max-runs (including 1 for
-    one-shot) overrides that. --persist always loops. Workers default to 1.
+    A seat's durable wake policy, rather than its harness brand, decides
+    whether the adapter remains online. An explicit --max-runs (including 1
+    for a diagnostic one-shot) overrides that. --persist always loops.
     """
     if persist:
         return 0
     if max_runs is not None:
         return int(max_runs)
-    if cos:
+    if wake_mode in ("continuous", "scheduled"):
         return 0
     return 1
+
+
+def wake_mode_of(board, owner, master_state=None, workforce=None):
+    """Effective durable wake policy for one seat.
+
+    Existing boards need no migration: an explicit workforce value wins;
+    otherwise the current master and CoS inherit the continuous default and
+    every other seat stays task-only. The setting is harness-neutral, so the
+    same policy applies to Claude, Codex, Cursor, or a remote/custom bridge.
+    """
+    wf = workforce if workforce is not None else _safe(lambda: load_workforce(board), {})
+    configured = ((wf or {}).get(owner, {}) or {}).get("wake_mode")
+    if configured in WAKE_MODES:
+        return configured
+    state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+        return "continuous"
+    return "task-only"
 
 
 def hours_since(stamp):
@@ -5683,7 +5710,8 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
     _rotate_messages_if_big(board)
     to, mentions, unknown = resolve_to_and_mentions(
         text, to, _registered_handles(board))
-    rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
+           "to": to, "re": re, "text": text}
     if mentions:
         rec["mentions"] = mentions
     kind = (kind or "").strip()
@@ -5754,14 +5782,12 @@ def _agent_rec(board, owner):
 def _msg_id(m):
     """A stable identity for a message record.
 
-    Messages carry no id on the wire, and adding one would change a format
-    that T-213's legacy import round-trips verbatim, so identity is derived
-    from content instead: the same record hashes the same whether it is read
-    from the live file or from a rotated archive, and nothing already on disk
-    has to be migrated. Two byte-identical messages in the same second do
-    share an identity, which is exactly why the boundary list is consumed as
-    a multiset below -- one delivery per occurrence, not per distinct value.
+    New records carry an id so at-least-once replay can be deduplicated. Legacy
+    records keep their content-derived identity and multiset behavior; no old
+    board needs a migration and lossless legacy import stays unchanged.
     """
+    if m.get("id"):
+        return str(m["id"])
     raw = json.dumps([m.get("at", ""), m.get("from", ""), m.get("to", ""),
                       m.get("re", ""), m.get("text", "")], sort_keys=True)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -5957,7 +5983,11 @@ def _is_unread(m, since, remaining):
         return False
     k = _msg_id(m)
     if remaining.get(k):
-        remaining[k] -= 1
+        # Explicit IDs are delivery identities: every replay of the same
+        # record is already seen. Legacy content hashes remain a multiset so
+        # two old, byte-identical sends are still delivered twice.
+        if not m.get("id"):
+            remaining[k] -= 1
         return False
     return True
 
@@ -6013,7 +6043,17 @@ def _inbox_scan(board, owner):
     visible = _visible_after_join(
         [m for m in msgs if _addressed(m, owner, registered)],
         owner, joined)
-    out = [m for m in visible if _is_unread(m, since, remaining)]
+    out = []
+    explicit_ids = set()
+    for message in visible:
+        if not _is_unread(message, since, remaining):
+            continue
+        explicit = message.get("id")
+        if explicit and explicit in explicit_ids:
+            continue
+        if explicit:
+            explicit_ids.add(explicit)
+        out.append(message)
     watermark = max([m.get("at", "") for m in msgs] or [""])
     ceiling = now()
     if watermark > ceiling:
@@ -6031,7 +6071,17 @@ def _inbox_scan(board, owner):
     # not by history. It is rebuilt from the file rather than carried forward,
     # because a message delivered on an EARLIER poll is no longer in `out` and
     # would otherwise lose its identity and be redelivered.
-    retained = [_msg_id(m) for m in visible if m.get("at", "") >= watermark]
+    retained = []
+    retained_explicit = set()
+    for message in visible:
+        if message.get("at", "") < watermark:
+            continue
+        identity = _msg_id(message)
+        if message.get("id") and identity in retained_explicit:
+            continue
+        if message.get("id"):
+            retained_explicit.add(identity)
+        retained.append(identity)
     return out, watermark, retained
 
 
@@ -6656,6 +6706,11 @@ def cmd_join(a, board):
         entry["cost"] = a.cost
     if a.best_for:
         entry["best_for"] = a.best_for
+    wake_mode = getattr(a, "wake_mode", None)
+    if wake_mode is not None:
+        if wake_mode not in WAKE_MODES:
+            sys.exit("--wake-mode must be one of: %s" % ", ".join(WAKE_MODES))
+        entry["wake_mode"] = wake_mode
     if knowledge_dir:
         entry["knowledge_dir"] = knowledge_dir
     entry.setdefault("can", [])
@@ -6671,9 +6726,9 @@ def cmd_join(a, board):
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
     root = os.path.dirname(board)
-    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s" % (
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s" % (
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
-        entry.get("harness") or "claude (default)"))
+        entry.get("harness") or "claude (default)", wake_mode_of(board, owner, workforce=wf)))
     if entry.get("cmd"):
         print("cmd: %s" % entry["cmd"])
     if entry.get("knowledge_dir"):
@@ -6785,6 +6840,9 @@ def pending_work(board, owner):
 
     Keys: messages_to_me, broadcasts (count), holding, suggested_for_me,
     ready_in_my_lane, limited (agent recorded a usage limit; do not wake).
+    For a continuous seat, an ordinary directed message is promoted into the
+    existing task_messages wake queue. The source message remains the receipt
+    and inbox watermark; no parallel queue can drift from it.
     """
     out = {}
     if not owner or not os.path.isdir(board):
@@ -6796,12 +6854,18 @@ def pending_work(board, owner):
     obj = _safe(lambda: load_objective(board), {})
     obj_state = objective_state(obj)
     msgs = _safe(lambda: unread(board, owner), [])
-    direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
+    # unread() already applied registered, case-insensitive addressing and
+    # suppressed the author's own mail. Anything non-broadcast in that result
+    # is therefore a DM or named mention for this seat. This also collapses a
+    # message carrying BOTH --to and @mention to one record / one wake.
+    direct = [m for m in msgs if not is_board_broadcast(m)]
     if direct:
-        out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
-        tasks = [fmt_msg(m) for m in direct if _message_wakes(m, obj_state)]
+        out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
+        tasks = [_wake_message_summary(m) for m in direct
+                 if (_message_wakes(m, obj_state)
+                     or _continuous_message_wakes(board, owner, m))]
         if tasks:
-            out["task_messages"] = tasks[-5:]
+            out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
     elif msgs:
         out["broadcasts"] = len(msgs)
     tickets = _safe(lambda: load_all(board), [])
@@ -6831,13 +6895,13 @@ def pending_work(board, owner):
         # its own counts.
         since = _seen_since(rec)
         _rem = _seen_counts(rec.get("inbox_seen_ids"))
-        stuck = [fmt_msg(x) for x in _visible_after_join(
+        stuck = [_wake_message_summary(x) for x in _visible_after_join(
                      _safe(lambda: load_messages(board), []), owner,
                      rec.get("joined_at", ""))
                  if x.get("from") != owner and _is_unread(x, since, _rem)
                  and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
         if stuck:
-            out["stuck_messages"] = stuck[-5:]
+            out["stuck_messages"] = stuck[-WAKE_MESSAGE_LIMIT:]
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
         if crit:
             out["health_crit"] = [i[1][:80] for i in crit[:3]]
@@ -6856,7 +6920,7 @@ def pending_work(board, owner):
 
 
 def _message_wakes(m, obj_state=""):
-    """Explicit task / stuck / blocked mail wakes a model; ACKs and ordinary DMs do not."""
+    """Harness-neutral base gate: explicit task / stuck / blocked mail wakes every mode."""
     if m.get("source") == "review" and obj_state in ("blocked", "achieved", "replaced"):
         return False
     if m.get("kind") == "task" or m.get("task"):
@@ -6867,9 +6931,52 @@ def _message_wakes(m, obj_state=""):
     return False
 
 
+def _wake_message_summary(message):
+    """Bound message text before it reaches pending JSON, logs, or a prompt."""
+    rendered = fmt_msg(message)
+    if len(rendered) <= WAKE_MESSAGE_MAX_CHARS:
+        return rendered
+    return rendered[:WAKE_MESSAGE_MAX_CHARS - 1] + "…"
+
+
+def _continuous_message_wakes(board, owner, message):
+    """An ordinary DM/@mention wakes only a seat configured continuous.
+
+    Review copies and acknowledgement/status replies remain notification-only;
+    otherwise a master and CoS acknowledging each other can create a paid
+    ping-pong loop. Explicit kind=task still wins through `_message_wakes`.
+    """
+    if wake_mode_of(board, owner) != "continuous" or is_board_broadcast(message):
+        return False
+    if message.get("source") in ("review", "receipt"):
+        return False
+    if message.get("kind") in ("ack", "receipt"):
+        return False
+    text = str(message.get("text") or "").strip().lower()
+    return not text.startswith(("ack", "idle:"))
+
+
 def wake_reason_of(pending):
-    for k in ("forced", "holding", "suggested_for_me", "ready_in_my_lane",
-              "stuck_messages", "task_messages", "drive"):
+    # A newly directed instruction must stay visible even when leadership has
+    # an older board-wide stuck escalation. Both gates remain in `pending`, but
+    # this primary reason drives the UI/log and tells the harness what arrived.
+    if pending.get("forced"):
+        return "forced"
+    tasks = pending.get("task_messages") or []
+    stuck = pending.get("stuck_messages") or []
+    # A directed `stuck:` record appears in both lists. Preserve the established
+    # stuck reason when that is all there is, while allowing any distinct/new
+    # directed instruction to take priority over an older escalation.
+    def _same_as_stuck(summary):
+        return any(s == summary or (summary.endswith("…") and s.startswith(summary[:-1]))
+                   for s in stuck)
+    if tasks and (not stuck or any(not _same_as_stuck(t) for t in tasks)):
+        return "task_messages"
+    if stuck:
+        return "stuck_messages"
+    if tasks:
+        return "task_messages"
+    for k in ("holding", "suggested_for_me", "ready_in_my_lane", "drive"):
         if pending.get(k):
             return k
     return "none"
@@ -6901,9 +7008,12 @@ def _watch_trigger_fingerprint(board, owner, pending):
     parts = []
     if pending.get("messages_to_me"):
         msgs = _safe(lambda: unread(board, owner), []) or []
-        direct = [m for m in msgs
-                  if m.get("to") == owner or owner in (m.get("mentions") or [])]
-        parts.extend("msg:" + _msg_id(m) for m in direct[-5:])
+        direct = [m for m in msgs if not is_board_broadcast(m)]
+        obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+        waking = [m for m in direct
+                  if (_message_wakes(m, obj_state)
+                      or _continuous_message_wakes(board, owner, m))]
+        parts.extend("msg:" + _msg_id(m) for m in waking[-WAKE_MESSAGE_LIMIT:])
     for key in ("holding", "suggested_for_me", "ready_in_my_lane", "review_queue"):
         if key in pending:
             for item in pending[key]:
@@ -6915,6 +7025,392 @@ def _watch_trigger_fingerprint(board, owner, pending):
     if pending.get("drive"):
         parts.append("drive:" + json.dumps(pending["drive"], sort_keys=True))
     return tuple(sorted(parts)) if parts else None
+
+
+# ---- remote adapters: fenced lease, atomic wake claim, measured run --------
+
+class RemoteProtocolError(Exception):
+    pass
+
+
+def _remote_state_path(board, owner):
+    return os.path.join(board, "adapters", owner + ".json")
+
+
+def _remote_epoch():
+    return datetime.now(timezone.utc).timestamp()
+
+
+def _load_remote_state_unlocked(board, owner):
+    try:
+        with open(_remote_state_path(board, owner)) as stream:
+            state = json.load(stream)
+        return state if isinstance(state, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def load_remote_state(board, owner):
+    """Read a remote adapter state record. Invalid seat names have no state."""
+    if not HOOK_AGENT_RE.fullmatch(str(owner or "")):
+        return {}
+    return _load_remote_state_unlocked(board, owner)
+
+
+def _remote_update(board, owner, mutate):
+    """Serialize a remote lease/claim transition and publish it atomically."""
+    path = _remote_state_path(board, owner)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    result = []
+    with _AgentLock(board, owner + ".remote"):
+        state = _load_remote_state_unlocked(board, owner)
+        state.setdefault("schema", 1)
+        state.setdefault("agent", owner)
+        value = mutate(state)
+        temporary = "%s.tmp.%d.%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
+        with open(temporary, "w") as stream:
+            json.dump(state, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        result.append(value)
+    return result[0] if result else None
+
+
+def _remote_lease_online(state, at=None):
+    lease = (state or {}).get("lease") or {}
+    return bool(lease.get("id") and float(lease.get("expires_epoch") or 0) >
+                (at if at is not None else _remote_epoch()))
+
+
+def _remote_public_state(state):
+    """Remote state safe for UI/status; the bearer lease id never leaves it."""
+    state = state or {}
+    lease = state.get("lease") or {}
+    claim = state.get("claim") or {}
+    failure = state.get("failure") or {}
+    return {
+        "online": _remote_lease_online(state),
+        "bridge_id": lease.get("bridge_id", ""),
+        "fence": int(lease.get("fence") or state.get("fence") or 0),
+        "heartbeat_at": lease.get("heartbeat_at", ""),
+        "expires_at": lease.get("expires_at", ""),
+        "claim_id": claim.get("id", ""),
+        "run_id": claim.get("run_id", ""),
+        "run_state": ("recovery-required" if claim.get("recovery_required") else
+                      ("running" if claim.get("started_at") else
+                       ("claimed" if claim else ""))),
+        "attempt": int(claim.get("attempt") or failure.get("attempts") or 0),
+        "failure_state": failure.get("state", ""),
+        "failure_reason": failure.get("reason", ""),
+        "retry_at": failure.get("retry_at", ""),
+        "last_run": state.get("last_run") or {},
+    }
+
+
+def _remote_require_lease(state, lease_id, fence, renew=True):
+    lease = state.get("lease") or {}
+    if not _remote_lease_online(state):
+        raise RemoteProtocolError("adapter lease expired; register again")
+    if lease.get("id") != lease_id or int(lease.get("fence") or 0) != int(fence):
+        raise RemoteProtocolError("stale adapter lease/fence")
+    if renew:
+        ttl = int(lease.get("ttl") or REMOTE_LEASE_TTL)
+        lease["heartbeat_at"] = now()
+        lease["expires_epoch"] = _remote_epoch() + ttl
+        lease["expires_at"] = datetime.fromtimestamp(
+            lease["expires_epoch"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return lease
+
+
+def _remote_trigger_key(fingerprint):
+    if not fingerprint:
+        return ""
+    return hashlib.sha256(json.dumps(list(fingerprint), sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _remote_register(board, owner, bridge_id, ttl, max_attempts, replace=False, worktree=""):
+    ttl = max(5, min(int(ttl or REMOTE_LEASE_TTL), 300))
+    max_attempts = max(1, min(int(max_attempts or REMOTE_MAX_ATTEMPTS), 10))
+
+    def mutate(state):
+        current = state.get("lease") or {}
+        if _remote_lease_online(state):
+            if current.get("bridge_id") != bridge_id:
+                raise RemoteProtocolError("adapter already online under bridge %s" %
+                                          current.get("bridge_id", "unknown"))
+            if not replace:
+                # Register creates a bearer credential. Never disclose the
+                # existing credential to another process merely because it
+                # guessed the same human-readable bridge id. The holder uses
+                # heartbeat for renewal; deliberate same-bridge recovery must
+                # say --replace, which increments the fence and invalidates
+                # the old bearer.
+                raise RemoteProtocolError(
+                    "adapter bridge is already registered; heartbeat it or use --replace")
+        fence = int(state.get("fence") or 0) + 1
+        expiry = _remote_epoch() + ttl
+        lease = {"id": "lease_" + uuid.uuid4().hex, "bridge_id": bridge_id,
+                 "fence": fence, "ttl": ttl, "registered_at": now(),
+                 "heartbeat_at": now(), "expires_epoch": expiry,
+                 "expires_at": datetime.fromtimestamp(
+                     expiry, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "worktree": os.path.abspath(worktree) if worktree else ""}
+        state["fence"] = fence
+        state["lease"] = lease
+        state["max_attempts"] = max_attempts
+        claim = state.get("claim") or {}
+        if claim:
+            claim["fence"] = fence
+            if claim.get("started_at"):
+                # The old process may have crossed an external side-effect
+                # boundary. Require an explicit recovery choice; never run it
+                # twice merely because a network lease expired.
+                claim["recovery_required"] = True
+            else:
+                claim["delivered_at"] = ""
+        return {"status": "online", "lease_id": lease["id"], "fence": fence,
+                "expires_at": lease["expires_at"], "reused": False,
+                "recovery_required": bool(claim.get("recovery_required"))}
+
+    return _remote_update(board, owner, mutate)
+
+
+def _remote_claim_once(board, owner, lease_id, fence, prompt_kind=""):
+    pending = pending_work(board, owner)
+    fingerprint = _watch_trigger_fingerprint(board, owner, pending) if actionable(pending) else None
+    trigger_key = _remote_trigger_key(fingerprint)
+
+    def mutate(state):
+        lease = _remote_require_lease(state, lease_id, fence)
+        claim = state.get("claim") or {}
+        if claim:
+            if claim.get("recovery_required"):
+                return {"status": "recovery-required", "claim_id": claim.get("id"),
+                        "run_id": claim.get("run_id"), "fence": int(lease["fence"])}
+            if claim.get("delivered_at"):
+                return {"status": "busy", "claim_id": claim.get("id"),
+                        "run_id": claim.get("run_id"), "fence": int(lease["fence"])}
+            claim["delivered_at"] = now()
+            return {"status": "wake", "claim": dict(claim), "recovered": True}
+        if not trigger_key:
+            return {"status": "idle", "fence": int(lease["fence"])}
+        if state.get("completed_trigger") == trigger_key:
+            return {"status": "handled", "fence": int(lease["fence"])}
+        failure = state.get("failure") or {}
+        if failure.get("trigger") == trigger_key:
+            if failure.get("state") == "failed":
+                return {"status": "failed", "attempts": int(failure.get("attempts") or 0),
+                        "reason": failure.get("reason", ""), "fence": int(lease["fence"])}
+            if float(failure.get("retry_epoch") or 0) > _remote_epoch():
+                return {"status": "retrying", "attempts": int(failure.get("attempts") or 0),
+                        "retry_at": failure.get("retry_at", ""), "fence": int(lease["fence"])}
+            attempt = int(failure.get("attempts") or 0) + 1
+        else:
+            attempt = 1
+        seq = int(state.get("run_seq") or 0) + 1
+        state["run_seq"] = seq
+        held = (pending.get("holding") or [""])[0].split(" ")[0] or _watch_bind_ticket(board, owner) or ""
+        claim = {"id": "claim_" + uuid.uuid4().hex,
+                 "run_id": "rr-%s-%d-%s" % (owner, seq, uuid.uuid4().hex[:12]),
+                 "run_no": seq, "trigger": trigger_key,
+                 "trigger_keys": sorted(k for k in pending if k in WAKE_KEYS),
+                 "ticket": held, "attempt": attempt, "fence": int(lease["fence"]),
+                 "claimed_at": now(), "delivered_at": now(), "started_at": ""}
+        state["claim"] = claim
+        return {"status": "wake", "claim": dict(claim), "recovered": False}
+
+    result = _remote_update(board, owner, mutate)
+    if result.get("status") == "wake":
+        claim = result.pop("claim")
+        result.update({"claim_id": claim["id"], "run_id": claim["run_id"],
+                       "run_no": claim["run_no"], "attempt": claim["attempt"],
+                       "fence": claim["fence"], "wake": pending_view(pending)})
+        kind = prompt_kind or ("cos" if owner == (current_master(board) or {}).get("cos")
+                               else ("master" if owner == (current_master(board) or {}).get("owner") else ""))
+        result["prompt"] = prompt_text(argparse.Namespace(
+            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+    return result
+
+
+def _remote_run_start(board, owner, lease_id, fence, claim_id):
+    emitted = []
+
+    def mutate(state):
+        lease = _remote_require_lease(state, lease_id, fence)
+        claim = state.get("claim") or {}
+        if claim.get("id") != claim_id or int(claim.get("fence") or 0) != int(fence):
+            raise RemoteProtocolError("claim is absent or fenced")
+        if claim.get("recovery_required"):
+            raise RemoteProtocolError("claim needs explicit remote retry recovery")
+        if claim.get("started_at"):
+            return {"status": "running", "run_id": claim["run_id"], "idempotent": True}
+        claim["started_at"] = now()
+        emitted.append(dict(claim, bridge_id=lease.get("bridge_id", ""),
+                            worktree=lease.get("worktree", "")))
+        return {"status": "running", "run_id": claim["run_id"], "idempotent": False}
+
+    result = _remote_update(board, owner, mutate)
+    if emitted:
+        claim = emitted[0]
+        traj_event(board, "run_start", agent=owner, ticket=claim.get("ticket") or None,
+                   run_no=claim["run_no"], run_id=claim["run_id"],
+                   trigger=claim.get("trigger_keys") or [], harness_cmd="remote",
+                   worktree=claim.get("worktree") or None, release_sha=_release_commit(),
+                   bridge_id=claim.get("bridge_id"), fence=int(fence), attempt=claim.get("attempt"))
+    return result
+
+
+def _remote_run_end(board, owner, lease_id, fence, claim_id, exit_code,
+                    input_tokens=None, output_tokens=None, cost_usd=None, reason=""):
+    ended = []
+
+    def mutate(state):
+        _remote_require_lease(state, lease_id, fence)
+        previous = state.get("last_run") or {}
+        if previous.get("claim_id") == claim_id:
+            return {"status": previous.get("status", "completed"),
+                    "run_id": previous.get("run_id"), "idempotent": True}
+        claim = state.get("claim") or {}
+        if claim.get("id") != claim_id or int(claim.get("fence") or 0) != int(fence):
+            raise RemoteProtocolError("claim is absent or fenced")
+        if not claim.get("started_at"):
+            raise RemoteProtocolError("remote start must succeed before remote end")
+        attempt = int(claim.get("attempt") or 1)
+        max_attempts = int(state.get("max_attempts") or REMOTE_MAX_ATTEMPTS)
+        status = "completed"
+        if int(exit_code) == 0:
+            state["completed_trigger"] = claim.get("trigger", "")
+            state.pop("failure", None)
+        else:
+            status = "retrying" if attempt < max_attempts else "failed"
+            delay = min(2 ** max(0, attempt - 1), 30) if status == "retrying" else 0
+            retry_epoch = _remote_epoch() + delay if delay else 0
+            state["failure"] = {"state": status, "trigger": claim.get("trigger", ""),
+                                "attempts": attempt, "max_attempts": max_attempts,
+                                "reason": (reason or "remote harness exit %s" % exit_code)[:240],
+                                "retry_epoch": retry_epoch,
+                                "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else "")}
+        record = {"claim_id": claim_id, "run_id": claim.get("run_id"), "run_no": claim.get("run_no"),
+                  "ticket": claim.get("ticket", ""), "started_at": claim.get("started_at"),
+                  "ended_at": now(), "exit": int(exit_code), "status": status,
+                  "attempt": attempt, "fence": int(fence), "reason": reason[:240] if reason else ""}
+        state["last_run"] = record
+        state.pop("claim", None)
+        ended.append((record, status))
+        return {"status": status, "run_id": record["run_id"], "attempt": attempt,
+                "max_attempts": max_attempts, "idempotent": False,
+                "retry_at": (state.get("failure") or {}).get("retry_at", "")}
+
+    result = _remote_update(board, owner, mutate)
+    if ended:
+        record, status = ended[0]
+        traj_event(board, "run_end", agent=owner, ticket=record.get("ticket") or None,
+                   run_no=record.get("run_no"), run_id=record.get("run_id"),
+                   started_at=record.get("started_at"), ended_at=record.get("ended_at"),
+                   duration_s=_iso_span_secs(record.get("started_at"), record.get("ended_at")),
+                   exit=int(exit_code), outcome=status, harness_cmd="remote", fence=int(fence),
+                   attempt=record.get("attempt"), input_tokens=input_tokens,
+                   output_tokens=output_tokens, cost_usd=cost_usd,
+                   usage_error=None if any(v is not None for v in
+                                           (input_tokens, output_tokens, cost_usd)) else "unreported")
+    return result
+
+
+def cmd_remote(a, board):
+    """Fenced local-board protocol used by a remote model/session bridge."""
+    owner = _hook_agent(a.agent)
+    operation = a.remote_cmd
+    try:
+        pinned = whoami()
+        if operation != "status" and pinned != owner:
+            raise RemoteProtocolError(
+                "remote wrapper identity is %s, not requested agent %s" % (pinned, owner))
+        registered, _ = harness_of(board, owner)
+        if operation not in ("status", "release") and registered != "remote":
+            raise RemoteProtocolError(
+                "agent %s is registered for harness %s, not remote" % (owner, registered))
+        if operation == "register":
+            bridge_id = _hook_agent(a.bridge_id)
+            result = _remote_register(board, owner, bridge_id, a.ttl, a.max_attempts,
+                                      replace=a.replace, worktree=a.worktree)
+        elif operation == "heartbeat":
+            result = _remote_update(board, owner, lambda state: {
+                "status": "online", "fence": int(_remote_require_lease(
+                    state, a.lease_id, a.fence)["fence"]),
+                "expires_at": state["lease"]["expires_at"]})
+        elif operation == "next":
+            wait = max(0, min(int(a.wait or 0), REMOTE_LONG_POLL_MAX))
+            deadline = _remote_epoch() + wait
+            while True:
+                result = _remote_claim_once(board, owner, a.lease_id, a.fence,
+                                            prompt_kind=a.prompt_kind)
+                if result.get("status") not in ("idle", "handled") or _remote_epoch() >= deadline:
+                    break
+                import time as _time
+                _time.sleep(min(0.25, max(0, deadline - _remote_epoch())))
+        elif operation == "start":
+            result = _remote_run_start(board, owner, a.lease_id, a.fence, a.claim_id)
+        elif operation == "end":
+            for value, label in ((a.input_tokens, "input tokens"),
+                                 (a.output_tokens, "output tokens"), (a.cost_usd, "cost")):
+                if value is not None and value < 0:
+                    raise RemoteProtocolError("%s cannot be negative" % label)
+            result = _remote_run_end(board, owner, a.lease_id, a.fence, a.claim_id,
+                                     a.exit, input_tokens=a.input_tokens,
+                                     output_tokens=a.output_tokens, cost_usd=a.cost_usd,
+                                     reason=a.reason)
+        elif operation == "retry":
+            abandoned = []
+
+            def retry(state):
+                _remote_require_lease(state, a.lease_id, a.fence)
+                claim = state.get("claim") or {}
+                if claim and claim.get("id") != (a.claim_id or claim.get("id")):
+                    raise RemoteProtocolError("claim is absent or fenced")
+                if claim.get("started_at"):
+                    abandoned.append(dict(claim))
+                # An uncertain in-flight recovery continues the prior attempt
+                # count. A deliberate retry after a terminal failure grants a
+                # fresh bounded budget instead of failing again immediately.
+                attempts = int(claim.get("attempt") or 0) if claim else 0
+                trigger = claim.get("trigger") or (state.get("failure") or {}).get("trigger", "")
+                if claim:
+                    state.pop("claim", None)
+                state["failure"] = {"state": "retrying", "trigger": trigger,
+                                    "attempts": attempts, "max_attempts": int(
+                                        state.get("max_attempts") or REMOTE_MAX_ATTEMPTS),
+                                    "reason": "operator-authorized retry", "retry_epoch": 0,
+                                    "retry_at": ""}
+                return {"status": "retrying", "attempts": attempts}
+
+            result = _remote_update(board, owner, retry)
+            if abandoned:
+                old = abandoned[0]
+                traj_event(board, "run_end", agent=owner, ticket=old.get("ticket") or None,
+                           run_no=old.get("run_no"), run_id=old.get("run_id"),
+                           started_at=old.get("started_at"), ended_at=now(), exit=75,
+                           outcome="lease_lost", harness_cmd="remote", fence=int(a.fence))
+        elif operation == "release":
+            def release(state):
+                lease = _remote_require_lease(state, a.lease_id, a.fence, renew=False)
+                lease["expires_epoch"] = 0
+                lease["expires_at"] = now()
+                claim = state.get("claim") or {}
+                if claim and not claim.get("started_at"):
+                    claim["delivered_at"] = ""
+                return {"status": "offline", "fence": int(lease["fence"])}
+            result = _remote_update(board, owner, release)
+        elif operation == "status":
+            result = _remote_public_state(load_remote_state(board, owner))
+        else:
+            raise RemoteProtocolError("remote operation required")
+    except (RemoteProtocolError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}), file=sys.stderr)
+        raise SystemExit(2)
+    print(json.dumps(result, sort_keys=True))
 
 
 def _watch_note_limit_from_log(board, owner, log_slice):
@@ -7116,6 +7612,8 @@ def cmd_drive(a, board):
         argv += ["--cmd", a.cmd_template]
     if a.model:
         argv += ["--model", a.model]
+    if getattr(a, "wake_mode", None):
+        argv += ["--wake-mode", a.wake_mode]
     import subprocess
     if a.restart:
         subprocess.call([sys.executable, os.path.realpath(__file__), "spawn", owner, "--stop"])
@@ -8618,14 +9116,21 @@ def cmd_watch(a, board):
     # be a FRESH prompt every time -- the whole point of the watcher is that the
     # board changed since the last run.
     templated = any(ph in cmd for ph in HARNESS_PLACEHOLDERS)
-    every = max(WATCH_MIN_INTERVAL, int(a.every))
+    wake_mode = wake_mode_of(board, owner)
+    requested_every = max(1, int(a.every))
+    # Continuous adapters are the event bridge for already-ended model turns.
+    # Keep their durable poll inside the local <5s acceptance target even when
+    # the generic worker default is 60s. This is a cheap file read, not a model
+    # call; the message gates still decide whether any paid turn starts.
+    every = min(WATCH_MIN_INTERVAL, requested_every) if wake_mode == "continuous" else max(
+        WATCH_MIN_INTERVAL, requested_every)
     harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
-    lock = None
-    if not a.once:
-        lock = _watch_lock(board, owner)
-        if lock is None:
-            sys.exit("another watcher for %s is already running (see %s)" % (
-                owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
+    # Cron/--once used to bypass this lock and could overlap a persistent
+    # adapter. All launch paths now share one lease per seat.
+    lock = _watch_lock(board, owner)
+    if lock is None:
+        sys.exit("another watcher for %s is already running (see %s)" % (
+            owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     # T-243: strip Git's LOCATION vars before handing the parent's environment
     # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
@@ -8661,11 +9166,12 @@ def cmd_watch(a, board):
             pass
 
     runs = failures = 0
-    skipped_trigger = None
     try:
         if not a.once:
-            print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, every, cwd, cmd))
-            _safe(lambda: checkin(board, owner, None, "watch loop online (every %ds)" % every), None)
+            print("watching %s for %s every %ds; wake=%s; cwd=%s; cmd=%s" % (
+                board, owner, every, wake_mode, cwd, cmd))
+            _safe(lambda: checkin(board, owner, None, "watch loop online (%s, every %ds)" % (
+                wake_mode, every)), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
             if os.path.exists(_stop_file(board, owner)):
@@ -8691,11 +9197,22 @@ def cmd_watch(a, board):
             if force and not actionable(p):
                 p = dict(p or {}, forced=True)
             trigger_fp = _watch_trigger_fingerprint(board, owner, p) if actionable(p) else None
-            if actionable(p) and skipped_trigger is not None and trigger_fp == skipped_trigger:
-                log("%s skip retrigger on unchanged trigger after exit!=0" % now())
+            trigger_key = _remote_trigger_key(trigger_fp)
+            retry_state = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
+            same_failure = bool(trigger_key and retry_state.get("trigger") == trigger_key)
+            retry_deferred = (not a.once and same_failure and not force and
+                              (retry_state.get("state") == "failed" or
+                               float(retry_state.get("retry_epoch") or 0) > _remote_epoch()))
+            if actionable(p) and retry_deferred:
+                log("%s skip retrigger on unchanged trigger; state=%s attempts=%s retry_at=%s" % (
+                    now(), retry_state.get("state"), retry_state.get("attempts"),
+                    retry_state.get("retry_at") or "manual"))
                 if a.verbose:
-                    print("%s skip retrigger (same unread trigger)" % now())
+                    print("%s dispatch %s (attempts=%s; queued trigger unchanged)" % (
+                        now(), retry_state.get("state"), retry_state.get("attempts")))
             elif actionable(p):
+                if not same_failure:
+                    failures = 0
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
                 print("%s work found (%s) wake=%s stop=%s -> run %d" % (
@@ -8816,10 +9333,30 @@ def cmd_watch(a, board):
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
                     run_slice = _read_run_slice(log_path, log_before)
                     _safe(lambda rs=run_slice: _watch_note_limit_from_log(board, owner, rs), None)
-                if rc not in (0, None):
-                    skipped_trigger = trigger_fp
-                else:
-                    skipped_trigger = None
+                if not a.once and rc not in (0, None):
+                    previous = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
+                    attempts = (int(previous.get("attempts") or 0) + 1
+                                if previous.get("trigger") == trigger_key else 1)
+                    retrying = attempts < LOCAL_DISPATCH_MAX_ATTEMPTS
+                    delay = min(every * (2 ** max(0, attempts - 1)), 60) if retrying else 0
+                    retry_epoch = _remote_epoch() + delay if delay else 0
+                    failure_record = {
+                        "state": "retrying" if retrying else "failed",
+                        "trigger": trigger_key, "attempts": attempts,
+                        "max_attempts": LOCAL_DISPATCH_MAX_ATTEMPTS,
+                        "reason": "local harness exit %s" % rc,
+                        "retry_epoch": retry_epoch,
+                        "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else ""),
+                        "at": now(),
+                    }
+                    _safe(lambda fr=failure_record: _agent_set(board, owner, adapter_failure=fr), None)
+                    log("%s skip retrigger armed for unchanged failed trigger; bounded attempt %d/%d state=%s" % (
+                        now(), attempts, LOCAL_DISPATCH_MAX_ATTEMPTS, failure_record["state"]))
+                elif not a.once:
+                    def clear_failure(rec):
+                        rec.pop("adapter_failure", None)
+                    _safe(lambda: _agent_update(board, owner, clear_failure), None)
                 failures = failures + 1 if rc not in (0, None) else 0
                 if max_runs and runs >= max_runs:
                     print("max-runs reached")
@@ -8906,11 +9443,13 @@ def cmd_boot(a, board):
     # 1. identity + roles
     wf = load_workforce(board)
     roles = load_roles(board)
-    if owner not in wf or (a.roles is not None):
+    if (owner not in wf or a.roles is not None or getattr(a, "wake_mode", None) is not None
+            or getattr(a, "harness", "") or getattr(a, "cmd_template", "")):
         ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                                 harness=getattr(a, "harness", "") or "",
                                 cmd_template=getattr(a, "cmd_template", "") or "",
-                                model=a.model, best_for="")
+                                model=a.model, best_for="",
+                                wake_mode=getattr(a, "wake_mode", None))
         _silent(lambda: cmd_join(ns, board))
         steps.append("joined as %s (roles=%s)" % (owner, a.roles or roles.get(owner, [])))
     else:
@@ -9044,7 +9583,7 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 # runtime's side of the contract never changes -- it hands the harness a prompt
 # and a working directory, and reads the board afterwards. docs/byoa.md is the
 # operator-facing version of this.
-BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude")
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote")
 # Documented shell-template placeholders for custom harnesses. `harness check`
 # refuses templates with any other {name} token or without {prompt_file}.
 HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
@@ -9174,6 +9713,9 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         # would launch a binary literally named "custom".
         sys.exit("%s is registered as a custom harness with no command; "
                  "re-register it: tickets join %s --harness custom --cmd '<shell template>'" % (owner, owner))
+    if tool == "remote":
+        sys.exit("%s uses a remote adapter; connect the generated remote hook/bridge "
+                 "or register a custom command. Refusing to substitute a local model." % owner)
     prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
         master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
     prompt = prompt_expr or '"$(%s)"' % prompt
@@ -9237,8 +9779,8 @@ def cmd_spawn(a, board):
     root = os.path.dirname(board)
     if a.list:
         wf = load_workforce(board)
-        print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
-            "agent", "watcher", "harness", "model", "check", "seen", "worktree"))
+        print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
+            "agent", "watcher", "harness", "wake", "model", "check", "seen", "worktree"))
         for r in sorted(load_agents(board), key=lambda r: r["owner"]):
             pids = _live_watch_pids(r["owner"], board=board)
             wc = len(pids)
@@ -9246,9 +9788,10 @@ def cmd_spawn(a, board):
             if wc > 1:
                 wlabel += " !!"
             entry = wf.get(r["owner"], {})
-            print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+            print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
                 r["owner"][:14], wlabel,
                 (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                wake_mode_of(board, r["owner"], workforce=wf)[:10],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
                 (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
@@ -9303,13 +9846,18 @@ def cmd_spawn(a, board):
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                             harness=getattr(a, "harness", "") or "",
                             cmd_template=getattr(a, "cmd_template", "") or "",
-                            model=a.model, best_for=a.best_for or "")
+                            model=a.model, best_for=a.best_for or "",
+                            wake_mode=getattr(a, "wake_mode", None))
     _silent(lambda: cmd_join(ns, board))
     # --tool/--harness no longer defaults to "claude" in the parser: an absent
     # flag must mean "use what `tickets join` registered for this agent",
     # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
     harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
                                        getattr(a, "cmd_template", ""))
+    if harness == "remote" and not (cmd_template or a.exec):
+        sys.exit("remote adapter is offline; no local executable was selected. "
+                 "Run `tickets hooks remote --agent %s`, connect its long-poll/callback bridge, "
+                 "or pass --cmd for a local adapter. Pending wakes remain queued." % owner)
     wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
     if not os.path.isdir(wt):
         base = a.base or _trunk()
@@ -9357,8 +9905,9 @@ def cmd_spawn(a, board):
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
             "--prompt-kind", kind,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
+    effective_wake_mode = wake_mode_of(board, owner)
     max_runs = spawn_watch_max_runs(
-        cos=bool(a.cos), persist=bool(getattr(a, "persist", False)),
+        wake_mode=effective_wake_mode, persist=bool(getattr(a, "persist", False)),
         max_runs=getattr(a, "max_runs", None))
     if max_runs == 0:
         argv += ["--persist", "--max-runs", "0"]
@@ -9380,9 +9929,9 @@ def cmd_spawn(a, board):
     _time.sleep(1.0)
     pid = _watcher_pid(board, owner)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; harness=%s; model=%s; persist=%s; max-runs=%s; log %s" % (
+    print("watcher for %s started%s; harness=%s; model=%s; wake=%s; persist=%s; max-runs=%s; log %s" % (
         owner, (" (pid %d)" % pid) if pid else "", harness, model,
-        "yes" if max_runs == 0 else "no", max_runs, log_path))
+        effective_wake_mode, "yes" if max_runs == 0 else "no", max_runs, log_path))
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
@@ -10317,9 +10866,10 @@ async function load(manual){
     const auth=a.auth==='login_required'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Login required · '+esc(a.auth_login_cmd||'agent login')+'</span>':'';
     const quota=a.auth==='quota'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Usage quota</span>':'';
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
+    const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span>'+auth+quota+lim+'</div>'+
-      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.adapter_online?' ●':'')+'</span>'+auth+quota+lim+wake+'</div>'+
+      '<div class="mute mono">'+esc(a.model||'—')+' · '+esc(a.harness||'—')+' · '+esc(a.wake_mode||'task-only')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
@@ -10814,12 +11364,65 @@ def _board_snapshot_body(board, messages=40):
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
+        agent_wf = wf.get(r["agent"], {}) or {}
+        harness_name = agent_wf.get("harness") or agent_wf.get("tool") or "claude"
         lim = rec.get("limit")
         wc = _watcher_count(r["agent"], board)
-        out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
+        wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
+        wake_pending = actionable(wake)
+        remote = (_remote_public_state(load_remote_state(board, r["agent"]))
+                  if harness_name == "remote" else {})
+        local_failure = rec.get("adapter_failure") or {}
+        failure_state = remote.get("failure_state", "") or local_failure.get("state", "")
+        failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
+        adapter_online = bool(remote.get("online")) if harness_name == "remote" else wc == 1
+        watcher_count = wc + (1 if remote.get("online") else 0)
+        if wc > 1 or (harness_name == "remote" and wc > 0):
+            adapter_state = "conflict"
+            adapter_reason = "Multiple adapters detected; stop extras so one identity-pinned lease remains."
+            adapter_online = False
+        elif failure_state == "failed":
+            adapter_state = "failed"
+            adapter_reason = failure_reason or "Dispatch exhausted its bounded retries; work remains queued."
+        elif failure_state == "retrying":
+            adapter_state = "retrying"
+            adapter_reason = failure_reason or "Dispatch failed and is waiting for its bounded retry."
+        elif remote.get("run_state") and adapter_online:
+            adapter_state = remote["run_state"]
+            adapter_reason = "Remote run is active under fence %s." % remote.get("fence")
+        elif remote.get("run_state"):
+            adapter_state = ("recovery-required" if remote["run_state"] == "recovery-required"
+                             else "queued-offline")
+            adapter_reason = "Remote run lost its adapter lease; reconnect to recover it."
+        elif wake_pending and not adapter_online:
+            adapter_state = "queued-offline"
+            adapter_reason = "Wake queued — adapter offline; delivery resumes when it reconnects."
+        elif wake_pending:
+            adapter_state = "queued"
+            adapter_reason = "Wake queued for the connected adapter."
+        elif adapter_online:
+            adapter_state = "online"
+            adapter_reason = "Adapter connected; no wake pending."
+        else:
+            adapter_state = "offline"
+            adapter_reason = "Adapter offline; directed work will remain queued."
+        out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
+                           "harness": harness_name,
+                           "wake_mode": wake_mode_of(board, r["agent"], master_state=m, workforce=wf),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
-                           "watcher": wc > 0,
-                           "watcher_count": wc,
+                           "watcher": adapter_online,
+                           "watcher_count": watcher_count,
+                           "adapter_online": adapter_online,
+                           "adapter_state": adapter_state,
+                           "adapter_reason": adapter_reason,
+                           "adapter_bridge_id": remote.get("bridge_id", ""),
+                           "adapter_fence": remote.get("fence", 0),
+                           "adapter_heartbeat_at": remote.get("heartbeat_at", ""),
+                           "adapter_run_id": remote.get("run_id", ""),
+                           "adapter_attempts": remote.get("attempt", 0) or local_failure.get("attempts", 0),
+                           "adapter_retry_at": remote.get("retry_at", "") or local_failure.get("retry_at", ""),
+                           "wake_pending": wake_pending,
+                           "wake_reason": wake_reason_of(wake),
                            "roles": roles.get(r["agent"]) or [],
                            "auth": (rec.get("auth_check") or {}).get("state", ""),
                            "auth_detail": (rec.get("auth_check") or {}).get("detail", ""),
@@ -10861,7 +11464,7 @@ def _board_snapshot_body(board, messages=40):
     turns, usage, promise = _cached_turns_usage_promise(board, tickets)
     raw_msgs = []
     for x in load_messages(board)[-messages:]:
-        row = {"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
+        row = {"id": _msg_id(x), "at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
                "kind": x.get("kind") or "message",
                "delivery": _message_delivery(board, x, agents_by=agents)}
@@ -10910,7 +11513,7 @@ def _board_snapshot_body(board, messages=40):
             "state": objective_state(obj) if obj else "",
             "exit_criterion": (obj or {}).get("exit_criterion") or "",
             "exit_missing": bool(obj) and objective_exit_missing(obj),
-            "wake_gates": "task messages, stuck/blocked, held tickets, ready assigned work; ACKs and ordinary DMs notify-only",
+            "wake_gates": "continuous seats: directed DM/@mention; task-only/scheduled seats: explicit tasks; all: stuck/blocked, held, assigned work",
             "stop_condition": STOP_CONDITION,
         },
         "coverage": coverage,
@@ -11634,10 +12237,33 @@ exec %s \"$@\"
        shlex.quote(owner), (" --prompt-kind " + shlex.quote(prompt_kind)) if prompt_kind else "",
        shlex.quote(script))
         _atomic_hook_write(wrapper, wrapper_text, 0o700)
-        payload = {"schema": 1, "agent": owner, "board": os.path.abspath(board),
-                   "wrapper": os.path.abspath(wrapper), "commands": commands}
+        pinned = shlex.quote(os.path.abspath(wrapper))
+        remote_base = "%s remote" % pinned
+        payload = {"schema": 2, "agent": owner, "board": os.path.abspath(board),
+                   "wrapper": os.path.abspath(wrapper), "commands": commands,
+                   "adapter": {
+                       "wake_mode": wake_mode_of(board, owner),
+                       "protocol": "fenced-wake-v1",
+                       "delivery": "atomic-claim-long-poll",
+                       "register_command": "%s register --agent %s --bridge-id {bridge_id}" % (
+                           remote_base, shlex.quote(owner)),
+                       "heartbeat_command": "%s heartbeat --agent %s --lease-id {lease_id} --fence {fence}" % (
+                           remote_base, shlex.quote(owner)),
+                       "next_command": "%s next --agent %s --lease-id {lease_id} --fence {fence} --wait 25%s" % (
+                           remote_base, shlex.quote(owner),
+                           (" --prompt-kind " + shlex.quote(prompt_kind)) if prompt_kind else ""),
+                       "start_command": "%s start --agent %s --lease-id {lease_id} --fence {fence} --claim-id {claim_id}" % (
+                           remote_base, shlex.quote(owner)),
+                       "end_command": "%s end --agent %s --lease-id {lease_id} --fence {fence} --claim-id {claim_id} --exit {exit}" % (
+                           remote_base, shlex.quote(owner)),
+                       "release_command": "%s release --agent %s --lease-id {lease_id} --fence {fence}" % (
+                           remote_base, shlex.quote(owner)),
+                       "dedupe": "atomic trigger claim under one exclusive fenced bridge lease",
+                       "offline": "wake stays queued; register/reconnect before claiming it",
+                   }}
         _atomic_hook_write(manifest, json.dumps(payload, indent=2, sort_keys=True) + "\n", 0o600)
         print("Remote hook wrapper for %s: %s" % (owner, wrapper))
+        print("Manifest schema 2: register one fenced bridge, long-poll next, then start/end each claimed run.")
         print("No arguments prints the %s task-wake prompt; normal ticket commands stay pinned to this identity."
               % (prompt_kind or "worker"))
         return
@@ -12045,7 +12671,7 @@ def main():
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--harness", default="",
                    help="label for watch/spawn, not invoked at join: claude | codex | "
-                        "cursor | cursor+claude | custom | custom:<cmd> | <executable>. "
+                        "cursor | cursor+claude | remote | custom | custom:<cmd> | <executable>. "
                         "omit prints harness=claude (default) and does not start Claude")
     c.add_argument("--tool", default="", help="original spelling of --harness")
     # dest is cmd_template, not cmd: `sub = p.add_subparsers(dest="cmd")` above
@@ -12056,6 +12682,8 @@ def main():
                    help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
+                   help="durable DM policy: continuous wakes on directed messages; task-only needs --task; scheduled uses heartbeat/task gates")
     c.add_argument("--knowledge-dir", default="",
                    help="canonical repo-backed knowledge/ directory inherited by this seat")
     c.set_defaults(fn=cmd_join)
@@ -12121,6 +12749,44 @@ def main():
     c.add_argument("--force", action="store_true", help="treat as actionable even without a wake gate (manual override)")
     c.set_defaults(fn=cmd_pending)
 
+    c = sub.add_parser("remote", help="fenced bridge protocol: register | heartbeat | next | start | end | retry | release | status")
+    rs = c.add_subparsers(dest="remote_cmd")
+    x = rs.add_parser("register", help="acquire the one remote bridge lease")
+    x.add_argument("--agent", required=True)
+    x.add_argument("--bridge-id", required=True)
+    x.add_argument("--ttl", type=int, default=REMOTE_LEASE_TTL)
+    x.add_argument("--max-attempts", type=int, default=REMOTE_MAX_ATTEMPTS)
+    x.add_argument("--replace", action="store_true", help="fence an online lease with the same bridge id")
+    x.add_argument("--worktree", default="", help="remote execution working tree, for run receipts")
+    x = rs.add_parser("heartbeat", help="renew an acquired bridge lease")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x = rs.add_parser("next", help="long-poll and atomically claim one wake")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x.add_argument("--wait", type=int, default=25, help="long-poll seconds, capped at 30")
+    x.add_argument("--prompt-kind", default="", choices=("", "master", "cos"))
+    x = rs.add_parser("start", help="record that the claimed remote model turn started")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", required=True)
+    x = rs.add_parser("end", help="finish a remote turn and report measured usage")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", required=True)
+    x.add_argument("--exit", type=int, required=True)
+    x.add_argument("--input-tokens", type=int, default=None)
+    x.add_argument("--output-tokens", type=int, default=None)
+    x.add_argument("--cost-usd", type=float, default=None)
+    x.add_argument("--reason", default="")
+    x = rs.add_parser("retry", help="authorize retry after failure or uncertain lease loss")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", default="")
+    x = rs.add_parser("release", help="release the bridge lease")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x = rs.add_parser("status", help="show public adapter state without its bearer lease")
+    x.add_argument("--agent", required=True)
+    c.set_defaults(fn=cmd_remote)
+
     c = sub.add_parser("prompt", help="print the standard worker (or --master) prompt for a headless run")
     c.add_argument("--agent", default="")
     c.add_argument("--master", action="store_true", help="the master/planner loop (or full master loop if no cos)")
@@ -12153,6 +12819,7 @@ def main():
                    help="claude | codex | cursor | cursor+claude | custom:<cmd> (default: the registered harness)")
     c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--model", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None)
     c.add_argument("--restart", action="store_true", help="stop an existing watcher for this seat first")
     c.set_defaults(fn=cmd_drive)
 
@@ -12201,6 +12868,7 @@ def main():
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--model", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None)
     c.add_argument("--worktree", default="", help="codex: scope the hook to this worktree")
     c.add_argument("--settings", default="", help="claude: settings.json to write (default ~/.claude/settings.json)")
     c.add_argument("--hooks-file", default="", help="codex: hooks.json to write (default ~/.codex/hooks.json)")
@@ -12224,6 +12892,8 @@ def main():
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--best-for", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
+                   help="persist the seat's wake policy (master/CoS default continuous; workers task-only)")
     c.add_argument("--brief", default="", help="standing context for this worker")
     c.add_argument("--worktree", default="", help="default .worktrees/<name>")
     c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
@@ -12232,10 +12902,10 @@ def main():
     c.add_argument("--heartbeat", type=int, default=0,
                    help="with --master: also wake every N minutes to drive the objective (0 = off)")
     c.add_argument("--persist", action="store_true",
-                   help="keep the watcher looping (default is one model run then stop; implied by --cos)")
+                   help="keep the watcher looping (default follows --wake-mode; continuous/scheduled persist)")
     c.add_argument("--max-runs", type=int, default=None,
-                   help="passed to watch; workers default 1; --cos defaults 0 (persist); "
-                        "pass 1 for a CoS one-shot")
+                   help="passed to watch; task-only defaults 1; continuous/scheduled default 0; "
+                        "pass 1 for a diagnostic one-shot")
     c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
     c.add_argument("--master", action="store_true",
                    help="spawn the board master/planner (scope, routing by complexity, escalations)")
@@ -12318,7 +12988,7 @@ def main():
     c.add_argument("--to", default="", help="seat / agent name, or omit for everyone")
     c.add_argument("--re", default="", help="ticket id this is about")
     c.add_argument("--task", action="store_true",
-                   help="explicit task message: wakes the addressee (ordinary DMs and ACKs do not)")
+                   help="explicit task message: wakes every mode (ordinary DMs wake only continuous; ACKs never auto-wake)")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_msg)
 

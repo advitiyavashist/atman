@@ -89,6 +89,29 @@ tickets join remote --roles backend --harness custom --cmd \
   'curl -sS -X POST https://my-agent.internal/run --data-urlencode prompt@{prompt_file} -d "{\"agent\":\"x\"}"'
 ```
 
+For a model session that stays connected elsewhere, use the explicit remote
+adapter contract instead of naming an executable that is not installed here:
+
+```sh
+tickets join grok-worker --roles cos --harness remote --wake-mode continuous
+tickets hooks remote --agent grok-worker --prompt-kind cos
+```
+
+The generated schema-2 manifest gives the remote service an identity-pinned
+wrapper and command templates to register one fenced lease, heartbeat,
+long-poll and atomically claim `next`, record `start`/`end`, and release. Directed
+DMs and `@mentions` wake a `continuous` seat immediately. A disconnected adapter
+leaves the wake queued and visible in `tickets ui`; reconnecting can claim it.
+Atman never substitutes Cursor, Claude, or Codex for a remote identity. Use
+`--wake-mode task-only` when the seat should run only for explicit `--task`
+messages, or `scheduled` when heartbeat and explicit task gates should drive a
+persistent adapter without ordinary DMs spending a turn. `scheduled` does not
+create a schedule; configure a heartbeat or external cadence separately.
+
+This adapter protocol is part of the root/live `tickets.py` installed by
+`install.sh`. The current `pyproject.toml` entry point is the smaller core-board
+CLI and does not expose runtime wake commands.
+
 Use the file, not `$(cat {prompt_file})`. A worker prompt is the standing
 brief plus ticket context -- 1.5 KB on an empty board, far more on a real one
 -- and inlining it into a command line is how you meet `ARG_MAX`.

@@ -315,6 +315,20 @@ tickets spawn --list
 tickets who
 ```
 
+`--wake-mode task-only|continuous|scheduled` is a durable seat policy. Current
+master and CoS seats default to `continuous`; other seats default to
+`task-only`. A continuous adapter remains alive and treats direct DMs and named
+mentions as task wakes. Scheduled adapters remain alive for explicit tasks and
+assignments; the mode itself does not create a clock. Configure an objective
+heartbeat or external cadence separately. The policy does not select a model
+or harness.
+
+For a model session hosted elsewhere, register `--harness remote` and install
+`tickets hooks remote`. The schema-2 manifest exposes identity-pinned
+register/heartbeat/long-poll claim/start/end/release commands under one fenced
+lease. A bare remote `tickets spawn` fails closed: queued work stays visible in
+the dashboard until the real bridge reconnects.
+
 `spawn` with no `--harness` uses whatever `join` registered. Passing
 `--harness` overrides **and** re-registers; a harness switch without a new
 `--cmd` **drops** the old command template on purpose.
