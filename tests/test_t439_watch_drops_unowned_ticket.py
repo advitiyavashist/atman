@@ -41,7 +41,7 @@ def test_watch_once_drops_stale_ticket_and_omits_run_start(board, tmp_path, monk
 
     run(board, "msg", "wake", "--to", "alice", agent="boss", cwd=repo)
     fake = _fake_harness(tmp_path, "echo ok\n")
-    wr = run(board, "watch", "--agent", "alice", "--once", "--exec", str(fake),
+    wr = run(board, "watch", "--agent", "alice", "--once", "--force", "--exec", str(fake),
              "--cwd", str(repo), agent="alice", cwd=repo)
     assert wr.returncode == 0, wr.stderr
 

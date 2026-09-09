@@ -37,7 +37,7 @@ def test_assign_clears_previous_owner_ticket_and_watch_omits(board, tmp_path, mo
 
     run(board, "msg", "wake", "--to", "alice", agent="boss", cwd=repo)
     fake = _fake_harness(tmp_path, "echo ok\n")
-    run(board, "watch", "--agent", "alice", "--once", "--exec", str(fake),
+    run(board, "watch", "--agent", "alice", "--once", "--force", "--exec", str(fake),
         "--cwd", str(repo), agent="alice", cwd=repo)
     start = events(board, kind="run_start", agent="alice")
     assert start, "alice watch should still run (direct msg)"

@@ -17,7 +17,7 @@ def test_watch_once_omits_self_owned_review_without_here(board, tmp_path, monkey
 
     run(board, "msg", "wake", "--to", "alice", agent="boss", cwd=repo)
     fake = _fake_harness(tmp_path, "echo ok\n")
-    wr = run(board, "watch", "--agent", "alice", "--once", "--exec", str(fake),
+    wr = run(board, "watch", "--agent", "alice", "--once", "--force", "--exec", str(fake),
              "--cwd", str(repo), agent="alice", cwd=repo)
     assert wr.returncode == 0, wr.stderr
     start = events(board, kind="run_start", agent="alice")

@@ -64,7 +64,7 @@ def test_here_with_empty_mine_clears_review_ticket_and_watch_omits(board, tmp_pa
 
     run(board, "msg", "wake", "--to", "alice", agent="boss", cwd=repo)
     fake = _fake_harness(tmp_path, "echo ok\n")
-    wr = run(board, "watch", "--agent", "alice", "--once", "--exec", str(fake),
+    wr = run(board, "watch", "--agent", "alice", "--once", "--force", "--exec", str(fake),
              "--cwd", str(repo), agent="alice", cwd=repo)
     assert wr.returncode == 0, wr.stderr
     start = events(board, kind="run_start", agent="alice")
