@@ -715,6 +715,42 @@ def _ensure_private_dir(path):
         pass
 
 
+def session_pid():
+    """The pid of the AGENT SESSION, not of this short-lived CLI process.
+
+    This distinction is the whole liveness story. `join` runs as a subprocess
+    that exits within milliseconds, so recording os.getpid() records a pid that
+    is already dead by the time anyone checks it -- every endpoint would read as
+    stale forever and no wake could ever fire. The harness publishes its own pid
+    in the environment; that is the process whose life the endpoint's validity
+    actually depends on.
+
+    Returns None when no session pid is discoverable, which callers must treat
+    as "cannot judge by pid" rather than "dead" -- see _endpoint_pid_ok.
+    """
+    for var in ("TICKET_SESSION_PID", "CLAUDE_PID"):
+        raw = (os.environ.get(var) or "").strip()
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+
+def _endpoint_pid_ok(pid):
+    """Whether a recorded pid rules the endpoint out.
+
+    Absent or unparseable pid means we could not identify the session that owns
+    the socket when it registered. That is not evidence of death, and treating
+    it as death is how a working endpoint gets reaped. Fall through to the
+    socket-file check instead, which is the fact we actually care about.
+    """
+    if pid in (None, "", 0):
+        return True
+    try:
+        return _pid_alive(int(pid))
+    except (TypeError, ValueError):
+        return True
+
+
 def write_endpoint(board, seat, socket_path, token, pid):
     """Record this session's wake endpoint. Called only from `join
     --persistent`, with values read straight out of the harness's own env
@@ -765,7 +801,7 @@ def live_endpoint(board, seat):
         return None, False
     pid = ep.get("pid")
     sock = ep.get("socket") or ""
-    if not _pid_alive(pid) or not sock or not os.path.exists(sock):
+    if not _endpoint_pid_ok(pid) or not sock or not os.path.exists(sock):
         # Stale for either reason reads the same to a caller: the record on
         # disk promised a live session and no longer can. Removing it here
         # means the NEXT check does not pay this same dead lookup again.
@@ -6887,9 +6923,17 @@ def cmd_join(a, board):
         sock = (os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or "").strip()
         token = (os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN") or "").strip()
         if sock:
-            write_endpoint(board, owner, sock, token, os.getpid())
-            print("persistent: wake endpoint registered for %s (pid %d)%s" % (
-                owner, os.getpid(), "" if token else " -- no token in env, auth line will be skipped"))
+            spid = session_pid()
+            write_endpoint(board, owner, sock, token, spid)
+            # spid can legitimately be None: not every harness publishes its
+            # session pid, and that is not a failure -- the socket file is the
+            # fact liveness turns on. Say so rather than formatting None as a
+            # number, which used to abort the whole registration.
+            print("persistent: wake endpoint registered for %s (%s)%s" % (
+                owner,
+                "pid %d" % spid if spid else "no session pid published; "
+                                             "liveness will follow the socket",
+                "" if token else " -- no token in env, auth line will be skipped"))
         else:
             # Not every harness (or every invocation of this one) exposes the
             # socket -- a plain shell, or a non-interactive run, has nothing

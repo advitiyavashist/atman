@@ -417,3 +417,101 @@ def test_spawn_skips_seat_with_live_endpoint(board, cache_dir, sock_dir):
     # Nothing was started: no worktree, no watcher pid file.
     assert not (Path(board).parent / ".worktrees" / "moe").exists()
     assert not (board / "agents" / "moe.watch.pid").exists()
+
+
+# --- the pid the endpoint records -------------------------------------------
+#
+# These exist because the first version of this feature was STRUCTURALLY unable
+# to wake anything, and twelve passing tests said otherwise. `join --persistent`
+# recorded the pid of its own CLI process -- which exits in milliseconds -- so
+# every endpoint read as stale forever and no poke ever fired.
+#
+# The suite missed it for one reason: every test above calls write_endpoint()
+# directly and hands it os.getpid(), the still-running test process. So no test
+# ever exercised `join` CHOOSING a pid, which is where the bug was. The tests
+# agreed with the implementation because they made the same assumption it did.
+#
+# The lesson worth encoding: exercise the command, not the helper it calls, and
+# assert liveness from a process that outlives the registering one.
+
+
+def _recorded_pid(cache_dir, board, seat):
+    tk = _tickets_module()
+    os.environ["TICKETS_CACHE_DIR"] = cache_dir
+    try:
+        with open(tk._endpoint_path(str(board), seat)) as f:
+            return json.load(f).get("pid")
+    finally:
+        os.environ.pop("TICKETS_CACHE_DIR", None)
+
+
+def _persistent_env(cache_dir, sock_path, session_pid):
+    return {
+        "TICKETS_CACHE_DIR": cache_dir,
+        "CLAUDE_CODE_MESSAGING_SOCKET": str(sock_path),
+        "CLAUDE_CODE_MESSAGING_TOKEN": "tok-session",
+        "CLAUDE_PID": "" if session_pid is None else str(session_pid),
+    }
+
+
+def test_join_records_the_session_pid_not_its_own(board, cache_dir, sock_dir):
+    """The recorded pid must outlive `join`, or liveness can never be true."""
+    sock_path = str(Path(sock_dir) / "seat-a.sock")
+    inbox = FakeInbox(sock_path)
+    try:
+        # A pid that is real, alive, and deliberately NOT the join subprocess's.
+        r = run(board, "join", "seat-a", "--roles", "ds", "--persistent",
+                env=_persistent_env(cache_dir, sock_path, os.getpid()))
+        assert r.returncode == 0, r.stderr
+        assert _recorded_pid(cache_dir, board, "seat-a") == os.getpid(), (
+            "endpoint recorded the registering subprocess's pid, which is "
+            "already dead by the time any caller checks it")
+    finally:
+        inbox.close()
+
+
+def test_endpoint_survives_the_process_that_registered_it(board, cache_dir, sock_dir):
+    """Register, let that process exit, then poke from a later one.
+
+    This is the assertion the original suite could not make, because it never
+    let the registering process die before checking liveness.
+    """
+    sock_path = str(Path(sock_dir) / "seat-b.sock")
+    inbox = FakeInbox(sock_path)
+    try:
+        r = run(board, "join", "seat-b", "--roles", "ds", "--persistent",
+                env=_persistent_env(cache_dir, sock_path, os.getpid()))
+        assert r.returncode == 0, r.stderr
+
+        # The `join` subprocess is gone now. A different, later process must
+        # still find this endpoint live.
+        r = run(board, "msg", "task: wake up", "--to", "seat-b", "--owner", "dana",
+                env={"TICKETS_CACHE_DIR": cache_dir})
+        assert r.returncode == 0, r.stderr
+        assert "wake: seat-b -> woken" in r.stdout, r.stdout
+        assert "stale" not in r.stdout, (
+            "the endpoint was reaped once its registering process exited")
+        assert inbox.wait_for_message() is not None, "nothing reached the socket"
+    finally:
+        inbox.close()
+
+
+def test_unknown_session_pid_does_not_reap_a_live_endpoint(board, cache_dir, sock_dir):
+    """No pid means "cannot judge", not "dead".
+
+    A harness that publishes no session pid still has a perfectly good socket.
+    Treating absence of evidence as evidence of death discards a working
+    endpoint, so the socket file has to be what decides.
+    """
+    sock_path = str(Path(sock_dir) / "seat-c.sock")
+    inbox = FakeInbox(sock_path)
+    try:
+        r = run(board, "join", "seat-c", "--roles", "ds", "--persistent",
+                env=_persistent_env(cache_dir, sock_path, None))
+        assert r.returncode == 0, r.stderr
+        r = run(board, "msg", "task: still there?", "--to", "seat-c", "--owner", "dana",
+                env={"TICKETS_CACHE_DIR": cache_dir})
+        assert r.returncode == 0, r.stderr
+        assert "stale" not in r.stdout, r.stdout
+    finally:
+        inbox.close()
