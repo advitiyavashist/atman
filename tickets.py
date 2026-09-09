@@ -6273,12 +6273,42 @@ def _note_native_wake_result(board, seat, label, message_id):
         return
     if not _native_injection_failed(label):
         return
+    harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+    provider = _session_adapters().provider_for_harness(harness) or harness
     _agent_set(board, seat, adapter_failure={
         "state": "failed",
         "trigger": str(message_id or ""),
         "reason": "native wake %s" % label,
         "at": now(),
+        "provider": provider,
+        "harness": harness,
     })
+
+
+def _local_adapter_failure(rec, harness_name):
+    """Native refusal is provider-local. Remote seats use the bridge failure only."""
+    failure = (rec or {}).get("adapter_failure") or {}
+    if not failure:
+        return {}
+    current = _session_adapters().provider_for_harness(harness_name) or harness_name or ""
+    scoped = failure.get("provider") or failure.get("harness") or ""
+    if (harness_name == "remote" or current == "remote") and scoped != "remote":
+        return {}
+    if scoped and current and scoped != current:
+        return {}
+    return failure
+
+
+def _clear_adapter_failure_on_provider_change(board, owner, new_harness):
+    """Drop leftover native failure when the seat's provider/harness changes."""
+    rec = _agent_rec(board, owner) or {}
+    if not rec.get("adapter_failure"):
+        return
+    if _local_adapter_failure(rec, new_harness):
+        return
+    def clear(agent):
+        agent.pop("adapter_failure", None)
+    _agent_update(board, owner, clear)
 
 
 def cmd_inbox(a, board):
@@ -6866,6 +6896,9 @@ def cmd_join(a, board):
         else:
             print("persistent: %s" % reg.get("reason", "registration failed"))
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
+    if harness:
+        _safe(lambda: _clear_adapter_failure_on_provider_change(
+            board, owner, harness), None)
     if first_join:
         # setdefault, not update: if two joins race, the earlier stamp wins and
         # neither can move the watermark forward over unread mail.
@@ -9395,7 +9428,9 @@ def cmd_watch(a, board):
                 p = dict(p or {}, forced=True)
             trigger_fp = _watch_trigger_fingerprint(board, owner, p) if actionable(p) else None
             trigger_key = _remote_trigger_key(trigger_fp)
-            retry_state = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
+            retry_state = _local_adapter_failure(
+                _agent_rec(board, owner) or {},
+                (load_workforce(board).get(owner, {}) or {}).get("harness") or harness)
             same_failure = bool(trigger_key and retry_state.get("trigger") == trigger_key)
             retry_deferred = (not a.once and same_failure and not force and
                               (retry_state.get("state") == "failed" or
@@ -11637,10 +11672,10 @@ def _board_snapshot_body(board, messages=40):
         wake_pending = actionable(wake)
         remote = (_remote_public_state(load_remote_state(board, r["agent"]))
                   if harness_name == "remote" else {})
-        local_failure = rec.get("adapter_failure") or {}
+        sa = _session_adapters()
+        local_failure = _local_adapter_failure(rec, harness_name)
         failure_state = remote.get("failure_state", "") or local_failure.get("state", "")
         failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
-        sa = _session_adapters()
         adapter_extra = sa.public_adapter_state(
             board, r["agent"], harness_name, False, wake_pending)
         native_online = bool(adapter_extra.get("adapter_native_online"))

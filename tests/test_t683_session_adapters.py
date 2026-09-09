@@ -1013,3 +1013,69 @@ def test_codex_hook_heartbeat_requires_matching_identity(board, cache_dir, monke
     after = sa.read_endpoint(str(board), "cx")
     assert after["heartbeat_epoch"] > before_mismatch
     assert after["heartbeat_at"] != registered_at
+
+
+def test_native_failure_clears_on_remote_rejoin_and_live_lease_is_online(
+        board, cache_dir, sock_dir, monkeypatch):
+    from test_t640_continuous_wake import _install_remote, _remote
+
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "leak.sock")
+    Path(sock_path).touch()
+    sa = _adapters()
+    _run(board, "join", "grok-worker", "--roles", "docs", "--harness", "claude",
+         "--wake-mode", "continuous")
+    sa.write_endpoint(str(board), "grok-worker", {
+        "seat": "grok-worker", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "lease_id": "lease-native", "fence": 1, "heartbeat_epoch": time.time()})
+    with mock.patch.object(sa, "_poke_claude", return_value=False):
+        label = sa.wake_seat(str(board), "grok-worker", "hello", harness="claude",
+                             message_id="native-fail")
+    assert label == "refused"
+    tk = _tickets()
+    tk._note_native_wake_result(str(board), "grok-worker", label, "native-fail")
+    rec = tk._agent_rec(str(board), "grok-worker") or {}
+    assert rec.get("adapter_failure", {}).get("state") == "failed"
+    assert rec.get("adapter_failure", {}).get("provider") == "claude"
+
+    _run(board, "join", "grok-worker", "--roles", "docs", "--harness", "remote",
+         "--wake-mode", "continuous")
+    rec = tk._agent_rec(str(board), "grok-worker") or {}
+    assert "adapter_failure" not in rec, rec
+
+    wrapper = _install_remote(board, "grok-worker")
+    registered, lease = _remote(wrapper, "register", "--agent", "grok-worker",
+                                "--bridge-id", "grok-session", "--ttl", "20")
+    assert registered.returncode == 0, registered.stderr
+    assert lease.get("status") == "online"
+    snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
+    grok = next(a for a in snap["agents"] if a["name"] == "grok-worker")
+    assert grok["adapter_online"] is True
+    assert grok["adapter_state"] != "failed"
+    assert grok["adapter_state"] in ("online", "queued")
+    assert grok["adapter_bridge_id"] == "grok-session"
+
+
+def test_unscoped_native_failure_does_not_override_live_remote_lease(board):
+    from test_t640_continuous_wake import _install_remote, _remote
+
+    _run(board, "join", "grok-worker", "--roles", "docs", "--harness", "remote",
+         "--wake-mode", "continuous")
+    tk = _tickets()
+    tk._agent_set(str(board), "grok-worker", adapter_failure={
+        "state": "failed",
+        "reason": "native wake refused",
+        "at": "now",
+    })
+    wrapper = _install_remote(board, "grok-worker")
+    registered, lease = _remote(wrapper, "register", "--agent", "grok-worker",
+                                "--bridge-id", "grok-live", "--ttl", "20")
+    assert registered.returncode == 0, registered.stderr
+    assert lease.get("status") == "online"
+    snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
+    grok = next(a for a in snap["agents"] if a["name"] == "grok-worker")
+    assert grok["adapter_online"] is True
+    assert grok["adapter_state"] != "failed"
+    assert grok["adapter_state"] in ("online", "queued")
+    assert grok["adapter_bridge_id"] == "grok-live"
