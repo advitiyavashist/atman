@@ -53,6 +53,19 @@ checkout free?", where the loose answer is the REFUSING answer: if `/w/a` and
 `w/a` might name one directory, the registry should decline to hand the second
 one out. Tightening it there would turn a refusal into a grant, which is the
 wrong direction for that question.
+
+CASE IS THE SAME LIMIT AS THE DECLARED SYMLINK ONE, AND CHEAPER (T-496,
+cos-opus C3). `/w/C3/x` and `/w/c3/x` are two different segment lists, so two
+agents could hold live leases on what darwin's default case-insensitive
+filesystem treats as ONE directory -- no filesystem access needed, no symlink
+to create, just the shift key. That is exactly the argument that promoted A3
+from a declared limit to a blocker-tier fix, and it applies unchanged here.
+`overlaps` now casefolds before comparing segments, for the same reason it
+tolerates the absolute/relative mismatch: the loose answer there is a
+REFUSAL, which is the safe side of "is this checkout free?" even on a
+case-SENSITIVE filesystem, where a genuine `/w/C3` and `/w/c3` pair would be
+two directories wrongly folded into one. `contains` does NOT get this fold --
+"may this runner run here?" must not GRANT on a guess.
 """
 
 import posixpath
@@ -76,8 +89,11 @@ def normalize(path):
     return collapsed.rstrip("/")
 
 
-def _segments(path):
-    return [part for part in normalize(path).split("/") if part not in ("", ".")]
+def _segments(path, *, casefold=False):
+    parts = [part for part in normalize(path).split("/") if part not in ("", ".")]
+    if casefold:
+        return [part.casefold() for part in parts]
+    return parts
 
 
 def is_absolute(path):
@@ -146,13 +162,100 @@ def overlaps(a, b):
     paths are the same directory, and when either contains the other, because
     an agent working in a parent checkout is working in every child of it.
     Compared segment by segment so a shared name PREFIX (`/w/agent` vs
-    `/w/agent-2`) is correctly two different directories.
+    `/w/agent-2`) is correctly two different directories. Casefolded (T-496,
+    cos-opus C3): a case-insensitive filesystem -- darwin's default, which is
+    what this fleet runs on -- treats `/w/C3/x` and `/w/c3/x` as one
+    directory, and the loose answer here is the REFUSING one, so folding case
+    is the same direction as tolerating the absolute/relative mismatch above.
     """
-    left, right = _segments(a), _segments(b)
+    left, right = _segments(a, casefold=True), _segments(b, casefold=True)
     if not left or not right:
         return False
     shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
     return longer[:len(shorter)] == shorter
+
+
+def is_bare_worktrees_root(path):
+    """True when `path` names a fleet container, not one agent's checkout.
+
+    Operators and agents on this board put seats under `.../.worktrees/<name>`.
+    A runner that registers the bare `.../.worktrees` root is not naming its
+    own checkout -- it is claiming every sibling beneath that directory.
+    """
+    segments = _segments(path)
+    return bool(segments) and segments[-1] == ".worktrees"
+
+
+def _extra_segments(parent, child):
+    outer, inner = _segments(parent), _segments(child)
+    if len(inner) <= len(outer) or inner[:len(outer)] != outer:
+        return ()
+    return inner[len(outer):]
+
+
+def child_is_nested_worktree(parent, child):
+    """True when `child` is a git worktree parked inside `parent`.
+
+    Nested layouts look like `.../desk/.worktrees/integration`. They share a
+    path prefix with the parent seat but are independent checkouts, not
+    subdirectories of one checkout tree.
+    """
+    return ".worktrees" in _extra_segments(parent, child)
+
+
+def _lease_contains(parent, child):
+    """Casefolded containment for the runner-lease scan only (T-495/T-555).
+
+    `contains` stays case-sensitive for operator approvals. The lease half
+    answers "is this checkout free?", where the loose answer is a REFUSAL, so
+    casefolding here matches `overlaps` (T-496) without widening grants.
+    """
+    outer = _segments(parent, casefold=True)
+    inner = _segments(child, casefold=True)
+    if not outer or not inner:
+        return False
+    if is_absolute(parent) != is_absolute(child):
+        return False
+    if ".." in _segments(parent) or ".." in _segments(child):
+        return False
+    return inner[:len(outer)] == outer
+
+
+def lease_precludes_registration(held, requested):
+    """Does a live runner lease block this registration attempt?
+
+    T-495/C2. `overlaps` is symmetric, which is right for "is this checkout
+    free?" on the operator registry, but on the runner-lease half it turns a
+    runner-supplied parent into an exclusive reservation over every child
+    beneath it. The lease scan therefore drops the PARENT direction: an
+    existing lease that merely CONTAINS the requested path does not block,
+    except when the held path is a bare `.worktrees` fleet root (the land-grab
+    case) or when the child is a subdirectory of the same checkout rather than
+    a nested worktree layout.
+
+    The CHILD direction is kept: equal paths still collide, a registration that
+    would wrap an existing narrower lease is refused, and a subdirectory of an
+    occupied checkout is still refused when it is not a nested-worktree path.
+
+    T-555/T-496 composition: segment comparisons here casefold like `overlaps`,
+    so a case-variant path cannot evade the scan while `contains` stays strict
+    for operator approvals.
+    """
+    held_norm = normalize(held)
+    req_norm = normalize(requested)
+    if not held_norm or not req_norm:
+        return False
+    if _segments(held, casefold=True) == _segments(requested, casefold=True):
+        return True
+    if _lease_contains(requested, held):
+        return True
+    if _lease_contains(held, requested):
+        if is_bare_worktrees_root(held):
+            return False
+        if child_is_nested_worktree(held, requested):
+            return False
+        return True
+    return False
 
 
 def contains(parent, child):
