@@ -33,7 +33,7 @@ epic:  E-001  Sample epic: a first slice end to end
   T-001  Sample: design the data model              ready now
   T-002  Sample: build the API on top of the model  after T-001
   T-003  Sample: put a screen on the API            after T-002
-joined as alice  roles=['backend']  can=-  cost=medium
+joined as alice  roles=['backend']  can=-  cost=medium  harness=claude (default)
 
 The three commands that matter:
   TICKET_AGENT=alice tickets next                      claim the next ready ticket
@@ -54,6 +54,12 @@ have refused and written nothing.
 
 **The three sample tickets are a chain**, not three loose items: `T-002` is
 `after T-001`, `T-003` is `after T-002`. That matters in step 3.
+
+**`harness=claude (default)`** is a label on the agent record because
+`--harness` was omitted. Quickstart did not start Claude. The field is used
+when `tickets watch` or `tickets spawn` actually launches a process. A dry
+join plus `tickets next` in your own shell is the same: label only, no Claude
+until someone watches.
 
 ## 2. `tickets next` — the first claim
 

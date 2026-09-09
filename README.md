@@ -133,10 +133,17 @@ working directory, and an identity; the harness reports through `tickets`.
 ```sh
 export TICKET_AGENT=claude-opus
 tickets join "$TICKET_AGENT" --roles backend --cost high --model opus
+# omit --harness: prints harness=claude (default) — a label, not a process
 tickets master
 tickets inbox
 tickets next
 ```
+
+`join` without `--harness` prints `harness=claude (default)`. That is a field on
+the agent record. Claude is not invoked until `tickets watch` or
+`tickets spawn`. Dry BYOA is `join` then `tickets next` in your own shell; pass
+`--harness custom --cmd '...'` when a watcher should run your harness
+([docs/byoa.md](docs/byoa.md)).
 
 The built-in runner names are `claude`, `codex`, `cursor`, and
 `cursor+claude`. A custom runner can be any command:

@@ -6305,6 +6305,12 @@ Grok, a human shell). Replace the name and roles.
     tickets inbox                             # anything addressed to you
     tickets next                              # claim work; prints handoffs
 
+`join` without `--harness` prints `harness=claude (default)`: a label on the
+agent record, not a running process. Claude is not started until `tickets watch`
+or `tickets spawn`. Dry BYOA is join then `tickets next` in your own shell;
+`--harness custom --cmd '...'` is for when a watcher should run your harness
+(docs/byoa.md).
+
 Then the loop, until `tickets next` says nothing is ready:
 
     # work on your own worktree (join prints the exact command)
@@ -8559,6 +8565,8 @@ Spawning a team from a master session (models per agent):
   tickets spawn --list | tickets spawn <name> --stop
 
 Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
+  tickets join without --harness prints harness=claude (default) — a label, not a process.
+  Claude is not started until watch/spawn. Dry join + tickets next is the BYOA plug path.
   tickets join qwen --roles backend --harness custom --cmd 'ollama run qwen3:8b < {prompt_file}'
   tickets harness check qwen          # runs it on 'reply OK' under a 60s cap, records pass/fail + latency
   tickets spawn qwen                  # no --harness: uses what `join` registered
@@ -11045,6 +11053,7 @@ dependency tree with each node's status and owner.
 
     export TICKET_AGENT=<your-unique-name>     # claude-opus, codex, grok ...
     tickets join $TICKET_AGENT --roles backend --can docker,browser --cost high
+    # omit --harness: prints harness=claude (default); label only until watch/spawn
     tickets master                             # briefing + health
     tickets inbox                              # messages addressed to you
 
@@ -11332,7 +11341,9 @@ def main():
     c.add_argument("--can", default=None, help="docker,browser,own-machine,gpu")
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--harness", default="",
-                   help="claude | codex | cursor | cursor+claude | custom | custom:<cmd> | <executable>")
+                   help="label for watch/spawn, not invoked at join: claude | codex | "
+                        "cursor | cursor+claude | custom | custom:<cmd> | <executable>. "
+                        "omit prints harness=claude (default) and does not start Claude")
     c.add_argument("--tool", default="", help="original spelling of --harness")
     # dest is cmd_template, not cmd: `sub = p.add_subparsers(dest="cmd")` above
     # means main() dispatches on a.cmd, and a --cmd flag would overwrite the

@@ -3435,6 +3435,12 @@ Grok, a human shell). Replace the name and roles.
     tickets inbox                             # anything addressed to you
     tickets next                              # claim work; prints handoffs
 
+`join` without `--harness` prints `harness=claude (default)`: a label on the
+agent record, not a running process. Claude is not started until `tickets watch`
+or `tickets spawn`. Dry BYOA is join then `tickets next` in your own shell;
+`--harness custom --cmd '...'` is for when a watcher should run your harness
+(docs/byoa.md).
+
 Then the loop, until `tickets next` says nothing is ready:
 
     # work on your own worktree (join prints the exact command)
@@ -3701,6 +3707,7 @@ dependency tree with each node's status and owner.
 
     export TICKET_AGENT=<your-unique-name>     # claude-opus, codex, grok ...
     tickets join $TICKET_AGENT --roles backend --can docker,browser --cost high
+    # omit --harness: prints harness=claude (default); label only until watch/spawn
     tickets master                             # briefing + health
     tickets inbox                              # messages addressed to you
 
