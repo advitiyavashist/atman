@@ -1841,8 +1841,18 @@ def cmd_board(a, board):
     # window cannot tell which agent they are talking to, and mail addressed to
     # one seat gets acted on by another.
     seat = whoami(board=board)
-    hdr.append("you: %s%s" % (seat, "" if session_key() else " (unkeyed session)"))
+    recorded = read_identity(board)
+    hdr.append("you: %s%s" % (seat, "" if recorded else " (UNCONFIRMED)"))
     print("  " + " | ".join(hdr))
+    if not recorded:
+        # An agent that does not know which seat it occupies cannot decline
+        # mail addressed to another one -- so say so plainly, and say what to
+        # do about it. The name above came from an inherited env var or a pid,
+        # neither of which this session chose.
+        print("  ^ this session has NOT recorded a seat; %r is a guess from the "
+              "environment." % seat)
+        print("    Run `tickets join <your-name> --roles <role>` before acting on "
+              "anything addressed to a seat.")
     for t in tickets:
         if t["status"] != "done" or a.all:
             print("  " + line(t, tickets))
@@ -6024,7 +6034,14 @@ def cmd_msg(a, board):
 
 
 def cmd_inbox(a, board):
-    owner = whoami(a.owner)
+    owner = whoami(a.owner, board=board)
+    if getattr(a, "quiet_if_unidentified", False) and not a.owner:
+        # An unidentified session must not be handed a seat's mail. Printing
+        # another agent's backlog is how one seat's messages get read and acted
+        # on by another; printing a pid handle's empty backlog is just noise.
+        # Silence is the correct output for "I do not know who I am".
+        if owner.startswith("agent-") or (session_key() and not read_identity(board)):
+            return
     seat = (getattr(a, "seat", None) or "").strip()
     scan = None
     if seat:
@@ -11818,6 +11835,9 @@ def main():
                    help="only this agent's seat thread (same messages.jsonl; does not mark read)")
     c.add_argument("--limit", type=int, default=40)
     c.add_argument("--keep", action="store_true", help="do not mark as read")
+    c.add_argument("--quiet-if-unidentified", action="store_true",
+                   help="print nothing when this session has no recorded seat "
+                        "(for hooks: silence beats another seat's backlog)")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_inbox)
 

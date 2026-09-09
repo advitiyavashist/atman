@@ -64,7 +64,7 @@ def seat_of(board, **kw):
     for line in out.splitlines():
         if "you: " in line:
             seat = line.split("you: ", 1)[1].split(" |")[0].strip()
-            return seat.replace("(unkeyed session)", "").strip()
+            return seat.replace("(UNCONFIRMED)", "").strip()
     raise AssertionError("board printed no seat:\n" + out)
 
 
@@ -121,9 +121,48 @@ def test_legacy_flat_file_is_honoured_only_when_there_is_no_session_key(board):
     assert seat_of(board, session="session-A", agent="ambient") == "ambient"
 
 
-def test_unkeyed_session_is_flagged_so_the_ambiguity_is_visible(board):
-    """If we cannot key the session, say so rather than implying certainty."""
-    out = run(board, ["board", "-q"], agent="ambient").stdout
-    assert "unkeyed session" in out
-    out_keyed = run(board, ["board", "-q"], session="session-A", agent="ambient").stdout
-    assert "unkeyed session" not in out_keyed
+def test_unconfirmed_seat_is_flagged_and_the_agent_is_told_what_to_do(board):
+    """An agent that does not know its seat cannot decline another seat's mail.
+
+    So the ambiguity must be stated, not implied -- and stated with the remedy,
+    because the reader here is usually an agent deciding whether a message is
+    addressed to it.
+    """
+    out = run(board, ["board", "-q"], session="fresh", agent="ambient").stdout
+    assert "(UNCONFIRMED)" in out
+    assert "is a guess from the environment" in out
+    assert "tickets join" in out
+
+    run(board, ["join", "alpha", "--roles", "lead"], session="fresh")
+    confirmed = run(board, ["board", "-q"], session="fresh").stdout
+    assert "(UNCONFIRMED)" not in confirmed
+    assert "you: alpha" in confirmed
+
+
+def test_inbox_is_silent_for_a_session_with_no_recorded_seat(board):
+    """For hooks: silence beats handing a session another seat's backlog.
+
+    The original failure was a hook printing one agent's unread mail into
+    another agent's window, where it was read and acted on. If identity cannot
+    be pinned, printing nothing is the only safe output.
+    """
+    run(board, ["join", "alpha", "--roles", "lead"], session="session-A")
+    run(board, ["join", "beta", "--roles", "ds"], session="session-B")
+    run(board, ["msg", "for alpha only", "--to", "alpha"], session="session-B")
+
+    quiet = run(
+        board,
+        ["inbox", "--keep", "--limit", "5", "--quiet-if-unidentified"],
+        session="unrecorded-window",
+        agent="alpha",  # the inherited-name trap: env says alpha, session did not
+    )
+    assert quiet.stdout.strip() == "", quiet.stdout
+    assert "for alpha only" not in quiet.stdout
+
+    # The seat that actually recorded itself still sees its own mail.
+    mine = run(
+        board,
+        ["inbox", "--keep", "--limit", "5", "--quiet-if-unidentified"],
+        session="session-A",
+    )
+    assert "for alpha only" in mine.stdout
