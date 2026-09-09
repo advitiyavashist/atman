@@ -9201,18 +9201,27 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
 
     beat_stop = threading.Event()
     beat_thread = None
-    if on_beat:
-        interval = beat_secs or RUN_HEARTBEAT_SECS
-
-        def beat():
-            while not beat_stop.wait(interval):
-                _safe(on_beat, None)
-
-        _safe(on_beat, None)  # stamp the start of the run, do not wait a tick
-        beat_thread = threading.Thread(target=beat, daemon=True)
-        beat_thread.start()
-
     try:
+        if on_beat:
+            interval = beat_secs or RUN_HEARTBEAT_SECS
+
+            def beat():
+                while not beat_stop.wait(interval):
+                    _safe(on_beat, None)
+
+            # Keep setup inside the InterruptedError boundary. SIGTERM is
+            # delivered to the main thread at any bytecode; wrapping this in
+            # _safe would swallow the signal handler's InterruptedError and
+            # leave the child running until its timeout.
+            try:
+                on_beat()  # stamp the start of the run, do not wait a tick
+            except InterruptedError:
+                raise
+            except Exception:
+                pass
+            beat_thread = threading.Thread(target=beat, daemon=True)
+            beat_thread.start()
+
         rc = proc.wait(timeout=timeout_s)
         timed_out = False
     except subprocess.TimeoutExpired:

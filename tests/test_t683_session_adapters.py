@@ -1054,6 +1054,30 @@ def test_sigterm_child_prompt_emits_run_end(board):
             proc.wait(timeout=5)
 
 
+def test_initial_heartbeat_interrupt_terminates_child(tmp_path, monkeypatch):
+    """SIGTERM during the first beat must not be swallowed by _safe."""
+    tk = _tickets()
+    started = {}
+    original_popen = subprocess.Popen
+
+    def capture_popen(*args, **kwargs):
+        proc = original_popen(*args, **kwargs)
+        started["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", capture_popen)
+
+    def interrupted_beat():
+        raise InterruptedError()
+
+    cmd = "%s -c 'import time; time.sleep(60)'" % sys.executable
+    with pytest.raises(InterruptedError):
+        tk._watch_run_capped(
+            cmd, str(tmp_path), dict(os.environ), str(tmp_path / "watch.log"),
+            60, 4096, on_beat=interrupted_beat, beat_secs=1)
+    assert started["proc"].poll() is not None
+
+
 def test_stale_inflight_message_id_is_reclaimed(board, cache_dir, sock_dir, monkeypatch):
     monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
     sock_path = str(Path(sock_dir) / "reclaim.sock")
