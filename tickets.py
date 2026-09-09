@@ -11705,10 +11705,20 @@ def cmd_hooks(a, board):
             ["env", "TICKET_AGENT=" + agent, "TICKETS_DIR=" + os.path.abspath(board),
              script, "codex-hook", "--agent", agent]
             + (["--worktree", wt] if wt else [])))
+        def same_codex_scope(entry):
+            rendered = json.dumps(entry)
+            if "codex-hook" not in rendered:
+                return False
+            # A global Codex hook file may serve several worktrees. Replace
+            # every Atman-generated identity for this worktree, including
+            # entries written by an older immutable release. Otherwise one
+            # lifecycle event can run twice under conflicting identities.
+            if wt:
+                return ("--worktree %s" % wt) in rendered
+            return "--worktree" not in rendered
         for ev in ("SessionStart", "UserPromptSubmit"):
             lst = hooks.setdefault(ev, [])
-            # replace only our own earlier entry for this agent; keep everything else
-            lst[:] = [e for e in lst if not ("codex-hook --agent %s" % agent) in json.dumps(e)]
+            lst[:] = [e for e in lst if not same_codex_scope(e)]
             lst.append({"hooks": [{"type": "command", "command": cmd, "timeout": 5,
                                    "statusMessage": "Checking the ticket board",
                                    "additionalContextLimit": 2000}]})
@@ -11741,7 +11751,12 @@ def cmd_hooks(a, board):
         entry = {"command": "%s --agent %s" % (shlex.quote(sp), shlex.quote(agent)), "timeout": 15}
         for ev in ("sessionStart", "beforeSubmitPrompt", "stop"):
             lst = cfg.setdefault("hooks", {}).setdefault(ev, [])
-            lst[:] = [x for x in lst if "tickets-board" not in json.dumps(x)]
+            # Replace both the current generated hook and the pre-T-633 global
+            # message-board hook. Leaving the latter installed would run two
+            # identities for one Cursor event and let its ambient identity
+            # disagree with the newly baked one.
+            lst[:] = [x for x in lst if not any(marker in json.dumps(x) for marker in (
+                "tickets-board", "check-message-board.py"))]
             lst.append(dict(entry, **({"loop_limit": 2} if ev == "stop" else {})))
         _atomic_hook_write(hp, json.dumps(cfg, indent=2) + "\n", 0o600)
         print("Cursor: %s + %s for %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings."
@@ -12785,7 +12800,7 @@ def main():
         "kb",
     ):
         if not os.path.isdir(board):
-            if a.cmd == "board":
+            if a.cmd in ("board", "stop-hook"):
                 return
             sys.exit("no board at %s (create a ticket first)" % board)
     # board-restore uses --dest, not the discovered board
