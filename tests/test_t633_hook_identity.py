@@ -81,6 +81,32 @@ def test_codex_and_cursor_hooks_ignore_wrong_ambient_identity(board, tmp_path):
     assert {"codex-a", "cursor-a"} <= set(identities) and "wrong-ambient" not in identities
 
 
+def test_codex_upgrade_replaces_old_identity_in_same_worktree(board):
+    hooks_file = board.parent / "codex-hooks.json"
+    worktree = board.parent / "target-worktree"
+    other_worktree = board.parent / "other-worktree"
+    foreign = {"hooks": [{"type": "command", "command": "echo keep-me"}]}
+    old_same_scope = {"hooks": [{"type": "command", "command":
+        "/old/release/tickets.py codex-hook --agent old-seat --worktree %s" % worktree}]}
+    other_scope = {"hooks": [{"type": "command", "command":
+        "/old/release/tickets.py codex-hook --agent other-seat --worktree %s" % other_worktree}]}
+    hooks_file.write_text(json.dumps({"hooks": {
+        event: [foreign, old_same_scope, other_scope]
+        for event in ("SessionStart", "UserPromptSubmit")
+    }}))
+
+    installed = run(board, "hooks", "codex", "--agent", "new-seat",
+                    "--worktree", str(worktree), "--hooks-file", str(hooks_file))
+    assert installed.returncode == 0, installed.stderr
+    hooks = json.loads(hooks_file.read_text())["hooks"]
+    for entries in hooks.values():
+        commands = [entry["hooks"][0]["command"] for entry in entries]
+        assert "echo keep-me" in commands
+        assert any("--agent other-seat" in command for command in commands)
+        assert not any("--agent old-seat" in command for command in commands)
+        assert sum("--agent new-seat" in command for command in commands) == 1
+
+
 def test_cursor_upgrade_replaces_legacy_message_board_hook(board):
     cursor = board.parent / ".cursor"
     cursor.mkdir()

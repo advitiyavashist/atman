@@ -11548,10 +11548,20 @@ def cmd_hooks(a, board):
             ["env", "TICKET_AGENT=" + agent, "TICKETS_DIR=" + os.path.abspath(board),
              script, "codex-hook", "--agent", agent]
             + (["--worktree", wt] if wt else [])))
+        def same_codex_scope(entry):
+            rendered = json.dumps(entry)
+            if "codex-hook" not in rendered:
+                return False
+            # A global Codex hook file may serve several worktrees. Replace
+            # every Atman-generated identity for this worktree, including
+            # entries written by an older immutable release. Otherwise one
+            # lifecycle event can run twice under conflicting identities.
+            if wt:
+                return ("--worktree %s" % wt) in rendered
+            return "--worktree" not in rendered
         for ev in ("SessionStart", "UserPromptSubmit"):
             lst = hooks.setdefault(ev, [])
-            # replace only our own earlier entry for this agent; keep everything else
-            lst[:] = [e for e in lst if not ("codex-hook --agent %s" % agent) in json.dumps(e)]
+            lst[:] = [e for e in lst if not same_codex_scope(e)]
             lst.append({"hooks": [{"type": "command", "command": cmd, "timeout": 5,
                                    "statusMessage": "Checking the ticket board",
                                    "additionalContextLimit": 2000}]})
