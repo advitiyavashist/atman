@@ -6243,23 +6243,21 @@ def _native_wake_succeeded(label):
 
 
 def _note_native_wake_result(board, seat, label, message_id):
-    """Failed native injection stays queued; bounded retry then supervised recovery."""
+    """Failed native injection stays queued; do not claim retrying without a retry loop.
+
+    Bounded retries happen inside wake_seat on the same durable message_id.
+    After those are exhausted the native endpoint is dropped so supervised
+    recovery can run.
+    """
     if _native_wake_succeeded(label):
         def clear(rec):
             rec.pop("adapter_failure", None)
         _agent_update(board, seat, clear)
         return
-    previous = ((_agent_rec(board, seat) or {}).get("adapter_failure") or {})
-    trigger = "native-wake:%s" % (message_id or "")
-    attempts = (int(previous.get("attempts") or 0) + 1
-                if previous.get("trigger") == trigger else 1)
-    retrying = attempts < LOCAL_DISPATCH_MAX_ATTEMPTS
-    if not retrying:
-        _session_adapters().remove_endpoint(board, seat)
+    _session_adapters().remove_endpoint(board, seat)
     _agent_set(board, seat, adapter_failure={
-        "state": "retrying" if retrying else "failed",
-        "trigger": trigger, "attempts": attempts,
-        "max_attempts": LOCAL_DISPATCH_MAX_ATTEMPTS,
+        "state": "failed",
+        "trigger": str(message_id or ""),
         "reason": "native wake %s" % label,
         "at": now(),
     })

@@ -101,20 +101,29 @@ def _seat_lock_path(board, seat):
     return os.path.join(endpoint_dir(board), seat + ".lock")
 
 
-def acquire_seat_lock(board, seat):
-    """Exclusive per-seat lock. The lock file is created with O_EXCL once."""
+def acquire_named_lock(board, name):
+    """Exclusive lock file. Created once with O_EXCL, then flocked."""
     d = endpoint_dir(board)
     root = cache_root()
     sessions = os.path.join(root, "sessions")
     for p in (root, sessions, d):
         _ensure_private_dir(p)
-    path = _seat_lock_path(board, seat)
+    path = os.path.join(d, name + ".lock")
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
     except FileExistsError:
         fd = os.open(path, os.O_RDWR, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX)
     return fd
+
+
+def acquire_seat_lock(board, seat):
+    return acquire_named_lock(board, seat)
+
+
+def acquire_fingerprint_lock(board, key):
+    ident = hashlib.sha256(("%s:%s" % key).encode("utf-8")).hexdigest()[:16]
+    return acquire_named_lock(board, "fp-" + ident)
 
 
 def release_seat_lock(fd):
@@ -159,13 +168,17 @@ def commit_endpoint(board, seat, record, presented_lease=""):
     lease_id, the same session fingerprint, or waiting until the record is
     stale. Unconditional os.replace is not ownership. Register/rebind is
     serialized on a per-seat exclusive lock so two first binds cannot both
-    stamp fence=1.
+    stamp fence=1. Cross-seat same-session binds share a fingerprint lock so
+    two seats cannot both scan-then-write the same provider identity.
     """
+    key = session_key(record)
+    fp_fd = acquire_fingerprint_lock(board, key) if key else None
     fd = acquire_seat_lock(board, seat)
     try:
         return _commit_endpoint_locked(board, seat, record, presented_lease)
     finally:
         release_seat_lock(fd)
+        release_seat_lock(fp_fd)
 
 
 def _commit_endpoint_locked(board, seat, record, presented_lease=""):
@@ -497,6 +510,16 @@ def is_reachable(native_online=False, watcher_online=False, remote_online=False)
     return bool(native_online or watcher_online or remote_online)
 
 
+NATIVE_POKE_ATTEMPTS = 3
+
+
+def _poke_until(fn, ep, text, attempts=NATIVE_POKE_ATTEMPTS):
+    for _ in range(max(1, int(attempts))):
+        if fn(ep, text):
+            return True
+    return False
+
+
 def wake_seat(board, seat, text, harness=None, message_id=""):
     """Best-effort native wake. Returns a short label; never raises."""
     expected = provider_for_harness(harness) if harness else ""
@@ -519,10 +542,10 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         fence = 0
     ok = False
     if provider == "claude":
-        ok = _poke_claude(ep, text)
+        ok = _poke_until(_poke_claude, ep, text)
         label = "woken" if ok else "refused"
     elif provider == "codex":
-        ok = _poke_codex(ep, text)
+        ok = _poke_until(_poke_codex, ep, text)
         label = "queued" if ok else "refused"
     elif provider == "cursor":
         label = "supervised (cursor agent -p --resume is a paid foreground run, not enqueue)"

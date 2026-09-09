@@ -708,3 +708,69 @@ def test_stale_delivery_after_rebind_does_not_mark_new_lease(board, cache_dir, s
     assert ep["socket"] == second
     assert ep.get("last_delivery_id") != "old-msg"
     assert ep.get("lease_id") != old_lease
+
+
+def test_concurrent_cross_seat_same_session_only_one_binds(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock = str(Path(sock_dir) / "shared.sock")
+    Path(sock).touch()
+    sa = _adapters()
+    results = []
+
+    def one(seat):
+        record = {
+            "seat": seat, "agent_id": seat, "provider": "claude", "mode": "native",
+            "socket": sock, "token": "", "pid": os.getpid(), "at": "now",
+        }
+        results.append((seat, sa.commit_endpoint(str(board), seat, record)))
+
+    t1 = threading.Thread(target=one, args=("alice",))
+    t2 = threading.Thread(target=one, args=("mallory",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    oks = [r for seat, r in results if r.get("ok")]
+    assert len(oks) == 1, results
+    bound = [seat for seat, r in results if r.get("ok")][0]
+    other = "mallory" if bound == "alice" else "alice"
+    assert sa.read_endpoint(str(board), bound)["socket"] == sock
+    assert sa.read_endpoint(str(board), other) is None
+
+
+def test_wake_retries_same_message_then_succeeds(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "retry.sock")
+    Path(sock_path).touch()
+    sa = _adapters()
+    sa.write_endpoint(str(board), "bob", {
+        "seat": "bob", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "lease_id": "lease-1", "fence": 1, "heartbeat_epoch": time.time()})
+    with mock.patch.object(sa, "_poke_claude", side_effect=[False, True]) as poke:
+        label = sa.wake_seat(str(board), "bob", "hello", harness="claude", message_id="durable-1")
+    assert label == "woken"
+    assert poke.call_count == 2
+    assert sa.read_endpoint(str(board), "bob")["last_delivery_id"] == "durable-1"
+
+
+def test_wake_exhausts_same_message_without_claiming_retrying(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "exh.sock")
+    Path(sock_path).touch()
+    sa = _adapters()
+    sa.write_endpoint(str(board), "bob", {
+        "seat": "bob", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "lease_id": "lease-1", "fence": 1, "heartbeat_epoch": time.time()})
+    _run(board, "join", "bob", "--roles", "backend")
+    with mock.patch.object(sa, "_poke_claude", return_value=False) as poke:
+        label = sa.wake_seat(str(board), "bob", "hello", harness="claude", message_id="durable-1")
+    assert label == "refused"
+    assert poke.call_count == 3
+    tk = _tickets()
+    tk._note_native_wake_result(str(board), "bob", label, "durable-1")
+    rec = tk._agent_rec(str(board), "bob") or {}
+    assert rec.get("adapter_failure", {}).get("state") == "failed"
+    assert rec.get("adapter_failure", {}).get("state") != "retrying"
+    assert sa.read_endpoint(str(board), "bob") is None
