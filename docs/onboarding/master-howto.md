@@ -322,8 +322,9 @@ tickets who
 A session cannot be woken by a hook after its turn ends — that is why waking
 is a poll plus `--exec`, not a callback.
 
-Interactive Claude: `tickets hooks claude` then
-`TICKET_AGENT=boss claude`. One-command enroll: `tickets boot --tool claude`.
+Interactive Claude: `tickets hooks claude --agent boss` in the intended
+worktree, then start `claude`. One-command enroll: `tickets boot --agent boss
+--tool claude`.
 Details: `tickets guide`, [connect-claude.md](../connect-claude.md).
 
 ---

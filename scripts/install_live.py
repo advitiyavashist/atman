@@ -96,6 +96,21 @@ def smoke(script, sha):
         snap = json.loads(run("ui", "--json"))
         if snap.get("turns", {}).get("v") != 1:
             raise RuntimeError("smoke failed: ui --json turns snapshot missing v=1")
+        # Generated hooks are part of the live release contract. Prove that a
+        # staged launcher can install and execute one from an unrelated cwd,
+        # and that a hostile ambient identity cannot replace the baked one.
+        settings = Path(scratch) / "hook-settings.json"
+        run("hooks", "claude", "--agent", "release-hook", "--settings", str(settings))
+        hook = json.loads(settings.read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        hook_env = dict(env, TICKET_AGENT="wrong-ambient", TICKETS_DIR=str(Path(scratch) / "wrong-board"))
+        result = subprocess.run(hook, shell=True, cwd=str(arbitrary_cwd), env=hook_env,
+                                input=json.dumps({"hook_event_name": "SessionStart"}),
+                                text=True, capture_output=True, timeout=30)
+        if result.returncode or "Ticket board" not in result.stdout:
+            raise RuntimeError("smoke failed: identity-pinned SessionStart hook did not run: %s" % result.stderr)
+        coordination = json.loads((board / "coordination" / "state.json").read_text())
+        if "release-hook" not in coordination.get("agents", {}) or "wrong-ambient" in coordination.get("agents", {}):
+            raise RuntimeError("smoke failed: hook inherited the ambient agent identity")
 
 
 def install(repo, ref, live, activate=False, expected=None):
