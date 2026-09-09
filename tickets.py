@@ -665,6 +665,173 @@ def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ---- persistent-session wake endpoints -----------------------------------
+#
+# A board message to an idle interactive session used to be invisible: the
+# board is a plain file, nothing polls it, and a Stop hook can only refuse to
+# let a turn end -- it cannot start one back up once it already has. The
+# harness separately exposes CLAUDE_CODE_MESSAGING_SOCKET / _TOKEN to
+# processes it spawns, and documents that writing to that socket starts a
+# fresh turn on a session that is currently idle. `tickets join --persistent`
+# records where that socket is; `tickets msg --to <seat>` uses the record to
+# poke it, after the board write, never instead of it.
+#
+# The record lives OUTSIDE .tickets/ on purpose: that directory is git-
+# tracked in real use, and a token that reaches a commit has to be treated as
+# burned from that point on. Keyed by a hash of the board path (so two boards
+# checked out on one machine never collide) and then by seat name (so two
+# seats on the same board wake independently).
+
+def _wake_cache_root():
+    # A dedicated env override exists purely so tests never touch a real
+    # $HOME -- writing a live socket-and-token file into a developer's actual
+    # ~/.cache during a test run is exactly the kind of thing that turns into
+    # a confusing bug report two weeks later, filed by someone who never ran
+    # the test.
+    return os.environ.get("TICKETS_CACHE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "atman")
+
+
+def _board_hash(board):
+    return hashlib.sha256(os.path.abspath(board).encode("utf-8")).hexdigest()[:16]
+
+
+def _endpoint_dir(board):
+    return os.path.join(_wake_cache_root(), "sessions", _board_hash(board))
+
+
+def _endpoint_path(board, seat):
+    return os.path.join(_endpoint_dir(board), seat + ".json")
+
+
+def _ensure_private_dir(path):
+    """os.makedirs' mode= is masked by the process umask, so 0700 has to be
+    forced with a follow-up chmod, or a permissive umask leaves the token
+    file's own parent directory group/world-readable."""
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def write_endpoint(board, seat, socket_path, token, pid):
+    """Record this session's wake endpoint. Called only from `join
+    --persistent`, with values read straight out of the harness's own env
+    vars -- never typed, never echoed, so there is no path by which the
+    token passes through a log line or a terminal."""
+    root = _wake_cache_root()
+    sessions = os.path.join(root, "sessions")
+    d = _endpoint_dir(board)
+    for p in (root, sessions, d):
+        _ensure_private_dir(p)
+    path = _endpoint_path(board, seat)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"seat": seat, "socket": socket_path, "token": token or "",
+                   "pid": pid, "at": now()}, f)
+    os.replace(tmp, path)  # atomic, same reasoning as write_identity
+    return path
+
+
+def read_endpoint(board, seat):
+    try:
+        with open(_endpoint_path(board, seat)) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return None
+
+
+def remove_endpoint(board, seat):
+    try:
+        os.unlink(_endpoint_path(board, seat))
+    except OSError:
+        pass
+
+
+def live_endpoint(board, seat):
+    """The endpoint record if it is still worth trying, else (None, was_stale).
+
+    Liveness here is two cheap local checks -- pid present, socket file still
+    on disk -- never an actual connect. `watch`/`spawn` call this on every
+    poll/spawn to decide whether to skip a seat, and paying a network round
+    trip (and the 2s timeout a real connect needs, see _poke_endpoint) just to
+    answer "is anyone home" would make the skip check slower than the work it
+    is meant to skip.
+    """
+    ep = read_endpoint(board, seat)
+    if not ep:
+        return None, False
+    pid = ep.get("pid")
+    sock = ep.get("socket") or ""
+    if not _pid_alive(pid) or not sock or not os.path.exists(sock):
+        # Stale for either reason reads the same to a caller: the record on
+        # disk promised a live session and no longer can. Removing it here
+        # means the NEXT check does not pay this same dead lookup again.
+        remove_endpoint(board, seat)
+        return None, True
+    return ep, False
+
+
+def _wake_payload(m):
+    """What is actually written into the socket. Short, and re-anchors to the
+    board rather than repeating the message body: the socket write is a wake
+    signal, not a second copy of the message store, so the receiving session
+    still reads the real message from `tickets inbox` rather than trusting
+    whatever text happened to arrive on this channel."""
+    return "tickets board message -- %s\n(see `tickets inbox` for the rest)" % fmt_msg(m)
+
+
+def _poke_endpoint(ep, text):
+    """Connect, optionally auth, write the message. Per the documented inbox
+    protocol: the auth line is required on native Windows and optional (but
+    harmless) on macOS/Linux, so it is sent whenever a token is on record
+    rather than trying to detect which platform the receiver is running on.
+
+    The 2s connect timeout is not a tuning knob -- it is what keeps a socket
+    whose listener already died from turning `tickets msg` into a hang. The
+    board write has already happened by the time this runs, so the worst
+    case here is a slow, honest "refused", never a lost message.
+    """
+    import socket as _socket
+    sock_path = ep.get("socket") or ""
+    if not sock_path:
+        return False
+    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    s.settimeout(2)
+    try:
+        s.connect(sock_path)
+        token = ep.get("token") or ""
+        if token:
+            s.sendall((json.dumps({"type": "auth", "token": token}) + "\n").encode("utf-8"))
+        s.sendall((text + "\n").encode("utf-8"))
+        return True
+    except OSError:
+        # ECONNREFUSED (nothing listening), a timed-out connect, or anything
+        # else the OS reports all read the same from here: could not deliver.
+        # A receiving-side crossSessionInbound=refuse policy is
+        # indistinguishable from this at the socket layer -- both are a
+        # normal outcome of posting across sessions, not a bug in this script.
+        return False
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def wake_seat(board, seat, text):
+    """Best-effort poke of a seat's wake endpoint. Returns a short, honest
+    label for `tickets msg` to print. Never raises: a failed wake must never
+    look like a failed message, and the board write this follows has already
+    succeeded by the time it is called."""
+    ep, was_stale = live_endpoint(board, seat)
+    if ep is None:
+        return "endpoint stale (removed)" if was_stale else "no live endpoint"
+    return "woken" if _poke_endpoint(ep, text) else "refused"
+
+
 def ticket_path(board, tid):
     return os.path.join(board, tid + ".json")
 
@@ -6115,9 +6282,24 @@ def cmd_msg(a, board):
         )
     if a.re:
         load(board, a.re)  # validate the ticket exists
+    # Board first, wake second, always in that order: the board is the
+    # source of truth and must succeed even when the addressee's socket is
+    # dead, so posting happens before the wake attempt is even considered,
+    # never the other way around.
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
                      task=bool(getattr(a, "task", False)))
     print("posted: " + fmt_msg(m))
+    # m["to"], not a.to: a lone @mention resolves to a real single recipient
+    # inside post_message (resolve_to_and_mentions) even when --to was never
+    # passed, and a broadcast (empty/"all") must never be treated as a seat
+    # to poke.
+    to = (m.get("to") or "").strip()
+    if to and _message_wakes(m):
+        # Only messages that already wake a polling `watch` seat attempt a
+        # live poke -- reusing that rule rather than inventing a second one,
+        # because two rules for "does this message wake someone" is how they
+        # drift apart the first time either one changes.
+        print("wake: %s -> %s" % (to, wake_seat(board, to, _wake_payload(m))))
 
 
 def cmd_inbox(a, board):
@@ -6698,6 +6880,23 @@ def cmd_join(a, board):
     post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
+    if getattr(a, "persistent", False):
+        # The socket/token are read from the harness's own env, not a flag --
+        # there is no --socket/--token to type, and typing a token is exactly
+        # the leak this whole mechanism exists to avoid.
+        sock = (os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or "").strip()
+        token = (os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN") or "").strip()
+        if sock:
+            write_endpoint(board, owner, sock, token, os.getpid())
+            print("persistent: wake endpoint registered for %s (pid %d)%s" % (
+                owner, os.getpid(), "" if token else " -- no token in env, auth line will be skipped"))
+        else:
+            # Not every harness (or every invocation of this one) exposes the
+            # socket -- a plain shell, or a non-interactive run, has nothing
+            # to register. Recording a fake endpoint would just mean the next
+            # liveness check discovers it is stale; saying so now is cheaper.
+            print("persistent: --persistent requested but CLAUDE_CODE_MESSAGING_SOCKET is not set "
+                  "in this environment; no wake endpoint recorded for %s" % owner)
     root = os.path.dirname(board)
     print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s" % (
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
@@ -6775,6 +6974,10 @@ def cmd_retire(a, board):
         with open(tmp, "w") as f:
             json.dump(roles, f, indent=2)
         os.replace(tmp, roles_path)
+    # A retired seat's wake endpoint is somebody's dead socket by definition;
+    # leaving it on disk would just mean the next `tickets msg --to <owner>`
+    # pays a doomed connect attempt before reporting "no live endpoint".
+    remove_endpoint(board, owner)
     retirer = whoami(getattr(a, "owner", None))
     post_message(board, retirer, "retired seat %s from the board" % owner)
     print("retired %s" % owner)
@@ -8482,6 +8685,20 @@ def cmd_watch(a, board):
     owner = whoami(a.agent)
     if owner.startswith("agent-"):
         sys.exit("set --agent or TICKET_AGENT to a real name")
+    if not getattr(a, "force", False):
+        # The whole point of a persistent endpoint: a headless watcher and an
+        # interactive session for the SAME seat is exactly the doubling-up
+        # this mechanism exists to prevent, not a redundancy to shrug at --
+        # the two would claim tickets, post updates and reply to mail as if
+        # they were one agent, and nothing downstream can tell them apart.
+        # --force already means "run even though the normal gates say don't";
+        # a live endpoint is just one more gate it steamrolls.
+        live_ep, _ = live_endpoint(board, owner)
+        if live_ep:
+            print("skip: %s has a live persistent session (wake endpoint reachable, pid %s) -- "
+                  "not launching a headless watcher on top of it; pass --force to override" % (
+                      owner, live_ep.get("pid")))
+            return
     _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     root = os.path.dirname(board)
     cwd = os.path.abspath(a.cwd or root)
@@ -9139,6 +9356,17 @@ def cmd_spawn(a, board):
             print("mid-run: %s -- wait for the pid(s) to exit before `tickets spawn %s`" % (
                 ", ".join(str(p) for p in busy), owner))
         post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
+        return
+    live_ep, _ = live_endpoint(board, owner)
+    if live_ep:
+        # No --force here on purpose: spawn does not have one today, and
+        # this ticket adds an escape hatch only where one already exists
+        # (see `watch --force`). Retiring the seat, or letting the endpoint
+        # go stale on its own, are the ways out.
+        print("skip: %s has a live persistent session (wake endpoint reachable, pid %s) -- "
+              "not spawning a headless watcher on top of it, which would double up a "
+              "supervisor on a seat a human is already driving. Nothing started." % (
+                  owner, live_ep.get("pid")))
         return
     # Prove the headless Cursor credential before creating a watcher. This is
     # a local status call, not a model turn. Keep it before cmd_join so a failed
@@ -11584,6 +11812,33 @@ def cmd_self(a, board):
     invoked = os.path.realpath(sys.argv[0])
     if invoked != script and (not on_path or invoked != os.path.realpath(on_path)):
         print("invoked: %s" % sys.argv[0])
+    # Persistence lives here rather than under a new command: "is this
+    # process reachable" is the same kind of fact as "which script is this
+    # process running", and `self` is already the one command guaranteed to
+    # work with no board around -- see main()'s dispatch, which calls this
+    # with board=None before board discovery even runs. So the board is
+    # discovered here, defensively, and this section just says nothing if
+    # there is none, instead of requiring one the way every other command
+    # can.
+    try:
+        b = board if board is not None else board_dir()
+    except SystemExit:
+        b = None
+    except Exception:
+        b = None
+    if b and os.path.isdir(b):
+        seat = session_seat(b)
+        ep, was_stale = live_endpoint(b, seat)
+        if ep:
+            print("persistent: yes -- seat %s reachable via wake endpoint (pid %s, registered %s)" % (
+                seat, ep.get("pid"), ep.get("at", "?")))
+        elif was_stale:
+            print("persistent: no -- seat %s had a wake endpoint but it went stale (process gone or "
+                  "socket missing) and was removed; `tickets join %s --persistent` re-registers one" % (
+                      seat, seat))
+        else:
+            print("persistent: no -- seat %s has no registered wake endpoint "
+                  "(`tickets join %s --persistent` registers one)" % (seat, seat))
 
 
 def main():
@@ -11676,6 +11931,10 @@ def main():
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
     c.add_argument("--knowledge-dir", default="",
                    help="canonical repo-backed knowledge/ directory inherited by this seat")
+    c.add_argument("--persistent", action="store_true",
+                   help="also register this session's wake endpoint (from "
+                        "CLAUDE_CODE_MESSAGING_SOCKET/_TOKEN) so `tickets msg --to <seat>` "
+                        "can wake it while it is idle")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
@@ -11789,7 +12048,9 @@ def main():
     c.add_argument("--max-runs", type=int, default=1,
                    help="model runs this session then stop (default 1; 0 = loop until --stop)")
     c.add_argument("--persist", action="store_true", help="loop until spawn --stop / SIGTERM (sets --max-runs 0)")
-    c.add_argument("--force", action="store_true", help="run once even if wake gates are empty")
+    c.add_argument("--force", action="store_true",
+                   help="run even if wake gates are empty, and even if the seat has a live "
+                        "persistent (--persistent) session")
     c.add_argument("--run-timeout", type=int, default=90, help="minutes per run before it is killed (0 = none)")
     c.add_argument("--beat-every", type=int, default=0,
                    help="seconds between in-run heartbeats (0 = TICKETS_RUN_HEARTBEAT_SECS, default 30)")
