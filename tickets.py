@@ -542,6 +542,55 @@ def write_identity(board, name):
     return name
 
 
+def seat_confirmed(board):
+    """True when this session DELIBERATELY recorded the seat it is answering as.
+
+    The distinction that matters is not "do we have a name" -- we almost always
+    have one, from an inherited env var or a pid -- but "did this session choose
+    it". Anything automated that acts on a seat's behalf (announcing its mail,
+    holding a turn open over its work) must gate on this, because acting under a
+    guessed name is how one agent ends up doing another agent's work.
+
+    A session with a key but no record is UNCONFIRMED on purpose: the ambient
+    env var is still fine for a human typing a command, and wrong as the basis
+    for automation.
+    """
+    try:
+        if session_key():
+            return bool(read_identity(board))
+        # No session key at all: a recorded flat identity is the best we get,
+        # and an env var is all that is left.
+        return bool(read_identity(board) or os.environ.get("TICKET_AGENT"))
+    except Exception:
+        return False
+
+
+def adopt_event_session(event):
+    """Take the session id out of a hook payload and make it resolvable.
+
+    A hook is not part of the session it fires for: it is a short-lived process
+    forked at a lifecycle point, with no conversation and no continuity. It can
+    learn which session it belongs to through exactly one channel -- the JSON
+    payload on its stdin -- because the environment it inherits carries only
+    whatever the parent shell happened to hold. Reading identity from the
+    environment is therefore reading it from the one channel that cannot know
+    it, which is how one agent's unread mail ends up announced in another
+    agent's window.
+
+    Call this before resolving identity in any command that consumes a hook
+    payload. Returns True if a session id was found.
+    """
+    try:
+        sid = (event or {}).get("session_id") or ""
+    except Exception:
+        sid = ""
+    sid = str(sid).strip()
+    if not sid:
+        return False
+    os.environ["TICKET_SESSION_ID"] = sid
+    return True
+
+
 def whoami(explicit=None, board=None):
     """Resolve the caller's agent id.
 
@@ -1841,7 +1890,7 @@ def cmd_board(a, board):
     # window cannot tell which agent they are talking to, and mail addressed to
     # one seat gets acted on by another.
     seat = whoami(board=board)
-    recorded = read_identity(board)
+    recorded = seat_confirmed(board) and read_identity(board)
     hdr.append("you: %s%s" % (seat, "" if recorded else " (UNCONFIRMED)"))
     print("  " + " | ".join(hdr))
     if not recorded:
@@ -6040,7 +6089,7 @@ def cmd_inbox(a, board):
         # another agent's backlog is how one seat's messages get read and acted
         # on by another; printing a pid handle's empty backlog is just noise.
         # Silence is the correct output for "I do not know who I am".
-        if owner.startswith("agent-") or (session_key() and not read_identity(board)):
+        if not seat_confirmed(board):
             return
     seat = (getattr(a, "seat", None) or "").strip()
     scan = None
@@ -8208,7 +8257,8 @@ def _record_stop_block(board, owner):
 def cmd_stop_hook(a, board):
     """Claude Code `Stop` hook: keep the turn alive while this agent still has work.
 
-    Never raises, always exits 0. Lets the session stop when: no TICKET_AGENT,
+    Never raises, always exits 0. Lets the session stop when: this session has
+    no resolvable identity,
     TICKETS_STOP_HOOK=off, the event says stop_hook_active (we already continued
     once this turn), the agent recorded a usage limit, only broadcasts are
     unread, or the hourly cap of continuations is reached.
@@ -8220,7 +8270,13 @@ def cmd_stop_hook(a, board):
             event = {}
     except Exception:  # noqa: BLE001
         event = {}
-    owner = os.environ.get("TICKET_AGENT") or ""
+    # The payload names the session this hook fired for; the environment does
+    # not. Adopt it before resolving, or a stale inherited TICKET_AGENT decides
+    # who we are and we hold the turn open over another seat's work.
+    adopt_event_session(event)
+    owner = whoami(board=board)
+    if not seat_confirmed(board):
+        owner = ""  # never pin a turn open over a seat this session only guessed
     if (not owner or os.environ.get("TICKETS_STOP_HOOK", "").lower() in ("off", "0", "false")
             or event.get("stop_hook_active")):
         print("{}")
