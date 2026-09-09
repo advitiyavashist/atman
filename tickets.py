@@ -5459,21 +5459,44 @@ def parse_mentions(text):
     return out
 
 
-def resolve_to_and_mentions(text, to=""):
-    """Empty --to + exactly one named mention becomes that recipient."""
+def _registered_handles(board):
+    """Lowercase names from workforce.json and agents/*.json, plus broadcast words."""
+    names = set(_MENTION_BROADCAST)
+    for key in load_workforce(board):
+        names.add(str(key).lower())
+    for rec in load_agents(board):
+        if not isinstance(rec, dict):
+            continue
+        owner = rec.get("owner") or ""
+        if owner:
+            names.add(owner.lower())
+    return names
+
+
+def resolve_to_and_mentions(text, to="", registered=None):
+    """Empty --to + exactly one *registered* named mention becomes that recipient.
+
+    Unknown handles stay in `mentions` (history unchanged) but do not become
+    implicit --to. Returns (to, mentions, unknown_implicit_handle_or_empty).
+    Explicit --to is never rewritten and never warns.
+    """
     mentions = parse_mentions(text)
     to = (to or "").strip()
     if to:
-        return to, mentions
+        return to, mentions, ""
     named = [h for h in mentions if h.lower() not in _MENTION_BROADCAST]
     if len(named) == 1 and len(named) == len(mentions):
-        return named[0], mentions
-    return to, mentions
+        handle = named[0]
+        if registered is not None and handle.lower() not in registered:
+            return "", mentions, handle
+        return handle, mentions, ""
+    return to, mentions, ""
 
 
 def post_message(board, sender, text, to="", re="", kind="", task=False, source=""):
     _rotate_messages_if_big(board)
-    to, mentions = resolve_to_and_mentions(text, to)
+    to, mentions, unknown = resolve_to_and_mentions(
+        text, to, _registered_handles(board))
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
     if mentions:
         rec["mentions"] = mentions
@@ -5495,6 +5518,8 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
     # message that reached the board must not be undone by instrumentation.
     _safe(lambda: traj_event(board, "msg", agent=sender, ticket=re or None,
                              to=to or "", text_len=len(text or "")), None)
+    if unknown:
+        rec["_unregistered_implicit"] = unknown
     return rec
 
 
@@ -5556,10 +5581,17 @@ def _msg_id(m):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _addressed_to(msg, owner):
-    """True if *owner* should see *msg*: broadcast, explicit --to, or @mention."""
+def _addressed_to(msg, owner, registered=None):
+    """True if *owner* should see *msg*: broadcast, explicit --to, or @mention.
+
+    Unregistered mention handles are kept on the record for history (T-490)
+    but do not address a mailbox. A body whose only mention is an unknown
+    handle is therefore a broadcast once implicit --to is refused.
+    """
     to = (msg.get("to") or "").strip().lower()
     mentions = {h.lower() for h in (msg.get("mentions") or [])}
+    if registered is not None:
+        mentions = {h for h in mentions if h in registered}
     target = owner.lower()
     if not to and not mentions:
         return True
@@ -5683,14 +5715,14 @@ def _seen_counts(seen_ids):
     return counts
 
 
-def _addressed(m, owner):
+def _addressed(m, owner, registered=None):
     """Would this message ever be shown to `owner`? (Own mail is never echoed.)
 
     Addressing itself is main's `_addressed_to` (T-221 @mentions, T-327), not a
     second copy of the rule: this function only adds "never echo an agent its
     own mail", which is the one part the inbox owns.
     """
-    return m.get("from") != owner and _addressed_to(m, owner)
+    return m.get("from") != owner and _addressed_to(m, owner, registered)
 
 
 def _seen_since(rec):
@@ -5791,8 +5823,10 @@ def _inbox_scan(board, owner):
         if glob.glob(os.path.join(board, "messages.*.jsonl")):
             msgs = load_messages(board, include_archives=True)
     remaining = _seen_counts(seen_ids)
-    visible = _visible_after_join([m for m in msgs if _addressed(m, owner)],
-                                  owner, joined)
+    registered = _registered_handles(board)
+    visible = _visible_after_join(
+        [m for m in msgs if _addressed(m, owner, registered)],
+        owner, joined)
     out = [m for m in visible if _is_unread(m, since, remaining)]
     watermark = max([m.get("at", "") for m in msgs] or [""])
     ceiling = now()
@@ -5881,6 +5915,10 @@ def cmd_msg(a, board):
         load(board, a.re)  # validate the ticket exists
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
                      task=bool(getattr(a, "task", False)))
+    unknown = m.pop("_unregistered_implicit", None)
+    if unknown:
+        print("WARNING: @handle %s is not a registered agent, message broadcast."
+              % unknown)
     print("posted: " + fmt_msg(m))
 
 
