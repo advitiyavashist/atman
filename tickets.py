@@ -10283,6 +10283,9 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 .ob-step i{width:14px;height:14px;border-radius:3px;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-style:normal;flex:none}
 .ob-step.done i{background:var(--ok);border-color:var(--ok);color:#fff}
 .empty-board{background:var(--card);border:1px dashed var(--line);border-radius:14px;padding:20px 18px;max-width:720px;margin-bottom:12px}
+.empty-board.empty-secondary{padding:16px;margin:8px 0}
+.agents>.empty-board{grid-column:1/-1}
+.msgs>.empty-board{max-width:none}
 .empty-board .empty-kicker{margin:0 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
 .empty-board p{margin:0 0 10px;color:var(--mute);font-size:13px;line-height:1.55}
 .empty-board b{color:var(--fg)}
@@ -10538,6 +10541,14 @@ function card(t,extra){
 function fillCol(id,items,html){
   document.getElementById('n-'+id).textContent=items.length;
   document.getElementById('col-'+id).innerHTML=items.length?html:('<div class="empty">none</div>');
+}
+function emptyCraft(kicker,lead,honesty,cta){
+  const cmds=(Array.isArray(cta)?cta:[cta]).map(c=>'<div class="cta">'+c+'</div>').join('');
+  return '<div class="empty-board empty-secondary">'+
+    '<p class="empty-kicker">'+kicker+'</p>'+
+    '<p>'+lead+'</p>'+
+    '<p class="empty-honesty">'+honesty+'</p>'+
+    cmds+'</div>';
 }
 const dash=x=>x==null?'—':String(x);
 function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(n).toFixed(4):Number(n).toFixed(2)))}
@@ -10875,10 +10886,13 @@ async function load(manual){
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
       '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div>'+
       '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
-  }).join('')||'<div class="empty">no agents checked in</div>';
+  }).join('')||emptyCraft('Team','<b>No agents checked in.</b> Plug a harness so coverage is by work, not a vacant roster.','Utilization and Done (24h) stay — until a seat heartbeats.',['tickets join &lt;name&gt; --roles … --harness','tickets quickstart --agent &lt;you&gt;']);
   const thread=visibleMessages(d.messages||[]).slice().reverse();
+  const msgEmpty=THREAD_SEAT
+    ?emptyCraft('Intervene','<b>No messages with this seat yet.</b> Msg opens the thread.','Delivery receipts only — never implied progress on tickets.','tickets msg --to '+esc(THREAD_SEAT))
+    :emptyCraft('Intervene','<b>No messages yet.</b> Post when a seat should see something.','Receipts show delivery — never implied progress on tickets.','tickets msg "text" [--to agent] [--re T-001]');
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+deliveryTags(m)+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
-    ||'<div class="empty">'+(THREAD_SEAT?'No messages with this seat yet.':'no messages yet')+'</div>';
+    ||msgEmpty;
 }
 function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
