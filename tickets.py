@@ -5875,13 +5875,51 @@ def fmt_msg(m):
     return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
 
 
+MSG_QUIET_WARN_SECS = 2 * 3600
+
+
+def _addressee_quiet_secs(board, to):
+    """Seconds since `to` last posted anything, or None if they never have.
+
+    Used only to decide whether to warn that a plain DM will not wake them.
+    Their own messages are the one activity signal that needs no extra state:
+    agents post on join, on update and on done, so a long silence means either
+    a hook-driven agent between wakes or a dead one -- and BOTH cases make an
+    ordinary DM the wrong tool.
+    """
+    if not to:
+        return None
+    newest = None
+    for m in load_messages(board, include_archives=True):
+        if (m.get("from") or "") == to:
+            at = m.get("at") or ""
+            if at and (newest is None or at > newest):
+                newest = at
+    return _age_secs(newest) if newest else None
+
+
 def cmd_msg(a, board):
     sender = whoami(a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
+    is_task = bool(getattr(a, "task", False))
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
-                     task=bool(getattr(a, "task", False)))
+                     task=is_task)
     print("posted: " + fmt_msg(m))
+    # A plain DM does not wake the addressee. That is by design -- acks and
+    # chatter must not cost a wake -- but it makes an unanswered DM ambiguous
+    # between "not read yet" and "not running", and a sender who wanted action
+    # has no way to tell. Warn only when the addressee has been quiet long
+    # enough that the distinction matters.
+    if a.to and not is_task:
+        quiet = _addressee_quiet_secs(board, a.to)
+        if quiet is None or quiet >= MSG_QUIET_WARN_SECS:
+            seen = "has never posted" if quiet is None else "last posted %s ago" % fmt_age(quiet)
+            print("NOTE: %s %s, and an ordinary DM does NOT wake anyone.\n"
+                  "      If this needs action, resend with --task:\n"
+                  "        tickets msg --to %s --task \"...\"\n"
+                  "      Silence after a plain DM does not mean the addressee is gone."
+                  % (a.to, seen, a.to))
 
 
 def cmd_inbox(a, board):
