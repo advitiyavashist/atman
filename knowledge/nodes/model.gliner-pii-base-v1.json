@@ -3,16 +3,21 @@
   "id": "model.gliner-pii-base-v1",
   "type": "model_pin",
   "title": "Knowledgator GLiNER PII base v1.0",
-  "summary": "Pinned public GLiNER comparison model: knowledgator/gliner-pii-base-v1.0. Preserve the exact downloaded file manifest in experiment evidence.",
+  "summary": "Pinned GLiNER comparison model knowledgator/gliner-pii-base-v1.0 at revision 61726e0ad791dcab3e29339bbec3ad42ded65641; FP32 ONNX SHA-256 c6ccec44625d46bfe3191152e41d6564b69bc9d4313b7f3e419e8372679e9fed.",
   "tags": ["steer", "gliner", "model", "pii"],
   "applies_to": ["steer", "detection", "evals", "gpu"],
-  "source": {"kind": "repository", "ref": "steer:experiments/model_benchmark/discovery.json"},
+  "source": {"kind": "repository", "ref": "steer:sol/t613-gliner-gpu@dfe88c1 docs/evals/t613-gliner-modal-cuda-onnx-result.json"},
   "recorded_at": "2026-09-09T02:42:00Z",
   "owner": "detection",
   "last_verified_at": "2026-09-09T02:42:00Z",
-  "verification": "observed",
-  "confidence": 0.98,
+  "verification": "verified",
+  "confidence": 1.0,
   "stale_after_days": 30,
-  "revision": 1,
-  "data": {"model_id": "knowledgator/gliner-pii-base-v1.0", "revision": "record in each experiment artifact"}
+  "revision": 2,
+  "data": {
+    "model_id": "knowledgator/gliner-pii-base-v1.0",
+    "revision": "61726e0ad791dcab3e29339bbec3ad42ded65641",
+    "onnx_file": "onnx/model.onnx",
+    "onnx_sha256": "c6ccec44625d46bfe3191152e41d6564b69bc9d4313b7f3e419e8372679e9fed"
+  }
 }

@@ -65,6 +65,14 @@ def test_checked_in_graph_is_valid_and_exposes_verified_gliner_result(board):
     assert nodes["experiment.gliner-t613-native-t4"]["data"]["p95_ms"] == 13.771
     assert nodes["artifact.gliner-t613-result"]["data"]["job_id"] == \
         "fc-01M221DBPDJ6GN24EWCJJF0FQ5"
+    model = nodes["model.gliner-pii-base-v1"]
+    assert model["data"]["revision"] == "61726e0ad791dcab3e29339bbec3ad42ded65641"
+    assert model["data"]["onnx_sha256"] == \
+        "c6ccec44625d46bfe3191152e41d6564b69bc9d4313b7f3e419e8372679e9fed"
+    rendered = run(board, "knowledge", "query", "knowledge:model.gliner-pii-base-v1",
+                   "--max-chars", "1800", env=graph_env())
+    assert model["data"]["revision"] in rendered.stdout
+    assert model["data"]["onnx_sha256"] in rendered.stdout
 
 
 def test_two_harnesses_receive_same_referenced_skill_and_failure(board):
@@ -109,6 +117,40 @@ def test_graph_cannot_be_configured_inside_the_ticket_board(board):
     assert "outside the ticket board" in queried.stderr + queried.stdout
 
 
+def test_graph_rejects_symlink_reads_and_authoring_directory_escapes(board, tmp_path):
+    graph = write_graph(tmp_path / "knowledge", [])
+    external = tmp_path / "outside.json"
+    external.write_text(json.dumps(record("failure.outside", "UNTRACKED OUTSIDE FACT")))
+    try:
+        (graph / "nodes" / "escape.json").symlink_to(external)
+    except OSError as exc:
+        import pytest
+        pytest.skip("symlinks unavailable: %s" % exc)
+
+    validated = run(board, "knowledge", "validate", env=graph_env(graph))
+    assert validated.returncode != 0
+    assert "symlink escapes the knowledge graph root" in validated.stderr + validated.stdout
+    queried = run(board, "knowledge", "query", "outside", env=graph_env(graph))
+    assert queried.returncode != 0
+    assert "UNTRACKED OUTSIDE FACT" not in queried.stdout
+
+    write_graph_root = tmp_path / "write-escape"
+    write_graph_root.mkdir()
+    (write_graph_root / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "name": "write-escape", "context_budget_chars": 1000,
+    }))
+    (write_graph_root / "edges").mkdir()
+    external_nodes = tmp_path / "external-nodes"
+    external_nodes.mkdir()
+    (write_graph_root / "nodes").symlink_to(external_nodes, target_is_directory=True)
+    source = tmp_path / "new-node.json"
+    source.write_text(json.dumps(record("failure.write-escape", "must stay inside")))
+    added = run(board, "knowledge", "add", str(source), env=graph_env(write_graph_root))
+    assert added.returncode != 0
+    assert "destination escapes graph root" in added.stderr + added.stdout
+    assert not (external_nodes / "failure.write-escape.json").exists()
+
+
 def test_ticket_brief_stores_only_a_knowledge_reference(board):
     attached = run(
         board, "brief", "--ticket", "T-001", "--knowledge",
@@ -125,6 +167,17 @@ def test_ticket_brief_stores_only_a_knowledge_reference(board):
     assert claimed.returncode == 0, claimed.stderr + claimed.stdout
     assert "knowledge:failure.gliner-cpu-ort-shadow" in claimed.stdout
     assert "onnxruntime-gpu[cuda,cudnn]==1.26.0" in claimed.stdout
+
+
+def test_ticket_brief_rejects_edge_reference(board):
+    result = run(
+        board, "brief", "--ticket", "T-001", "--knowledge",
+        "knowledge-requires-boundary", env=graph_env(), agent="master",
+    )
+    assert result.returncode != 0
+    assert "must name a node, not edge" in result.stderr + result.stdout
+    ticket = json.loads((board / "T-001.json").read_text())
+    assert "knowledge:knowledge-requires-boundary" not in json.dumps(ticket)
 
 
 def test_native_session_hooks_use_the_same_bounded_selector(board):
@@ -158,6 +211,37 @@ def test_native_session_hooks_use_the_same_bounded_selector(board):
     assert "failure.gliner-cpu-ort-shadow" in json.loads(cursor.stdout)["additional_context"]
 
 
+def test_claude_session_start_inherits_knowledge_when_board_has_no_tickets(tmp_path):
+    repo = tmp_path / "empty-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    empty_board = repo / ".tickets"
+    initialized = run(empty_board, "init", "--board", str(empty_board), cwd=repo)
+    assert initialized.returncode == 0, initialized.stderr + initialized.stdout
+    joined = run(empty_board, "join", "empty-seat", "--roles", "detection",
+                 "--harness", "claude", "--knowledge-dir", str(REPO / "knowledge"),
+                 cwd=repo)
+    assert joined.returncode == 0, joined.stderr + joined.stdout
+
+    # Claude's installed SessionStart hook invokes exactly this board command.
+    started = run(empty_board, "board", agent="empty-seat", cwd=repo)
+    assert started.returncode == 0, started.stderr + started.stdout
+    assert "Inherited knowledge" in started.stdout
+    assert "failure.gliner-cpu-ort-shadow" in started.stdout
+
+
+def test_explicit_reference_matching_is_exact(board, tmp_path):
+    graph = write_graph(tmp_path / "knowledge", [
+        record("failure.foo", "short id"),
+        record("failure.foo.bar", "exact id"),
+    ])
+    result = run(board, "knowledge", "query", "knowledge:failure.foo.bar", "--json",
+                 env=graph_env(graph))
+    assert result.returncode == 0, result.stderr + result.stdout
+    ids = [node["id"] for node in json.loads(result.stdout)["nodes"]]
+    assert ids == ["failure.foo.bar"]
+
+
 def test_stale_label_dedup_and_budget_are_deterministic(board, tmp_path):
     weak = record("failure.weak", "old duplicate", verification="inferred",
                   confidence=0.4, canonical_key="failure.same")
@@ -175,6 +259,23 @@ def test_stale_label_dedup_and_budget_are_deterministic(board, tmp_path):
     stale_result = run(board, "knowledge", "list", "--stale", "--json",
                        env=graph_env(graph))
     assert [row["id"] for row in json.loads(stale_result.stdout)] == ["failure.stale"]
+
+
+def test_validation_rejects_unusable_canonical_key_and_future_timestamps(board, tmp_path):
+    bad_key = record("failure.bad-key", "bad canonical key")
+    bad_key["canonical_key"] = ["not", "hashable"]
+    future = record("failure.future", "future verification",
+                    verified_at="2999-01-01T00:00:00Z")
+    graph = write_graph(tmp_path / "knowledge", [bad_key, future])
+
+    validated = run(board, "knowledge", "validate", env=graph_env(graph))
+    assert validated.returncode != 0
+    output = validated.stderr + validated.stdout
+    assert "canonical_key must be a safe stable slug" in output
+    assert "last_verified_at cannot be more than 5 minutes in the future" in output
+    queried = run(board, "knowledge", "query", "failure", env=graph_env(graph))
+    assert queried.returncode != 0
+    assert "TypeError" not in queried.stderr + queried.stdout
 
 
 def test_authoring_validates_graph_and_update_increments_revision(board, tmp_path):
