@@ -33,6 +33,7 @@ import re
 import shlex
 import sys
 import threading
+import uuid
 from datetime import datetime, timezone
 
 # Immutable releases verify every shipped byte before dispatch.  Do not add
@@ -809,13 +810,16 @@ def load_objective(board):
 
 OBJECTIVE_STATES = ("active", "achieved", "blocked", "replaced")
 STOP_CONDITION = (
-    "unattended watchers only: one model run then stop; restart watch to continue "
-    "(--persist or --max-runs 0 to loop). Interactive Codex/Claude master sessions stay open."
+    "unattended task-only watchers run one model run then stop; continuous/scheduled adapters "
+    "stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter."
 )
+WAKE_MODES = ("task-only", "continuous", "scheduled")
 WAKE_KEYS = frozenset({
     "holding", "suggested_for_me", "ready_in_my_lane",
     "task_messages", "stuck_messages", "drive", "forced",
 })
+WAKE_MESSAGE_LIMIT = 5
+WAKE_MESSAGE_MAX_CHARS = 320
 
 
 def objective_state(obj):
@@ -916,19 +920,38 @@ def _notify_review_submitted(board, author, tid, text, master_state=None):
     return master_name, cos_name
 
 
-def spawn_watch_max_runs(cos=False, persist=False, max_runs=None):
+def spawn_watch_max_runs(wake_mode="task-only", persist=False, max_runs=None):
     """Watch --max-runs for `tickets spawn`. 0 loops until spawn --stop.
 
-    CoS is persistent by default. An explicit --max-runs (including 1 for
-    one-shot) overrides that. --persist always loops. Workers default to 1.
+    A seat's durable wake policy, rather than its harness brand, decides
+    whether the adapter remains online. An explicit --max-runs (including 1
+    for a diagnostic one-shot) overrides that. --persist always loops.
     """
     if persist:
         return 0
     if max_runs is not None:
         return int(max_runs)
-    if cos:
+    if wake_mode in ("continuous", "scheduled"):
         return 0
     return 1
+
+
+def wake_mode_of(board, owner, master_state=None, workforce=None):
+    """Effective durable wake policy for one seat.
+
+    Existing boards need no migration: an explicit workforce value wins;
+    otherwise the current master and CoS inherit the continuous default and
+    every other seat stays task-only. The setting is harness-neutral, so the
+    same policy applies to Claude, Codex, Cursor, or a remote/custom bridge.
+    """
+    wf = workforce if workforce is not None else _safe(lambda: load_workforce(board), {})
+    configured = ((wf or {}).get(owner, {}) or {}).get("wake_mode")
+    if configured in WAKE_MODES:
+        return configured
+    state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+        return "continuous"
+    return "task-only"
 
 
 def hours_since(stamp):
@@ -5683,7 +5706,8 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
     _rotate_messages_if_big(board)
     to, mentions, unknown = resolve_to_and_mentions(
         text, to, _registered_handles(board))
-    rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
+           "to": to, "re": re, "text": text}
     if mentions:
         rec["mentions"] = mentions
     kind = (kind or "").strip()
@@ -5754,14 +5778,12 @@ def _agent_rec(board, owner):
 def _msg_id(m):
     """A stable identity for a message record.
 
-    Messages carry no id on the wire, and adding one would change a format
-    that T-213's legacy import round-trips verbatim, so identity is derived
-    from content instead: the same record hashes the same whether it is read
-    from the live file or from a rotated archive, and nothing already on disk
-    has to be migrated. Two byte-identical messages in the same second do
-    share an identity, which is exactly why the boundary list is consumed as
-    a multiset below -- one delivery per occurrence, not per distinct value.
+    New records carry an id so at-least-once replay can be deduplicated. Legacy
+    records keep their content-derived identity and multiset behavior; no old
+    board needs a migration and lossless legacy import stays unchanged.
     """
+    if m.get("id"):
+        return str(m["id"])
     raw = json.dumps([m.get("at", ""), m.get("from", ""), m.get("to", ""),
                       m.get("re", ""), m.get("text", "")], sort_keys=True)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -5957,7 +5979,11 @@ def _is_unread(m, since, remaining):
         return False
     k = _msg_id(m)
     if remaining.get(k):
-        remaining[k] -= 1
+        # Explicit IDs are delivery identities: every replay of the same
+        # record is already seen. Legacy content hashes remain a multiset so
+        # two old, byte-identical sends are still delivered twice.
+        if not m.get("id"):
+            remaining[k] -= 1
         return False
     return True
 
@@ -6013,7 +6039,17 @@ def _inbox_scan(board, owner):
     visible = _visible_after_join(
         [m for m in msgs if _addressed(m, owner, registered)],
         owner, joined)
-    out = [m for m in visible if _is_unread(m, since, remaining)]
+    out = []
+    explicit_ids = set()
+    for message in visible:
+        if not _is_unread(message, since, remaining):
+            continue
+        explicit = message.get("id")
+        if explicit and explicit in explicit_ids:
+            continue
+        if explicit:
+            explicit_ids.add(explicit)
+        out.append(message)
     watermark = max([m.get("at", "") for m in msgs] or [""])
     ceiling = now()
     if watermark > ceiling:
@@ -6031,7 +6067,17 @@ def _inbox_scan(board, owner):
     # not by history. It is rebuilt from the file rather than carried forward,
     # because a message delivered on an EARLIER poll is no longer in `out` and
     # would otherwise lose its identity and be redelivered.
-    retained = [_msg_id(m) for m in visible if m.get("at", "") >= watermark]
+    retained = []
+    retained_explicit = set()
+    for message in visible:
+        if message.get("at", "") < watermark:
+            continue
+        identity = _msg_id(message)
+        if message.get("id") and identity in retained_explicit:
+            continue
+        if message.get("id"):
+            retained_explicit.add(identity)
+        retained.append(identity)
     return out, watermark, retained
 
 
@@ -6656,6 +6702,11 @@ def cmd_join(a, board):
         entry["cost"] = a.cost
     if a.best_for:
         entry["best_for"] = a.best_for
+    wake_mode = getattr(a, "wake_mode", None)
+    if wake_mode is not None:
+        if wake_mode not in WAKE_MODES:
+            sys.exit("--wake-mode must be one of: %s" % ", ".join(WAKE_MODES))
+        entry["wake_mode"] = wake_mode
     if knowledge_dir:
         entry["knowledge_dir"] = knowledge_dir
     entry.setdefault("can", [])
@@ -6671,9 +6722,9 @@ def cmd_join(a, board):
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
     root = os.path.dirname(board)
-    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s" % (
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s" % (
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
-        entry.get("harness") or "claude (default)"))
+        entry.get("harness") or "claude (default)", wake_mode_of(board, owner, workforce=wf)))
     if entry.get("cmd"):
         print("cmd: %s" % entry["cmd"])
     if entry.get("knowledge_dir"):
@@ -6785,6 +6836,9 @@ def pending_work(board, owner):
 
     Keys: messages_to_me, broadcasts (count), holding, suggested_for_me,
     ready_in_my_lane, limited (agent recorded a usage limit; do not wake).
+    For a continuous seat, an ordinary directed message is promoted into the
+    existing task_messages wake queue. The source message remains the receipt
+    and inbox watermark; no parallel queue can drift from it.
     """
     out = {}
     if not owner or not os.path.isdir(board):
@@ -6796,12 +6850,18 @@ def pending_work(board, owner):
     obj = _safe(lambda: load_objective(board), {})
     obj_state = objective_state(obj)
     msgs = _safe(lambda: unread(board, owner), [])
-    direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
+    # unread() already applied registered, case-insensitive addressing and
+    # suppressed the author's own mail. Anything non-broadcast in that result
+    # is therefore a DM or named mention for this seat. This also collapses a
+    # message carrying BOTH --to and @mention to one record / one wake.
+    direct = [m for m in msgs if not is_board_broadcast(m)]
     if direct:
-        out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
-        tasks = [fmt_msg(m) for m in direct if _message_wakes(m, obj_state)]
+        out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
+        tasks = [_wake_message_summary(m) for m in direct
+                 if (_message_wakes(m, obj_state)
+                     or _continuous_message_wakes(board, owner, m))]
         if tasks:
-            out["task_messages"] = tasks[-5:]
+            out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
     elif msgs:
         out["broadcasts"] = len(msgs)
     tickets = _safe(lambda: load_all(board), [])
@@ -6867,9 +6927,52 @@ def _message_wakes(m, obj_state=""):
     return False
 
 
+def _wake_message_summary(message):
+    """Bound message text before it reaches pending JSON, logs, or a prompt."""
+    rendered = fmt_msg(message)
+    if len(rendered) <= WAKE_MESSAGE_MAX_CHARS:
+        return rendered
+    return rendered[:WAKE_MESSAGE_MAX_CHARS - 1] + "…"
+
+
+def _continuous_message_wakes(board, owner, message):
+    """An ordinary DM/@mention wakes only a seat configured continuous.
+
+    Review copies and acknowledgement/status replies remain notification-only;
+    otherwise a master and CoS acknowledging each other can create a paid
+    ping-pong loop. Explicit kind=task still wins through `_message_wakes`.
+    """
+    if wake_mode_of(board, owner) != "continuous" or is_board_broadcast(message):
+        return False
+    if message.get("source") in ("review", "receipt"):
+        return False
+    if message.get("kind") in ("ack", "receipt"):
+        return False
+    text = str(message.get("text") or "").strip().lower()
+    return not text.startswith(("ack", "idle:"))
+
+
 def wake_reason_of(pending):
-    for k in ("forced", "holding", "suggested_for_me", "ready_in_my_lane",
-              "stuck_messages", "task_messages", "drive"):
+    # A newly directed instruction must stay visible even when leadership has
+    # an older board-wide stuck escalation. Both gates remain in `pending`, but
+    # this primary reason drives the UI/log and tells the harness what arrived.
+    if pending.get("forced"):
+        return "forced"
+    tasks = pending.get("task_messages") or []
+    stuck = pending.get("stuck_messages") or []
+    # A directed `stuck:` record appears in both lists. Preserve the established
+    # stuck reason when that is all there is, while allowing any distinct/new
+    # directed instruction to take priority over an older escalation.
+    def _same_as_stuck(summary):
+        return any(s == summary or (summary.endswith("…") and s.startswith(summary[:-1]))
+                   for s in stuck)
+    if tasks and (not stuck or any(not _same_as_stuck(t) for t in tasks)):
+        return "task_messages"
+    if stuck:
+        return "stuck_messages"
+    if tasks:
+        return "task_messages"
+    for k in ("holding", "suggested_for_me", "ready_in_my_lane", "drive"):
         if pending.get(k):
             return k
     return "none"
@@ -6901,9 +7004,12 @@ def _watch_trigger_fingerprint(board, owner, pending):
     parts = []
     if pending.get("messages_to_me"):
         msgs = _safe(lambda: unread(board, owner), []) or []
-        direct = [m for m in msgs
-                  if m.get("to") == owner or owner in (m.get("mentions") or [])]
-        parts.extend("msg:" + _msg_id(m) for m in direct[-5:])
+        direct = [m for m in msgs if not is_board_broadcast(m)]
+        obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+        waking = [m for m in direct
+                  if (_message_wakes(m, obj_state)
+                      or _continuous_message_wakes(board, owner, m))]
+        parts.extend("msg:" + _msg_id(m) for m in waking[-WAKE_MESSAGE_LIMIT:])
     for key in ("holding", "suggested_for_me", "ready_in_my_lane", "review_queue"):
         if key in pending:
             for item in pending[key]:
@@ -7116,6 +7222,8 @@ def cmd_drive(a, board):
         argv += ["--cmd", a.cmd_template]
     if a.model:
         argv += ["--model", a.model]
+    if getattr(a, "wake_mode", None):
+        argv += ["--wake-mode", a.wake_mode]
     import subprocess
     if a.restart:
         subprocess.call([sys.executable, os.path.realpath(__file__), "spawn", owner, "--stop"])
@@ -8618,14 +8726,21 @@ def cmd_watch(a, board):
     # be a FRESH prompt every time -- the whole point of the watcher is that the
     # board changed since the last run.
     templated = any(ph in cmd for ph in HARNESS_PLACEHOLDERS)
-    every = max(WATCH_MIN_INTERVAL, int(a.every))
+    wake_mode = wake_mode_of(board, owner)
+    requested_every = max(1, int(a.every))
+    # Continuous adapters are the event bridge for already-ended model turns.
+    # Keep their durable poll inside the local <5s acceptance target even when
+    # the generic worker default is 60s. This is a cheap file read, not a model
+    # call; the message gates still decide whether any paid turn starts.
+    every = min(WATCH_MIN_INTERVAL, requested_every) if wake_mode == "continuous" else max(
+        WATCH_MIN_INTERVAL, requested_every)
     harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
-    lock = None
-    if not a.once:
-        lock = _watch_lock(board, owner)
-        if lock is None:
-            sys.exit("another watcher for %s is already running (see %s)" % (
-                owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
+    # Cron/--once used to bypass this lock and could overlap a persistent
+    # adapter. All launch paths now share one lease per seat.
+    lock = _watch_lock(board, owner)
+    if lock is None:
+        sys.exit("another watcher for %s is already running (see %s)" % (
+            owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     # T-243: strip Git's LOCATION vars before handing the parent's environment
     # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
@@ -8664,8 +8779,10 @@ def cmd_watch(a, board):
     skipped_trigger = None
     try:
         if not a.once:
-            print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, every, cwd, cmd))
-            _safe(lambda: checkin(board, owner, None, "watch loop online (every %ds)" % every), None)
+            print("watching %s for %s every %ds; wake=%s; cwd=%s; cmd=%s" % (
+                board, owner, every, wake_mode, cwd, cmd))
+            _safe(lambda: checkin(board, owner, None, "watch loop online (%s, every %ds)" % (
+                wake_mode, every)), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
             if os.path.exists(_stop_file(board, owner)):
@@ -8818,6 +8935,7 @@ def cmd_watch(a, board):
                     _safe(lambda rs=run_slice: _watch_note_limit_from_log(board, owner, rs), None)
                 if rc not in (0, None):
                     skipped_trigger = trigger_fp
+                    log("%s skip retrigger armed for unchanged failed trigger" % now())
                 else:
                     skipped_trigger = None
                 failures = failures + 1 if rc not in (0, None) else 0
@@ -8906,11 +9024,13 @@ def cmd_boot(a, board):
     # 1. identity + roles
     wf = load_workforce(board)
     roles = load_roles(board)
-    if owner not in wf or (a.roles is not None):
+    if (owner not in wf or a.roles is not None or getattr(a, "wake_mode", None) is not None
+            or getattr(a, "harness", "") or getattr(a, "cmd_template", "")):
         ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                                 harness=getattr(a, "harness", "") or "",
                                 cmd_template=getattr(a, "cmd_template", "") or "",
-                                model=a.model, best_for="")
+                                model=a.model, best_for="",
+                                wake_mode=getattr(a, "wake_mode", None))
         _silent(lambda: cmd_join(ns, board))
         steps.append("joined as %s (roles=%s)" % (owner, a.roles or roles.get(owner, [])))
     else:
@@ -9044,7 +9164,7 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 # runtime's side of the contract never changes -- it hands the harness a prompt
 # and a working directory, and reads the board afterwards. docs/byoa.md is the
 # operator-facing version of this.
-BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude")
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote")
 # Documented shell-template placeholders for custom harnesses. `harness check`
 # refuses templates with any other {name} token or without {prompt_file}.
 HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
@@ -9174,6 +9294,9 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         # would launch a binary literally named "custom".
         sys.exit("%s is registered as a custom harness with no command; "
                  "re-register it: tickets join %s --harness custom --cmd '<shell template>'" % (owner, owner))
+    if tool == "remote":
+        sys.exit("%s uses a remote adapter; connect the generated remote hook/bridge "
+                 "or register a custom command. Refusing to substitute a local model." % owner)
     prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
         master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
     prompt = prompt_expr or '"$(%s)"' % prompt
@@ -9237,8 +9360,8 @@ def cmd_spawn(a, board):
     root = os.path.dirname(board)
     if a.list:
         wf = load_workforce(board)
-        print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
-            "agent", "watcher", "harness", "model", "check", "seen", "worktree"))
+        print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
+            "agent", "watcher", "harness", "wake", "model", "check", "seen", "worktree"))
         for r in sorted(load_agents(board), key=lambda r: r["owner"]):
             pids = _live_watch_pids(r["owner"], board=board)
             wc = len(pids)
@@ -9246,9 +9369,10 @@ def cmd_spawn(a, board):
             if wc > 1:
                 wlabel += " !!"
             entry = wf.get(r["owner"], {})
-            print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+            print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
                 r["owner"][:14], wlabel,
                 (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                wake_mode_of(board, r["owner"], workforce=wf)[:10],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
                 (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
@@ -9303,13 +9427,18 @@ def cmd_spawn(a, board):
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                             harness=getattr(a, "harness", "") or "",
                             cmd_template=getattr(a, "cmd_template", "") or "",
-                            model=a.model, best_for=a.best_for or "")
+                            model=a.model, best_for=a.best_for or "",
+                            wake_mode=getattr(a, "wake_mode", None))
     _silent(lambda: cmd_join(ns, board))
     # --tool/--harness no longer defaults to "claude" in the parser: an absent
     # flag must mean "use what `tickets join` registered for this agent",
     # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
     harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
                                        getattr(a, "cmd_template", ""))
+    if harness == "remote" and not (cmd_template or a.exec):
+        sys.exit("remote adapter is offline; no local executable was selected. "
+                 "Run `tickets hooks remote --agent %s`, connect its long-poll/callback bridge, "
+                 "or pass --cmd for a local adapter. Pending wakes remain queued." % owner)
     wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
     if not os.path.isdir(wt):
         base = a.base or _trunk()
@@ -9357,8 +9486,9 @@ def cmd_spawn(a, board):
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
             "--prompt-kind", kind,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
+    effective_wake_mode = wake_mode_of(board, owner)
     max_runs = spawn_watch_max_runs(
-        cos=bool(a.cos), persist=bool(getattr(a, "persist", False)),
+        wake_mode=effective_wake_mode, persist=bool(getattr(a, "persist", False)),
         max_runs=getattr(a, "max_runs", None))
     if max_runs == 0:
         argv += ["--persist", "--max-runs", "0"]
@@ -9380,9 +9510,9 @@ def cmd_spawn(a, board):
     _time.sleep(1.0)
     pid = _watcher_pid(board, owner)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; harness=%s; model=%s; persist=%s; max-runs=%s; log %s" % (
+    print("watcher for %s started%s; harness=%s; model=%s; wake=%s; persist=%s; max-runs=%s; log %s" % (
         owner, (" (pid %d)" % pid) if pid else "", harness, model,
-        "yes" if max_runs == 0 else "no", max_runs, log_path))
+        effective_wake_mode, "yes" if max_runs == 0 else "no", max_runs, log_path))
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
@@ -10317,9 +10447,10 @@ async function load(manual){
     const auth=a.auth==='login_required'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Login required · '+esc(a.auth_login_cmd||'agent login')+'</span>':'';
     const quota=a.auth==='quota'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Usage quota</span>':'';
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
+    const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':'');
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span>'+auth+quota+lim+'</div>'+
-      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.adapter_online?' ●':'')+'</span>'+auth+quota+lim+wake+'</div>'+
+      '<div class="mute mono">'+esc(a.model||'—')+' · '+esc(a.harness||'—')+' · '+esc(a.wake_mode||'task-only')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
@@ -10814,12 +10945,38 @@ def _board_snapshot_body(board, messages=40):
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
+        agent_wf = wf.get(r["agent"], {}) or {}
         lim = rec.get("limit")
         wc = _watcher_count(r["agent"], board)
-        out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
+        wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
+        wake_pending = actionable(wake)
+        adapter_online = wc == 1
+        if wc > 1:
+            adapter_state = "conflict"
+            adapter_reason = "Multiple adapters detected; stop extras so one identity-pinned lease remains."
+        elif wake_pending and not adapter_online:
+            adapter_state = "queued-offline"
+            adapter_reason = "Wake queued — adapter offline; delivery resumes when it reconnects."
+        elif wake_pending:
+            adapter_state = "queued"
+            adapter_reason = "Wake queued for the connected adapter."
+        elif adapter_online:
+            adapter_state = "online"
+            adapter_reason = "Adapter connected; no wake pending."
+        else:
+            adapter_state = "offline"
+            adapter_reason = "Adapter offline; directed work will remain queued."
+        out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
+                           "harness": agent_wf.get("harness") or agent_wf.get("tool") or "claude",
+                           "wake_mode": wake_mode_of(board, r["agent"], master_state=m, workforce=wf),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
-                           "watcher": wc > 0,
+                           "watcher": adapter_online,
                            "watcher_count": wc,
+                           "adapter_online": adapter_online,
+                           "adapter_state": adapter_state,
+                           "adapter_reason": adapter_reason,
+                           "wake_pending": wake_pending,
+                           "wake_reason": wake_reason_of(wake),
                            "roles": roles.get(r["agent"]) or [],
                            "auth": (rec.get("auth_check") or {}).get("state", ""),
                            "auth_detail": (rec.get("auth_check") or {}).get("detail", ""),
@@ -10861,7 +11018,7 @@ def _board_snapshot_body(board, messages=40):
     turns, usage, promise = _cached_turns_usage_promise(board, tickets)
     raw_msgs = []
     for x in load_messages(board)[-messages:]:
-        row = {"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
+        row = {"id": _msg_id(x), "at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
                "kind": x.get("kind") or "message",
                "delivery": _message_delivery(board, x, agents_by=agents)}
@@ -10910,7 +11067,7 @@ def _board_snapshot_body(board, messages=40):
             "state": objective_state(obj) if obj else "",
             "exit_criterion": (obj or {}).get("exit_criterion") or "",
             "exit_missing": bool(obj) and objective_exit_missing(obj),
-            "wake_gates": "task messages, stuck/blocked, held tickets, ready assigned work; ACKs and ordinary DMs notify-only",
+            "wake_gates": "continuous seats: directed DM/@mention; task-only/scheduled seats: explicit tasks; all: stuck/blocked, held, assigned work",
             "stop_condition": STOP_CONDITION,
         },
         "coverage": coverage,
@@ -11620,7 +11777,15 @@ exec %s \"$@\"
        shlex.quote(script))
         _atomic_hook_write(wrapper, wrapper_text, 0o700)
         payload = {"schema": 1, "agent": owner, "board": os.path.abspath(board),
-                   "wrapper": os.path.abspath(wrapper), "commands": commands}
+                   "wrapper": os.path.abspath(wrapper), "commands": commands,
+                   "adapter": {
+                       "wake_mode": wake_mode_of(board, owner),
+                       "delivery": "durable-long-poll",
+                       "pending_command": "%s pending --agent %s --json" % (
+                           shlex.quote(os.path.abspath(wrapper)), shlex.quote(owner)),
+                       "dedupe": "message identity + recipient; one live adapter lease",
+                       "offline": "pending returns true; no local model is substituted",
+                   }}
         _atomic_hook_write(manifest, json.dumps(payload, indent=2, sort_keys=True) + "\n", 0o600)
         print("Remote hook wrapper for %s: %s" % (owner, wrapper))
         print("No arguments prints the %s task-wake prompt; normal ticket commands stay pinned to this identity."
@@ -12030,7 +12195,7 @@ def main():
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--harness", default="",
                    help="label for watch/spawn, not invoked at join: claude | codex | "
-                        "cursor | cursor+claude | custom | custom:<cmd> | <executable>. "
+                        "cursor | cursor+claude | remote | custom | custom:<cmd> | <executable>. "
                         "omit prints harness=claude (default) and does not start Claude")
     c.add_argument("--tool", default="", help="original spelling of --harness")
     # dest is cmd_template, not cmd: `sub = p.add_subparsers(dest="cmd")` above
@@ -12041,6 +12206,8 @@ def main():
                    help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
+                   help="durable DM policy: continuous wakes on directed messages; task-only needs --task; scheduled uses heartbeat/task gates")
     c.add_argument("--knowledge-dir", default="",
                    help="canonical repo-backed knowledge/ directory inherited by this seat")
     c.set_defaults(fn=cmd_join)
@@ -12138,6 +12305,7 @@ def main():
                    help="claude | codex | cursor | cursor+claude | custom:<cmd> (default: the registered harness)")
     c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--model", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None)
     c.add_argument("--restart", action="store_true", help="stop an existing watcher for this seat first")
     c.set_defaults(fn=cmd_drive)
 
@@ -12186,6 +12354,7 @@ def main():
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--model", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None)
     c.add_argument("--worktree", default="", help="codex: scope the hook to this worktree")
     c.add_argument("--settings", default="", help="claude: settings.json to write (default ~/.claude/settings.json)")
     c.add_argument("--hooks-file", default="", help="codex: hooks.json to write (default ~/.codex/hooks.json)")
@@ -12209,6 +12378,8 @@ def main():
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--best-for", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
+                   help="persist the seat's wake policy (master/CoS default continuous; workers task-only)")
     c.add_argument("--brief", default="", help="standing context for this worker")
     c.add_argument("--worktree", default="", help="default .worktrees/<name>")
     c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
@@ -12217,10 +12388,10 @@ def main():
     c.add_argument("--heartbeat", type=int, default=0,
                    help="with --master: also wake every N minutes to drive the objective (0 = off)")
     c.add_argument("--persist", action="store_true",
-                   help="keep the watcher looping (default is one model run then stop; implied by --cos)")
+                   help="keep the watcher looping (default follows --wake-mode; continuous/scheduled persist)")
     c.add_argument("--max-runs", type=int, default=None,
-                   help="passed to watch; workers default 1; --cos defaults 0 (persist); "
-                        "pass 1 for a CoS one-shot")
+                   help="passed to watch; task-only defaults 1; continuous/scheduled default 0; "
+                        "pass 1 for a diagnostic one-shot")
     c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
     c.add_argument("--master", action="store_true",
                    help="spawn the board master/planner (scope, routing by complexity, escalations)")

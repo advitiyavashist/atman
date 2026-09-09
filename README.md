@@ -147,8 +147,9 @@ the agent record. Claude is not invoked until `tickets watch` or
 `--harness custom --cmd '...'` when a watcher should run your harness
 ([docs/byoa.md](docs/byoa.md)).
 
-The built-in runner names are `claude`, `codex`, `cursor`, and
-`cursor+claude`. A custom runner can be any command:
+The built-in runner names are `claude`, `codex`, `cursor`, `cursor+claude`, and
+`remote`. `remote` is a fail-closed adapter boundary: it never substitutes an
+installed local model. A custom runner can be any command:
 
 ```sh
 tickets join qwen --roles docs \
@@ -158,6 +159,12 @@ tickets join qwen --roles docs \
 tickets harness check qwen
 tickets spawn qwen --every 3600
 ```
+
+Choose message behavior separately with `--wake-mode task-only|continuous|scheduled`.
+Workers default to `task-only`; the current master and CoS default to
+`continuous`. Continuous seats stay connected and wake on a direct DM or named
+mention. An offline continuous adapter keeps the wake queued and visible until
+its local command or remote session bridge reconnects.
 
 Start with `tickets connect` for tool-specific onboarding. See
 [Bring your own agent](docs/byoa.md) for the complete runner contract and
@@ -200,9 +207,9 @@ For an unattended coordinator:
 tickets drive "Ship V1" --as boss --heartbeat 30 --tool cursor+claude
 ```
 
-The heartbeat stops when the objective reaches a terminal state. Agent watchers
-wake for assigned work or actionable messages; they do not need to stay inside
-one endless model turn.
+The heartbeat stops when the objective reaches a terminal state. The master
+adapter remains available between bounded model turns; it does not keep one
+endless model turn open.
 
 ## Plan dependent work
 

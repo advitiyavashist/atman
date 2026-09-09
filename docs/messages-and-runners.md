@@ -7,12 +7,28 @@ still a contract rather than a deployed service.
 
 ## Local V1 launch path
 
-The dashboard sends a same-origin JSON message with `kind=task`. That durable
-task makes `tickets pending` actionable for its recipient. A local watcher can
-then start one bounded harness run, which reads `tickets inbox`, claims or
-continues its assigned ticket, and posts an acknowledgement. Reading the inbox
-moves the dashboard receipt from pending to acknowledged; the reply follows the
-same receipt path back to its recipient.
+Every seat has a durable `wake_mode` in `workforce.json`:
+
+- `task-only` (ordinary worker default): only an explicit task, held/assigned
+  work, or a blocker starts a paid turn. Ordinary DMs remain notifications.
+- `continuous` (current master and CoS default): a direct DM or named @mention
+  also wakes the persistent adapter. ACK, self, review-copy and broadcast mail
+  do not create reply loops.
+- `scheduled`: explicit task gates plus objective heartbeat; the adapter remains
+  available between scheduled checks.
+
+Set it with `tickets join <seat> --wake-mode ...` or `tickets spawn <seat>
+--wake-mode ...`. The setting is independent of harness: Claude Code, Codex,
+Cursor and a custom/remote bridge use the same message rules. Existing boards
+migrate without a rewrite: missing master/CoS values resolve to `continuous`;
+other missing values resolve to `task-only`.
+
+The dashboard sends a same-origin JSON message. A durable task wakes every
+mode; a directed message wakes a continuous recipient. One watcher lease starts
+one bounded harness run, which reads `tickets inbox`, claims or continues its
+assigned ticket, and posts an acknowledgement or action. A message carrying
+both `--to seat` and `@seat` is one record and therefore one wake. Reading the
+inbox moves the dashboard receipt from pending to acknowledged.
 
 The launch acceptance test runs this whole path on an isolated board with a
 deterministic harness: task POST, actionable wake, exactly one run, bound ticket
@@ -21,9 +37,9 @@ agent-addressed; named channels remain part of the managed-service contract.
 
 ## What happens when you send
 
-- DM to an agent: creates a durable delivery and wakes its managed runner. Task
-  instructions are linked to an existing ticket or create a draft for master
-  routing. The agent claims eligible assigned work before implementation.
+- DM to an agent: creates a durable delivery. It wakes a `continuous` adapter;
+  use Send task / `--task` for a `task-only` or `scheduled` recipient. Task
+  instructions are linked to an existing ticket or create a draft for routing.
 - A channel mention wakes the named agent. An unaddressed task in a project
   channel wakes its designated master to decide the owner. Ordinary channel
   conversation reaches subscribed members without launching every agent.
@@ -67,8 +83,9 @@ review. Do not promise exactly-once shell execution. Retry transient dispatch
 failure with bounded backoff; final failures enter an inspectable failed queue.
 Use replay cursor plus periodic outbox sweep so disconnected streams lose no work.
 
-Agent messages carry actor type, causation ID and conversation ID. A reply/receipt
-does not wake its author or generate another auto-reply. Agent-to-agent task
+Agent messages carry actor type, causation ID and conversation ID. An ACK,
+self-addressed message, review notification, or broadcast does not generate an
+automatic reply loop. Agent-to-agent task
 requests may trigger another agent within configured permissions and a bounded
 hop/turn budget (pilot default: 3 hops, 10 turns, 15 minutes per run). Reaching a
 budget pauses with a visible reason; operators can resume. No global broadcast
@@ -78,6 +95,32 @@ cooperative and does not delete artifacts or mark tickets complete.
 Acceptance target (not an observed result): idle managed agent starts within 5s
 of a committed task message on a healthy local system. Failed preconditions must
 show an explicit reason rather than a false green status.
+
+## Remote continuous adapter
+
+`remote` is an explicit harness label, never an alias for another installed
+model. This matters for a seat such as `grok-worker`: registering it as Cursor
+would launch Cursor under a Grok name. Configure the real boundary instead:
+
+```sh
+tickets join grok-worker --harness remote --wake-mode continuous
+tickets master cos grok-worker
+tickets hooks remote --agent grok-worker --prompt-kind cos
+```
+
+The generated identity-pinned manifest provides `pending` (durable poll) and
+`taskWake` (bounded CoS prompt) commands. A bridge on the machine that owns the
+Grok session long-polls `pending`, feeds `taskWake` to that session once, runs
+board commands through the pinned wrapper, and reconnects with the same seat
+identity. A webhook/session service can use the same two operations. If no
+bridge is connected, the dashboard says **Wake queued — adapter offline** and
+the unread message remains the queue. `tickets spawn` refuses a bare `remote`
+harness instead of silently substituting Claude, Codex, or Cursor.
+
+Local and remote adapters share the same delivery rules: one watcher/bridge
+lease per seat, message-recipient dedupe, capped wake summaries (five messages,
+320 characters each), run heartbeat, and stale-lock recovery. Harness cost is
+recorded only when the harness reports it; an unreported run remains unmeasured.
 
 ## Team interface
 
