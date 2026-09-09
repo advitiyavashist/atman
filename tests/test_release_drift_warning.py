@@ -27,8 +27,7 @@ spec.loader.exec_module(installer)
 def source(tmp_path):
     repo = tmp_path / "source"
     repo.mkdir()
-    for name in installer.FILES:
-        shutil.copy2(ROOT / name, repo / name)
+    installer.seed_fixture_repo(repo, ROOT)
     env = dict(installer.clean_env(), GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="t@t",
                GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="t@t")
     def git(*args):

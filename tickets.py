@@ -10576,7 +10576,7 @@ def release_status():
     try:
         with open(manifest) as source:
             release = json.load(source)
-        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
+        for name in sorted(release["files"]):
             path = os.path.join(root, name)
             recorded = release["files"][name]
             expected_sha, expected_size = (
