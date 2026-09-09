@@ -2971,6 +2971,12 @@ def _run_beat(board, owner, **fields):
     silently drop whatever the child had just written (inbox_seen, limit,
     ticket). One watcher per agent holds the pid lock, so this file has a
     single writer.
+
+    Updates are generation-fenced. `_run_begin(..., _new_run=True)` advances
+    `generation` and may set active=True. A late heartbeat after stop/end
+    (same or missing generation) cannot resurrect active=True once the
+    receipt is closed — including when spawn --stop already found no live
+    watcher.
     """
     try:
         os.makedirs(agents_dir(board), exist_ok=True)
@@ -2979,8 +2985,31 @@ def _run_beat(board, owner, **fields):
         # can overlap: the lock keeps a read-modify-write whole, and the tmp
         # name is per-writer so two overlapping writers cannot truncate each
         # other's scratch file and leave a spliced record on disk.
+        new_run = bool(fields.pop("_new_run", False))
         with _RUN_BEAT_LOCK:
             rec = _read_run(board, owner)
+            try:
+                current_gen = int(rec["generation"]) if rec.get("generation") is not None else 0
+            except (TypeError, ValueError):
+                current_gen = 0
+            incoming_gen = fields.get("generation")
+            try:
+                incoming_gen = int(incoming_gen) if incoming_gen is not None else None
+            except (TypeError, ValueError):
+                incoming_gen = None
+            want_active = fields.get("active")
+            was_active = rec.get("active")
+            if new_run:
+                fields["generation"] = current_gen + 1
+                fields.setdefault("interrupted", False)
+                fields.setdefault("ended", "")
+                fields.setdefault("rc", None)
+            elif incoming_gen is not None and incoming_gen < current_gen:
+                return
+            elif want_active is True and was_active is False:
+                return
+            elif want_active is False and was_active is not False:
+                fields.setdefault("generation", current_gen + 1)
             rec.update(fields)
             rec["beat"] = now()
             tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
@@ -3002,7 +3031,8 @@ def _read_run(board, owner):
 
 def _run_begin(board, owner, run_no, cwd, run_id="", ticket=""):
     fields = dict(pid=os.getpid(), run=run_no, cwd=cwd,
-                  started=now(), active=True, rc=None, ended="")
+                  started=now(), active=True, rc=None, ended="",
+                  _new_run=True)
     if run_id:
         fields["run_id"] = run_id
     if ticket:
@@ -10083,9 +10113,13 @@ def cmd_spawn(a, board):
     if a.stop:
         import signal
 
-        pids = _live_watch_pids(owner)
+        pids = _live_watch_pids(owner, board=board)
         _mark_run_interrupted(board, owner)
         if not pids:
+            # Watcher is already gone; a late heartbeat from the dead run
+            # must not reopen the receipt. Re-apply the stop fence after the
+            # liveness check so a beat that raced the first mark stays closed.
+            _mark_run_interrupted(board, owner)
             print("no running watcher for %s" % owner)
             return
         busy = [p for p in pids if _watcher_run_active(board, owner, p)]

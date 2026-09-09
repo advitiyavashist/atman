@@ -50,7 +50,9 @@ unscoped) failure when the provider actually changes — Claude/custom to
 Codex or Cursor, not only a remote rejoin. Re-joining as another harness
 (including a healthy remote bridge) therefore does not report `failed` for
 the new adapter. `tickets watch` / `tickets spawn` refuse to double up
-on a seat with a live native endpoint. Wake delivery reserves `message_id`
+on a seat with a live native endpoint. Run receipts are generation-fenced:
+`spawn --stop` with no live watcher closes the receipt, and a late heartbeat
+from the dead run cannot set `active=true` again. Wake delivery reserves `message_id`
 in-flight under the seat lock before poke so concurrent callers cannot double-inject.
 
 ## Identity

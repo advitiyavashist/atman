@@ -605,17 +605,31 @@ def test_sigterm_finalizes_active_watch_run(board):
     assert tk._finalize_active_watch_run(str(board), "runner") is False
 
 
-def test_sigterm_finalizes_after_stop_heartbeat_race(board):
+def test_late_heartbeat_cannot_resurrect_stopped_run_without_live_watcher(board):
+    """spawn --stop with no live watcher must stay closed if a dead beat lands."""
     tk = _tickets()
     _run(board, "join", "runner", "--roles", "backend")
-    tk._run_begin(str(board), "runner", 1, str(board.parent))
-    tk._mark_run_interrupted(str(board), "runner")
-    tk._run_beat(str(board), "runner", pid=os.getpid(), run=1, active=True)
-    assert tk._read_run(str(board), "runner").get("active") is True
-    assert tk._finalize_active_watch_run(str(board), "runner") is True
+    tk._run_begin(str(board), "runner", 11, str(board.parent), run_id="r-11")
+    r = _run(board, "spawn", "runner", "--stop")
+    assert r.returncode == 0, r.stderr
+    assert "no running watcher" in (r.stdout + r.stderr)
     rec = tk._read_run(str(board), "runner")
     assert rec.get("active") is False
     assert rec.get("interrupted") is True
+    closed_gen = rec.get("generation")
+    tk._run_beat(str(board), "runner", pid=os.getpid(), run=11,
+                 cwd=str(board.parent), active=True, interrupted=True)
+    rec = tk._read_run(str(board), "runner")
+    assert rec.get("active") is False
+    assert rec.get("interrupted") is True
+    assert rec.get("run") == 11
+    assert rec.get("generation") == closed_gen
+    tk._run_begin(str(board), "runner", 12, str(board.parent), run_id="r-12")
+    rec = tk._read_run(str(board), "runner")
+    assert rec.get("active") is True
+    assert rec.get("run") == 12
+    assert rec.get("interrupted") is False
+    assert rec.get("generation") == closed_gen + 1
 
 
 def test_staged_release_ships_session_adapters(tmp_path):
