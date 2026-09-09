@@ -244,6 +244,26 @@ def remove_endpoint(board, seat):
         pass
 
 
+def remove_endpoint_if_match(board, seat, expected_lease="", expected_fence=None):
+    """Delete only the endpoint this caller observed. Never drop a rebound lease."""
+    fd = acquire_seat_lock(board, seat)
+    try:
+        ep = read_endpoint(board, seat)
+        if not ep:
+            return False
+        if expected_lease and (ep.get("lease_id") or "") != expected_lease:
+            return False
+        if expected_fence is not None and int(ep.get("fence") or 0) != int(expected_fence):
+            return False
+        try:
+            os.unlink(endpoint_path(board, seat))
+        except OSError:
+            return False
+        return True
+    finally:
+        release_seat_lock(fd)
+
+
 def list_endpoints(board):
     """Return (seat, record) pairs for this board's cache, skipping unreadable files."""
     try:
@@ -532,14 +552,14 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     if mid and ep.get("last_delivery_id") == mid:
         return "deduped"
     provider = ep.get("provider") or ""
-    if expected and provider and expected != provider:
-        remove_endpoint(board, seat)
-        return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
     lease = ep.get("lease_id") or ""
     try:
         fence = int(ep.get("fence") or 0)
     except (TypeError, ValueError):
         fence = 0
+    if expected and provider and expected != provider:
+        remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
+        return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
     ok = False
     if provider == "claude":
         ok = _poke_until(_poke_claude, ep, text)
@@ -561,6 +581,8 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         touch_endpoint(
             board, seat, expected_lease=lease, expected_fence=fence,
             last_attempt_id=mid, last_attempt_status=label)
+        if label == "refused":
+            remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
     return label
 
 

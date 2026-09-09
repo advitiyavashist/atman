@@ -704,6 +704,9 @@ def test_stale_delivery_after_rebind_does_not_mark_new_lease(board, cache_dir, s
     with mock.patch.object(sa, "_poke_claude", side_effect=poke_and_rebind):
         label = sa.wake_seat(str(board), "alice", "hello", harness="claude", message_id="old-msg")
     assert "stale" in label
+    tk = _tickets()
+    _run(board, "join", "alice", "--roles", "backend")
+    tk._note_native_wake_result(str(board), "alice", label, "old-msg")
     ep = sa.read_endpoint(str(board), "alice")
     assert ep["socket"] == second
     assert ep.get("last_delivery_id") != "old-msg"
@@ -773,4 +776,5 @@ def test_wake_exhausts_same_message_without_claiming_retrying(board, cache_dir, 
     rec = tk._agent_rec(str(board), "bob") or {}
     assert rec.get("adapter_failure", {}).get("state") == "failed"
     assert rec.get("adapter_failure", {}).get("state") != "retrying"
+    # wake_seat retired only the observed lease; _note must not delete by seat.
     assert sa.read_endpoint(str(board), "bob") is None

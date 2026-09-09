@@ -6243,18 +6243,12 @@ def _native_wake_succeeded(label):
 
 
 def _note_native_wake_result(board, seat, label, message_id):
-    """Failed native injection stays queued; do not claim retrying without a retry loop.
-
-    Bounded retries happen inside wake_seat on the same durable message_id.
-    After those are exhausted the native endpoint is dropped so supervised
-    recovery can run.
-    """
+    """Record native wake outcome. Never delete an endpoint by seat name alone."""
     if _native_wake_succeeded(label):
         def clear(rec):
             rec.pop("adapter_failure", None)
         _agent_update(board, seat, clear)
         return
-    _session_adapters().remove_endpoint(board, seat)
     _agent_set(board, seat, adapter_failure={
         "state": "failed",
         "trigger": str(message_id or ""),
