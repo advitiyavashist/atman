@@ -245,14 +245,14 @@ def test_hooks_claude_idempotent_and_no_stop(board, tmp_path):
     settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-tool"}]}]},
                                     "permissions": {"allow": ["Bash(ls)"]}}))
     for _ in range(2):
-        r = run(board, "hooks", "claude", "--settings", str(settings))
+        r = run(board, "hooks", "claude", "--agent", "doc", "--settings", str(settings))
         assert r.returncode == 0, r.stderr
     s = json.loads(settings.read_text())
     assert len(s["hooks"]["SessionStart"]) == 1 and len(s["hooks"]["UserPromptSubmit"]) == 1
     cmds = [h["command"] for e in s["hooks"]["Stop"] for h in e["hooks"]]
-    assert "other-tool" in cmds and any("stop-hook" in c for c in cmds) and len(cmds) == 2
+    assert "other-tool" in cmds and any("hook-run --agent doc --event stop" in c for c in cmds) and len(cmds) == 2
     assert "Bash(ls)" in s["permissions"]["allow"] and "Bash(tickets:*)" in s["permissions"]["allow"]
-    run(board, "hooks", "claude", "--settings", str(settings), "--no-stop")
+    run(board, "hooks", "claude", "--agent", "doc", "--settings", str(settings), "--no-stop")
     s = json.loads(settings.read_text())
     assert [h["command"] for e in s["hooks"]["Stop"] for h in e["hooks"]] == ["other-tool"]
 
