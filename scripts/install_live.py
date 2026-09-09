@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py")
+PACKAGE_PREFIX = "src/ticket_board"
 
 
 def digest(data):
@@ -27,27 +28,80 @@ def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args], env=clean_env())
 
 
+def export_paths(repo, sha):
+    """Pinned paths exported into every immutable release snapshot."""
+    paths = list(FILES)
+    pkg = git(repo, "ls-tree", "-r", "--name-only", sha, "--", PACKAGE_PREFIX).decode().strip()
+    if pkg:
+        paths.extend(line for line in pkg.splitlines() if line)
+    return paths
+
+
+def seed_fixture_repo(repo_dir, source_repo):
+    """Copy exportable release bytes into a throwaway git repo for tests."""
+    repo_dir = Path(repo_dir)
+    source_repo = Path(source_repo)
+    for name in FILES:
+        shutil.copy2(source_repo / name, repo_dir / name)
+    shutil.copytree(source_repo / PACKAGE_PREFIX, repo_dir / PACKAGE_PREFIX)
+
+
+def _write_release_file(stage, rel_path, data):
+    dest = stage / rel_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    dest.chmod(0o555 if rel_path == "tickets.py" else 0o444)
+
+
+def _seed_smoke_board(board):
+    board.mkdir()
+    for name, content in (("tickets.json", "[]"), ("sprints.json", "[]"),
+                          ("roles.json", "{}"), ("agents.json", "[]")):
+        (board / name).write_text(content)
+
+
 def smoke(script, sha):
     # Explicit board override: no discovery and no reads/writes to the live board.
+    # -S + PYTHONNOUSERSITE: never let a dev checkout's site-packages hide a
+    # missing src/ticket_board/ in the staged release.
     with tempfile.TemporaryDirectory(prefix="tickets-install-smoke-") as scratch:
-        env = dict(clean_env(), TICKETS_DIR=str(Path(scratch) / ".tickets"),
-                   HOME=scratch, TICKET_AGENT="installer")
+        board = Path(scratch) / ".tickets"
+        _seed_smoke_board(board)
+        env = dict(clean_env(), TICKETS_DIR=str(board), HOME=scratch,
+                   TICKET_AGENT="installer", PYTHONNOUSERSITE="1")
+        env.pop("PYTHONPATH", None)
+        arbitrary_cwd = Path(scratch) / "elsewhere"
+        arbitrary_cwd.mkdir()
+        py = [sys.executable, "-S", str(script)]
+
         def run(*args):
-            result = subprocess.run([str(script), *args], cwd=scratch,
+            result = subprocess.run([*py, *args], cwd=str(arbitrary_cwd),
                                     env=env, text=True, capture_output=True, timeout=30)
             if result.returncode:
-                raise RuntimeError("smoke failed: " + result.stderr)
+                raise RuntimeError("smoke failed (%s): %s" % (" ".join(args), result.stderr))
             return result.stdout
+
         if run("--version").strip() != "tickets commit %s (verified release)" % sha:
             raise RuntimeError("smoke failed: version does not match pinned commit")
         run("create", "Installer smoke fixture")
         if "Installer smoke fixture" not in run("show", "T-001"):
             raise RuntimeError("smoke failed: show did not read isolated fixture")
+        turns = json.loads(run("turns", "--json"))
+        if turns.get("v") != 1:
+            raise RuntimeError("smoke failed: turns --json missing v=1")
+        util = json.loads(run("util", "--json"))
+        if "agents" not in util:
+            raise RuntimeError("smoke failed: util --json missing agents")
+        run("route")
+        snap = json.loads(run("ui", "--json"))
+        if snap.get("turns", {}).get("v") != 1:
+            raise RuntimeError("smoke failed: ui --json turns snapshot missing v=1")
 
 
 def install(repo, ref, live, activate=False, expected=None):
     sha = git(repo, "rev-parse", "--verify", ref + "^{commit}").decode().strip()
-    payload = {name: git(repo, "show", sha + ":" + name) for name in FILES}
+    paths = export_paths(repo, sha)
+    payload = {name: git(repo, "show", sha + ":" + name) for name in paths}
     manifest = {"commit": sha, "files": {name: {"sha256": digest(data), "size": len(data)}
                                           for name, data in payload.items()}}
     releases = live.parent / "tickets-releases"
@@ -59,8 +113,7 @@ def install(repo, ref, live, activate=False, expected=None):
             stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=releases))
             try:
                 for name, data in payload.items():
-                    (stage / name).write_bytes(data)
-                    (stage / name).chmod(0o555 if name == "tickets.py" else 0o444)
+                    _write_release_file(stage, name, data)
                 (stage / "release.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
                 (stage / "release.json").chmod(0o444)
                 smoke(stage / "tickets.py", sha)
