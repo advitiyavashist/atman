@@ -1,0 +1,273 @@
+{
+  "contract_version": "atman-core/v1",
+  "oracle_revision": "3a19777f731db58db65291733d53d71a4f446207",
+  "description": "Portable black-box cases selected from accepted Python behavior.",
+  "cases": [
+    {
+      "id": "atomic-claim-eight-way",
+      "area": "storage.atomic-claims",
+      "steps": [
+        {"id": "create", "argv": ["create", "Contended work", "--role", "backend"]},
+        {"id": "join-a", "argv": ["join", "worker-a", "--roles", "backend"]},
+        {"id": "join-b", "argv": ["join", "worker-b", "--roles", "backend"]},
+        {"id": "join-c", "argv": ["join", "worker-c", "--roles", "backend"]},
+        {"id": "join-d", "argv": ["join", "worker-d", "--roles", "backend"]},
+        {"id": "join-e", "argv": ["join", "worker-e", "--roles", "backend"]},
+        {"id": "join-f", "argv": ["join", "worker-f", "--roles", "backend"]},
+        {"id": "join-g", "argv": ["join", "worker-g", "--roles", "backend"]},
+        {"id": "join-h", "argv": ["join", "worker-h", "--roles", "backend"]},
+        {
+          "id": "race",
+          "kind": "parallel",
+          "parallel": {
+            "workers": ["worker-a", "worker-b", "worker-c", "worker-d", "worker-e", "worker-f", "worker-g", "worker-h"],
+            "argv": ["claim", "T-001", "--owner", "${WORKER}"],
+            "agent": "${WORKER}"
+          },
+          "expect": {"successes": 1, "failures": 7, "failure_contains_any": ["already claimed", "already taken"]}
+        },
+        {
+          "id": "claimed-state",
+          "argv": ["show", "T-001", "--json"],
+          "expect": {"json": {"status": "claimed"}},
+          "capture": {"json_paths": ["status"]}
+        }
+      ]
+    },
+    {
+      "id": "dependency-ordering",
+      "area": "dependencies",
+      "steps": [
+        {
+          "id": "plan",
+          "argv": ["plan"],
+          "stdin": "[{\"key\":\"upstream\",\"title\":\"Build API\",\"role\":\"backend\",\"deps\":[]},{\"key\":\"downstream\",\"title\":\"Use API\",\"role\":\"backend\",\"deps\":[\"upstream\"]}]"
+        },
+        {"id": "join", "argv": ["join", "worker", "--roles", "backend"], "agent": "worker"},
+        {"id": "first-claim", "argv": ["next"], "agent": "worker", "expect": {"contains": ["T-001"]}},
+        {
+          "id": "blocked-detail",
+          "argv": ["show", "T-002", "--json"],
+          "agent": "worker",
+          "expect": {"json": {"status": "open", "deps.0": "T-001"}},
+          "capture": {"json_paths": ["status", "deps.0"]}
+        },
+        {"id": "blocked-next", "argv": ["next", "--another"], "agent": "worker", "expect": {"exit_codes": [1]}},
+        {"id": "finish-upstream", "argv": ["done", "T-001", "--force", "--notes", "API ready"], "agent": "worker"},
+        {"id": "second-claim", "argv": ["claim", "T-002"], "agent": "worker"},
+        {
+          "id": "unblocked-detail",
+          "argv": ["show", "T-002", "--json"],
+          "agent": "worker",
+          "expect": {"json": {"status": "claimed"}},
+          "capture": {"json_paths": ["status", "deps.0"]}
+        }
+      ]
+    },
+    {
+      "id": "bounded-objective",
+      "area": "objectives",
+      "steps": [
+        {"id": "seed", "argv": ["create", "Seed"]},
+        {
+          "id": "set",
+          "argv": ["objective", "Ship the portable core", "--exit", "all conformance cases pass"],
+          "expect": {
+            "files": [{"path": "${BOARD}/objective.json", "json": {"state": "active", "done": false, "exit_criterion": "all conformance cases pass"}}]
+          },
+          "capture": {"file_json_paths": {"${BOARD}/objective.json": ["state", "done", "exit_criterion"]}}
+        },
+        {
+          "id": "achieve",
+          "argv": ["objective", "--done", "golden report passed"],
+          "expect": {
+            "files": [{"path": "${BOARD}/objective.json", "json": {"state": "achieved", "done": true, "evidence": "golden report passed"}}]
+          },
+          "capture": {"file_json_paths": {"${BOARD}/objective.json": ["state", "done", "evidence"]}}
+        }
+      ]
+    },
+    {
+      "id": "task-message-wake-ack",
+      "area": "messages.mentions.wakes",
+      "steps": [
+        {"id": "seed", "argv": ["create", "Seed", "--role", "nobody"]},
+        {"id": "join", "argv": ["join", "worker", "--roles", "docs"], "agent": "worker"},
+        {"id": "send", "argv": ["msg", "please investigate", "--to", "worker", "--task", "--re", "T-001"], "agent": "operator"},
+        {
+          "id": "pending",
+          "argv": ["pending", "--agent", "worker", "--json"],
+          "expect": {"json": {"pending": true, "wake_reason": "task_messages"}},
+          "capture": {"json_paths": ["pending", "wake_reason"]}
+        },
+        {"id": "ack", "argv": ["inbox"], "agent": "worker", "expect": {"contains": ["please investigate"]}},
+        {
+          "id": "after-ack",
+          "argv": ["pending", "--agent", "worker", "--json"],
+          "expect": {"exit_codes": [1], "json": {"pending": false, "wake_reason": "none"}},
+          "capture": {"exit_code": true, "json_paths": ["pending", "wake_reason"]}
+        }
+      ]
+    },
+    {
+      "id": "durable-identity-and-remote-hook",
+      "area": "identity.hooks",
+      "steps": [
+        {"id": "seed", "argv": ["create", "Seed"]},
+        {"id": "join", "argv": ["join", "grok-worker", "--roles", "review"], "agent": "grok-worker"},
+        {
+          "id": "identity",
+          "argv": ["identity"],
+          "agent": "grok-worker",
+          "expect": {"json": {"agent_id": "grok-worker"}},
+          "capture": {"json_paths": ["agent_id"]}
+        },
+        {
+          "id": "install",
+          "argv": ["hooks", "remote", "--agent", "grok-worker", "--prompt-kind", "cos", "--wrapper", "${ROOT}/tickets-grok-worker"],
+          "agent": "operator",
+          "expect": {
+            "files": [
+              {"path": "${ROOT}/tickets-grok-worker", "exists": true},
+              {"path": "${ROOT}/tickets-grok-worker.hooks.json", "json": {"agent": "grok-worker"}}
+            ]
+          },
+          "capture": {"file_json_paths": {"${ROOT}/tickets-grok-worker.hooks.json": ["agent"]}}
+        },
+        {
+          "id": "wrong-ambient",
+          "external_argv": ["${ROOT}/tickets-grok-worker", "identity"],
+          "agent": "wrong-ambient",
+          "expect": {"json": {"agent_id": "grok-worker"}},
+          "capture": {"json_paths": ["agent_id"]}
+        },
+        {
+          "id": "rollback",
+          "argv": ["hooks", "remote", "--agent", "grok-worker", "--wrapper", "${ROOT}/tickets-grok-worker", "--rollback"],
+          "expect": {"files": [{"path": "${ROOT}/tickets-grok-worker", "exists": false}, {"path": "${ROOT}/tickets-grok-worker.hooks.json", "exists": false}]}
+        }
+      ]
+    },
+    {
+      "id": "duplicate-delivery",
+      "area": "messages.duplicate-delivery",
+      "driver": "storage-adapter",
+      "steps": [
+        {
+          "id": "replay",
+          "argv": ["duplicate-delivery", "--db", "${ROOT}/board.sqlite3"],
+          "expect": {"json": {"request_replay_equal": true, "delivery_count": 1, "wake_job_count": 1, "wake_deduplicated": true}},
+          "capture": {"json_paths": ["request_replay_equal", "delivery_count", "wake_job_count", "wake_deduplicated"]}
+        }
+      ]
+    },
+    {
+      "id": "runner-lease-fencing",
+      "area": "leases.clock-skew",
+      "driver": "storage-adapter",
+      "steps": [
+        {
+          "id": "lease",
+          "argv": ["lease-fencing", "--db", "${ROOT}/board.sqlite3"],
+          "expect": {"json": {"first_epoch": 1, "live_conflict": "run_already_active", "takeover_epoch": 2, "stale_heartbeat": "run_already_active", "holder": "rnr_second01"}},
+          "capture": {"json_paths": ["first_epoch", "live_conflict", "takeover_epoch", "stale_heartbeat", "holder"]}
+        }
+      ]
+    },
+    {
+      "id": "crash-orphan-partial-write",
+      "area": "storage.crash-recovery",
+      "steps": [
+        {"id": "create", "argv": ["create", "Committed work"]},
+        {"id": "partial", "kind": "write", "path": "${BOARD}/.T-001.json.partial", "text": "{\"status\":"},
+        {
+          "id": "read",
+          "argv": ["list"],
+          "expect": {"contains": ["T-001", "Committed work"], "files": [{"path": "${BOARD}/T-001.json", "json": {"status": "open"}}]},
+          "capture": {"output_tokens": ["T-001", "Committed work"], "file_json_paths": {"${BOARD}/T-001.json": ["status"]}}
+        }
+      ]
+    },
+    {
+      "id": "backup-restore-recovery",
+      "area": "recovery",
+      "steps": [
+        {"id": "first", "argv": ["create", "Before snapshot"]},
+        {"id": "mark-source", "kind": "write", "path": "${BOARD}/.fixture-board", "text": "fixture\n"},
+        {"id": "backup", "argv": ["board-backup", "--out", "${ROOT}/board.tgz"], "expect": {"files": [{"path": "${ROOT}/board.tgz", "exists": true}]}},
+        {"id": "second", "argv": ["create", "After snapshot"]},
+        {"id": "mark-dest", "kind": "write", "path": "${ROOT}/restored/.fixture-board/.fixture-board", "text": "fixture\n"},
+        {"id": "restore", "argv": ["board-restore", "--archive", "${ROOT}/board.tgz", "--dest", "${ROOT}/restored/.fixture-board"]},
+        {
+          "id": "restored-list",
+          "argv": ["list"],
+          "env": {"TICKETS_DIR": "${ROOT}/restored/.fixture-board"},
+          "expect": {"contains": ["Before snapshot"], "not_contains": ["After snapshot"], "files": [{"path": "${ROOT}/restored/.fixture-board/T-001.json", "exists": true}, {"path": "${ROOT}/restored/.fixture-board/T-002.json", "exists": false}]},
+          "capture": {"output_tokens": ["Before snapshot", "After snapshot"]}
+        }
+      ]
+    },
+    {
+      "id": "knowledge-reference",
+      "area": "knowledge.references",
+      "copy": [{"from": "fixtures/knowledge-valid", "to": "${ROOT}/knowledge"}],
+      "steps": [
+        {"id": "seed", "argv": ["create", "Seed"]},
+        {"id": "validate", "argv": ["knowledge", "validate"], "env": {"ATMAN_KNOWLEDGE_DIR": "${ROOT}/knowledge"}, "expect": {"contains": ["knowledge graph valid"]}},
+        {
+          "id": "exact-ref",
+          "argv": ["knowledge", "query", "knowledge:failure.conformance", "--json"],
+          "env": {"ATMAN_KNOWLEDGE_DIR": "${ROOT}/knowledge"},
+          "expect": {"json": {"nodes.0.id": "failure.conformance"}},
+          "capture": {"json_paths": ["nodes.0.id"]}
+        }
+      ]
+    },
+    {
+      "id": "knowledge-path-containment",
+      "area": "knowledge.symlink-path",
+      "copy": [{"from": "fixtures/knowledge-valid", "to": "${ROOT}/knowledge"}],
+      "files": [{"path": "${ROOT}/outside.json", "json": {"kind": "node", "id": "failure.outside", "type": "failure", "title": "Outside", "summary": "must not load", "tags": [], "applies_to": [], "source": {"kind": "fixture", "ref": "outside"}, "recorded_at": "2026-09-09T03:00:00Z", "owner": "fixture", "last_verified_at": "2026-09-09T03:00:00Z", "verification": "verified", "confidence": 1.0, "stale_after_days": 30, "revision": 1}}],
+      "steps": [
+        {"id": "seed", "argv": ["create", "Seed"]},
+        {"id": "escape", "kind": "symlink", "path": "${ROOT}/knowledge/nodes/failure.outside.json", "target": "${ROOT}/outside.json"},
+        {"id": "reject", "argv": ["knowledge", "validate"], "env": {"ATMAN_KNOWLEDGE_DIR": "${ROOT}/knowledge"}, "expect": {"exit_codes": [1], "contains": ["symlink escapes the knowledge graph root"], "not_contains": ["must not load"]}, "capture": {"exit_code": true, "output_tokens": ["symlink escapes the knowledge graph root"]}}
+      ]
+    },
+    {
+      "id": "knowledge-future-clock",
+      "area": "knowledge.clock-skew",
+      "copy": [{"from": "fixtures/knowledge-future", "to": "${ROOT}/knowledge"}],
+      "steps": [
+        {"id": "seed", "argv": ["create", "Seed"]},
+        {"id": "reject", "argv": ["knowledge", "validate"], "env": {"ATMAN_KNOWLEDGE_DIR": "${ROOT}/knowledge"}, "expect": {"exit_codes": [1], "contains": ["future"]}, "capture": {"exit_code": true, "output_tokens": ["future"]}}
+      ]
+    },
+    {
+      "id": "legacy-board-read",
+      "area": "backwards-compatibility",
+      "copy": [{"from": "fixtures/legacy-board", "to": "${BOARD}"}],
+      "steps": [
+        {"id": "list", "argv": ["list"], "expect": {"contains": ["T-001", "Legacy task"]}, "capture": {"output_tokens": ["T-001", "Legacy task"]}},
+        {"id": "show", "argv": ["show", "T-001", "--json"], "expect": {"json": {"id": "T-001", "status": "open", "title": "Legacy task"}}, "capture": {"json_paths": ["id", "status", "title", "deps"]}}
+      ]
+    },
+    {
+      "id": "cli-json-and-errors",
+      "area": "cli.json-errors",
+      "steps": [
+        {"id": "create", "argv": ["create", "JSON task", "--role", "backend"]},
+        {"id": "show", "argv": ["show", "T-001", "--json"], "expect": {"json": {"id": "T-001", "status": "open", "role": "backend"}}, "capture": {"json_paths": ["id", "status", "role"]}},
+        {"id": "missing", "argv": ["show", "T-999", "--json"], "expect": {"exit_codes": [1], "contains": ["T-999"]}, "capture": {"exit_code": true, "output_tokens": ["T-999"]}}
+      ]
+    },
+    {
+      "id": "board-read-performance",
+      "area": "performance",
+      "steps": [
+        {"id": "bulk", "kind": "bulk_plan", "count": 250, "role": "backend", "timeout": 60},
+        {"id": "warm-board", "kind": "measure", "argv": ["board", "--quiet"], "warmup": 2, "samples": 7, "p95_under_ms": 1000}
+      ]
+    }
+  ]
+}

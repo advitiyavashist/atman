@@ -1,0 +1,16 @@
+{
+  "title": "Legacy task",
+  "body": "A board record written by the pre-core Python CLI.",
+  "role": "backend",
+  "status": "open",
+  "deps": [],
+  "priority": 2,
+  "epic": "",
+  "sprint": "",
+  "needs": [],
+  "owner": "",
+  "created": "2026-01-01T00:00:00Z",
+  "updated": "2026-01-01T00:00:00Z",
+  "notes": [],
+  "id": "T-001"
+}

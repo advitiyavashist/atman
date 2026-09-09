@@ -1,0 +1,51 @@
+{
+  "id": "atman-core/v1",
+  "status": "frozen",
+  "oracle": {
+    "implementation": "Python tickets CLI and BoardStore",
+    "git_revision": "3a19777f731db58db65291733d53d71a4f446207",
+    "selection_rule": "Accepted documented behavior is normative; incidental formatting and known implementation quirks are not."
+  },
+  "compatibility": {
+    "read": ["atman-core/v1", "python-file-board/v0", "sqlite-contract/v2"],
+    "write": "atman-core/v1",
+    "unknown_fields": "preserve_or_reject; never silently discard",
+    "breaking_change": "new major contract and an explicit migration path"
+  },
+  "surfaces": {
+    "cli": {
+      "entrypoint": "tickets",
+      "machine_output": "JSON on stdout when --json is supported; diagnostics on stderr; non-zero on failure",
+      "environment": ["TICKETS_DIR", "TICKET_AGENT", "ATMAN_KNOWLEDGE_DIR"]
+    },
+    "http": {
+      "schema": "../../docs/contracts/openapi.yaml",
+      "fixtures": "../../tests/fixtures/manifest.json"
+    },
+    "storage_adapter": {
+      "purpose": "black-box differential testing only",
+      "invocation": "<adapter> <scenario> --db <isolated-path>",
+      "stdout": "one JSON object",
+      "stderr": "diagnostics only"
+    }
+  },
+  "requirements": [
+    {"id": "STORE-001", "area": "storage", "rule": "A canonical record becomes visible in full or remains at its previous full value; temporary and partial-write residue is never treated as a record.", "evidence": ["corpus:crash-orphan-partial-write", "tests/storage/test_backup_rollback.py"]},
+    {"id": "CLAIM-001", "area": "atomic_claims", "rule": "For concurrent claims of one eligible ticket, exactly one claimant succeeds and all losers receive a stable conflict without corrupting the ticket.", "evidence": ["corpus:atomic-claim-eight-way", "tests/storage/test_claim_race.py"]},
+    {"id": "DEPS-001", "area": "dependencies", "rule": "A ticket with any unfinished dependency cannot be claimed; cycles and missing dependencies are rejected before mutation.", "evidence": ["corpus:dependency-ordering", "tests/storage/test_dependencies.py"]},
+    {"id": "OBJ-001", "area": "objectives", "rule": "An active objective has a measurable exit criterion and reaches a terminal state only with evidence or a recorded blocked/replaced reason.", "evidence": ["corpus:bounded-objective", "tests/test_t611_objective_bounds.py"]},
+    {"id": "MSG-001", "area": "messages", "rule": "Messages are immutable, project-scoped records with a bound author. Direct recipients and exact @mentions receive delivery; code spans, email addresses and @@ text do not create mentions.", "evidence": ["tests/test_t221_mentions.py", "tests/storage/test_messaging_storage.py"]},
+    {"id": "WAKE-001", "area": "wakes", "rule": "An explicit task delivery is actionable until its recipient acknowledges it. Delivery alone is not execution, and ordinary conversation does not start work.", "evidence": ["corpus:task-message-wake-ack", "tests/test_wakeup.py"]},
+    {"id": "WAKE-002", "area": "duplicate_delivery", "rule": "Delivery is at-least-once. Replaying the same request is idempotent, and (message_id, recipient_agent_id) creates at most one wake job and one active run.", "evidence": ["corpus:duplicate-delivery", "tests/fixtures/runners/jobs-duplicate-suppressed.json"]},
+    {"id": "IDENT-001", "area": "identity", "rule": "Every installed harness owns a durable agent identity. A baked identity and board path override ambient shell values for hook and wrapper execution.", "evidence": ["corpus:durable-identity-and-remote-hook", "tests/test_t633_hook_identity.py"]},
+    {"id": "HOOK-001", "area": "hooks", "rule": "Hook installation and rollback are atomic and idempotent. Rollback restores exact prior bytes and refuses to erase post-install edits.", "evidence": ["corpus:durable-identity-and-remote-hook", "tests/test_t633_hook_identity.py", "tests/adapters/test_real_hook_fixtures.py"]},
+    {"id": "LEASE-001", "area": "runner_leases", "rule": "One live lease exists per project and agent. Takeover after expiry increments a fencing epoch; a stale runner cannot heartbeat, expire or mutate through its old epoch.", "evidence": ["corpus:runner-lease-fencing", "tests/storage/test_runner_lease_race.py"]},
+    {"id": "RECOVER-001", "area": "recovery", "rule": "Backup is a consistent snapshot. Restore verifies before replace, removes stale sidecars, keeps the replaced copy, and never revives post-snapshot writes.", "evidence": ["corpus:backup-restore-recovery", "tests/storage/test_backup_rollback.py"]},
+    {"id": "PATH-001", "area": "path_containment", "rule": "Board, worktree, hook and knowledge operations resolve paths before access and refuse a symlink or traversal that escapes the declared root.", "evidence": ["corpus:knowledge-path-containment", "tests/test_t620_knowledge_graph.py", "tests/test_t273_tmpdir_guard.py"]},
+    {"id": "CLOCK-001", "area": "clock_skew", "rule": "Lease decisions use explicit comparable UTC instants and fencing epochs. Knowledge timestamps more than five minutes in the future are rejected.", "evidence": ["corpus:runner-lease-fencing", "corpus:knowledge-future-clock"]},
+    {"id": "KB-001", "area": "knowledge", "rule": "Knowledge is separate from ticket state. References are exact knowledge:<node-id> tokens, edges cannot masquerade as nodes, and prompt selection is bounded and provenance-preserving.", "evidence": ["corpus:knowledge-reference", "tests/test_t620_knowledge_graph.py"]},
+    {"id": "CLI-001", "area": "cli_json", "rule": "Documented --json commands emit one valid JSON value on stdout with no prose. Errors exit non-zero, identify the failed subject or stable error code, and do not emit a success value.", "evidence": ["corpus:cli-json-and-errors", "docs/contracts/openapi.yaml"]},
+    {"id": "COMPAT-001", "area": "backwards_compatibility", "rule": "The core reads the frozen Python file-board fixture without changing it. Migrations preserve archived unknown data and are atomic.", "evidence": ["corpus:legacy-board-read", "tests/storage/test_legacy_import.py", "tests/storage/test_t328_migration_atomicity.py"]},
+    {"id": "PERF-001", "area": "performance", "rule": "After warmup, a 250-ticket local board summary has p95 under 1000 ms on the reference laptop; correctness gates remain mandatory at every size.", "evidence": ["corpus:board-read-performance", "tests/test_t604_board_perf.py"]}
+  ]
+}
