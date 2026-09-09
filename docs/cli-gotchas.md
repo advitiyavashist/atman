@@ -94,3 +94,37 @@ Worth knowing alongside the guard that `done` refuses when the recorded
 repository does not match the current one. Those two together mean a
 cross-repo board needs `TICKETS_DIR` on the way in and the right repo on the
 way out.
+
+## A dots-only pytest red is a killed runner, not a failing test (T-538)
+
+Before you FIX-FIRST on a red merge, look at the shape of the output, not just
+the exit code:
+
+    tests/test_t427_watch_reexec.py ..
+    EXITCODE=143
+
+No `F`, no `E`, no `=== N failed, M passed ===` summary line. pytest **always**
+prints a summary when a test fails, so output that stops mid-progress-line is a
+process that was killed, not a suite that failed. Exit 143 is 128+15, i.e.
+SIGTERM; 137 is 128+9, SIGKILL.
+
+The kill has been called on the code under review more than once. It was
+neither. `tests/conftest.py` reaps every `tmp_path` after every test via
+`watch_reaper.reap_watchers_under()`, which `rglob`s `*.watch.pid` and SIGTERMs
+whatever integer it reads. That pid is written by the code under test, and
+`tickets.py`'s `watch_idle_reexec` writes `str(os.getpid())` — so a test that
+calls the helper in-process plants the **pytest process's own pid** where the
+reaper looks, and the teardown shoots the runner. `kill_pid_tree` now refuses
+any pid that is this process or one of its ancestors; see
+`tests/test_t538_reaper_self_kill.py`.
+
+The discriminator, which costs about 12 seconds:
+
+1. Dots and no summary line → treat it as a kill, not a failure.
+2. Re-run the single suspected test **isolated**. A real defect reproduces
+   isolated; a kill does not, and neither does a load-sensitive flake.
+3. Only believe a failure that comes with an `F`/`E` *and* a summary line.
+
+Corollary: "it also dies when run alone, so it is not concurrency" does not
+mean "it is therefore the code". A self-inflicted kill is perfectly
+reproducible on an idle box, and so is unaffected by quieting it.
