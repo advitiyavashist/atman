@@ -457,7 +457,8 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         return "deduped"
     provider = ep.get("provider") or ""
     if expected and provider and expected != provider:
-        return "refused (harness %s != provider %s)" % (harness, provider)
+        remove_endpoint(board, seat)
+        return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
     ok = False
     if provider == "claude":
         ok = _poke_claude(ep, text)

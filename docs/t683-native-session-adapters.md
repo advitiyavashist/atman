@@ -63,7 +63,8 @@ removes the endpoint; those seats are not shown as reachable after exit.
 
 `tickets msg` pokes only when the workforce harness maps to the endpoint
 provider. A leftover Claude socket on a remote/Grok or Codex seat is never
-injected. Grok stays on the T-640 remote bridge.
+injected; the stale endpoint is removed. Grok stays on the T-640 remote
+bridge.
 
 Installed releases export `session_adapters.py` next to `tickets.py`
 (`scripts/install_live.py` FILES + smoke `join --persistent`). A staged

@@ -557,6 +557,8 @@ def test_harness_mismatch_does_not_cross_poke(board, cache_dir, sock_dir, monkey
     assert label == "remote bridge required"
     label = sa.wake_seat(str(board), "grok-worker", "hello", harness="codex")
     assert "refused" in label
+    assert "removed" in label
+    assert sa.read_endpoint(str(board), "grok-worker") is None
     inbox.close()
     assert not inbox.received
 
@@ -591,6 +593,19 @@ def test_sigterm_finalizes_active_watch_run(board):
     assert rec.get("interrupted") is True
     assert rec.get("rc") == 143
     assert tk._finalize_active_watch_run(str(board), "runner") is False
+
+
+def test_sigterm_finalizes_after_stop_heartbeat_race(board):
+    tk = _tickets()
+    _run(board, "join", "runner", "--roles", "backend")
+    tk._run_begin(str(board), "runner", 1, str(board.parent))
+    tk._mark_run_interrupted(str(board), "runner")
+    tk._run_beat(str(board), "runner", pid=os.getpid(), run=1, active=True)
+    assert tk._read_run(str(board), "runner").get("active") is True
+    assert tk._finalize_active_watch_run(str(board), "runner") is True
+    rec = tk._read_run(str(board), "runner")
+    assert rec.get("active") is False
+    assert rec.get("interrupted") is True
 
 
 def test_staged_release_ships_session_adapters(tmp_path):
