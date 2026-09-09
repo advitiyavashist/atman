@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-labelledby="t d">
+  <title id="t">Pitch grain</title>
+  <desc id="d">Team formation with grain: smaller mute mates, one larger bone seat, one live mint teammate. Field hierarchy without edges.</desc>
+  <rect width="32" height="32" rx="7" fill="#0c0e12"/>
+  <circle cx="9.4" cy="8.2" r="2.05" fill="#8a8d96"/>
+  <circle cx="22.6" cy="8.8" r="2.05" fill="#3ee8c5"/>
+  <circle cx="6.8" cy="17.4" r="2.05" fill="#8a8d96"/>
+  <circle cx="25.2" cy="18.0" r="2.05" fill="#8a8d96"/>
+  <circle cx="16.0" cy="24.2" r="3.35" fill="#e8e6e1"/>
+</svg>
