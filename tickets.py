@@ -11584,7 +11584,12 @@ def cmd_hooks(a, board):
         entry = {"command": "%s --agent %s" % (shlex.quote(sp), shlex.quote(agent)), "timeout": 15}
         for ev in ("sessionStart", "beforeSubmitPrompt", "stop"):
             lst = cfg.setdefault("hooks", {}).setdefault(ev, [])
-            lst[:] = [x for x in lst if "tickets-board" not in json.dumps(x)]
+            # Replace both the current generated hook and the pre-T-633 global
+            # message-board hook. Leaving the latter installed would run two
+            # identities for one Cursor event and let its ambient identity
+            # disagree with the newly baked one.
+            lst[:] = [x for x in lst if not any(marker in json.dumps(x) for marker in (
+                "tickets-board", "check-message-board.py"))]
             lst.append(dict(entry, **({"loop_limit": 2} if ev == "stop" else {})))
         _atomic_hook_write(hp, json.dumps(cfg, indent=2) + "\n", 0o600)
         print("Cursor: %s + %s for %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings."
