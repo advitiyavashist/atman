@@ -104,7 +104,8 @@ leaves the wake queued and visible in `tickets ui`; reconnecting consumes it.
 Atman never substitutes Cursor, Claude, or Codex for a remote identity. Use
 `--wake-mode task-only` when the seat should run only for explicit `--task`
 messages, or `scheduled` when heartbeat and explicit task gates should drive a
-persistent adapter without ordinary DMs spending a turn.
+persistent adapter without ordinary DMs spending a turn. `scheduled` does not
+create a schedule; configure a heartbeat or external cadence separately.
 
 Use the file, not `$(cat {prompt_file})`. A worker prompt is the standing
 brief plus ticket context -- 1.5 KB on an empty board, far more on a real one

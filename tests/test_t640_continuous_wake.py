@@ -45,6 +45,24 @@ def test_continuous_policy_is_harness_neutral(board, harness):
     assert queued["pending"] is True
 
 
+def test_per_process_and_explicit_identity_survive_another_seat_join(board):
+    _join(board, "alice", "continuous")
+    _join(board, "grok-worker", "continuous", "remote")
+    time.sleep(1.1)
+    # A different process joining last must not become a board-wide identity.
+    sent = run(board, "msg", "from process env", "--to", "grok-worker", agent="alice")
+    assert sent.returncode == 0, sent.stderr
+    # An explicit command identity is stronger still and is what pinned hook
+    # wrappers use when their launching shell has the wrong ambient identity.
+    explicit = run(board, "msg", "from explicit owner", "--to", "grok-worker",
+                   "--owner", "alice", agent="wrong-ambient")
+    assert explicit.returncode == 0, explicit.stderr
+    records = [json.loads(line) for line in (board / "messages.jsonl").read_text().splitlines()]
+    assert [record["from"] for record in records[-2:]] == ["alice", "alice"]
+    queued = pending(board, "grok-worker")[1]
+    assert len(queued["task_messages"]) == 2, queued
+
+
 @pytest.mark.parametrize("mode", ["task-only", "scheduled"])
 def test_noncontinuous_modes_keep_ordinary_dm_notification_only(board, mode):
     _join(board, "seat", mode)

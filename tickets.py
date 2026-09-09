@@ -6916,7 +6916,7 @@ def pending_work(board, owner):
 
 
 def _message_wakes(m, obj_state=""):
-    """Explicit task / stuck / blocked mail wakes a model; ACKs and ordinary DMs do not."""
+    """Harness-neutral base gate: explicit task / stuck / blocked mail wakes every mode."""
     if m.get("source") == "review" and obj_state in ("blocked", "achieved", "replaced"):
         return False
     if m.get("kind") == "task" or m.get("task"):
@@ -12489,7 +12489,7 @@ def main():
     c.add_argument("--to", default="", help="seat / agent name, or omit for everyone")
     c.add_argument("--re", default="", help="ticket id this is about")
     c.add_argument("--task", action="store_true",
-                   help="explicit task message: wakes the addressee (ordinary DMs and ACKs do not)")
+                   help="explicit task message: wakes every mode (ordinary DMs wake only continuous; ACKs never auto-wake)")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_msg)
 

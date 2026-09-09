@@ -14,8 +14,9 @@ Every seat has a durable `wake_mode` in `workforce.json`:
 - `continuous` (current master and CoS default): a direct DM or named @mention
   also wakes the persistent adapter. ACK, self, review-copy and broadcast mail
   do not create reply loops.
-- `scheduled`: explicit task gates plus objective heartbeat; the adapter remains
-  available between scheduled checks.
+- `scheduled`: the task-only gates with a persistent adapter. The mode itself
+  creates no clock or deadline; configure an objective `--heartbeat` separately
+  or let an external scheduler poll it.
 
 Set it with `tickets join <seat> --wake-mode ...` or `tickets spawn <seat>
 --wake-mode ...`. The setting is independent of harness: Claude Code, Codex,
