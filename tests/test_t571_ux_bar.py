@@ -28,12 +28,15 @@ def _ui_html():
 
 def test_empty_board_is_three_command_steps_with_honesty():
     ui = _ui_html()
-    empty_fn = ui[ui.index("function renderEmptyBoard"):ui.index("load();setInterval")]
+    start = ui.index("function dayOneStep")
+    empty_fn = ui[start:ui.index("load();setInterval")]
     assert 'id="emptySteps"' in empty_fn
-    assert empty_fn.count("<li>") == 3
+    assert empty_fn.count("dayOneStep(") == 4  # helper + three steps
     assert "tickets quickstart --agent" in empty_fn
     assert "tickets join" in empty_fn and "--harness" in empty_fn
     assert "tickets objective" in empty_fn
+    assert "Copy command" in empty_fn
+    assert "data-copy=" in empty_fn
     assert "Median turns and yield@cost stay — until a done ticket reports." in empty_fn
     assert "Welcome to Atman." not in empty_fn
     assert "Everyone reads the same board state" not in empty_fn

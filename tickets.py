@@ -10291,6 +10291,9 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 .empty-steps .n{flex:none;width:22px;height:22px;border-radius:50%;background:var(--chip);border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--fg)}
 .empty-board .cta{margin-top:6px;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--acc)}
 .empty-board .empty-cta{margin-top:14px}
+.empty-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.empty-acts button{font:12px inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer;font-weight:650}
+.empty-acts button.copy-run{background:var(--acc);color:var(--on-acc);border-color:var(--acc)}
 .empty-honesty,.empty-intervene{margin-top:14px}
 .col h2 .hint{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--mute);display:block;margin-top:2px}
 .stat-lbl{cursor:help;border-bottom:1px dotted var(--line)}
@@ -10906,6 +10909,14 @@ function renderNextStep(ns){
   el.innerHTML='<span class="lbl">'+esc(ns.label||'Next')+'</span><span class="msg">'+esc(ns.message)+'</span>'+
     (ns.cmd?'<span class="cmd">'+esc(ns.cmd)+'</span>':'');
 }
+function dayOneStep(n,title,body,cmd,tab){
+  return '<li><span class="n">'+n+'</span><div><b>'+title+'</b> — '+body+
+    '<div class="cta">'+esc(cmd)+'</div>'+
+    '<div class="empty-acts">'+
+      '<button type="button" class="copy-run" data-copy="'+esc(cmd)+'">Copy command</button>'+
+      (tab?'<button type="button" class="try-run" data-tab="'+esc(tab)+'">Open '+esc(title)+'</button>':'')+
+    '</div></div></li>';
+}
 function renderEmptyBoard(d){
   const el=document.getElementById('emptyBoard');
   const empty=d.empty_board||!(d.counts&&d.counts.total);
@@ -10914,12 +10925,26 @@ function renderEmptyBoard(d){
   el.innerHTML='<p class="empty-kicker">Day one</p>'+
     '<p><b>Three steps.</b> Work · Team · Objective — then intervene when a seat needs you.</p>'+
     '<ol class="empty-steps" id="emptySteps">'+
-      '<li><span class="n">1</span><div><b>Work</b> — seed the board and claim a first ticket.<div class="cta">tickets quickstart --agent &lt;you&gt;</div></div></li>'+
-      '<li><span class="n">2</span><div><b>Team</b> — plug a second harness. Coverage by work, not a fixed role.<div class="cta">tickets join … --harness</div></div></li>'+
-      '<li><span class="n">3</span><div><b>Objective</b> — name what the team finishes.<div class="cta">tickets objective "…"</div></div></li>'+
+      dayOneStep(1,'Work','seed the board and claim a first ticket.','tickets quickstart --agent <you>','')+
+      dayOneStep(2,'Team','plug a second harness. Coverage by work, not a fixed role.','tickets join … --harness','agents')+
+      dayOneStep(3,'Objective','name what the team finishes.','tickets objective "…"','objective')+
     '</ol>'+
     '<p class="empty-honesty">Median turns and yield@cost stay — until a done ticket reports.</p>'+
-    '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock.</p>';
+    '<p class="empty-intervene">Intervene is always available — <button type="button" class="try-run" data-tab="messages">Msg</button> a seat, route, or unblock.</p>';
+  if(!el.dataset.actsBound){
+    el.dataset.actsBound='1';
+    el.addEventListener('click',e=>{
+      const t=e.target.closest('button');
+      if(!t||!el.contains(t))return;
+      const cmd=t.getAttribute('data-copy');
+      if(cmd&&navigator.clipboard&&navigator.clipboard.writeText){
+        const prev=t.textContent;
+        navigator.clipboard.writeText(cmd).then(()=>{t.textContent='Copied';setTimeout(()=>{t.textContent=prev},1200)}).catch(()=>{});
+      }
+      const tab=t.getAttribute('data-tab');
+      if(tab)setTab(tab);
+    });
+  }
 }
 function renderAttention(items){
   const box=document.getElementById('attentionBox'),list=document.getElementById('attnList'),cnt=document.getElementById('attnCount');

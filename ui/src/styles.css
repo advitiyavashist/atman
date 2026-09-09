@@ -221,6 +221,17 @@ td button.link {
   color: var(--text);
 }
 .day-one .cta { margin-top: 6px; font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--blue); }
+.day-one .empty-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.day-one .copy-run {
+  font: 12px inherit;
+  background: var(--blue);
+  color: var(--bg);
+  border: 1px solid var(--blue);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-weight: 650;
+}
 .day-one .empty-intervene { margin-top: 14px; }
 
 details.evidence { margin-top: 6px; }
