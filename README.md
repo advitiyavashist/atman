@@ -1,155 +1,180 @@
-# Atman
+<p align="center">
+  <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
+</p>
 
-Finish more work at least cost — in the fewest turns.
+<h1 align="center">Bring your agents. Make them one team.</h1>
 
-Atman is a runtime for teams of AI coding agents: bring the agents you already
-use — Claude Code, Codex, Cursor, a local model, your own harness — and it owns
-the objective, the shared state, the work queue, the messaging, the scheduling
-and the verification. `tickets` is its control plane: one Python file, standard
-library only, no server, no database, no network.
+<p align="center">
+  Atman is an open, local runtime for managing Claude Code, Codex, Cursor, Grok,
+  local models, and your own agent harnesses around one objective.
+</p>
 
-**See it:** `tickets ui` → <http://127.0.0.1:8765>. The hero is median turns
-and yield@cost. Values stay `—` until a done ticket reports (unknown ≠ 0).
+Give Atman an objective. It assigns ready work, carries the relevant handoff
+context, watches liveness and limits, routes messages, and holds finished work
+for review. The result is a team you can understand and recover when a model,
+session, or machine stops.
 
-It exists because a swarm of agents fails in predictable ways: two agents do the
-same work, work starts before its prerequisite exists, an agent dies on a usage
-limit still holding a ticket nobody else can see, handoff context lives in a chat
-window that is now gone, and the human ends up merging the conflicts. Every
-command here closes one of those gaps.
+![Atman dashboard showing an objective, agent team, dependency-aware work, and review queue](docs/brand/evidence/t606-atman-dark-desktop.png)
 
-## Install
+The dashboard above is a checked-in product capture. The live dashboard runs
+locally with `tickets ui`; it is not a public hosted demo.
+
+## What Atman manages
+
+An agent is more than a model. Atman treats each working seat as the combination
+of:
+
+| Part | What Atman needs to know |
+| --- | --- |
+| Intelligence | Model or agent harness: Claude Code, Codex, Cursor, Grok, a local model, or your own runner |
+| Working context | Current objective, task, dependency handoffs, messages, and standing briefs |
+| Operating boundary | Tools, permissions, worktree, time budget, and usage quota |
+| Capability | What the seat can do, such as backend work, browser checks, Docker, or GPU jobs |
+
+Atman uses that whole profile to decide who should receive ready work and what
+context should travel with it. Today that context is explicit, inspectable text.
+There is no hidden shared-memory claim.
+
+## What works today
+
+- One objective with concrete exit criteria.
+- Atomic task claiming, dependencies, roles, capabilities, cost tiers, epics,
+  and sprints.
+- Board messages, direct agent messages, dependency handoffs, and review notes.
+- Local runners for existing agent CLIs, with per-agent worktrees and one active
+  task by default.
+- Liveness, usage-limit, blocked-work, and stale-agent signals with explicit
+  recovery.
+- A review queue and gated merge flow so submitted work does not silently become
+  accepted work.
+- A local dashboard for Objective, Team, Work, Messages, and intervention.
+
+The control plane is the `tickets` CLI: one Python file, standard library only,
+with plain files under `.tickets/`. It does not require a hosted service,
+database, or agent SDK.
+
+## Context without repetition
+
+Coordination and knowledge are separate parts of the system.
+
+**Tickets coordinate execution.** They record ownership, dependencies, status,
+messages, evidence, and review. They answer: *what should happen next, and who
+owns it?*
+
+**Team knowledge supplies context.** The current v0 is deliberately simple:
+tracked documents, board briefings, and role or agent briefs. It answers: *what
+does this agent need to know before it starts?* See
+[Team knowledge](docs/knowledge/README.md).
+
+The next knowledge layer will map objectives, decisions, artifacts, and prior
+work so a new agent inherits the smallest useful context instead of repeating
+discovery. It remains separate from the task state machine.
+
+**Brahman is the research path, not a shipped Atman feature.** That work tests
+whether models can transfer useful state more efficiently than text alone,
+including prefill reuse, KV-cache transfer, and learned latent communication.
+Atman is where the resulting context method can eventually be assigned,
+budgeted, observed, and reviewed.
+
+## First run
+
+Python 3.9+ and Git are the only requirements.
 
 ```sh
-git clone <this repo> ~/tickets
-ln -s ~/tickets/tickets.py ~/.local/bin/tickets     # any dir on your PATH
-cd your-project && tickets quickstart               # board + sample work + you, registered
+git clone https://github.com/advitiyavashist/atman.git
+cd atman
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+
+cd /path/to/your-project
+tickets quickstart --agent alice --roles backend
+tickets msg "alice is online"
+tickets next
+git worktree add .worktrees/alice -b alice
+cd .worktrees/alice
+tickets update T-001 "working on the data model"
+tickets review T-001 --notes "paths changed, tests run, decisions"
+tickets ui
 ```
 
-Optional, Claude Code: add a `SessionStart` hook so every session sees the
-board (see `install.sh`).
+`quickstart` creates a local board, registers the first agent, and adds three
+sample tasks in a real dependency chain. It is safe to run twice. Remove the
+samples with `tickets quickstart --remove`.
 
-## Quickstart
+`tickets ui` prints the local address for the read-only dashboard. For the full
+captured session, read [A first session](docs/first-session.md).
 
-`tickets quickstart` is the whole first run. It is non-interactive and safe to
-run twice: it creates the board if there is none, adds a sample epic and three
-tickets in a real dependency chain, registers you as an agent, and prints the
-three commands that matter.
+## Connect a team
 
-```sh
-cd your-project
-tickets quickstart --agent alice        # or: export TICKET_AGENT=alice first
-tickets next                            # claims the first sample ticket
-tickets update T-001 "poking at it"
-tickets review T-001 --notes "what I did, what I ran, what I decided"
-tickets quickstart --remove             # delete the samples when you are done
-```
-
-Open the board: `tickets ui` → <http://127.0.0.1:8765> (read-only,
-auto-refresh). Median turns and yield@cost stay `—` until a done ticket
-reports. Then read [docs/first-session.md](docs/first-session.md) for a real
-captured first session, command by command.
-
-Ask for the second ticket and you will be told `no ticket ready`. That is
-waiting-on working, not the board being broken — `T-002` waits on `T-001`.
-
-Taking the **master** seat (Claude / Cursor / Codex as the board
-coordinator): [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md)
-— folders, install, first commands, role-context briefs, what not to
-expect. Index: [docs/onboarding/README.md](docs/onboarding/README.md).
-Team knowledge — **Standing files. Not a memory product.** KB v0 = board
-docs + tracked docs + briefs (E-013 inject):
-[docs/knowledge/README.md](docs/knowledge/README.md).
-
-## The model
-
-- **Ticket** `T-001`: title, body, `role`, `priority` (1 hard .. 3 routine),
-  `deps` (ticket ids this work waits on; cycles and dangling ids refused),
-  `epic`, `sprint`, `needs` (capabilities such as `docker`, `browser`,
-  `own-machine`), owner, notes, timings.
-- **Status**: `TO DO -> IN PROGRESS -> IN REVIEW -> DONE`, or `BLOCKED`.
-- **Epic** `E-001`, **Sprint** `S-01` (one active; `next` prefers it).
-- **Agent**: `TICKET_AGENT=name`; registered with roles, capabilities, cost
-  tier, model, and what it is best for.
-- **Master**: whoever ran `tickets master take`. Reviews, merges, routes, logs.
-  Designed to be replaced mid-flight: `tickets master` prints the whole
-  handover.
-
-Claims are atomic (`O_EXCL` lock), so parallel `tickets next` calls never hand
-out the same ticket. Git worktrees share one board.
-
-## Worker loop
+Every harness uses the same small contract: Atman gives it a prompt file, a
+working directory, and an identity; the harness reports through `tickets`.
 
 ```sh
 export TICKET_AGENT=claude-opus
-tickets join $TICKET_AGENT --roles backend --cost high --model opus
-tickets master                    # briefing: sprint, epics, workforce, review queue, health
-tickets inbox                     # messages addressed to you
-tickets next                      # atomically claims; prints body, epic, handoff notes from deps
-tickets update T-012 "..."        # every 45 min; silence is treated as a timeout
-tickets msg "question" --to grok --re T-012
-tickets sync                      # merge main into your branch (conflicts are yours, early)
-tickets review T-012 --notes "paths, tests run, decisions"   # -> IN REVIEW, branch@sha recorded
+tickets join "$TICKET_AGENT" --roles backend --cost high --model opus
+tickets master
+tickets inbox
 tickets next
 ```
 
-`review` and `done` refuse from `main` or with uncommitted files. `next` refuses
-a second ticket while you hold one (`--another` to override).
-
-## Master loop
+The built-in runner names are `claude`, `codex`, `cursor`, and
+`cursor+claude`. A custom runner can be any command:
 
 ```sh
+tickets join qwen --roles docs \
+  --harness custom \
+  --cmd 'ollama run qwen3:8b < {prompt_file}'
+
+tickets harness check qwen
+tickets spawn qwen --every 3600
+```
+
+Start with `tickets connect` for tool-specific onboarding. See
+[Bring your own agent](docs/byoa.md) for the complete runner contract and
+[Master onboarding](docs/onboarding/master-howto.md) for the coordinating seat.
+
+## The worker loop
+
+```sh
+tickets master                    # objective, sprint, workforce, reviews, health
+tickets inbox                     # direct messages and board mentions
+tickets next                      # claim one ready task atomically
+tickets update T-012 "..."        # progress and blockers
+tickets msg "question" --to boss --re T-012
+tickets sync                      # bring main into this agent's branch
+tickets review T-012 --notes "paths, tests, decisions"
+```
+
+Tasks move through `TO DO → IN PROGRESS → IN REVIEW → DONE`, or `BLOCKED`.
+Unfinished dependencies remain invisible to `tickets next`, and parallel claims
+use an exclusive lock so two agents cannot receive the same task.
+
+## The master loop
+
+```sh
+tickets objective "Ship V1 with the local acceptance gate green"
 tickets master take
-tickets master                    # REVIEW QUEUE + HEALTH with fix commands
-tickets merge                     # integration worktree -> queue branches -> tests -> ff main -> close
-git push origin main              # the tool never pushes
-tickets route [--claim]           # suggest/assign owners by role, capability, cost, model
-tickets limits                    # who is out on a usage limit
-tickets master log "why I did X"
+tickets master                    # review queue and health, with recovery actions
+tickets route --claim             # assign by role, capability, cost, and model
+tickets merge                     # test and integrate submitted branches
+tickets objective --done "evidence"
 ```
 
-`merge` auto-resolves conflicts that touch only docs (keeps main's, saves the
-branch's copy under `docs/handoffs/conflicts/`), skips branches with code
-conflicts and tells you whose `tickets sync` is needed, and never touches main
-unless the test command passes (`.tickets/merge.json` to change it).
+The master role is replaceable. Its objective, decisions, workforce, health,
+and review queue live on the board so another agent can take over after a
+session ends.
 
-## Bring your own agent
-
-Any harness that can run a shell command can be a worker: it just shells out to
-`tickets`, so they all share one board.
+For an unattended coordinator:
 
 ```sh
-tickets connect                   # per-tool onboarding text
-tickets hooks claude              # Stop hook: keep a turn alive while board work remains
-tickets pending --agent alice     # exit 0 if there is work: unread DM, held ticket, ready ticket
-tickets prompt --agent alice      # the standard worker prompt for a headless run
-tickets watch --agent alice --every 60 --cwd .worktrees/alice \
-  --exec 'claude -p "$(tickets prompt)" --permission-mode acceptEdits'
+tickets drive "Ship V1" --as boss --heartbeat 30 --tool cursor+claude
 ```
 
-`--exec` takes any tool — `codex`, `cursor-agent`, a script of your own.
-`watch --once` is the cron/launchd form. A session cannot be woken by a hook
-after its turn ends, which is why waking is a poll plus an `--exec`, not a
-callback.
+The heartbeat stops when the objective reaches a terminal state. Agent watchers
+wake for assigned work or actionable messages; they do not need to stay inside
+one endless model turn.
 
-## Driving an objective
-
-Workers wake when there is work for them. The master is different: it has to
-keep planning when nothing is pending, or the board goes quiet with the goal
-unmet. So the master seat has a heartbeat.
-
-```sh
-tickets objective "V1: offline gates green on main, deploy waits on credentials"
-tickets drive "<objective>" --as boss --heartbeat 30 --tool cursor+claude
-tickets objective                       # objective + drive status
-tickets objective --done "evidence"     # closes it; the heartbeat stops
-```
-
-Every heartbeat the master prompt carries the objective and a status picture,
-and the rule that a heartbeat run ends by advancing the plan or logging why
-nothing changed. Only the master seat is driven; the Claude Stop hook ignores
-heartbeats, so an interactive session is never pinned open by one.
-
-## Planning
+## Plan dependent work
 
 ```sh
 tickets epic create "Auth" -b "..."
@@ -161,53 +186,35 @@ tickets plan <<'EOF'
  {"key":"ui","title":"Login UI","role":"console","deps":["api"]}
 ]}
 EOF
-tickets create "DB migration" --blocks T-002     # new work T-002 must wait on
-tickets dep T-004 --after T-003                  # set waiting-on
-tickets map                                      # sprint -> epic -> tickets
-tickets graph                                    # who waits on whom, with status
 ```
 
-## Where the data lives
+Use `tickets map` for sprint and epic progress, `tickets graph` for dependency
+diagnosis, and `tickets who` for live ownership and worktrees.
 
-Everything is `.tickets/` at the repo root — plain files you can read, diff and
-commit:
+## Inspectable by design
 
-| path | what |
+Everything lives under the project’s `.tickets/` directory:
+
+| Path | Purpose |
 | --- | --- |
-| `T-001.json` | one file per ticket, so parallel agents never fight over one file |
-| `epics/`, `sprints/` | one file each |
-| `agents/`, `roles.json`, `workforce.json` | who exists, what they can do |
-| `messages.jsonl` | append-only message log |
-| `MASTER.md` | master context and the decision log |
-| `briefs/_shared.md`, `briefs/roles/<role>.md`, `briefs/<agent>.md` | standing context injected on watch/spawn (E-013); not a shared-memory brain |
+| `T-001.json` | One file per task, allowing atomic claims without a central server |
+| `epics/`, `sprints/` | Delivery structure and active scope |
+| `agents/`, `roles.json`, `workforce.json` | Agent identity, capability, cost, and availability |
+| `messages.jsonl` | Append-only team and direct messages |
+| `MASTER.md` | Objective context and durable decision log |
+| `briefs/` | Shared, role, and agent-specific standing context |
 
-KB v0 is board docs + tracked docs
-([docs/knowledge/](docs/knowledge/README.md)) + those briefs — the same
-E-013 inject. Not a shared-memory brain, vector DB, or auto-sync role KB.
+`tickets init` ignores the live board by default. Standing briefings can be
+tracked when the team needs them to survive clones; see the
+[handoff contract](docs/handoff-contract.md) and
+[board resolution](docs/board-resolution.md).
 
-`tickets init` gitignores the board by default (`--track` to commit it
-instead). Standing files (`MASTER.md`, `briefs/`) should still be tracked —
-see [docs/handoff-contract.md](docs/handoff-contract.md) and the folder map
-in [docs/onboarding/master-howto.md](docs/onboarding/master-howto.md).
-Board location resolves in this order: `$TICKETS_DIR`, the nearest
-ancestor with a live board, the git worktree root, then cwd — see
-[docs/board-resolution.md](docs/board-resolution.md).
+## Read next
 
-## Everything else
+- [First session](docs/first-session.md)
+- [Agent onboarding](docs/onboarding/README.md)
+- [Team knowledge](docs/knowledge/README.md)
+- [Messages and runners](docs/messages-and-runners.md)
+- [Design notes](docs/design-notes.md)
 
-`board` (compact, used by hooks; silent when there is no board), `list`, `show`,
-`who` (where every agent is: worktree, branch, ticket), `here`, `assign`,
-`status`, `block`, `reopen`, `note`, `limit`, `context`, `knowledge`, `where`,
-`guide`.
-
-## Design notes
-
-Why it is built this way — no daemon, filesystem atomicity, and why the process
-rules are deliberately opinionated — is in
-[docs/design-notes.md](docs/design-notes.md).
-
-Python 3.9+, stdlib only. MIT licensed.
-
-Before publishing this repository, see [docs/PUBLIC_PREP.md](docs/PUBLIC_PREP.md)
-and the history-rewrite runbook in [docs/HISTORY_REWRITE.md](docs/HISTORY_REWRITE.md).
-Visibility stays private until Advitiya / CTO flip it.
+Atman is MIT licensed.

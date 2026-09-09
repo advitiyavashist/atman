@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>atman</title>
-  <meta name="description" content="Open repo, self-hosted team runtime. Finish more work at least cost — in the fewest turns. Not a SaaS cloud.">
-  <meta name="theme-color" content="#f4f1ea">
+  <title>atman · bring your agents into one team</title>
+  <meta name="description" content="Atman manages the agents you already use around one objective, with explicit context, liveness, messaging, and review.">
+  <meta name="theme-color" content="#0c0e12">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -13,7 +13,7 @@
   <a class="skip" href="#main">Skip to content</a>
 
   <header class="bar">
-    <a class="lockup" href="#main">
+    <a class="lockup" href="#main" aria-label="Atman home">
       <svg class="mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
         <circle cx="10" cy="7.8" r="3.35"/>
         <circle cx="22.4" cy="8.8" r="3.35"/>
@@ -24,89 +24,129 @@
       <span class="wordmark">atman</span>
     </a>
     <nav aria-label="Page">
-      <a href="https://github.com/advitiyavashist/atman" rel="noopener">Clone the repo</a>
-      <a href="#start">Run it locally</a>
+      <a href="#today">Today</a>
+      <a href="#direction">Direction</a>
+      <a href="https://github.com/advitiyavashist/atman" rel="noopener">GitHub</a>
     </nav>
   </header>
 
   <main id="main">
     <section class="hero">
-      <p class="kicker">open repo · self-hosted</p>
-      <h1>Finish more work at least cost — in the fewest turns.</h1>
-      <p class="lede">Bring Claude, Codex, Cursor, or your own harness. Atman makes them one team and shows the efficiency score.</p>
-      <p class="ctas">
-        <a class="btn" href="https://github.com/advitiyavashist/atman" rel="noopener">Clone the repo</a>
-        <a class="ghost" href="#start">Run it locally</a>
-      </p>
-      <svg class="hero-mark" viewBox="0 0 32 32" width="160" height="160" aria-hidden="true">
-        <circle cx="10" cy="7.8" r="3.35"/>
-        <circle cx="22.4" cy="8.8" r="3.35"/>
-        <circle cx="6.6" cy="17.6" r="3.35"/>
-        <circle cx="25.4" cy="18.2" r="3.35"/>
-        <circle cx="16" cy="24.6" r="3.35"/>
-      </svg>
+      <div>
+        <p class="kicker">multi-agent management · open and local</p>
+        <h1>Bring your agents.<br>Make them<span class="mobile-break"><br></span> one team.</h1>
+        <p class="lede">Set an objective. Atman assigns ready work, gives each agent the relevant context, watches liveness and limits, routes messages, and gets finished work reviewed.</p>
+        <p class="agent-list">Claude Code · Codex · Cursor · Grok · local models · your harness</p>
+        <p class="ctas">
+          <a class="btn" href="https://github.com/advitiyavashist/atman" rel="noopener">Get Atman</a>
+          <a class="ghost" href="#start">First run</a>
+        </p>
+      </div>
+      <aside class="agent-card" aria-label="The agent Atman manages">
+        <p class="card-label">one working agent</p>
+        <div class="formula">
+          <span>intelligence</span>
+          <b>+</b>
+          <span>context</span>
+          <b>+</b>
+          <span>tools &amp; permissions</span>
+          <b>+</b>
+          <span>limits &amp; capabilities</span>
+        </div>
+        <p>Atman manages the whole seat, not just the model endpoint.</p>
+      </aside>
     </section>
 
-    <section id="what">
-      <h2>What it is</h2>
-      <p class="lead">A team runtime. Not a framework.</p>
-      <ul>
-        <li>Bring the agents you already use. We make them one team.</li>
-        <li>Objective → allocate → concurrent → handoffs → review → replan.</li>
-        <li>Not a multi-agent framework, a model router, or a shared-memory product.</li>
-      </ul>
+    <section class="proof" aria-labelledby="proof-title">
+      <div class="section-heading">
+        <p class="eyebrow">the product today</p>
+        <h2 id="proof-title">See the whole team. Know the next move.</h2>
+      </div>
+      <figure>
+        <img src="../docs/brand/evidence/t606-atman-dark-desktop.png" alt="Atman dashboard with objective, team state, work lanes, blockers, and review queue" width="1440" height="1000">
+        <figcaption>A checked-in product capture. Live data stays local to your board.</figcaption>
+      </figure>
     </section>
 
-    <section id="how">
-      <h2>How</h2>
-      <div class="steps">
+    <section id="today" class="split">
+      <div class="section-heading">
+        <p class="eyebrow">ships today</p>
+        <h2>Execution state agents can share.</h2>
+        <p>The <code>tickets</code> control plane records objective, ownership, dependencies, messages, evidence, review, and recovery in plain local files.</p>
+      </div>
+      <div class="capabilities">
         <article>
-          <h3>Objective</h3>
-          <p>Standing mission. Met, not met, or evidence. No invented bars.</p>
+          <span>01</span>
+          <h3>Assign the next ready task</h3>
+          <p>Match work to roles, tools, capabilities, cost, and availability. Atomic claims prevent duplicate work.</p>
         </article>
         <article>
-          <h3>Team</h3>
-          <p>Seats and coverage. Empty seats are uncovered work.</p>
+          <span>02</span>
+          <h3>Carry the handoff</h3>
+          <p>Dependency notes, messages, and standing briefs reach the next agent when it starts.</p>
         </article>
         <article>
-          <h3>Work</h3>
-          <p>Teammates, lanes, next step, handoff. Blocked · Ready · In flight · Review.</p>
+          <span>03</span>
+          <h3>Notice when a seat stops</h3>
+          <p>Usage limits, missing heartbeats, blockers, and stale claims stay visible and recoverable.</p>
         </article>
         <article>
-          <h3>Intervene</h3>
-          <p>Route, unblock, reassign, nudge, msg. No silent auto-promote.</p>
+          <span>04</span>
+          <h3>Review before accepting</h3>
+          <p>Work moves through a review queue with its branch, tests, decisions, and evidence attached.</p>
         </article>
       </div>
     </section>
 
-    <section id="metrics">
-      <h2>Metrics</h2>
-      <p class="score">efficiency score · <b>unmeasured</b></p>
-      <p>Not measured until real. The score is turns to done. Unknown is not zero. No sample numbers.</p>
+    <section id="direction" class="direction">
+      <div class="section-heading">
+        <p class="eyebrow">the broader direction</p>
+        <h2>Give every agent the smallest useful context.</h2>
+      </div>
+      <div class="layers">
+        <article>
+          <p class="status">today · separate system</p>
+          <h3>Task control plane</h3>
+          <p>Coordinates work: state, ownership, dependencies, messages, liveness, and review.</p>
+        </article>
+        <article>
+          <p class="status">next · separate system</p>
+          <h3>Team knowledge</h3>
+          <p>Maps objectives, decisions, and artifacts so a new seat inherits relevant context instead of repeating discovery.</p>
+        </article>
+        <article>
+          <p class="status">research · Brahman</p>
+          <h3>Model communication</h3>
+          <p>Tests text against prefill, KV-cache, and latent transfer. This research is not a shipped Atman feature.</p>
+        </article>
+      </div>
     </section>
 
-    <section id="start">
-      <h2>Start</h2>
-      <p class="lead">Clone the repo. First session in four lines.</p>
+    <section id="start" class="start">
+      <div class="section-heading">
+        <p class="eyebrow">first run</p>
+        <h2>One local board. Any shell-capable agent.</h2>
+      </div>
       <pre><code>git clone https://github.com/advitiyavashist/atman.git
-cd atman
-tickets quickstart --agent &lt;you&gt;
-tickets ui</code></pre>
-      <p>Command-by-command walkthrough: <a href="https://github.com/advitiyavashist/atman/blob/main/docs/first-session.md">docs/first-session.md</a>.</p>
-    </section>
+cd atman &amp;&amp; ./install.sh
+export PATH="$HOME/.local/bin:$PATH"
 
-    <section id="close">
-      <h2>Close</h2>
-      <p class="lead">Open repo. Self-hosted. You run it.</p>
+cd /path/to/your-project
+tickets quickstart --agent alice --roles backend
+tickets msg "alice is online"
+tickets next
+git worktree add .worktrees/alice -b alice
+cd .worktrees/alice
+tickets review T-001 --notes "paths, tests, decisions"
+tickets ui</code></pre>
+      <p><code>tickets ui</code> starts the dashboard on your machine. Read the <a href="https://github.com/advitiyavashist/atman/blob/main/docs/first-session.md">captured first session</a> or the <a href="https://github.com/advitiyavashist/atman/blob/main/docs/byoa.md">bring-your-own-agent contract</a>.</p>
     </section>
   </main>
 
   <footer>
     <span class="wordmark">atman</span>
-    <p>
-      MIT · <a href="https://github.com/advitiyavashist/atman" rel="noopener">github.com/advitiyavashist/atman</a>
-      · No custom domain is registered.
-    </p>
+    <p>Open repo · local by default · MIT</p>
+    <a href="https://github.com/advitiyavashist/atman" rel="noopener">github.com/advitiyavashist/atman</a>
   </footer>
 </body>
 </html>
