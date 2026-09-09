@@ -9,7 +9,7 @@ Start by running the fixtures — they are the fastest way to see the shapes:
 ```sh
 pip install -e '.[contracts]'
 python -m pytest -q
-ls tests/fixtures/          # 124 fixtures, grouped by screen
+ls tests/fixtures/          # 126 fixtures, grouped by screen
 cat tests/fixtures/manifest.json
 ```
 
@@ -432,3 +432,46 @@ Non-obvious requirements:
   or schema changed, so nothing dependent on the shape of these fixtures is
   affected — only the literal string value of one example field. `docs/interface-v1.md:5`
   had the same real identity in prose and got the same substitution.
+
+- **T-297, additive route, no `info.version` bump**: new
+  `POST /tickets/{ticket_id}/acceptance` (`setTicketAcceptance`, request
+  `SetTicketAcceptanceRequest`: `request_id`, `expected_version`,
+  `acceptance` with `minItems: 1`), returning the `Ticket` at its new version.
+  New error code `acceptance_not_editable` (409). Two new fixtures:
+  `tickets/request-set-acceptance.json` and
+  `errors/409-acceptance-not-editable.json`.
+
+  **Why it exists — this is a gap in amendment 2 above, not a reversal of
+  it.** Amendment 2 made `acceptance` optional at create and moved ticket
+  quality from a create-time schema minimum to enforcement "later", at the
+  review gate. That gate is real and still live: `store.transition` and
+  `store.submit_review` both refuse `review` on an empty acceptance list.
+  What amendment 2 did not notice is that "later" had no door — no route
+  could write `acceptance` after create, so a ticket that arrived without
+  criteria could never reach review through the API at all, by any caller,
+  including the master. Measured on the live board while implementing this:
+  all 217 tickets lack the field, and 29 of them are not `done`.
+  `storage/legacy.py:_import_ticket` writes `acceptance` as the SQL literal
+  `'[]'` and never consults the legacy item, so this is *every* imported
+  ticket — T-213's import was lossless in storage and lossy in capability.
+
+  **What this does NOT change, deliberately.** The create-time optionality of
+  amendment 2 is untouched — imports stay lossless. The review gate is
+  untouched — relaxing it to allow review with an empty list was the
+  considered alternative and was rejected, because it deletes the quality
+  guarantee rather than relocating it.
+
+  **If you consume tickets:** a ticket's `acceptance` can now change after
+  creation, so it is no longer safe to treat it as create-time-immutable.
+  It is `expected_version`-guarded like every other mutation, so a stale read
+  is a 409, not a silent overwrite.
+
+  **If you write tickets:** the route replaces the list outright rather than
+  appending — `expected_version` already gives you read-modify-write, and a
+  separate append verb would only let two writers interleave into a list
+  neither intended. It is refused with 409 `acceptance_not_editable` on a
+  `done` ticket (terminal) and on one in `review` (an in-flight reviewer is
+  judging against the list as it stands). A rejected review returns the
+  ticket to `claimed`, which is writable — so the ticket stranded by a
+  rejection, which is the case that reaches imported tickets that arrived
+  already in `review`, is recoverable.

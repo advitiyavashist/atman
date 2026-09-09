@@ -276,6 +276,7 @@ components:
         - dependency_cycle
         - dependency_unmet
         - missing_acceptance_criteria
+        - acceptance_not_editable
         - invalid_review_evidence
         - enrollment_code_invalid
         - enrollment_code_expired
@@ -1561,6 +1562,36 @@ components:
               maxLength: 1000
               description: Required when `blocked` is true.
 
+    SetTicketAcceptanceRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, acceptance]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            acceptance:
+              type: array
+              minItems: 1
+              description: |
+                Replaces the ticket's acceptance criteria outright. T-297:
+                `minItems: 1` here is not a reversal of T-224 -- T-224 dropped
+                the minimum at *create* so T-213's legacy import stays
+                lossless, and this is the separate, later door that amendment
+                assumed existed. A caller reaching this route is supplying
+                criteria; an empty list would only re-arm the dead end the
+                route exists to close, so it is 400 rather than a silent
+                no-op. Replace rather than append: `expected_version` already
+                provides read-modify-write, and a second append verb would
+                only let two writers interleave into a list neither intended.
+              items:
+                type: object
+                additionalProperties: false
+                required: [text]
+                properties:
+                  text: { type: string, minLength: 1, maxLength: 500 }
+
     ReopenTicketRequest:
       allOf:
         - $ref: '#/components/schemas/MutationEnvelope'
@@ -2230,6 +2261,53 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /tickets/{ticket_id}/acceptance:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { $ref: '#/components/schemas/TicketId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tickets]
+      operationId: setTicketAcceptance
+      summary: Set the acceptance criteria of an existing ticket.
+      description: |
+        T-297: the write path T-224 assumed existed. That amendment made
+        `acceptance` optional at create -- forced, because T-213's legacy
+        import must be lossless and no ticket on the real board carries the
+        field -- and moved ticket quality from a create-time schema minimum to
+        enforcement "later", at the review gate. But no route could write
+        `acceptance` after create, so "later" had no door: `transition` and
+        `submitReview` both refuse `review` on an empty list, which made every
+        ticket created or imported without criteria permanently unroutable
+        through the API. The importer hardcodes `[]`, so that is every
+        imported ticket that is not already `done`.
+
+        Refused 409 `acceptance_not_editable` on `done` (terminal) and on
+        `review` (an in-flight reviewer is judging against the list as it
+        stands; moving that bar underneath them is the failure the review gate
+        exists to prevent). A rejected review returns the ticket to `claimed`,
+        which is writable -- so a ticket stranded by a rejection is
+        recoverable without editing a live review.
+
+        Owner-or-operator, matching `setTicketBlocked`: an agent may set
+        criteria on a ticket it owns or on an unowned one, not on another
+        agent's.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetTicketAcceptanceRequest' }
+      responses:
+        '200':
+          description: Updated. Returns the ticket at its new version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /tickets/{ticket_id}/reopen:
     parameters:

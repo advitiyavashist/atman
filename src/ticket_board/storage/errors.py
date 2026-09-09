@@ -226,3 +226,21 @@ class InvalidReviewEvidence(BoardError):
 
     def __init__(self, message, details=None):
         super().__init__(message, details)
+
+
+class AcceptanceNotEditable(BoardError):
+    """T-297: acceptance is writable while a ticket can still be worked.
+
+    `done` is terminal and `review` is in flight -- editing the criteria a
+    reviewer is judging against moves the bar underneath them. A rejected
+    review returns the ticket to `claimed`, where this route works again.
+    """
+    code = "acceptance_not_editable"
+    status = 409
+
+    def __init__(self, ticket_id, state):
+        super().__init__(
+            "A ticket's acceptance criteria cannot be changed in state "
+            "'{}'.".format(state),
+            {"ticket_id": ticket_id, "state": state},
+        )

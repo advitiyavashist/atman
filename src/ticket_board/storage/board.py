@@ -33,6 +33,7 @@ from .errors import (
     InvalidReviewEvidence,
     InvalidStateTransition,
     MalformedRequest,
+    AcceptanceNotEditable,
     MissingAcceptanceCriteria,
     NotFound,
     RequestIdReused,
@@ -1053,6 +1054,64 @@ class BoardStore(MessagingMixin):
                 conn, self._ticket_row(conn, project_id, ticket_id)
             )
             self._remember(conn, project_id, request_id, "transition", body, result)
+        return result
+
+    def set_acceptance(self, project_id, ticket_id, acceptance, *,
+                       expected_version, actor=None, request_id=None):
+        """Replace a ticket's acceptance criteria after creation (T-297).
+
+        T-224 made `acceptance` optional at create because T-213's legacy
+        import must be lossless and no ticket on the real board carries the
+        field. It moved ticket quality from a create-time schema minimum to
+        "enforced later" -- but `transition` and `submit_review` still refuse
+        `review` on an empty list, and no route could write the field after
+        create. Enforcement moved to "later" and "later" had no door: every
+        imported ticket that is not already `done` was permanently unroutable
+        through the API. This is that door.
+
+        Replace, not append: `expected_version` already gives the caller
+        read-modify-write under optimistic concurrency, so appending is a
+        client-side concat and a second verb would only add a way for two
+        writers to interleave into a list neither of them intended.
+
+        Refused on `done` (terminal -- ALLOWED_TRANSITIONS has no edge out) and
+        on `review` (an in-flight reviewer is judging against the list as it
+        was; moving that bar underneath them is the failure the guard exists to
+        prevent). A rejected review returns the ticket to `claimed`, which is
+        writable, so the stranded-on-rejection case this ticket documents is
+        reachable again without editing a live review.
+        """
+        actor = actor or SYSTEM_ACTOR
+        body = {"ticket_id": ticket_id, "acceptance": acceptance,
+                "expected_version": expected_version}
+        with write_txn(self.conn) as conn:
+            replay = self._replay(conn, project_id, request_id,
+                                  "set_acceptance", body)
+            if replay is not None:
+                return replay
+            row = self._ticket_row(conn, project_id, ticket_id)
+            if row["version"] != expected_version:
+                raise TicketVersionConflict(ticket_id, expected_version,
+                                            row["version"])
+            if row["state"] in ("done", "review"):
+                raise AcceptanceNotEditable(ticket_id, row["state"])
+
+            conn.execute(
+                "UPDATE tickets SET acceptance = ?, updated_at = ?,"
+                " version = version + 1"
+                " WHERE project_id = ? AND id = ? AND version = ?",
+                (_json(acceptance), ids.now(), project_id, ticket_id,
+                 expected_version),
+            )
+            self._audit(conn, project_id, actor, "ticket.set_acceptance",
+                        subject_type="ticket", subject_id=ticket_id,
+                        request_id=request_id,
+                        summary="{} criteria".format(len(acceptance)))
+            result = self._serialize_ticket(
+                conn, self._ticket_row(conn, project_id, ticket_id)
+            )
+            self._remember(conn, project_id, request_id, "set_acceptance",
+                           body, result)
         return result
 
     # --------------------------------------------------------------- reviews
