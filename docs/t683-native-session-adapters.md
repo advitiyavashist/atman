@@ -63,9 +63,12 @@ be replaced without the old lease. Unconditional `os.replace` is not
 ownership. PID-less Codex/Cursor endpoints go **offline** after a heartbeat
 TTL and are not advertised `adapter_native_online`; the thread/session identity
 is retained so the first later poke or `join --persistent` can reconnect.
-Codex `SessionStart` / `UserPromptSubmit` hooks refresh that heartbeat.
-Ephemeral watch/retire teardown
-removes the endpoint; those seats are not shown as reachable after exit.
+Codex `SessionStart` / `UserPromptSubmit` hooks refresh that heartbeat only when
+the current `TICKETS_SESSION_LEASE` or `CODEX_THREAD_ID` matches the stored
+identity. A crash during poke reclaims a stale in-flight `message_id` after
+`TICKETS_NATIVE_INFLIGHT_TTL_SECS` (default 30s) so the durable wake can retry.
+Ephemeral watch/retire teardown removes the endpoint; those seats are not
+shown as reachable after exit.
 
 `tickets msg` pokes only when the workforce harness maps to the endpoint
 provider. A leftover Claude socket on a remote/Grok or Codex seat is never

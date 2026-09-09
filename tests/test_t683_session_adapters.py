@@ -955,3 +955,61 @@ def test_sigterm_child_prompt_emits_run_end(board):
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
+
+
+def test_stale_inflight_message_id_is_reclaimed(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "reclaim.sock")
+    Path(sock_path).touch()
+    sa = _adapters()
+    sa.write_endpoint(str(board), "bob", {
+        "seat": "bob", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "lease_id": "lease-1", "fence": 1, "heartbeat_epoch": time.time(),
+        "last_inflight_id": "crash-mid", "last_inflight_epoch": 1})
+    with mock.patch.object(sa, "_poke_claude", return_value=True) as poke:
+        label = sa.wake_seat(str(board), "bob", "hello", harness="claude",
+                             message_id="crash-mid")
+    assert label == "woken"
+    assert poke.call_count == 1
+    ep = sa.read_endpoint(str(board), "bob")
+    assert ep.get("last_delivery_id") == "crash-mid"
+    assert ep.get("last_inflight_id") is None
+
+
+def test_codex_hook_heartbeat_requires_matching_identity(board, cache_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sa = _adapters()
+    registered_at = "2026-01-01T00:00:00Z"
+    sa.write_endpoint(str(board), "cx", {
+        "seat": "cx", "provider": "codex", "mode": "native",
+        "thread": "thread-live", "pid": None, "at": registered_at,
+        "lease_id": "lease-cx", "fence": 1, "heartbeat_epoch": 1,
+        "heartbeat_at": registered_at})
+    monkeypatch.delenv("TICKETS_SESSION_LEASE", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
+    assert sa.heartbeat_session(str(board), "cx") is None
+    assert sa.read_endpoint(str(board), "cx")["heartbeat_at"] == registered_at
+    assert sa.heartbeat_session(str(board), "cx", thread="other-thread") is None
+    matched = sa.heartbeat_session(str(board), "cx", thread="thread-live")
+    assert matched is not None
+    assert matched["heartbeat_at"] != registered_at
+    assert matched["heartbeat_epoch"] > 1
+    leased = sa.heartbeat_session(str(board), "cx", presented_lease="lease-cx")
+    assert leased is not None
+    _run(board, "join", "cx", "--roles", "docs")
+    ev = json.dumps({"hook_event_name": "SessionStart", "cwd": str(board.parent)})
+    before_mismatch = sa.read_endpoint(str(board), "cx")["heartbeat_epoch"]
+    mismatch = _run(board, "codex-hook", "--agent", "cx", "--worktree", str(board.parent),
+                    env={"TICKETS_CACHE_DIR": cache_dir, "CODEX_THREAD_ID": "wrong"},
+                    stdin=ev)
+    assert mismatch.returncode == 0, mismatch.stderr
+    assert sa.read_endpoint(str(board), "cx")["heartbeat_epoch"] == before_mismatch
+    match = _run(board, "codex-hook", "--agent", "cx", "--worktree", str(board.parent),
+                 env={"TICKETS_CACHE_DIR": cache_dir, "CODEX_THREAD_ID": "thread-live"},
+                 stdin=ev)
+    assert match.returncode == 0, match.stderr
+    after = sa.read_endpoint(str(board), "cx")
+    assert after["heartbeat_epoch"] > before_mismatch
+    assert after["heartbeat_at"] != registered_at

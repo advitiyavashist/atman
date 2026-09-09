@@ -9410,6 +9410,9 @@ def cmd_watch(a, board):
             elif actionable(p):
                 if not same_failure:
                     failures = 0
+                    def _clear_stale_failure(rec):
+                        rec.pop("adapter_failure", None)
+                    _safe(lambda: _agent_update(board, owner, _clear_stale_failure), None)
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
                 print("%s work found (%s) wake=%s stop=%s -> run %d" % (
@@ -9614,7 +9617,12 @@ def cmd_codex_hook(a, board):
         except (ValueError, OSError):
             return
     _pinned_hook_identity(board, owner)
-    _safe(lambda: _session_adapters().heartbeat_session(board, owner), None)
+    _safe(lambda: _session_adapters().heartbeat_session(
+        board, owner,
+        presented_lease=(os.environ.get("TICKETS_SESSION_LEASE") or "").strip(),
+        thread=(os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID") or "").strip(),
+        session_id=(os.environ.get("CURSOR_CONVERSATION_ID")
+                    or os.environ.get("CURSOR_SESSION_ID") or "").strip()), None)
     p = _safe(lambda: pending_work(board, owner), {})
     lines = [
         "Ticket board context (%s):" % owner,

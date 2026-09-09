@@ -21,6 +21,8 @@ ADAPTER_MODES = ("native", "supervised", "remote")
 PROVIDERS = ("claude", "codex", "cursor", "remote")
 # PID-less Codex/Cursor endpoints cannot stay live forever and suppress recovery.
 NATIVE_TTL_SECS = int(os.environ.get("TICKETS_NATIVE_TTL_SECS", "90"))
+# Crash during poke must not suppress the durable message_id forever.
+INFLIGHT_TTL_SECS = int(os.environ.get("TICKETS_NATIVE_INFLIGHT_TTL_SECS", "30"))
 
 
 def cache_root():
@@ -222,7 +224,7 @@ def touch_endpoint(board, seat, expected_lease="", expected_fence=None, **fields
             return None
         ep.update(fields)
         ep["heartbeat_epoch"] = time.time()
-        ep["heartbeat_at"] = fields.get("heartbeat_at") or ep.get("at") or ""
+        ep["heartbeat_at"] = fields.get("heartbeat_at") or _iso_now()
         write_endpoint(board, seat, ep)
         return ep
     finally:
@@ -545,6 +547,21 @@ def _poke_until(fn, ep, text, attempts=NATIVE_POKE_ATTEMPTS):
     return False
 
 
+def _iso_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _inflight_fresh(ep, ttl=None):
+    ttl = INFLIGHT_TTL_SECS if ttl is None else ttl
+    try:
+        beat = float((ep or {}).get("last_inflight_epoch") or 0)
+    except (TypeError, ValueError):
+        beat = 0.0
+    if beat <= 0:
+        return False
+    return (time.time() - beat) <= max(1, int(ttl))
+
+
 def _endpoint_lease_fence(ep):
     lease = (ep or {}).get("lease_id") or ""
     try:
@@ -554,26 +571,34 @@ def _endpoint_lease_fence(ep):
     return lease, fence
 
 
-def heartbeat_session(board, seat, presented_lease=""):
+def heartbeat_session(board, seat, presented_lease="", thread="", session_id=""):
     """Keep-alive for a stored native identity. Does not create or steal a seat.
 
-    Codex SessionStart/UserPromptSubmit hooks call this so a PID-less thread
-    stays online while the session is actually used. A TTL-expired record
-    remains on disk but is not advertised online until a heartbeat or
-    reconnect (`join --persistent`) refreshes it.
+    Requires the current lease or a matching session fingerprint
+    (`CODEX_THREAD_ID` / Cursor session id). Absent or mismatched identity is
+    rejected so a new session cannot keep an old thread online.
     """
     presented = (presented_lease or os.environ.get("TICKETS_SESSION_LEASE") or "").strip()
+    thread = (thread or os.environ.get("CODEX_THREAD_ID")
+              or os.environ.get("CODEX_SESSION_ID") or "").strip()
+    session_id = (session_id or os.environ.get("CURSOR_CONVERSATION_ID")
+                  or os.environ.get("CURSOR_SESSION_ID") or "").strip()
+    if not presented and not thread and not session_id:
+        return None
     fd = acquire_seat_lock(board, seat)
     try:
         ep = read_endpoint(board, seat)
         if not ep:
             return None
-        if presented and (ep.get("lease_id") or "") != presented:
+        lease_ok = bool(presented and presented == (ep.get("lease_id") or ""))
+        thread_ok = bool(thread and thread == (ep.get("thread") or "").strip())
+        session_ok = bool(session_id and session_id == (ep.get("session_id") or "").strip())
+        if not (lease_ok or thread_ok or session_ok):
             return None
         if _endpoint_pid_ok(ep.get("pid")) is False:
             return None
         ep["heartbeat_epoch"] = time.time()
-        ep["heartbeat_at"] = ep.get("at") or ""
+        ep["heartbeat_at"] = _iso_now()
         write_endpoint(board, seat, ep)
         return ep
     finally:
@@ -606,7 +631,7 @@ def _reserve_wake(board, seat, mid, lease, fence):
             return "stale (rebound before delivery)", ep
         if mid and ep.get("last_delivery_id") == mid:
             return "deduped", ep
-        if mid and ep.get("last_inflight_id") == mid:
+        if mid and ep.get("last_inflight_id") == mid and _inflight_fresh(ep):
             return "deduped", ep
         if mid:
             ep["last_inflight_id"] = mid
