@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -202,9 +203,10 @@ def test_native_session_hooks_use_the_same_bounded_selector(board):
 
     installed = run(board, "hooks", "cursor", "--agent", "hook-seat", "--force")
     assert installed.returncode == 0, installed.stderr + installed.stdout
-    hook = board.parent / ".cursor" / "hooks" / "tickets-board.py"
+    hooks = json.loads((board.parent / ".cursor" / "hooks.json").read_text())
+    command = hooks["hooks"]["sessionStart"][-1]["command"]
     cursor = subprocess.run(
-        [sys.executable, str(hook)], input=event, capture_output=True, text=True,
+        shlex.split(command), input=event, capture_output=True, text=True,
         env=env, cwd=board.parent,
     )
     assert cursor.returncode == 0, cursor.stderr + cursor.stdout
