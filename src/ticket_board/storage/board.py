@@ -315,6 +315,47 @@ class BoardStore(MessagingMixin):
                             preset, permission_policy))
         return self.get_agent_preset(agent_id, project_id)
 
+    def re_enroll_agent(self, project_id, agent_id, *, role, capabilities=None,
+                        connection_mode="managed", max_active_tickets=1,
+                        worktree=None):
+        """Refresh a revoked agent's operator-approved profile for recovery.
+
+        Reuses the existing `agent_id` -- tickets, assignments and lease
+        history stay attached. Only `state == 'revoked'` agents may pass;
+        lapsed-but-not-revoked agents heal through `POST /hook-events`.
+        """
+        with write_txn(self.conn) as conn:
+            row = conn.execute(
+                "SELECT id, state FROM agents WHERE id = ? AND project_id = ?",
+                (agent_id, project_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound("No such agent.", {"agent_id": agent_id})
+            if row["state"] != "revoked":
+                raise InvalidStateTransition(
+                    agent_id, row["state"], "re_enrolled")
+            conn.execute(
+                "UPDATE agents SET role = ?, capabilities = ?,"
+                " connection_mode = ?, max_active_tickets = ?, worktree = ?,"
+                " state = 'idle', hook_health = ?, version = version + 1"
+                " WHERE id = ? AND project_id = ?",
+                (
+                    role, _json(capabilities or []), connection_mode,
+                    max_active_tickets, worktree,
+                    _json({
+                        "config_installed": False,
+                        "server_received": False,
+                        "response_delivered": False,
+                        "session_adopted": False,
+                    }),
+                    agent_id, project_id,
+                ),
+            )
+            self._audit(conn, project_id, SYSTEM_ACTOR, "agent.re_enroll",
+                        subject_type="agent", subject_id=agent_id,
+                        summary="re-enrolled agent {}".format(agent_id))
+        return self.get_agent(agent_id, project_id)
+
     def get_agent_preset(self, agent_id, project_id=None):
         """The approved profile, or None for an agent enrolled before T-192.
 

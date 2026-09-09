@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ticket Board service API
-  version: 1.0.0-rc.2
+  version: 1.0.0-rc.3
   summary: Connect your agents. Give them work. See what needs you.
   description: |
     Frozen V1 contract for the Ticket Board service (epic E-010), derived from
@@ -1630,6 +1630,26 @@ components:
               change: { type: string, enum: [add, update, none] }
               summary: { type: string, maxLength: 300 }
 
+    ReEnrollAgentRequest:
+      allOf:
+        - $ref: '#/components/schemas/MutationEnvelope'
+        - type: object
+          additionalProperties: false
+          required: [request_id, expected_version, role]
+          properties:
+            request_id: { $ref: '#/components/schemas/RequestId' }
+            expected_version: { $ref: '#/components/schemas/Version' }
+            role: { type: string, maxLength: 40 }
+            capabilities:
+              type: array
+              items: { type: string, maxLength: 40 }
+            worktree: { type: string, maxLength: 300 }
+            connection_mode:
+              type: string
+              enum: [managed, hook_only]
+              default: managed
+            max_active_tickets: { type: integer, minimum: 1, default: 1 }
+
     ExchangeEnrollmentRequest:
       allOf:
         - $ref: '#/components/schemas/MutationEnvelope'
@@ -2283,6 +2303,38 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Agent' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /agents/{agent_id}/enrollments:
+    parameters:
+      - { name: agent_id, in: path, required: true, schema: { $ref: '#/components/schemas/AgentId' } }
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [agents]
+      operationId: reEnrollAgent
+      summary: Re-enrol a revoked agent under its existing identity.
+      description: |
+        T-405: operator-scoped recovery for a revoked agent. Mints a fresh
+        enrollment code for the SAME `agent_id` so tickets, assignments and
+        lease history stay attached. Only agents in `revoked` state may use
+        this route; lapsed-but-not-revoked agents heal through
+        `POST /hook-events`. Agent tokens receive 403
+        `agent_token_insufficient`.
+      security: [{ operatorSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReEnrollAgentRequest' }
+      responses:
+        '201':
+          description: Fresh enrollment code for the existing agent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateEnrollmentResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
   /enrollments:

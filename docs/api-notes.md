@@ -297,13 +297,16 @@ number is the highest existing plus one.
   the frozen CreateEnrollmentResponse forbids ("returned exactly once here and
   never again"). T-192 asked for idempotent create; T-474 closed that as
   WONT-amend rather than filing an OpenAPI change. Pinned by
-  `tests/server/test_t474_enrollment_replay.py`. Same-identity re-enrol stays
-  T-405.
+  `tests/server/test_t474_enrollment_replay.py`.
+- **Same-identity re-enrolment is `POST /agents/{agent_id}/enrollments` (T-405).**
+  Only a revoked agent may use it; the operator supplies a fresh role and
+  optional worktree, and the route mints a new enrollment code for the SAME
+  `agent_id` so tickets and assignments stay attached. Lapsed-but-not-revoked
+  agents still heal through `POST /hook-events`.
 - **A preset is recorded at enrolment and never updated (T-192).** Changing what
-  an agent may hold means enrolling a new identity, because same-identity
-  re-enrolment is T-405 and does not exist yet. An agent enrolled before T-192
-  has no preset row at all and is read as the default `worker` preset — never as
-  permission to do anything.
+  an agent may hold means enrolling a new identity unless T-405 same-identity
+  re-enrol applies. An agent enrolled before T-192 has no preset row at all and
+  is read as the default `worker` preset — never as permission to do anything.
 - **Loopback only.** `serve()` refuses a non-loopback bind unless the caller
   passes `allow_remote=True`, because this build has no remote operator
   authentication to bind to. There is no TLS termination here.
