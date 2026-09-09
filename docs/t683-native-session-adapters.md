@@ -10,7 +10,7 @@ importing their unsafe identity overlap.
 |---|---|---|---|
 | Claude | native | AF_UNIX inbox socket (`CLAUDE_CODE_MESSAGING_SOCKET`) | `test_claude_register_and_wake`, fake socket server |
 | Codex | native | `codex queue --thread <id> --message <text>` | `test_codex_queue_wake_uses_thread`, subprocess stub |
-| Cursor | native | `agent -p --resume <session_id> <text>` | `test_cursor_resume_wake`, subprocess stub |
+| Cursor | supervised | identity bind only; `agent -p --resume` is a paid foreground run, not enqueue | `test_cursor_resume_is_not_native_enqueue` |
 | Remote/Grok | remote | T-640 schema-2 bridge only | `test_remote_adapter_fails_closed_on_native_wake` |
 | Custom/other | supervised | `tickets watch` headless subprocess | existing T-640 path |
 
@@ -18,7 +18,8 @@ importing their unsafe identity overlap.
 
 - End-to-end proof that a real idle Claude Code session resumes from a live poke
   (wire mechanics only, per PR #61 honesty).
-- Cursor `agent persist` tmux path (requires tmux; resume path used instead).
+- Cursor `agent persist` tmux path and `agent -p --resume` as native enqueue (resume is a paid
+  foreground model run; seats stay supervised unless a real queue transport exists).
 - Real Grok/model transport (remote bridge protocol only, per T-640).
 
 ## Registration
@@ -51,9 +52,15 @@ Master/CoS default to persistent+continuous unless the user sets explicit
 values. Ordinary seats default ephemeral+task-only.
 
 A native session fingerprint (Claude socket, Codex thread, Cursor session id)
-binds to exactly one `agent_id`. Re-joining the same seat rebinds; another
-seat with the same transport is refused. Ephemeral watch/retire teardown
-removes the endpoint; those seats are not shown as reachable after exit.
+binds to exactly one `agent_id`. Re-joining the same seat rebinds and increments
+the endpoint fence/lease; another seat with the same transport is refused.
+PID-less Codex/Cursor endpoints expire after a heartbeat TTL so they cannot
+suppress supervised recovery. Ephemeral watch/retire teardown removes the
+endpoint; those seats are not shown as reachable after exit.
+
+`reachable` requires a live native endpoint, an active supervised watcher, or a
+live remote lease. `lifecycle=persistent` only means the seat is intended to
+remain; persistent+offline is known but unreachable/queued.
 
 ## UI fields
 

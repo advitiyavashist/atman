@@ -10,14 +10,16 @@ bridge when native injection is unavailable.
 import hashlib
 import json
 import os
-import shlex
 import socket
 import subprocess
-import sys
+import time
+import uuid
 
 
 ADAPTER_MODES = ("native", "supervised", "remote")
 PROVIDERS = ("claude", "codex", "cursor", "remote")
+# PID-less Codex/Cursor endpoints cannot stay live forever and suppress recovery.
+NATIVE_TTL_SECS = int(os.environ.get("TICKETS_NATIVE_TTL_SECS", "90"))
 
 
 def cache_root():
@@ -70,11 +72,11 @@ def _pid_alive(pid):
 
 def _endpoint_pid_ok(pid):
     if pid in (None, "", 0):
-        return True
+        return None
     try:
         return _pid_alive(int(pid))
     except (TypeError, ValueError):
-        return True
+        return None
 
 
 def write_endpoint(board, seat, record):
@@ -88,8 +90,40 @@ def write_endpoint(board, seat, record):
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(record, f)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
     return path
+
+
+def commit_endpoint(board, seat, record):
+    """Same-seat rebind increments fence; never steal another seat's session."""
+    taken = other_seat_for_session(board, seat, record)
+    if taken:
+        return {"ok": False, "reason": "session already bound to %s; refuse identity crosswire" % taken}
+    existing = read_endpoint(board, seat)
+    if existing:
+        record["fence"] = int(existing.get("fence") or 0) + 1
+        record["prev_lease_id"] = existing.get("lease_id") or ""
+    else:
+        record["fence"] = 1
+    record["lease_id"] = uuid.uuid4().hex[:16]
+    record["heartbeat_epoch"] = time.time()
+    record.setdefault("heartbeat_at", record.get("at") or "")
+    write_endpoint(board, seat, record)
+    return {"ok": True, "fence": record["fence"], "lease_id": record["lease_id"],
+            "record": redact_endpoint(record)}
+
+
+def touch_endpoint(board, seat, **fields):
+    ep = read_endpoint(board, seat)
+    if not ep:
+        return None
+    ep.update(fields)
+    ep["heartbeat_epoch"] = time.time()
+    ep["heartbeat_at"] = fields.get("heartbeat_at") or ep.get("at") or ""
+    write_endpoint(board, seat, ep)
+    return ep
 
 
 def read_endpoint(board, seat):
@@ -161,12 +195,24 @@ def redact_endpoint(ep):
     return out
 
 
+def _heartbeat_fresh(ep, ttl=None):
+    ttl = NATIVE_TTL_SECS if ttl is None else ttl
+    try:
+        beat = float(ep.get("heartbeat_epoch") or 0)
+    except (TypeError, ValueError):
+        beat = 0.0
+    if beat <= 0:
+        return False
+    return (time.time() - beat) <= max(1, int(ttl))
+
+
 def live_endpoint(board, seat):
-    """Return (record, was_stale). Liveness is local pid + transport file checks."""
+    """Return (record, was_stale). Native live requires transport proof, not lifecycle."""
     ep = read_endpoint(board, seat)
     if not ep:
         return None, False
-    if not _endpoint_pid_ok(ep.get("pid")):
+    pid_ok = _endpoint_pid_ok(ep.get("pid"))
+    if pid_ok is False:
         remove_endpoint(board, seat)
         return None, True
     provider = ep.get("provider") or ""
@@ -179,10 +225,22 @@ def live_endpoint(board, seat):
         if not (ep.get("thread") or "").strip():
             remove_endpoint(board, seat)
             return None, True
+        if pid_ok is None and not _heartbeat_fresh(ep):
+            remove_endpoint(board, seat)
+            return None, True
     elif provider == "cursor":
         if not (ep.get("session_id") or "").strip():
             remove_endpoint(board, seat)
             return None, True
+        if pid_ok is None and not _heartbeat_fresh(ep):
+            remove_endpoint(board, seat)
+            return None, True
+        # Cursor resume is not an enqueue primitive; a recorded session is identity only.
+        if ep.get("mode") == "native":
+            ep = dict(ep)
+            ep["mode"] = "supervised"
+    else:
+        return None, False
     return ep, False
 
 
@@ -204,9 +262,13 @@ def _probe_cursor():
     if not _which("agent"):
         return {"ok": False, "reason": "cursor agent CLI not on PATH"}
     r = subprocess.run(["agent", "--help"], capture_output=True, text=True)
-    if r.returncode != 0 or "--resume" not in (r.stdout + r.stderr):
+    help_text = r.stdout + r.stderr
+    if r.returncode != 0 or "--resume" not in help_text:
         return {"ok": False, "reason": "cursor agent --resume unavailable"}
-    return {"ok": True, "capabilities": {"native_inject": True, "transport": "agent -p --resume"}}
+    return {"ok": True, "capabilities": {
+        "native_inject": False,
+        "transport": "supervised watch (agent -p --resume is a paid foreground run, not enqueue)",
+    }}
 
 
 def _probe_claude():
@@ -248,10 +310,6 @@ def adapter_mode_for(board, seat, harness):
     ep, _ = live_endpoint(board, seat)
     if ep and ep.get("mode") == "native":
         return "native"
-    if provider in PROVIDERS:
-        probe = probe_provider(provider)
-        if probe.get("ok"):
-            return "native"
     return "supervised"
 
 
@@ -265,9 +323,10 @@ def register_persistent(board, seat, harness, at_iso):
     probe = probe_provider(provider)
     if not probe.get("ok"):
         return {"ok": False, "reason": probe.get("reason", "native transport unavailable")}
-    record = {"seat": seat, "agent_id": seat, "provider": provider, "mode": "native",
-              "pid": session_pid(), "at": at_iso,
-              "capabilities": probe.get("capabilities") or {}}
+    caps = probe.get("capabilities") or {}
+    record = {"seat": seat, "agent_id": seat, "provider": provider,
+              "mode": "native" if caps.get("native_inject") else "supervised",
+              "pid": session_pid(), "at": at_iso, "capabilities": caps}
     if provider == "claude":
         sock = (os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or "").strip()
         token = (os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN") or "").strip()
@@ -275,21 +334,28 @@ def register_persistent(board, seat, harness, at_iso):
             return {"ok": False, "reason": "CLAUDE_CODE_MESSAGING_SOCKET not set"}
         record["socket"] = sock
         record["token"] = token
+        record["mode"] = "native"
     elif provider == "codex":
         thread = ((os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID") or "").strip())
         if not thread:
             return {"ok": False, "reason": "CODEX_THREAD_ID / CODEX_SESSION_ID not set"}
         record["thread"] = thread
+        record["mode"] = "native"
     elif provider == "cursor":
         session_id = (os.environ.get("CURSOR_CONVERSATION_ID") or os.environ.get("CURSOR_SESSION_ID") or "").strip()
         if not session_id:
             return {"ok": False, "reason": "CURSOR_CONVERSATION_ID not set"}
         record["session_id"] = session_id
-    taken = other_seat_for_session(board, seat, record)
-    if taken:
-        return {"ok": False, "reason": "session already bound to %s; refuse identity crosswire" % taken}
-    write_endpoint(board, seat, record)
-    return {"ok": True, "provider": provider, "mode": "native", "record": redact_endpoint(record)}
+        record["mode"] = "supervised"
+        record["capabilities"] = {
+            "native_inject": False,
+            "transport": "supervised watch (agent -p --resume is a paid foreground run, not enqueue)",
+        }
+    committed = commit_endpoint(board, seat, record)
+    if not committed.get("ok"):
+        return committed
+    return {"ok": True, "provider": provider, "mode": record["mode"],
+            "record": committed["record"]}
 
 
 def wake_payload(fmt_msg, message):
@@ -331,32 +397,40 @@ def _poke_codex(ep, text):
 
 
 def _poke_cursor(ep, text):
-    session_id = (ep.get("session_id") or "").strip()
-    if not session_id:
-        return False
-    cmd = ["agent", "-p", "--resume", session_id, "--output-format", "text", "--force", text]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        return r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    """Never enqueue via agent -p --resume: that is a paid foreground model run."""
+    return False
 
 
-def wake_seat(board, seat, text, harness=None):
+def is_reachable(native_online=False, watcher_online=False, remote_online=False):
+    """Persistent is identity, not reachability. Need a live transport."""
+    return bool(native_online or watcher_online or remote_online)
+
+
+def wake_seat(board, seat, text, harness=None, message_id=""):
     """Best-effort native wake. Returns a short label; never raises."""
     ep, was_stale = live_endpoint(board, seat)
     if ep is None:
         if harness == "remote":
             return "remote bridge required"
         return "endpoint stale (removed)" if was_stale else "no live endpoint"
+    mid = str(message_id or "")
+    if mid and ep.get("last_delivery_id") == mid:
+        return "deduped"
     provider = ep.get("provider") or ""
+    ok = False
     if provider == "claude":
-        return "woken" if _poke_claude(ep, text) else "refused"
-    if provider == "codex":
-        return "queued" if _poke_codex(ep, text) else "refused"
-    if provider == "cursor":
-        return "woken" if _poke_cursor(ep, text) else "refused"
-    return "unsupported provider"
+        ok = _poke_claude(ep, text)
+        label = "woken" if ok else "refused"
+    elif provider == "codex":
+        ok = _poke_codex(ep, text)
+        label = "queued" if ok else "refused"
+    elif provider == "cursor":
+        label = "supervised (cursor agent -p --resume is a paid foreground run, not enqueue)"
+    else:
+        label = "unsupported provider"
+    if ok:
+        touch_endpoint(board, seat, last_delivery_id=mid, last_delivery_status=label)
+    return label
 
 
 def has_live_native_session(board, seat):
@@ -369,13 +443,11 @@ def public_adapter_state(board, seat, harness, adapter_online, wake_pending):
     provider = provider_for_harness(harness) or "custom"
     mode = adapter_mode_for(board, seat, harness)
     ep, _ = live_endpoint(board, seat)
-    native_online = ep is not None
+    native_online = bool(ep) and ep.get("mode") == "native"
     if mode == "remote":
-        online = adapter_online
-    elif mode == "native":
-        online = native_online or adapter_online
+        online = bool(adapter_online)
     else:
-        online = adapter_online
+        online = native_online or bool(adapter_online)
     state = {
         "adapter_provider": provider,
         "adapter_mode": mode,
@@ -386,6 +458,11 @@ def public_adapter_state(board, seat, harness, adapter_online, wake_pending):
         state["adapter_capabilities"] = ep.get("capabilities") or {}
         state["adapter_session"] = ep.get("session_id") or ep.get("thread") or ep.get("pid") or ""
         state["adapter_pid"] = ep.get("pid")
+        state["adapter_fence"] = int(ep.get("fence") or 0)
+        state["adapter_heartbeat_at"] = ep.get("heartbeat_at") or ""
+        if ep.get("last_delivery_id"):
+            state["adapter_last_delivery_id"] = ep.get("last_delivery_id")
+            state["adapter_last_delivery"] = ep.get("last_delivery_status") or ""
     state["adapter_usage"] = "unmeasured"
     if wake_pending and not online:
         state["adapter_delivery"] = "queued-offline"

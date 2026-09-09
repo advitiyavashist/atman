@@ -143,7 +143,8 @@ def test_codex_queue_wake_uses_thread(board, cache_dir, monkeypatch):
     sa = _adapters()
     sa.write_endpoint(str(board), "codex-seat", {
         "seat": "codex-seat", "provider": "codex", "mode": "native",
-        "thread": "thread-abc", "pid": os.getpid(), "at": "now"})
+        "thread": "thread-abc", "pid": os.getpid(), "at": "now",
+        "heartbeat_epoch": time.time()})
     with mock.patch("subprocess.run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
         label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
@@ -153,18 +154,23 @@ def test_codex_queue_wake_uses_thread(board, cache_dir, monkeypatch):
     assert args[5] == "hello"
 
 
-def test_cursor_resume_wake(board, cache_dir, monkeypatch):
+def test_cursor_resume_is_not_native_enqueue(board, cache_dir, monkeypatch):
     monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
     sa = _adapters()
     sa.write_endpoint(str(board), "cursor-seat", {
         "seat": "cursor-seat", "provider": "cursor", "mode": "native",
-        "session_id": "chat-123", "pid": os.getpid(), "at": "now"})
+        "session_id": "chat-123", "pid": os.getpid(), "at": "now",
+        "heartbeat_epoch": time.time()})
     with mock.patch("subprocess.run") as run_mock:
-        run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
         label = sa.wake_seat(str(board), "cursor-seat", "hello", harness="cursor")
-    assert label == "woken"
-    args = run_mock.call_args[0][0]
-    assert "chat-123" in args
+    assert "supervised" in label
+    run_mock.assert_not_called()
+    with mock.patch.object(sa, "_which", return_value="/bin/agent"):
+        with mock.patch("subprocess.run") as help_mock:
+            help_mock.return_value = subprocess.CompletedProcess([], 0, "--resume", "")
+            probe = sa.probe_provider("cursor")
+    assert probe.get("ok")
+    assert probe["capabilities"]["native_inject"] is False
 
 
 def test_remote_adapter_fails_closed_on_native_wake(board, cache_dir):
@@ -344,6 +350,8 @@ def test_rebind_replaces_same_seat_session(board, cache_dir, sock_dir, monkeypat
     ep = sa.read_endpoint(str(board), "alice")
     assert ep["socket"] == second
     assert ep["agent_id"] == "alice"
+    assert int(ep.get("fence") or 0) >= 2
+    assert ep.get("lease_id")
 
 
 def test_persistent_task_only_does_not_poke_ordinary_dm(board, cache_dir, sock_dir):
@@ -416,6 +424,9 @@ def test_board_snapshot_lifecycle_badge_fields(board, cache_dir, sock_dir, monke
     assert row["adapter_provider"] == "claude"
     assert row["adapter_mode"] == "native"
     assert row["adapter_usage"] == "unmeasured"
+    assert row["reachable"] is True
+    assert row["adapter_native_online"] is True
+    assert row["adapter_state"] == "online"
     assert "lifecycle" in tk_html()
 
 
@@ -436,3 +447,92 @@ def test_installed_cursor_resume_help_smoke():
     r = subprocess.run(["agent", "--help"], capture_output=True, text=True)
     assert r.returncode == 0
     assert "--resume" in (r.stdout + r.stderr)
+
+
+def test_persistent_offline_is_not_reachable(board, cache_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    r = _run(board, "join", "boss", "--roles", "leadership", "--lifecycle", "persistent",
+             "--wake-mode", "task-only",
+             env={"TICKETS_CACHE_DIR": cache_dir})
+    assert r.returncode == 0, r.stderr
+    snap = _tickets().board_snapshot(str(board))
+    row = next(a for a in snap["agents"] if a["name"] == "boss")
+    assert row["lifecycle"] == "persistent"
+    assert row["reachable"] is False
+    assert row["adapter_native_online"] is False
+    assert row["adapter_state"] in ("offline", "queued-offline")
+
+
+def test_pidless_codex_endpoint_expires_without_heartbeat(board, cache_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sa = _adapters()
+    sa.write_endpoint(str(board), "codex-seat", {
+        "seat": "codex-seat", "provider": "codex", "mode": "native",
+        "thread": "thread-old", "pid": None, "at": "now", "heartbeat_epoch": 1})
+    ep, was_stale = sa.live_endpoint(str(board), "codex-seat")
+    assert ep is None and was_stale
+    assert sa.read_endpoint(str(board), "codex-seat") is None
+
+
+def test_wake_delivery_is_deduped_by_message_id(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "dedupe.sock")
+    inbox = FakeInbox(sock_path)
+    sa = _adapters()
+    sa.write_endpoint(str(board), "bob", {
+        "seat": "bob", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "heartbeat_epoch": time.time()})
+    assert sa.wake_seat(str(board), "bob", "hello", message_id="m1") == "woken"
+    assert sa.wake_seat(str(board), "bob", "hello", message_id="m1") == "deduped"
+    inbox.close()
+
+
+def test_held_explicit_task_dominates_cos_prompt(board):
+    tk = _tickets()
+    _run(board, "join", "planner", "--roles", "leadership", agent="planner")
+    _run(board, "join", "grok-worker", "--roles", "docs,review,verification", agent="grok-worker")
+    _run(board, "master", "take", agent="planner")
+    _run(board, "master", "cos", "grok-worker", agent="planner")
+    _run(board, "next", agent="grok-worker")
+    sent = _run(board, "msg", "prove the live Grok CoS identity wake", "--to", "grok-worker",
+                "--task", "--re", "T-001", agent="planner")
+    assert sent.returncode == 0, sent.stderr
+    ns = type("A", (), {"agent": "grok-worker", "master": False, "cos": True, "extra": ""})()
+    text = tk.prompt_text(ns, str(board))
+    assert text.startswith("HELD WORK DOMINATES THIS RUN.")
+    assert "T-001" in text
+    assert "prove the live Grok CoS identity wake" in text
+    assert text.index("HELD WORK") < text.index("REVIEW + MERGE")
+
+
+def test_spawn_stop_clears_dead_active_run(board):
+    tk = _tickets()
+    _run(board, "join", "runner", "--roles", "backend")
+    tk._run_beat(str(board), "runner", pid=99999999, run=1, active=True, started="now")
+    rec = tk._read_run(str(board), "runner")
+    assert rec.get("active") is True
+    r = _run(board, "spawn", "runner", "--stop")
+    assert r.returncode == 0, r.stderr
+    rec = tk._read_run(str(board), "runner")
+    assert rec.get("active") is False
+    assert rec.get("interrupted") is True
+
+
+def test_codex_persistent_ceo_stub_queue_shape(board, cache_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sa = _adapters()
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-ceo")
+    monkeypatch.setenv("TICKET_SESSION_PID", str(os.getpid()))
+    with mock.patch.object(sa, "_which", return_value="/bin/codex"):
+        with mock.patch("subprocess.run") as run_mock:
+            run_mock.return_value = subprocess.CompletedProcess([], 0, "queue", "")
+            reg = sa.register_persistent(str(board), "codex-ceo", "codex", "now")
+    assert reg.get("ok"), reg
+    assert reg.get("mode") == "native"
+    with mock.patch("subprocess.run") as run_mock:
+        run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
+        label = sa.wake_seat(str(board), "codex-ceo", "hello")
+    assert label == "queued"
+    args = run_mock.call_args[0][0]
+    assert args[:4] == ["codex", "queue", "--thread", "thread-ceo"]

@@ -3009,6 +3009,14 @@ def _run_end(board, owner, run_no, rc):
     _run_beat(board, owner, run=run_no, active=False, rc=rc, ended=now())
 
 
+def _mark_run_interrupted(board, owner):
+    """Clear a recorded in-flight run after spawn --stop or a dead PID."""
+    rec = _read_run(board, owner)
+    if not rec:
+        return
+    _run_beat(board, owner, active=False, interrupted=True, ended=now())
+
+
 # ---- ground truth per tool ---------------------------------------------
 
 def _claude_project_dir(cwd):
@@ -3372,6 +3380,8 @@ def _watcher_run_active(board, owner, pid):
     """
     rec = _read_run(board, owner) if board else {}
     if rec.get("pid") == pid and ("active" in rec):
+        if rec.get("active") and rec.get("pid") and not _pid_alive(rec.get("pid")):
+            return False
         return bool(rec.get("active"))
     return _has_child_process(pid)
 
@@ -4907,8 +4917,13 @@ def cmd_who(a, board):
         harness_name = entry.get("harness") or entry.get("tool") or "claude"
         ep, _ = sa.live_endpoint(board, r["owner"])
         life = lifecycle_of(board, r["owner"], workforce=wf)
-        native = bool(ep)
-        reachable = life == "persistent" or native or (lv.get("watcher") if lv else False)
+        native = bool(ep) and (ep or {}).get("mode") == "native"
+        watcher_on = bool(lv.get("watcher") if lv else False)
+        remote_on = False
+        if harness_name == "remote":
+            remote_on = _remote_lease_online(load_remote_state(board, r["owner"]))
+        reachable = sa.is_reachable(native_online=native, watcher_online=watcher_on,
+                                    remote_online=remote_on)
         print("%-14s lifecycle=%s provider=%s session=%s reachable=%s" % (
             "", life, (ep or {}).get("provider") or harness_name,
             (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
@@ -6203,7 +6218,8 @@ def cmd_msg(a, board):
     if to and _message_wakes_seat(board, to, m):
         harness = (load_workforce(board).get(to, {}) or {}).get("harness") or "claude"
         sa = _session_adapters()
-        label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness)
+        label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
+                             message_id=_msg_id(m))
         print("wake: %s -> %s" % (to, label))
 
 
@@ -6781,8 +6797,9 @@ def cmd_join(a, board):
         reg = sa.register_persistent(board, owner, harness or entry.get("harness") or "claude", now())
         if reg.get("ok"):
             pid = (reg.get("record") or {}).get("pid")
-            print("persistent: native %s endpoint registered for %s (%s)" % (
-                reg.get("provider"), owner,
+            mode = reg.get("mode") or (reg.get("record") or {}).get("mode") or "native"
+            print("persistent: %s %s endpoint registered for %s (%s)" % (
+                mode, reg.get("provider"), owner,
                 "pid %s" % pid if pid else "no session pid published; liveness follows transport"))
         else:
             print("persistent: %s" % reg.get("reason", "registration failed"))
@@ -7819,6 +7836,25 @@ def ticket_context(board, owner):
     return "\n".join(out)
 
 
+def _task_dominant_extra(board, owner):
+    """Held ticket + explicit task beat unrelated CoS review/notification traffic."""
+    pending = _safe(lambda: pending_work(board, owner), {}) or {}
+    holding = pending.get("holding") or []
+    if not holding:
+        return ""
+    tasks = pending.get("task_messages") or []
+    return (
+        "HELD WORK DOMINATES THIS RUN.\n"
+        "You currently hold: %s\n"
+        "Explicit task/DM (do this now; do not review, merge, or pulse unrelated tickets):\n%s\n"
+        "Unrelated review_queue and notification-only mail are suppressed until this held "
+        "work is finished, reviewed, or blocked."
+    ) % (
+        "; ".join(holding),
+        "\n".join(tasks) if tasks else "(continue from the held ticket notes)",
+    )
+
+
 def cmd_prompt(a, board):
     print(prompt_text(a, board))
 
@@ -7836,24 +7872,32 @@ def prompt_text(a, board):
     cos = (m or {}).get("cos") or ""
     role_ctx = role_context(board, owner)
     knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "")
+    held_first = _task_dominant_extra(board, owner)
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
         extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
-        return cos_prompt_text(owner, board, os.path.dirname(board), extra)
+        body = cos_prompt_text(owner, board, os.path.dirname(board), extra)
+        return (held_first + "\n\n" + body) if held_first else body
     if getattr(a, "master", False):
-        extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
+        rest = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
+        extra = rest
         obj = _safe(lambda: load_objective(board), {})
         if obj and not obj.get("done"):
             _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
-            extra = DRIVE_PROMPT.format(
+            drive = DRIVE_PROMPT.format(
                 objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
                 state=objective_state(obj) or "active",
                 exit_criterion=(obj.get("exit_criterion") or "(none — FLAG: add --exit)"),
-                status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
+                status=_safe(lambda: drive_status(board), ""))
+            extra = drive + ("\n" + extra if extra else "")
         if cos and owner != cos:
-            return PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
+            body = PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
                                          extra=extra)
-        return MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
+        else:
+            body = MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
+        return (held_first + "\n\n" + body) if held_first else body
     parts = []
+    if held_first:
+        parts.append(held_first)
     if role_ctx:
         parts.append(role_ctx)
     if knowledge_ctx:
@@ -9886,6 +9930,7 @@ def cmd_spawn(a, board):
         import signal
 
         pids = _live_watch_pids(owner)
+        _mark_run_interrupted(board, owner)
         if not pids:
             print("no running watcher for %s" % owner)
             return
@@ -11467,42 +11512,50 @@ def _board_snapshot_body(board, messages=40):
         local_failure = rec.get("adapter_failure") or {}
         failure_state = remote.get("failure_state", "") or local_failure.get("state", "")
         failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
-        adapter_online = bool(remote.get("online")) if harness_name == "remote" else wc == 1
-        watcher_count = wc + (1 if remote.get("online") else 0)
-        if wc > 1 or (harness_name == "remote" and wc > 0):
+        sa = _session_adapters()
+        adapter_extra = sa.public_adapter_state(
+            board, r["agent"], harness_name, False, wake_pending)
+        native_online = bool(adapter_extra.get("adapter_native_online"))
+        remote_online = bool(remote.get("online")) if harness_name == "remote" else False
+        watcher_online = wc == 1
+        if wc > 1 or (harness_name == "remote" and wc > 0) or (native_online and wc > 0):
             adapter_state = "conflict"
             adapter_reason = "Multiple adapters detected; stop extras so one identity-pinned lease remains."
             adapter_online = False
-        elif failure_state == "failed":
-            adapter_state = "failed"
-            adapter_reason = failure_reason or "Dispatch exhausted its bounded retries; work remains queued."
-        elif failure_state == "retrying":
-            adapter_state = "retrying"
-            adapter_reason = failure_reason or "Dispatch failed and is waiting for its bounded retry."
-        elif remote.get("run_state") and adapter_online:
-            adapter_state = remote["run_state"]
-            adapter_reason = "Remote run is active under fence %s." % remote.get("fence")
-        elif remote.get("run_state"):
-            adapter_state = ("recovery-required" if remote["run_state"] == "recovery-required"
-                             else "queued-offline")
-            adapter_reason = "Remote run lost its adapter lease; reconnect to recover it."
-        elif wake_pending and not adapter_online:
-            adapter_state = "queued-offline"
-            adapter_reason = "Wake queued — adapter offline; delivery resumes when it reconnects."
-        elif wake_pending:
-            adapter_state = "queued"
-            adapter_reason = "Wake queued for the connected adapter."
-        elif adapter_online:
-            adapter_state = "online"
-            adapter_reason = "Adapter connected; no wake pending."
         else:
-            adapter_state = "offline"
-            adapter_reason = "Adapter offline; directed work will remain queued."
-        adapter_extra = _session_adapters().public_adapter_state(
-            board, r["agent"], harness_name, adapter_online, wake_pending)
+            adapter_online = sa.is_reachable(native_online=native_online,
+                                            watcher_online=watcher_online,
+                                            remote_online=remote_online)
+            adapter_extra = sa.public_adapter_state(
+                board, r["agent"], harness_name, adapter_online, wake_pending)
+            if failure_state == "failed":
+                adapter_state = "failed"
+                adapter_reason = failure_reason or "Dispatch exhausted its bounded retries; work remains queued."
+            elif failure_state == "retrying":
+                adapter_state = "retrying"
+                adapter_reason = failure_reason or "Dispatch failed and is waiting for its bounded retry."
+            elif remote.get("run_state") and adapter_online:
+                adapter_state = remote["run_state"]
+                adapter_reason = "Remote run is active under fence %s." % remote.get("fence")
+            elif remote.get("run_state"):
+                adapter_state = ("recovery-required" if remote["run_state"] == "recovery-required"
+                                 else "queued-offline")
+                adapter_reason = "Remote run lost its adapter lease; reconnect to recover it."
+            elif wake_pending and not adapter_online:
+                adapter_state = "queued-offline"
+                adapter_reason = "Wake queued — adapter offline; delivery resumes when it reconnects."
+            elif wake_pending:
+                adapter_state = "queued"
+                adapter_reason = "Wake queued for the connected adapter."
+            elif adapter_online:
+                adapter_state = "online"
+                adapter_reason = "Adapter connected; no wake pending."
+            else:
+                adapter_state = "offline"
+                adapter_reason = "Adapter offline; directed work will remain queued."
+        watcher_count = wc + (1 if remote.get("online") else 0) + (1 if native_online else 0)
         life = lifecycle_of(board, r["agent"], master_state=m, workforce=wf)
-        native_online = bool(adapter_extra.get("adapter_native_online"))
-        reachable = life == "persistent" or native_online or adapter_online
+        reachable = adapter_online
         if life == "ephemeral" and not reachable and adapter_state == "offline":
             adapter_extra["adapter_delivery"] = "exited"
         out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
