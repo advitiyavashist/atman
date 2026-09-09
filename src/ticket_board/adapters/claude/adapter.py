@@ -97,6 +97,43 @@ class GitProbeInconclusive(RuntimeError):
     """
 
 
+class ResponseTooLarge(RuntimeError):
+    """Raised when a board HTTP response exceeds the configured byte cap.
+
+    Raised before any JSON parsing, from the byte count alone -- nothing in
+    the response body shapes or appears in this message, unlike a truncation
+    notice printed on the same stream as the content it truncates (T-289).
+    """
+
+
+# The frozen contract bounds exactly one response shape (HookEventResponse's
+# `context`: maxItems 20 * maxLength 300, see docs/contracts/openapi.yaml) --
+# list endpoints such as tickets/messages/agents declare no maxItems, so a
+# legitimate board's response size grows with board size and there is no
+# single "server-declared limit" to inherit. This cap is instead a ceiling
+# set well above any response an honest board produces today and far below
+# what would exhaust an agent process's memory, following the same
+# env-overridable-default shape as `LEGACY_DOCUMENT_MAX_BYTES`.
+DEFAULT_MAX_RESPONSE_BYTES = int(
+    os.environ.get("TICKET_BOARD_ADAPTER_MAX_RESPONSE_BYTES", 8 * 1024 * 1024)
+)
+
+
+def _read_bounded(response: Any, cap: int, *, source: str) -> bytes:
+    """Read at most ``cap`` bytes from an HTTP response-like object.
+
+    Requests ``cap + 1`` bytes so a body of exactly ``cap`` bytes is accepted
+    while anything larger is caught -- without ever holding more than
+    ``cap + 1`` bytes of an oversized body in memory.
+    """
+    chunk = response.read(cap + 1)
+    if len(chunk) > cap:
+        raise ResponseTooLarge(
+            "%s response exceeded %d byte cap; refused before parsing" % (source, cap)
+        )
+    return chunk
+
+
 @dataclass(frozen=True)
 class AdapterConfig:
     project_id: str
@@ -949,10 +986,17 @@ def _without_owned_hooks(entry: Any, agent_id: str) -> Optional[Any]:
 
 
 class BoardClient:
-    def __init__(self, base_url: str, project_id: str, timeout: float = 2.0):
+    def __init__(
+        self,
+        base_url: str,
+        project_id: str,
+        timeout: float = 2.0,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+    ):
         self.base_url = base_url.rstrip("/")
         self.project_id = project_id
         self.timeout = timeout
+        self.max_response_bytes = max_response_bytes
 
     def post_json(
         self,
@@ -971,10 +1015,12 @@ class BoardClient:
         try:
             with request.urlopen(req, timeout=self.timeout) as res:
                 status = int(res.status)
-                payload = json.loads(res.read().decode("utf-8") or "{}")
+                raw = _read_bounded(res, self.max_response_bytes, source="board")
+                payload = json.loads(raw.decode("utf-8") or "{}")
         except error.HTTPError as exc:
             status = int(exc.code)
-            payload = json.loads(exc.read().decode("utf-8") or "{}")
+            raw = _read_bounded(exc, self.max_response_bytes, source="board error")
+            payload = json.loads(raw.decode("utf-8") or "{}")
         if status not in expected_status:
             raise RuntimeError("board returned %s: %s" % (status, payload))
         return payload
@@ -994,7 +1040,8 @@ class BoardClient:
             headers["Authorization"] = "Bearer %s" % token
         req = request.Request(url, headers=headers, method="GET")
         with request.urlopen(req, timeout=self.timeout) as res:
-            return json.loads(res.read().decode("utf-8") or "{}")
+            raw = _read_bounded(res, self.max_response_bytes, source="board")
+            return json.loads(raw.decode("utf-8") or "{}")
 
     def delete_json(
         self,
@@ -1024,10 +1071,12 @@ class BoardClient:
         try:
             with request.urlopen(req, timeout=self.timeout) as res:
                 status = int(res.status)
-                payload = json.loads(res.read().decode("utf-8") or "{}")
+                raw = _read_bounded(res, self.max_response_bytes, source="board")
+                payload = json.loads(raw.decode("utf-8") or "{}")
         except error.HTTPError as exc:
             status = int(exc.code)
-            payload = json.loads(exc.read().decode("utf-8") or "{}")
+            raw = _read_bounded(exc, self.max_response_bytes, source="board error")
+            payload = json.loads(raw.decode("utf-8") or "{}")
         if status not in expected_status:
             raise RuntimeError("board returned %s: %s" % (status, payload))
         return payload

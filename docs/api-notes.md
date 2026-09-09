@@ -337,6 +337,13 @@ number is the highest existing plus one.
   text in the message (a traceback string can carry a path, a query or a
   credential). It is a deliberate, named departure from the frozen schema, not
   an oversight; adding a member to the enum is a contract amendment.
+- **An oversized request body answers 413 with a body the contract cannot
+  describe.** Same closed `ErrorResponse.status` enum as the 500 case above,
+  same absent member -- `httpd._Handler._reject_oversized_body` checks
+  `Content-Length` against `TICKET_BOARD_SERVER_MAX_REQUEST_BYTES` (default
+  1MiB) before `rfile.read`, so an oversized body is refused without ever
+  being read into memory, and closes the connection rather than draining the
+  body to keep it alive (T-301).
 - **Acknowledging an attention item is not possible.** `AttentionItem.acknowledged_by`
   is always `null`: there is no route in the frozen contract to set it, so the
   field is carried rather than invented.
