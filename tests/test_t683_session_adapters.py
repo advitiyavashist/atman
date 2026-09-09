@@ -283,3 +283,156 @@ def test_adapter_contract_probe_shape(provider):
         assert probe["capabilities"]["native_inject"] is False
     else:
         assert "capabilities" in probe or "reason" in probe
+
+
+def test_two_same_provider_persistent_sessions_stay_isolated(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    alice_sock = str(Path(sock_dir) / "alice.sock")
+    bob_sock = str(Path(sock_dir) / "bob.sock")
+    alice_inbox = FakeInbox(alice_sock)
+    bob_inbox = FakeInbox(bob_sock)
+    for name, sock in (("alice", alice_sock), ("bob", bob_sock)):
+        r = _run(board, "join", name, "--roles", "backend", "--persistent",
+                  "--wake-mode", "continuous",
+                  env={"TICKETS_CACHE_DIR": cache_dir,
+                       "CLAUDE_CODE_MESSAGING_SOCKET": sock,
+                       "TICKET_SESSION_PID": str(os.getpid())},
+                  agent=name)
+        assert r.returncode == 0, r.stderr
+        assert "lifecycle=persistent" in r.stdout
+    sa = _adapters()
+    assert sa.read_endpoint(str(board), "alice")["socket"] == alice_sock
+    assert sa.read_endpoint(str(board), "bob")["socket"] == bob_sock
+    time.sleep(1.1)
+    sent = _run(board, "msg", "only-alice", "--to", "alice", agent="sender",
+                 env={"TICKETS_CACHE_DIR": cache_dir})
+    assert sent.returncode == 0, sent.stderr
+    payload = alice_inbox.wait_for_message()
+    alice_inbox.close()
+    bob_inbox.close()
+    assert payload and "only-alice" in payload
+    assert not bob_inbox.received
+
+
+def test_session_bind_refuses_identity_crosswire(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "shared.sock")
+    sa = _adapters()
+    sa.write_endpoint(str(board), "alice", {
+        "seat": "alice", "agent_id": "alice", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now"})
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", sock_path)
+    monkeypatch.setenv("TICKET_SESSION_PID", str(os.getpid()))
+    reg = sa.register_persistent(str(board), "mallory", "claude", "now")
+    assert not reg.get("ok")
+    assert "alice" in reg.get("reason", "")
+    assert sa.read_endpoint(str(board), "mallory") is None
+
+
+def test_rebind_replaces_same_seat_session(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    first = str(Path(sock_dir) / "old.sock")
+    second = str(Path(sock_dir) / "new.sock")
+    Path(first).touch()
+    Path(second).touch()
+    monkeypatch.setenv("TICKET_SESSION_PID", str(os.getpid()))
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", first)
+    sa = _adapters()
+    assert sa.register_persistent(str(board), "alice", "claude", "t1").get("ok")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", second)
+    assert sa.register_persistent(str(board), "alice", "claude", "t2").get("ok")
+    ep = sa.read_endpoint(str(board), "alice")
+    assert ep["socket"] == second
+    assert ep["agent_id"] == "alice"
+
+
+def test_persistent_task_only_does_not_poke_ordinary_dm(board, cache_dir, sock_dir):
+    sock_path = str(Path(sock_dir) / "task.sock")
+    inbox = FakeInbox(sock_path)
+    r = _run(board, "join", "seat", "--roles", "backend", "--persistent",
+              "--wake-mode", "task-only",
+              env={"TICKETS_CACHE_DIR": cache_dir,
+                   "CLAUDE_CODE_MESSAGING_SOCKET": sock_path,
+                   "TICKET_SESSION_PID": str(os.getpid())})
+    assert r.returncode == 0, r.stderr
+    time.sleep(1.1)
+    quiet = _run(board, "msg", "do not spend a turn", "--to", "seat", agent="sender",
+                  env={"TICKETS_CACHE_DIR": cache_dir})
+    assert quiet.returncode == 0, quiet.stderr
+    assert "wake:" not in quiet.stdout
+    tasked = _run(board, "msg", "spend this turn", "--to", "seat", "--task", agent="sender",
+                  env={"TICKETS_CACHE_DIR": cache_dir})
+    assert tasked.returncode == 0, tasked.stderr
+    assert "wake: seat -> woken" in tasked.stdout
+    payload = inbox.wait_for_message()
+    inbox.close()
+    assert payload and "spend this turn" in payload
+
+
+def test_ephemeral_teardown_is_not_reachable(board, cache_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    _run(board, "join", "temp", "--roles", "backend", "--lifecycle", "ephemeral",
+         env={"TICKETS_CACHE_DIR": cache_dir})
+    r = _run(board, "watch", "--agent", "temp", "--once",
+              env={"TICKETS_CACHE_DIR": cache_dir})
+    assert r.returncode in (0, 1), r.stderr
+    snap = _tickets().board_snapshot(str(board))
+    row = next(a for a in snap["agents"] if a["name"] == "temp")
+    assert row["lifecycle"] == "ephemeral"
+    assert row["reachable"] is False
+    assert row["adapter_delivery"] == "exited"
+
+
+def test_lifecycle_defaults_and_explicit_override(board):
+    tk = _tickets()
+    _run(board, "join", "master", "--roles", "leadership", agent="master")
+    _run(board, "join", "cos", "--roles", "leadership", agent="cos")
+    _run(board, "master", "take", agent="master")
+    _run(board, "master", "cos", "cos", agent="master")
+    _run(board, "join", "worker", "--roles", "backend")
+    assert tk.lifecycle_of(str(board), "worker") == "ephemeral"
+    assert tk.lifecycle_of(str(board), "master") == "persistent"
+    assert tk.lifecycle_of(str(board), "cos") == "persistent"
+    _run(board, "join", "master", "--roles", "leadership", "--lifecycle", "ephemeral",
+         "--wake-mode", "continuous", agent="master")
+    assert tk.lifecycle_of(str(board), "master") == "ephemeral"
+    assert tk.wake_mode_of(str(board), "master") == "continuous"
+
+
+def test_board_snapshot_lifecycle_badge_fields(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "ui.sock")
+    Path(sock_path).touch()
+    _run(board, "join", "seat", "--roles", "backend", "--persistent",
+         "--wake-mode", "task-only",
+         env={"TICKETS_CACHE_DIR": cache_dir,
+              "CLAUDE_CODE_MESSAGING_SOCKET": sock_path,
+              "TICKET_SESSION_PID": str(os.getpid())})
+    snap = _tickets().board_snapshot(str(board))
+    row = next(a for a in snap["agents"] if a["name"] == "seat")
+    assert row["agent_id"] == "seat"
+    assert row["lifecycle"] == "persistent"
+    assert row["wake_mode"] == "task-only"
+    assert row["adapter_provider"] == "claude"
+    assert row["adapter_mode"] == "native"
+    assert row["adapter_usage"] == "unmeasured"
+    assert "lifecycle" in tk_html()
+
+
+def tk_html():
+    src = (ROOT / "tickets.py").read_text()
+    start = src.index('UI_HTML = r"""')
+    return src[start:start + 80000]
+
+
+@pytest.mark.skipif(not shutil.which("codex"), reason="codex CLI not installed")
+def test_installed_codex_queue_help_smoke():
+    r = subprocess.run(["codex", "queue", "--help"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.skipif(not shutil.which("agent"), reason="cursor agent CLI not installed")
+def test_installed_cursor_resume_help_smoke():
+    r = subprocess.run(["agent", "--help"], capture_output=True, text=True)
+    assert r.returncode == 0
+    assert "--resume" in (r.stdout + r.stderr)

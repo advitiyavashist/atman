@@ -107,6 +107,51 @@ def remove_endpoint(board, seat):
         pass
 
 
+def list_endpoints(board):
+    """Return (seat, record) pairs for this board's cache, skipping unreadable files."""
+    try:
+        names = os.listdir(endpoint_dir(board))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        seat = name[:-5]
+        ep = read_endpoint(board, seat)
+        if ep:
+            out.append((seat, ep))
+    return out
+
+
+def session_key(ep):
+    """Provider + transport identity. Empty identities do not fence."""
+    provider = (ep or {}).get("provider") or ""
+    if provider == "claude":
+        ident = (ep.get("socket") or "").strip()
+    elif provider == "codex":
+        ident = (ep.get("thread") or "").strip()
+    elif provider == "cursor":
+        ident = (ep.get("session_id") or "").strip()
+    else:
+        ident = ""
+    if not ident:
+        return None
+    return (provider, ident)
+
+
+def other_seat_for_session(board, seat, record):
+    key = session_key(record)
+    if not key:
+        return None
+    for other, ep in list_endpoints(board):
+        if other == seat:
+            continue
+        if session_key(ep) == key:
+            return other
+    return None
+
+
 def redact_endpoint(ep):
     if not ep:
         return {}
@@ -220,7 +265,7 @@ def register_persistent(board, seat, harness, at_iso):
     probe = probe_provider(provider)
     if not probe.get("ok"):
         return {"ok": False, "reason": probe.get("reason", "native transport unavailable")}
-    record = {"seat": seat, "provider": provider, "mode": "native",
+    record = {"seat": seat, "agent_id": seat, "provider": provider, "mode": "native",
               "pid": session_pid(), "at": at_iso,
               "capabilities": probe.get("capabilities") or {}}
     if provider == "claude":
@@ -240,6 +285,9 @@ def register_persistent(board, seat, harness, at_iso):
         if not session_id:
             return {"ok": False, "reason": "CURSOR_CONVERSATION_ID not set"}
         record["session_id"] = session_id
+    taken = other_seat_for_session(board, seat, record)
+    if taken:
+        return {"ok": False, "reason": "session already bound to %s; refuse identity crosswire" % taken}
     write_endpoint(board, seat, record)
     return {"ok": True, "provider": provider, "mode": "native", "record": redact_endpoint(record)}
 
@@ -336,6 +384,9 @@ def public_adapter_state(board, seat, harness, adapter_online, wake_pending):
     if ep:
         state["adapter_registered_at"] = ep.get("at", "")
         state["adapter_capabilities"] = ep.get("capabilities") or {}
+        state["adapter_session"] = ep.get("session_id") or ep.get("thread") or ep.get("pid") or ""
+        state["adapter_pid"] = ep.get("pid")
+    state["adapter_usage"] = "unmeasured"
     if wake_pending and not online:
         state["adapter_delivery"] = "queued-offline"
     elif wake_pending:

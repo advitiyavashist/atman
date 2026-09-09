@@ -40,8 +40,25 @@ injection when the message already wakes a polling seat (`_message_wakes` or
 continuous DM/@mention). `tickets watch` / `tickets spawn` refuse to double up
 on a seat with a live native endpoint.
 
+## Identity
+
+`lifecycle=persistent|ephemeral` is stored on the workforce record, separate
+from `wake_mode`, `session_id`, harness, and watcher lease. `--persistent`
+implies lifecycle=persistent and registers a native endpoint. `--lifecycle`
+alone does not require a native transport.
+
+Master/CoS default to persistent+continuous unless the user sets explicit
+values. Ordinary seats default ephemeral+task-only.
+
+A native session fingerprint (Claude socket, Codex thread, Cursor session id)
+binds to exactly one `agent_id`. Re-joining the same seat rebinds; another
+seat with the same transport is refused. Ephemeral watch/retire teardown
+removes the endpoint; those seats are not shown as reachable after exit.
+
 ## UI fields
 
-`board_snapshot` agents now include `adapter_provider`, `adapter_mode`
-(`native` | `supervised` | `remote`), `adapter_native_online`, and
-`adapter_delivery`.
+`board_snapshot` agents include `agent_id`, `lifecycle`, `reachable`,
+`adapter_provider`, `adapter_mode` (`native` | `supervised` | `remote`),
+`adapter_native_online`, `adapter_delivery`, `adapter_session`, and
+`adapter_usage` (`unmeasured` for native pokes; remote receipts stay on the
+T-640 bridge fields). The Team idle lane omits exited ephemeral seats.

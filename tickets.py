@@ -814,6 +814,7 @@ STOP_CONDITION = (
     "stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter."
 )
 WAKE_MODES = ("task-only", "continuous", "scheduled")
+LIFECYCLES = ("persistent", "ephemeral")
 WAKE_KEYS = frozenset({
     "holding", "suggested_for_me", "ready_in_my_lane",
     "task_messages", "stuck_messages", "drive", "forced",
@@ -956,6 +957,23 @@ def wake_mode_of(board, owner, master_state=None, workforce=None):
     if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
         return "continuous"
     return "task-only"
+
+
+def lifecycle_of(board, owner, master_state=None, workforce=None):
+    """Effective seat lifecycle, separate from wake_mode and session_id.
+
+    Explicit workforce.lifecycle wins. Otherwise the current master and CoS
+    migrate to persistent; every other seat stays ephemeral. A persistent seat
+    may still be task-only, continuous, or scheduled.
+    """
+    wf = workforce if workforce is not None else _safe(lambda: load_workforce(board), {})
+    configured = ((wf or {}).get(owner, {}) or {}).get("lifecycle")
+    if configured in LIFECYCLES:
+        return configured
+    state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+        return "persistent"
+    return "ephemeral"
 
 
 def hours_since(stamp):
@@ -4850,6 +4868,8 @@ def cmd_who(a, board):
                            {"state": "unknown", "detail": "liveness read failed",
                             "source": "none", "heuristic": True}))
         for r in agents)
+    wf = load_workforce(board)
+    sa = _session_adapters()
     print("%-14s %-9s %-8s %-30s %-20s %s" % ("agent", "state", "loop-seen", "branch@sha", "ticket", "worktree"))
     for r in sorted(agents, key=lambda r: r.get("seen", ""), reverse=True):
         tid = r.get("ticket") or ""
@@ -4883,6 +4903,16 @@ def cmd_who(a, board):
                                                         (", back %s" % lim["until"]) if lim.get("until") else ""))
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
+        entry = wf.get(r["owner"], {}) or {}
+        harness_name = entry.get("harness") or entry.get("tool") or "claude"
+        ep, _ = sa.live_endpoint(board, r["owner"])
+        life = lifecycle_of(board, r["owner"], workforce=wf)
+        native = bool(ep)
+        reachable = life == "persistent" or native or (lv.get("watcher") if lv else False)
+        print("%-14s lifecycle=%s provider=%s session=%s reachable=%s" % (
+            "", life, (ep or {}).get("provider") or harness_name,
+            (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
+            "yes" if reachable else "no"))
     # collisions
     by_branch = {}
     for r in agents:
@@ -6730,6 +6760,16 @@ def cmd_join(a, board):
         if wake_mode not in WAKE_MODES:
             sys.exit("--wake-mode must be one of: %s" % ", ".join(WAKE_MODES))
         entry["wake_mode"] = wake_mode
+    lifecycle = getattr(a, "lifecycle", None)
+    if getattr(a, "persistent", False):
+        if lifecycle == "ephemeral":
+            sys.exit("--persistent cannot be combined with --lifecycle ephemeral")
+        lifecycle = lifecycle or "persistent"
+    if lifecycle is not None:
+        if lifecycle not in LIFECYCLES:
+            sys.exit("--lifecycle must be one of: %s" % ", ".join(LIFECYCLES))
+        entry["lifecycle"] = lifecycle
+    entry["agent_id"] = owner
     if knowledge_dir:
         entry["knowledge_dir"] = knowledge_dir
     entry.setdefault("can", [])
@@ -6755,9 +6795,10 @@ def cmd_join(a, board):
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
     root = os.path.dirname(board)
-    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s" % (
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s  lifecycle=%s" % (
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
-        entry.get("harness") or "claude (default)", wake_mode_of(board, owner, workforce=wf)))
+        entry.get("harness") or "claude (default)", wake_mode_of(board, owner, workforce=wf),
+        lifecycle_of(board, owner, workforce=wf)))
     if entry.get("cmd"):
         print("cmd: %s" % entry["cmd"])
     if entry.get("knowledge_dir"):
@@ -6824,6 +6865,7 @@ def cmd_retire(a, board):
     if owner in wf:
         del wf[owner]
         save_workforce(board, wf)
+    _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
     if owner in roles:
         del roles[owner]
         os.makedirs(board, exist_ok=True)
@@ -9162,6 +9204,8 @@ def cmd_watch(a, board):
         print("skip: %s has a live native session (provider=%s, pid=%s) -- "
               "a headless watcher would double up on the seat; use watch --force to override"
               % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
+        if lifecycle_of(board, owner) == "ephemeral":
+            sa.remove_endpoint(board, owner)
         sys.exit(0)
     lock = _watch_lock(board, owner)
     if lock is None:
@@ -9411,6 +9455,8 @@ def cmd_watch(a, board):
                 os.unlink(lock)
             except OSError:
                 pass
+        if lifecycle_of(board, owner) == "ephemeral":
+            _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
         if not a.once:
             print("watch stopped")
 
@@ -10647,11 +10693,12 @@ function renderSeats(d){
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   (d.agents||[]).forEach(a=>{
     if(placed.has(a.name))return;
+    if(a.lifecycle==='ephemeral' && a.reachable===false)return;
     const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any lane';
     const u=utilBy[a.name]||{};
     const quota=u.util_pct!=null?' · '+Math.round(u.util_pct)+'%':'';
     const st=a.state==='DOWN'?'down':'idle';
-    idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'?'ghost':'idle'));
+    idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'||a.reachable===false?'ghost':'idle'));
   });
   const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
   put('lane-operator',operator.join(''),'no operator');
@@ -10911,8 +10958,10 @@ async function load(manual){
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.adapter_online?' ●':'')+'</span>'+auth+quota+lim+wake+'</div>'+
-      '<div class="mute mono">'+esc(a.model||'—')+' · '+esc(a.harness||'—')+' · '+esc(a.wake_mode||'task-only')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
+    const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
+    const onlineDot=(a.reachable!==false && a.adapter_online)?' ●':'';
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+auth+quota+lim+wake+'</div>'+
+      '<div class="mute mono">'+esc(a.agent_id||a.name)+' · '+esc(a.adapter_provider||a.harness||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.adapter_delivery||'offline')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
@@ -11451,8 +11500,16 @@ def _board_snapshot_body(board, messages=40):
             adapter_reason = "Adapter offline; directed work will remain queued."
         adapter_extra = _session_adapters().public_adapter_state(
             board, r["agent"], harness_name, adapter_online, wake_pending)
+        life = lifecycle_of(board, r["agent"], master_state=m, workforce=wf)
+        native_online = bool(adapter_extra.get("adapter_native_online"))
+        reachable = life == "persistent" or native_online or adapter_online
+        if life == "ephemeral" and not reachable and adapter_state == "offline":
+            adapter_extra["adapter_delivery"] = "exited"
         out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
                            "harness": harness_name,
+                           "agent_id": agent_wf.get("agent_id") or r["agent"],
+                           "lifecycle": life,
+                           "reachable": reachable,
                            **adapter_extra,
                            "wake_mode": wake_mode_of(board, r["agent"], master_state=m, workforce=wf),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
@@ -12745,10 +12802,12 @@ def main():
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
     c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
                    help="durable DM policy: continuous wakes on directed messages; task-only needs --task; scheduled uses heartbeat/task gates")
+    c.add_argument("--lifecycle", choices=LIFECYCLES, default=None,
+                   help="persistent seats stay known after exit; ephemeral seats are one-shot and not reachable after the session ends")
     c.add_argument("--knowledge-dir", default="",
                    help="canonical repo-backed knowledge/ directory inherited by this seat")
     c.add_argument("--persistent", action="store_true",
-                   help="register this interactive session's native wake endpoint (socket/queue/resume)")
+                   help="lifecycle=persistent and register this interactive session's native wake endpoint (socket/queue/resume)")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
