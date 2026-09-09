@@ -778,3 +778,27 @@ def test_wake_exhausts_same_message_without_claiming_retrying(board, cache_dir, 
     assert rec.get("adapter_failure", {}).get("state") != "retrying"
     # wake_seat retired only the observed lease; _note must not delete by seat.
     assert sa.read_endpoint(str(board), "bob") is None
+
+
+def test_live_endpoint_stale_cleanup_does_not_drop_rebind(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    dead = str(Path(sock_dir) / "dead.sock")
+    alive = str(Path(sock_dir) / "alive.sock")
+    Path(dead).touch()
+    Path(alive).touch()
+    sa = _adapters()
+    sa.write_endpoint(str(board), "alice", {
+        "seat": "alice", "provider": "claude", "mode": "native",
+        "socket": dead, "token": "", "pid": 99999999, "at": "now",
+        "lease_id": "old-lease", "fence": 1, "heartbeat_epoch": time.time()})
+    observed = sa.read_endpoint(str(board), "alice")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", alive)
+    monkeypatch.setenv("TICKET_SESSION_PID", str(os.getpid()))
+    monkeypatch.delenv("TICKETS_SESSION_LEASE", raising=False)
+    assert sa.register_persistent(str(board), "alice", "claude", "now").get("ok")
+    sa.remove_endpoint_if_match(str(board), "alice", expected_lease=observed["lease_id"],
+                                 expected_fence=int(observed["fence"]))
+    ep, was_stale = sa.live_endpoint(str(board), "alice")
+    assert ep is not None and not was_stale
+    assert ep["socket"] == alive
+    assert ep.get("lease_id") != "old-lease"

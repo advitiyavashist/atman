@@ -334,30 +334,34 @@ def live_endpoint(board, seat):
     ep = read_endpoint(board, seat)
     if not ep:
         return None, False
+
+    def _drop_observed():
+        lease = ep.get("lease_id") or ""
+        try:
+            fence = int(ep.get("fence") or 0)
+        except (TypeError, ValueError):
+            fence = 0
+        remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
+        return None, True
+
     pid_ok = _endpoint_pid_ok(ep.get("pid"))
     if pid_ok is False:
-        remove_endpoint(board, seat)
-        return None, True
+        return _drop_observed()
     provider = ep.get("provider") or ""
     if provider == "claude":
         sock = ep.get("socket") or ""
         if not sock or not os.path.exists(sock):
-            remove_endpoint(board, seat)
-            return None, True
+            return _drop_observed()
     elif provider == "codex":
         if not (ep.get("thread") or "").strip():
-            remove_endpoint(board, seat)
-            return None, True
+            return _drop_observed()
         if pid_ok is None and not _heartbeat_fresh(ep):
-            remove_endpoint(board, seat)
-            return None, True
+            return _drop_observed()
     elif provider == "cursor":
         if not (ep.get("session_id") or "").strip():
-            remove_endpoint(board, seat)
-            return None, True
+            return _drop_observed()
         if pid_ok is None and not _heartbeat_fresh(ep):
-            remove_endpoint(board, seat)
-            return None, True
+            return _drop_observed()
         # Cursor resume is not an enqueue primitive; a recorded session is identity only.
         if ep.get("mode") == "native":
             ep = dict(ep)
