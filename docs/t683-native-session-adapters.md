@@ -1,0 +1,47 @@
+# T-683 native session adapters receipt
+
+Provider-native persistent session injection on top of merged T-640 wake
+semantics. Reconciles safe endpoint ideas from Opus PR #61/#67 without
+importing their unsafe identity overlap.
+
+## Proven transports
+
+| Provider | Mode | Transport | Verified in |
+|---|---|---|---|
+| Claude | native | AF_UNIX inbox socket (`CLAUDE_CODE_MESSAGING_SOCKET`) | `test_claude_register_and_wake`, fake socket server |
+| Codex | native | `codex queue --thread <id> --message <text>` | `test_codex_queue_wake_uses_thread`, subprocess stub |
+| Cursor | native | `agent -p --resume <session_id> <text>` | `test_cursor_resume_wake`, subprocess stub |
+| Remote/Grok | remote | T-640 schema-2 bridge only | `test_remote_adapter_fails_closed_on_native_wake` |
+| Custom/other | supervised | `tickets watch` headless subprocess | existing T-640 path |
+
+## Not claimed
+
+- End-to-end proof that a real idle Claude Code session resumes from a live poke
+  (wire mechanics only, per PR #61 honesty).
+- Cursor `agent persist` tmux path (requires tmux; resume path used instead).
+- Real Grok/model transport (remote bridge protocol only, per T-640).
+
+## Registration
+
+```sh
+tickets join <seat> --persistent
+```
+
+Reads harness env vars only (never typed tokens). Endpoint files live under
+`~/.cache/atman/sessions/<board-hash>/<seat>.json` (dirs `0700`, files `0600`).
+
+Capability probe fails closed with an actionable reason when transport is
+missing. `tickets self` reports probe/registration status.
+
+## Wake path
+
+`tickets msg --to <seat>` writes the board first, then attempts native
+injection when the message already wakes a polling seat (`_message_wakes` or
+continuous DM/@mention). `tickets watch` / `tickets spawn` refuse to double up
+on a seat with a live native endpoint.
+
+## UI fields
+
+`board_snapshot` agents now include `adapter_provider`, `adapter_mode`
+(`native` | `supervised` | `remote`), `adapter_native_online`, and
+`adapter_delivery`.

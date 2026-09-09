@@ -6145,10 +6145,23 @@ def fmt_msg(m):
     return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
 
 
+def _message_wakes_seat(board, seat, message):
+    """Whether a posted message should attempt a native session wake for seat."""
+    obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+    return (_message_wakes(message, obj_state)
+            or _continuous_message_wakes(board, seat, message))
+
+
+def _session_adapters():
+    import session_adapters as mod
+    return mod
+
+
 def cmd_msg(a, board):
     sender = whoami(a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
+    # Board first, native wake second: the board is the source of truth.
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
                      task=bool(getattr(a, "task", False)))
     unknown = m.pop("_unregistered_implicit", None)
@@ -6156,6 +6169,12 @@ def cmd_msg(a, board):
         print("WARNING: @handle %s is not a registered agent, message broadcast."
               % unknown)
     print("posted: " + fmt_msg(m))
+    to = (m.get("to") or "").strip()
+    if to and _message_wakes_seat(board, to, m):
+        harness = (load_workforce(board).get(to, {}) or {}).get("harness") or "claude"
+        sa = _session_adapters()
+        label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness)
+        print("wake: %s -> %s" % (to, label))
 
 
 def cmd_inbox(a, board):
@@ -6717,6 +6736,16 @@ def cmd_join(a, board):
     entry.setdefault("cost", "medium")
     wf[owner] = entry
     save_workforce(board, wf)
+    if getattr(a, "persistent", False):
+        sa = _session_adapters()
+        reg = sa.register_persistent(board, owner, harness or entry.get("harness") or "claude", now())
+        if reg.get("ok"):
+            pid = (reg.get("record") or {}).get("pid")
+            print("persistent: native %s endpoint registered for %s (%s)" % (
+                reg.get("provider"), owner,
+                "pid %s" % pid if pid else "no session pid published; liveness follows transport"))
+        else:
+            print("persistent: %s" % reg.get("reason", "registration failed"))
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
     if first_join:
         # setdefault, not update: if two joins race, the earlier stamp wins and
@@ -9127,6 +9156,13 @@ def cmd_watch(a, board):
     harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
     # Cron/--once used to bypass this lock and could overlap a persistent
     # adapter. All launch paths now share one lease per seat.
+    sa = _session_adapters()
+    if sa.has_live_native_session(board, owner) and not getattr(a, "force", False):
+        ep, _ = sa.live_endpoint(board, owner)
+        print("skip: %s has a live native session (provider=%s, pid=%s) -- "
+              "a headless watcher would double up on the seat; use watch --force to override"
+              % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
+        sys.exit(0)
     lock = _watch_lock(board, owner)
     if lock is None:
         sys.exit("another watcher for %s is already running (see %s)" % (
@@ -9888,6 +9924,13 @@ def cmd_spawn(a, board):
         with open(master_state_path(board), "w") as f:
             json.dump(prev, f)
         _master_log(board, "%s spawned as persistent chief of staff (review/unblock/merge)" % owner, by=whoami())
+    sa = _session_adapters()
+    if sa.has_live_native_session(board, owner):
+        ep, _ = sa.live_endpoint(board, owner)
+        print("skip: %s has a live native session (provider=%s, pid=%s) -- "
+              "spawn would double up on the interactive seat"
+              % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
+        return
     live = _live_watch_pids(owner, board=board)
     if live:
         print("watcher for %s already running (%d process(es), pids %s); --stop first" % (
@@ -11406,8 +11449,11 @@ def _board_snapshot_body(board, messages=40):
         else:
             adapter_state = "offline"
             adapter_reason = "Adapter offline; directed work will remain queued."
+        adapter_extra = _session_adapters().public_adapter_state(
+            board, r["agent"], harness_name, adapter_online, wake_pending)
         out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
                            "harness": harness_name,
+                           **adapter_extra,
                            "wake_mode": wake_mode_of(board, r["agent"], master_state=m, workforce=wf),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
                            "watcher": adapter_online,
@@ -12574,6 +12620,21 @@ def cmd_self(a, board):
     script = os.path.realpath(__file__)
     print("script: %s" % script)
     print("status: %s" % release_status())
+    seat = whoami()
+    if board and seat and not seat.startswith("agent-"):
+        harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+        sa = _session_adapters()
+        ep, was_stale = sa.live_endpoint(board, seat)
+        if ep:
+            print("persistent: yes -- seat %s native %s endpoint (pid %s, registered %s)" % (
+                seat, ep.get("provider"), ep.get("pid", "?"), ep.get("at", "?")))
+        elif was_stale:
+            print("persistent: no -- seat %s had a native endpoint but it went stale "
+                  "(re-register with `tickets join %s --persistent`)" % (seat, seat))
+        else:
+            probe = sa.probe_provider(sa.provider_for_harness(harness))
+            print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
+                seat, probe.get("reason", "ok") if not probe.get("ok") else "transport available"))
     on_path = shutil.which("tickets")
     if on_path:
         resolved = os.path.realpath(on_path)
@@ -12686,6 +12747,8 @@ def main():
                    help="durable DM policy: continuous wakes on directed messages; task-only needs --task; scheduled uses heartbeat/task gates")
     c.add_argument("--knowledge-dir", default="",
                    help="canonical repo-backed knowledge/ directory inherited by this seat")
+    c.add_argument("--persistent", action="store_true",
+                   help="register this interactive session's native wake endpoint (socket/queue/resume)")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
