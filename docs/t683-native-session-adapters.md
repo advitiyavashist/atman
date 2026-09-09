@@ -41,7 +41,10 @@ injection when the message already wakes a polling seat (`_message_wakes` or
 continuous DM/@mention). Remote/custom/no-endpoint and supervised Cursor
 outcomes stay queued-offline; only a refused or rebound native injection is
 recorded as adapter `failed`, scoped to that provider. Watcher exhaust
-records stamp the same provider/harness. `join` captures the previous
+records stamp the same provider/harness. Watcher retries and terminal
+`failed` are scoped from the registered workforce harness, not `_harness_of_cmd`
+(`agent -p` / cursor+claude look like `custom` and must not reset the cost gate).
+`join` captures the previous
 workforce harness before overwrite and clears leftover (including legacy
 unscoped) failure when the provider actually changes — Claude/custom to
 Codex or Cursor, not only a remote rejoin. Re-joining as another harness

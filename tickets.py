@@ -9363,7 +9363,15 @@ def cmd_watch(a, board):
     # call; the message gates still decide whether any paid turn starts.
     every = min(WATCH_MIN_INTERVAL, requested_every) if wake_mode == "continuous" else max(
         WATCH_MIN_INTERVAL, requested_every)
+    # Retry/cost gates follow the enrolled seat, not argv[0]. Built-in Cursor
+    # is `agent -p` (and cursor+claude starts the same way), which _harness_of_cmd
+    # reports as custom — scoping from that would ignore the failure and relaunch.
+    workforce_rec = load_workforce(board).get(owner, {}) or {}
+    workforce_harness = (workforce_rec.get("harness") or workforce_rec.get("tool") or "").strip()
+    if not workforce_harness:
+        workforce_harness, _ = harness_of(board, owner)
     harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
+    retry_harness = workforce_harness or harness
     # Cron/--once used to bypass this lock and could overlap a persistent
     # adapter. All launch paths now share one lease per seat.
     sa = _session_adapters()
@@ -9447,8 +9455,7 @@ def cmd_watch(a, board):
             trigger_fp = _watch_trigger_fingerprint(board, owner, p) if actionable(p) else None
             trigger_key = _remote_trigger_key(trigger_fp)
             retry_state = _local_adapter_failure(
-                _agent_rec(board, owner) or {},
-                (load_workforce(board).get(owner, {}) or {}).get("harness") or harness)
+                _agent_rec(board, owner) or {}, retry_harness)
             same_failure = bool(trigger_key and retry_state.get("trigger") == trigger_key)
             retry_deferred = (not a.once and same_failure and not force and
                               (retry_state.get("state") == "failed" or
@@ -9609,8 +9616,8 @@ def cmd_watch(a, board):
                         "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
                             "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else ""),
                         "at": now(),
-                        "provider": _adapter_provider(harness),
-                        "harness": harness or "",
+                        "provider": _adapter_provider(retry_harness),
+                        "harness": retry_harness or "",
                     }
                     _safe(lambda fr=failure_record: _agent_set(board, owner, adapter_failure=fr), None)
                     log("%s skip retrigger armed for unchanged failed trigger; bounded attempt %d/%d state=%s" % (

@@ -1149,3 +1149,67 @@ def test_claude_scoped_failure_is_ignored_after_codex_join_without_clear(board):
     assert row["adapter_state"] != "failed"
     assert tk._local_adapter_failure(
         tk._agent_rec(str(board), "cx"), "codex") == {}
+
+
+def _cursor_shaped_failing_agent(path):
+    path.write_text("#!/bin/sh\nexit 1\n")
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize("harness_name,expected_provider", [
+    ("cursor", "cursor"),
+    ("cursor+claude", "claude"),
+])
+def test_cursor_shaped_watcher_stops_after_three_failed_runs(
+        board, harness_name, expected_provider):
+    """agent -p is custom to _harness_of_cmd; cost gate must still bind the seat."""
+    seat = "cx-%s" % harness_name.replace("+", "-")
+    _run(board, "join", seat, "--roles", "docs", "--harness", harness_name,
+         "--wake-mode", "continuous")
+    bin_dir = board.parent.parent / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    _cursor_shaped_failing_agent(bin_dir / "agent")
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=seat,
+               HOME=str(board.parent.parent / "home"),
+               PATH=str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    env.pop("TICKETS_STOP_HOOK", None)
+    proc = subprocess.Popen(
+        [sys.executable, str(TOOL), "watch", "--agent", seat, "--every", "1",
+         "--persist", "--exec", "agent -p --force paid-turn"],
+        env=env, cwd=str(board.parent),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    log_path = board / "agents" / ("%s.watch.log" % seat)
+    rec_path = board / "agents" / ("%s.json" % seat)
+    try:
+        deadline = time.time() + 25
+        rec = {}
+        while time.time() < deadline:
+            if rec_path.exists():
+                rec = json.loads(rec_path.read_text())
+                failure = rec.get("adapter_failure") or {}
+                if failure.get("state") == "failed" and int(failure.get("attempts") or 0) >= 3:
+                    break
+            time.sleep(0.2)
+        else:
+            log = log_path.read_text() if log_path.exists() else ""
+            pytest.fail("did not reach terminal failed: rec=%s log=%s" % (rec, log[-800:]))
+        time.sleep(2)
+        log = log_path.read_text()
+        assert log.count("run 1 trigger=") == 1
+        assert log.count("run 2 trigger=") == 1
+        assert log.count("run 3 trigger=") == 1
+        assert "run 4 trigger=" not in log
+        failure = rec.get("adapter_failure") or {}
+        assert failure.get("state") == "failed"
+        assert failure.get("attempts") == 3
+        assert failure.get("harness") == harness_name
+        assert failure.get("provider") == expected_provider
+        starts = []
+        traj = board / "trajectories.jsonl"
+        if traj.exists():
+            starts = [json.loads(ln) for ln in traj.read_text().splitlines()
+                      if ln.strip() and json.loads(ln).get("kind") == "run_start"]
+        assert len(starts) == 3
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
