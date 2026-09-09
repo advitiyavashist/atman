@@ -1694,6 +1694,16 @@ def cmd_list(a, board):
 def cmd_board(a, board):
     tickets = load_all(board)
     if not tickets:
+        # Claude's SessionStart hook calls `tickets board`. An initialized
+        # project may legitimately have no tickets yet, but its durable
+        # knowledge is still useful. Stay silent when there is no board at
+        # all so the global hook remains inert in unrelated directories.
+        if os.path.isdir(board):
+            owner = whoami()
+            if not owner.startswith("agent-"):
+                inherited = knowledge_context(board, owner, max_chars=1800)
+                if inherited:
+                    print(inherited)
         return
     counts = {}
     for t in tickets:
@@ -7077,8 +7087,12 @@ def cmd_brief(a, board):
             nodes, edges, errors = _knowledge_records(root) if _knowledge_graph(root) else ([], [], [])
             if errors:
                 sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
-            if knowledge_id not in {r["id"] for r in nodes + edges}:
-                sys.exit("no knowledge record %r under %s" % (knowledge_id, root))
+            node_ids = {r["id"] for r in nodes}
+            if knowledge_id not in node_ids:
+                if knowledge_id in {r["id"] for r in edges}:
+                    sys.exit("knowledge references on tickets must name a node, not edge %r" %
+                             knowledge_id)
+                sys.exit("no knowledge node %r under %s" % (knowledge_id, root))
             text = "knowledge:" + knowledge_id
         else:
             text = a.text or (open(a.file).read().strip() if a.file else "")
@@ -7198,6 +7212,16 @@ def _knowledge_inside_board(root, board):
         return True
 
 
+def _knowledge_path_inside_root(root, path):
+    """Reject graph files and directories whose symlinks escape `root`."""
+    try:
+        root = os.path.realpath(root)
+        path = os.path.realpath(path)
+        return os.path.commonpath([root, path]) == root
+    except (OSError, ValueError):
+        return False
+
+
 def _knowledge_json(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -7242,6 +7266,11 @@ def _knowledge_validate_record(record, kind=None):
         revision = record.get("revision")
         if not isinstance(revision, int) or revision < 1:
             errors.append("revision must be an integer >= 1")
+        canonical = record.get("canonical_key")
+        if canonical is not None and (
+                not isinstance(canonical, str) or
+                not _KNOWLEDGE_SLUG_RE.match(canonical)):
+            errors.append("canonical_key must be a safe stable slug")
     else:
         if record.get("type") not in _KNOWLEDGE_EDGE_TYPES:
             errors.append("unknown edge type %r" % record.get("type"))
@@ -7254,9 +7283,13 @@ def _knowledge_validate_record(record, kind=None):
     source = record.get("source")
     if not isinstance(source, dict) or not isinstance(source.get("ref"), str) or not source["ref"].strip():
         errors.append("source.ref is required")
+    future_cutoff = datetime.now(timezone.utc).timestamp() + 300
     for field in ("recorded_at", "last_verified_at"):
-        if not _knowledge_timestamp(record.get(field)):
+        stamp = _knowledge_timestamp(record.get(field))
+        if not stamp:
             errors.append("%s must be an ISO-8601 timestamp" % field)
+        elif stamp.timestamp() > future_cutoff:
+            errors.append("%s cannot be more than 5 minutes in the future" % field)
     if record.get("verification") not in _KNOWLEDGE_VERIFICATION:
         errors.append("verification must be one of %s" % ", ".join(sorted(_KNOWLEDGE_VERIFICATION)))
     confidence = record.get("confidence")
@@ -7271,10 +7304,15 @@ def _knowledge_validate_record(record, kind=None):
 def _knowledge_records(root):
     """Load and validate graph records without ever consulting ticket files."""
     nodes, edges, errors = [], [], []
-    manifest, manifest_error = _knowledge_json(os.path.join(root, "manifest.json"))
-    if manifest_error:
-        errors.append(manifest_error)
+    manifest_path = os.path.join(root, "manifest.json")
+    if not _knowledge_path_inside_root(root, manifest_path):
+        manifest = None
+        errors.append("%s: symlink escapes the knowledge graph root" % manifest_path)
     else:
+        manifest, manifest_error = _knowledge_json(manifest_path)
+        if manifest_error:
+            errors.append(manifest_error)
+    if manifest is not None:
         if manifest.get("schema_version") != 1:
             errors.append("manifest schema_version must be 1")
         budget = manifest.get("context_budget_chars")
@@ -7283,6 +7321,9 @@ def _knowledge_records(root):
                           _KNOWLEDGE_MAX_BUDGET)
     for kind, folder in (("node", "nodes"), ("edge", "edges")):
         for path in sorted(glob.glob(os.path.join(root, folder, "*.json"))):
+            if not _knowledge_path_inside_root(root, path):
+                errors.append("%s: symlink escapes the knowledge graph root" % path)
+                continue
             record, error = _knowledge_json(path)
             if error:
                 errors.append(error)
@@ -7347,6 +7388,12 @@ def _knowledge_terms(text):
             if len(x) > 2 and x not in stop}
 
 
+def _knowledge_refs(text):
+    """Return exact knowledge:<id> references without prefix collisions."""
+    pattern = r"(?<![A-Za-z0-9_.-])knowledge:([A-Za-z0-9][A-Za-z0-9_.-]*)(?![A-Za-z0-9_.-])"
+    return {match.lower() for match in re.findall(pattern, text or "", flags=re.IGNORECASE)}
+
+
 def _knowledge_preference(node):
     return (_KNOWLEDGE_VERIFY_RANK.get(node.get("verification"), -2),
             int(node.get("revision") or 0),
@@ -7373,8 +7420,8 @@ def _knowledge_query(root, text="", scopes=None, max_nodes=12):
     by_id = {n["id"]: n for n in nodes}
     terms = _knowledge_terms(text)
     scopes = {str(x).lower() for x in (scopes or []) if x}
-    explicit = {n["id"] for n in nodes
-                if ("knowledge:" + n["id"]).lower() in (text or "").lower()}
+    referenced = _knowledge_refs(text)
+    explicit = {n["id"] for n in nodes if n["id"].lower() in referenced}
     scored = {}
     for node in nodes:
         fields = " ".join(_knowledge_strings({
@@ -7687,6 +7734,8 @@ def cmd_knowledge(a, board):
                 sys.exit("NO CHANGE WAS MADE: " + "; ".join(found))
             folder = "nodes" if record["kind"] == "node" else "edges"
             target = os.path.join(root, folder, record["id"] + ".json")
+            if not _knowledge_path_inside_root(root, os.path.dirname(target)):
+                sys.exit("NO CHANGE WAS MADE: knowledge destination escapes graph root")
             current, _ = _knowledge_json(target)
             if sub == "add" and current is not None:
                 sys.exit("NO CHANGE WAS MADE: knowledge record %s already exists" % record["id"])
