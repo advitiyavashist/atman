@@ -156,10 +156,17 @@ runtimes rather than one coherent contributor environment.
   defines parity.
 - CLI, HTTP, and hook adapters contain parsing and presentation only. They call
   one domain implementation.
+- Each storage adapter commits state, audit, idempotency result, and durable
+  outbox events together. SSE derives from that outbox, so a crash cannot leave
+  a successful mutation without its event.
 - The React UI stays TypeScript and is embedded into the release binary as
   static assets. Its generated API types come from the frozen OpenAPI document.
 - We do not use Go's `plugin` facility. External harnesses use the documented
   subprocess/config protocol so they remain language- and platform-neutral.
+- Continuous, task-only, and scheduled wake behavior is a user-selected seat
+  setting for every harness. Master and chief-of-staff roles only supply the
+  continuous default. Scheduled seats receive an externally driven cadence;
+  Atman does not add an internal clock scheduler.
 - No CGo dependency enters the default build. A pure-Go SQLite driver, if the
   SQLite adapter needs one, requires a focused ADR with binary-size,
   cross-build, migration, and license evidence.

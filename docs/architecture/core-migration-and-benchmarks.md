@@ -36,10 +36,10 @@ does not receive features independently.
 | --- | --- | --- |
 | 0. Freeze | T-641 + T-642 | ADR accepted; language-neutral fixtures cover current accepted behavior and failure cases. |
 | 1. Scaffold | T-643 | Go module and package skeleton; `version`, `self`, fixture loader, six-platform build matrix, docs and checks pass. Python remains live. |
-| 2. Storage | T-644 | Existing board resolution, JSON, locks, atomic writes, backup/restore and race primitives pass differential and crash tests. No live cutover. |
+| 2. Storage | T-644 | Existing board resolution, JSON, locks, state-plus-outbox transaction directories, SQLite transactional outbox, recovery, backup/restore and race primitives pass differential and crash tests. No live cutover. |
 | 3. Domain | T-645 | Tickets, graph, objectives, roles, routing inputs and reviews use one service implementation and pass fixtures. |
-| 4. Messages | T-646 | Channels, mentions, inbox watermarks and idempotent message-to-wake behavior pass T-640 and the language-neutral corpus. |
-| 5. Runners | T-647 | Harnesses, leases, hook events, liveness and recovery pass deterministic fake-harness tests on macOS and Linux. |
+| 4. Messages | T-646 | Channels, mentions, inbox watermarks and idempotent message-to-wake behavior pass T-640 and the language-neutral corpus for all three wake modes. |
+| 5. Runners | T-647 | Claude, Codex, Cursor, Grok, and custom adapters support user-selected continuous, task-only, and scheduled modes; leases, hook events, liveness and recovery pass deterministic fake-harness tests on macOS and Linux. |
 | 6. Service | T-652 | All 34 frozen API paths, SSE replay/heartbeat and embedded UI use the same domain services and pass OpenAPI conformance. |
 | 7. Compatibility binary | T-648 | `tickets` compatibility command and `atman` alias are the same versioned binary; platform archives, checksums and exact Python rollback are reproducible. |
 | 8. Public library | T-649 | Public Go API, package docs, examples and contributor path are reviewed; no internal implementation leaked into the API. |
@@ -69,6 +69,52 @@ malformed/unknown fields, older board versions, and an interrupted install.
 Cutover requires **zero unexplained semantic mismatches**. A deliberately fixed
 Python bug is encoded as a versioned contract change with before/after fixtures;
 it is never hidden in the rewrite diff.
+
+### Crash and outbox gate
+
+T-644 injects a process kill before and after every file-board protocol step:
+payload write, payload flush, manifest flush, staging-directory flush, committed
+directory rename, committed-parent flush, each state projection, checkpoint
+replacement, and compaction cleanup. After reopening, each attempted operation
+must have exactly one of two observable outcomes:
+
+1. no committed transaction, no state change, no audit entry, and no event; or
+2. one committed transaction whose complete state, audit, stored result, and
+   outbox events recover and materialize exactly once.
+
+There is no accepted state-only or event-only outcome. Reopening twice must
+produce identical bytes and cursors. Corrupt checksum, sequence gap, foreign
+after-image, and unsupported durable-replace cases must refuse writes and expose
+the recovery error without advancing the checkpoint.
+
+SQLite fault injection covers every statement before commit, commit followed by
+a lost response, process death before the SSE notification, and restart with an
+undrained outbox. Before commit, no row is observable. After commit, domain,
+audit, idempotency, and outbox rows are all observable; retry returns the stored
+result. SSE tests disconnect after receipt but before client persistence and
+prove at-least-once replay with stable ids, then cross the retention floor and
+prove snapshot fallback.
+
+### Wake-mode gate
+
+T-646/T-647 run the same table for Claude, Codex, Cursor, Grok, and a fake custom
+harness. Every seat is tested under all three user-selected modes:
+
+- `continuous`: DM, explicit mention, task message, and assignment each wake a
+  live session immediately; an offline wake queues and delivers once on
+  reconnect.
+- `task-only`: assignment and `--task` start one bounded run; an ordinary DM or
+  mention remains unread without starting a model turn.
+- `scheduled`: an externally invoked cadence consumes durable ordinary DMs and
+  mentions in one bounded turn; an assignment or `--task` starts an immediate
+  run. The test supplies the cadence event because Atman does not own a cron
+  expression or next-run deadline.
+
+The matrix also proves DM-plus-mention deduplication, self/broadcast suppression,
+one live session lease, identity pinning, bounded context, failure receipts,
+recovery after process death, and a mode change with queued work. Master and CoS
+receive `continuous` only as a default registration value; tests override both
+roles to the other modes and configure ordinary workers as continuous.
 
 ## Performance protocol
 
