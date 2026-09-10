@@ -2,8 +2,9 @@
 
 Static page. No build step, no JavaScript, no framework.
 
-Copy follows the current Atman team-runtime, knowledge-layer, and Brahman
-research boundaries in the repository. The dashboard image is a checked-in
+Copy follows the T-714 spike: Clone → Claude Code seat → `tickets ui`,
+with fewest-turns / least measured cost on the hero, usage-limit recovery
+early, and Brahman as optional research. The dashboard image is a checked-in
 product capture; the page does not point visitors at a machine-local demo.
 
 ## Open locally
