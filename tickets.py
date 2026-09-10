@@ -9583,7 +9583,9 @@ def cmd_watch(a, board):
                 # credits THAT run_id, not a time window (two seats, one ticket).
                 run_id = "r-%s-%d-%s" % (
                     owner, runs,
-                    hashlib.sha1(("%s:%d:%s" % (owner, runs, run_started)).encode()).hexdigest()[:12])
+                    hashlib.sha1(("%s:%d:%s:%d:%d" % (
+                        owner, runs, run_started, os.getpid(), _time.time_ns()
+                    )).encode()).hexdigest()[:12])
                 env["TICKETS_RUN_ID"] = run_id
                 env["TICKETS_RUN_NO"] = str(runs)
                 release_sha = _release_commit()
