@@ -24,4 +24,6 @@ T-688 owns live provider smoke.
   `~/.cache/atman/credentials/<board-hash>/` (0600). No secrets on the board.
 
 Tests: `tests/test_t686_auth_v2_probes.py`, `tests/test_t610_auth_recovery.py`,
-`tests/test_t685_auth_v2_contract.py`.
+`tests/test_t685_auth_v2_contract.py`, `tests/test_byoa.py`,
+`tests/test_t409_watch_teardown.py` (built-in `--tool` spawn uses a PATH stub
+for `codex login status`, not a live CLI).
