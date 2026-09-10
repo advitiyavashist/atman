@@ -8436,6 +8436,31 @@ def cmd_connect(a, board):
 
 STOP_HOOK_MAX_PER_HOUR = 4
 WATCH_MIN_INTERVAL = 5
+# T-509: notice SIGTERM / spawn --stop during the poll wait AND an in-flight
+# --exec. PEP 475 retries a single time.sleep after a flag-only handler
+# returns, so one sleep(--every) delayed exit by up to --every. Event.wait
+# + InterruptedError from the same-thread handler deadlocked the wait and
+# still missed the stop-file during wait.
+WATCH_STOP_SLICE = 0.2
+
+
+def _watch_poll_wait(wait, stop, board, owner):
+    """Sleep up to `wait` seconds. True = SIGTERM or spawn --stop file.
+
+    KeyboardInterrupt is not caught here (cmd_watch still breaks immediately).
+    """
+    import time as _time
+    deadline = _time.monotonic() + max(0.0, float(wait))
+    while not stop["now"]:
+        if os.path.exists(_stop_file(board, owner)):
+            return True
+        left = deadline - _time.monotonic()
+        if left <= 0:
+            return False
+        _time.sleep(min(WATCH_STOP_SLICE, left))
+    return True
+
+
 # Bounds so long-lived boards do not grow files without limit. All overridable
 # for tests; defaults are generous enough to never matter in normal use.
 WATCH_LOG_MAX_BYTES = int(os.environ.get("TICKETS_WATCH_LOG_MAX_BYTES", 5 * 1024 * 1024))
@@ -10504,7 +10529,7 @@ def reclaim_stale_watch_lock(board, owner):
 
 
 def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
-                      on_beat=None, beat_secs=None):
+                      on_beat=None, beat_secs=None, should_stop=None):
     """Run cmd with stdout+stderr teed into log_path, capped at cap_bytes for
     this run alone -- a single verbose run must not be able to blow past the
     log's rotation budget before the between-run rotation in cmd_watch's
@@ -10573,7 +10598,21 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
             beat_thread = threading.Thread(target=beat, daemon=True)
             beat_thread.start()
 
-        rc = proc.wait(timeout=timeout_s)
+        import time as _time
+        deadline = None if timeout_s is None else (_time.monotonic() + float(timeout_s))
+        rc = None
+        while True:
+            if should_stop and should_stop():
+                raise InterruptedError()
+            remaining = None if deadline is None else (deadline - _time.monotonic())
+            if remaining is not None and remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout_s)
+            slice_s = WATCH_STOP_SLICE if remaining is None else min(WATCH_STOP_SLICE, remaining)
+            try:
+                rc = proc.wait(timeout=slice_s)
+                break
+            except subprocess.TimeoutExpired:
+                continue
         timed_out = False
     except subprocess.TimeoutExpired:
         proc.kill()
@@ -10753,7 +10792,10 @@ def cmd_watch(a, board):
     """Poll the board; when there is work for the agent, launch a worker command.
 
     One watcher per agent (pid lock), one run at a time, per-run timeout,
-    exponential backoff after failed runs, clean exit on SIGTERM/Ctrl-C.
+    exponential backoff after failed runs. SIGTERM and spawn --stop take
+    effect within WATCH_STOP_SLICE, including during an in-flight --exec
+    (the child is terminated and run_end is written). Ctrl-C still breaks
+    immediately.
     """
     import signal
     import time as _time
@@ -10838,8 +10880,13 @@ def cmd_watch(a, board):
     stop_cond = STOP_CONDITION if max_runs else "until spawn --stop or SIGTERM (--persist)"
 
     def _term(signum, frame):
+        # Flag only: sliced _watch_poll_wait / _watch_run_capped observe this
+        # within WATCH_STOP_SLICE. Do not raise InterruptedError here —
+        # Event.wait + a same-thread handler deadlocked the poll wait.
         stop["now"] = True
-        raise InterruptedError()
+
+    def _should_stop_watch():
+        return stop["now"] or os.path.exists(_stop_file(board, owner))
 
     def _usr1(signum, frame):
         # The interpreter writes this signal to poke_write through
@@ -10893,7 +10940,6 @@ def cmd_watch(a, board):
                     os.unlink(_stop_file(board, owner))
                 except OSError:
                     pass
-                stop_event.set()
                 print("stop requested via tickets spawn --stop")
                 break
             if not a.once:
@@ -10959,7 +11005,9 @@ def cmd_watch(a, board):
                             failures += 1
                             if a.once:
                                 sys.exit(1)
-                            _time.sleep(min(every * (2 ** min(failures, 5)), 900))
+                            if _watch_poll_wait(min(every * (2 ** min(failures, 5)), 900),
+                                                stop, board, owner):
+                                break
                             continue
                     run_cmd = _expand_harness_cmd(cmd, agent=owner, cwd=cwd, prompt_file=pf)
                 # The trigger is recorded as the pending KEYS only: the values
@@ -11016,6 +11064,7 @@ def cmd_watch(a, board):
                             on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
                                                       cwd=cwd, active=True),
                             beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
+                            should_stop=_should_stop_watch,
                         )
                     except InterruptedError:
                         _safe(lambda: _finalize_active_watch_run(board, owner), None)
@@ -11301,7 +11350,7 @@ Safety rails (all on by default):
   - Stop hook: at most one extra continuation per user turn (stop_hook_active) and 4 per hour;
     off with TICKETS_STOP_HOOK=off; never fires without TICKET_AGENT; never for broadcasts only.
   - watch: one watcher per agent name (pid lock), one run at a time, --run-timeout, backoff on failures,
-    logs in .tickets/agents/<name>.watch.log, stops on SIGTERM.
+    logs in .tickets/agents/<name>.watch.log, stops on SIGTERM/spawn --stop within WATCH_STOP_SLICE.
   - An agent that recorded `tickets limit` is never woken until `tickets limit --clear`.
 
 Spawning a team from a master session (models per agent):
@@ -11605,10 +11654,10 @@ def cmd_spawn(a, board):
         print("stopped %d watcher(s) for %s (pids %s)" % (
             stopped, owner, ", ".join(str(p) for p in pids)))
         if busy:
-            # SIGTERM asks; a loop inside a run exits at its next boundary. The
-            # duplicate guard in the start path below only sees a pid that has
-            # actually gone, so say so rather than let the operator spawn into
-            # a still-live loop (T-554).
+            # SIGTERM + stop-file are observed within WATCH_STOP_SLICE, including
+            # mid-run. The duplicate guard in the start path below only sees a
+            # pid that has actually gone, so say so rather than let the operator
+            # spawn into a still-live loop (T-554).
             print("mid-run: %s -- wait for the pid(s) to exit before `tickets spawn %s`" % (
                 ", ".join(str(p) for p in busy), owner))
         post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
