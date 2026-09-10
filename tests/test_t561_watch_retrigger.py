@@ -12,8 +12,30 @@ import pytest
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 
 
+def _session_env(agent):
+    """Strip whatever session-id vars this test process itself happens to be
+    sitting in (e.g. CLAUDE_CODE_SESSION_ID from an outer coding-agent
+    session) and give the call one keyed on the actor it names.
+
+    Without this, every call in this file -- and the raw `watch` subprocess
+    below, which sets TICKET_AGENT directly -- would share one identical
+    session key, and a session's RECORDED identity (from `join`) deliberately
+    outranks an explicit per-invocation TICKET_AGENT (see
+    tests/test_identity_precedence.py). "join doc" followed by
+    "TICKET_AGENT=planner tickets msg ... --to doc" would then post as "doc",
+    the name that session joined as, not "planner" -- which is indistinguishable
+    from a self-addressed message and gets refused outright. Same isolation
+    fix as tests/test_wakeup.py's `run()`, for the same reason.
+    """
+    e = dict(os.environ)
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID", "TERM_SESSION_ID"):
+        e.pop(var, None)
+    e["TICKET_SESSION_ID"] = "test-session-" + (agent or "__anonymous__")
+    return e
+
+
 def run(board, *args, agent="", env=None, cwd=None):
-    e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
+    e = dict(_session_env(agent), TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
     if env:
@@ -57,7 +79,7 @@ def test_watch_weekly_limit_does_not_retrigger_same_inbox(board):
     proc = subprocess.Popen(
         [sys.executable, str(TOOL), "watch", "--agent", "doc", "--every", "1",
          "--exec", exec_cmd],
-        env=dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="doc",
+        env=dict(_session_env("doc"), TICKETS_DIR=str(board), TICKET_AGENT="doc",
                  HOME=str(board.parent.parent / "home")),
         cwd=str(board.parent),
         stdout=subprocess.PIPE,
@@ -91,7 +113,7 @@ def test_watch_pre_inbox_exit1_skips_unchanged_trigger(board):
     proc = subprocess.Popen(
         [sys.executable, str(TOOL), "watch", "--agent", "doc", "--every", "1",
          "--exec", "exit 1"],
-        env=dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="doc",
+        env=dict(_session_env("doc"), TICKETS_DIR=str(board), TICKET_AGENT="doc",
                  HOME=str(board.parent.parent / "home")),
         cwd=str(board.parent),
         stdout=subprocess.PIPE,

@@ -23,6 +23,48 @@ TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 def run(board, *args, agent="", stdin="", env=None, cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "", HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    # Strip every session-id var the harness running THIS test might itself
+    # be sitting in (e.g. CLAUDE_CODE_SESSION_ID from an outer coding-agent
+    # session) -- left in place, every subprocess this file launches would
+    # share one identical session key, and a session's RECORDED identity
+    # (from `join`) deliberately outranks an explicit per-invocation
+    # TICKET_AGENT for the surfaces that resolve through it (board/msg/inbox/
+    # stop-hook; see tests/test_identity_precedence.py) -- so every simulated
+    # actor in a test that exercises several of them would collapse onto
+    # whichever name last joined under that one shared session, instead of
+    # the TICKET_AGENT each call actually asked for.
+    #
+    # Stripping to nothing is not enough on its own: with NO session key at
+    # all, read_identity() falls back to the flat legacy per-board file
+    # (deliberately, for harnesses that genuinely give none -- see
+    # test_identity_session_scope's legacy-file test), and this file joins
+    # several differently-named agents on ONE board per test, so they would
+    # all collide on that single shared file -- the exact sideways bleed the
+    # session-scoped identity fix exists to prevent, just re-triggered by the
+    # test doing what no single real harness session would.
+    #
+    # A FRESH id per call does not work either: `join doc` and a later
+    # `agent="doc"` call are meant to model the SAME session across two
+    # subprocesses, and giving them unrelated ids breaks that continuity --
+    # session_seat()/seat_confirmed() then see a session key with no
+    # matching record and refuse to fall back to the (correctly set)
+    # TICKET_AGENT, because a session key present at all means "trust the
+    # record, not the ambient var".
+    #
+    # So: derive a STABLE id per simulated actor instead, anchored on
+    # whichever value names that actor for THIS call -- the positional name
+    # for `join` (which never passes `agent=`), otherwise `agent=` itself.
+    # Same actor name -> same id across every call in a test, matching what
+    # one continuous harness session would give for real; different actors,
+    # or no actor at all, get different (or no-record) ids and so cannot
+    # inherit each other's recorded identity.
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID", "TERM_SESSION_ID"):
+        e.pop(var, None)
+    if args and args[0] == "join" and len(args) > 1 and args[1]:
+        actor = args[1]
+    else:
+        actor = agent or "__anonymous__"
+    e["TICKET_SESSION_ID"] = "test-session-" + actor
     if env:
         e.update(env)
     where = cwd or (board.parent if board.parent.is_dir() else Path("/"))
