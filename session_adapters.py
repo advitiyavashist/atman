@@ -365,8 +365,8 @@ def live_endpoint(board, seat):
             return _drop_observed()
         if pid_ok is None and not _heartbeat_fresh(ep):
             return None, True
-        # Cursor resume is not an enqueue primitive; a recorded session is identity only.
-        if ep.get("mode") == "native":
+        # Persist+tmux is native inject. Identity-only session ids stay supervised.
+        if ep.get("mode") == "native" and not (ep.get("persist_session") or "").strip():
             ep = dict(ep)
             ep["mode"] = "supervised"
     else:
@@ -377,6 +377,38 @@ def live_endpoint(board, seat):
 def _which(cmd):
     from shutil import which
     return which(cmd)
+
+
+def default_codex_control_socket():
+    return _codex_control_sock()
+
+
+def _codex_control_sock():
+    """Managed app-server control socket (not the IDE in-process server)."""
+    override = (os.environ.get("CODEX_APP_SERVER_CONTROL_SOCK")
+                or os.environ.get("CODEX_APP_SERVER_SOCKET") or "").strip()
+    if override:
+        return override
+    home = (os.environ.get("CODEX_HOME") or "").strip() or os.path.join(
+        os.path.expanduser("~"), ".codex")
+    return os.path.join(home, "app-server-control", "app-server-control.sock")
+
+
+def _cursor_persist_target():
+    named = (os.environ.get("CURSOR_PERSIST_SESSION") or "").strip()
+    if named:
+        return named
+    if not os.environ.get("TMUX") or not _which("tmux"):
+        return ""
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "#{session_name}"],
+            capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
 
 
 def _probe_codex():
@@ -390,10 +422,12 @@ def _probe_codex():
         transport = "codex queue --thread + app-server thread/queue/start"
         native = True
     else:
-        # Queue alone is durable offline enqueue, not pause→resume inject.
         transport = "codex queue --thread (queued-offline without app-server control sock)"
         native = False
-    return {"ok": True, "capabilities": {"native_inject": native, "transport": transport}}
+    return {"ok": True, "capabilities": {
+        "native_inject": native, "transport": transport,
+        "control_socket": sock, "control_socket_live": bool(native),
+    }}
 
 
 def _probe_cursor():
@@ -403,9 +437,16 @@ def _probe_cursor():
     help_text = r.stdout + r.stderr
     if r.returncode != 0 or "--resume" not in help_text:
         return {"ok": False, "reason": "cursor agent --resume unavailable"}
+    persist = _cursor_persist_target()
+    if persist and _which("tmux"):
+        return {"ok": True, "capabilities": {
+            "native_inject": True,
+            "transport": "tmux send-keys into agent persist session",
+            "persist_session": persist,
+        }}
     return {"ok": True, "capabilities": {
         "native_inject": False,
-        "transport": "supervised watch (agent -p --resume is a paid foreground run, not enqueue)",
+        "transport": "supervised (need agent persist + tmux; agent -p --resume is a new paid run)",
     }}
 
 
@@ -478,17 +519,35 @@ def register_persistent(board, seat, harness, at_iso):
         if not thread:
             return {"ok": False, "reason": "CODEX_THREAD_ID / CODEX_SESSION_ID not set"}
         record["thread"] = thread
-        record["mode"] = "native"
+        sock = default_codex_control_socket()
+        record["socket"] = sock
+        live = bool(sock and os.path.exists(sock))
+        record["mode"] = "native" if live else "supervised"
+        record["capabilities"] = {
+            "native_inject": live,
+            "transport": ("codex app-server turn/start" if live
+                          else "codex queue mailbox only (poll unless app-server socket is live)"),
+        }
     elif provider == "cursor":
         session_id = (os.environ.get("CURSOR_CONVERSATION_ID") or os.environ.get("CURSOR_SESSION_ID") or "").strip()
         if not session_id:
             return {"ok": False, "reason": "CURSOR_CONVERSATION_ID not set"}
         record["session_id"] = session_id
-        record["mode"] = "supervised"
-        record["capabilities"] = {
-            "native_inject": False,
-            "transport": "supervised watch (agent -p --resume is a paid foreground run, not enqueue)",
-        }
+        persist = _cursor_persist_target()
+        if persist:
+            record["persist_session"] = persist
+        if persist and _which("tmux"):
+            record["mode"] = "native"
+            record["capabilities"] = {
+                "native_inject": True,
+                "transport": "tmux send-keys into agent persist session",
+            }
+        else:
+            record["mode"] = "supervised"
+            record["capabilities"] = {
+                "native_inject": False,
+                "transport": "supervised (need agent persist + tmux; agent -p --resume is a new paid run)",
+            }
     committed = commit_endpoint(board, seat, record)
     if not committed.get("ok"):
         return committed
@@ -523,15 +582,6 @@ def _poke_claude(ep, text):
             pass
 
 
-def _codex_control_sock():
-    """Managed app-server control socket (not the IDE in-process server)."""
-    override = (os.environ.get("CODEX_APP_SERVER_CONTROL_SOCK") or "").strip()
-    if override:
-        return override
-    return os.path.join(os.path.expanduser("~"), ".codex",
-                        "app-server-control", "app-server-control.sock")
-
-
 def _codex_app_server_rpc(method, params, timeout=5):
     """JSON-RPC one-shot via `codex app-server proxy`. None if unavailable."""
     sock = _codex_control_sock()
@@ -559,16 +609,13 @@ def _codex_app_server_rpc(method, params, timeout=5):
             continue
         if msg.get("id") == 1:
             return msg
-    # No JSON-RPC response => not a successful start/inject.
     return None
 
 
 def _codex_queue_start(thread):
     """Ask the managed app-server to start the next queued turn (pause→resume)."""
     resp = _codex_app_server_rpc("thread/queue/start", {"threadId": thread})
-    if not resp:
-        return False
-    if resp.get("error"):
+    if not resp or resp.get("error"):
         return False
     return True
 
@@ -616,8 +663,29 @@ def _poke_codex(ep, text):
 
 
 def _poke_cursor(ep, text):
-    """Never enqueue via agent -p --resume: that is a paid foreground model run."""
-    return False
+    """Inject into a paused persist session. Never spawn agent -p --resume."""
+    session = (ep.get("persist_session") or "").strip()
+    if not session or not _which("tmux"):
+        return False
+    try:
+        typed = subprocess.run(
+            ["tmux", "send-keys", "-t", session, "-l", text],
+            capture_output=True, text=True, timeout=5)
+        if typed.returncode != 0:
+            return False
+        enter = subprocess.run(
+            ["tmux", "send-keys", "-t", session, "Enter"],
+            capture_output=True, text=True, timeout=5)
+        return enter.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _cursor_pause_resume(ep, text):
+    if _poke_until(_poke_cursor, ep, text):
+        return "woken"
+    return ("supervised (no persist/tmux inject; agent -p --resume is a new paid run, "
+            "not pause-resume)")
 
 
 def is_reachable(native_online=False, watcher_online=False, remote_online=False):
@@ -787,9 +855,7 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     if expected and provider and expected != provider:
         remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
         return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
-    if provider == "cursor":
-        return "supervised (cursor agent -p --resume is a paid foreground run, not enqueue)"
-    if provider not in ("claude", "codex"):
+    if provider not in ("claude", "codex", "cursor"):
         return "unsupported provider"
     reserved, ep = _reserve_wake(board, seat, mid, lease, fence)
     if reserved != "reserved":
@@ -797,12 +863,13 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     if ep is None:
         return "no live endpoint"
     lease, fence = _endpoint_lease_fence(ep)
-    ok = False
     if provider == "claude":
         ok = _poke_until(_poke_claude, ep, text)
         label = "woken" if ok else "refused"
+    elif provider == "cursor":
+        label = _cursor_pause_resume(ep, text)
+        ok = label == "woken"
     else:
-        # Codex: woken = app-server start/inject; else durable queued-offline.
         label = _poke_codex_wake(ep, text)
         ok = label in ("woken", "queued-offline")
     return _commit_wake(board, seat, mid, lease, fence, label, ok)

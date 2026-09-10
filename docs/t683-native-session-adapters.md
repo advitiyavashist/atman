@@ -9,8 +9,8 @@ importing their unsafe identity overlap.
 | Provider | Mode | Transport | Verified in |
 |---|---|---|---|
 | Claude | native | AF_UNIX inbox socket (`CLAUDE_CODE_MESSAGING_SOCKET`) | `test_claude_register_and_wake`, fake socket server |
-| Codex | native | `codex queue --thread <id> --message <text>` | `test_codex_queue_wake_uses_thread`, subprocess stub |
-| Cursor | supervised | identity bind only; `agent -p --resume` is a paid foreground run, not enqueue | `test_cursor_resume_is_not_native_enqueue` |
+| Codex | native | live app-server `turn/start` (queue CLI is mailbox / poll-only) | T-706 `test_codex_app_server_turn_start_is_woken` |
+| Cursor | native or supervised | `tmux send-keys` into `agent persist`; `-p --resume` is a new paid run | T-706 persist test; T-683 supervised fallback |
 | Remote/Grok | remote | T-640 schema-2 bridge only | `test_remote_adapter_fails_closed_on_native_wake` |
 | Custom/other | supervised | `tickets watch` headless subprocess | existing T-640 path |
 

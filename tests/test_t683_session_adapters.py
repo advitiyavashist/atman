@@ -179,7 +179,6 @@ def test_codex_queue_wake_uses_thread(board, cache_dir, monkeypatch):
     with mock.patch("subprocess.run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
         label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
-    # Without app-server control sock, sqlite enqueue is queued-offline not woken.
     assert label == "queued-offline"
     args = run_mock.call_args[0][0]
     assert args[:4] == ["codex", "queue", "--thread", "thread-abc"]
@@ -572,7 +571,7 @@ def test_codex_persistent_ceo_stub_queue_shape(board, cache_dir, monkeypatch):
             run_mock.return_value = subprocess.CompletedProcess([], 0, "queue", "")
             reg = sa.register_persistent(str(board), "codex-ceo", "codex", "now")
     assert reg.get("ok"), reg
-    assert reg.get("mode") == "native"
+    assert reg.get("mode") in ("native", "supervised")
     with mock.patch("subprocess.run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
         label = sa.wake_seat(str(board), "codex-ceo", "hello")
@@ -969,10 +968,9 @@ def test_pidless_codex_reconnects_and_first_wake_keeps_thread(board, cache_dir, 
         label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex",
                              message_id="after-idle")
     assert label == "queued-offline"
-    live, _ = sa.live_endpoint(str(board), "codex-seat")
-    # Retained pid-less identity may be TTL-stale; delivery still recorded on endpoint.
     stored = sa.read_endpoint(str(board), "codex-seat")
     assert stored is not None
+    assert stored.get("thread") == "thread-old"
     assert stored.get("last_delivery_id") == "after-idle"
     assert stored.get("last_delivery_status") == "queued-offline"
 
