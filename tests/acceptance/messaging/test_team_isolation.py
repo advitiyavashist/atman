@@ -84,6 +84,28 @@ def test_a_private_channel_is_invisible_and_unusable_to_a_non_member(board):
     assert board.task(board.operator, source["id"], insider.agent_id).status == 201
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "F-14 (T-493): send_task applies the conversation ACL to the sender only. An "
+    "agent that is a member of a private channel can task a non-member: 201, "
+    "wake job minted, outsider can claim. GET /messages on that channel stays "
+    "403 for the outsider. OpenAPI names not_channel_member for READ only."))
+def test_a_private_channel_task_cannot_dispatch_a_non_member(board):
+    insider = board.enroll("insider")
+    outsider = board.enroll("outsider")
+    private = board.channel("secret", "private")
+    added = board.operator.post("/channels/{}/members".format(private["id"]),
+                               {"request_id": rid(), "member_id": insider.member_id})
+    assert added.status == 201, added.body
+    source = board.say(board.operator, private["id"], "insiders only").body["message"]
+    task = board.task(insider.http, source["id"], outsider.agent_id)
+    assert task.status in (403, 422)
+    assert task.code() in ("not_channel_member", "recipient_not_channel_member")
+    assert board.store.conn.execute(
+        "SELECT COUNT(*) FROM wake_jobs").fetchone()[0] == 0
+    read = outsider.http.get("/messages", "channel_id=" + private["id"])
+    assert read.status == 403 and read.code() == "not_channel_member"
+
+
 def test_a_dm_is_readable_by_exactly_its_two_participants(board):
     a, b, c = board.enroll("a"), board.enroll("b"), board.enroll("c")
     dm = board.dm(a.member_id, b.member_id)
@@ -203,3 +225,31 @@ def test_revocation_cancels_the_pending_dispatch(board):
     assert board.wake_job(task["wake_job"]["id"])["state"] in ("canceled", "failed")
     receipt = board.deliveries(task["message"]["id"])[0]
     assert receipt["state"] in ("blocked", "canceled")
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "F-15 (T-493): a task whose existing_ticket_id is already claimed by another "
+    "agent still 201s with a delivered receipt. _task_ticket is an unscoped "
+    "get_ticket; the supervisor's claim refuses and the run fails, so the "
+    "operator only learns from a failed run. Owner must stay unchanged."))
+def test_a_task_on_another_agents_claimed_ticket_is_refused_at_send(board):
+    owner = board.enroll("owner", max_active_tickets=2)
+    other = board.enroll("other")
+    ticket = board.ticket("already claimed")
+    claimed = owner.http.post("/tickets/{}/claim".format(ticket["id"]), {
+        "request_id": rid(), "expected_version": ticket["version"],
+        "session_id": owner.session_id})
+    assert claimed.status in (200, 201), claimed.body
+    general = board.channel("general")
+    source = board.say(board.operator, general["id"], "steal?").body["message"]
+    task = board.task(board.operator, source["id"], other.agent_id,
+                       ticket={"existing_ticket_id": ticket["id"]})
+    assert task.status in (409, 422, 403)
+    assert task.body.get("wake_job") in (None, {})
+    launcher = FakeLauncher()
+    outcomes = board.supervisor(other, launcher=launcher).run_forever(
+        wait_seconds=0, max_polls=1)
+    assert outcomes == []
+    assert launcher.specs == []
+    detail = owner.http.get("/tickets/" + ticket["id"]).body
+    assert detail["ticket"]["owner"] == owner.agent_id
