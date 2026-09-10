@@ -124,10 +124,11 @@ nav a:hover { color: var(--fg); }
 h1 {
   max-width: 50rem;
   margin: 0;
-  font-size: clamp(3.4rem, 6.2vw, 5.6rem);
+  font-size: clamp(2.5rem, 5.4vw, 4.5rem);
   font-weight: 500;
   letter-spacing: -0.065em;
-  line-height: 0.94;
+  line-height: 1.02;
+  text-wrap: balance;
 }
 
 h1 em { color: var(--accent); font-style: normal; }
@@ -334,6 +335,7 @@ figcaption { margin-top: 0.8rem; color: var(--mute); font-size: 0.76rem; }
 
 .start { display: grid; grid-template-columns: minmax(0, 0.78fr) minmax(23rem, 1.22fr); gap: clamp(3rem, 9vw, 7rem); align-items: center; }
 .start-copy > p:not(.eyebrow, .start-links) { max-width: 34rem; margin: 1.25rem 0 0; color: var(--mute); }
+.start-copy code { color: var(--fg); font-size: 0.86em; }
 .start-links { display: flex; flex-direction: column; align-items: flex-start; gap: 0.55rem; margin: 1.7rem 0 0; }
 .start-links a { color: var(--fg); font-size: 0.82rem; text-decoration-color: var(--line); }
 .terminal { min-width: 0; }
@@ -362,7 +364,7 @@ footer > a:last-child:hover { color: var(--fg); }
   nav a:not(.nav-github) { display: none; }
   .nav-github { position: absolute; right: 1.25rem; top: 50%; border-left: 0; padding-left: 0; transform: translateY(-50%); }
   .hero { gap: 3.5rem; padding-top: 4.5rem; padding-bottom: 4.5rem; }
-  h1 { font-size: clamp(3rem, 14vw, 4.35rem); }
+  h1 { font-size: clamp(2.15rem, 11vw, 3.25rem); }
   .trust { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .runtime-map { width: calc(100% + 0.5rem); margin-left: -0.25rem; padding: 0.75rem; }
   .runtime-map::before, .runtime-map::after { display: none; }
