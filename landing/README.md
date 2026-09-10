@@ -14,21 +14,22 @@ visitors at a machine-local demo.
 Visual: dark `#0c0e12`, bone type, brass CTA — command-board / team roster.
 Formation-dot mark. No lime, grid wallpaper, or Claude-only onboarding.
 
+The dashboard image lives under `landing/assets/` so a deploy that publishes
+only this directory can still load the capture.
+
 ## Open locally
 
-From the repository root, serve the whole checkout so the page can load the
-checked-in dashboard capture:
+From `landing/`:
 
 ```sh
 python3 -m http.server 4173
 ```
 
-Then open `/landing/` on the address printed by Python. This is local preview
-only.
+Then open `/` on the address printed by Python. This is local preview only.
 
 ## Deploy static
 
-Publish the repository root and use `/landing/` as the page path so relative
-links to checked-in evidence remain valid. GitHub Pages is optional.
+Publish the `landing/` directory as the site root. The product capture is
+`assets/t732-dashboard-1440.png` next to `index.html`. GitHub Pages is optional.
 
 **No custom domain is registered.** Do not invent one.

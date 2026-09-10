@@ -10529,7 +10529,7 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .mark{color:var(--fg)}
 .brand .mark{flex:none;width:22px;height:22px}
 .wordmark{font:650 16px/1.2 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:.22em;text-transform:lowercase}
-.brand .board-name{margin:2px 0 0;font-size:11px}
+.brand .board-name{margin:2px 0 0;font:11px/1.3 ui-monospace,Menlo,monospace;letter-spacing:.02em;text-transform:none}
 .sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .portfolio{position:relative}
 .portfolio summary{display:inline-flex;align-items:center;gap:5px;list-style:none;padding:2px 4px;border:0;border-radius:7px;background:transparent;color:var(--mute);font:11px/1.3 ui-monospace,Menlo,monospace;cursor:pointer}
@@ -10760,7 +10760,7 @@ body[data-empty-board][data-tab=board] #onboardBox{display:none}
     <div>
       <span class="wordmark">atman</span>
       <h1 id="title" class="sr-only">Atman</h1>
-      <p class="board-name mute" id="boardName" hidden></p>
+      <p class="board-name mute" id="boardName" hidden data-kind="workspace"></p>
     </div>
   </div>
   <details class="portfolio" id="portfolioSwitch">
@@ -11221,7 +11221,7 @@ async function load(manual){
   if(boardName){
     const proj=String(d.project||'').trim();
     const show=proj&&proj.toLowerCase()!=='atman';
-    boardName.textContent=show?proj:'';
+    boardName.textContent=show?('workspace · '+proj):'';
     boardName.hidden=!show;
   }
   const counts=d.counts||{total:0,done:0};
