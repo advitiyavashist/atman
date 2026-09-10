@@ -17,7 +17,7 @@ Roles are fluid: seats cover lanes; identity is not a permanent persona.
 
 Related: [brand direction v1](../brand/atman-brand-direction-v1.md).
 
-**CEO/PM PRIORITY lock (Advitiya agent chats):** a per-agent chat is a seat-scoped thread on the existing `tickets msg` / inbox surface (`messages.jsonl`). The repo-backed knowledge graph is a separate evidence and skill system, not a second chat store. IA stays Objective · Team · Work · Intervene. No pitch chrome.
+**CEO/PM PRIORITY lock (Advitiya agent chats):** a per-agent chat is a seat-scoped thread on the existing `tickets msg` / inbox surface (`messages.jsonl`). Store and read only the board, docs, and `.tickets/briefs/` (standing context). The repo-backed knowledge graph is a separate evidence and skill system, not a second chat store. Not a shared-memory brain, not a vector DB. IA stays Objective · Team · Work · Intervene. No pitch chrome.
 
 ---
 
