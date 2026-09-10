@@ -1,0 +1,3 @@
+# Runtime install of ticket-board is stdlib-only (see pyproject.toml).
+# This file exists so `pip install --constraint` is the documented
+# reproducible path; add hashed deps here if a runtime dependency is ever added.
