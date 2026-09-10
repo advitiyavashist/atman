@@ -210,9 +210,17 @@ def test_spawn_uses_the_stored_harness_when_tool_is_absent(board, tmp_path):
 
 def test_spawn_tool_flag_still_overrides(board, tmp_path):
     script, _ = stub_harness(tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    codex = bindir / "codex"
+    codex.write_text("#!/bin/sh\n"
+                     "if [ \"$1\" = login ] && [ \"$2\" = status ]; then echo logged in; exit 0; fi\n"
+                     "echo OK; exit 0\n")
+    codex.chmod(0o755)
+    env = dict(PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""))
     assert run(board, "join", "qwen", "--roles", "docs", "--harness",
                "custom:%s {prompt_file}" % script).returncode == 0
-    r = run(board, "spawn", "qwen", "--tool", "codex", "--every", "3600")
+    r = run(board, "spawn", "qwen", "--tool", "codex", "--every", "3600", env=env)
     assert r.returncode == 0, r.stderr + r.stdout
     try:
         assert "codex exec" in r.stdout and str(script) not in r.stdout

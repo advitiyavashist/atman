@@ -534,6 +534,14 @@ def _sanitize_string(text, field=""):
                 continue
             parts.append(piece)
         return " ".join(parts)
+    if field in (
+        "binary", "argv0", "worktree", "repo_root", "hostname", "username",
+        "runner_id", "head", "agent_id", "ticket_agent", "status_cmd", "detail",
+        "identity", "identity_label",
+    ):
+        if _EMBEDDED_TOKEN_RE.search(text):
+            return ""
+        return text
     if _looks_secret_value(text) or _EMBEDDED_TOKEN_RE.search(text):
         return ""
     return text
