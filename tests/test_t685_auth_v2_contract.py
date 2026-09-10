@@ -364,7 +364,18 @@ def test_origin_mismatch_on_record_is_a_contract_error():
     assert any("origin_url" in e for e in errs)
 
 
-def test_secrets_never_survive_redaction_or_board_dump():
+def test_unix_identity_paths_survive_redaction():
+    rec = v2_ready(runner_ctx(
+        binary="/private/var/folders/qr/test-agent-path-longer-than-thirty-two/bin/agent",
+        repo_root="/private/var/folders/qr/test-agent-path-longer-than-thirty-two/repo",
+        worktree="/private/var/folders/qr/test-agent-path-longer-than-thirty-two/repo",
+    ))
+    rec["execution_context"]["worktree"] = rec["execution_context"]["repo_root"]
+    clean = redact_auth_check(rec)
+    ctx = clean["execution_context"]
+    assert ctx["binary"].endswith("/bin/agent")
+    assert ctx["repo_root"].endswith("/repo")
+    assert is_authoritative(clean, ctx)
     dirty = v2_ready()
     dirty["api_key"] = "sk-live-this-must-not-be-stored-anywhere-ok"
     dirty["token"] = "tok_" + ("x" * 40)
@@ -426,10 +437,10 @@ def test_generic_cursor_child_claiming_named_seat_fails_preflight():
         ATMAN, ATMAN, host, host) == []
 
 
-def test_t610_suite_still_imports_without_v2_probe_wiring():
-    """T-685 must not implement T-686 spawn/probe behavior in tickets.py."""
+def test_t686_wires_auth_v2_into_tickets():
+    """T-686 implements probes/spawn/pause using the frozen T-685 contract."""
     text = (ROOT / "tickets.py").read_text()
-    assert "auth_v2_contract" not in text
+    assert "auth_v2_contract" in text
     assert "def harness_auth_probe" in text
 
 

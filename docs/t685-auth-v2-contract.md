@@ -149,7 +149,7 @@ Keep the agent-record key `auth_check`. Additive fields:
 Legacy blobs without context remain readable via `load_auth_check` and are
 non-authoritative. The first valid authoritative probe upgrades them.
 T-610 Cursor-only spawn gate stays until T-686 gates every built-in spawn.
-`tickets.py` is unchanged in T-685.
+`tickets.py` is wired in **T-686** (`docs/t686-auth-v2-probes.md`): probes, spawn gates, pause/resume.
 
 CLI flags for T-686 (specified, not implemented): probe must run on the
 enrolled runner host; a coordinator may only record a **non-authoritative**

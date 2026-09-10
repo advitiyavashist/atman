@@ -5900,6 +5900,10 @@ def _agent_set(board, owner, **fields):
     """Update fields on an agent record without touching the rest of it."""
     if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
         checkin(board, owner)
+    if "auth_check" in fields:
+        from auth_v2_contract import redact_auth_check
+        fields = dict(fields)
+        fields["auth_check"] = redact_auth_check(fields.get("auth_check") or {})
     return _agent_update(board, owner, lambda rec: rec.update(fields))
 
 
@@ -7027,6 +7031,7 @@ def cmd_join(a, board):
     print("Full instructions: tickets connect")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
+    _safe(lambda: _enroll_runner_context(board, owner), None)
 
 
 def _agent_holds_ticket(board, owner):
@@ -9544,6 +9549,17 @@ def cmd_watch(a, board):
                     print("%s dispatch %s (attempts=%s; queued trigger unchanged)" % (
                         now(), retry_state.get("state"), retry_state.get("attempts")))
             elif actionable(p):
+                if _auth_gates_spawn(retry_harness) and not getattr(a, "exec", None):
+                    auth = _refresh_auth_check(board, owner)
+                    if (auth.get("state") != "ready"
+                            and ((auth.get("pause") or {}).get("retry_model") is False)):
+                        log("%s skip model run; auth=%s pause retry_model=%s" % (
+                            now(), auth.get("state"), (auth.get("pause") or {}).get("retry_model")))
+                        print("  auth paused (%s); not starting a model turn" % auth.get("state"))
+                        if a.once:
+                            sys.exit(1)
+                        _time.sleep(every)
+                        continue
                 if not same_failure:
                     failures = 0
                     def _clear_stale_failure(rec):
@@ -9634,19 +9650,23 @@ def cmd_watch(a, board):
                         cleanup()
                     ended = now()
                     run_output = _read_run_slice(log_path, log_before)
-                    if harness == "cursor":
+                    if _auth_gates_spawn(retry_harness) or retry_harness == "cursor":
                         run_auth_state = _classify_auth_output(rc, run_output)
-                        if run_auth_state in ("login_required", "quota") or rc == 0:
+                        if run_auth_state in ("login_required", "expired", "quota", "network") or rc == 0:
                             previous_auth = (_agent_rec(board, owner) or {}).get("auth_check") or {}
+                            spec = _harness_auth_spec(board, owner, retry_harness)
+                            status_cmd, login_cmd = spec if spec else (["status"], [""])
                             run_auth = {
                                 "state": "ready" if rc == 0 else run_auth_state,
-                                "harness": "cursor", "at": now(), "exit": rc,
+                                "harness": retry_harness or "cursor", "at": now(), "exit": rc,
                                 "detail": ("headless run succeeded" if rc == 0 else
                                            ((run_output or "run failed").strip().splitlines()[-1][:240])),
                                 "identity": previous_auth.get("identity", "") if rc == 0 else "",
-                                "status_cmd": "agent status", "login_cmd": "agent login",
+                                "identity_label": previous_auth.get("identity_label", "") if rc == 0 else "",
+                                "status_cmd": " ".join(status_cmd),
+                                "login_cmd": " ".join(login_cmd) if login_cmd else previous_auth.get("login_cmd", ""),
                             }
-                            _safe(lambda ra=run_auth: _agent_set(board, owner, auth_check=ra), None)
+                            _safe(lambda ra=run_auth: _store_auth_check(board, owner, ra), None)
                     # Tokens/cost for THIS run: the harness's own stdout when
                     # it was asked for a JSON format, else its session store.
                     # usage_error records "reported something unreadable",
@@ -10194,15 +10214,26 @@ def cmd_spawn(a, board):
                 ", ".join(str(p) for p in busy), owner))
         post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
         return
-    # Prove the headless Cursor credential before creating a watcher. This is
-    # a local status call, not a model turn. Keep it before cmd_join so a failed
-    # relaunch cannot alter the seat's roles, harness, or worktree record.
+    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
+    git_root, origin_err = _spawn_git_root(board, owner, wt)
+    if origin_err:
+        sys.exit(origin_err)
     requested_harness = getattr(a, "harness", "") or a.tool
     resolved_harness, _ = harness_of(board, owner, requested_harness,
                                      getattr(a, "cmd_template", ""))
-    if resolved_harness == "cursor" and not a.exec:
-        auth = harness_auth_probe(board, owner, requested_harness)
-        _safe(lambda: _agent_set(board, owner, auth_check=auth), None)
+    sa = _session_adapters()
+    if sa.has_live_native_session(board, owner):
+        ep, _ = sa.live_endpoint(board, owner)
+        print("skip: %s has a live native session (provider=%s, pid=%s) -- "
+              "spawn would double up on the interactive seat"
+              % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
+        return
+    # Zero-model preflight. Merge uses the enrolled runner (join-time host), so
+    # a sandboxed coordinator cannot clobber it. Built-in Claude/Codex/Cursor
+    # must be ready before a watcher starts. Keep this before cmd_join so a
+    # failed relaunch cannot alter roles/harness/worktree. --exec skips it.
+    if _auth_gates_spawn(resolved_harness) and not a.exec:
+        auth = _refresh_auth_check(board, owner, requested_harness)
         if auth.get("state") != "ready":
             _print_auth_result(owner, auth)
             sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
@@ -10221,13 +10252,13 @@ def cmd_spawn(a, board):
         sys.exit("remote adapter is offline; no local executable was selected. "
                  "Run `tickets hooks remote --agent %s`, connect its long-poll/callback bridge, "
                  "or pass --cmd for a local adapter. Pending wakes remain queued." % owner)
-    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
     if not os.path.isdir(wt):
         base = a.base or _trunk()
-        r = subprocess.run(["git", "-C", root, "worktree", "add", "-q", wt, "-b", owner, base],
+        r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            r = subprocess.run(["git", "-C", root, "worktree", "add", "-q", wt, owner], capture_output=True, text=True)
+            r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, owner],
+                               capture_output=True, text=True)
         if r.returncode != 0:
             sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
         print("worktree %s (branch %s)" % (wt, owner))
@@ -10312,19 +10343,343 @@ HARNESS_CHECK_TIMEOUT = 60
 
 HARNESS_AUTH_COMMANDS = {
     "cursor": (["agent", "status"], ["agent", "login"]),
+    "cursor+claude": (["agent", "status"], ["agent", "login"]),
     "claude": (["claude", "auth", "status"], ["claude", "auth", "login"]),
     "codex": (["codex", "login", "status"], ["codex", "login"]),
 }
 
+_AUTH_ENV_NAMES = (
+    "HOME", "USER", "LOGNAME", "USERNAME",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+)
+_AUTH_ENV_PREFIXES = (
+    "ANTHROPIC", "CLAUDE", "CODEX", "CURSOR", "OPENAI", "OPENROUTER", "XAI",
+)
+_AUTH_EXPIRED_STRINGS = (
+    "token expired", "session expired", "credential expired",
+    "token has been revoked", "refresh token",
+)
+_AUTH_NETWORK_STRINGS = (
+    "connection refused", "network is unreachable", "network unreachable",
+    "temporary failure in name resolution", "could not resolve",
+    "nodename nor servname", "connection reset", "connection timed out",
+    "tls handshake", "ssl:", "name or service not known",
+)
+_DEFAULT_PROFILE_KIND = {
+    "cursor": "browser",
+    "cursor+claude": "browser",
+    "claude": "subscription",
+    "codex": "chatgpt",
+    "remote": "adapter",
+    "custom": "adapter",
+}
+
+
+def _auth_probe_env():
+    """Keep the caller's PATH first so a host probe sees the same CLIs as the runner."""
+    env = dict(os.environ)
+    extra = os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin"
+    env["PATH"] = (os.environ.get("PATH") or "") + ":" + extra
+    return env
+
+
+def _auth_gates_spawn(harness):
+    return (harness or "") in ("claude", "codex", "cursor", "cursor+claude")
+
+
+def _detect_runner_kind():
+    kind = (os.environ.get("ATMAN_RUNNER_KIND") or "").strip()
+    if kind in ("host", "sandbox", "container"):
+        return kind
+    if os.path.exists("/.dockerenv") or os.environ.get("container"):
+        return "container"
+    if os.environ.get("CURSOR_SANDBOX") or os.environ.get("ATMAN_SANDBOX"):
+        return "sandbox"
+    return "host"
+
+
+def _env_fingerprint(env=None):
+    env = env if env is not None else os.environ
+    names = set(_AUTH_ENV_NAMES)
+    for key in env:
+        up = key.upper()
+        if any(up == p or up.startswith(p + "_") for p in _AUTH_ENV_PREFIXES):
+            names.add(key)
+    present = sorted(n for n in names if n in env)
+    return hashlib.sha256("|".join(present).encode()).hexdigest()[:16]
+
+
+def _git_remote_origin(cwd):
+    import subprocess
+    if not cwd or not os.path.isdir(cwd):
+        return ""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        r = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=5, env=env)
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _git_head_sha(cwd):
+    import subprocess
+    if not cwd or not os.path.isdir(cwd):
+        return ""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        r = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=5, env=env)
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _which_binary(argv0):
+    import shutil
+    if not argv0:
+        return argv0 or ""
+    if os.path.isabs(argv0) and os.path.isfile(argv0):
+        return argv0
+    found = shutil.which(argv0)
+    return os.path.realpath(found) if found else argv0
+
+
+def _expected_origin_for(board, owner, worktree=""):
+    from auth_v2_contract import normalize_git_origin
+    wf = (load_workforce(board).get(owner, {}) or {})
+    pinned = (wf.get("expected_origin") or os.environ.get("ATMAN_EXPECTED_ORIGIN") or "").strip()
+    if pinned:
+        return normalize_git_origin(pinned) or pinned
+    rec = _agent_rec(board, owner) or {}
+    for path in (worktree, rec.get("worktree"), rec.get("cwd")):
+        origin = _git_remote_origin(path)
+        if origin:
+            return normalize_git_origin(origin) or origin
+    return ""
+
+
+def _auth_execution_context(board, owner, status_cmd=None, worktree=""):
+    import getpass
+    rec = _agent_rec(board, owner) or {}
+    wt = worktree or rec.get("worktree") or rec.get("cwd") or os.path.dirname(board)
+    repo_root = _init_cwd_worktree_root(wt) or wt
+    origin = _git_remote_origin(wt) or _git_remote_origin(repo_root)
+    expected = _expected_origin_for(board, owner, wt) or origin
+    if not origin:
+        origin = "local/" + hashlib.sha1(
+            os.path.realpath(repo_root or wt or board).encode()).hexdigest()[:12]
+        if not expected:
+            expected = origin
+    argv0 = (status_cmd or ["tickets"])[0]
+    binary = _which_binary(argv0)
+    host = os.uname().nodename if hasattr(os, "uname") else ""
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "operator"
+    life = lifecycle_of(board, owner)
+    runner_id = "rnr_%s" % hashlib.sha1(
+        ("%s|%s|%s|%s" % (host, user, binary, owner)).encode()).hexdigest()[:12]
+    return {
+        "runner_id": runner_id,
+        "runner_kind": _detect_runner_kind(),
+        "hostname": host,
+        "username": user,
+        "binary": binary,
+        "argv0": argv0,
+        "env_fingerprint": _env_fingerprint(),
+        "worktree": os.path.abspath(wt) if wt else "",
+        "repo_root": repo_root,
+        "origin_url": origin,
+        "expected_origin": expected or origin,
+        "head": _git_head_sha(wt or repo_root),
+        "agent_id": owner,
+        "ticket_agent": owner,
+        "lifecycle": life,
+    }
+
+
+def _enroll_runner_context(board, owner):
+    from auth_v2_contract import context_is_complete
+    rec = _agent_rec(board, owner) or {}
+    stored = rec.get("runner_context")
+    if context_is_complete(stored):
+        return stored
+    ctx = _auth_execution_context(board, owner)
+    if context_is_complete(ctx):
+        _agent_set(board, owner, runner_context=ctx)
+        return ctx
+    return stored or ctx
+
+
+def _enrolled_runner_ctx(board, owner):
+    from auth_v2_contract import context_is_complete
+    rec = _agent_rec(board, owner) or {}
+    stored = rec.get("runner_context")
+    if context_is_complete(stored):
+        return stored
+    return _enroll_runner_context(board, owner)
+
+
+def _harness_auth_spec(board, owner, harness=""):
+    resolved, _ = harness_of(board, owner, harness, "")
+    spec = HARNESS_AUTH_COMMANDS.get(resolved)
+    if spec:
+        return spec
+    entry = load_workforce(board).get(owner, {}) or {}
+    status = (entry.get("auth_status_cmd") or "").strip()
+    if not status:
+        return None
+    login = (entry.get("auth_login_cmd") or "").strip()
+    return (shlex.split(status), shlex.split(login) if login else [])
+
+
+def _profile_kind_for(harness):
+    return _DEFAULT_PROFILE_KIND.get(harness or "", "adapter")
+
+
+def _persist_auth_profile(board, owner, harness, identity_label, kind):
+    from auth_v2_contract import PROFILE_DIR_MODE, PROFILE_STORE_MODE, profile_store_path
+    digest = hashlib.sha1(("%s:%s:%s" % (os.path.realpath(board), owner, harness)).encode()).hexdigest()[:12]
+    ref = "prf_%s" % digest
+    cache = os.environ.get("TICKETS_CACHE_DIR") or os.path.expanduser("~/.cache/atman")
+    board_hash = hashlib.sha1(os.path.realpath(board).encode()).hexdigest()[:16]
+    path = profile_store_path(cache, board_hash, ref)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    try:
+        os.chmod(os.path.dirname(path), PROFILE_DIR_MODE)
+    except OSError:
+        pass
+    payload = {
+        "provider": harness,
+        "profile_kind": kind,
+        "identity_label": identity_label or "",
+        "agent": owner,
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, sort_keys=True)
+    os.replace(tmp, path)
+    os.chmod(path, PROFILE_STORE_MODE)
+    return ref
+
+
+def _store_auth_check(board, owner, incoming, runner_ctx=None):
+    from auth_v2_contract import merge_auth_check, redact_auth_check
+    if not _agent_rec(board, owner):
+        checkin(board, owner)
+    incoming = dict(incoming or {})
+    if not incoming.get("execution_context"):
+        incoming["execution_context"] = _auth_execution_context(
+            board, owner, shlex.split(incoming.get("status_cmd") or "tickets"))
+    probe_ctx = incoming.get("execution_context") or {}
+    enrolled = _enrolled_runner_ctx(board, owner)
+    previous = ((_agent_rec(board, owner) or {}).get("auth_check") or {})
+    prev_ctx = (previous or {}).get("execution_context") or {}
+    from auth_v2_contract import context_is_complete
+    if (previous or {}).get("authoritative") and context_is_complete(prev_ctx):
+        ctx = runner_ctx or prev_ctx
+    elif (enrolled.get("runner_kind") == probe_ctx.get("runner_kind")
+          and enrolled.get("hostname") == probe_ctx.get("hostname")
+          and enrolled.get("username") == probe_ctx.get("username")
+          and enrolled.get("agent_id") == probe_ctx.get("agent_id")):
+        ctx = probe_ctx
+    else:
+        ctx = runner_ctx or enrolled
+    harness = incoming.get("harness") or ""
+    if incoming.get("state") == "ready" and not incoming.get("credential_profile_ref"):
+        label = incoming.get("identity_label") or incoming.get("identity") or ""
+        incoming["profile_kind"] = incoming.get("profile_kind") or _profile_kind_for(harness)
+        try:
+            incoming["credential_profile_ref"] = _persist_auth_profile(
+                board, owner, harness, label, incoming["profile_kind"])
+        except (OSError, ValueError):
+            pass
+    merged = merge_auth_check(previous, incoming, ctx)
+    _agent_set(board, owner, auth_check=redact_auth_check(merged))
+    _maybe_resume_auth_wake(board, owner, previous, merged)
+    return (_agent_rec(board, owner) or {}).get("auth_check") or merged
+
+
+def _maybe_resume_auth_wake(board, owner, previous, merged):
+    from auth_v2_contract import NO_SPEND_STATES
+    prev_state = (previous or {}).get("state")
+    if prev_state not in NO_SPEND_STATES:
+        return
+    if (merged or {}).get("state") != "ready":
+        return
+    if lifecycle_of(board, owner) != "persistent":
+        return
+    rec = _agent_rec(board, owner) or {}
+    if rec.get("auth_resume_at"):
+        return
+    harness, _ = harness_of(board, owner)
+    try:
+        from session_adapters import wake_seat
+        wake_seat(board, owner, "auth resume", harness=harness, message_id="auth-resume")
+    except Exception:
+        pass
+    _agent_set(board, owner, auth_resume_at=now())
+
+
+def _refresh_auth_check(board, owner, harness=""):
+    incoming = harness_auth_probe(board, owner, harness)
+    return _store_auth_check(board, owner, incoming)
+
+
+def _auth_blocks_model(auth):
+    from auth_v2_contract import NO_SPEND_STATES
+    rec = auth or {}
+    pause = rec.get("pause") or {}
+    if rec.get("state") in NO_SPEND_STATES and pause.get("retry_model") is False:
+        if pause.get("paused") or rec.get("state") in NO_SPEND_STATES:
+            return True
+    return False
+
+
+def _spawn_git_root(board, owner, worktree):
+    """Git object database for `worktree add`. Origin, not dirname(board)."""
+    from auth_v2_contract import repo_identity_matches, spawn_repo_identity_ok
+    board_root = os.path.dirname(board)
+    expected = _expected_origin_for(board, owner, worktree)
+    exists = os.path.isdir(worktree)
+    wt_origin = _git_remote_origin(worktree) if exists else ""
+    if expected:
+        candidates = []
+        for path in (worktree if exists else "", board_root, os.getcwd()):
+            root = _init_cwd_worktree_root(path) if path else ""
+            if root and root not in candidates:
+                candidates.append(root)
+        git_root = ""
+        for root in candidates:
+            if repo_identity_matches(expected, _git_remote_origin(root)):
+                git_root = root
+                break
+        if not git_root:
+            return board_root, (
+                "repo_mismatch: spawn git root origin must be %s (dirname(board) is not identity)"
+                % expected)
+        spawn_origin = _git_remote_origin(git_root)
+        if not spawn_repo_identity_ok(expected, wt_origin or spawn_origin, spawn_origin,
+                                     worktree_exists=exists):
+            return git_root, "repo_mismatch: worktree origin does not match %s" % expected
+        return git_root, ""
+    return board_root, ""
+
 
 def _classify_auth_output(rc, output):
-    """Keep credentials, quota, and host failures as separate operator states."""
+    """Keep credentials, quota, expiry, network, and host failures separate."""
     text = (output or "").strip()
     low = text.lower()
-    if _looks_auth(text) or "authentication required" in low or "login required" in low:
-        return "login_required"
     if _looks_limited(text):
         return "quota"
+    if any(s in low for s in _AUTH_EXPIRED_STRINGS):
+        return "expired"
+    if _looks_auth(text) or "authentication required" in low or "login required" in low:
+        return "login_required"
+    if any(s in low for s in _AUTH_NETWORK_STRINGS):
+        return "network"
     if rc == 0:
         return "ready"
     return "unavailable"
@@ -10335,13 +10690,16 @@ def harness_auth_probe(board, owner, harness="", timeout=15):
     import subprocess
 
     resolved, _ = harness_of(board, owner, harness, "")
-    spec = HARNESS_AUTH_COMMANDS.get(resolved)
+    spec = _harness_auth_spec(board, owner, resolved)
+    ctx = _auth_execution_context(board, owner, (spec or (["tickets"], []))[0])
     if not spec:
-        return {"state": "unsupported", "harness": resolved, "at": now(),
-                "detail": "auth preflight is not defined for this harness", "login_cmd": ""}
+        rec = {"state": "unsupported", "harness": resolved, "at": now(),
+               "detail": "auth preflight is not defined for this harness", "login_cmd": "",
+               "execution_context": ctx, "profile_kind": _profile_kind_for(resolved)}
+        return rec
     status_cmd, login_cmd = spec
-    env = dict(os.environ,
-               PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+    ctx = _auth_execution_context(board, owner, status_cmd)
+    env = _auth_probe_env()
     try:
         r = subprocess.run(status_cmd, capture_output=True, text=True, timeout=timeout,
                            stdin=subprocess.DEVNULL, env=env)
@@ -10351,25 +10709,49 @@ def harness_auth_probe(board, owner, harness="", timeout=15):
     except FileNotFoundError:
         state, rc, output = "unavailable", 127, "%s is not installed" % status_cmd[0]
     except subprocess.TimeoutExpired:
-        state, rc, output = "unavailable", 124, "authentication status timed out"
-    return {"state": state, "harness": resolved, "at": now(), "exit": rc,
-            "detail": (output.splitlines()[0][:240] if output else "status returned no identity"),
-            "identity": (output.splitlines()[0][:240] if state == "ready" and output else ""),
-            "status_cmd": " ".join(status_cmd), "login_cmd": " ".join(login_cmd)}
+        output = "authentication status timed out"
+        state, rc = ("network" if any(s in output.lower() for s in _AUTH_NETWORK_STRINGS)
+                    else "unavailable"), 124
+    line = (output.splitlines()[0][:240] if output else "status returned no identity")
+    identity = line if state == "ready" and output else ""
+    return {
+        "state": state, "harness": resolved, "at": now(), "exit": rc,
+        "detail": line, "identity": identity, "identity_label": identity,
+        "status_cmd": " ".join(status_cmd), "login_cmd": " ".join(login_cmd),
+        "execution_context": ctx, "profile_kind": _profile_kind_for(resolved),
+    }
 
 
 def _print_auth_result(owner, result):
-    labels = {"ready": "Ready", "login_required": "Login required",
-              "quota": "Usage quota reached", "unavailable": "Harness unavailable",
-              "unsupported": "Auth check unsupported"}
+    labels = {
+        "ready": "Ready",
+        "login_required": "Login required",
+        "expired": "Credential expired",
+        "quota": "Usage quota reached",
+        "network": "Network error",
+        "unavailable": "Harness unavailable",
+        "unsupported": "Auth check unsupported",
+    }
     print("%s: %s" % (owner, labels.get(result.get("state"), result.get("state", "unknown"))))
-    if result.get("identity"):
-        print("  identity: %s" % result["identity"])
+    if result.get("identity_label") or result.get("identity"):
+        print("  identity: %s" % (result.get("identity_label") or result.get("identity")))
     elif result.get("detail"):
         print("  detail:   %s" % result["detail"])
-    if result.get("state") == "login_required":
+    if result.get("authoritative") is False:
+        print("  context:  non-authoritative observation (enrolled runner unchanged)")
+    ctx = result.get("execution_context") or {}
+    if ctx.get("hostname"):
+        print("  context:  %s@%s %s %s" % (
+            ctx.get("username") or "?", ctx.get("hostname"),
+            ctx.get("runner_kind") or "?", ctx.get("origin_url") or ""))
+    if result.get("credential_profile_ref"):
+        print("  profile:  %s" % result["credential_profile_ref"])
+    path = (result.get("pause") or {}).get("operator_path")
+    if result.get("state") in ("login_required", "expired") and result.get("login_cmd"):
         print("  recover:  %s" % result["login_cmd"])
         print("  verify:   tickets harness auth %s" % owner)
+    elif path and path != "ready":
+        print("  recover:  %s" % (result.get("login_cmd") or path))
 
 
 def cmd_harness_auth(a, board):
@@ -10384,20 +10766,21 @@ def cmd_harness_auth(a, board):
         print("watcher: %s" % recovered["detail"])
         if recovered["state"] == "live":
             sys.exit(2)
-    result = harness_auth_probe(board, owner, a.harness, a.timeout)
-    _safe(lambda: _agent_set(board, owner, auth_check=result), None)
+    result = _refresh_auth_check(board, owner, a.harness)
     _print_auth_result(owner, result)
     if a.login:
         if result.get("state") == "unsupported":
             sys.exit("interactive login is not supported for %s" % result.get("harness"))
-        login_cmd = HARNESS_AUTH_COMMANDS[result["harness"]][1]
-        env = dict(os.environ,
-                   PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
+        login_line = result.get("login_cmd") or ""
+        spec = _harness_auth_spec(board, owner, result.get("harness") or a.harness)
+        login_cmd = shlex.split(login_line) if login_line else (spec[1] if spec else [])
+        if not login_cmd:
+            sys.exit("no safe recovery command for %s" % owner)
+        env = _auth_probe_env()
         rc = subprocess.call(login_cmd, env=env)
         if rc:
             sys.exit(rc)
-        result = harness_auth_probe(board, owner, a.harness, a.timeout)
-        _safe(lambda: _agent_set(board, owner, auth_check=result), None)
+        result = _refresh_auth_check(board, owner, a.harness)
         print("verification:")
         _print_auth_result(owner, result)
     if result.get("state") != "ready":
@@ -11266,13 +11649,18 @@ async function load(manual){
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
     const auth=a.auth==='login_required'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Login required · '+esc(a.auth_login_cmd||'agent login')+'</span>':'';
+    const expired=a.auth==='expired'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Expired</span>':'';
+    const network=a.auth==='network'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Network</span>':'';
+    const unavail=a.auth==='unavailable'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Unavailable</span>':'';
+    const unsup=a.auth==='unsupported'?'<span class="tag mute" title="'+esc(a.auth_detail||'')+'">Unsupported</span>':'';
+    const pausedAuth=a.auth_paused?'<span class="tag pending" title="paused-auth">paused-auth</span>':'';
     const quota=a.auth==='quota'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Usage quota</span>':'';
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
     const onlineDot=(a.reachable!==false && a.adapter_online)?' ●':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+auth+quota+lim+wake+'</div>'+
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+auth+expired+network+unavail+unsup+pausedAuth+quota+lim+wake+'</div>'+
       '<div class="mute mono">'+esc(a.agent_id||a.name)+' · '+esc(a.adapter_provider||a.harness||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.adapter_delivery||'offline')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
@@ -11855,6 +12243,10 @@ def _board_snapshot_body(board, messages=40):
                            "auth": (rec.get("auth_check") or {}).get("state", ""),
                            "auth_detail": (rec.get("auth_check") or {}).get("detail", ""),
                            "auth_login_cmd": (rec.get("auth_check") or {}).get("login_cmd", ""),
+                           "auth_profile_ref": (rec.get("auth_check") or {}).get("credential_profile_ref", ""),
+                           "auth_profile_kind": (rec.get("auth_check") or {}).get("profile_kind", ""),
+                           "auth_authoritative": (rec.get("auth_check") or {}).get("authoritative"),
+                           "auth_paused": ((rec.get("auth_check") or {}).get("pause") or {}).get("paused"),
                            "limit": lim,
                            "limit_until": (lim or {}).get("until", "") if lim else ""})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))

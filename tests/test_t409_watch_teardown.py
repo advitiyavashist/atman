@@ -47,11 +47,13 @@ def board(tmp_path):
     return b
 
 
-def _spawn_qwen_watch(board, tmp_path, *spawn_args):
+def _spawn_qwen_watch(board, tmp_path, *spawn_args, env=None):
     """Start a detached spawn without registering pids (simulates interrupt)."""
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    if env:
+        e.update(env)
     r = subprocess.run(
         [sys.executable, str(TOOL), "spawn", "qwen", *spawn_args],
         capture_output=True, text=True, env=e, cwd=str(board.parent),
@@ -105,9 +107,21 @@ def test_byoa_spawn_stored_harness_reaped_without_pid_file(board, tmp_path):
 
 def test_byoa_spawn_tool_flag_reaped_without_pid_file(board, tmp_path):
     script = _stub(tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    codex = bindir / "codex"
+    # T-686 gates built-in spawn on a zero-model auth probe. Put a stub
+    # Codex on PATH the same way test_byoa.test_spawn_tool_flag_still_overrides
+    # does so this reaper fixture is not a live login check.
+    codex.write_text("#!/bin/sh\n"
+                     "if [ \"$1\" = login ] && [ \"$2\" = status ]; then echo logged in; exit 0; fi\n"
+                     "echo OK; exit 0\n")
+    codex.chmod(0o755)
+    env = dict(PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""))
     run(board, "join", "qwen", "--roles", "docs", "--harness",
-        "custom:%s {prompt_file}" % script)
-    pid = _spawn_qwen_watch(board, tmp_path, "--tool", "codex", "--every", "3600", "--persist")
+        "custom:%s {prompt_file}" % script, env=env)
+    pid = _spawn_qwen_watch(board, tmp_path, "--tool", "codex", "--every", "3600",
+                            "--persist", env=env)
     _assert_reaper_clears_qwen(board, tmp_path, pid)
 
 
