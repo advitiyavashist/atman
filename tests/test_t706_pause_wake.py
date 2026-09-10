@@ -1,7 +1,10 @@
 """T-706: pause→wake poke parity. Claude socket is gold; queue/poll is not a PASS."""
 
+import json
 import os
+import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 from unittest import mock
@@ -9,6 +12,63 @@ from unittest import mock
 from test_t683_session_adapters import (  # noqa: F401
     FakeInbox, _adapters, _run, board, cache_dir, sock_dir,
 )
+
+
+class FakeAcp:
+    """Newline JSON-RPC ACP control sock. Accepts many short connections."""
+
+    def __init__(self, path):
+        self.path = str(path)
+        self.requests = []
+        self._stop = threading.Event()
+        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._srv.bind(self.path)
+        self._srv.listen(8)
+        self._srv.settimeout(0.2)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+
+    def _accept_loop(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(2)
+                buf = b""
+                try:
+                    while b"\n" not in buf:
+                        data = conn.recv(4096)
+                        if not data:
+                            break
+                        buf += data
+                except OSError:
+                    continue
+                line = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    req = json.loads(line)
+                except ValueError:
+                    continue
+                self.requests.append(req)
+                rid = req.get("id", 1)
+                result = {"sessionId": (req.get("params") or {}).get("sessionId")}
+                if req.get("method") == "session/prompt":
+                    result = {"stopReason": "end_turn"}
+                conn.sendall((json.dumps({"jsonrpc": "2.0", "id": rid,
+                                          "result": result}) + "\n").encode("utf-8"))
+
+    def close(self):
+        self._stop.set()
+        try:
+            self._srv.close()
+        except OSError:
+            pass
+
 
 
 def test_codex_app_server_turn_start_is_woken(board, cache_dir, monkeypatch):
@@ -68,6 +128,7 @@ def test_cursor_tmux_persist_is_woken(board, cache_dir, monkeypatch):
 
 def test_cursor_without_persist_is_not_native_pass(board, cache_dir, monkeypatch):
     monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    monkeypatch.delenv("CURSOR_ACP_CONTROL_SOCK", raising=False)
     sa = _adapters()
     sa.write_endpoint(str(board), "cursor-seat", {
         "seat": "cursor-seat", "provider": "cursor", "mode": "supervised",
@@ -77,6 +138,48 @@ def test_cursor_without_persist_is_not_native_pass(board, cache_dir, monkeypatch
         label = sa.wake_seat(str(board), "cursor-seat", "hello", harness="cursor")
     assert label.startswith("supervised"), label
     run_mock.assert_not_called()
+
+
+def test_cursor_acp_session_prompt_is_woken(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "cursor-acp.sock")
+    monkeypatch.setenv("CURSOR_ACP_CONTROL_SOCK", sock_path)
+    inbox = FakeAcp(sock_path)
+    sa = _adapters()
+    sa.write_endpoint(str(board), "cursor-native-wake", {
+        "seat": "cursor-native-wake", "provider": "cursor", "mode": "native",
+        "session_id": "6312ec1d-e48d-4649-9712-1314accc0d21",
+        "socket": sock_path, "pid": os.getpid(), "at": "now",
+        "heartbeat_epoch": time.time(), "lease_id": "lease-c", "fence": 1})
+    label = sa.wake_seat(str(board), "cursor-native-wake", "pause resume now",
+                          harness="cursor")
+    assert label == "woken", label
+    methods = [m.get("method") for m in inbox.requests]
+    assert "session/load" in methods
+    assert "session/prompt" in methods
+    prompt = next(m for m in inbox.requests if m.get("method") == "session/prompt")
+    assert prompt["params"]["sessionId"] == "6312ec1d-e48d-4649-9712-1314accc0d21"
+    inbox.close()
+
+
+def test_cursor_conversation_id_join_without_transport_is_supervised(
+        board, cache_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    monkeypatch.setenv("CURSOR_CONVERSATION_ID", "chat-interactive")
+    monkeypatch.delenv("CURSOR_PERSIST_SESSION", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("CURSOR_ACP_CONTROL_SOCK", str(Path(cache_dir) / "missing.sock"))
+    sa = _adapters()
+    def fake_which(cmd):
+        return "/bin/agent" if cmd == "agent" else None
+
+    with mock.patch.object(sa, "_which", side_effect=fake_which):
+        with mock.patch("subprocess.run") as help_mock:
+            help_mock.return_value = subprocess.CompletedProcess([], 0, "--resume", "")
+            reg = sa.register_persistent(str(board), "cursor-native-wake", "cursor", "now")
+    assert reg.get("ok"), reg
+    assert reg.get("mode") == "supervised"
+    assert reg["record"]["capabilities"]["native_inject"] is False
 
 
 def test_remote_grok_still_fail_closed(board, cache_dir):

@@ -365,8 +365,12 @@ def live_endpoint(board, seat):
             return _drop_observed()
         if pid_ok is None and not _heartbeat_fresh(ep):
             return None, True
-        # Persist+tmux is native inject. Identity-only session ids stay supervised.
-        if ep.get("mode") == "native" and not (ep.get("persist_session") or "").strip():
+        # Native inject needs persist+tmux or a live ACP control sock.
+        # Identity-only CURSOR_CONVERSATION_ID stays supervised.
+        persist = (ep.get("persist_session") or "").strip()
+        acp = (ep.get("socket") or "").strip()
+        acp_live = bool(acp and os.path.exists(acp))
+        if ep.get("mode") == "native" and not persist and not acp_live:
             ep = dict(ep)
             ep["mode"] = "supervised"
     else:
@@ -392,6 +396,19 @@ def _codex_control_sock():
     home = (os.environ.get("CODEX_HOME") or "").strip() or os.path.join(
         os.path.expanduser("~"), ".codex")
     return os.path.join(home, "app-server-control", "app-server-control.sock")
+
+
+def default_cursor_acp_socket():
+    return _cursor_acp_sock()
+
+
+def _cursor_acp_sock():
+    """Managed ACP control socket (not `agent -p --resume`, not worker.sock)."""
+    override = (os.environ.get("CURSOR_ACP_CONTROL_SOCK") or "").strip()
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".cursor", "acp-control",
+                        "acp-control.sock")
 
 
 def _cursor_persist_target():
@@ -444,9 +461,18 @@ def _probe_cursor():
             "transport": "tmux send-keys into agent persist session",
             "persist_session": persist,
         }}
+    sock = _cursor_acp_sock()
+    if sock and os.path.exists(sock):
+        return {"ok": True, "capabilities": {
+            "native_inject": True,
+            "transport": "ACP session/load + session/prompt on live control sock",
+            "control_socket": sock,
+            "control_socket_live": True,
+        }}
     return {"ok": True, "capabilities": {
         "native_inject": False,
-        "transport": "supervised (need agent persist + tmux; agent -p --resume is a new paid run)",
+        "transport": ("supervised (need agent persist + tmux, or a live ACP "
+                      "control sock; agent -p --resume is a new paid run)"),
     }}
 
 
@@ -536,17 +562,26 @@ def register_persistent(board, seat, harness, at_iso):
         persist = _cursor_persist_target()
         if persist:
             record["persist_session"] = persist
+        sock = _cursor_acp_sock()
         if persist and _which("tmux"):
             record["mode"] = "native"
             record["capabilities"] = {
                 "native_inject": True,
                 "transport": "tmux send-keys into agent persist session",
             }
+        elif sock and os.path.exists(sock):
+            record["socket"] = sock
+            record["mode"] = "native"
+            record["capabilities"] = {
+                "native_inject": True,
+                "transport": "ACP session/load + session/prompt on live control sock",
+            }
         else:
             record["mode"] = "supervised"
             record["capabilities"] = {
                 "native_inject": False,
-                "transport": "supervised (need agent persist + tmux; agent -p --resume is a new paid run)",
+                "transport": ("supervised (need agent persist + tmux, or a live ACP "
+                              "control sock; agent -p --resume is a new paid run)"),
             }
     committed = commit_endpoint(board, seat, record)
     if not committed.get("ok"):
@@ -681,11 +716,62 @@ def _poke_cursor(ep, text):
         return False
 
 
+def _cursor_acp_rpc(method, params, sock=None, timeout=5):
+    """JSON-RPC one-shot to a live ACP control sock. None if unavailable."""
+    sock = (sock or _cursor_acp_sock() or "").strip()
+    if not sock or not os.path.exists(sock):
+        return None
+    req = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(sock)
+        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        buf = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            if b"\n" in buf:
+                break
+        line = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+        if not line:
+            return None
+        return json.loads(line)
+    except (OSError, ValueError):
+        return None
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _poke_cursor_acp(ep, text):
+    """Inject via ACP session/load + session/prompt. Never spawn agent acp or -p."""
+    session_id = (ep.get("session_id") or "").strip()
+    sock = (ep.get("socket") or "").strip() or _cursor_acp_sock()
+    if not session_id or not sock or not os.path.exists(sock):
+        return False
+    # Load may error if the conversation is already the active ACP session.
+    _cursor_acp_rpc("session/load", {"sessionId": session_id}, sock=sock)
+    prompt = _cursor_acp_rpc(
+        "session/prompt",
+        {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]},
+        sock=sock)
+    if not prompt or prompt.get("error"):
+        return False
+    return True
+
+
 def _cursor_pause_resume(ep, text):
     if _poke_until(_poke_cursor, ep, text):
         return "woken"
-    return ("supervised (no persist/tmux inject; agent -p --resume is a new paid run, "
-            "not pause-resume)")
+    if _poke_until(_poke_cursor_acp, ep, text):
+        return "woken"
+    return ("supervised (no persist/tmux or ACP control sock; agent -p --resume "
+            "is a new paid run, not pause-resume)")
 
 
 def is_reachable(native_online=False, watcher_online=False, remote_online=False):
@@ -892,6 +978,10 @@ def has_live_native_session(board, seat):
         if os.path.exists(_codex_control_sock()):
             return True
         return _endpoint_pid_ok(ep.get("pid")) is True
+    if provider == "cursor":
+        persist = (ep.get("persist_session") or "").strip()
+        acp = (ep.get("socket") or "").strip()
+        return bool(persist) or bool(acp and os.path.exists(acp))
     return True
 
 

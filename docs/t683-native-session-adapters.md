@@ -10,7 +10,7 @@ importing their unsafe identity overlap.
 |---|---|---|---|
 | Claude | native | AF_UNIX inbox socket (`CLAUDE_CODE_MESSAGING_SOCKET`) | `test_claude_register_and_wake`, fake socket server |
 | Codex | native | live app-server `turn/start` (queue CLI is mailbox / poll-only) | T-706 `test_codex_app_server_turn_start_is_woken` |
-| Cursor | native or supervised | `tmux send-keys` into `agent persist`; `-p --resume` is a new paid run | T-706 persist test; T-683 supervised fallback |
+| Cursor | native or supervised | `tmux send-keys` into `agent persist`, or ACP `session/prompt` on a live control sock; `-p --resume` is a new paid run | T-706 persist + ACP tests; T-683 supervised fallback |
 | Remote/Grok | remote | T-640 schema-2 bridge only | `test_remote_adapter_fails_closed_on_native_wake` |
 | Custom/other | supervised | `tickets watch` headless subprocess | existing T-640 path |
 
@@ -18,8 +18,9 @@ importing their unsafe identity overlap.
 
 - End-to-end proof that a real idle Claude Code session resumes from a live poke
   (wire mechanics only, per PR #61 honesty).
-- Cursor `agent persist` tmux path and `agent -p --resume` as native enqueue (resume is a paid
-  foreground model run; seats stay supervised unless a real queue transport exists).
+- Cursor `agent persist` tmux path, ACP control-sock `session/prompt`, and `agent -p --resume`
+  as native enqueue (resume is a paid foreground model run; seats stay supervised unless
+  persist/tmux or a live ACP control sock exists).
 - Real Grok/model transport (remote bridge protocol only, per T-640).
 
 ## Registration

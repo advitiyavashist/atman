@@ -187,6 +187,7 @@ def test_codex_queue_wake_uses_thread(board, cache_dir, monkeypatch):
 
 def test_cursor_resume_is_not_native_enqueue(board, cache_dir, monkeypatch):
     monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    monkeypatch.setenv("CURSOR_ACP_CONTROL_SOCK", str(Path(cache_dir) / "no-acp.sock"))
     sa = _adapters()
     sa.write_endpoint(str(board), "cursor-seat", {
         "seat": "cursor-seat", "provider": "cursor", "mode": "native",

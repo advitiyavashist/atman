@@ -12,6 +12,7 @@ Poll-based retrieval (`tickets watch` / inbox on the next cron) is **not** a PAS
 | Claude | `join --persistent` with `CLAUDE_CODE_MESSAGING_SOCKET` | AF_UNIX inbox (`auth` JSON + text newline) | inject into paused Claude Code session | **PASS** (regression: `test_claude_socket_regression`) |
 | Codex | native when app-server sock live | `codex queue` then `thread/queue/start` / `turn/start` via `codex app-server proxy` | **PASS** `woken`; sqlite-only is `queued-offline` not PASS |
 | Cursor / Grok Bot | persist+tmux | `tmux send-keys` into paused `agent persist` | **PASS** `woken` |
+| Cursor / Grok Bot | live ACP control sock + `CURSOR_CONVERSATION_ID` | `session/load` then `session/prompt` (never spawn `agent acp` / `-p --resume`) | **PASS** `woken` |
 | Cursor / Grok Bot | conversation id only | none (`agent -p --resume` is a new paid run) | **FAIL-CLOSED** supervised |
 | Grok remote | schema-2 bridge (`tickets remote register`) | T-640 `remote next` claim | reconnect delivers queued work | protocol only; no Grok binary on this host |
 | Grok native | n/a | n/a | n/a | **FAIL-CLOSED** (`remote bridge required`) |
@@ -36,6 +37,11 @@ tickets join ml-eng --persistent --harness codex --wake-mode continuous --lifecy
 agent persist "…"               # requires tmux
 # inside the persist session:
 export CURSOR_PERSIST_SESSION="$(tmux display-message -p '#{session_name}')"
+tickets join <seat> --persistent --harness cursor --wake-mode continuous --lifecycle persistent
+
+# Or: long-lived ACP proxy (Codex app-server analog). Do not spawn per poke.
+python3 scripts/cursor_acp_proxy.py   # ~/.cursor/acp-control/acp-control.sock
+# from the interactive Cursor session (CURSOR_CONVERSATION_ID already set):
 tickets join <seat> --persistent --harness cursor --wake-mode continuous --lifecycle persistent
 ```
 
