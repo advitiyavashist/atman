@@ -385,7 +385,15 @@ def _probe_codex():
     r = subprocess.run(["codex", "queue", "--help"], capture_output=True, text=True)
     if r.returncode != 0:
         return {"ok": False, "reason": "codex queue subcommand unavailable"}
-    return {"ok": True, "capabilities": {"native_inject": True, "transport": "codex queue --thread"}}
+    sock = _codex_control_sock()
+    if os.path.exists(sock):
+        transport = "codex queue --thread + app-server thread/queue/start"
+        native = True
+    else:
+        # Queue alone is durable offline enqueue, not pause→resume inject.
+        transport = "codex queue --thread (queued-offline without app-server control sock)"
+        native = False
+    return {"ok": True, "capabilities": {"native_inject": native, "transport": transport}}
 
 
 def _probe_cursor():
@@ -515,16 +523,96 @@ def _poke_claude(ep, text):
             pass
 
 
-def _poke_codex(ep, text):
+def _codex_control_sock():
+    """Managed app-server control socket (not the IDE in-process server)."""
+    override = (os.environ.get("CODEX_APP_SERVER_CONTROL_SOCK") or "").strip()
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".codex",
+                        "app-server-control", "app-server-control.sock")
+
+
+def _codex_app_server_rpc(method, params, timeout=5):
+    """JSON-RPC one-shot via `codex app-server proxy`. None if unavailable."""
+    sock = _codex_control_sock()
+    if not sock or not os.path.exists(sock):
+        return None
+    if not _which("codex"):
+        return None
+    req = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
+    try:
+        r = subprocess.run(
+            ["codex", "app-server", "proxy", "--sock", sock],
+            input=json.dumps(req) + "\n",
+            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get("id") == 1:
+            return msg
+    # No JSON-RPC response => not a successful start/inject.
+    return None
+
+
+def _codex_queue_start(thread):
+    """Ask the managed app-server to start the next queued turn (pause→resume)."""
+    resp = _codex_app_server_rpc("thread/queue/start", {"threadId": thread})
+    if not resp:
+        return False
+    if resp.get("error"):
+        return False
+    return True
+
+
+def _codex_turn_start(thread, text):
+    """Direct turn inject via app-server when the thread is loaded."""
+    params = {
+        "threadId": thread,
+        "input": [{"type": "text", "text": text}],
+    }
+    resp = _codex_app_server_rpc("turn/start", params)
+    if not resp or resp.get("error"):
+        return False
+    return True
+
+
+def _poke_codex_wake(ep, text):
+    """Enqueue then start. Returns woken | queued-offline | refused.
+
+    `codex queue` alone writes ~/.codex/queue_1.sqlite and does not resume a
+    paused session. Managed app-server `thread/queue/start` or `turn/start` is
+    required for Claude-parity pause→resume. Sqlite-only success is
+    queued-offline (durable, not a native wake).
+    """
     thread = (ep.get("thread") or "").strip()
     if not thread:
-        return False
+        return "refused"
     cmd = ["codex", "queue", "--thread", thread, "--message", text]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        return r.returncode == 0
+        queued = r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        queued = False
+    if not queued:
+        return "refused"
+    for _ in range(max(1, int(NATIVE_POKE_ATTEMPTS))):
+        if _codex_queue_start(thread) or _codex_turn_start(thread, text):
+            return "woken"
+    return "queued-offline"
+
+
+def _poke_codex(ep, text):
+    """Bool wrapper for older call sites/tests: True only on live wake."""
+    return _poke_codex_wake(ep, text) == "woken"
 
 
 def _poke_cursor(ep, text):
@@ -714,18 +802,30 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         ok = _poke_until(_poke_claude, ep, text)
         label = "woken" if ok else "refused"
     else:
-        ok = _poke_until(_poke_codex, ep, text)
-        label = "queued" if ok else "refused"
+        # Codex: woken = app-server start/inject; else durable queued-offline.
+        label = _poke_codex_wake(ep, text)
+        ok = label in ("woken", "queued-offline")
     return _commit_wake(board, seat, mid, lease, fence, label, ok)
 
 
 def has_live_native_session(board, seat):
+    """True only when a native poke can resume the session now.
+
+    Retained PID-less Codex thread identity alone must NOT suppress watch:
+    `codex queue` sqlite writes are not Claude-parity wake, and claiming live
+    here left seats stranded until an unrelated poll loop noticed mail.
+    """
     ep, _ = live_endpoint(board, seat)
-    if ep is not None and ep.get("mode") == "native":
-        return True
-    stored = read_endpoint(board, seat)
-    # Retained PID-less Codex identity still owns the seat; do not start watch.
-    return _can_inject_retained(stored, "")
+    if ep is None or ep.get("mode") != "native":
+        return False
+    provider = ep.get("provider") or ""
+    if provider == "codex":
+        # Live wake requires managed app-server control sock (queue/start) or
+        # a still-alive session pid that owns the endpoint.
+        if os.path.exists(_codex_control_sock()):
+            return True
+        return _endpoint_pid_ok(ep.get("pid")) is True
+    return True
 
 
 def public_adapter_state(board, seat, harness, adapter_online, wake_pending):
