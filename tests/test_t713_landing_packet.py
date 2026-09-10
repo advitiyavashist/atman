@@ -40,10 +40,10 @@ def _start_terminal():
     return start[pre : start.index("</pre>")]
 
 
-def test_hero_is_team_runtime_not_turns_or_cost():
+def test_hero_is_control_plane_not_turns_or_cost():
     lowered = HERO.lower()
-    assert "bring the agents you already use" in lowered
-    assert "one team" in lowered
+    assert "local control plane" in lowered
+    assert "one repo" in lowered
     assert "fewest turns" not in lowered
     assert "measured cost" not in lowered
 
@@ -97,12 +97,15 @@ def test_brahman_is_research_not_required():
     assert "not required" in LANDING.lower()
 
 
-def test_keeps_local_mit_formation_dots_and_dark_brand():
+def test_keeps_local_mit_formation_dots_and_distinct_dark_brand():
     assert LANDING.count("<circle ") >= 10
     assert "MIT licensed" in LANDING
     assert "wordmark\">atman" in LANDING
-    assert "--bg: #0b1416" in CSS
-    assert "--accent: #c8f04a" in CSS
+    assert "--bg: #0c0e12" in CSS
+    assert "--accent: #c4b49a" in CSS
+    assert "#c8f04a" not in CSS
+    assert "#0b1416" not in CSS
+    assert "4.5rem 4.5rem" not in CSS
 
 
 def test_no_swarm_hype_steer_cta_or_localhost_product_link():

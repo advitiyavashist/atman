@@ -2,9 +2,9 @@
 
 Static page. No build step, no JavaScript, no framework.
 
-Copy follows the T-713 lock: **team runtime / BYOA**, spike **Clone → any first
-seat → `tickets ui`**. Example seats, in order: Claude Code, Codex, Cursor,
-Grok Bot, custom. Fewest turns and least measured cost are **secondary**
+Copy follows the T-713 lock: **local control plane / team runtime for multiple
+coding agents in one repo.** Spike **Clone → any first seat → `tickets ui`**.
+Visual: dark `#0c0e12`, bone type, brass CTA — **not** Steer lime/grid/`#0b1416`.
 (promise strip; `—` until a done ticket reports). Usage-limit recovery stays
 early. Brahman is optional research. The dashboard image is a checked-in
 product capture; the page does not point visitors at a machine-local demo.
