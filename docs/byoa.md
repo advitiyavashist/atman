@@ -173,7 +173,9 @@ different states, and the dashboard shows the same state. If a machine stopped
 mid-watcher, add `--recover-stale`; it removes only a dead PID lock and refuses
 when the recorded watcher is alive. `tickets spawn` performs this cheap check
 automatically for Cursor and leaves the seat's roles, harness, and worktree
-registration unchanged when login is missing.
+registration unchanged when login is missing. Auth V2 (execution context,
+opaque credential profiles, repo identity) is specified in
+[t685-auth-v2-contract.md](t685-auth-v2-contract.md); T-686 implements it.
 
 ## Run it
 
