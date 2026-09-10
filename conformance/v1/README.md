@@ -34,11 +34,18 @@ negative corpus cases; a replacement must not preserve them for parity.
 
 A compatible implementation must:
 
-1. pass every case and structured capture in the golden corpus;
-2. validate every HTTP fixture against the existing OpenAPI contract;
-3. preserve atomicity and fencing under process-level races;
-4. read the frozen legacy board and migrate without data loss;
-5. meet performance thresholds on the same machine and corpus size.
+1. pass every case and structured capture in the golden corpus, including the
+   original 15 oracle cases plus the T-640 wake-mode matrix;
+2. match normalized per-step stdout, stderr and exit status, and the canonical
+   board-tree snapshot after every step;
+3. validate every HTTP fixture against the existing OpenAPI contract;
+4. preserve atomicity and fencing under process-level races;
+5. read the frozen legacy board and migrate without data loss;
+6. meet performance thresholds on the same machine and corpus size.
+
+The runner resolves candidate CLI and adapter paths against the invocation
+working directory before it creates a temporary fixture board. A missing binary
+is a `ConformanceFailure`, not an uncaught `FileNotFoundError` after `chdir`.
 
 Unknown stored fields must be preserved in an archive or rejected before any
 mutation. They may not disappear silently. A breaking storage or command

@@ -23,6 +23,8 @@
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$"},
         "area": {"type": "string", "minLength": 1},
         "driver": {"enum": ["cli", "storage-adapter"]},
+        "snapshot_redact_keys": {"type": "array", "items": {"type": "string"}},
+        "snapshot_names_only": {"type": "array", "items": {"type": "string"}},
         "copy": {"type": "array", "items": {"type": "object", "required": ["from", "to"]}},
         "files": {"type": "array", "items": {"type": "object", "required": ["path"]}},
         "steps": {
@@ -33,7 +35,8 @@
             "required": ["id"],
             "properties": {
               "id": {"type": "string"},
-              "kind": {"enum": ["command", "parallel", "write", "symlink", "bulk_plan", "measure"]},
+              "kind": {"enum": ["command", "parallel", "write", "symlink", "bulk_plan", "measure", "sleep"]},
+              "seconds": {"type": "number", "minimum": 0},
               "argv": {"type": "array", "items": {"type": "string"}},
               "external_argv": {"type": "array", "items": {"type": "string"}},
               "agent": {"type": "string"},

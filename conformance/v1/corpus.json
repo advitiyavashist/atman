@@ -1,11 +1,13 @@
 {
   "contract_version": "atman-core/v1",
-  "oracle_revision": "7b49b4aa3bab82793e56d8696ab8ab9606327927",
+  "oracle_revision": "ea681f3c4edd12bf3f7d5ec43bb814c518d1597a",
   "description": "Portable black-box cases selected from accepted Python behavior.",
   "cases": [
     {
       "id": "atomic-claim-eight-way",
       "area": "storage.atomic-claims",
+      "snapshot_redact_keys": ["owner", "ticket"],
+      "snapshot_names_only": ["agents/"],
       "steps": [
         {"id": "create", "argv": ["create", "Contended work", "--role", "backend"]},
         {"id": "join-a", "argv": ["join", "worker-a", "--roles", "backend"]},
@@ -259,6 +261,52 @@
         {"id": "create", "argv": ["create", "JSON task", "--role", "backend"]},
         {"id": "show", "argv": ["show", "T-001", "--json"], "expect": {"json": {"id": "T-001", "status": "open", "role": "backend"}}, "capture": {"json_paths": ["id", "status", "role"]}},
         {"id": "missing", "argv": ["show", "T-999", "--json"], "expect": {"exit_codes": [1], "contains": ["T-999"]}, "capture": {"exit_code": true, "output_tokens": ["T-999"]}}
+      ]
+    },
+    {
+      "id": "wake-mode-matrix",
+      "area": "wakes.mode-matrix",
+      "steps": [
+        {"id": "seed", "argv": ["create", "Wake seed", "--role", "nobody"]},
+        {"id": "join-continuous", "argv": ["join", "continuous-seat", "--roles", "docs", "--wake-mode", "continuous"], "agent": "continuous-seat"},
+        {"id": "join-task-only", "argv": ["join", "task-seat", "--roles", "docs", "--wake-mode", "task-only"], "agent": "task-seat"},
+        {"id": "join-scheduled", "argv": ["join", "sched-seat", "--roles", "docs", "--wake-mode", "scheduled"], "agent": "sched-seat"},
+        {"id": "clock-gap", "kind": "sleep", "seconds": 1.1},
+        {"id": "dm-continuous", "argv": ["msg", "ordinary continuous note", "--to", "continuous-seat"], "agent": "sender"},
+        {"id": "dm-task-only", "argv": ["msg", "ordinary task-only note", "--to", "task-seat"], "agent": "sender"},
+        {"id": "dm-scheduled", "argv": ["msg", "ordinary scheduled note", "--to", "sched-seat"], "agent": "sender"},
+        {
+          "id": "pending-continuous-dm",
+          "argv": ["pending", "--agent", "continuous-seat", "--json"],
+          "expect": {"json": {"pending": true, "wake_reason": "task_messages"}},
+          "capture": {"json_paths": ["pending", "wake_reason"]}
+        },
+        {
+          "id": "pending-task-only-dm",
+          "argv": ["pending", "--agent", "task-seat", "--json"],
+          "expect": {"exit_codes": [1], "json": {"pending": false, "wake_reason": "none"}},
+          "capture": {"exit_code": true, "json_paths": ["pending", "wake_reason"]}
+        },
+        {
+          "id": "pending-scheduled-dm",
+          "argv": ["pending", "--agent", "sched-seat", "--json"],
+          "expect": {"exit_codes": [1], "json": {"pending": false, "wake_reason": "none"}},
+          "capture": {"exit_code": true, "json_paths": ["pending", "wake_reason"]}
+        },
+        {"id": "task-task-only", "argv": ["msg", "Run this now", "--to", "task-seat", "--task"], "agent": "sender"},
+        {"id": "task-scheduled", "argv": ["msg", "Run this now", "--to", "sched-seat", "--task"], "agent": "sender"},
+        {
+          "id": "pending-task-only-task",
+          "argv": ["pending", "--agent", "task-seat", "--json"],
+          "expect": {"json": {"pending": true, "wake_reason": "task_messages"}},
+          "capture": {"json_paths": ["pending", "wake_reason"]}
+        },
+        {
+          "id": "pending-scheduled-task",
+          "argv": ["pending", "--agent", "sched-seat", "--json"],
+          "expect": {"json": {"pending": true, "wake_reason": "task_messages"}},
+          "capture": {"json_paths": ["pending", "wake_reason"]}
+        }
       ]
     },
     {
