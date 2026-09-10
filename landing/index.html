@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Atman · fewest turns, least measured cost</title>
-  <meta name="description" content="Local team runtime for the agents you already use. Clone, sit Claude Code as the first seat, open tickets ui. Finish in the fewest turns at least measured cost. MIT.">
+  <title>Atman · team runtime for the agents you already use</title>
+  <meta name="description" content="Local team runtime for the agents you already use. Clone, sit any first seat (Claude Code, Codex, Cursor, Grok Bot, custom), open tickets ui. MIT.">
   <meta name="theme-color" content="#0b1416">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
@@ -35,8 +35,8 @@
     <section class="hero">
       <div class="hero-copy">
         <p class="kicker"><span class="signal" aria-hidden="true"></span> open · local · bring your own agents</p>
-        <h1>Finish in the fewest turns.<br><em>Least measured cost.</em></h1>
-        <p class="lede">Local team runtime. Sit Claude Code first, keep one objective, and recover when a seat hits a usage limit.</p>
+        <h1>Bring the agents you already use.<br><em>Make them one team.</em></h1>
+        <p class="lede">Local team runtime. Sit any first seat — Claude Code, Codex, Cursor, Grok Bot, or custom — keep one objective, and recover when a seat hits a usage limit.</p>
         <p class="ctas">
           <a class="btn" href="#start">Start locally <span aria-hidden="true">→</span></a>
           <a class="ghost" href="https://github.com/advitiyavashist/atman" rel="noopener">View source</a>
@@ -51,7 +51,7 @@
             <dd>—</dd>
           </div>
         </dl>
-        <p class="promise-note">Unknown until a done ticket reports. Unknown is not zero.</p>
+        <p class="promise-note">Secondary: fewest turns at least measured cost. Unknown until a done ticket reports. Unknown is not zero.</p>
         <ul class="trust" aria-label="Product properties">
           <li>Plain local state</li>
           <li>Usage-limit recovery</li>
@@ -76,17 +76,17 @@
         <div class="seats">
           <article>
             <span class="seat-mark seat-live">C</span>
-            <div><strong>Claude Code</strong><small>First seat · in progress</small></div>
+            <div><strong>Claude Code</strong><small>Example first seat · in progress</small></div>
             <span class="state state-live">working</span>
           </article>
           <article>
             <span class="seat-mark seat-ready">X</span>
-            <div><strong>Cursor</strong><small>Review · context ready</small></div>
+            <div><strong>Codex</strong><small>Review · context ready</small></div>
             <span class="state state-ready">next</span>
           </article>
           <article>
-            <span class="seat-mark">H</span>
-            <div><strong>Human</strong><small>Release · waits on review</small></div>
+            <span class="seat-mark">G</span>
+            <div><strong>Grok Bot</strong><small>Remote seat · waits on review</small></div>
             <span class="state">held</span>
           </article>
         </div>
@@ -102,7 +102,7 @@
     <section id="runtime" class="loop" aria-labelledby="loop-title">
       <div class="section-heading">
         <p class="eyebrow">the first-win path</p>
-        <h2 id="loop-title">Clone. Sit Claude Code.<br>Open tickets ui.</h2>
+        <h2 id="loop-title">Clone. Sit a first seat.<br>Open tickets ui.</h2>
         <p>One objective on a local board. Recover as soon as a seat hits a usage limit—before the thread is lost.</p>
       </div>
       <ol class="loop-grid">
@@ -113,8 +113,8 @@
         </li>
         <li>
           <span class="step">02</span>
-          <h3>Sit Claude Code first</h3>
-          <p>Join one Claude Code seat. Later seats (Codex, Cursor, custom) attach to the same objective.</p>
+          <h3>Sit any first seat</h3>
+          <p>Join Claude Code, Codex, Cursor, Grok Bot, or a custom harness. Later seats attach to the same objective.</p>
         </li>
         <li>
           <span class="step">03</span>
@@ -124,7 +124,7 @@
         <li>
           <span class="step">04</span>
           <h3>Recover from limits</h3>
-          <p>When Claude Code hits a usage limit or the session ends, the board keeps the claim, the blocker, and a safe reassign path.</p>
+          <p>When a seat hits a usage limit or the session ends, the board keeps the claim, the blocker, and a safe reassign path.</p>
         </li>
       </ol>
     </section>
@@ -159,8 +159,8 @@
           <h3>Team runtime</h3>
           <p>Objective, ownership, dependencies, messages, liveness, review, and recovery.</p>
           <ul>
-            <li>Claude Code first, then Codex and Cursor</li>
-            <li>Custom and remote harnesses</li>
+            <li>Claude Code, Codex, Cursor, Grok Bot, custom</li>
+            <li>Any of those as the first seat</li>
             <li>CLI and local dashboard</li>
           </ul>
         </article>
@@ -172,7 +172,7 @@
         <article>
           <p class="status">Brahman · research</p>
           <h3>Model communication</h3>
-          <p>Measures text, prefill, KV-cache, and learned latent transfer between models. Research only — not required for the first Claude Code win.</p>
+          <p>Measures text, prefill, KV-cache, and learned latent transfer between models. Research only — not required for the first seat.</p>
         </article>
       </div>
     </section>
@@ -180,8 +180,8 @@
     <section id="start" class="start" aria-labelledby="start-title">
       <div class="start-copy">
         <p class="eyebrow">first run</p>
-        <h2 id="start-title">Clone → Claude Code seat → tickets ui.</h2>
-        <p>Quickstart writes the local board. Hook Claude Code as the first seat, then open the ship UI immediately. If that seat hits a usage limit, recover from the board—do not restart from chat history.</p>
+        <h2 id="start-title">Clone → first seat → tickets ui.</h2>
+        <p>Quickstart writes the local board. Hook any first seat — Claude Code, Codex, Cursor, Grok Bot, or custom — then open the ship UI immediately. If that seat hits a usage limit, recover from the board—do not restart from chat history.</p>
         <p class="start-links">
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/first-session.md">Read the first session <span aria-hidden="true">↗</span></a>
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/byoa.md">Bring your own agent <span aria-hidden="true">↗</span></a>
@@ -194,10 +194,11 @@ git clone https://github.com/advitiyavashist/atman.git
 cd atman &amp;&amp; ./install.sh
 export PATH="$HOME/.local/bin:$PATH"
 
-<span class="comment"># Claude Code as the first seat</span>
+<span class="comment"># any first seat: Claude Code, Codex, Cursor, Grok Bot, custom</span>
 cd /path/to/your-project
 tickets quickstart --agent alice --roles backend
 tickets hooks claude --agent alice
+<span class="comment"># or: hooks codex | hooks cursor | hooks remote</span>
 
 <span class="comment"># ship UI — not the React tree</span>
 tickets ui</code></pre>

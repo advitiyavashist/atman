@@ -2,10 +2,15 @@
 
 Static page. No build step, no JavaScript, no framework.
 
-Copy follows the T-714 spike: Clone → Claude Code seat → `tickets ui`,
-with fewest-turns / least measured cost on the hero, usage-limit recovery
-early, and Brahman as optional research. The dashboard image is a checked-in
+Copy follows the T-713 lock: **team runtime / BYOA**, spike **Clone → any first
+seat → `tickets ui`**. Example seats, in order: Claude Code, Codex, Cursor,
+Grok Bot, custom. Fewest turns and least measured cost are **secondary**
+(promise strip; `—` until a done ticket reports). Usage-limit recovery stays
+early. Brahman is optional research. The dashboard image is a checked-in
 product capture; the page does not point visitors at a machine-local demo.
+
+Do not make this page resemble Steer (Try the API, evaluate CTA, DLP, caret
+logo). Packet: [`docs/brand/t713-brand-acceptance-2026-09-10.md`](../docs/brand/t713-brand-acceptance-2026-09-10.md).
 
 ## Open locally
 
