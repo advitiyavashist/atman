@@ -42,8 +42,15 @@ enrolled runner:
 | `head` | Resolved commit of the worktree |
 
 `contexts_match` compares `runner_id`, `runner_kind`, `hostname`, `binary`,
-`repo_root`, normalized origin, and `head`. Missing `execution_context` on a
-legacy T-610 blob means **not authoritative**.
+`repo_root`, normalized origin, `head`, and enrolled `agent_id`. Missing
+`execution_context` on a legacy T-610 blob means **not authoritative**.
+
+Seat identity is first-class: `execution_context.agent_id` (enrolled seat)
+must equal process `TICKET_AGENT` (`ticket_agent`). Live 2026-09-10: the
+Atman worktree was origin/main@920644c, but the Cursor child claimed T-685 as
+generic `cursor` while the seat was `atman-auth-v2`. That is
+`seat_mismatch`, not `login_required`. `preflight_failures` is fail-closed
+(`unavailable`) on `seat_mismatch`, `repo_mismatch`, or `runner_mismatch`.
 
 ## Credential profiles
 
@@ -121,6 +128,8 @@ when the ticket says so. `spawn_repo_identity_ok`:
 - `git worktree add` root origin must match `expected_origin`.
 - If the worktree already exists, its origin must match too.
 - `dirname(board)` is not the repo identity (Steer board + Atman worktree).
+- `TICKET_AGENT` must equal the enrolled seat name. A generic `cursor` child
+  on an `atman-auth-v2` seat is a failed preflight.
 
 ## Acceptance gates (deterministic)
 

@@ -82,6 +82,8 @@ def v2_ready(ctx=None):
             "origin_url": ctx["origin_url"],
             "expected_origin": "advitiyavashist/atman",
             "head": ctx["head"],
+            "agent_id": ctx.get("agent_id") or "atman-auth-v2",
+            "ticket_agent": ctx.get("agent_id") or "atman-auth-v2",
         },
     }
 
@@ -217,6 +219,29 @@ def test_adapter_without_declared_check_is_unsupported_not_login_required():
     assert validate_auth_check(rec) == []
     rec["profile_kind"] = "browser"
     assert any("profile_kind" in e for e in validate_auth_check(rec))
+
+
+def test_generic_cursor_child_claiming_named_seat_fails_preflight():
+    """Worktree can be correct Atman@920644c and still fail: TICKET_AGENT=cursor."""
+    from auth_v2_contract import mismatch_auth_check, preflight_failures
+    host = runner_ctx()
+    reasons = preflight_failures(
+        enrolled_agent="atman-auth-v2",
+        ticket_agent="cursor",
+        expected_origin="advitiyavashist/atman",
+        worktree_origin=ATMAN,
+        spawn_git_root_origin=ATMAN,
+        probe_ctx=host,
+        runner_ctx=host,
+    )
+    assert reasons == ["seat_mismatch"]
+    rec = mismatch_auth_check(reasons)
+    assert rec["state"] == "unavailable"
+    assert rec["state"] != "login_required"
+    assert "seat_mismatch" in rec["detail"]
+    assert preflight_failures(
+        "atman-auth-v2", "atman-auth-v2", "advitiyavashist/atman",
+        ATMAN, ATMAN, host, host) == []
 
 
 def test_t610_suite_still_imports_without_v2_probe_wiring():

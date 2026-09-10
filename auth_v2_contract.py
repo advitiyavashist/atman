@@ -67,6 +67,8 @@ EXECUTION_CONTEXT_FIELDS = (
     "origin_url",
     "expected_origin",
     "head",
+    "agent_id",       # enrolled seat (tickets join / spawn name)
+    "ticket_agent",   # process TICKET_AGENT; must equal agent_id
 )
 
 # Never persist these names or values on the board, logs, or UI.
@@ -141,7 +143,49 @@ def context_fingerprint(ctx):
         str(ctx.get("repo_root") or ""),
         normalize_git_origin(ctx.get("origin_url") or ""),
         str(ctx.get("head") or ""),
+        str(ctx.get("agent_id") or ""),
     ])
+
+
+def seat_identity_matches(enrolled_agent, ticket_agent):
+    """The process claiming work must be the enrolled seat, not a generic harness name."""
+    enrolled = (enrolled_agent or "").strip()
+    process = (ticket_agent or "").strip()
+    return bool(enrolled) and enrolled == process
+
+
+def preflight_failures(enrolled_agent, ticket_agent, expected_origin,
+                        worktree_origin, spawn_git_root_origin,
+                        probe_ctx, runner_ctx, worktree_exists=True):
+    """Reasons a zero-model preflight must fail closed. Empty means proceed.
+
+    Live 2026-09-10: Atman worktree origin/main@920644c was correct, but the
+    Cursor child claimed T-685 as generic `cursor` while the seat was
+    `atman-auth-v2`. That is a seat identity mismatch, not `login_required`.
+    """
+    reasons = []
+    if not seat_identity_matches(enrolled_agent, ticket_agent):
+        reasons.append("seat_mismatch")
+    if not spawn_repo_identity_ok(
+            expected_origin, worktree_origin, spawn_git_root_origin,
+            worktree_exists=worktree_exists):
+        reasons.append("repo_mismatch")
+    if probe_ctx is not None and runner_ctx is not None:
+        if not contexts_match(probe_ctx, runner_ctx):
+            reasons.append("runner_mismatch")
+    return reasons
+
+
+def mismatch_auth_check(reasons):
+    """Non-ready result for identity/repo/runner mismatch. Never login_required."""
+    why = ",".join(reasons) or "mismatch"
+    return {
+        "state": "unavailable",
+        "authoritative": False,
+        "detail": "preflight mismatch: %s" % why,
+        "login_cmd": "",
+        "pause": pause_policy("persistent", "unavailable"),
+    }
 
 
 def contexts_match(probe_ctx, runner_ctx):
