@@ -3,8 +3,9 @@
 Static page. No build step, no JavaScript, no framework.
 
 Copy follows the current Atman team-runtime, knowledge-layer, and Brahman
-research boundaries in the repository. The dashboard image is a checked-in
-product capture; the page does not point visitors at a machine-local demo.
+research boundaries in the repository. The first-run path is clone → Claude
+Code seat → `tickets ui`. The dashboard image is a checked-in product
+capture; the page does not point visitors at a machine-local demo.
 
 ## Open locally
 
