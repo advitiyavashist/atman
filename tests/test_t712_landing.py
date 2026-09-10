@@ -44,10 +44,9 @@ def test_start_is_claude_code_first_seat_then_tickets_ui():
     assert "tickets hooks claude --agent alice" in start
     assert "BYOA" in start
     assert "tickets join" in start
-    assert start.index("tickets quickstart") < start.index("tickets hooks claude")
-    assert start.index("tickets hooks claude") < start.index("tickets ui")
-    assert start.index("tickets quickstart") < start.index("tickets ui")
     terminal = _section(start, "<pre>", "</pre>")
+    assert terminal.index("tickets quickstart") < terminal.index("tickets hooks claude")
+    assert terminal.index("tickets hooks claude") < terminal.index("tickets ui")
     assert "tickets next" not in terminal
 
 
