@@ -104,6 +104,36 @@ def test_exit0_structured_rate_limit_error_without_write_is_limit(
     assert by[tid]["turns"] is None
 
 
+def test_exit0_pretty_printed_rate_limit_error_plus_trailing_line_is_limit(
+        board, tmp_path, monkeypatch):
+    """T-501 D1: pretty envelope + any trailing line must still be limit.
+
+    Compact last-output control stays in the test above. Joining the `{`
+    line through EOF made this shape invalid JSON; raw_decode recovers it.
+    """
+    repo, tid = _alice_on_docs(board, monkeypatch)
+    dump = tmp_path / "pretty_rate_limit.txt"
+    dump.write_text(
+        '{\n'
+        '  "type": "error",\n'
+        '  "error": {\n'
+        '    "type": "rate_limit_error",\n'
+        '    "message": "This request would exceed your account rate limit."\n'
+        '  }\n'
+        '}\n'
+        'trailing-output-after-envelope\n')
+    fake = _fake_harness(tmp_path, "cat '%s'\n" % dump)
+    r = run(board, "watch", "--agent", "alice", "--once", "--exec", str(fake),
+            "--cwd", str(repo), agent="alice", cwd=repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    e = events(board, kind="run_end")[-1]
+    assert e["exit"] == 0 and e["outcome"] == "limit", e
+    assert "bound_write" not in e
+    report = json.loads(run(board, "turns", "--json", cwd=repo).stdout)
+    by = {row["ticket"]: row for row in report["tickets"]}
+    assert by[tid]["turns"] is None
+
+
 def test_exit0_codex_rate_limits_telemetry_is_not_limit(board, tmp_path, monkeypatch):
     """Rule-8: healthy Codex telemetry must not become outcome=limit."""
     repo, _tid = _alice_on_docs(board, monkeypatch)

@@ -5407,28 +5407,25 @@ def _usage_from_codex_event(rec):
 
 
 def _json_candidates(text):
-    """Every JSON object a run's output might end with, newest first."""
+    """Every JSON object in the last 400 lines of a run's output, newest first.
+
+    T-501: ``json.JSONDecoder().raw_decode`` from each ``{``. Joining a
+    pretty-printed object through EOF dropped it when anything trailed the
+    closing brace. Envelopes more than 400 lines from the end of the slice
+    stay out of window (same class as before).
+    """
     blobs = []
     stripped = (text or "").strip()
     if not stripped:
         return blobs
-    if stripped.startswith("{"):
-        blobs.append(stripped)
-    lines = stripped.splitlines()
-    for i in range(len(lines) - 1, max(-1, len(lines) - 400) - 1, -1):
-        ln = lines[i].strip()
-        if not ln.startswith("{"):
+    window = "\n".join(stripped.splitlines()[-400:])
+    decoder = json.JSONDecoder()
+    for i in reversed([p for p, ch in enumerate(window) if ch == "{"]):
+        try:
+            _rec, end = decoder.raw_decode(window, i)
+        except ValueError:
             continue
-        # A complete object on its own line: this is the shape of every event
-        # in a `codex exec --json` stream, and of a compact claude result.
-        if ln.endswith("}"):
-            blobs.append(ln)
-        # A pretty-printed object runs to the end of the output, so the tail
-        # from this line is the candidate. Both are tried: a stream line at
-        # column 0 is complete on its own AND starts a (bad) tail, and only
-        # trying the tail would miss every codex event but the last.
-        if lines[i].startswith("{"):
-            blobs.append("\n".join(lines[i:]))
+        blobs.append(window[i:end])
     return blobs
 
 
