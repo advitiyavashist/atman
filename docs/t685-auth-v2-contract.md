@@ -96,8 +96,18 @@ missing / timeout without a transport error). Never classify auth as quota.
 
 - Incoming probe with a non-matching context cannot replace **any**
   authoritative runner blob (not only `ready`). Sandbox `ready` must not
-  clobber host `quota` / `login_required` / `expired`.
+  clobber host `quota` / `login_required` / `expired`, **including when the
+  merge caller passes `runner_ctx=sandbox`**. Freeze compares
+  `previous.execution_context` to `incoming.execution_context` plus
+  incoming authority for that stored lineage — not only both blobs against
+  the caller `runner_ctx`.
+- Silent runner rebind is forbidden in this merge. Changing the enrolled
+  runner is an explicit fenced T-686 operation, not an auth-check side
+  effect.
 - Matching-context probes replace the stored blob.
+- Matching authoritative `quota|login_required|expired|…` → `ready` must
+  clear `pause.paused` and `alert_id` so a recovered persistent seat resumes
+  once.
 - Persistent seats (`lifecycle=persistent`, T-683): on every no-spend
   state (`login_required|expired|quota|network|unavailable|unsupported`),
   `retry_model=false`, retain queued work, dedupe **one** operator alert via

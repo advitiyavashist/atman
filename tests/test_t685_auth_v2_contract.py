@@ -134,6 +134,56 @@ def test_sandbox_ready_does_not_clobber_authoritative_host_quota():
     assert merged["authoritative"] is True
 
 
+@pytest.mark.parametrize("host_state", ["quota", "login_required", "expired"])
+def test_sandbox_ready_cannot_replace_host_auth_even_when_caller_is_sandbox(
+        host_state):
+    """Lineage freeze is blob-vs-blob, not caller runner_ctx.
+
+    merge(host_<state>, sandbox_ready, sandbox_ctx) must keep the host blob.
+    Silent runner rebind is not an auth merge.
+    """
+    host = runner_ctx()
+    sand = sandbox_ctx()
+    stored = v2_ready(host)
+    stored["state"] = host_state
+    stored["detail"] = "host %s" % host_state
+    stored = merge_auth_check({}, stored, host)
+    assert stored["state"] == host_state and stored["authoritative"] is True
+    incoming = v2_ready(sand)
+    incoming["state"] = "ready"
+    incoming["detail"] = "Logged in (sandbox)"
+    merged = merge_auth_check(stored, incoming, sand)
+    assert merged["state"] == host_state
+    assert merged["detail"] == "host %s" % host_state
+    assert merged["authoritative"] is True
+    assert merged["execution_context"]["runner_kind"] == "host"
+    assert merged["pause"]["paused"] is True
+    assert merged["alert_id"] == alert_id(
+        "atman-auth-v2", host_state, "prf_cursor_browser_1")
+
+
+@pytest.mark.parametrize("paused_state", ["quota", "login_required", "expired"])
+def test_matching_authoritative_recovery_clears_pause_and_alert(paused_state):
+    """Recovered persistent seat must resume once: drop stale pause/alert."""
+    host = runner_ctx()
+    stored = v2_ready(host)
+    stored["state"] = paused_state
+    stored["detail"] = "host %s" % paused_state
+    stored = merge_auth_check({}, stored, host)
+    assert stored["pause"]["paused"] is True
+    assert stored["alert_id"] == alert_id(
+        "atman-auth-v2", paused_state, "prf_cursor_browser_1")
+    incoming = v2_ready(host)
+    incoming["state"] = "ready"
+    incoming["detail"] = "Logged in"
+    merged = merge_auth_check(stored, incoming, host)
+    assert merged["state"] == "ready"
+    assert merged["authoritative"] is True
+    assert merged["pause"]["paused"] is False
+    assert merged["pause"]["operator_path"] == "ready"
+    assert merged["alert_id"] == ""
+
+
 @pytest.mark.parametrize("host_state", [
     "ready", "login_required", "expired", "quota", "network",
     "unavailable", "unsupported",

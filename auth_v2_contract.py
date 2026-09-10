@@ -272,6 +272,18 @@ def alert_id(agent_id, state, profile_ref=""):
     return "auth:%s:%s:%s" % (agent_id or "", state or "", profile_ref or "")
 
 
+def _stored_authoritative_lineage(previous):
+    """True when the blob already claims authority for its own execution_context.
+
+    Authority is the stored runner, not the merge caller's runner_ctx. A
+    later sandbox (or other) caller must not silently rebind that lineage.
+    """
+    rec = previous or {}
+    if rec.get("authoritative") is not True:
+        return False
+    return bool(rec.get("execution_context"))
+
+
 def merge_auth_check(previous, incoming, runner_ctx):
     """Apply an incoming probe to the stored blob.
 
@@ -279,25 +291,47 @@ def merge_auth_check(previous, incoming, runner_ctx):
     authoritative runner blob (`ready`, `quota`, `login_required`,
     `expired`, `network`, `unavailable`, `unsupported`). Matching-context
     probes may replace.
+
+    Stored authority is the previous blob's execution_context. Comparing
+    only against the caller's runner_ctx would let sandbox ready clobber
+    host quota when the caller passes sandbox_ctx. Silent runner rebind
+    is forbidden here; T-686 may add an explicit fenced rebind later.
     """
     previous = dict(previous or {})
     incoming = dict(incoming or {})
-    incoming_auth = is_authoritative(incoming, runner_ctx)
-    previous_auth = is_authoritative(previous, runner_ctx)
+    prev_ctx = previous.get("execution_context") or {}
+    inc_ctx = incoming.get("execution_context") or {}
+    if _stored_authoritative_lineage(previous):
+        if not contexts_match(prev_ctx, inc_ctx):
+            return previous
+        incoming_auth = is_authoritative(incoming, prev_ctx)
+        if not incoming_auth:
+            return previous
+    else:
+        incoming_auth = is_authoritative(incoming, runner_ctx)
+        previous_auth = is_authoritative(previous, runner_ctx)
+        if previous_auth and not incoming_auth:
+            return previous
     incoming["authoritative"] = incoming_auth
-    if previous_auth and not incoming_auth:
-        return previous
     merged = dict(previous)
     merged.update(incoming)
     merged["authoritative"] = incoming_auth
+    lifecycle = (
+        (runner_ctx or {}).get("lifecycle")
+        or merged.get("lifecycle")
+        or "ephemeral"
+    )
     if merged.get("state") in NO_SPEND_STATES:
-        merged["pause"] = pause_policy(
-            (runner_ctx or {}).get("lifecycle") or merged.get("lifecycle") or "ephemeral",
-            merged.get("state"))
+        merged["pause"] = pause_policy(lifecycle, merged.get("state"))
         merged["alert_id"] = alert_id(
             (runner_ctx or {}).get("agent_id") or merged.get("agent_id") or "",
             merged.get("state"),
             merged.get("credential_profile_ref") or "")
+    else:
+        # Matching quota/login/expired → ready must resume once: drop stale
+        # auth pause and the paused-state alert so the seat is not stuck.
+        merged["pause"] = pause_policy(lifecycle, merged.get("state") or "ready")
+        merged["alert_id"] = ""
     return merged
 
 
