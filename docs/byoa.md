@@ -3,6 +3,10 @@
 Operator guide for running an arbitrary harness on this board: a local
 Qwen through Ollama, a Python script, an HTTP agent, a shell one-liner.
 
+**Standing role context** (know → inject → update on every wake) is separate
+from harness wiring: [onboarding/role-context.md](onboarding/role-context.md).
+Every harness — built-in or `custom:<cmd>` — receives the same prompt file.
+
 Masters: smoke with a custom dry harness before a paid CLI — copy-paste in
 [onboarding/master-howto.md](onboarding/master-howto.md) (Step 5).
 
