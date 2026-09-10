@@ -2866,6 +2866,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WakeJobListResponse' }
+        '400':
+          description: |
+            Missing or malformed `runner_id`. `malformed_request` with
+            `details.rejected_fields` containing `runner_id` (T-523; matches
+            the live T-502 pin).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
           description: |
