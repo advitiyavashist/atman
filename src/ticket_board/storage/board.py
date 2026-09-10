@@ -441,6 +441,10 @@ class BoardStore(MessagingMixin):
         gives an operator, since there is no delete-agent route. An expired
         lease holds nothing: the runner is gone and the directory is free.
 
+        The lease half uses `lease_precludes_registration` (T-495), not
+        `overlaps`, so a grab of a bare `.worktrees` root cannot lock sibling
+        seats that have no operator-approved worktree.
+
         Deliberately a SEPARATE method rather than a widening of
         `find_worktree_occupant`. The enrolment route's question is about what
         an operator approved and should not start refusing on what a runner
@@ -469,7 +473,12 @@ class BoardStore(MessagingMixin):
                 continue
             if row["state"] == "revoked":
                 continue
-            if worktrees.overlaps(needle, row["worktree"]):
+            # T-495/C2: runner-lease scan is not symmetric `overlaps`. A live
+            # lease on a parent must not lock sibling/nested checkouts except
+            # for the land-grab / same-checkout cases in
+            # `lease_precludes_registration`. Enrolment occupancy above still
+            # uses `overlaps`.
+            if worktrees.lease_precludes_registration(row["worktree"], needle):
                 return {"id": row["id"], "name": row["name"],
                         "state": row["state"], "worktree": row["worktree"]}
         return None
