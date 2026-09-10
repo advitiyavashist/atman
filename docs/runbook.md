@@ -221,13 +221,15 @@ mention is a delivery") disagree and that is a product call, not a defect.
 - **F-11 cancel does not reach the child.** Supervisor blocks in
   `handle.wait()`. Fix: poll the run (or a cancel long-poll) while waiting
   and `terminate()` on `canceled`. T-188.
-- **F-12 every real spawn crashed at `wait()`** -- FIXED on this branch,
-  commit `cb04314`, one line in `launcher.py` (`process.stdin = None` after
-  the close). Reproduced first with the shell-script child, then live (child
-  pid 7426 orphaned and still running after the supervisor crashed). This is
-  the T-188 lane's file; the commit is separate so it can be taken or
-  replaced by the owner. Without it the runner cannot complete a single real
-  run.
+- **F-12 every real spawn crashed at `wait()`** -- FIXED on main
+  (`process.stdin = None` after the close). T-190's child round-trip only
+  failed on CPython 3.9; T-404 adds
+  `tests/runners/test_t404_f12_stdin.py::test_start_drops_stdin_so_wait_cannot_flush_a_closed_pipe`
+  which asserts `handle._process.stdin is None` after `start()` so a revert
+  reds Python 3.14 as well as 3.9.
+- **F-12b parent death still orphans the child** -- FINDING. SIGKILL of the
+  launcher parent leaves the child alive. Strict xfail
+  `test_killing_the_launcher_parent_does_not_leave_the_child_alive`.
 - **F-13 the child is never told the task.** `default_prompt` names ids and
   says "read the ticket, report back on the board" to a process with no
   board access. Live, the model searched an empty worktree for 266 s and
@@ -235,14 +237,33 @@ mention is a delivery") disagree and that is a product call, not a defect.
   `client.get_ticket`) carries the task message body and ticket outcome into
   the prompt. The live test does exactly that through the public
   `prompt_builder` hook. T-188.
+- **F-14 private-channel task to a non-member** -- FINDING (T-493). Sender
+  ACL only. Strict xfail
+  `test_a_private_channel_task_cannot_dispatch_a_non_member`.
+- **F-15 task on another agent's claimed ticket** -- FINDING (T-493). Send
+  still 201s; claim refuses later. Strict xfail
+  `test_a_task_on_another_agents_claimed_ticket_is_refused_at_send`.
+
+## T-404 re-run (merged main)
+
+T-190 is an ancestor of `origin/main`. This ticket does not re-prove the
+happy path. It re-runs the edge modules on current main, adds F-12 teeth
+that bite on Python 3.14, and pins F-12b/F-14/F-15 that T-493 recorded
+against T-190 but did not land as tests.
+
+```
+cd /Users/kavana/Downloads/tickets/.worktrees/cursor-native-wake-t404
+python3 -m pytest -q tests/acceptance/messaging tests/runners/test_t404_f12_stdin.py
+```
 
 ## Re-running everything
 
 ```
-cd /Users/kavana/Downloads/tickets/.worktrees/cursor-demo-t190
+cd /Users/kavana/Downloads/tickets/.worktrees/cursor-native-wake-t404
 TICKET_BOARD_CONTRACTS_REQUIRED=1 python3 -m pytest -q          # whole repo
 python3 -m pytest -q tests/acceptance/messaging                  # this suite
 python3 -m pytest -q tests/acceptance/messaging --runxfail       # see each finding fail for its stated reason
+python3 -m pytest -q tests/runners/test_t404_f12_stdin.py
 ```
 
 If a finding starts passing, the strict marker fails the suite. Promote it
