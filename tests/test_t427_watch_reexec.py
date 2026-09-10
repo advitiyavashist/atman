@@ -126,7 +126,19 @@ def start_watch(tool, board, shim, *args, cwd=None):
     )
 
 
-def wait_pid_file(board, owner="doc", timeout=8):
+def wait_until(pred, timeout, interval=0.05):
+    """Poll until pred() is true, or timeout. Load-sensitive tests must not sleep blindly."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = pred()
+        if last:
+            return last
+        time.sleep(interval)
+    return last
+
+
+def wait_pid_file(board, owner="doc", timeout=8, cmdline_needle=None):
     path = board / "agents" / ("%s.watch.pid" % owner)
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -136,7 +148,8 @@ def wait_pid_file(board, owner="doc", timeout=8):
             except ValueError:
                 pid = 0
             if pid and pid_alive(pid):
-                return pid, path
+                if cmdline_needle is None or cmdline_needle in cmdline_of(pid):
+                    return pid, path
         time.sleep(0.05)
     return 0, path
 
@@ -327,39 +340,74 @@ def test_loop_reexecs_onto_flipped_shim(board, tmp_path):
 
 
 def test_in_flight_run_is_not_interrupted(board, tmp_path):
+    """Hop only after the child exits; do not bind that to wall-clock sleeps.
+
+    T-541: full-file pytest made the old `sleep(1)` window miss the child
+    (wait_log/wait_pid_file delayed by sibling watches), so the parent had
+    already hopped. Wait until THIS release's pid is running the child, then
+    flip the shim, then require sha_a until the marker exists.
+    """
     from test_wakeup import run
     run(board, "join", "doc", "--roles", "docs")
     marker = board.parent / "ran.txt"
-    shim, rel_a, rel_b, sha_a, sha_b = make_releases(tmp_path)
-    cmd = "sleep 6; echo done > %s" % marker
+    # Distinct shas so cmdline_of cannot match a leftover sibling watch
+    # that still uses the default aaaa../bbbb.. release dirs.
+    sha_a, sha_b = "c" * 40, "d" * 40
+    shim, rel_a, rel_b, sha_a, sha_b = make_releases(tmp_path, sha_a, sha_b)
+    cmd = "sleep 8; echo done > %s" % marker
     proc = start_watch(rel_a / "tickets.py", board, shim, "--every", "5", "--exec", cmd)
     try:
-        pid, pid_file = wait_pid_file(board)
-        assert pid
+        pid, pid_file = wait_pid_file(board, timeout=20, cmdline_needle=sha_a)
+        assert pid, "watch did not take the pid lock for release %s" % sha_a
         log = board / "agents" / "doc.watch.log"
-        wait_log(log, "run 1", timeout=8)
+
+        def child_in_flight():
+            if not pid_alive(pid) or sha_a not in cmdline_of(pid):
+                return False
+            try:
+                text = log.read_text()
+            except OSError:
+                text = ""
+            return "run 1" in text and not marker.exists()
+
+        assert wait_until(child_in_flight, timeout=20), (
+            "never saw an in-flight run on pid %s: alive=%s cmd=%r log=%r marker=%s"
+            % (pid, pid_alive(pid), cmdline_of(pid),
+               log.read_text() if log.exists() else "", marker.exists())
+        )
         write_shim(shim, rel_b / "tickets.py")
-        time.sleep(1.0)
-        assert pid_alive(pid)
-        assert sha_a in cmdline_of(pid), "parent hopped while the child was running"
-        assert not marker.exists()
-        deadline = time.time() + 20
-        hopped = False
-        while time.time() < deadline:
+
+        def still_on_a_or_done():
+            if marker.exists():
+                return "done"
             try:
                 cur = int(pid_file.read_text().strip() or "0")
             except (OSError, ValueError):
                 cur = 0
-            if cur and sha_b in cmdline_of(cur):
-                hopped = True
-                break
-            time.sleep(0.2)
-        assert marker.read_text().strip() == "done"
-        try:
-            leftover = int(pid_file.read_text().strip() or "0") or pid
-        except (OSError, ValueError):
-            leftover = pid
-        assert hopped, cmdline_of(leftover)
+            cmd_line = cmdline_of(cur or pid)
+            if sha_b in cmd_line:
+                return False
+            return sha_a in cmd_line
+
+        # Until the child writes the marker, the parent must stay on sha_a.
+        deadline = time.time() + 25
+        while time.time() < deadline and not marker.exists():
+            state = still_on_a_or_done()
+            assert state, "parent hopped to %s while the child was still running: %s" % (
+                sha_b, cmdline_of(int(pid_file.read_text().strip() or pid)))
+            time.sleep(0.1)
+        assert marker.exists() and marker.read_text().strip() == "done"
+
+        def hopped_to_b():
+            try:
+                cur = int(pid_file.read_text().strip() or "0")
+            except (OSError, ValueError):
+                return False
+            return bool(cur and sha_b in cmdline_of(cur))
+
+        assert wait_until(hopped_to_b, timeout=20), cmdline_of(
+            int((pid_file.read_text().strip() or "0") or pid)
+        )
     finally:
         stop_watch(board, "doc", proc)
 
