@@ -22,7 +22,7 @@ from ticket_board.runners.client import ApiError  # noqa: E402
 from ticket_board.server.wire import Request  # noqa: E402
 
 
-FLEET_ROOT = "/Users/kavana/Downloads/steer/.worktrees"
+FLEET_ROOT = "/Users/<operator>/Downloads/steer/.worktrees"
 VICTIM_WT = FLEET_ROOT + "/victim"
 
 
