@@ -1,3 +1,48 @@
+# Runbook
+
+## T-185: connection, concurrency and agent recovery
+
+Verify against a **disposable** `serve()` board on loopback. Never point these
+tests at the live Steer board. Every mutation mints its own `uuid4` `request_id`
+(the T-180 fixture trap: shared ids 409 after the first write).
+
+```
+TICKET_BOARD_CONTRACTS_REQUIRED=1 python3 -m pytest -q tests/acceptance/recovery
+```
+
+Cut from `origin/main` `ea681f3` (advitiyavashist/atman; GitHub `tickets`
+redirects here). Worktree
+`/Users/kavana/Downloads/atman/.worktrees/cursor-t563-t185`, branch
+`cursor/t185-verify`. Own paths: `tests/acceptance/recovery/`, this section.
+
+| acceptance item | evidence |
+|---|---|
+| Two sessions connect; each gets a different ticket | `test_two_enrolled_sessions_each_claim_a_different_ticket` |
+| Eight claims, one owner, contract 409s | `test_eight_http_claims_yield_exactly_one_owner` |
+| Two masters, one lease; takeover advances epoch; stale pause 409 | `test_master_failover_one_holder_then_takeover_advances_epoch` |
+| Same hook event retried → one row, one audit | `test_retried_hook_event_is_one_audit_record` |
+| Hook failure visible (`offline`); peer still claims; expired lease cannot | `test_hook_failure_is_visible_and_a_healthy_peer_still_claims` |
+| Expired worker writes fail | `test_expired_lease_cannot_claim_or_update` |
+| Revoke keeps claimed work; does not reassign | `test_revocation_retains_claimed_work_and_does_not_reassign` |
+| Legacy import/rollback fixture evidence | `test_import_rollback.py` (sample board + backup drill) |
+| Keyboard-only connect + review | `test_keyboard.py` pins Escape cases in `tests/ui/app.test.tsx` and `tests/ui/tickets.test.tsx`; re-runs vitest when `node_modules` exists |
+
+Install / run / takeover (same commands an operator uses, against a temp db):
+
+1. `python3 -c "from ticket_board.server.httpd import serve; ..."` or the tests'
+   `LiveBoard` (`tests/acceptance/messaging/live_board.py`) which calls `serve()`
+   on a reserved port (do not use `port=0` — CSRF allowlist is built before bind,
+   T-280).
+2. Operator cookie comes from `operator-session.json` next to the db.
+3. Master takeover: `POST /master/lease` with `expected_epoch` = current epoch.
+   Wrong epoch → `master_lease_conflict` / `master_lease_expired`.
+
+Honest limits: two-session proof is two enrolled HTTP agents (Claude-shaped
+runtime metadata), not two live `claude` processes. T-190 already spent a live
+`claude -p` for message-to-task. Do not set `T185_LIVE_CLAUDE` against the
+shared Steer board. Keyboard proof is jsdom + Testing Library, not a headed
+browser.
+
 # Runbook: message-to-task execution, verified (T-190)
 
 What `tests/acceptance/messaging/` proves about the messaging (T-187),
