@@ -114,6 +114,40 @@ def test_v2_record_validates_and_legacy_t610_blob_is_not_authoritative():
     assert is_authoritative(legacy, runner_ctx()) is False
 
 
+def test_sandbox_ready_does_not_clobber_authoritative_host_quota():
+    """P0: non-matching ready must not replace any authoritative non-ready blob."""
+    host = runner_ctx()
+    stored = v2_ready(host)
+    stored["state"] = "quota"
+    stored["detail"] = "usage limit"
+    stored = merge_auth_check({}, stored, host)
+    assert stored["state"] == "quota" and stored["authoritative"] is True
+    incoming = v2_ready(sandbox_ctx())
+    incoming["state"] = "ready"
+    incoming["detail"] = "Logged in (sandbox)"
+    merged = merge_auth_check(stored, incoming, host)
+    assert merged["state"] == "quota"
+    assert merged["detail"] == "usage limit"
+    assert merged["authoritative"] is True
+
+
+@pytest.mark.parametrize("host_state", [
+    "ready", "login_required", "expired", "quota", "network",
+    "unavailable", "unsupported",
+])
+def test_nonmatching_probe_never_replaces_any_authoritative_blob(host_state):
+    host = runner_ctx()
+    stored = v2_ready(host)
+    stored["state"] = host_state
+    stored = merge_auth_check({}, stored, host)
+    incoming = v2_ready(sandbox_ctx())
+    incoming["state"] = "login_required"
+    incoming["detail"] = "Not logged in"
+    merged = merge_auth_check(stored, incoming, host)
+    assert merged["state"] == host_state
+    assert merged["authoritative"] is True
+
+
 def test_sandbox_login_required_does_not_clobber_host_ready():
     host = runner_ctx()
     stored = merge_auth_check({}, v2_ready(host), host)
@@ -153,6 +187,59 @@ def test_ephemeral_failed_preflight_still_does_not_retry_model():
     assert pol["retry_model"] is False
     assert pol["paused"] is False
     assert pause_policy("persistent", "login_required")["paused"] is True
+
+
+def test_persistent_unsupported_is_no_spend_and_not_login():
+    """P1: persistent+unsupported pauses without retrying a model or login_cmd."""
+    pol = pause_policy("persistent", "unsupported")
+    assert pol["paused"] is True
+    assert pol["retry_model"] is False
+    assert pol["retain_queue"] is True
+    assert pol["dedupe_alert"] is True
+    assert pol["operator_path"] == "unsupported"
+    rec = v2_ready()
+    rec["harness"] = "remote"
+    rec["profile_kind"] = "adapter"
+    rec["state"] = "unsupported"
+    rec["login_cmd"] = ""
+    rec["credential_profile_ref"] = "prf_remote_adapter_1"
+    merged = merge_auth_check({}, rec, runner_ctx())
+    assert merged["pause"]["retry_model"] is False
+    assert merged["pause"]["operator_path"] == "unsupported"
+    assert merged["login_cmd"] == ""
+    eph = pause_policy("ephemeral", "unsupported")
+    assert eph["paused"] is False
+    assert eph["retry_model"] is False
+    assert eph["operator_path"] == "unsupported"
+
+
+def test_head_change_is_not_runner_mismatch():
+    """Ordinary git HEAD motion is not auth authority."""
+    from auth_v2_contract import contexts_match, preflight_failures
+    a = runner_ctx(head="920644ca10e8d3f4166769c631e7940829248cf0")
+    b = runner_ctx(head="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    assert contexts_match(a, b) is True
+    assert preflight_failures(
+        "atman-auth-v2", "atman-auth-v2", "advitiyavashist/atman",
+        ATMAN, ATMAN, a, b) == []
+    stored = merge_auth_check({}, v2_ready(a), b)
+    assert stored["authoritative"] is True
+    incoming = v2_ready(b)
+    incoming["state"] = "quota"
+    merged = merge_auth_check(stored, incoming, a)
+    assert merged["state"] == "quota"
+    assert merged["authoritative"] is True
+
+
+def test_validate_requires_ticket_agent_equals_agent_id():
+    rec = v2_ready()
+    rec["execution_context"]["ticket_agent"] = "cursor"
+    errs = validate_auth_check(rec)
+    assert any("ticket_agent" in e for e in errs)
+    rec["execution_context"]["ticket_agent"] = "atman-auth-v2"
+    assert validate_auth_check(rec) == []
+    rec["execution_context"]["ticket_agent"] = ""
+    assert any("ticket_agent" in e for e in validate_auth_check(rec))
 
 
 @pytest.mark.parametrize("url", [ATMAN, ATMAN_SSH, "ssh://git@github.com/advitiyavashist/atman.git"])

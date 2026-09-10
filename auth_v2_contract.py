@@ -132,19 +132,35 @@ def spawn_repo_identity_ok(expected_origin, worktree_origin, spawn_git_root_orig
     return True
 
 
+# Auth authority is *where* the probe ran, not which commit the worktree
+# currently points at. Ordinary `git commit` / `git checkout` must not flip
+# `runner_mismatch` or demote an authoritative blob. `head` remains an
+# observational field on the record; spawn may pin a required SHA separately.
+AUTH_CONTEXT_IDENTITY_FIELDS = (
+    "runner_id",
+    "runner_kind",
+    "hostname",
+    "binary",
+    "repo_root",
+    "origin_url",
+    "agent_id",
+)
+
+
 def context_fingerprint(ctx):
-    """Stable identity of where a probe ran. Host vs sandbox must differ."""
+    """Stable identity of where a probe ran. Host vs sandbox must differ.
+
+    HEAD is excluded: it changes on ordinary commits and is not auth authority.
+    Repo identity for spawn is origin (`expected_origin`), not path or HEAD.
+    """
     ctx = ctx or {}
-    return "|".join([
-        str(ctx.get("runner_id") or ""),
-        str(ctx.get("runner_kind") or ""),
-        str(ctx.get("hostname") or ""),
-        str(ctx.get("binary") or ""),
-        str(ctx.get("repo_root") or ""),
-        normalize_git_origin(ctx.get("origin_url") or ""),
-        str(ctx.get("head") or ""),
-        str(ctx.get("agent_id") or ""),
-    ])
+    parts = []
+    for field in AUTH_CONTEXT_IDENTITY_FIELDS:
+        val = ctx.get(field) or ""
+        if field == "origin_url":
+            val = normalize_git_origin(val)
+        parts.append(str(val))
+    return "|".join(parts)
 
 
 def seat_identity_matches(enrolled_agent, ticket_agent):
@@ -204,16 +220,45 @@ def is_authoritative(auth_check, runner_ctx):
     return contexts_match(ctx, runner_ctx)
 
 
+# Failed preflight never spends a model turn, including adapters with no
+# declared zero-model check (`unsupported`).
+NO_SPEND_STATES = (
+    "login_required",
+    "expired",
+    "quota",
+    "network",
+    "unavailable",
+    "unsupported",
+)
+
+# Operator recovery is keyed by state, not by "try login" for every pause.
+OPERATOR_PATH = {
+    "login_required": "login",
+    "expired": "login",
+    "quota": "quota",
+    "network": "network",
+    "unavailable": "unavailable",
+    "unsupported": "unsupported",
+}
+
+
 def pause_policy(lifecycle, state):
-    """Persistent seats pause without model retries; queued work is kept."""
-    paused = state in ("login_required", "expired", "quota", "network", "unavailable")
+    """Persistent seats pause without model retries; queued work is kept.
+
+    `unsupported` is no-spend: do not retry a model and do not send the
+    operator down the login path. Recovery is declare-an-adapter-check
+    (or switch provider); queued work stays until that happens.
+    """
+    no_spend = state in NO_SPEND_STATES
     persistent = lifecycle == "persistent"
+    paused = bool(no_spend and persistent)
     return {
-        "paused": bool(paused and persistent),
-        "retry_model": False if paused else True,
+        "paused": paused,
+        "retry_model": False if no_spend else True,
         "retain_queue": True,
-        "dedupe_alert": paused,
-        "resume_once_on_ready": persistent,
+        "dedupe_alert": no_spend,
+        "resume_once_on_ready": persistent and no_spend,
+        "operator_path": OPERATOR_PATH.get(state) or "ready",
     }
 
 
@@ -225,24 +270,22 @@ def alert_id(agent_id, state, profile_ref=""):
 def merge_auth_check(previous, incoming, runner_ctx):
     """Apply an incoming probe to the stored blob.
 
-    A non-matching (coordinator/sandbox) probe never overwrites an
-    authoritative runner `ready`. Matching-context probes may.
+    A non-matching / non-authoritative probe never replaces *any*
+    authoritative runner blob (`ready`, `quota`, `login_required`,
+    `expired`, `network`, `unavailable`, `unsupported`). Matching-context
+    probes may replace.
     """
     previous = dict(previous or {})
     incoming = dict(incoming or {})
     incoming_auth = is_authoritative(incoming, runner_ctx)
     previous_auth = is_authoritative(previous, runner_ctx)
     incoming["authoritative"] = incoming_auth
-    if previous_auth and previous.get("state") == "ready" and not incoming_auth:
-        return previous
-    if not incoming_auth and previous_auth and incoming.get("state") in (
-            "login_required", "expired", "unavailable", "unsupported"):
+    if previous_auth and not incoming_auth:
         return previous
     merged = dict(previous)
     merged.update(incoming)
     merged["authoritative"] = incoming_auth
-    if merged.get("state") in ("login_required", "expired", "quota", "network",
-                               "unavailable"):
+    if merged.get("state") in NO_SPEND_STATES:
         merged["pause"] = pause_policy(
             (runner_ctx or {}).get("lifecycle") or merged.get("lifecycle") or "ephemeral",
             merged.get("state"))
@@ -319,6 +362,8 @@ def validate_auth_check(record):
         origin = ctx.get("origin_url") or ""
         if expected and origin and not repo_identity_matches(expected, origin):
             errors.append("origin_url does not match expected_origin")
+        if not seat_identity_matches(ctx.get("agent_id"), ctx.get("ticket_agent")):
+            errors.append("ticket_agent must equal agent_id")
     for k in rec:
         if _secret_key(k):
             errors.append("forbidden secret key %s" % k)

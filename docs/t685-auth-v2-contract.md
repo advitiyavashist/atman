@@ -11,14 +11,15 @@ Observed failures this contract exists to prevent:
    in the coordinator process environment (`os.environ` of whoever invoked
    `tickets spawn` / `tickets harness auth`). A sandboxed or credential-less
    coordinator then writes `auth_check.state=login_required` onto a seat
-   whose **runner host** is already logged in. T-686: `never let a sandboxed
-   coordinator overwrite a host runner's authoritative ready state`.
+   whose **runner host** is already logged in. T-686: a non-matching probe
+   must never replace **any** authoritative runner blob (`ready`, `quota`,
+   `login_required`, `expired`, `network`, `unavailable`, `unsupported`).
 2. **Wrong-repository spawn (2026-09-10).** `tickets spawn` used
    `root = dirname(board)` while `--worktree` pointed at
    `/Users/kavana/Downloads/atman/.worktrees/atman-auth-v2`. The path looked
-   like Atman; the git object database was Steer. Repo identity is origin URL +
-   head, not directory spelling. A shared board in Steer driving an Atman
-   worktree is legal.
+   like Atman; the git object database was Steer. Repo identity is origin URL,
+   not directory spelling and not git HEAD. A shared board in Steer driving an
+   Atman worktree is legal.
 
 Code: `auth_v2_contract.py`. Tests: `tests/test_t685_auth_v2_contract.py`.
 
@@ -39,11 +40,15 @@ enrolled runner:
 | `repo_root` | `git rev-parse --show-toplevel` of that worktree |
 | `origin_url` | `git remote get-url origin` (stored normalized) |
 | `expected_origin` | Ticket/project repo, e.g. `advitiyavashist/atman` |
-| `head` | Resolved commit of the worktree |
+| `head` | Observational commit of the worktree. **Not** part of auth identity. |
 
-`contexts_match` compares `runner_id`, `runner_kind`, `hostname`, `binary`,
-`repo_root`, normalized origin, `head`, and enrolled `agent_id`. Missing
-`execution_context` on a legacy T-610 blob means **not authoritative**.
+`contexts_match` compares `AUTH_CONTEXT_IDENTITY_FIELDS`: `runner_id`,
+`runner_kind`, `hostname`, `binary`, `repo_root`, normalized origin, and
+enrolled `agent_id`. **`head` is excluded** so ordinary git commits and
+checkouts cannot become `runner_mismatch` or demote an authoritative blob.
+Spawn still uses origin (`expected_origin`); a ticket that pins a SHA checks
+that SHA in T-686 spawn, not in auth merge. Missing `execution_context` on a
+legacy T-610 blob means **not authoritative**.
 
 Seat identity is first-class: `execution_context.agent_id` (enrolled seat)
 must equal process `TICKET_AGENT` (`ticket_agent`). Live 2026-09-10: the
@@ -86,14 +91,18 @@ missing / timeout without a transport error). Never classify auth as quota.
 
 `merge_auth_check(previous, incoming, runner_ctx)`:
 
-- Incoming probe with a non-matching context cannot replace an authoritative
-  runner `ready` (or other authoritative non-ready diagnosis from the runner).
+- Incoming probe with a non-matching context cannot replace **any**
+  authoritative runner blob (not only `ready`). Sandbox `ready` must not
+  clobber host `quota` / `login_required` / `expired`.
 - Matching-context probes replace the stored blob.
-- Persistent seats (`lifecycle=persistent`, T-683): on
-  `login_required|expired|quota|network|unavailable`, `retry_model=false`,
-  retain queued work, dedupe **one** operator alert via
+- Persistent seats (`lifecycle=persistent`, T-683): on every no-spend
+  state (`login_required|expired|quota|network|unavailable|unsupported`),
+  `retry_model=false`, retain queued work, dedupe **one** operator alert via
   `alert_id=auth:<agent_id>:<state>:<profile_ref>`, resume **once** after
-  `ready`. Ephemeral seats still do not spend a model turn on failed preflight.
+  `ready`. `pause.operator_path` is `login` (login/expired), `quota`,
+  `network`, `unavailable` (binary/identity), or `unsupported` (adapter must
+  declare a zero-model check — never treat as login, never retry a model).
+  Ephemeral seats still do not spend a model turn on failed preflight.
 
 ## Schema / CLI / UI migration from `auth_check`
 
@@ -129,7 +138,8 @@ when the ticket says so. `spawn_repo_identity_ok`:
 - If the worktree already exists, its origin must match too.
 - `dirname(board)` is not the repo identity (Steer board + Atman worktree).
 - `TICKET_AGENT` must equal the enrolled seat name. A generic `cursor` child
-  on an `atman-auth-v2` seat is a failed preflight.
+  on an `atman-auth-v2` seat is a failed preflight. `validate_auth_check`
+  requires `execution_context.ticket_agent == execution_context.agent_id`.
 
 ## Acceptance gates (deterministic)
 
