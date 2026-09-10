@@ -13,6 +13,9 @@ visitors at a machine-local demo.
 
 Visual: dark `#0c0e12`, bone type, brass CTA — command-board / team roster.
 Formation-dot mark. No lime, grid wallpaper, or Claude-only onboarding.
+Public copy is product-only: team runtime plus shipped Team knowledge
+(decisions, artifacts, dependency notes, recovery). Do not present
+research layers on this page.
 
 The dashboard image lives under `landing/assets/` so a deploy that publishes
 only this directory can still load the capture.

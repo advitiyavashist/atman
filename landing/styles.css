@@ -460,12 +460,36 @@ figcaption { margin-top: 0.75rem; color: var(--mute); font-size: 0.76rem; }
   border-radius: 0.5rem;
   background: var(--card);
 }
-.layers .layer-current {
+.layers .layer-current,
+.layers .layer-knowledge {
   grid-column: 1 / -1;
+}
+.layers .layer-current {
   border-color: rgb(196 180 154 / 38%);
 }
+.product-flow {
+  margin: 1.1rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.65rem;
+}
+.product-flow li {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--mute);
+  font-size: 0.88rem;
+}
+.product-flow strong {
+  display: block;
+  color: var(--fg);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
 .layers .status { color: var(--mute); }
-.layers .layer-current .status { color: var(--accent); }
+.layers .layer-current .status,
+.layers .layer-knowledge .status { color: var(--accent); }
 .layers h3 { margin: 2.2rem 0 0.55rem; font-size: 1.15rem; }
 .layers p:last-of-type { margin: 0; color: var(--mute); font-size: 0.88rem; }
 .layers ul {
@@ -614,7 +638,8 @@ footer > a:last-child:hover { color: var(--fg); }
   .surface-grid .span-2 { grid-column: auto; }
   .lanes ol { grid-template-columns: 1fr 1fr; }
   .layers { grid-template-columns: 1fr; }
-  .layers .layer-current { grid-column: auto; }
+  .layers .layer-current,
+  .layers .layer-knowledge { grid-column: auto; }
   .start { grid-template-columns: minmax(0, 1fr); }
   .terminal pre { font-size: 0.68rem; }
   footer { align-items: flex-start; flex-direction: column; justify-content: center; }

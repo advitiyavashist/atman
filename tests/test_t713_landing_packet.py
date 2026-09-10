@@ -92,9 +92,17 @@ def test_example_roster_does_not_lock_claude_as_the_only_first_seat():
     assert "Claude Code as the first seat" not in LANDING
 
 
-def test_brahman_is_research_not_required():
-    assert "Brahman · research" in LANDING
-    assert "not required" in LANDING.lower()
+def test_landing_is_product_only_without_research_layer():
+    lowered = LANDING.lower()
+    assert "Brahman" not in LANDING
+    assert "model communication" not in lowered
+    assert "kv-cache" not in lowered
+    assert "prefill" not in lowered
+    assert "Team knowledge" in LANDING
+    assert "Decisions already made" in LANDING
+    assert "Artifacts (paths, SHAs, reports)" in LANDING
+    assert "Dependency notes on blocked work" in LANDING
+    assert "Recovery: claim, blocker, next step" in LANDING
 
 
 def test_keeps_local_mit_formation_dots_and_distinct_dark_brand():

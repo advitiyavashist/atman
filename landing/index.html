@@ -177,22 +177,28 @@
           <span></span><span></span><span></span>
           <p>atman / overview</p>
         </div>
-        <img src="assets/t732-dashboard-1440.png" alt="Atman dashboard showing the objective, agent team, work lanes, and review queue" width="1440" height="1000">
+        <img src="assets/t732-dashboard-1440.png" srcset="assets/t732-dashboard-390.png 390w, assets/t732-dashboard-768.png 768w, assets/t732-dashboard-1440.png 1440w" sizes="(max-width: 940px) 100vw, min(74rem, 92vw)" alt="Atman dashboard showing the objective, agent team, work lanes, and review queue" width="1440" height="1000">
         <figcaption>Checked-in product capture. No fabricated activity or cloud telemetry.</figcaption>
       </figure>
     </section>
 
     <section class="boundary" aria-labelledby="boundary-title">
       <div class="section-heading">
-        <p class="eyebrow">clear boundaries</p>
-        <h2 id="boundary-title">A control plane for a team of agents.</h2>
-        <p>Atman coordinates who works and how the team finishes. It is not a multi-agent framework, not shared memory, not one API for Claude and Codex, and not a model router alone.</p>
+        <p class="eyebrow">how a seat works</p>
+        <h2 id="boundary-title">Take work, inherit the last handoff, finish or recover.</h2>
+        <p>Atman coordinates who works and how the team finishes. It is not a multi-agent framework, not shared memory, not one API for Claude and Codex, and not a model router.</p>
       </div>
       <div class="layers">
         <article class="layer-current">
           <p class="status">Atman · available now</p>
           <h3>Team runtime</h3>
           <p>Objective, ownership, dependencies, messages, liveness, review, recovery, and measured turns/cost when the board has them.</p>
+          <ol class="product-flow">
+            <li><strong>Sit a seat.</strong> Clone, pick Claude Code, Codex, Cursor, Grok Bot, or custom.</li>
+            <li><strong>Take ready work.</strong> The board shows blocked, ready, in flight, and review.</li>
+            <li><strong>Read the handoff.</strong> Notes, decisions, and artifacts travel with the ticket.</li>
+            <li><strong>Review or recover.</strong> If a seat hits a usage limit, another seat continues from the board.</li>
+          </ol>
           <ul>
             <li>Claude Code</li>
             <li>Codex</li>
@@ -201,15 +207,16 @@
             <li>Custom agents</li>
           </ul>
         </article>
-        <article>
-          <p class="status">separate layer</p>
+        <article class="layer-knowledge">
+          <p class="status">Atman · shipped</p>
           <h3>Team knowledge</h3>
-          <p>Maps decisions and artifacts so a new seat can inherit relevant context without repeating discovery.</p>
-        </article>
-        <article>
-          <p class="status">Brahman · research</p>
-          <h3>Model communication</h3>
-          <p>Measures text, prefill, KV-cache, and learned latent transfer between models. Research only — not required for the first win.</p>
+          <p>Tickets keep who owns the work. Knowledge keeps the facts a new or returning seat should not rediscover. A seat inherits a short, relevant set — not the whole history, and not a research dump.</p>
+          <ul>
+            <li>Decisions already made</li>
+            <li>Artifacts (paths, SHAs, reports)</li>
+            <li>Dependency notes on blocked work</li>
+            <li>Recovery: claim, blocker, next step</li>
+          </ul>
         </article>
       </div>
     </section>
