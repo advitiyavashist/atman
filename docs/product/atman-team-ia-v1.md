@@ -6,8 +6,9 @@ Atman is a runtime for teams of agents you already bring. One-liner: *Bring the 
 
 | | |
 |---|---|
-| **IS** | Runtime for teams of agents you already bring. Feels like TEAM: objective → allocate → concurrent → handoffs → review → replan. North star = task completion in fewest turns. BYOA = bring-your-own-agent *harness*, not install our model. |
-| **NOT** | Multi-agent framework. Shared-memory product. One API for Claude/Codex. Model router alone. DAG toy. |
+| **IS** | Runtime for teams of agents you already bring. Feels like TEAM: objective → allocate → concurrent → handoffs → review → replan. First seat is any of Claude Code, Codex, Cursor, Grok Bot, custom. BYOA = bring-your-own-agent *harness*, not install our model. |
+| **NOT** | Agent swarms. Multi-agent framework. Shared-memory product. One API for Claude/Codex. Model router alone. DAG toy. Claude-only first seat. |
+| **Secondary** | Task completion in fewest turns at least measured cost — not the homepage claim. |
 | **Language** | teammates, lanes, next step, handoff — not nodes / edges / SDK. |
 | **Don't** | Promise a learned router or shadow optimizer as V1 brand. No compliance / shield / enforce chrome. Don't collapse Atman into tickets-CLI marketing — the product is the team runtime; the CLI is how it runs today. |
 

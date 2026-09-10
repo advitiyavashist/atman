@@ -14,7 +14,9 @@ BANNED = (
     "memory brain",
     "localhost:8765",
     "127.0.0.1",
-    "Steer",
+    "task graph",
+    "DAG",
+    "Claude Code is an example, not a requirement",
 )
 
 STEER_CHROME = (
@@ -29,10 +31,14 @@ def _start_block():
     return LANDING[start:]
 
 
-def test_hero_leads_with_team_runtime_line():
+def test_hero_leads_with_category_then_team_runtime_line():
     hero = LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
-    assert "Bring the agents you already use" in hero
-    assert "We make them one team" in hero
+    lede = LANDING[LANDING.index('class="lede"') : LANDING.index('class="ctas"')]
+    assert "local control plane" in hero.lower()
+    assert "one repo" in hero.lower()
+    assert "Bring the agents you already use" in lede
+    assert "We make them one team" in lede
+    assert "fewest turns" not in hero.lower()
 
 
 def test_fewest_turns_and_cost_are_secondary_dashes():
@@ -45,10 +51,11 @@ def test_fewest_turns_and_cost_are_secondary_dashes():
     assert "measured cost" in LANDING.lower()
 
 
-def test_claude_code_is_example_not_requirement():
-    assert "Claude Code is an example, not a requirement" in LANDING
+def test_claude_code_is_example_first_seat_not_requirement():
+    assert "Example first seat" in LANDING
     assert "Sit Claude Code first" not in LANDING
     assert "Sit Claude Code." not in LANDING
+    assert "Claude Code is an example, not a requirement" not in LANDING
 
 
 def test_provider_order_is_claude_codex_cursor_grok_custom():
@@ -102,12 +109,15 @@ def test_surfaces_explain_team_ia():
     assert "No silent auto-promote" in LANDING or "does not silently auto-promote" in LANDING
 
 
-def test_visual_tokens_are_navy_action_blue_not_steer_lime():
-    assert "--bg: #0a0e14" in CSS
-    assert "--acc: #4d7cff" in CSS
+def test_visual_tokens_are_bone_brass_not_steer_lime():
+    assert "--bg: #0c0e12" in CSS
+    assert "--accent: #c4b49a" in CSS
+    assert "--fg: #ece8e1" in CSS
     assert "--warn: #e0a53d" in CSS
-    assert "--live: #5ec7b0" in CSS
+    assert "--live: #6f9e96" in CSS
     assert "#c8f04a" not in CSS
+    assert "#0a0e14" not in CSS
+    assert "#4d7cff" not in CSS
     assert "radial-gradient" not in CSS
     assert "4.5rem 4.5rem" not in CSS
     assert LANDING.count("<circle ") >= 10

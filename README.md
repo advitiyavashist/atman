@@ -2,26 +2,25 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<h1 align="center">Bring your agents. Make them one team.</h1>
+<h1 align="center">A local control plane for coding agents in one repo.</h1>
 
 <p align="center">
-  Atman is an open, local runtime for managing Claude Code, Codex, Cursor, Grok,
-  local models, and your own agent harnesses around one objective.
+  Atman is the local team runtime for multiple coding agents in one repo.
+  Bring the agents you already use — Claude Code, Codex, Cursor, Grok Bot,
+  or custom. We make them one team.
 </p>
 
-<p align="center"><strong>Finish more work at least cost — in the fewest turns.</strong></p>
+<p align="center"><strong>Fewest turns and measured cost stay secondary.</strong> Values stay <code>—</code> until a done ticket reports (unknown ≠ 0).</p>
 
-Give Atman an objective. It assigns ready work, carries the relevant handoff
-context, watches liveness and limits, routes messages, and holds finished work
-for review. The result is a team you can understand and recover when a model,
-session, or machine stops.
+Give Atman an objective. Sit any first seat. It assigns ready work, carries the
+relevant handoff context, watches liveness and limits, routes messages, and
+holds finished work for review. Recover when a model, session, or machine
+stops — do not restart from chat history.
 
 ![Atman dashboard showing an objective, agent team, dependency-aware work, and review queue](docs/brand/evidence/t606-atman-dark-desktop.png)
 
-The dashboard above is a checked-in product capture. See it live with
-`tickets ui` → <http://127.0.0.1:8765>. The hero is median turns and
-yield@cost. Values stay `—` until a done ticket reports (unknown ≠ 0). It is
-not a public hosted demo.
+The dashboard above is a checked-in product capture. Open it locally with
+`tickets ui`. It is not a public hosted demo.
 
 ## What Atman manages
 
@@ -30,7 +29,7 @@ of:
 
 | Part | What Atman needs to know |
 | --- | --- |
-| Intelligence | Model or agent harness: Claude Code, Codex, Cursor, Grok, a local model, or your own runner |
+| Intelligence | Model or agent harness: Claude Code, Codex, Cursor, Grok Bot, a local model, or your own runner |
 | Working context | Current objective, task, dependency handoffs, messages, standing briefs, and relevant reviewed knowledge |
 | Operating boundary | Tools, permissions, worktree, time budget, and usage quota |
 | Capability | What the seat can do, such as backend work, browser checks, Docker, or GPU jobs |
@@ -132,8 +131,8 @@ cd ~/tickets
 Check what is actually running: `tickets self` (script path, PATH entry, release
 status). `tickets --version` prints the pinned commit or flags drift.
 
-Optional, Claude Code: add a `SessionStart` hook so every session sees the
-board (see `install.sh`).
+Any first seat: hook Claude Code, Codex, Cursor, Grok Bot, or a custom
+harness (see `install.sh` and [Bring your own agent](docs/byoa.md)).
 
 `tickets ui` prints the local address for the read-only dashboard. For the full
 captured session, read [A first session](docs/first-session.md).
