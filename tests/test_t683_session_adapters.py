@@ -139,6 +139,36 @@ def test_claude_register_and_wake(board, cache_dir, sock_dir):
     assert payload and "please act" in payload
 
 
+
+def test_codex_app_server_start_is_woken(board, cache_dir, monkeypatch, tmp_path):
+    """Managed app-server queue/start elevates Codex poke to woken (Claude bar)."""
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock = tmp_path / "app-server-control.sock"
+    sock.write_text("")  # exists check only; RPC is mocked
+    monkeypatch.setenv("CODEX_APP_SERVER_CONTROL_SOCK", str(sock))
+    sa = _adapters()
+    sa.write_endpoint(str(board), "codex-seat", {
+        "seat": "codex-seat", "provider": "codex", "mode": "native",
+        "thread": "thread-live", "pid": os.getpid(), "at": "now",
+        "heartbeat_epoch": time.time()})
+    with mock.patch("subprocess.run") as run_mock:
+        run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(sa, "_codex_queue_start", return_value=True):
+            label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
+    assert label == "woken"
+    assert sa.has_live_native_session(str(board), "codex-seat") is True
+
+
+def test_codex_retained_without_control_sock_does_not_block_watch(board, cache_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    monkeypatch.delenv("CODEX_APP_SERVER_CONTROL_SOCK", raising=False)
+    sa = _adapters()
+    sa.write_endpoint(str(board), "codex-seat", {
+        "seat": "codex-seat", "provider": "codex", "mode": "native",
+        "thread": "thread-old", "pid": None, "at": "now", "heartbeat_epoch": 1})
+    assert sa.has_live_native_session(str(board), "codex-seat") is False
+
+
 def test_codex_queue_wake_uses_thread(board, cache_dir, monkeypatch):
     monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
     sa = _adapters()
@@ -149,7 +179,8 @@ def test_codex_queue_wake_uses_thread(board, cache_dir, monkeypatch):
     with mock.patch("subprocess.run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
         label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
-    assert label == "queued"
+    # Without app-server control sock, sqlite enqueue is queued-offline not woken.
+    assert label == "queued-offline"
     args = run_mock.call_args[0][0]
     assert args[:4] == ["codex", "queue", "--thread", "thread-abc"]
     assert args[5] == "hello"
@@ -482,7 +513,8 @@ def test_pidless_codex_endpoint_expires_without_heartbeat(board, cache_dir, monk
     assert retained is not None and retained.get("thread") == "thread-old"
     assert sa.public_adapter_state(str(board), "codex-seat", "codex", False, False)[
         "adapter_native_online"] is False
-    assert sa.has_live_native_session(str(board), "codex-seat") is True
+    # Retained thread identity must not suppress watch: queue≠pause→resume.
+    assert sa.has_live_native_session(str(board), "codex-seat") is False
 
 
 def test_wake_delivery_is_deduped_by_message_id(board, cache_dir, sock_dir, monkeypatch):
@@ -544,7 +576,7 @@ def test_codex_persistent_ceo_stub_queue_shape(board, cache_dir, monkeypatch):
     with mock.patch("subprocess.run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
         label = sa.wake_seat(str(board), "codex-ceo", "hello")
-    assert label == "queued"
+    assert label == "queued-offline"
     args = run_mock.call_args[0][0]
     assert args[:4] == ["codex", "queue", "--thread", "thread-ceo"]
 
@@ -936,10 +968,13 @@ def test_pidless_codex_reconnects_and_first_wake_keeps_thread(board, cache_dir, 
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
         label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex",
                              message_id="after-idle")
-    assert label == "queued"
+    assert label == "queued-offline"
     live, _ = sa.live_endpoint(str(board), "codex-seat")
-    assert live is not None
-    assert live.get("last_delivery_id") == "after-idle"
+    # Retained pid-less identity may be TTL-stale; delivery still recorded on endpoint.
+    stored = sa.read_endpoint(str(board), "codex-seat")
+    assert stored is not None
+    assert stored.get("last_delivery_id") == "after-idle"
+    assert stored.get("last_delivery_status") == "queued-offline"
 
 
 def test_concurrent_same_message_id_pokes_once(board, cache_dir, sock_dir, monkeypatch):

@@ -6319,8 +6319,9 @@ def cmd_msg(a, board):
 
 
 def _native_wake_succeeded(label):
+    # "queued" / "queued-offline" are durable enqueue, not Claude-parity wake.
     return bool(label) and (
-        label in ("woken", "queued", "deduped") or str(label).startswith("supervised"))
+        label in ("woken", "deduped") or str(label).startswith("supervised"))
 
 
 def _native_injection_failed(label):
