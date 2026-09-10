@@ -27,6 +27,7 @@ import argparse
 import errno
 import glob
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -748,32 +749,33 @@ def agents_dir(board):
     return os.path.join(board, "agents")
 
 
-def checkin(board, owner, ticket=None, note=""):
-    """Record where this agent is working: cwd, worktree root, branch, sha."""
-    _drop_unowned_agent_ticket(board, owner)
-    g = git_state() or {}
-    fields = {
-        "owner": owner,
-        "cwd": os.getcwd(),
-        "worktree": g.get("top", ""),
-        "branch": g.get("branch", ""),
-        "sha": g.get("sha", ""),
-        "dirty": g.get("dirty", 0),
-        "ticket": ticket if ticket is not None else _current_ticket(board, owner),
-        "note": note,
-        "seen": now(),
-    }
-    # inbox_seen, joined_at, limit, stop_blocks and future fields live here;
-    # merge into the existing record instead of rebuilding it (T-418 / root 9c5c606).
-    rec = _agent_rec(board, owner) or {}
-    rec.update(fields)
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f, indent=2)
-    os.replace(tmp, path)
-    return rec
+def _root_tickets():
+    """Load the repo-root tickets.py delivery path (T-492).
+
+    The packaged console script must not keep a second checkin/_apply body.
+    Root tickets.py is not in the installed wheel, so fall back to the
+    checkout copy two directories above this file when `import tickets`
+    is unavailable.
+    """
+    existing = sys.modules.get("tickets")
+    if existing is not None and getattr(existing, "checkin", None) is not None:
+        return existing
+    try:
+        import tickets as root
+        return root
+    except ImportError:
+        pass
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tickets.py"))
+    spec = importlib.util.spec_from_file_location("tickets", path)
+    if spec is None or spec.loader is None or not os.path.isfile(path):
+        raise ImportError("T-492: cannot load root tickets.py from %s" % path)
+    root = importlib.util.module_from_spec(spec)
+    sys.modules["tickets"] = root
+    spec.loader.exec_module(root)
+    return root
+
+
+checkin = _root_tickets().checkin
 
 
 def _clear_agent_ticket(board, agent, tid):
