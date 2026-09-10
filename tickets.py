@@ -33,6 +33,7 @@ import re
 import shlex
 import sys
 import threading
+import uuid
 from datetime import datetime, timezone
 
 # Immutable releases verify every shipped byte before dispatch.  Do not add
@@ -809,13 +810,21 @@ def load_objective(board):
 
 OBJECTIVE_STATES = ("active", "achieved", "blocked", "replaced")
 STOP_CONDITION = (
-    "unattended watchers only: one model run then stop; restart watch to continue "
-    "(--persist or --max-runs 0 to loop). Interactive Codex/Claude master sessions stay open."
+    "unattended task-only watchers run one model run then stop; continuous/scheduled adapters "
+    "stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter."
 )
+WAKE_MODES = ("task-only", "continuous", "scheduled")
+LIFECYCLES = ("persistent", "ephemeral")
 WAKE_KEYS = frozenset({
     "holding", "suggested_for_me", "ready_in_my_lane",
     "task_messages", "stuck_messages", "drive", "forced",
 })
+WAKE_MESSAGE_LIMIT = 5
+WAKE_MESSAGE_MAX_CHARS = 320
+REMOTE_LEASE_TTL = 30
+REMOTE_MAX_ATTEMPTS = 3
+REMOTE_LONG_POLL_MAX = 30
+LOCAL_DISPATCH_MAX_ATTEMPTS = 3
 
 
 def objective_state(obj):
@@ -916,19 +925,55 @@ def _notify_review_submitted(board, author, tid, text, master_state=None):
     return master_name, cos_name
 
 
-def spawn_watch_max_runs(cos=False, persist=False, max_runs=None):
+def spawn_watch_max_runs(wake_mode="task-only", persist=False, max_runs=None):
     """Watch --max-runs for `tickets spawn`. 0 loops until spawn --stop.
 
-    CoS is persistent by default. An explicit --max-runs (including 1 for
-    one-shot) overrides that. --persist always loops. Workers default to 1.
+    A seat's durable wake policy, rather than its harness brand, decides
+    whether the adapter remains online. An explicit --max-runs (including 1
+    for a diagnostic one-shot) overrides that. --persist always loops.
     """
     if persist:
         return 0
     if max_runs is not None:
         return int(max_runs)
-    if cos:
+    if wake_mode in ("continuous", "scheduled"):
         return 0
     return 1
+
+
+def wake_mode_of(board, owner, master_state=None, workforce=None):
+    """Effective durable wake policy for one seat.
+
+    Existing boards need no migration: an explicit workforce value wins;
+    otherwise the current master and CoS inherit the continuous default and
+    every other seat stays task-only. The setting is harness-neutral, so the
+    same policy applies to Claude, Codex, Cursor, or a remote/custom bridge.
+    """
+    wf = workforce if workforce is not None else _safe(lambda: load_workforce(board), {})
+    configured = ((wf or {}).get(owner, {}) or {}).get("wake_mode")
+    if configured in WAKE_MODES:
+        return configured
+    state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+        return "continuous"
+    return "task-only"
+
+
+def lifecycle_of(board, owner, master_state=None, workforce=None):
+    """Effective seat lifecycle, separate from wake_mode and session_id.
+
+    Explicit workforce.lifecycle wins. Otherwise the current master and CoS
+    migrate to persistent; every other seat stays ephemeral. A persistent seat
+    may still be task-only, continuous, or scheduled.
+    """
+    wf = workforce if workforce is not None else _safe(lambda: load_workforce(board), {})
+    configured = ((wf or {}).get(owner, {}) or {}).get("lifecycle")
+    if configured in LIFECYCLES:
+        return configured
+    state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+        return "persistent"
+    return "ephemeral"
 
 
 def hours_since(stamp):
@@ -2917,6 +2962,38 @@ def _run_file(board, owner):
 _RUN_BEAT_LOCK = threading.Lock()
 
 
+class _RunFileLock:
+    """Serialize one agent's run receipt across watcher and operator CLIs.
+
+    The stable sidecar is required because the receipt itself is published
+    with ``os.replace``. Locking the receipt would lock the old inode and let
+    another process enter through the replacement inode.
+    """
+
+    def __init__(self, board, owner):
+        self.path = _run_file(board, owner) + ".lock"
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - Windows keeps thread safety
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
 def _run_beat(board, owner, **fields):
     """Write the in-run heartbeat.
 
@@ -2925,7 +3002,15 @@ def _run_beat(board, owner, **fields):
     and a heartbeat thread rewriting it every few seconds would race them and
     silently drop whatever the child had just written (inbox_seen, limit,
     ticket). One watcher per agent holds the pid lock, so this file has a
-    single writer.
+    single logical writer. Operator commands such as ``spawn --stop`` are a
+    second process, so the complete receipt transaction also takes the stable
+    ``.run.lock`` sidecar below.
+
+    Updates are generation-fenced. `_run_begin(..., _new_run=True)` advances
+    `generation` and may set active=True. A late heartbeat after stop/end
+    (same or missing generation) cannot resurrect active=True once the
+    receipt is closed — including when spawn --stop already found no live
+    watcher.
     """
     try:
         os.makedirs(agents_dir(board), exist_ok=True)
@@ -2934,14 +3019,42 @@ def _run_beat(board, owner, **fields):
         # can overlap: the lock keeps a read-modify-write whole, and the tmp
         # name is per-writer so two overlapping writers cannot truncate each
         # other's scratch file and leave a spliced record on disk.
+        new_run = bool(fields.pop("_new_run", False))
         with _RUN_BEAT_LOCK:
-            rec = _read_run(board, owner)
-            rec.update(fields)
-            rec["beat"] = now()
-            tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
-            with open(tmp, "w") as f:
-                json.dump(rec, f)
-            os.replace(tmp, path)
+            # A watcher heartbeat and ``spawn --stop`` run in different
+            # processes. The generation check must share the same
+            # inter-process critical section as the read and replace or a
+            # heartbeat can publish a stale active=True snapshot after stop.
+            with _RunFileLock(board, owner):
+                rec = _read_run(board, owner)
+                try:
+                    current_gen = int(rec["generation"]) if rec.get("generation") is not None else 0
+                except (TypeError, ValueError):
+                    current_gen = 0
+                incoming_gen = fields.get("generation")
+                try:
+                    incoming_gen = int(incoming_gen) if incoming_gen is not None else None
+                except (TypeError, ValueError):
+                    incoming_gen = None
+                want_active = fields.get("active")
+                was_active = rec.get("active")
+                if new_run:
+                    fields["generation"] = current_gen + 1
+                    fields.setdefault("interrupted", False)
+                    fields.setdefault("ended", "")
+                    fields.setdefault("rc", None)
+                elif incoming_gen is not None and incoming_gen < current_gen:
+                    return
+                elif want_active is True and was_active is False:
+                    return
+                elif want_active is False and was_active is not False:
+                    fields.setdefault("generation", current_gen + 1)
+                rec.update(fields)
+                rec["beat"] = now()
+                tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+                with open(tmp, "w") as f:
+                    json.dump(rec, f)
+                os.replace(tmp, path)
     except OSError:
         pass
 
@@ -2955,13 +3068,43 @@ def _read_run(board, owner):
         return {}
 
 
-def _run_begin(board, owner, run_no, cwd):
-    _run_beat(board, owner, pid=os.getpid(), run=run_no, cwd=cwd,
-              started=now(), active=True, rc=None, ended="")
+def _run_begin(board, owner, run_no, cwd, run_id="", ticket=""):
+    fields = dict(pid=os.getpid(), run=run_no, cwd=cwd,
+                  started=now(), active=True, rc=None, ended="",
+                  _new_run=True)
+    if run_id:
+        fields["run_id"] = run_id
+    if ticket:
+        fields["ticket"] = ticket
+    _run_beat(board, owner, **fields)
 
 
 def _run_end(board, owner, run_no, rc):
     _run_beat(board, owner, run=run_no, active=False, rc=rc, ended=now())
+
+
+def _mark_run_interrupted(board, owner):
+    """Clear a recorded in-flight run after spawn --stop or a dead PID."""
+    rec = _read_run(board, owner)
+    if not rec:
+        return
+    _run_beat(board, owner, active=False, interrupted=True, ended=now())
+
+
+def _finalize_active_watch_run(board, owner, rc=143):
+    """SIGTERM/finally must not leave active=True without a run-end stamp."""
+    rec = _read_run(board, owner)
+    if not rec.get("active"):
+        return False
+    ended = now()
+    _run_beat(board, owner, active=False, interrupted=True, rc=rc, ended=ended)
+    _safe(lambda: traj_event(
+        board, "run_end", agent=owner, ticket=rec.get("ticket") or None,
+        run_no=rec.get("run"), run_id=rec.get("run_id") or None,
+        exit=rc, interrupted=True, outcome="interrupted",
+        started_at=rec.get("started") or None, ended_at=ended,
+        worktree=rec.get("cwd") or None), None)
+    return True
 
 
 # ---- ground truth per tool ---------------------------------------------
@@ -4823,6 +4966,8 @@ def cmd_who(a, board):
                            {"state": "unknown", "detail": "liveness read failed",
                             "source": "none", "heuristic": True}))
         for r in agents)
+    wf = load_workforce(board)
+    sa = _session_adapters()
     print("%-14s %-9s %-8s %-30s %-20s %s" % ("agent", "state", "loop-seen", "branch@sha", "ticket", "worktree"))
     for r in sorted(agents, key=lambda r: r.get("seen", ""), reverse=True):
         tid = r.get("ticket") or ""
@@ -4856,6 +5001,21 @@ def cmd_who(a, board):
                                                         (", back %s" % lim["until"]) if lim.get("until") else ""))
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
+        entry = wf.get(r["owner"], {}) or {}
+        harness_name = entry.get("harness") or entry.get("tool") or "claude"
+        ep, _ = sa.live_endpoint(board, r["owner"])
+        life = lifecycle_of(board, r["owner"], workforce=wf)
+        native = bool(ep) and (ep or {}).get("mode") == "native"
+        watcher_on = bool(lv.get("watcher") if lv else False)
+        remote_on = False
+        if harness_name == "remote":
+            remote_on = _remote_lease_online(load_remote_state(board, r["owner"]))
+        reachable = sa.is_reachable(native_online=native, watcher_online=watcher_on,
+                                    remote_online=remote_on)
+        print("%-14s lifecycle=%s provider=%s session=%s reachable=%s" % (
+            "", life, (ep or {}).get("provider") or harness_name,
+            (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
+            "yes" if reachable else "no"))
     # collisions
     by_branch = {}
     for r in agents:
@@ -5683,7 +5843,8 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
     _rotate_messages_if_big(board)
     to, mentions, unknown = resolve_to_and_mentions(
         text, to, _registered_handles(board))
-    rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
+           "to": to, "re": re, "text": text}
     if mentions:
         rec["mentions"] = mentions
     kind = (kind or "").strip()
@@ -5754,14 +5915,12 @@ def _agent_rec(board, owner):
 def _msg_id(m):
     """A stable identity for a message record.
 
-    Messages carry no id on the wire, and adding one would change a format
-    that T-213's legacy import round-trips verbatim, so identity is derived
-    from content instead: the same record hashes the same whether it is read
-    from the live file or from a rotated archive, and nothing already on disk
-    has to be migrated. Two byte-identical messages in the same second do
-    share an identity, which is exactly why the boundary list is consumed as
-    a multiset below -- one delivery per occurrence, not per distinct value.
+    New records carry an id so at-least-once replay can be deduplicated. Legacy
+    records keep their content-derived identity and multiset behavior; no old
+    board needs a migration and lossless legacy import stays unchanged.
     """
+    if m.get("id"):
+        return str(m["id"])
     raw = json.dumps([m.get("at", ""), m.get("from", ""), m.get("to", ""),
                       m.get("re", ""), m.get("text", "")], sort_keys=True)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -5957,7 +6116,11 @@ def _is_unread(m, since, remaining):
         return False
     k = _msg_id(m)
     if remaining.get(k):
-        remaining[k] -= 1
+        # Explicit IDs are delivery identities: every replay of the same
+        # record is already seen. Legacy content hashes remain a multiset so
+        # two old, byte-identical sends are still delivered twice.
+        if not m.get("id"):
+            remaining[k] -= 1
         return False
     return True
 
@@ -6013,7 +6176,17 @@ def _inbox_scan(board, owner):
     visible = _visible_after_join(
         [m for m in msgs if _addressed(m, owner, registered)],
         owner, joined)
-    out = [m for m in visible if _is_unread(m, since, remaining)]
+    out = []
+    explicit_ids = set()
+    for message in visible:
+        if not _is_unread(message, since, remaining):
+            continue
+        explicit = message.get("id")
+        if explicit and explicit in explicit_ids:
+            continue
+        if explicit:
+            explicit_ids.add(explicit)
+        out.append(message)
     watermark = max([m.get("at", "") for m in msgs] or [""])
     ceiling = now()
     if watermark > ceiling:
@@ -6031,7 +6204,17 @@ def _inbox_scan(board, owner):
     # not by history. It is rebuilt from the file rather than carried forward,
     # because a message delivered on an EARLIER poll is no longer in `out` and
     # would otherwise lose its identity and be redelivered.
-    retained = [_msg_id(m) for m in visible if m.get("at", "") >= watermark]
+    retained = []
+    retained_explicit = set()
+    for message in visible:
+        if message.get("at", "") < watermark:
+            continue
+        identity = _msg_id(message)
+        if message.get("id") and identity in retained_explicit:
+            continue
+        if message.get("id"):
+            retained_explicit.add(identity)
+        retained.append(identity)
     return out, watermark, retained
 
 
@@ -6095,10 +6278,26 @@ def fmt_msg(m):
     return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
 
 
+def _message_wakes_seat(board, seat, message):
+    """Whether a posted message should attempt a native session wake for seat."""
+    obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+    return (_message_wakes(message, obj_state)
+            or _continuous_message_wakes(board, seat, message))
+
+
+def _session_adapters():
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import session_adapters as mod
+    return mod
+
+
 def cmd_msg(a, board):
     sender = whoami(a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
+    # Board first, native wake second: the board is the source of truth.
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
                      task=bool(getattr(a, "task", False)))
     unknown = m.pop("_unregistered_implicit", None)
@@ -6106,6 +6305,95 @@ def cmd_msg(a, board):
         print("WARNING: @handle %s is not a registered agent, message broadcast."
               % unknown)
     print("posted: " + fmt_msg(m))
+    to = (m.get("to") or "").strip()
+    if to and _message_wakes_seat(board, to, m):
+        harness = (load_workforce(board).get(to, {}) or {}).get("harness") or "claude"
+        sa = _session_adapters()
+        mid = _msg_id(m)
+        label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
+                             message_id=mid)
+        print("wake: %s -> %s" % (to, label))
+        _safe(lambda: _note_native_wake_result(board, to, label, mid), None)
+
+
+def _native_wake_succeeded(label):
+    """Only a live pause-resume inject counts. queue/poll/supervised is not a PASS."""
+    return bool(label) and label in ("woken", "deduped")
+
+
+def _native_injection_failed(label):
+    """Only refused/stale native injection is a local adapter failure.
+
+    Remote bridge required, no live endpoint, retained-but-offline Codex, and
+    supervised Cursor stay durable queued-offline (T-640).
+    """
+    s = str(label or "")
+    return s.startswith("refused") or s.startswith("stale (rebound")
+
+
+def _note_native_wake_result(board, seat, label, message_id):
+    """Record native wake outcome. Never delete an endpoint by seat name alone."""
+    if _native_wake_succeeded(label):
+        def clear(rec):
+            rec.pop("adapter_failure", None)
+        _agent_update(board, seat, clear)
+        return
+    if not _native_injection_failed(label):
+        return
+    harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+    provider = _session_adapters().provider_for_harness(harness) or harness
+    _agent_set(board, seat, adapter_failure={
+        "state": "failed",
+        "trigger": str(message_id or ""),
+        "reason": "native wake %s" % label,
+        "at": now(),
+        "provider": provider,
+        "harness": harness,
+    })
+
+
+def _adapter_provider(harness_name):
+    """Stable adapter identity for a workforce harness (empty for custom)."""
+    name = harness_name or ""
+    return _session_adapters().provider_for_harness(name) or name
+
+
+def _failure_provider(failure):
+    """Provider/harness stamped on a failure record; empty means legacy unscoped."""
+    failure = failure or {}
+    return failure.get("provider") or _adapter_provider(failure.get("harness") or "")
+
+
+def _local_adapter_failure(rec, harness_name):
+    """Native/watcher refusal is provider-local. Remote seats use the bridge failure only."""
+    failure = (rec or {}).get("adapter_failure") or {}
+    if not failure:
+        return {}
+    current = _adapter_provider(harness_name)
+    scoped = _failure_provider(failure)
+    if (harness_name == "remote" or current == "remote") and scoped != "remote":
+        return {}
+    if scoped and current and scoped != current:
+        return {}
+    return failure
+
+
+def _clear_adapter_failure_on_provider_change(board, owner, new_harness,
+                                             previous_harness=""):
+    """Drop leftover failure when the captured previous provider/harness changes."""
+    rec = _agent_rec(board, owner) or {}
+    if not rec.get("adapter_failure"):
+        return
+    old_key = _adapter_provider(previous_harness)
+    new_key = _adapter_provider(new_harness)
+    scoped = _failure_provider(rec.get("adapter_failure") or {})
+    same_provider = bool(old_key) and old_key == new_key
+    same_harness = bool(previous_harness) and previous_harness == new_harness
+    if (same_provider or same_harness) and (not scoped or scoped == new_key):
+        return
+    def clear(agent):
+        agent.pop("adapter_failure", None)
+    _agent_update(board, owner, clear)
 
 
 def cmd_inbox(a, board):
@@ -6656,13 +6944,46 @@ def cmd_join(a, board):
         entry["cost"] = a.cost
     if a.best_for:
         entry["best_for"] = a.best_for
+    wake_mode = getattr(a, "wake_mode", None)
+    if wake_mode is not None:
+        if wake_mode not in WAKE_MODES:
+            sys.exit("--wake-mode must be one of: %s" % ", ".join(WAKE_MODES))
+        entry["wake_mode"] = wake_mode
+    lifecycle = getattr(a, "lifecycle", None)
+    if getattr(a, "persistent", False):
+        if lifecycle == "ephemeral":
+            sys.exit("--persistent cannot be combined with --lifecycle ephemeral")
+        lifecycle = lifecycle or "persistent"
+    if lifecycle is not None:
+        if lifecycle not in LIFECYCLES:
+            sys.exit("--lifecycle must be one of: %s" % ", ".join(LIFECYCLES))
+        entry["lifecycle"] = lifecycle
+    entry["agent_id"] = owner
     if knowledge_dir:
         entry["knowledge_dir"] = knowledge_dir
     entry.setdefault("can", [])
     entry.setdefault("cost", "medium")
     wf[owner] = entry
     save_workforce(board, wf)
+    if getattr(a, "persistent", False):
+        sa = _session_adapters()
+        reg = sa.register_persistent(board, owner, harness or entry.get("harness") or "claude", now())
+        if reg.get("ok"):
+            pid = (reg.get("record") or {}).get("pid")
+            mode = reg.get("mode") or (reg.get("record") or {}).get("mode") or "native"
+            extra = ("pid %s" % pid if pid else
+                     "no session pid published; liveness follows transport")
+            lease = reg.get("lease_id") or (reg.get("record") or {}).get("lease_id") or ""
+            if lease:
+                extra += "; lease %s" % lease
+            print("persistent: %s %s endpoint registered for %s (%s)" % (
+                mode, reg.get("provider"), owner, extra))
+        else:
+            print("persistent: %s" % reg.get("reason", "registration failed"))
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
+    if harness:
+        _safe(lambda: _clear_adapter_failure_on_provider_change(
+            board, owner, harness, prev_harness), None)
     if first_join:
         # setdefault, not update: if two joins race, the earlier stamp wins and
         # neither can move the watermark forward over unread mail.
@@ -6671,9 +6992,10 @@ def cmd_join(a, board):
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
     root = os.path.dirname(board)
-    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s" % (
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s  lifecycle=%s" % (
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
-        entry.get("harness") or "claude (default)"))
+        entry.get("harness") or "claude (default)", wake_mode_of(board, owner, workforce=wf),
+        lifecycle_of(board, owner, workforce=wf)))
     if entry.get("cmd"):
         print("cmd: %s" % entry["cmd"])
     if entry.get("knowledge_dir"):
@@ -6740,6 +7062,7 @@ def cmd_retire(a, board):
     if owner in wf:
         del wf[owner]
         save_workforce(board, wf)
+    _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
     if owner in roles:
         del roles[owner]
         os.makedirs(board, exist_ok=True)
@@ -6785,6 +7108,9 @@ def pending_work(board, owner):
 
     Keys: messages_to_me, broadcasts (count), holding, suggested_for_me,
     ready_in_my_lane, limited (agent recorded a usage limit; do not wake).
+    For a continuous seat, an ordinary directed message is promoted into the
+    existing task_messages wake queue. The source message remains the receipt
+    and inbox watermark; no parallel queue can drift from it.
     """
     out = {}
     if not owner or not os.path.isdir(board):
@@ -6796,12 +7122,18 @@ def pending_work(board, owner):
     obj = _safe(lambda: load_objective(board), {})
     obj_state = objective_state(obj)
     msgs = _safe(lambda: unread(board, owner), [])
-    direct = [m for m in msgs if m.get("to") == owner or owner in (m.get("mentions") or [])]
+    # unread() already applied registered, case-insensitive addressing and
+    # suppressed the author's own mail. Anything non-broadcast in that result
+    # is therefore a DM or named mention for this seat. This also collapses a
+    # message carrying BOTH --to and @mention to one record / one wake.
+    direct = [m for m in msgs if not is_board_broadcast(m)]
     if direct:
-        out["messages_to_me"] = [fmt_msg(m) for m in direct[-5:]]
-        tasks = [fmt_msg(m) for m in direct if _message_wakes(m, obj_state)]
+        out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
+        tasks = [_wake_message_summary(m) for m in direct
+                 if (_message_wakes(m, obj_state)
+                     or _continuous_message_wakes(board, owner, m))]
         if tasks:
-            out["task_messages"] = tasks[-5:]
+            out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
     elif msgs:
         out["broadcasts"] = len(msgs)
     tickets = _safe(lambda: load_all(board), [])
@@ -6831,13 +7163,13 @@ def pending_work(board, owner):
         # its own counts.
         since = _seen_since(rec)
         _rem = _seen_counts(rec.get("inbox_seen_ids"))
-        stuck = [fmt_msg(x) for x in _visible_after_join(
+        stuck = [_wake_message_summary(x) for x in _visible_after_join(
                      _safe(lambda: load_messages(board), []), owner,
                      rec.get("joined_at", ""))
                  if x.get("from") != owner and _is_unread(x, since, _rem)
                  and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
         if stuck:
-            out["stuck_messages"] = stuck[-5:]
+            out["stuck_messages"] = stuck[-WAKE_MESSAGE_LIMIT:]
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
         if crit:
             out["health_crit"] = [i[1][:80] for i in crit[:3]]
@@ -6856,7 +7188,7 @@ def pending_work(board, owner):
 
 
 def _message_wakes(m, obj_state=""):
-    """Explicit task / stuck / blocked mail wakes a model; ACKs and ordinary DMs do not."""
+    """Harness-neutral base gate: explicit task / stuck / blocked mail wakes every mode."""
     if m.get("source") == "review" and obj_state in ("blocked", "achieved", "replaced"):
         return False
     if m.get("kind") == "task" or m.get("task"):
@@ -6867,9 +7199,52 @@ def _message_wakes(m, obj_state=""):
     return False
 
 
+def _wake_message_summary(message):
+    """Bound message text before it reaches pending JSON, logs, or a prompt."""
+    rendered = fmt_msg(message)
+    if len(rendered) <= WAKE_MESSAGE_MAX_CHARS:
+        return rendered
+    return rendered[:WAKE_MESSAGE_MAX_CHARS - 1] + "…"
+
+
+def _continuous_message_wakes(board, owner, message):
+    """An ordinary DM/@mention wakes only a seat configured continuous.
+
+    Review copies and acknowledgement/status replies remain notification-only;
+    otherwise a master and CoS acknowledging each other can create a paid
+    ping-pong loop. Explicit kind=task still wins through `_message_wakes`.
+    """
+    if wake_mode_of(board, owner) != "continuous" or is_board_broadcast(message):
+        return False
+    if message.get("source") in ("review", "receipt"):
+        return False
+    if message.get("kind") in ("ack", "receipt"):
+        return False
+    text = str(message.get("text") or "").strip().lower()
+    return not text.startswith(("ack", "idle:"))
+
+
 def wake_reason_of(pending):
-    for k in ("forced", "holding", "suggested_for_me", "ready_in_my_lane",
-              "stuck_messages", "task_messages", "drive"):
+    # A newly directed instruction must stay visible even when leadership has
+    # an older board-wide stuck escalation. Both gates remain in `pending`, but
+    # this primary reason drives the UI/log and tells the harness what arrived.
+    if pending.get("forced"):
+        return "forced"
+    tasks = pending.get("task_messages") or []
+    stuck = pending.get("stuck_messages") or []
+    # A directed `stuck:` record appears in both lists. Preserve the established
+    # stuck reason when that is all there is, while allowing any distinct/new
+    # directed instruction to take priority over an older escalation.
+    def _same_as_stuck(summary):
+        return any(s == summary or (summary.endswith("…") and s.startswith(summary[:-1]))
+                   for s in stuck)
+    if tasks and (not stuck or any(not _same_as_stuck(t) for t in tasks)):
+        return "task_messages"
+    if stuck:
+        return "stuck_messages"
+    if tasks:
+        return "task_messages"
+    for k in ("holding", "suggested_for_me", "ready_in_my_lane", "drive"):
         if pending.get(k):
             return k
     return "none"
@@ -6901,9 +7276,12 @@ def _watch_trigger_fingerprint(board, owner, pending):
     parts = []
     if pending.get("messages_to_me"):
         msgs = _safe(lambda: unread(board, owner), []) or []
-        direct = [m for m in msgs
-                  if m.get("to") == owner or owner in (m.get("mentions") or [])]
-        parts.extend("msg:" + _msg_id(m) for m in direct[-5:])
+        direct = [m for m in msgs if not is_board_broadcast(m)]
+        obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+        waking = [m for m in direct
+                  if (_message_wakes(m, obj_state)
+                      or _continuous_message_wakes(board, owner, m))]
+        parts.extend("msg:" + _msg_id(m) for m in waking[-WAKE_MESSAGE_LIMIT:])
     for key in ("holding", "suggested_for_me", "ready_in_my_lane", "review_queue"):
         if key in pending:
             for item in pending[key]:
@@ -6915,6 +7293,392 @@ def _watch_trigger_fingerprint(board, owner, pending):
     if pending.get("drive"):
         parts.append("drive:" + json.dumps(pending["drive"], sort_keys=True))
     return tuple(sorted(parts)) if parts else None
+
+
+# ---- remote adapters: fenced lease, atomic wake claim, measured run --------
+
+class RemoteProtocolError(Exception):
+    pass
+
+
+def _remote_state_path(board, owner):
+    return os.path.join(board, "adapters", owner + ".json")
+
+
+def _remote_epoch():
+    return datetime.now(timezone.utc).timestamp()
+
+
+def _load_remote_state_unlocked(board, owner):
+    try:
+        with open(_remote_state_path(board, owner)) as stream:
+            state = json.load(stream)
+        return state if isinstance(state, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def load_remote_state(board, owner):
+    """Read a remote adapter state record. Invalid seat names have no state."""
+    if not HOOK_AGENT_RE.fullmatch(str(owner or "")):
+        return {}
+    return _load_remote_state_unlocked(board, owner)
+
+
+def _remote_update(board, owner, mutate):
+    """Serialize a remote lease/claim transition and publish it atomically."""
+    path = _remote_state_path(board, owner)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    result = []
+    with _AgentLock(board, owner + ".remote"):
+        state = _load_remote_state_unlocked(board, owner)
+        state.setdefault("schema", 1)
+        state.setdefault("agent", owner)
+        value = mutate(state)
+        temporary = "%s.tmp.%d.%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
+        with open(temporary, "w") as stream:
+            json.dump(state, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        result.append(value)
+    return result[0] if result else None
+
+
+def _remote_lease_online(state, at=None):
+    lease = (state or {}).get("lease") or {}
+    return bool(lease.get("id") and float(lease.get("expires_epoch") or 0) >
+                (at if at is not None else _remote_epoch()))
+
+
+def _remote_public_state(state):
+    """Remote state safe for UI/status; the bearer lease id never leaves it."""
+    state = state or {}
+    lease = state.get("lease") or {}
+    claim = state.get("claim") or {}
+    failure = state.get("failure") or {}
+    return {
+        "online": _remote_lease_online(state),
+        "bridge_id": lease.get("bridge_id", ""),
+        "fence": int(lease.get("fence") or state.get("fence") or 0),
+        "heartbeat_at": lease.get("heartbeat_at", ""),
+        "expires_at": lease.get("expires_at", ""),
+        "claim_id": claim.get("id", ""),
+        "run_id": claim.get("run_id", ""),
+        "run_state": ("recovery-required" if claim.get("recovery_required") else
+                      ("running" if claim.get("started_at") else
+                       ("claimed" if claim else ""))),
+        "attempt": int(claim.get("attempt") or failure.get("attempts") or 0),
+        "failure_state": failure.get("state", ""),
+        "failure_reason": failure.get("reason", ""),
+        "retry_at": failure.get("retry_at", ""),
+        "last_run": state.get("last_run") or {},
+    }
+
+
+def _remote_require_lease(state, lease_id, fence, renew=True):
+    lease = state.get("lease") or {}
+    if not _remote_lease_online(state):
+        raise RemoteProtocolError("adapter lease expired; register again")
+    if lease.get("id") != lease_id or int(lease.get("fence") or 0) != int(fence):
+        raise RemoteProtocolError("stale adapter lease/fence")
+    if renew:
+        ttl = int(lease.get("ttl") or REMOTE_LEASE_TTL)
+        lease["heartbeat_at"] = now()
+        lease["expires_epoch"] = _remote_epoch() + ttl
+        lease["expires_at"] = datetime.fromtimestamp(
+            lease["expires_epoch"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return lease
+
+
+def _remote_trigger_key(fingerprint):
+    if not fingerprint:
+        return ""
+    return hashlib.sha256(json.dumps(list(fingerprint), sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _remote_register(board, owner, bridge_id, ttl, max_attempts, replace=False, worktree=""):
+    ttl = max(5, min(int(ttl or REMOTE_LEASE_TTL), 300))
+    max_attempts = max(1, min(int(max_attempts or REMOTE_MAX_ATTEMPTS), 10))
+
+    def mutate(state):
+        current = state.get("lease") or {}
+        if _remote_lease_online(state):
+            if current.get("bridge_id") != bridge_id:
+                raise RemoteProtocolError("adapter already online under bridge %s" %
+                                          current.get("bridge_id", "unknown"))
+            if not replace:
+                # Register creates a bearer credential. Never disclose the
+                # existing credential to another process merely because it
+                # guessed the same human-readable bridge id. The holder uses
+                # heartbeat for renewal; deliberate same-bridge recovery must
+                # say --replace, which increments the fence and invalidates
+                # the old bearer.
+                raise RemoteProtocolError(
+                    "adapter bridge is already registered; heartbeat it or use --replace")
+        fence = int(state.get("fence") or 0) + 1
+        expiry = _remote_epoch() + ttl
+        lease = {"id": "lease_" + uuid.uuid4().hex, "bridge_id": bridge_id,
+                 "fence": fence, "ttl": ttl, "registered_at": now(),
+                 "heartbeat_at": now(), "expires_epoch": expiry,
+                 "expires_at": datetime.fromtimestamp(
+                     expiry, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "worktree": os.path.abspath(worktree) if worktree else ""}
+        state["fence"] = fence
+        state["lease"] = lease
+        state["max_attempts"] = max_attempts
+        claim = state.get("claim") or {}
+        if claim:
+            claim["fence"] = fence
+            if claim.get("started_at"):
+                # The old process may have crossed an external side-effect
+                # boundary. Require an explicit recovery choice; never run it
+                # twice merely because a network lease expired.
+                claim["recovery_required"] = True
+            else:
+                claim["delivered_at"] = ""
+        return {"status": "online", "lease_id": lease["id"], "fence": fence,
+                "expires_at": lease["expires_at"], "reused": False,
+                "recovery_required": bool(claim.get("recovery_required"))}
+
+    return _remote_update(board, owner, mutate)
+
+
+def _remote_claim_once(board, owner, lease_id, fence, prompt_kind=""):
+    pending = pending_work(board, owner)
+    fingerprint = _watch_trigger_fingerprint(board, owner, pending) if actionable(pending) else None
+    trigger_key = _remote_trigger_key(fingerprint)
+
+    def mutate(state):
+        lease = _remote_require_lease(state, lease_id, fence)
+        claim = state.get("claim") or {}
+        if claim:
+            if claim.get("recovery_required"):
+                return {"status": "recovery-required", "claim_id": claim.get("id"),
+                        "run_id": claim.get("run_id"), "fence": int(lease["fence"])}
+            if claim.get("delivered_at"):
+                return {"status": "busy", "claim_id": claim.get("id"),
+                        "run_id": claim.get("run_id"), "fence": int(lease["fence"])}
+            claim["delivered_at"] = now()
+            return {"status": "wake", "claim": dict(claim), "recovered": True}
+        if not trigger_key:
+            return {"status": "idle", "fence": int(lease["fence"])}
+        if state.get("completed_trigger") == trigger_key:
+            return {"status": "handled", "fence": int(lease["fence"])}
+        failure = state.get("failure") or {}
+        if failure.get("trigger") == trigger_key:
+            if failure.get("state") == "failed":
+                return {"status": "failed", "attempts": int(failure.get("attempts") or 0),
+                        "reason": failure.get("reason", ""), "fence": int(lease["fence"])}
+            if float(failure.get("retry_epoch") or 0) > _remote_epoch():
+                return {"status": "retrying", "attempts": int(failure.get("attempts") or 0),
+                        "retry_at": failure.get("retry_at", ""), "fence": int(lease["fence"])}
+            attempt = int(failure.get("attempts") or 0) + 1
+        else:
+            attempt = 1
+        seq = int(state.get("run_seq") or 0) + 1
+        state["run_seq"] = seq
+        held = (pending.get("holding") or [""])[0].split(" ")[0] or _watch_bind_ticket(board, owner) or ""
+        claim = {"id": "claim_" + uuid.uuid4().hex,
+                 "run_id": "rr-%s-%d-%s" % (owner, seq, uuid.uuid4().hex[:12]),
+                 "run_no": seq, "trigger": trigger_key,
+                 "trigger_keys": sorted(k for k in pending if k in WAKE_KEYS),
+                 "ticket": held, "attempt": attempt, "fence": int(lease["fence"]),
+                 "claimed_at": now(), "delivered_at": now(), "started_at": ""}
+        state["claim"] = claim
+        return {"status": "wake", "claim": dict(claim), "recovered": False}
+
+    result = _remote_update(board, owner, mutate)
+    if result.get("status") == "wake":
+        claim = result.pop("claim")
+        result.update({"claim_id": claim["id"], "run_id": claim["run_id"],
+                       "run_no": claim["run_no"], "attempt": claim["attempt"],
+                       "fence": claim["fence"], "wake": pending_view(pending)})
+        kind = prompt_kind or ("cos" if owner == (current_master(board) or {}).get("cos")
+                               else ("master" if owner == (current_master(board) or {}).get("owner") else ""))
+        result["prompt"] = prompt_text(argparse.Namespace(
+            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+    return result
+
+
+def _remote_run_start(board, owner, lease_id, fence, claim_id):
+    emitted = []
+
+    def mutate(state):
+        lease = _remote_require_lease(state, lease_id, fence)
+        claim = state.get("claim") or {}
+        if claim.get("id") != claim_id or int(claim.get("fence") or 0) != int(fence):
+            raise RemoteProtocolError("claim is absent or fenced")
+        if claim.get("recovery_required"):
+            raise RemoteProtocolError("claim needs explicit remote retry recovery")
+        if claim.get("started_at"):
+            return {"status": "running", "run_id": claim["run_id"], "idempotent": True}
+        claim["started_at"] = now()
+        emitted.append(dict(claim, bridge_id=lease.get("bridge_id", ""),
+                            worktree=lease.get("worktree", "")))
+        return {"status": "running", "run_id": claim["run_id"], "idempotent": False}
+
+    result = _remote_update(board, owner, mutate)
+    if emitted:
+        claim = emitted[0]
+        traj_event(board, "run_start", agent=owner, ticket=claim.get("ticket") or None,
+                   run_no=claim["run_no"], run_id=claim["run_id"],
+                   trigger=claim.get("trigger_keys") or [], harness_cmd="remote",
+                   worktree=claim.get("worktree") or None, release_sha=_release_commit(),
+                   bridge_id=claim.get("bridge_id"), fence=int(fence), attempt=claim.get("attempt"))
+    return result
+
+
+def _remote_run_end(board, owner, lease_id, fence, claim_id, exit_code,
+                    input_tokens=None, output_tokens=None, cost_usd=None, reason=""):
+    ended = []
+
+    def mutate(state):
+        _remote_require_lease(state, lease_id, fence)
+        previous = state.get("last_run") or {}
+        if previous.get("claim_id") == claim_id:
+            return {"status": previous.get("status", "completed"),
+                    "run_id": previous.get("run_id"), "idempotent": True}
+        claim = state.get("claim") or {}
+        if claim.get("id") != claim_id or int(claim.get("fence") or 0) != int(fence):
+            raise RemoteProtocolError("claim is absent or fenced")
+        if not claim.get("started_at"):
+            raise RemoteProtocolError("remote start must succeed before remote end")
+        attempt = int(claim.get("attempt") or 1)
+        max_attempts = int(state.get("max_attempts") or REMOTE_MAX_ATTEMPTS)
+        status = "completed"
+        if int(exit_code) == 0:
+            state["completed_trigger"] = claim.get("trigger", "")
+            state.pop("failure", None)
+        else:
+            status = "retrying" if attempt < max_attempts else "failed"
+            delay = min(2 ** max(0, attempt - 1), 30) if status == "retrying" else 0
+            retry_epoch = _remote_epoch() + delay if delay else 0
+            state["failure"] = {"state": status, "trigger": claim.get("trigger", ""),
+                                "attempts": attempt, "max_attempts": max_attempts,
+                                "reason": (reason or "remote harness exit %s" % exit_code)[:240],
+                                "retry_epoch": retry_epoch,
+                                "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else "")}
+        record = {"claim_id": claim_id, "run_id": claim.get("run_id"), "run_no": claim.get("run_no"),
+                  "ticket": claim.get("ticket", ""), "started_at": claim.get("started_at"),
+                  "ended_at": now(), "exit": int(exit_code), "status": status,
+                  "attempt": attempt, "fence": int(fence), "reason": reason[:240] if reason else ""}
+        state["last_run"] = record
+        state.pop("claim", None)
+        ended.append((record, status))
+        return {"status": status, "run_id": record["run_id"], "attempt": attempt,
+                "max_attempts": max_attempts, "idempotent": False,
+                "retry_at": (state.get("failure") or {}).get("retry_at", "")}
+
+    result = _remote_update(board, owner, mutate)
+    if ended:
+        record, status = ended[0]
+        traj_event(board, "run_end", agent=owner, ticket=record.get("ticket") or None,
+                   run_no=record.get("run_no"), run_id=record.get("run_id"),
+                   started_at=record.get("started_at"), ended_at=record.get("ended_at"),
+                   duration_s=_iso_span_secs(record.get("started_at"), record.get("ended_at")),
+                   exit=int(exit_code), outcome=status, harness_cmd="remote", fence=int(fence),
+                   attempt=record.get("attempt"), input_tokens=input_tokens,
+                   output_tokens=output_tokens, cost_usd=cost_usd,
+                   usage_error=None if any(v is not None for v in
+                                           (input_tokens, output_tokens, cost_usd)) else "unreported")
+    return result
+
+
+def cmd_remote(a, board):
+    """Fenced local-board protocol used by a remote model/session bridge."""
+    owner = _hook_agent(a.agent)
+    operation = a.remote_cmd
+    try:
+        pinned = whoami()
+        if operation != "status" and pinned != owner:
+            raise RemoteProtocolError(
+                "remote wrapper identity is %s, not requested agent %s" % (pinned, owner))
+        registered, _ = harness_of(board, owner)
+        if operation not in ("status", "release") and registered != "remote":
+            raise RemoteProtocolError(
+                "agent %s is registered for harness %s, not remote" % (owner, registered))
+        if operation == "register":
+            bridge_id = _hook_agent(a.bridge_id)
+            result = _remote_register(board, owner, bridge_id, a.ttl, a.max_attempts,
+                                      replace=a.replace, worktree=a.worktree)
+        elif operation == "heartbeat":
+            result = _remote_update(board, owner, lambda state: {
+                "status": "online", "fence": int(_remote_require_lease(
+                    state, a.lease_id, a.fence)["fence"]),
+                "expires_at": state["lease"]["expires_at"]})
+        elif operation == "next":
+            wait = max(0, min(int(a.wait or 0), REMOTE_LONG_POLL_MAX))
+            deadline = _remote_epoch() + wait
+            while True:
+                result = _remote_claim_once(board, owner, a.lease_id, a.fence,
+                                            prompt_kind=a.prompt_kind)
+                if result.get("status") not in ("idle", "handled") or _remote_epoch() >= deadline:
+                    break
+                import time as _time
+                _time.sleep(min(0.25, max(0, deadline - _remote_epoch())))
+        elif operation == "start":
+            result = _remote_run_start(board, owner, a.lease_id, a.fence, a.claim_id)
+        elif operation == "end":
+            for value, label in ((a.input_tokens, "input tokens"),
+                                 (a.output_tokens, "output tokens"), (a.cost_usd, "cost")):
+                if value is not None and value < 0:
+                    raise RemoteProtocolError("%s cannot be negative" % label)
+            result = _remote_run_end(board, owner, a.lease_id, a.fence, a.claim_id,
+                                     a.exit, input_tokens=a.input_tokens,
+                                     output_tokens=a.output_tokens, cost_usd=a.cost_usd,
+                                     reason=a.reason)
+        elif operation == "retry":
+            abandoned = []
+
+            def retry(state):
+                _remote_require_lease(state, a.lease_id, a.fence)
+                claim = state.get("claim") or {}
+                if claim and claim.get("id") != (a.claim_id or claim.get("id")):
+                    raise RemoteProtocolError("claim is absent or fenced")
+                if claim.get("started_at"):
+                    abandoned.append(dict(claim))
+                # An uncertain in-flight recovery continues the prior attempt
+                # count. A deliberate retry after a terminal failure grants a
+                # fresh bounded budget instead of failing again immediately.
+                attempts = int(claim.get("attempt") or 0) if claim else 0
+                trigger = claim.get("trigger") or (state.get("failure") or {}).get("trigger", "")
+                if claim:
+                    state.pop("claim", None)
+                state["failure"] = {"state": "retrying", "trigger": trigger,
+                                    "attempts": attempts, "max_attempts": int(
+                                        state.get("max_attempts") or REMOTE_MAX_ATTEMPTS),
+                                    "reason": "operator-authorized retry", "retry_epoch": 0,
+                                    "retry_at": ""}
+                return {"status": "retrying", "attempts": attempts}
+
+            result = _remote_update(board, owner, retry)
+            if abandoned:
+                old = abandoned[0]
+                traj_event(board, "run_end", agent=owner, ticket=old.get("ticket") or None,
+                           run_no=old.get("run_no"), run_id=old.get("run_id"),
+                           started_at=old.get("started_at"), ended_at=now(), exit=75,
+                           outcome="lease_lost", harness_cmd="remote", fence=int(a.fence))
+        elif operation == "release":
+            def release(state):
+                lease = _remote_require_lease(state, a.lease_id, a.fence, renew=False)
+                lease["expires_epoch"] = 0
+                lease["expires_at"] = now()
+                claim = state.get("claim") or {}
+                if claim and not claim.get("started_at"):
+                    claim["delivered_at"] = ""
+                return {"status": "offline", "fence": int(lease["fence"])}
+            result = _remote_update(board, owner, release)
+        elif operation == "status":
+            result = _remote_public_state(load_remote_state(board, owner))
+        else:
+            raise RemoteProtocolError("remote operation required")
+    except (RemoteProtocolError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}), file=sys.stderr)
+        raise SystemExit(2)
+    print(json.dumps(result, sort_keys=True))
 
 
 def _watch_note_limit_from_log(board, owner, log_slice):
@@ -7116,6 +7880,8 @@ def cmd_drive(a, board):
         argv += ["--cmd", a.cmd_template]
     if a.model:
         argv += ["--model", a.model]
+    if getattr(a, "wake_mode", None):
+        argv += ["--wake-mode", a.wake_mode]
     import subprocess
     if a.restart:
         subprocess.call([sys.executable, os.path.realpath(__file__), "spawn", owner, "--stop"])
@@ -7250,6 +8016,25 @@ def ticket_context(board, owner):
     return "\n".join(out)
 
 
+def _task_dominant_extra(board, owner):
+    """Held ticket + explicit task beat unrelated CoS review/notification traffic."""
+    pending = _safe(lambda: pending_work(board, owner), {}) or {}
+    holding = pending.get("holding") or []
+    if not holding:
+        return ""
+    tasks = pending.get("task_messages") or []
+    return (
+        "HELD WORK DOMINATES THIS RUN.\n"
+        "You currently hold: %s\n"
+        "Explicit task/DM (do this now; do not review, merge, or pulse unrelated tickets):\n%s\n"
+        "Unrelated review_queue and notification-only mail are suppressed until this held "
+        "work is finished, reviewed, or blocked."
+    ) % (
+        "; ".join(holding),
+        "\n".join(tasks) if tasks else "(continue from the held ticket notes)",
+    )
+
+
 def cmd_prompt(a, board):
     print(prompt_text(a, board))
 
@@ -7267,24 +8052,32 @@ def prompt_text(a, board):
     cos = (m or {}).get("cos") or ""
     role_ctx = role_context(board, owner)
     knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "")
+    held_first = _task_dominant_extra(board, owner)
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
         extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
-        return cos_prompt_text(owner, board, os.path.dirname(board), extra)
+        body = cos_prompt_text(owner, board, os.path.dirname(board), extra)
+        return (held_first + "\n\n" + body) if held_first else body
     if getattr(a, "master", False):
-        extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
+        rest = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
+        extra = rest
         obj = _safe(lambda: load_objective(board), {})
         if obj and not obj.get("done"):
             _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
-            extra = DRIVE_PROMPT.format(
+            drive = DRIVE_PROMPT.format(
                 objective=obj.get("text", ""), set_by=obj.get("set_by", "?"),
                 state=objective_state(obj) or "active",
                 exit_criterion=(obj.get("exit_criterion") or "(none — FLAG: add --exit)"),
-                status=_safe(lambda: drive_status(board), "")) + ("\n" + extra if extra else "")
+                status=_safe(lambda: drive_status(board), ""))
+            extra = drive + ("\n" + extra if extra else "")
         if cos and owner != cos:
-            return PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
+            body = PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
                                          extra=extra)
-        return MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
+        else:
+            body = MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
+        return (held_first + "\n\n" + body) if held_first else body
     parts = []
+    if held_first:
+        parts.append(held_first)
     if role_ctx:
         parts.append(role_ctx)
     if knowledge_ctx:
@@ -8406,18 +9199,27 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
 
     beat_stop = threading.Event()
     beat_thread = None
-    if on_beat:
-        interval = beat_secs or RUN_HEARTBEAT_SECS
-
-        def beat():
-            while not beat_stop.wait(interval):
-                _safe(on_beat, None)
-
-        _safe(on_beat, None)  # stamp the start of the run, do not wait a tick
-        beat_thread = threading.Thread(target=beat, daemon=True)
-        beat_thread.start()
-
     try:
+        if on_beat:
+            interval = beat_secs or RUN_HEARTBEAT_SECS
+
+            def beat():
+                while not beat_stop.wait(interval):
+                    _safe(on_beat, None)
+
+            # Keep setup inside the InterruptedError boundary. SIGTERM is
+            # delivered to the main thread at any bytecode; wrapping this in
+            # _safe would swallow the signal handler's InterruptedError and
+            # leave the child running until its timeout.
+            try:
+                on_beat()  # stamp the start of the run, do not wait a tick
+            except InterruptedError:
+                raise
+            except Exception:
+                pass
+            beat_thread = threading.Thread(target=beat, daemon=True)
+            beat_thread.start()
+
         rc = proc.wait(timeout=timeout_s)
         timed_out = False
     except subprocess.TimeoutExpired:
@@ -8425,6 +9227,17 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
         proc.wait()
         rc = 124
         timed_out = True
+    except InterruptedError:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+        raise
     finally:
         beat_stop.set()
         # Join, do not just signal: a beat already inside its write would
@@ -8618,14 +9431,38 @@ def cmd_watch(a, board):
     # be a FRESH prompt every time -- the whole point of the watcher is that the
     # board changed since the last run.
     templated = any(ph in cmd for ph in HARNESS_PLACEHOLDERS)
-    every = max(WATCH_MIN_INTERVAL, int(a.every))
+    wake_mode = wake_mode_of(board, owner)
+    requested_every = max(1, int(a.every))
+    # Continuous adapters are the event bridge for already-ended model turns.
+    # Keep their durable poll inside the local <5s acceptance target even when
+    # the generic worker default is 60s. This is a cheap file read, not a model
+    # call; the message gates still decide whether any paid turn starts.
+    every = min(WATCH_MIN_INTERVAL, requested_every) if wake_mode == "continuous" else max(
+        WATCH_MIN_INTERVAL, requested_every)
+    # Retry/cost gates follow the enrolled seat, not argv[0]. Built-in Cursor
+    # is `agent -p` (and cursor+claude starts the same way), which _harness_of_cmd
+    # reports as custom — scoping from that would ignore the failure and relaunch.
+    workforce_rec = load_workforce(board).get(owner, {}) or {}
+    workforce_harness = (workforce_rec.get("harness") or workforce_rec.get("tool") or "").strip()
+    if not workforce_harness:
+        workforce_harness, _ = harness_of(board, owner)
     harness = _safe(lambda: _harness_of_cmd(cmd), "") or ""
-    lock = None
-    if not a.once:
-        lock = _watch_lock(board, owner)
-        if lock is None:
-            sys.exit("another watcher for %s is already running (see %s)" % (
-                owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
+    retry_harness = workforce_harness or harness
+    # Cron/--once used to bypass this lock and could overlap a persistent
+    # adapter. All launch paths now share one lease per seat.
+    sa = _session_adapters()
+    if sa.has_live_native_session(board, owner) and not getattr(a, "force", False):
+        ep, _ = sa.live_endpoint(board, owner)
+        print("skip: %s has a live native session (provider=%s, pid=%s) -- "
+              "a headless watcher would double up on the seat; use watch --force to override"
+              % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
+        if lifecycle_of(board, owner) == "ephemeral":
+            sa.remove_endpoint(board, owner)
+        sys.exit(0)
+    lock = _watch_lock(board, owner)
+    if lock is None:
+        sys.exit("another watcher for %s is already running (see %s)" % (
+            owner, os.path.join(agents_dir(board), owner + ".watch.pid")))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     # T-243: strip Git's LOCATION vars before handing the parent's environment
     # to a spawned/exec'd child, or an ambient GIT_DIR in *this* process
@@ -8661,11 +9498,12 @@ def cmd_watch(a, board):
             pass
 
     runs = failures = 0
-    skipped_trigger = None
     try:
         if not a.once:
-            print("watching %s for %s every %ds; cwd=%s; cmd=%s" % (board, owner, every, cwd, cmd))
-            _safe(lambda: checkin(board, owner, None, "watch loop online (every %ds)" % every), None)
+            print("watching %s for %s every %ds; wake=%s; cwd=%s; cmd=%s" % (
+                board, owner, every, wake_mode, cwd, cmd))
+            _safe(lambda: checkin(board, owner, None, "watch loop online (%s, every %ds)" % (
+                wake_mode, every)), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
             if os.path.exists(_stop_file(board, owner)):
@@ -8691,11 +9529,26 @@ def cmd_watch(a, board):
             if force and not actionable(p):
                 p = dict(p or {}, forced=True)
             trigger_fp = _watch_trigger_fingerprint(board, owner, p) if actionable(p) else None
-            if actionable(p) and skipped_trigger is not None and trigger_fp == skipped_trigger:
-                log("%s skip retrigger on unchanged trigger after exit!=0" % now())
+            trigger_key = _remote_trigger_key(trigger_fp)
+            retry_state = _local_adapter_failure(
+                _agent_rec(board, owner) or {}, retry_harness)
+            same_failure = bool(trigger_key and retry_state.get("trigger") == trigger_key)
+            retry_deferred = (not a.once and same_failure and not force and
+                              (retry_state.get("state") == "failed" or
+                               float(retry_state.get("retry_epoch") or 0) > _remote_epoch()))
+            if actionable(p) and retry_deferred:
+                log("%s skip retrigger on unchanged trigger; state=%s attempts=%s retry_at=%s" % (
+                    now(), retry_state.get("state"), retry_state.get("attempts"),
+                    retry_state.get("retry_at") or "manual"))
                 if a.verbose:
-                    print("%s skip retrigger (same unread trigger)" % now())
+                    print("%s dispatch %s (attempts=%s; queued trigger unchanged)" % (
+                        now(), retry_state.get("state"), retry_state.get("attempts")))
             elif actionable(p):
+                if not same_failure:
+                    failures = 0
+                    def _clear_stale_failure(rec):
+                        rec.pop("adapter_failure", None)
+                    _safe(lambda: _agent_update(board, owner, _clear_stale_failure), None)
                 runs += 1
                 log("%s run %d trigger=%s" % (now(), runs, json.dumps(p)[:400]))
                 print("%s work found (%s) wake=%s stop=%s -> run %d" % (
@@ -8727,7 +9580,9 @@ def cmd_watch(a, board):
                 # credits THAT run_id, not a time window (two seats, one ticket).
                 run_id = "r-%s-%d-%s" % (
                     owner, runs,
-                    hashlib.sha1(("%s:%d:%s" % (owner, runs, run_started)).encode()).hexdigest()[:12])
+                    hashlib.sha1(("%s:%d:%s:%d:%d" % (
+                        owner, runs, run_started, os.getpid(), _time.time_ns()
+                    )).encode()).hexdigest()[:12])
                 env["TICKETS_RUN_ID"] = run_id
                 env["TICKETS_RUN_NO"] = str(runs)
                 release_sha = _release_commit()
@@ -8753,20 +9608,27 @@ def cmd_watch(a, board):
                     # The whole point of T-237: something must record that this
                     # agent is alive WHILE the child runs. checkin() cannot --
                     # the next call to it is on the far side of this line.
-                    _safe(lambda: _run_begin(board, owner, runs, cwd), None)
+                    _safe(lambda: _run_begin(board, owner, runs, cwd,
+                                             run_id=run_id, ticket=held_ticket), None)
                     # Where this run's own output starts in the shared log, so
                     # the usage parse below reads THIS run's tail and not the
                     # previous run's result object (T-311: a stale JSON blob
                     # would attribute one run's tokens to another).
                     log_before = _safe(lambda: os.path.getsize(log_path), 0) or 0
-                    rc, timed_out = _watch_run_capped(
-                        run_cmd, cwd, env, log_path,
-                        a.run_timeout * 60 if a.run_timeout else None,
-                        WATCH_LOG_MAX_BYTES,
-                        on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
-                                                  cwd=cwd, active=True),
-                        beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
-                    )
+                    try:
+                        rc, timed_out = _watch_run_capped(
+                            run_cmd, cwd, env, log_path,
+                            a.run_timeout * 60 if a.run_timeout else None,
+                            WATCH_LOG_MAX_BYTES,
+                            on_beat=lambda: _run_beat(board, owner, pid=os.getpid(), run=runs,
+                                                      cwd=cwd, active=True),
+                            beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
+                        )
+                    except InterruptedError:
+                        _safe(lambda: _finalize_active_watch_run(board, owner), None)
+                        if cleanup:
+                            cleanup()
+                        raise
                     _safe(lambda: _run_end(board, owner, runs, rc), None)
                     if cleanup:
                         cleanup()
@@ -8816,10 +9678,32 @@ def cmd_watch(a, board):
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
                     run_slice = _read_run_slice(log_path, log_before)
                     _safe(lambda rs=run_slice: _watch_note_limit_from_log(board, owner, rs), None)
-                if rc not in (0, None):
-                    skipped_trigger = trigger_fp
-                else:
-                    skipped_trigger = None
+                if not a.once and rc not in (0, None):
+                    previous = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
+                    attempts = (int(previous.get("attempts") or 0) + 1
+                                if previous.get("trigger") == trigger_key else 1)
+                    retrying = attempts < LOCAL_DISPATCH_MAX_ATTEMPTS
+                    delay = min(every * (2 ** max(0, attempts - 1)), 60) if retrying else 0
+                    retry_epoch = _remote_epoch() + delay if delay else 0
+                    failure_record = {
+                        "state": "retrying" if retrying else "failed",
+                        "trigger": trigger_key, "attempts": attempts,
+                        "max_attempts": LOCAL_DISPATCH_MAX_ATTEMPTS,
+                        "reason": "local harness exit %s" % rc,
+                        "retry_epoch": retry_epoch,
+                        "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else ""),
+                        "at": now(),
+                        "provider": _adapter_provider(retry_harness),
+                        "harness": retry_harness or "",
+                    }
+                    _safe(lambda fr=failure_record: _agent_set(board, owner, adapter_failure=fr), None)
+                    log("%s skip retrigger armed for unchanged failed trigger; bounded attempt %d/%d state=%s" % (
+                        now(), attempts, LOCAL_DISPATCH_MAX_ATTEMPTS, failure_record["state"]))
+                elif not a.once:
+                    def clear_failure(rec):
+                        rec.pop("adapter_failure", None)
+                    _safe(lambda: _agent_update(board, owner, clear_failure), None)
                 failures = failures + 1 if rc not in (0, None) else 0
                 if max_runs and runs >= max_runs:
                     print("max-runs reached")
@@ -8832,12 +9716,17 @@ def cmd_watch(a, board):
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
             if stop_event.wait(timeout=wait):
                 break
+    except InterruptedError:
+        pass
     finally:
+        _safe(lambda: _finalize_active_watch_run(board, owner), None)
         if lock:
             try:
                 os.unlink(lock)
             except OSError:
                 pass
+        if lifecycle_of(board, owner) == "ephemeral":
+            _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
         if not a.once:
             print("watch stopped")
 
@@ -8868,6 +9757,12 @@ def cmd_codex_hook(a, board):
         except (ValueError, OSError):
             return
     _pinned_hook_identity(board, owner)
+    _safe(lambda: _session_adapters().heartbeat_session(
+        board, owner,
+        presented_lease=(os.environ.get("TICKETS_SESSION_LEASE") or "").strip(),
+        thread=(os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID") or "").strip(),
+        session_id=(os.environ.get("CURSOR_CONVERSATION_ID")
+                    or os.environ.get("CURSOR_SESSION_ID") or "").strip()), None)
     p = _safe(lambda: pending_work(board, owner), {})
     lines = [
         "Ticket board context (%s):" % owner,
@@ -8906,11 +9801,13 @@ def cmd_boot(a, board):
     # 1. identity + roles
     wf = load_workforce(board)
     roles = load_roles(board)
-    if owner not in wf or (a.roles is not None):
+    if (owner not in wf or a.roles is not None or getattr(a, "wake_mode", None) is not None
+            or getattr(a, "harness", "") or getattr(a, "cmd_template", "")):
         ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                                 harness=getattr(a, "harness", "") or "",
                                 cmd_template=getattr(a, "cmd_template", "") or "",
-                                model=a.model, best_for="")
+                                model=a.model, best_for="",
+                                wake_mode=getattr(a, "wake_mode", None))
         _silent(lambda: cmd_join(ns, board))
         steps.append("joined as %s (roles=%s)" % (owner, a.roles or roles.get(owner, [])))
     else:
@@ -9044,7 +9941,7 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 # runtime's side of the contract never changes -- it hands the harness a prompt
 # and a working directory, and reads the board afterwards. docs/byoa.md is the
 # operator-facing version of this.
-BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude")
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote")
 # Documented shell-template placeholders for custom harnesses. `harness check`
 # refuses templates with any other {name} token or without {prompt_file}.
 HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
@@ -9174,6 +10071,9 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         # would launch a binary literally named "custom".
         sys.exit("%s is registered as a custom harness with no command; "
                  "re-register it: tickets join %s --harness custom --cmd '<shell template>'" % (owner, owner))
+    if tool == "remote":
+        sys.exit("%s uses a remote adapter; connect the generated remote hook/bridge "
+                 "or register a custom command. Refusing to substitute a local model." % owner)
     prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
         master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
     prompt = prompt_expr or '"$(%s)"' % prompt
@@ -9237,8 +10137,8 @@ def cmd_spawn(a, board):
     root = os.path.dirname(board)
     if a.list:
         wf = load_workforce(board)
-        print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
-            "agent", "watcher", "harness", "model", "check", "seen", "worktree"))
+        print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
+            "agent", "watcher", "harness", "wake", "model", "check", "seen", "worktree"))
         for r in sorted(load_agents(board), key=lambda r: r["owner"]):
             pids = _live_watch_pids(r["owner"], board=board)
             wc = len(pids)
@@ -9246,9 +10146,10 @@ def cmd_spawn(a, board):
             if wc > 1:
                 wlabel += " !!"
             entry = wf.get(r["owner"], {})
-            print("%-14s %-9s %-9s %-8s %-12s %-8s %s" % (
+            print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
                 r["owner"][:14], wlabel,
                 (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                wake_mode_of(board, r["owner"], workforce=wf)[:10],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
                 (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
@@ -9261,7 +10162,12 @@ def cmd_spawn(a, board):
         import signal
 
         pids = _live_watch_pids(owner)
+        _mark_run_interrupted(board, owner)
         if not pids:
+            # Watcher is already gone; a late heartbeat from the dead run
+            # must not reopen the receipt. Re-apply the stop fence after the
+            # liveness check so a beat that raced the first mark stays closed.
+            _mark_run_interrupted(board, owner)
             print("no running watcher for %s" % owner)
             return
         busy = [p for p in pids if _watcher_run_active(board, owner, p)]
@@ -9303,13 +10209,18 @@ def cmd_spawn(a, board):
     ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
                             harness=getattr(a, "harness", "") or "",
                             cmd_template=getattr(a, "cmd_template", "") or "",
-                            model=a.model, best_for=a.best_for or "")
+                            model=a.model, best_for=a.best_for or "",
+                            wake_mode=getattr(a, "wake_mode", None))
     _silent(lambda: cmd_join(ns, board))
     # --tool/--harness no longer defaults to "claude" in the parser: an absent
     # flag must mean "use what `tickets join` registered for this agent",
     # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
     harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
                                        getattr(a, "cmd_template", ""))
+    if harness == "remote" and not (cmd_template or a.exec):
+        sys.exit("remote adapter is offline; no local executable was selected. "
+                 "Run `tickets hooks remote --agent %s`, connect its long-poll/callback bridge, "
+                 "or pass --cmd for a local adapter. Pending wakes remain queued." % owner)
     wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
     if not os.path.isdir(wt):
         base = a.base or _trunk()
@@ -9340,6 +10251,13 @@ def cmd_spawn(a, board):
         with open(master_state_path(board), "w") as f:
             json.dump(prev, f)
         _master_log(board, "%s spawned as persistent chief of staff (review/unblock/merge)" % owner, by=whoami())
+    sa = _session_adapters()
+    if sa.has_live_native_session(board, owner):
+        ep, _ = sa.live_endpoint(board, owner)
+        print("skip: %s has a live native session (provider=%s, pid=%s) -- "
+              "spawn would double up on the interactive seat"
+              % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
+        return
     live = _live_watch_pids(owner, board=board)
     if live:
         print("watcher for %s already running (%d process(es), pids %s); --stop first" % (
@@ -9357,8 +10275,9 @@ def cmd_spawn(a, board):
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
             "--prompt-kind", kind,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
+    effective_wake_mode = wake_mode_of(board, owner)
     max_runs = spawn_watch_max_runs(
-        cos=bool(a.cos), persist=bool(getattr(a, "persist", False)),
+        wake_mode=effective_wake_mode, persist=bool(getattr(a, "persist", False)),
         max_runs=getattr(a, "max_runs", None))
     if max_runs == 0:
         argv += ["--persist", "--max-runs", "0"]
@@ -9380,9 +10299,9 @@ def cmd_spawn(a, board):
     _time.sleep(1.0)
     pid = _watcher_pid(board, owner)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; harness=%s; model=%s; persist=%s; max-runs=%s; log %s" % (
+    print("watcher for %s started%s; harness=%s; model=%s; wake=%s; persist=%s; max-runs=%s; log %s" % (
         owner, (" (pid %d)" % pid) if pid else "", harness, model,
-        "yes" if max_runs == 0 else "no", max_runs, log_path))
+        effective_wake_mode, "yes" if max_runs == 0 else "no", max_runs, log_path))
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
@@ -9599,9 +10518,9 @@ def cmd_harness(a, board):
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{color-scheme:dark;--bg:#0b1416;--fg:#e6eeea;--mute:#8fa4a6;--line:#243236;--card:#121c1e;--surface:#0f191b;--chip:#182427;--acc:#c8f04a;--on-acc:#142022;--ok:#5ec7b0;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#8fa4a6;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
-body[data-theme=light]{color-scheme:light;--bg:#f3f6f4;--fg:#142022;--mute:#6a7c7f;--line:#d5ded9;--card:#fbfdfc;--surface:#eef2f0;--chip:#e8eeea;--on-acc:#142022;--ok:#187a67;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6a7c7f;--flight:#93610a;--review:#6954a5;--progress:#789396}
-*{box-sizing:border-box}html,body{height:100%}
+:root{color-scheme:dark;--bg:#0c0e12;--fg:#ece8e1;--mute:#9a958c;--line:#2a2d34;--card:#161820;--surface:#12141a;--chip:#1c2028;--acc:#c4b49a;--on-acc:#14120e;--ok:#6f9e96;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#9a958c;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
+body[data-theme=light]{color-scheme:light;--bg:#f4f1eb;--fg:#14120e;--mute:#6e6a63;--line:#d8d3ca;--card:#fcfaf6;--surface:#eeeae3;--chip:#e8e3d9;--on-acc:#14120e;--ok:#3d6e68;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6e6a63;--flight:#93610a;--review:#6954a5;--progress:#789396}
+*{box-sizing:border-box}html,body{height:100%;overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
 body.loading main{opacity:.55;pointer-events:none}
 header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--line)}
@@ -9609,10 +10528,10 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .mark{color:var(--fg)}
 .brand .mark{flex:none;width:22px;height:22px}
 .wordmark{font:650 16px/1.2 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:.22em;text-transform:lowercase}
-.brand .board-name{margin:2px 0 0;font-size:11px}
+.brand .board-name{margin:2px 0 0;font:11px/1.3 ui-monospace,Menlo,monospace;letter-spacing:.02em;text-transform:none}
 .sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .portfolio{position:relative}
-.portfolio summary{display:inline-flex;align-items:center;gap:7px;list-style:none;padding:4px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--fg);font:11px/1.3 ui-monospace,Menlo,monospace;cursor:pointer}
+.portfolio summary{display:inline-flex;align-items:center;gap:5px;list-style:none;padding:2px 4px;border:0;border-radius:7px;background:transparent;color:var(--mute);font:11px/1.3 ui-monospace,Menlo,monospace;cursor:pointer}
 .portfolio summary::-webkit-details-marker{display:none}
 .portfolio .caret{color:var(--acc);font-weight:800}
 .portfolio-menu{position:absolute;z-index:8;top:calc(100% + 7px);left:0;width:260px;padding:5px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 14px 36px color-mix(in srgb,var(--bg) 72%,transparent)}
@@ -9625,6 +10544,7 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .chip b{font-weight:650}
 .chip.master,.chip.cos{border-color:var(--line)}
 .sprint{display:flex;flex-direction:column;gap:3px;min-width:180px;flex:1}
+.sprint[hidden]{display:none}
 .sprint .row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--mute)}
 .sprint .row span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bar{height:5px;background:var(--surface);border-radius:99px;overflow:hidden}
@@ -9635,6 +10555,10 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .health.bad i{background:var(--bad)}
 #clock{font:12px/1.2 ui-monospace,Menlo,monospace;color:var(--mute)}
 .conn{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+.live-meta{position:relative}
+.live-meta>summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center}
+.live-meta>summary::-webkit-details-marker{display:none}
+.live-meta-pop{position:absolute;right:0;top:calc(100% + 6px);z-index:6;min-width:168px;padding:8px 10px;background:var(--card);border:1px solid var(--line);border-radius:8px;display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--mute);box-shadow:0 10px 24px color-mix(in srgb,var(--bg) 72%,transparent)}
 .conn-status{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:99px;border:1px solid var(--line)}
 .conn-status.live{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
 .conn-status.reconnecting{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
@@ -9672,6 +10596,10 @@ button:focus-visible,summary:focus-visible,select:focus-visible,input:focus-visi
 main{flex:1;min-width:0;min-height:0;width:100%;padding:14px 16px 18px;overflow:auto}
 .pane{display:none;height:100%}
 body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[data-tab=agents] #pane-agents,body[data-tab=messages] #pane-messages{display:flex;flex-direction:column;gap:12px}
+body[data-empty-board][data-tab=board] .kanban,
+body[data-empty-board][data-tab=board] #objectivePromise,
+body[data-empty-board][data-tab=board] #turnsPanel,
+body[data-empty-board][data-tab=board] #onboardBox{display:none}
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
 @media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
 .col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
@@ -9718,7 +10646,7 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 .seats-title{margin:0 0 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:650}
 .seats-lede{color:var(--mute);font-size:12px;margin:0;max-width:720px}
 .seats-lede b{color:var(--fg)}
-.next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+.next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
 .next-step .lbl{font-weight:700;color:var(--acc);white-space:nowrap}
 .next-step .msg{flex:1;min-width:160px}
 .next-step .cmd{font:12px/1.35 ui-monospace,Menlo,monospace;color:var(--mute);white-space:nowrap}
@@ -9734,6 +10662,9 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 .ob-step i{width:14px;height:14px;border-radius:3px;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-style:normal;flex:none}
 .ob-step.done i{background:var(--ok);border-color:var(--ok);color:#fff}
 .empty-board{background:var(--card);border:1px dashed var(--line);border-radius:14px;padding:20px 18px;max-width:720px;margin-bottom:12px}
+.empty-board.empty-secondary{padding:16px;margin:8px 0}
+.agents>.empty-board{grid-column:1/-1}
+.msgs>.empty-board{max-width:none}
 .empty-board .empty-kicker{margin:0 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
 .empty-board p{margin:0 0 10px;color:var(--mute);font-size:13px;line-height:1.55}
 .empty-board b{color:var(--fg)}
@@ -9799,9 +10730,8 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 @media(max-width:700px){.seat{min-width:108px}.chat-layout{flex-direction:column}.chat-rail{max-width:none;flex-direction:row;flex-wrap:wrap}}
 @media(max-width:600px){
   header.cmd{flex-direction:column;align-items:stretch}
-  .conn{display:grid;grid-template-columns:auto auto auto;justify-content:start;margin-left:0}
-  #lastUpdated{display:none}
-  #clock{grid-column:1/-1;margin-left:0}
+  .conn{display:flex;justify-content:flex-start;margin-left:0}
+  .live-meta-pop{left:0;right:auto}
   .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
   .next-step .cmd{white-space:normal;overflow-wrap:anywhere}
   .promise-strip .msg{max-width:100%;overflow-wrap:anywhere}
@@ -9829,7 +10759,7 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
     <div>
       <span class="wordmark">atman</span>
       <h1 id="title" class="sr-only">Atman</h1>
-      <p class="board-name mute" id="boardName" hidden></p>
+      <p class="board-name mute" id="boardName" hidden data-kind="workspace"></p>
     </div>
   </div>
   <details class="portfolio" id="portfolioSwitch">
@@ -9849,11 +10779,17 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
   <div class="sprint" id="sprint"></div>
   <div class="health" id="pulse"><i></i><span>No alerts</span></div>
   <div class="conn" id="connBar">
-    <span id="connStatus" class="conn-status live" aria-live="polite">live</span>
-    <span id="lastUpdated" class="mute">—</span>
+    <details class="live-meta" id="liveMeta">
+      <summary aria-label="Connection and last updated">
+        <span id="connStatus" class="conn-status live" aria-live="polite">live</span>
+      </summary>
+      <div class="live-meta-pop">
+        <span id="clock"></span>
+        <span id="lastUpdated" class="mute">—</span>
+      </div>
+    </details>
     <button type="button" id="refreshBtn" title="Refresh board" aria-label="Refresh board">↻</button>
     <button type="button" id="themeBtn" title="Switch to light mode" aria-label="Switch to light mode" aria-pressed="false"><span id="themeLabel">Light mode</span></button>
-    <span id="clock"></span>
   </div>
 </header>
 <details class="attention" id="attentionBox" hidden><summary>Needs attention <span id="attnCount" class="mute">0</span></summary>
@@ -9990,6 +10926,14 @@ function fillCol(id,items,html){
   document.getElementById('n-'+id).textContent=items.length;
   document.getElementById('col-'+id).innerHTML=items.length?html:('<div class="empty">none</div>');
 }
+function emptyCraft(kicker,lead,honesty,cta){
+  const cmds=(Array.isArray(cta)?cta:[cta]).map(c=>'<div class="cta">'+c+'</div>').join('');
+  return '<div class="empty-board empty-secondary">'+
+    '<p class="empty-kicker">'+kicker+'</p>'+
+    '<p>'+lead+'</p>'+
+    '<p class="empty-honesty">'+honesty+'</p>'+
+    cmds+'</div>';
+}
 const dash=x=>x==null?'—':String(x);
 function money(n){return n==null?'—':('$'+(Number(n)<0.01&&Number(n)>0?Number(n).toFixed(4):Number(n).toFixed(2)))}
 function fmtMedian(p){return(!p||p.median_turns==null)?'—':Number(p.median_turns).toFixed(p.median_turns%1?2:0)}
@@ -10017,7 +10961,11 @@ function renderPromise(p){
     else yh.textContent=(p.done_with_cost||0)+' done / '+money(p.cost_usd)+' · '+(p.n_unmeasured_cost||0)+' done with cost unknown';
   }
   const panel=document.getElementById('turnsPanel');
-  if(panel&&(!p||p.median_turns==null)&&( !p||p.yield_per_usd==null))panel.open=true;
+  const empty=document.body.hasAttribute('data-empty-board');
+  if(panel){
+    if(empty)panel.open=false;
+    else if((!p||p.median_turns==null)&&(!p||p.yield_per_usd==null))panel.open=true;
+  }
 }
 function renderTurns(t){
   const sum=document.getElementById('turnsSummary'),worst=document.getElementById('turnsWorst'),agents=document.getElementById('turnsAgents');
@@ -10055,11 +11003,12 @@ function renderSeats(d){
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   (d.agents||[]).forEach(a=>{
     if(placed.has(a.name))return;
+    if(a.lifecycle==='ephemeral' && a.reachable===false)return;
     const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any lane';
     const u=utilBy[a.name]||{};
     const quota=u.util_pct!=null?' · '+Math.round(u.util_pct)+'%':'';
     const st=a.state==='DOWN'?'down':'idle';
-    idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'?'ghost':'idle'));
+    idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'||a.reachable===false?'ghost':'idle'));
   });
   const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
   put('lane-operator',operator.join(''),'no operator');
@@ -10271,7 +11220,7 @@ async function load(manual){
   if(boardName){
     const proj=String(d.project||'').trim();
     const show=proj&&proj.toLowerCase()!=='atman';
-    boardName.textContent=show?proj:'';
+    boardName.textContent=show?('workspace · '+proj):'';
     boardName.hidden=!show;
   }
   const counts=d.counts||{total:0,done:0};
@@ -10280,9 +11229,11 @@ async function load(manual){
     '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
     '<span class="chip"><b>'+esc(counts.done)+'</b>/'+esc(counts.total)+' done</span>';
   const s=d.sprint;
-  document.getElementById('sprint').innerHTML=s
+  const sprintEl=document.getElementById('sprint');
+  sprintEl.hidden=!s;
+  sprintEl.innerHTML=s
     ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
-    :'<div class="row"><span>no active sprint</span></div><div class="bar"><i style="width:0"></i></div>';
+    :'';
   const crit=(d.health||[]).filter(x=>x.sev==='CRIT').length;
   const warn=(d.health||[]).filter(x=>x.sev==='WARN').length;
   const pulse=document.getElementById('pulse');
@@ -10317,18 +11268,24 @@ async function load(manual){
     const auth=a.auth==='login_required'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Login required · '+esc(a.auth_login_cmd||'agent login')+'</span>':'';
     const quota=a.auth==='quota'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Usage quota</span>':'';
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
+    const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+(a.watcher?' ●':'')+'</span>'+auth+quota+lim+'</div>'+
-      '<div class="mute mono">'+esc(a.model||'—')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
+    const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
+    const onlineDot=(a.reachable!==false && a.adapter_online)?' ●':'';
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+auth+quota+lim+wake+'</div>'+
+      '<div class="mute mono">'+esc(a.agent_id||a.name)+' · '+esc(a.adapter_provider||a.harness||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.adapter_delivery||'offline')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
       '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div>'+
       '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
-  }).join('')||'<div class="empty">no agents checked in</div>';
+  }).join('')||emptyCraft('Team','<b>No agents checked in.</b> Plug a harness so coverage is by work, not a vacant roster.','Utilization and Done (24h) stay — until a seat heartbeats.',['tickets join &lt;name&gt; --roles … --harness','tickets quickstart --agent &lt;you&gt;']);
   const thread=visibleMessages(d.messages||[]).slice().reverse();
+  const msgEmpty=THREAD_SEAT
+    ?emptyCraft('Intervene','<b>No messages with this seat yet.</b> Msg opens the thread.','Delivery receipts only — never implied progress on tickets.','tickets msg --to '+esc(THREAD_SEAT))
+    :emptyCraft('Intervene','<b>No messages yet.</b> Post when a seat should see something.','Receipts show delivery — never implied progress on tickets.','tickets msg "text" [--to agent] [--re T-001]');
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+deliveryTags(m)+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
-    ||'<div class="empty">'+(THREAD_SEAT?'No messages with this seat yet.':'no messages yet')+'</div>';
+    ||msgEmpty;
 }
 function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
@@ -10358,7 +11315,9 @@ function renderNextStep(ns){
 }
 function renderEmptyBoard(d){
   const el=document.getElementById('emptyBoard');
-  const empty=d.empty_board||!(d.counts&&d.counts.total);
+  const empty=!!(d.empty_board||!(d.counts&&d.counts.total));
+  if(empty)document.body.setAttribute('data-empty-board','');
+  else document.body.removeAttribute('data-empty-board');
   el.hidden=!empty;
   if(!empty)return;
   el.innerHTML='<p class="empty-kicker">Day one</p>'+
@@ -10814,12 +11773,84 @@ def _board_snapshot_body(board, messages=40):
     out_agents = []
     for r in rows:
         rec = agents.get(r["agent"], {})
+        agent_wf = wf.get(r["agent"], {}) or {}
+        harness_name = agent_wf.get("harness") or agent_wf.get("tool") or "claude"
         lim = rec.get("limit")
         wc = _watcher_count(r["agent"], board)
-        out_agents.append({"name": r["agent"], "state": r["state"], "model": wf.get(r["agent"], {}).get("model", ""),
+        wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
+        wake_pending = actionable(wake)
+        remote = (_remote_public_state(load_remote_state(board, r["agent"]))
+                  if harness_name == "remote" else {})
+        sa = _session_adapters()
+        local_failure = _local_adapter_failure(rec, harness_name)
+        failure_state = remote.get("failure_state", "") or local_failure.get("state", "")
+        failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
+        adapter_extra = sa.public_adapter_state(
+            board, r["agent"], harness_name, False, wake_pending)
+        native_online = bool(adapter_extra.get("adapter_native_online"))
+        remote_online = bool(remote.get("online")) if harness_name == "remote" else False
+        watcher_online = wc == 1
+        if wc > 1 or (harness_name == "remote" and wc > 0) or (native_online and wc > 0):
+            adapter_state = "conflict"
+            adapter_reason = "Multiple adapters detected; stop extras so one identity-pinned lease remains."
+            adapter_online = False
+        else:
+            adapter_online = sa.is_reachable(native_online=native_online,
+                                            watcher_online=watcher_online,
+                                            remote_online=remote_online)
+            adapter_extra = sa.public_adapter_state(
+                board, r["agent"], harness_name, adapter_online, wake_pending)
+            if failure_state == "failed":
+                adapter_state = "failed"
+                adapter_reason = failure_reason or "Dispatch exhausted its bounded retries; work remains queued."
+            elif failure_state == "retrying":
+                adapter_state = "retrying"
+                adapter_reason = failure_reason or "Dispatch failed and is waiting for its bounded retry."
+            elif remote.get("run_state") and adapter_online:
+                adapter_state = remote["run_state"]
+                adapter_reason = "Remote run is active under fence %s." % remote.get("fence")
+            elif remote.get("run_state"):
+                adapter_state = ("recovery-required" if remote["run_state"] == "recovery-required"
+                                 else "queued-offline")
+                adapter_reason = "Remote run lost its adapter lease; reconnect to recover it."
+            elif wake_pending and not adapter_online:
+                adapter_state = "queued-offline"
+                adapter_reason = "Wake queued — adapter offline; delivery resumes when it reconnects."
+            elif wake_pending:
+                adapter_state = "queued"
+                adapter_reason = "Wake queued for the connected adapter."
+            elif adapter_online:
+                adapter_state = "online"
+                adapter_reason = "Adapter connected; no wake pending."
+            else:
+                adapter_state = "offline"
+                adapter_reason = "Adapter offline; directed work will remain queued."
+        watcher_count = wc + (1 if remote.get("online") else 0) + (1 if native_online else 0)
+        life = lifecycle_of(board, r["agent"], master_state=m, workforce=wf)
+        reachable = adapter_online
+        if life == "ephemeral" and not reachable and adapter_state == "offline":
+            adapter_extra["adapter_delivery"] = "exited"
+        out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
+                           "harness": harness_name,
+                           "agent_id": agent_wf.get("agent_id") or r["agent"],
+                           "lifecycle": life,
+                           "reachable": reachable,
+                           **adapter_extra,
+                           "wake_mode": wake_mode_of(board, r["agent"], master_state=m, workforce=wf),
                            "done": r["done"], "seen_h": r["seen_h"], "ticket": rec.get("ticket", ""),
-                           "watcher": wc > 0,
-                           "watcher_count": wc,
+                           "watcher": adapter_online,
+                           "watcher_count": watcher_count,
+                           "adapter_online": adapter_online,
+                           "adapter_state": adapter_state,
+                           "adapter_reason": adapter_reason,
+                           "adapter_bridge_id": remote.get("bridge_id", ""),
+                           "adapter_fence": remote.get("fence", 0),
+                           "adapter_heartbeat_at": remote.get("heartbeat_at", ""),
+                           "adapter_run_id": remote.get("run_id", ""),
+                           "adapter_attempts": remote.get("attempt", 0) or local_failure.get("attempts", 0),
+                           "adapter_retry_at": remote.get("retry_at", "") or local_failure.get("retry_at", ""),
+                           "wake_pending": wake_pending,
+                           "wake_reason": wake_reason_of(wake),
                            "roles": roles.get(r["agent"]) or [],
                            "auth": (rec.get("auth_check") or {}).get("state", ""),
                            "auth_detail": (rec.get("auth_check") or {}).get("detail", ""),
@@ -10861,7 +11892,7 @@ def _board_snapshot_body(board, messages=40):
     turns, usage, promise = _cached_turns_usage_promise(board, tickets)
     raw_msgs = []
     for x in load_messages(board)[-messages:]:
-        row = {"at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
+        row = {"id": _msg_id(x), "at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
                "kind": x.get("kind") or "message",
                "delivery": _message_delivery(board, x, agents_by=agents)}
@@ -10910,7 +11941,7 @@ def _board_snapshot_body(board, messages=40):
             "state": objective_state(obj) if obj else "",
             "exit_criterion": (obj or {}).get("exit_criterion") or "",
             "exit_missing": bool(obj) and objective_exit_missing(obj),
-            "wake_gates": "task messages, stuck/blocked, held tickets, ready assigned work; ACKs and ordinary DMs notify-only",
+            "wake_gates": "continuous seats: directed DM/@mention; task-only/scheduled seats: explicit tasks; all: stuck/blocked, held, assigned work",
             "stop_condition": STOP_CONDITION,
         },
         "coverage": coverage,
@@ -11634,10 +12665,33 @@ exec %s \"$@\"
        shlex.quote(owner), (" --prompt-kind " + shlex.quote(prompt_kind)) if prompt_kind else "",
        shlex.quote(script))
         _atomic_hook_write(wrapper, wrapper_text, 0o700)
-        payload = {"schema": 1, "agent": owner, "board": os.path.abspath(board),
-                   "wrapper": os.path.abspath(wrapper), "commands": commands}
+        pinned = shlex.quote(os.path.abspath(wrapper))
+        remote_base = "%s remote" % pinned
+        payload = {"schema": 2, "agent": owner, "board": os.path.abspath(board),
+                   "wrapper": os.path.abspath(wrapper), "commands": commands,
+                   "adapter": {
+                       "wake_mode": wake_mode_of(board, owner),
+                       "protocol": "fenced-wake-v1",
+                       "delivery": "atomic-claim-long-poll",
+                       "register_command": "%s register --agent %s --bridge-id {bridge_id}" % (
+                           remote_base, shlex.quote(owner)),
+                       "heartbeat_command": "%s heartbeat --agent %s --lease-id {lease_id} --fence {fence}" % (
+                           remote_base, shlex.quote(owner)),
+                       "next_command": "%s next --agent %s --lease-id {lease_id} --fence {fence} --wait 25%s" % (
+                           remote_base, shlex.quote(owner),
+                           (" --prompt-kind " + shlex.quote(prompt_kind)) if prompt_kind else ""),
+                       "start_command": "%s start --agent %s --lease-id {lease_id} --fence {fence} --claim-id {claim_id}" % (
+                           remote_base, shlex.quote(owner)),
+                       "end_command": "%s end --agent %s --lease-id {lease_id} --fence {fence} --claim-id {claim_id} --exit {exit}" % (
+                           remote_base, shlex.quote(owner)),
+                       "release_command": "%s release --agent %s --lease-id {lease_id} --fence {fence}" % (
+                           remote_base, shlex.quote(owner)),
+                       "dedupe": "atomic trigger claim under one exclusive fenced bridge lease",
+                       "offline": "wake stays queued; register/reconnect before claiming it",
+                   }}
         _atomic_hook_write(manifest, json.dumps(payload, indent=2, sort_keys=True) + "\n", 0o600)
         print("Remote hook wrapper for %s: %s" % (owner, wrapper))
+        print("Manifest schema 2: register one fenced bridge, long-poll next, then start/end each claimed run.")
         print("No arguments prints the %s task-wake prompt; normal ticket commands stay pinned to this identity."
               % (prompt_kind or "worker"))
         return
@@ -11948,6 +13002,26 @@ def cmd_self(a, board):
     script = os.path.realpath(__file__)
     print("script: %s" % script)
     print("status: %s" % release_status())
+    seat = whoami()
+    if board and seat and not seat.startswith("agent-"):
+        harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+        sa = _session_adapters()
+        ep, was_stale = sa.live_endpoint(board, seat)
+        stored = sa.read_endpoint(board, seat)
+        if ep:
+            print("persistent: yes -- seat %s native %s endpoint (pid %s, registered %s)" % (
+                seat, ep.get("provider"), ep.get("pid", "?"), ep.get("at", "?")))
+        elif stored and was_stale:
+            print("persistent: no -- seat %s native identity is retained but offline after TTL "
+                  "(reconnect with `tickets join %s --persistent` or a session heartbeat)"
+                  % (seat, seat))
+        elif was_stale:
+            print("persistent: no -- seat %s had a native endpoint but it went stale "
+                  "(re-register with `tickets join %s --persistent`)" % (seat, seat))
+        else:
+            probe = sa.probe_provider(sa.provider_for_harness(harness))
+            print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
+                seat, probe.get("reason", "ok") if not probe.get("ok") else "transport available"))
     on_path = shutil.which("tickets")
     if on_path:
         resolved = os.path.realpath(on_path)
@@ -12045,7 +13119,7 @@ def main():
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--harness", default="",
                    help="label for watch/spawn, not invoked at join: claude | codex | "
-                        "cursor | cursor+claude | custom | custom:<cmd> | <executable>. "
+                        "cursor | cursor+claude | remote | custom | custom:<cmd> | <executable>. "
                         "omit prints harness=claude (default) and does not start Claude")
     c.add_argument("--tool", default="", help="original spelling of --harness")
     # dest is cmd_template, not cmd: `sub = p.add_subparsers(dest="cmd")` above
@@ -12056,8 +13130,14 @@ def main():
                    help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
+                   help="durable DM policy: continuous wakes on directed messages; task-only needs --task; scheduled uses heartbeat/task gates")
+    c.add_argument("--lifecycle", choices=LIFECYCLES, default=None,
+                   help="persistent seats stay known after exit; ephemeral seats are one-shot and not reachable after the session ends")
     c.add_argument("--knowledge-dir", default="",
                    help="canonical repo-backed knowledge/ directory inherited by this seat")
+    c.add_argument("--persistent", action="store_true",
+                   help="lifecycle=persistent and register this interactive session's native wake endpoint (socket/queue/resume)")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
@@ -12121,6 +13201,44 @@ def main():
     c.add_argument("--force", action="store_true", help="treat as actionable even without a wake gate (manual override)")
     c.set_defaults(fn=cmd_pending)
 
+    c = sub.add_parser("remote", help="fenced bridge protocol: register | heartbeat | next | start | end | retry | release | status")
+    rs = c.add_subparsers(dest="remote_cmd")
+    x = rs.add_parser("register", help="acquire the one remote bridge lease")
+    x.add_argument("--agent", required=True)
+    x.add_argument("--bridge-id", required=True)
+    x.add_argument("--ttl", type=int, default=REMOTE_LEASE_TTL)
+    x.add_argument("--max-attempts", type=int, default=REMOTE_MAX_ATTEMPTS)
+    x.add_argument("--replace", action="store_true", help="fence an online lease with the same bridge id")
+    x.add_argument("--worktree", default="", help="remote execution working tree, for run receipts")
+    x = rs.add_parser("heartbeat", help="renew an acquired bridge lease")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x = rs.add_parser("next", help="long-poll and atomically claim one wake")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x.add_argument("--wait", type=int, default=25, help="long-poll seconds, capped at 30")
+    x.add_argument("--prompt-kind", default="", choices=("", "master", "cos"))
+    x = rs.add_parser("start", help="record that the claimed remote model turn started")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", required=True)
+    x = rs.add_parser("end", help="finish a remote turn and report measured usage")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", required=True)
+    x.add_argument("--exit", type=int, required=True)
+    x.add_argument("--input-tokens", type=int, default=None)
+    x.add_argument("--output-tokens", type=int, default=None)
+    x.add_argument("--cost-usd", type=float, default=None)
+    x.add_argument("--reason", default="")
+    x = rs.add_parser("retry", help="authorize retry after failure or uncertain lease loss")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int); x.add_argument("--claim-id", default="")
+    x = rs.add_parser("release", help="release the bridge lease")
+    x.add_argument("--agent", required=True); x.add_argument("--lease-id", required=True)
+    x.add_argument("--fence", required=True, type=int)
+    x = rs.add_parser("status", help="show public adapter state without its bearer lease")
+    x.add_argument("--agent", required=True)
+    c.set_defaults(fn=cmd_remote)
+
     c = sub.add_parser("prompt", help="print the standard worker (or --master) prompt for a headless run")
     c.add_argument("--agent", default="")
     c.add_argument("--master", action="store_true", help="the master/planner loop (or full master loop if no cos)")
@@ -12153,6 +13271,7 @@ def main():
                    help="claude | codex | cursor | cursor+claude | custom:<cmd> (default: the registered harness)")
     c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--model", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None)
     c.add_argument("--restart", action="store_true", help="stop an existing watcher for this seat first")
     c.set_defaults(fn=cmd_drive)
 
@@ -12201,6 +13320,7 @@ def main():
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--model", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None)
     c.add_argument("--worktree", default="", help="codex: scope the hook to this worktree")
     c.add_argument("--settings", default="", help="claude: settings.json to write (default ~/.claude/settings.json)")
     c.add_argument("--hooks-file", default="", help="codex: hooks.json to write (default ~/.codex/hooks.json)")
@@ -12224,6 +13344,8 @@ def main():
     c.add_argument("--can", default=None)
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--best-for", default="")
+    c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
+                   help="persist the seat's wake policy (master/CoS default continuous; workers task-only)")
     c.add_argument("--brief", default="", help="standing context for this worker")
     c.add_argument("--worktree", default="", help="default .worktrees/<name>")
     c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
@@ -12232,10 +13354,10 @@ def main():
     c.add_argument("--heartbeat", type=int, default=0,
                    help="with --master: also wake every N minutes to drive the objective (0 = off)")
     c.add_argument("--persist", action="store_true",
-                   help="keep the watcher looping (default is one model run then stop; implied by --cos)")
+                   help="keep the watcher looping (default follows --wake-mode; continuous/scheduled persist)")
     c.add_argument("--max-runs", type=int, default=None,
-                   help="passed to watch; workers default 1; --cos defaults 0 (persist); "
-                        "pass 1 for a CoS one-shot")
+                   help="passed to watch; task-only defaults 1; continuous/scheduled default 0; "
+                        "pass 1 for a diagnostic one-shot")
     c.add_argument("--safe", action="store_true", help="worker confirms edits instead of running unattended")
     c.add_argument("--master", action="store_true",
                    help="spawn the board master/planner (scope, routing by complexity, escalations)")
@@ -12318,7 +13440,7 @@ def main():
     c.add_argument("--to", default="", help="seat / agent name, or omit for everyone")
     c.add_argument("--re", default="", help="ticket id this is about")
     c.add_argument("--task", action="store_true",
-                   help="explicit task message: wakes the addressee (ordinary DMs and ACKs do not)")
+                   help="explicit task message: wakes every mode (ordinary DMs wake only continuous; ACKs never auto-wake)")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_msg)
 
@@ -12629,7 +13751,7 @@ def main():
         "kb",
     ):
         if not os.path.isdir(board):
-            if a.cmd == "board":
+            if a.cmd in ("board", "stop-hook"):
                 return
             sys.exit("no board at %s (create a ticket first)" % board)
     # board-restore uses --dest, not the discovered board

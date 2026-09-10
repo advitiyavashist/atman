@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import in_process_opener, rid  # noqa: F401
-
 from ticket_board import worktrees  # noqa: E402
 from ticket_board.runners.client import ApiError  # noqa: E402
 

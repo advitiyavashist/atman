@@ -16,3 +16,6 @@ the catalog here.
 - One ticket at a time. Own worktree. Board-only comms (`tickets msg`).
 - If blocked: say so early (`stuck:`). Do not wait silently.
 - BYO harnesses are fine. This file is context, not a backend.
+- **steer.md** is a separate runtime policy product. Do not mix Steer claims into Atman chrome.
+
+Full operator path: [docs/onboarding/role-context.md](../docs/onboarding/role-context.md) · [docs/byoa.md](../docs/byoa.md)

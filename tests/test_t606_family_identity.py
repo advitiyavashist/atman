@@ -14,13 +14,16 @@ def _ui_html():
 
 def test_family_tokens_cover_dark_and_light_without_old_action_palette():
     ui = _ui_html()
-    assert "--bg:#0b1416" in ui and "--card:#121c1e" in ui
-    assert "--bg:#f3f6f4" in ui and "--fg:#142022" in ui
-    assert "--acc:#c8f04a" in ui and "--on-acc:#142022" in ui
-    assert "--ok:#5ec7b0" in ui and "--warn:#e0a53d" in ui and "--bad:#e85d4c" in ui
+    assert "--bg:#0c0e12" in ui and "--card:#161820" in ui
+    assert "--fg:#ece8e1" in ui and "--acc:#c4b49a" in ui and "--on-acc:#14120e" in ui
+    assert "--ok:#6f9e96" in ui and "--warn:#e0a53d" in ui and "--bad:#e85d4c" in ui
+    assert "--bg:#f4f1eb" in ui and "--fg:#14120e" in ui
     assert "--acc:#5b8def" not in ui
+    assert "--acc:#c8f04a" not in ui
+    assert "--bg:#0b1416" not in ui
     assert "--live:" not in ui and "--intervene:" not in ui
     assert "linear-gradient" not in ui and "box-shadow:0 0 0" not in ui
+    assert "repeating-linear" not in ui
 
 
 def test_atman_mark_and_portfolio_caret_have_separate_jobs():
@@ -52,7 +55,7 @@ def test_locked_ia_and_keyboard_accessibility_markers():
     assert "updateThemeControl" in ui
 
 
-def test_lime_is_reserved_for_actions_and_selection():
+def test_brass_is_reserved_for_actions_and_selection():
     ui = _ui_html()
     assert ".bar i{display:block;height:100%;background:var(--progress)}" in ui
     assert ".health i{width:8px;height:8px;border-radius:2px;background:var(--ok)}" in ui

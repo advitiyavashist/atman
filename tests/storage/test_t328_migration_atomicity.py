@@ -10,14 +10,15 @@ rebuild committed on its own: a crash partway left the database with
 `hook_events` on the next boot, the old rows -- the audit trail -- become
 permanently and silently unreachable, with no error raised anywhere.
 
-These tests simulate the crash for real: a forked child process runs the
-actual `_migrate_hook_events_pk` against a real sqlite file, intercepting the
-script it hands to `executescript()` so it can stop and hard-kill itself
-(`os._exit`, not a Python exception -- nothing in the production `except`
-block gets a chance to run) right after a chosen statement lands. The parent
-then reopens the same file through the normal `connect()` path -- the way a
-restarted process actually would -- and checks whether the pre-crash row
-survived.
+These tests simulate the crash for real: a spawned child process (not
+`fork` -- Python 3.9 + sqlite3 + pytest on macOS SIGSEGVs inside the forked
+interpreter before the crash point) runs the actual `_migrate_hook_events_pk`
+against a real sqlite file, intercepting the script it hands to
+`executescript()` so it can stop and hard-kill itself (`os._exit`, not a
+Python exception -- nothing in the production `except` block gets a chance
+to run) right after a chosen statement lands. The parent then reopens the
+same file through the normal `connect()` path -- the way a restarted process
+actually would -- and checks whether the pre-crash row survived.
 
 Run against the pre-T328 migrations.py (tickets main / T-266 pin bc12b35),
 both tests below fail: a crash after the RENAME loses the row outright, and a
@@ -78,7 +79,7 @@ def _seed_pre_t266_board(db_path):
 
 
 def _child_crash_after(db_path_str, stop_after_prefix):
-    """Runs in a forked child: drive the real migration, hard-kill right
+    """Runs in a spawned child: drive the real migration, hard-kill right
     after the first statement matching `stop_after_prefix` lands.
 
     `sqlite3.Connection` instances refuse plain attribute assignment (its
@@ -105,7 +106,7 @@ def _child_crash_after(db_path_str, stop_after_prefix):
 
 
 def _crash_migration_after(db_path, stop_after_prefix):
-    ctx = multiprocessing.get_context("fork")
+    ctx = multiprocessing.get_context("spawn")
     proc = ctx.Process(target=_child_crash_after,
                         args=(str(db_path), stop_after_prefix))
     proc.start()

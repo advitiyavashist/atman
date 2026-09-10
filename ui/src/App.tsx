@@ -72,7 +72,7 @@ function BoardShell({ session }: { session: BoardSession }) {
           <span className="wordmark">atman</span>
         </a>
         <span className="tag" data-testid="board-label">
-          {session.boardLabel}
+          workspace · {session.boardLabel}
         </span>
         <span className="spacer" />
         <button

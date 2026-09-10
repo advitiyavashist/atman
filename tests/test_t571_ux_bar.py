@@ -1,4 +1,4 @@
-"""T-571 / T-567: Atman UX bar — emptyBoard 3-step, chrome, Done (24h), promise chips."""
+"""T-571 / T-567 / T-678 / T-679: Atman UX bar — emptyBoard 3-step, chrome, Done (24h), promise chips."""
 
 from pathlib import Path
 
@@ -48,8 +48,10 @@ def test_atman_chrome_wordmark_and_formation_dots():
     assert "text-transform:lowercase" in ui
     assert 'class="mark" viewBox="0 0 32 32"' in header
     assert header.count("<circle ") >= 5
-    assert "--bg:#0b1416" in ui
-    assert "--acc:#c8f04a" in ui
+    assert "--bg:#0c0e12" in ui
+    assert "--acc:#c4b49a" in ui
+    assert "#c8f04a" not in ui
+    assert "#0b1416" not in ui
     assert "↗" not in header
     assert "Ticket board" not in header
     assert 'class="prod"' not in header
@@ -110,3 +112,41 @@ def test_ux_bar_bans_sports_kitsch_and_steer_chrome():
     ui = _ui_html()
     for word in BANNED:
         assert word not in ui, "banned chrome still in console: %s" % word
+
+
+def test_empty_board_collapses_work_stack_and_does_not_force_open_turns():
+    """T-678: while empty_board, Work is the Day-one card (+ optional Next)."""
+    ui = _ui_html()
+    empty_fn = ui[ui.index("function renderEmptyBoard"):ui.index("function renderAttention")]
+    assert "data-empty-board" in empty_fn
+    assert "setAttribute('data-empty-board'" in empty_fn
+    assert "removeAttribute('data-empty-board')" in empty_fn
+    assert empty_fn.count("<li>") == 3
+    assert "Work · Team · Objective" in empty_fn
+    assert "Median turns and yield@cost stay — until a done ticket reports." in empty_fn
+    assert "Intervene is always available" in empty_fn
+    assert "body[data-empty-board][data-tab=board] .kanban" in ui
+    assert "body[data-empty-board][data-tab=board] #objectivePromise" in ui
+    assert "body[data-empty-board][data-tab=board] #turnsPanel" in ui
+    assert "body[data-empty-board][data-tab=board] #onboardBox" in ui
+    promise_fn = ui[ui.index("function renderPromise"):ui.index("function renderTurns")]
+    assert "hasAttribute('data-empty-board')" in promise_fn
+    assert "panel.open=false" in promise_fn
+    assert "panel.open=true" in promise_fn
+
+
+def test_sprint_row_hidden_when_no_active_sprint():
+    """T-679: hide the sprint row when there is no active sprint."""
+    ui = _ui_html()
+    header = ui[ui.index("<header"):ui.index("</header>")]
+    assert 'id="sprint"' in header
+    assert ".sprint[hidden]{display:none}" in ui
+    assert "sprintEl.hidden=!s" in ui
+    assert "no active sprint" not in ui
+    assert 'id="liveMeta"' in header
+    assert 'id="clock"' in header
+    assert 'id="lastUpdated"' in header
+    assert 'id="connStatus"' in header
+    assert "live-meta" in header
+    assert 'id="promiseChips"' in header
+    assert 'class="wordmark">atman</span>' in header

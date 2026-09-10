@@ -70,7 +70,11 @@ def test_cursor_shaped_fixture_board_idle_stays_one(board):
 
 
 def test_cursor_tool_watch_stamps_run_id_and_bound_write(board, tmp_path, monkeypatch):
-    """Cursor-harness watch child gets the same TICKETS_RUN_ID FLAG as Claude."""
+    """Cursor-harness watch child gets the same TICKETS_RUN_ID FLAG as Claude.
+
+    After IN REVIEW, idle --task watches still stamp distinct run_ids; they do
+    not bind the reviewed ticket and do not increment turns.
+    """
     for var in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"):
         monkeypatch.delenv(var, raising=False)
     repo = board.parent
@@ -93,20 +97,31 @@ def test_cursor_tool_watch_stamps_run_id_and_bound_write(board, tmp_path, monkey
     run(board, "review", tid, "--notes", "paths tests", agent="alice", cwd=repo)
     idle = _fake_harness(tmp_path, "echo idle-pulse\n")
     for _ in range(2):
-        run(board, "msg", "wake", "--to", "alice", agent="boss", cwd=repo)
+        # Task-only seats (Cursor workers included) ignore ordinary DMs after
+        # IN REVIEW (T-425). An explicit --task is the wake that starts an idle
+        # FLAG run without a bound write.
+        run(board, "msg", "idle-pulse", "--task", "--to", "alice", agent="boss", cwd=repo)
         r = run(board, "watch", "--agent", "alice", "--once", "--exec", str(idle),
                 "--cwd", str(repo), agent="alice", cwd=repo)
         assert r.returncode == 0, r.stdout + r.stderr
     after = json.loads(run(board, "turns", "--json", cwd=repo).stdout)
     by = {row["ticket"]: row for row in after["tickets"]}
     assert by[tid]["turns"] == 1
-    ends = events(board, kind="run_end", ticket=tid)
-    assert len(ends) == 3
-    assert ends[0].get("bound_write") is True
-    assert ends[0].get("run_id")
-    assert ends[0].get("run_no") == 1
-    assert "bound_write" not in ends[1]
-    assert ends[1].get("run_id") and ends[1].get("run_id") != ends[0].get("run_id")
+    # Idle pulses must not bind the IN REVIEW ticket (T-543/T-563); FLAG
+    # pairing is run_id on the claim run vs later watch runs.
+    claimed = events(board, kind="run_end", ticket=tid)
+    assert len(claimed) == 1
+    assert claimed[0].get("bound_write") is True
+    assert claimed[0].get("run_id")
+    assert claimed[0].get("run_no") == 1
+    alice_ends = events(board, kind="run_end", agent="alice")
+    assert len(alice_ends) == 3
+    idle_ends = [e for e in alice_ends if e.get("ticket") != tid]
+    assert len(idle_ends) == 2
+    assert all("bound_write" not in e for e in idle_ends)
+    assert idle_ends[0].get("run_id") and idle_ends[1].get("run_id")
+    assert idle_ends[0]["run_id"] != idle_ends[1].get("run_id")
+    assert idle_ends[0]["run_id"] != claimed[0]["run_id"]
     writes = events(board, kind="update", ticket=tid)
-    assert writes and writes[0].get("run_id") == ends[0].get("run_id")
+    assert writes and writes[0].get("run_id") == claimed[0].get("run_id")
     assert writes[0].get("run_no") == 1

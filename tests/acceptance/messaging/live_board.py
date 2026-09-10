@@ -310,7 +310,11 @@ class LiveBoard:
 
     def supervisor(self, agent: Agent, *, launcher=None, state_dir=None,
                    worktree=None, budget=None, prompt_builder=None,
-                   permission_policy="prompt") -> Supervisor:
+                   permission_policy=None) -> Supervisor:
+        # T-658 / T-192: do not default to `prompt`. Enrollment for role
+        # `backend` (and other worker roles) approves `allowlist`; asking
+        # for `prompt` is a widen and 403s `forbidden_scope` before the
+        # scenario runs. None means inherit the operator-approved preset.
         state_dir = Path(state_dir or self.tmp_path / ("state-" + agent.name))
         worktree = Path(worktree or self.tmp_path / ("wt-" + agent.name))
         worktree.mkdir(parents=True, exist_ok=True)

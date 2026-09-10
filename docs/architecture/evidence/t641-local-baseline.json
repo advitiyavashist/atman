@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "purpose": "Directional local evidence for ADR-001; reference applications do not predict final Atman performance.",
+  "source_commit": "3a19777",
+  "measured_on": "2026-09-09",
+  "host": {
+    "os": "macOS 26.3.1",
+    "architecture": "arm64",
+    "python": "3.9.6",
+    "node": "24.7.0",
+    "go_toolchain_installed": false,
+    "rust_toolchain_installed": false
+  },
+  "method": {
+    "startup_warmups": 4,
+    "startup_samples": 41,
+    "startup_clock": "time.perf_counter_ns around subprocess completion",
+    "rss_samples": 5,
+    "rss_sample_delay_ms": 150,
+    "rss_source": "ps rss",
+    "ui_ready_probe": "TCP connect to 127.0.0.1 after process spawn"
+  },
+  "results": [
+    {
+      "name": "atman_python_version",
+      "command": "python3 tickets.py --version",
+      "startup_p50_ms": 105.887,
+      "startup_p95_ms": 112.422
+    },
+    {
+      "name": "atman_python_ui",
+      "command": "python3 tickets.py ui --host 127.0.0.1 --port 48791",
+      "ready_ms": [176.09, 115.94, 119.04, 126.51, 158.70],
+      "rss_mib": [55.52, 55.16, 55.08, 55.03, 55.19]
+    },
+    {
+      "name": "node_runtime_reference",
+      "version": "24.7.0",
+      "startup_command": "node --version",
+      "idle_command": "node -e setTimeout",
+      "startup_p50_ms": 17.579,
+      "startup_p95_ms": 20.147,
+      "rss_p50_mib": 38.17,
+      "executable_mib": 77.79
+    },
+    {
+      "name": "ripgrep_rust_reference",
+      "version": "15.2.0",
+      "startup_command": "rg --version",
+      "idle_command": "rg x -",
+      "startup_p50_ms": 2.598,
+      "startup_p95_ms": 3.230,
+      "rss_p50_mib": 3.25,
+      "executable_mib": 3.83
+    },
+    {
+      "name": "github_cli_go_reference",
+      "version": "2.89.0",
+      "startup_command": "gh --version",
+      "idle_command": "gh api --input - /rate_limit",
+      "startup_p50_ms": 24.613,
+      "startup_p95_ms": 26.419,
+      "rss_p50_mib": 40.38,
+      "executable_mib": 35.79
+    }
+  ]
+}

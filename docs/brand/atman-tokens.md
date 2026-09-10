@@ -1,8 +1,6 @@
 # Atman tokens
 
-Paste-ready light and dark tokens for the command-board UI. These implement the
-accepted four-product family direction while retaining Atman's formation-dot
-mark and command vocabulary.
+Paste-ready dark tokens for Atman. **Do not share Steer’s lime `#c8f04a` or teal-black `#0b1416`.** T-713 retracts the T-606 family-lime lock for Atman surfaces.
 
 Chrome wordmark is lowercase `atman` with tracking — never `ATMAN`.
 
@@ -19,40 +17,36 @@ Chrome wordmark is lowercase `atman` with tracking — never `ATMAN`.
 ```css
 :root{
   color-scheme:dark;
-  --bg:#0b1416;
-  --fg:#e6eeea;
-  --mute:#8fa4a6;
-  --line:#243236;
-  --card:#121c1e;
-  --surface:#0f191b;
-  --chip:#182427;
-  --acc:#c8f04a;
-  --on-acc:#142022;
-  --ok:#5ec7b0;
+  --bg:#0c0e12;
+  --fg:#ece8e1;
+  --mute:#9a958c;
+  --line:#2a2d34;
+  --card:#161820;
+  --surface:#12141a;
+  --chip:#1c2028;
+  --acc:#c4b49a;
+  --on-acc:#14120e;
+  --ok:#6f9e96;
   --warn:#e0a53d;
   --bad:#e85d4c;
   --progress:#6f8c8f;
 }
-
-body[data-theme=light]{
-  color-scheme:light;
-  --bg:#f3f6f4;
-  --fg:#142022;
-  --mute:#6a7c7f;
-  --line:#d5ded9;
-  --card:#fbfdfc;
-  --surface:#eef2f0;
-  --chip:#e8eeea;
-  --ok:#187a67;
-  --warn:#93610a;
-  --bad:#b43a31;
-  --progress:#789396;
-}
 ```
 
-Lime is the single action accent. Use it for the primary or next action,
-selected navigation, the portfolio caret, and keyboard focus. It never means
-healthy, connected, ready, or working. Progress bars use `--progress`.
+Brass is the action accent. Use it for the primary or next action and keyboard focus. It never means healthy, connected, ready, or working. Progress bars use `--progress`. Do not wash the page with accent. Do not use a graph-paper grid (that read as Steer).
+
+Mint/teal `--ok` is status only, with a text label. Do not pulse a live-agent indicator or add glow.
+
+## Migration from T-606 family lime
+
+| Retired (Steer-family) | Replacement |
+|---|---|
+| Lime `--acc:#c8f04a` | Brass `--acc:#c4b49a` |
+| Teal-black `--bg:#0b1416` | `#0c0e12` |
+| Graph-paper body grid | Flat `--bg` |
+| Mint page wash | None; `--ok` on labels only |
+
+The `^` belongs to steer.md and may appear only on portfolio navigation. It is not an Atman logo.
 
 Mint, amber, and red are semantic status colors:
 
@@ -65,14 +59,14 @@ Mint, amber, and red are semantic status colors:
 Status always includes text and a shape. Do not rely on color alone. Do not
 pulse a live-agent indicator or add glow.
 
-## Migration from the first Atman palette
+## Migration from earlier Atman palettes
 
 | Retired token | Replacement |
 |---|---|
-| Blue `--acc:#5b8def` | Lime `--acc:#c8f04a` for actions only |
+| Blue `--acc:#5b8def` | Brass `--acc:#c4b49a` |
+| Family lime `--acc:#c8f04a` | Brass `--acc:#c4b49a` |
 | Amber `--intervene` | `--acc` for ordinary actions; `--warn` only when the state warrants attention |
 | Mint `--live` | `--ok` for a confirmed status with an adjacent text label |
-| Dark-only `--bg`, `--fg`, `--card`, `--line`, `--mute` | Theme mappings above |
 
 Do not keep the retired names as aliases; competing meanings make later UI
 changes ambiguous.

@@ -2,22 +2,25 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<h1 align="center">Bring your agents. Make them one team.</h1>
+<h1 align="center">A local control plane for coding agents in one repo.</h1>
 
 <p align="center">
-  Atman is an open, local runtime for managing Claude Code, Codex, Cursor, Grok,
-  local models, and your own agent harnesses around one objective.
+  Atman is the local team runtime for multiple coding agents in one repo.
+  Bring the agents you already use — Claude Code, Codex, Cursor, Grok Bot,
+  or custom. We make them one team.
 </p>
 
-Give Atman an objective. It assigns ready work, carries the relevant handoff
-context, watches liveness and limits, routes messages, and holds finished work
-for review. The result is a team you can understand and recover when a model,
-session, or machine stops.
+<p align="center"><strong>Fewest turns and measured cost stay secondary.</strong> Values stay <code>—</code> until a done ticket reports (unknown ≠ 0).</p>
 
-![Atman dashboard showing an objective, agent team, dependency-aware work, and review queue](docs/brand/evidence/t606-atman-dark-desktop.png)
+Give Atman an objective. Sit any first seat. It assigns ready work, carries the
+relevant handoff context, watches liveness and limits, routes messages, and
+holds finished work for review. Recover when a model, session, or machine
+stops — do not restart from chat history.
 
-The dashboard above is a checked-in product capture. The live dashboard runs
-locally with `tickets ui`; it is not a public hosted demo.
+![Atman dashboard showing an objective, agent team, dependency-aware work, and review queue](landing/assets/t732-dashboard-1440.png)
+
+The dashboard above is a checked-in product capture. Open it locally with
+`tickets ui`. It is not a public hosted demo.
 
 ## What Atman manages
 
@@ -26,7 +29,7 @@ of:
 
 | Part | What Atman needs to know |
 | --- | --- |
-| Intelligence | Model or agent harness: Claude Code, Codex, Cursor, Grok, a local model, or your own runner |
+| Intelligence | Model or agent harness: Claude Code, Codex, Cursor, Grok Bot, a local model, or your own runner |
 | Working context | Current objective, task, dependency handoffs, messages, standing briefs, and relevant reviewed knowledge |
 | Operating boundary | Tools, permissions, worktree, time budget, and usage quota |
 | Capability | What the seat can do, such as backend work, browser checks, Docker, or GPU jobs |
@@ -54,6 +57,13 @@ There is no hidden shared-memory claim.
 The control plane is the `tickets` CLI: one Python file, standard library only,
 with plain files under `.tickets/`. It does not require a hosted service,
 database, or agent SDK.
+
+Runtime commands such as `watch`, `spawn`, `hooks`, `ui`, `--wake-mode`, and
+`remote` are provided by the root/live `tickets.py` installed with
+`./install.sh` or `./install.sh --live-release`. The `pyproject.toml` console
+script still points at the smaller core-board CLI in `src/ticket_board/cli.py`;
+it does not yet provide runtime wake or remote-adapter parity. Do not use the
+pip entry point for those features.
 
 ## Context without repetition
 
@@ -121,8 +131,8 @@ cd ~/tickets
 Check what is actually running: `tickets self` (script path, PATH entry, release
 status). `tickets --version` prints the pinned commit or flags drift.
 
-Optional, Claude Code: add a `SessionStart` hook so every session sees the
-board (see `install.sh`).
+Any first seat: hook Claude Code, Codex, Cursor, Grok Bot, or a custom
+harness (see `install.sh` and [Bring your own agent](docs/byoa.md)).
 
 `tickets ui` prints the local address for the read-only dashboard. For the full
 captured session, read [A first session](docs/first-session.md).
@@ -147,8 +157,9 @@ the agent record. Claude is not invoked until `tickets watch` or
 `--harness custom --cmd '...'` when a watcher should run your harness
 ([docs/byoa.md](docs/byoa.md)).
 
-The built-in runner names are `claude`, `codex`, `cursor`, and
-`cursor+claude`. A custom runner can be any command:
+The built-in runner names are `claude`, `codex`, `cursor`, `cursor+claude`, and
+`remote`. `remote` is a fail-closed adapter boundary: it never substitutes an
+installed local model. A custom runner can be any command:
 
 ```sh
 tickets join qwen --roles docs \
@@ -158,6 +169,12 @@ tickets join qwen --roles docs \
 tickets harness check qwen
 tickets spawn qwen --every 3600
 ```
+
+Choose message behavior separately with `--wake-mode task-only|continuous|scheduled`.
+Workers default to `task-only`; the current master and CoS default to
+`continuous`. Continuous seats stay connected and wake on a direct DM or named
+mention. An offline continuous adapter keeps the wake queued and visible until
+its local command or remote session bridge reconnects.
 
 Start with `tickets connect` for tool-specific onboarding. See
 [Bring your own agent](docs/byoa.md) for the complete runner contract and
@@ -200,9 +217,9 @@ For an unattended coordinator:
 tickets drive "Ship V1" --as boss --heartbeat 30 --tool cursor+claude
 ```
 
-The heartbeat stops when the objective reaches a terminal state. Agent watchers
-wake for assigned work or actionable messages; they do not need to stay inside
-one endless model turn.
+The heartbeat stops when the objective reaches a terminal state. The master
+adapter remains available between bounded model turns; it does not keep one
+endless model turn open.
 
 ## Plan dependent work
 
@@ -249,5 +266,7 @@ tracked when the team needs them to survive clones; see the
 - [Team knowledge](docs/knowledge/README.md)
 - [Messages and runners](docs/messages-and-runners.md)
 - [Design notes](docs/design-notes.md)
+- [Contributing](CONTRIBUTING.md)
+- [Atman Core architecture decision](docs/architecture/ADR-001-go-core.md)
 
 Atman is MIT licensed.

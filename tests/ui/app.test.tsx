@@ -34,7 +34,7 @@ describe("App shell", () => {
     render(ui);
     await waitFor(() => expect(screen.getByTestId("count-ready")).toBeInTheDocument());
     expect(screen.queryByText("FIXTURE MODE · NO LIVE DATA")).not.toBeInTheDocument();
-    expect(screen.getByTestId("board-label")).toBeInTheDocument();
+    expect(screen.getByTestId("board-label").textContent).toMatch(/^workspace · /);
   });
 
   it("navigates between screens via the nav links and updates aria-current", async () => {

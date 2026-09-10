@@ -32,11 +32,7 @@ _HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 # yet, each tagged with the ticket that owns it. This is an ALLOWLIST, not a
 # mute: an entry that becomes routed fails the staleness check below, so the
 # list shrinks as those lanes land instead of silently outliving them.
-PENDING_ROUTES = {
-    ("POST", "/channels/{channel_id}/members"): "T-187 messaging API",
-    ("GET", "/messages/{message_id}/deliveries"): "T-187 messaging API",
-    ("POST", "/messages/{message_id}/task"): "T-187 messaging API",
-}
+PENDING_ROUTES = {}
 
 
 def _contract_operations():

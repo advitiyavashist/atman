@@ -26,7 +26,9 @@ def test_ui_html_is_command_board_not_spreadsheet(board):
     html = TOOL.read_text()
     start = html.index('UI_HTML = r"""')
     ui = html[start:html.index('"""', start + 14)]
-    assert "--bg:#0b1416" in ui
+    assert "--bg:#0c0e12" in ui
+    assert "--acc:#c4b49a" in ui
+    assert "#c8f04a" not in ui
     assert 'data-tab-btn="board"' in ui
     assert 'data-tab-btn="agents"' in ui
     assert 'data-tab-btn="messages"' in ui
