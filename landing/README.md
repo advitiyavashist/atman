@@ -1,11 +1,18 @@
 # Atman public landing
 
-Static page. No build step, no JavaScript, no framework.
+Static page. No build step, no JavaScript, no framework. First-seat examples
+use CSS radio tabs so the ordered providers (Claude Code, Codex, Cursor, Grok
+Bot, custom) can be inspected without a script.
 
-Copy follows the T-714 spike: Clone → Claude Code seat → `tickets ui`,
-with fewest-turns / least measured cost on the hero, usage-limit recovery
-early, and Brahman as optional research. The dashboard image is a checked-in
-product capture; the page does not point visitors at a machine-local demo.
+Copy follows T-726: Atman is the local team runtime. Lead line is *Bring the
+agents you already use. We make them one team.* Any first seat. Fewest turns
+and measured cost stay `—` until a done ticket reports. The dashboard image is a
+checked-in product capture; the page does not point visitors at a machine-local
+demo.
+
+Visual direction is ink/navy surfaces, action blue, amber intervene, and mint
+only on a live seat. Formation-dot mark. No Steer lime, grid wallpaper, or
+Claude-only onboarding.
 
 ## Open locally
 
