@@ -43,9 +43,12 @@ enrolled runner:
 | `head` | Observational commit of the worktree. **Not** part of auth identity. |
 
 `contexts_match` compares `AUTH_CONTEXT_IDENTITY_FIELDS`: `runner_id`,
-`runner_kind`, `hostname`, `binary`, `repo_root`, normalized origin, and
-enrolled `agent_id`. **`head` is excluded** so ordinary git commits and
-checkouts cannot become `runner_mismatch` or demote an authoritative blob.
+`runner_kind`, `hostname`, `username`, `binary`, `argv0`, `env_fingerprint`,
+`repo_root`, normalized origin, and enrolled `agent_id`. **`head` is
+excluded** so ordinary git commits and checkouts cannot become
+`runner_mismatch` or demote an authoritative blob. A different OS user or
+credential-relevant env fingerprint is a mismatch and cannot overwrite the
+enrolled runner blob.
 Spawn still uses origin (`expected_origin`); a ticket that pins a SHA checks
 that SHA in T-686 spawn, not in auth merge. Missing `execution_context` on a
 legacy T-610 blob means **not authoritative**.

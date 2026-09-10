@@ -35,7 +35,10 @@ def runner_ctx(**over):
         "runner_id": "rnr_host_1",
         "runner_kind": "host",
         "hostname": "mac-1",
+        "username": "kavana",
         "binary": "/opt/homebrew/bin/agent",
+        "argv0": "agent",
+        "env_fingerprint": "path",
         "repo_root": "/Users/kavana/Downloads/atman",
         "origin_url": ATMAN,
         "head": "920644ca10e8d3f4166769c631e7940829248cf0",
@@ -73,10 +76,10 @@ def v2_ready(ctx=None):
             "runner_id": ctx["runner_id"],
             "runner_kind": ctx["runner_kind"],
             "hostname": ctx["hostname"],
-            "username": "kavana",
+            "username": ctx.get("username") or "kavana",
             "binary": ctx["binary"],
-            "argv0": "agent",
-            "env_fingerprint": "path",
+            "argv0": ctx.get("argv0") or "agent",
+            "env_fingerprint": ctx.get("env_fingerprint") or "path",
             "worktree": "/Users/kavana/Downloads/atman/.worktrees/atman-auth-v2",
             "repo_root": ctx["repo_root"],
             "origin_url": ctx["origin_url"],
@@ -211,6 +214,40 @@ def test_persistent_unsupported_is_no_spend_and_not_login():
     assert eph["paused"] is False
     assert eph["retry_model"] is False
     assert eph["operator_path"] == "unsupported"
+
+
+def test_username_or_env_fingerprint_change_is_mismatch():
+    """Different OS user or credential-relevant env is not the enrolled runner."""
+    from auth_v2_contract import (
+        AUTH_CONTEXT_IDENTITY_FIELDS,
+        contexts_match,
+        preflight_failures,
+    )
+    assert AUTH_CONTEXT_IDENTITY_FIELDS == (
+        "runner_id", "runner_kind", "hostname", "username", "binary",
+        "argv0", "env_fingerprint", "repo_root", "origin_url", "agent_id",
+    )
+    assert "head" not in AUTH_CONTEXT_IDENTITY_FIELDS
+    host = runner_ctx()
+    other_user = runner_ctx(username="other")
+    other_env = runner_ctx(env_fingerprint="homebrew-path")
+    other_argv = runner_ctx(argv0="cursor-agent")
+    assert contexts_match(host, other_user) is False
+    assert contexts_match(host, other_env) is False
+    assert contexts_match(host, other_argv) is False
+    assert "runner_mismatch" in preflight_failures(
+        "atman-auth-v2", "atman-auth-v2", "advitiyavashist/atman",
+        ATMAN, ATMAN, other_user, host)
+    stored = merge_auth_check({}, v2_ready(host), host)
+    assert stored["state"] == "ready" and stored["authoritative"] is True
+    for probe_ctx in (other_user, other_env):
+        incoming = v2_ready(probe_ctx)
+        incoming["state"] = "login_required"
+        incoming["detail"] = "Not logged in"
+        merged = merge_auth_check(stored, incoming, host)
+        assert merged["state"] == "ready"
+        assert merged["authoritative"] is True
+        assert merged["detail"] == "Logged in"
 
 
 def test_head_change_is_not_runner_mismatch():

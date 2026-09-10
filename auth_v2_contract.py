@@ -140,7 +140,10 @@ AUTH_CONTEXT_IDENTITY_FIELDS = (
     "runner_id",
     "runner_kind",
     "hostname",
+    "username",
     "binary",
+    "argv0",
+    "env_fingerprint",
     "repo_root",
     "origin_url",
     "agent_id",
@@ -151,7 +154,9 @@ def context_fingerprint(ctx):
     """Stable identity of where a probe ran. Host vs sandbox must differ.
 
     HEAD is excluded: it changes on ordinary commits and is not auth authority.
-    Repo identity for spawn is origin (`expected_origin`), not path or HEAD.
+    Username, argv0, and env_fingerprint (credential-relevant env *names*,
+    never values) are included so another OS user or env cannot overwrite the
+    enrolled runner blob. Repo identity for spawn is origin, not path/HEAD.
     """
     ctx = ctx or {}
     parts = []
