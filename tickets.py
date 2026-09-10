@@ -3470,8 +3470,6 @@ def _watcher_run_active(board, owner, pid):
     """
     rec = _read_run(board, owner) if board else {}
     if rec.get("pid") == pid and ("active" in rec):
-        if rec.get("active") and rec.get("pid") and not _pid_alive(rec.get("pid")):
-            return False
         return bool(rec.get("active"))
     return _has_child_process(pid)
 
