@@ -41,17 +41,22 @@ enrolled runner:
 | `origin_url` | `git remote get-url origin` (stored normalized) |
 | `expected_origin` | Ticket/project repo, e.g. `advitiyavashist/atman` |
 | `head` | Observational commit of the worktree. **Not** part of auth identity. |
+| `agent_id` / `ticket_agent` | Enrolled seat; process `TICKET_AGENT` must equal it |
+| `lifecycle` | `persistent` \| `ephemeral` — pause/alert derive from this, not the merge caller |
 
 `contexts_match` compares `AUTH_CONTEXT_IDENTITY_FIELDS`: `runner_id`,
 `runner_kind`, `hostname`, `username`, `binary`, `argv0`, `env_fingerprint`,
-`repo_root`, normalized origin, and enrolled `agent_id`. **`head` is
+`repo_root`, normalized credential-free origin, `expected_origin`, and
+enrolled `agent_id`. Incomplete contexts never match. **`head` is
 excluded** so ordinary git commits and checkouts cannot become
 `runner_mismatch` or demote an authoritative blob. A different OS user or
 credential-relevant env fingerprint is a mismatch and cannot overwrite the
-enrolled runner blob.
+enrolled runner blob. `preflight_failures` treats a missing probe or runner
+context as `runner_mismatch`.
 Spawn still uses origin (`expected_origin`); a ticket that pins a SHA checks
 that SHA in T-686 spawn, not in auth merge. Missing `execution_context` on a
-legacy T-610 blob means **not authoritative**.
+legacy T-610 blob means **not authoritative**. `load_auth_check` keeps that
+blob display-readable; the first valid authoritative probe upgrades it.
 
 Seat identity is first-class: `execution_context.agent_id` (enrolled seat)
 must equal process `TICKET_AGENT` (`ticket_agent`). Live 2026-09-10: the
@@ -62,14 +67,18 @@ generic `cursor` while the seat was `atman-auth-v2`. That is
 
 ## Credential profiles
 
-`credential_profile_ref` is an opaque `prf_…` token. Metadata lives outside
-Git under `~/.cache/atman/credentials/<board-hash>/` (dir `0700`, file `0600`),
-same privacy class as T-683 session endpoints. **No secret material** in the
-profile file, the board, logs, or UI: no passwords, tokens, API keys,
-cookies, or `Authorization` headers. The profile records provider, kind, and
-a safe `identity_label` (for example `cursor-cli` or `dev@example.test` only
-when the provider status command already prints it). Secrets stay in the
-provider CLI or OS keychain.
+`credential_profile_ref` is a strict opaque token `prf_[A-Za-z0-9][A-Za-z0-9_-]{0,63}`.
+Path separators, dots, and `..` are rejected. `profile_store_path` resolves
+the file and refuses anything outside `cache/credentials/<board-hash>/`.
+Metadata lives outside Git under `~/.cache/atman/credentials/<board-hash>/`
+(dir `0700`, file `0600`), same privacy class as T-683 session endpoints.
+**No secret material** in the profile file, the board, logs, or UI: no
+passwords, tokens, API keys, cookies, or `Authorization` headers. Nested
+dicts/lists are recursively allowlisted; `login_cmd` cannot embed tokens;
+origin userinfo is stripped before normalize. The profile records provider,
+kind, and a safe `identity_label` (for example `cursor-cli` or
+`dev@example.test` only when the provider status command already prints it).
+Secrets stay in the provider CLI or OS keychain.
 
 | Provider | `profile_kind` |
 |---|---|
@@ -94,16 +103,20 @@ missing / timeout without a transport error). Never classify auth as quota.
 
 `merge_auth_check(previous, incoming, runner_ctx)`:
 
-- Incoming probe with a non-matching context cannot replace **any**
-  authoritative runner blob (not only `ready`). Sandbox `ready` must not
-  clobber host `quota` / `login_required` / `expired`, **including when the
-  merge caller passes `runner_ctx=sandbox`**. Freeze compares
-  `previous.execution_context` to `incoming.execution_context` plus
-  incoming authority for that stored lineage — not only both blobs against
-  the caller `runner_ctx`.
+- Incoming probe with a non-matching, incomplete, or invalid context cannot
+  replace **any** authoritative runner blob (not only `ready`). Sandbox
+  `ready` must not clobber host `quota` / `login_required` / `expired` /
+  `network`, **including when the merge caller passes `runner_ctx=sandbox`**.
+  For stored lineage, **stored, incoming, and enrolled caller** contexts
+  must all agree. Freeze is blob-vs-blob plus caller, not caller-only.
+- Malformed incoming (bad state, missing identity fields, seat
+  `ticket_agent` mismatch) never overwrites an authoritative previous.
 - Silent runner rebind is forbidden in this merge. Changing the enrolled
   runner is an explicit fenced T-686 operation, not an auth-check side
   effect.
+- `pause` lifecycle and `alert_id` agent come from trusted stored/incoming
+  enrolled context, never from an arbitrary caller. A sandbox caller cannot
+  unpause a persistent host `network` seat or steal its alert.
 - Matching-context probes replace the stored blob.
 - Matching authoritative `quota|login_required|expired|…` → `ready` must
   clear `pause.paused` and `alert_id` so a recovered persistent seat resumes
@@ -133,7 +146,8 @@ Keep the agent-record key `auth_check`. Additive fields:
 | `execution_context` | `context:` one-line host/binary/origin | T-687 Connect surface |
 | `pause` / `alert_id` | new | paused-auth ≠ quota/offline |
 
-Legacy blobs without context remain readable; they are non-authoritative.
+Legacy blobs without context remain readable via `load_auth_check` and are
+non-authoritative. The first valid authoritative probe upgrades them.
 T-610 Cursor-only spawn gate stays until T-686 gates every built-in spawn.
 `tickets.py` is unchanged in T-685.
 

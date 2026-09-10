@@ -1,6 +1,7 @@
 """T-685 contract gates: context match, opaque profiles, repo identity."""
 
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ from auth_v2_contract import (  # noqa: E402
     alert_id,
     dumps_board_safe,
     is_authoritative,
+    load_auth_check,
     merge_auth_check,
     normalize_git_origin,
     pause_policy,
@@ -41,11 +43,15 @@ def runner_ctx(**over):
         "env_fingerprint": "path",
         "repo_root": "/Users/kavana/Downloads/atman",
         "origin_url": ATMAN,
+        "expected_origin": "advitiyavashist/atman",
         "head": "920644ca10e8d3f4166769c631e7940829248cf0",
         "lifecycle": "persistent",
         "agent_id": "atman-auth-v2",
+        "ticket_agent": "atman-auth-v2",
     }
     base.update(over)
+    if "agent_id" in over and "ticket_agent" not in over:
+        base["ticket_agent"] = over["agent_id"]
     return base
 
 
@@ -83,10 +89,11 @@ def v2_ready(ctx=None):
             "worktree": "/Users/kavana/Downloads/atman/.worktrees/atman-auth-v2",
             "repo_root": ctx["repo_root"],
             "origin_url": ctx["origin_url"],
-            "expected_origin": "advitiyavashist/atman",
+            "expected_origin": ctx.get("expected_origin") or "advitiyavashist/atman",
             "head": ctx["head"],
             "agent_id": ctx.get("agent_id") or "atman-auth-v2",
-            "ticket_agent": ctx.get("agent_id") or "atman-auth-v2",
+            "ticket_agent": ctx.get("ticket_agent") or ctx.get("agent_id") or "atman-auth-v2",
+            "lifecycle": ctx.get("lifecycle") or "persistent",
         },
     }
 
@@ -275,7 +282,8 @@ def test_username_or_env_fingerprint_change_is_mismatch():
     )
     assert AUTH_CONTEXT_IDENTITY_FIELDS == (
         "runner_id", "runner_kind", "hostname", "username", "binary",
-        "argv0", "env_fingerprint", "repo_root", "origin_url", "agent_id",
+        "argv0", "env_fingerprint", "repo_root", "origin_url",
+        "expected_origin", "agent_id",
     )
     assert "head" not in AUTH_CONTEXT_IDENTITY_FIELDS
     host = runner_ctx()
@@ -423,3 +431,141 @@ def test_t610_suite_still_imports_without_v2_probe_wiring():
     text = (ROOT / "tickets.py").read_text()
     assert "auth_v2_contract" not in text
     assert "def harness_auth_probe" in text
+
+
+def test_incomplete_or_missing_context_fails_preflight_and_is_not_authoritative():
+    """T-708: validator/preflight fail-closed when identity fields are missing."""
+    from auth_v2_contract import context_is_complete, preflight_failures
+    host = runner_ctx()
+    rec = v2_ready(host)
+    rec["execution_context"]["username"] = ""
+    errs = ";".join(validate_auth_check(rec))
+    assert "execution_context.username is required" in errs
+    assert context_is_complete(rec["execution_context"]) is False
+    assert is_authoritative(rec, host) is False
+    assert "runner_mismatch" in preflight_failures(
+        "atman-auth-v2", "atman-auth-v2", "advitiyavashist/atman",
+        ATMAN, ATMAN, None, host)
+    assert "runner_mismatch" in preflight_failures(
+        "atman-auth-v2", "atman-auth-v2", "advitiyavashist/atman",
+        ATMAN, ATMAN, host, None)
+    empty = dict(host)
+    empty["hostname"] = ""
+    assert "runner_mismatch" in preflight_failures(
+        "atman-auth-v2", "atman-auth-v2", "advitiyavashist/atman",
+        ATMAN, ATMAN, empty, host)
+
+
+def test_merge_rejects_mismatched_ticket_agent_and_malformed_incoming():
+    """T-708: malformed or seat-mismatched incoming never overwrites authority."""
+    host = runner_ctx()
+    stored = merge_auth_check({}, v2_ready(host), host)
+    assert stored["authoritative"] is True
+    bad_seat = v2_ready(host)
+    bad_seat["execution_context"]["ticket_agent"] = "cursor"
+    merged = merge_auth_check(stored, bad_seat, host)
+    assert merged["state"] == "ready"
+    assert merged["execution_context"]["ticket_agent"] == "atman-auth-v2"
+    malformed = v2_ready(host)
+    malformed["state"] = "not-a-state"
+    merged = merge_auth_check(stored, malformed, host)
+    assert merged["state"] == "ready"
+
+
+def test_three_way_lineage_required_and_sandbox_caller_cannot_steal_pause():
+    """T-708: stored, incoming, and enrolled caller must agree; caller is not authority."""
+    host = runner_ctx()
+    sand = sandbox_ctx()
+    stored = v2_ready(host)
+    stored["state"] = "network"
+    stored["detail"] = "host network"
+    stored = merge_auth_check({}, stored, host)
+    assert stored["pause"]["paused"] is True
+    assert stored["alert_id"] == alert_id(
+        "atman-auth-v2", "network", "prf_cursor_browser_1")
+    host_ready = v2_ready(host)
+    stolen = merge_auth_check(stored, host_ready, sand)
+    assert stolen["state"] == "network"
+    assert stolen["pause"]["paused"] is True
+    assert stolen["alert_id"] == alert_id(
+        "atman-auth-v2", "network", "prf_cursor_browser_1")
+    sand_ready = v2_ready(sand)
+    sand_ready["execution_context"]["lifecycle"] = "ephemeral"
+    sand_ready["execution_context"]["agent_id"] = "sandbox-thief"
+    sand_ready["execution_context"]["ticket_agent"] = "sandbox-thief"
+    paused = merge_auth_check(stored, sand_ready, sand)
+    assert paused["state"] == "network"
+    assert paused["pause"]["paused"] is True
+    assert paused["alert_id"].startswith("auth:atman-auth-v2:network:")
+
+
+def test_recursive_sanitize_strips_nested_secrets_login_cmd_and_origin_userinfo():
+    """T-708: nested dict/list, login_cmd tokens, and credential origins never persist."""
+    dirty = v2_ready()
+    dirty["login_cmd"] = (
+        "agent login --token=sk-live-this-must-not-be-stored-anywhere-ok"
+    )
+    dirty["execution_context"]["origin_url"] = (
+        "https://x-access-token:ghs_abcdefghijklmnopqrstuvwxyz012345@github.com/"
+        "advitiyavashist/atman.git"
+    )
+    dirty["execution_context"]["nested"] = {
+        "api_key": "sk-live-nested-secret-value-must-go-now-ok",
+        "items": [{"refresh_token": "rt_" + ("y" * 40), "ok": "host"}],
+    }
+    dirty["extra_blob"] = {"password": "hunter2-not-a-board-field", "keep": 1}
+    clean = redact_auth_check(dirty)
+    blob = dumps_board_safe(dirty)
+    assert "sk-live" not in blob
+    assert "ghs_" not in blob
+    assert "x-access-token" not in blob
+    assert "nested" not in (clean.get("execution_context") or {})
+    assert "extra_blob" not in clean
+    assert "password" not in blob
+    assert clean["login_cmd"] == "agent login"
+    assert clean["execution_context"]["origin_url"] == "advitiyavashist/atman"
+    assert normalize_git_origin(dirty["execution_context"]["origin_url"]) == (
+        "advitiyavashist/atman")
+
+
+def test_profile_ref_rejects_traversal_and_unsafe_tokens():
+    """T-708: credential_profile_ref is a safe token; resolved path stays contained."""
+    with pytest.raises(ValueError):
+        profile_store_path("/tmp/atman-cache", "boardhash", "prf_../../etc/passwd")
+    with pytest.raises(ValueError):
+        profile_store_path("/tmp/atman-cache", "../etc", "prf_abc")
+    with pytest.raises(ValueError):
+        profile_store_path("/tmp/atman-cache", "boardhash", "prf_foo/bar")
+    rec = v2_ready()
+    rec["credential_profile_ref"] = "prf_../../etc/passwd"
+    assert any("credential_profile_ref" in e for e in validate_auth_check(rec))
+    path = profile_store_path("/tmp/atman-cache", "boardhash", "prf_abc")
+    assert os.path.basename(path) == "prf_abc.json"
+    assert "credentials" in path
+
+
+def test_legacy_t610_load_is_display_readable_then_first_authoritative_probe_upgrades():
+    """T-708: legacy T-610 stays readable and non-authoritative until a valid V2 probe."""
+    host = runner_ctx()
+    legacy = {
+        "state": "login_required",
+        "harness": "cursor",
+        "detail": "Not logged in",
+        "login_cmd": "agent login",
+        "status_cmd": "agent status",
+        "identity": "cursor-cli",
+    }
+    loaded = load_auth_check(legacy)
+    assert loaded["authoritative"] is False
+    assert loaded["state"] == "login_required"
+    assert loaded["login_cmd"] == "agent login"
+    assert loaded["detail"] == "Not logged in"
+    assert is_authoritative(loaded, host) is False
+    upgraded = merge_auth_check(legacy, v2_ready(host), host)
+    assert upgraded["authoritative"] is True
+    assert upgraded["state"] == "ready"
+    assert upgraded["execution_context"]["runner_kind"] == "host"
+    still_legacy = merge_auth_check(legacy, v2_ready(sandbox_ctx()), host)
+    assert still_legacy["authoritative"] is False
+    assert still_legacy.get("state") == "login_required"
+
