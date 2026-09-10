@@ -10519,9 +10519,9 @@ def cmd_harness(a, board):
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{color-scheme:dark;--bg:#0b1416;--fg:#e6eeea;--mute:#8fa4a6;--line:#243236;--card:#121c1e;--surface:#0f191b;--chip:#182427;--acc:#c8f04a;--on-acc:#142022;--ok:#5ec7b0;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#8fa4a6;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
-body[data-theme=light]{color-scheme:light;--bg:#f3f6f4;--fg:#142022;--mute:#6a7c7f;--line:#d5ded9;--card:#fbfdfc;--surface:#eef2f0;--chip:#e8eeea;--on-acc:#142022;--ok:#187a67;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6a7c7f;--flight:#93610a;--review:#6954a5;--progress:#789396}
-*{box-sizing:border-box}html,body{height:100%}
+:root{color-scheme:dark;--bg:#0c0e12;--fg:#ece8e1;--mute:#9a958c;--line:#2a2d34;--card:#161820;--surface:#12141a;--chip:#1c2028;--acc:#c4b49a;--on-acc:#14120e;--ok:#6f9e96;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#9a958c;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
+body[data-theme=light]{color-scheme:light;--bg:#f4f1eb;--fg:#14120e;--mute:#6e6a63;--line:#d8d3ca;--card:#fcfaf6;--surface:#eeeae3;--chip:#e8e3d9;--on-acc:#14120e;--ok:#3d6e68;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6e6a63;--flight:#93610a;--review:#6954a5;--progress:#789396}
+*{box-sizing:border-box}html,body{height:100%;overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
 body.loading main{opacity:.55;pointer-events:none}
 header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--line)}
@@ -10529,7 +10529,7 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .mark{color:var(--fg)}
 .brand .mark{flex:none;width:22px;height:22px}
 .wordmark{font:650 16px/1.2 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:.22em;text-transform:lowercase}
-.brand .board-name{margin:2px 0 0;font-size:11px}
+.brand .board-name{margin:2px 0 0;font:11px/1.3 ui-monospace,Menlo,monospace;letter-spacing:.02em;text-transform:none}
 .sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .portfolio{position:relative}
 .portfolio summary{display:inline-flex;align-items:center;gap:5px;list-style:none;padding:2px 4px;border:0;border-radius:7px;background:transparent;color:var(--mute);font:11px/1.3 ui-monospace,Menlo,monospace;cursor:pointer}
@@ -10647,7 +10647,7 @@ body[data-empty-board][data-tab=board] #onboardBox{display:none}
 .seats-title{margin:0 0 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:650}
 .seats-lede{color:var(--mute);font-size:12px;margin:0;max-width:720px}
 .seats-lede b{color:var(--fg)}
-.next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+.next-step{display:flex;gap:10px 14px;align-items:flex-start;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
 .next-step .lbl{font-weight:700;color:var(--acc);white-space:nowrap}
 .next-step .msg{flex:1;min-width:160px}
 .next-step .cmd{font:12px/1.35 ui-monospace,Menlo,monospace;color:var(--mute);white-space:nowrap}
@@ -10760,7 +10760,7 @@ body[data-empty-board][data-tab=board] #onboardBox{display:none}
     <div>
       <span class="wordmark">atman</span>
       <h1 id="title" class="sr-only">Atman</h1>
-      <p class="board-name mute" id="boardName" hidden></p>
+      <p class="board-name mute" id="boardName" hidden data-kind="workspace"></p>
     </div>
   </div>
   <details class="portfolio" id="portfolioSwitch">
@@ -11221,7 +11221,7 @@ async function load(manual){
   if(boardName){
     const proj=String(d.project||'').trim();
     const show=proj&&proj.toLowerCase()!=='atman';
-    boardName.textContent=show?proj:'';
+    boardName.textContent=show?('workspace · '+proj):'';
     boardName.hidden=!show;
   }
   const counts=d.counts||{total:0,done:0};

@@ -17,7 +17,7 @@ relevant handoff context, watches liveness and limits, routes messages, and
 holds finished work for review. Recover when a model, session, or machine
 stops — do not restart from chat history.
 
-![Atman dashboard showing an objective, agent team, dependency-aware work, and review queue](docs/brand/evidence/t606-atman-dark-desktop.png)
+![Atman dashboard showing an objective, agent team, dependency-aware work, and review queue](landing/assets/t732-dashboard-1440.png)
 
 The dashboard above is a checked-in product capture. Open it locally with
 `tickets ui`. It is not a public hosted demo.

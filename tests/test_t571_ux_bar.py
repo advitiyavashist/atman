@@ -48,8 +48,10 @@ def test_atman_chrome_wordmark_and_formation_dots():
     assert "text-transform:lowercase" in ui
     assert 'class="mark" viewBox="0 0 32 32"' in header
     assert header.count("<circle ") >= 5
-    assert "--bg:#0b1416" in ui
-    assert "--acc:#c8f04a" in ui
+    assert "--bg:#0c0e12" in ui
+    assert "--acc:#c4b49a" in ui
+    assert "#c8f04a" not in ui
+    assert "#0b1416" not in ui
     assert "↗" not in header
     assert "Ticket board" not in header
     assert 'class="prod"' not in header
