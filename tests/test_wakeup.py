@@ -62,6 +62,33 @@ def pending(board, agent):
     return r.returncode, json.loads(r.stdout)
 
 
+def ready_agent_env(board):
+    """PATH-first logged-in stubs for watch --dry-run without --exec.
+
+    T-686 gates built-in model turns on a zero-model probe even for dry-run.
+    Default join harness is Claude (`claude auth status`); Cursor is
+    `agent status`. These are not live CLIs — same pattern as T-409/test_byoa.
+    """
+    bindir = board.parent.parent / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "agent").write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = status ]; then echo 'Logged in as fixture@example.test'; exit 0; fi\n"
+        "echo OK; exit 0\n")
+    (bindir / "claude").write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = auth ] && [ \"$2\" = status ]; then "
+        "echo 'Logged in as fixture@example.test'; exit 0; fi\n"
+        "echo OK; exit 0\n")
+    (bindir / "codex").write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = login ] && [ \"$2\" = status ]; then echo logged in; exit 0; fi\n"
+        "echo OK; exit 0\n")
+    for name in ("agent", "claude", "codex"):
+        (bindir / name).chmod(0o755)
+    return dict(PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+
+
 # ---- pending ------------------------------------------------------------
 
 def test_pending_nothing_for_stranger(board):
@@ -183,11 +210,12 @@ def test_stop_hook_ignores_limited_agent(board):
 # ---- watch --------------------------------------------------------------
 
 def test_watch_once_exit_codes_and_dry_run(board):
+    env = ready_agent_env(board)
     run(board, "join", "doc", "--roles", "docs")
-    r = run(board, "watch", "--agent", "doc", "--once", "--dry-run")
+    r = run(board, "watch", "--agent", "doc", "--once", "--dry-run", env=env)
     assert r.returncode == 0 and "dry-run" in r.stdout
     run(board, "join", "bob", "--roles", "backend")
-    assert run(board, "watch", "--agent", "bob", "--once", "--dry-run").returncode == 1
+    assert run(board, "watch", "--agent", "bob", "--once", "--dry-run", env=env).returncode == 1
 
 
 def test_watch_executes_command_and_logs(board):
@@ -515,7 +543,8 @@ def test_master_heartbeat_drives_only_the_master_seat(board):
     run(board, "objective", "Ship V1", "--exit", "gates green", agent="boss")
     rc, p = pending(board, "boss")
     assert "drive" not in p                                   # no heartbeat configured
-    r = run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="boss")
+    env = ready_agent_env(board)
+    r = run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="boss", env=env)
     rc, p = pending(board, "boss")
     assert "drive" in p and p["pending"] is True, p
     # the interactive stop hook never keeps a turn open for a heartbeat
@@ -529,7 +558,7 @@ def test_master_heartbeat_drives_only_the_master_seat(board):
     run(board, "join", "bob", "--roles", "backend")
     rc, p = pending(board, "bob")
     assert "drive" not in p
-    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob")
+    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="bob", env=env)
     rc, p = pending(board, "bob")
     assert "drive" in p
     out = run(board, "prompt", agent="bob").stdout

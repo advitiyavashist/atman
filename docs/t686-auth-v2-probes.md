@@ -26,4 +26,7 @@ T-688 owns live provider smoke.
 Tests: `tests/test_t686_auth_v2_probes.py`, `tests/test_t610_auth_recovery.py`,
 `tests/test_t685_auth_v2_contract.py`, `tests/test_byoa.py`,
 `tests/test_t409_watch_teardown.py` (built-in `--tool` spawn uses a PATH stub
-for `codex login status`, not a live CLI).
+for `codex login status`, not a live CLI), `tests/test_wakeup.py` and
+`tests/test_t611_objective_bounds.py` (`watch --dry-run` without `--exec`
+stubs `agent status` / `claude auth status` / `codex login status` on PATH;
+the gate is unchanged).

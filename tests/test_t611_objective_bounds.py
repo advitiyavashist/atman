@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from test_wakeup import board, pending, run, stop  # noqa: F401
+from test_wakeup import board, pending, ready_agent_env, run, stop  # noqa: F401
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 
@@ -267,18 +267,19 @@ def test_spawn_cos_defaults_persistent_with_max_runs_oneshot(board):
 
 
 def test_heartbeat_requires_exit_criterion(board):
+    env = ready_agent_env(board)
     run(board, "master", "take", agent="boss")
     run(board, "join", "doc", "--roles", "docs")
     run(board, "next", agent="doc")
     run(board, "objective", "Ship V1", agent="boss")
-    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="boss")
+    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="boss", env=env)
     rc, p = pending(board, "boss")
     assert "drive" not in p, p
     run(board, "objective", "Ship V1", "--exit", "gates green", agent="boss")
     rec = json.loads((board / "agents" / "boss.json").read_text())
     rec.pop("drive_at", None)
     (board / "agents" / "boss.json").write_text(json.dumps(rec))
-    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="boss")
+    run(board, "watch", "--once", "--heartbeat", "30", "--dry-run", agent="boss", env=env)
     rc, p = pending(board, "boss")
     assert "drive" in p and p["pending"] is True, p
 
