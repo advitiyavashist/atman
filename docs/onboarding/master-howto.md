@@ -178,7 +178,9 @@ teammates, review + merge, coordinate (route, spawn, reopen silent claims).
 ## Step 4 — Seed role context (E-013)
 
 Standing context lives on the **board**. Watch and spawn inject it. It does
-not store conversation and it is not a memory product.
+not store conversation and it is not a memory product. Dedicated operator
+guide: [role-context.md](role-context.md). Product spec:
+[pm-atman-role-context-v1.md](../product/pm-atman-role-context-v1.md).
 
 | File | Who sees it | How you write it |
 |---|---|---|
