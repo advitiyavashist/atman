@@ -19,8 +19,14 @@ Board location, in order of preference:
 `tickets board` does not scan children — SessionStart hooks stay silent in
 folders that are not the project. `tickets next` / `show` / `done` do.
 
-Agent identity comes from $TICKET_AGENT (set it per tool: claude, codex, cursor).
-Default roles for those names can be overridden by .tickets/roles.json.
+Agent identity for a single command comes from $TICKET_AGENT (set it per tool:
+claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
+launched. Session-scoped surfaces (`board`'s "you:" line, the stop-hook,
+`msg`/`inbox` with no --owner) instead resolve through `tickets join <name>`,
+which records the seat for this session and outranks both env vars -- see
+session_seat()'s docstring for why the two questions ("who does this one
+command act as" vs "who is this session") need different precedence. Default
+roles for those names can be overridden by .tickets/roles.json.
 """
 
 import argparse
@@ -549,8 +555,210 @@ def _board_dir_uncached(discover_children=True):
     return os.path.join(os.getcwd(), ".tickets")
 
 
+IDENTITY_FILE = ".agent-identity"   # legacy: one identity for the whole board
+IDENTITY_DIR = ".identities"        # current: one identity per agent session
+
+# Env vars that carry a per-session id, in preference order. Each coding-agent
+# harness names its own, so probe generically rather than hardcoding one --
+# this board is shared across harnesses and an unrecognised one must degrade
+# safely rather than adopt a neighbour's identity.
+#
+# Named agent_session_key() below, not session_key(): session_adapters.py
+# already has a session_key() for a different concept (the provider+transport
+# identity of a wake ENDPOINT record, used to fence stale endpoints against
+# each other). Same word, unrelated question -- keeping them apart by name
+# avoids reading one as an answer to the other.
+SESSION_ID_VARS = (
+    "TICKET_SESSION_ID",        # explicit override, and what tests use
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "CURSOR_SESSION_ID",
+    "TERM_SESSION_ID",          # terminal-provided; last resort
+)
+
+
+def agent_session_key():
+    """A key unique to this agent session, or None if the harness gives us none.
+
+    THIS IS THE CRUX of the identity fix. Identity cannot be keyed by the
+    board, because several sessions share one board -- that was the original
+    bug in a different costume (one recorded seat, adopted by whichever
+    session read it). It cannot be keyed by the environment alone either,
+    because TICKET_AGENT is inherited: a session started from a shell that
+    once held another agent's value silently answers to that agent's name,
+    and starts reporting that agent's unread mail to whoever is watching.
+    """
+    for var in SESSION_ID_VARS:
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return hashlib.sha256(val.encode("utf-8")).hexdigest()[:16]
+    return None
+
+
+def _identity_path(board, key=None):
+    """Where this session's identity is recorded.
+
+    Deliberately beside the board rather than in a shell profile: a profile is
+    shared by every process on the machine, so agents setting identity there
+    overwrite each other. Keyed by session so co-resident agents don't.
+    """
+    if key:
+        return os.path.join(board, IDENTITY_DIR, key)
+    return os.path.join(board, IDENTITY_FILE)
+
+
+def _read_identity_file(path):
+    try:
+        with open(path) as f:
+            return (f.read() or "").strip() or None
+    except (OSError, IOError):
+        return None
+
+
+def read_identity(board):
+    key = agent_session_key()
+    if key:
+        # A session-keyed record is the only unambiguous answer. If this
+        # session has none, do NOT fall back to the flat legacy file: that
+        # file belongs to whichever agent wrote it last, and adopting it is
+        # exactly the cross-session (sideways) bleed this exists to prevent.
+        return _read_identity_file(_identity_path(board, key))
+    # No session key available at all -- the flat file is the best we have.
+    return _read_identity_file(_identity_path(board))
+
+
+def write_identity(board, name):
+    key = agent_session_key()
+    path = _identity_path(board, key)
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write((name or "").strip() + "\n")
+    os.replace(tmp, path)  # atomic
+    return name
+
+
+def seat_confirmed(board):
+    """True when this session DELIBERATELY confirmed the seat it answers as.
+
+    The distinction that matters is not "do we have a name" -- we almost
+    always have one, from an inherited env var or a pid -- but "did this
+    session choose it". Anything automated that acts on a seat's behalf
+    (announcing its mail, holding a turn open over its work) must gate on
+    this, because acting under a guessed name is how one agent ends up doing
+    another agent's work.
+
+    A session with a key but no record is UNCONFIRMED on purpose: the ambient
+    env var is still fine for a human typing a command, and wrong as the
+    basis for automation.
+    """
+    try:
+        # TICKET_SEAT is set by a supervisor (watch/spawn, or a hook install
+        # that bakes an owner into the command it runs) for a run it is
+        # launching, naming the seat that run exists to occupy. That is a
+        # deliberate assignment, not ambient inheritance, so it confirms --
+        # otherwise a launched worker would be hidden from its own mail,
+        # since a fresh process has a new session id and no record of its
+        # own yet.
+        if os.environ.get("TICKET_SEAT"):
+            return True
+        if agent_session_key():
+            return bool(read_identity(board))
+        # No session key at all: a recorded flat identity is the best we
+        # get, and an env var is all that is left.
+        return bool(read_identity(board) or os.environ.get("TICKET_AGENT"))
+    except Exception:
+        return False
+
+
+def adopt_event_session(event):
+    """Take the session id out of a hook payload and make it resolvable.
+
+    A hook is not part of the session it fires for: it is a short-lived
+    process forked at a lifecycle point, with no conversation and no
+    continuity. It can learn which session it belongs to through exactly one
+    channel -- the JSON payload on its stdin -- because the environment it
+    inherits carries only whatever the parent shell happened to hold. Reading
+    identity from the environment is therefore reading it from the one
+    channel that cannot know it, which is how one agent's unread mail ends up
+    announced in another agent's window, or a turn gets held open over a
+    different seat's work.
+
+    Call this before resolving identity in any command that consumes a hook
+    payload. Returns True if a session id was found.
+    """
+    try:
+        sid = (event or {}).get("session_id") or ""
+    except Exception:
+        sid = ""
+    sid = str(sid).strip()
+    if not sid:
+        return False
+    os.environ["TICKET_SESSION_ID"] = sid
+    return True
+
+
 def whoami(explicit=None):
-    return explicit or os.environ.get("TICKET_AGENT") or "agent-%d" % os.getpid()
+    """Resolve who a SINGLE COMMAND acts as.
+
+    Precedence: an explicitly-passed --owner beats the deliberate per-run
+    TICKET_SEAT a supervisor sets for the process it launches, which beats
+    the ambient TICKET_AGENT a shell inherits, which beats a pid fallback.
+
+    This deliberately does NOT consult the session's recorded identity (from
+    `tickets join`) and does NOT discover the board -- `TICKET_AGENT=alice
+    tickets msg --to bob` is the documented way to run a single command as a
+    name other than whatever this session joined as, and a recorded identity
+    outranking that explicit-for-this-invocation env var would make the
+    override silently do nothing.
+
+    Anything that needs "who is THIS SESSION" rather than "who does this one
+    command act as" -- board's own status line, a hook deciding whether to
+    stay quiet, the stop-hook holding a turn open for a seat, `msg`'s sender
+    or `inbox`'s owner when no --owner is given -- wants session_seat(), not
+    this. Collapsing the two into one function is the failure this split
+    guards against: it makes a recorded identity outrank an explicit
+    per-command override, breaking the `TICKET_AGENT=X tickets <cmd>`
+    pattern this docstring describes.
+    """
+    if explicit:
+        return explicit
+    return (os.environ.get("TICKET_SEAT")
+            or os.environ.get("TICKET_AGENT")
+            or "agent-%d" % os.getpid())
+
+
+def session_seat(board, explicit=None):
+    """Resolve who THIS SESSION is, for the surfaces that act on a seat's
+    behalf without a human naming it turn by turn: `board`'s "you:" line, an
+    `inbox --quiet-if-unidentified` hook, the stop-hook, and `msg`'s sender /
+    `inbox`'s owner when no --owner is given. These need the session-recorded
+    identity (from `tickets join`) precisely because nobody is passing an
+    explicit name on that particular call.
+
+    Precedence: explicit > this session's own recorded identity > TICKET_SEAT
+    > TICKET_AGENT > pid. Recorded identity sits ABOVE the env vars here,
+    unlike in whoami() -- the opposite ordering is the whole point of having
+    two functions. `join` writing a recorded identity is a deliberate act by
+    this session about itself; TICKET_AGENT is ambient and inherited. Use
+    this for "who is this session", and whoami() for "who does this one
+    command act as" -- see whoami()'s docstring for the failure that comes
+    from answering both questions with the same precedence.
+    """
+    if explicit:
+        return explicit
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+        if recorded:
+            return recorded
+    return (os.environ.get("TICKET_SEAT")
+            or os.environ.get("TICKET_AGENT")
+            or "agent-%d" % os.getpid())
 
 
 def now():
@@ -2454,7 +2662,25 @@ def cmd_board(a, board):
         d, n, _, _ = progress(mine)
         hdr.append("sprint %s %s" % (cur["id"], bar(d, n, 10)))
     hdr.append("master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    # Name the seat this session is answering as. Without it a human reading a
+    # window cannot tell which agent they are talking to, and mail addressed to
+    # one seat gets acted on by another.
+    seat = session_seat(board)
+    # seat_confirmed(), not a truthy read_identity(): a TICKET_SEAT-launched
+    # run (watch/spawn, or a hook pinned at install time) is confirmed with
+    # no `.identities/` record of its own, and must not be shown as guessing.
+    recorded = seat_confirmed(board)
+    hdr.append("you: %s%s" % (seat, "" if recorded else " (UNCONFIRMED)"))
     print("  " + " | ".join(hdr))
+    if not recorded:
+        # An agent that does not know which seat it occupies cannot decline
+        # mail addressed to another one -- so say so plainly, and say what to
+        # do about it. The name above came from an inherited env var or a pid,
+        # neither of which this session chose.
+        print("  ^ this session has NOT recorded a seat; %r is a guess from the "
+              "environment." % seat)
+        print("    Run `tickets join <your-name> --roles <role>` before acting on "
+              "anything addressed to a seat.")
     for t in tickets:
         if t["status"] != "done" or a.all:
             print("  " + line(t, tickets))
@@ -7512,12 +7738,52 @@ def _session_adapters():
 
 
 def cmd_msg(a, board):
-    sender = whoami(a.owner)
+    # session_seat, not whoami: with no --owner, "who is sending this" is
+    # "who is THIS session", the same question board's "you:" line answers --
+    # a recorded `join` is the deliberate, authoritative fact, and it must
+    # outrank a stray ambient TICKET_AGENT the way it outranks one everywhere
+    # else identity is resolved. whoami() intentionally does not make that
+    # promise; see its docstring.
+    sender = session_seat(board, a.owner)
+    is_task = bool(getattr(a, "task", False))
+    if a.to and a.to == sender:
+        # Addressing yourself is never what anyone means, and it fails
+        # SILENTLY: the message posts, the addressee's unread count rises,
+        # and the sender's own inbox hook reports it back -- which reads
+        # exactly like the other party receiving mail and not replying. A
+        # coordinator lost most of a session to this: every assignment went
+        # to its own handle, and it diagnosed the resulting silence as a
+        # dead peer, a missing wake flag and a broken hook chain in turn.
+        #
+        # Refuse outright only on the path that would actually wake the
+        # sender -- a --task send, or an ordinary DM landing on a seat
+        # configured `continuous` -- because that is the case that is
+        # DESTRUCTIVE: this exact command was meant to hand work to someone
+        # else, and it silently didn't. A plain DM that would not wake
+        # anyone (the common case) is far more likely a harmless note to
+        # self than the coordinator's mistake, so warn instead of blocking
+        # a command that may have been intentional.
+        candidate = {"to": a.to, "text": a.text, "task": is_task,
+                     "kind": "task" if is_task else ""}
+        if _message_wakes_seat(board, sender, candidate):
+            sys.exit(
+                "RULE: --to %r is your OWN identity, so this message would go to "
+                "yourself, and it would wake you -- this is almost always a "
+                "misdirected --task meant for someone else.\n"
+                "  Your agent_id here is %r (tickets identity).\n"
+                "  Either name a different addressee, or drop --to to broadcast."
+                % (a.to, sender)
+            )
+        print(
+            "NOTE: --to %r is your OWN identity (%r), so this is a note to "
+            "yourself. It will not wake you, and silence after it does not "
+            "mean anyone ignored it." % (a.to, sender)
+        )
     if a.re:
         load(board, a.re)  # validate the ticket exists
     # Board first, native wake second: the board is the source of truth.
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
-                     task=bool(getattr(a, "task", False)))
+                     task=is_task)
     unknown = m.pop("_unregistered_implicit", None)
     explicit_unknown = m.pop("_unregistered_explicit", None) or []
     dropped = m.pop("_unregistered_dropped", None) or []
@@ -7699,7 +7965,17 @@ def _clear_adapter_failure_on_provider_change(board, owner, new_harness,
 
 
 def cmd_inbox(a, board):
-    owner = whoami(a.owner)
+    # session_seat, not whoami: reading "my" inbox with no --owner is asking
+    # "who is THIS session", which is exactly the question a recorded
+    # identity answers and an ambient TICKET_AGENT does not.
+    owner = session_seat(board, a.owner)
+    if getattr(a, "quiet_if_unidentified", False) and not a.owner:
+        # An unidentified session must not be handed a seat's mail. Printing
+        # another agent's backlog is how one seat's messages get read and
+        # acted on by another; printing a pid handle's empty backlog is just
+        # noise. Silence is the correct output for "I do not know who I am".
+        if not seat_confirmed(board):
+            return
     seat = (getattr(a, "seat", None) or "").strip()
     scan = None
     if seat:
@@ -8318,6 +8594,14 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    # Record the seat for THIS session so later commands in it -- board's
+    # "you:" line, msg/inbox with no --owner, the stop-hook -- resolve to it
+    # without depending on an env var that can be inherited by a shell that
+    # was never told to be this agent. Joining IS the declaration of who you
+    # are, so this is the honest place to persist it. Silently a no-op when
+    # there is no session key at all (write_identity then falls back to the
+    # flat legacy file, honoured only in that same no-key case elsewhere).
+    write_identity(board, owner)
     knowledge_dir = (getattr(a, "knowledge_dir", "") or "").strip()
     if knowledge_dir:
         knowledge_dir = os.path.abspath(os.path.expanduser(knowledge_dir))
@@ -10570,10 +10854,11 @@ def _record_stop_block(board, owner):
 def cmd_stop_hook(a, board):
     """Claude Code `Stop` hook: keep the turn alive while this agent still has work.
 
-    Never raises, always exits 0. Lets the session stop when: no TICKET_AGENT,
-    TICKETS_STOP_HOOK=off, the event says stop_hook_active (we already continued
-    once this turn), the agent recorded a usage limit, only broadcasts are
-    unread, or the hourly cap of continuations is reached.
+    Never raises, always exits 0. Lets the session stop when: this session
+    has no resolvable, confirmed identity, TICKETS_STOP_HOOK=off, the event
+    says stop_hook_active (we already continued once this turn), the agent
+    recorded a usage limit, only broadcasts are unread, or the hourly cap of
+    continuations is reached.
     """
     try:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
@@ -10582,7 +10867,15 @@ def cmd_stop_hook(a, board):
             event = {}
     except Exception:  # noqa: BLE001
         event = {}
-    owner = os.environ.get("TICKET_AGENT") or ""
+    # The payload names the SESSION this hook fired for; the environment does
+    # not -- a hook is a short-lived process forked at a lifecycle point with
+    # no continuity of its own. Adopt it before resolving, or a stale
+    # inherited TICKET_AGENT decides who we are and we hold the turn open
+    # over another seat's work.
+    adopt_event_session(event)
+    owner = session_seat(board)
+    if not seat_confirmed(board):
+        owner = ""  # never pin a turn open over a seat this session only guessed
     if (not owner or os.environ.get("TICKETS_STOP_HOOK", "").lower() in ("off", "0", "false")
             or event.get("stop_hook_active")):
         print("{}")
@@ -10994,7 +11287,13 @@ def cmd_watch(a, board):
     # narrow: GIT_AUTHOR_*/GIT_COMMITTER_* survive, because this is the
     # fleet-launch env and stripping identity here would be a T-238-class
     # attribution loss (T-259 defect 3).
-    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+    # TICKET_SEAT alongside the legacy TICKET_AGENT: this launch is a
+    # deliberate assignment of the seat to the process it starts, not
+    # ambient inheritance, so seat_confirmed() must trust it even though
+    # the launched process has a brand-new session id with no record of
+    # its own yet -- otherwise a worker would be hidden from the very
+    # mail it was launched to handle.
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKET_SEAT=owner, TICKETS_DIR=board,
                TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     import select
@@ -11918,7 +12217,13 @@ def cmd_spawn(a, board):
     # narrow: GIT_AUTHOR_*/GIT_COMMITTER_* survive, because this is the
     # fleet-launch env and stripping identity here would be a T-238-class
     # attribution loss (T-259 defect 3).
-    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+    # TICKET_SEAT alongside the legacy TICKET_AGENT: this launch is a
+    # deliberate assignment of the seat to the process it starts, not
+    # ambient inheritance, so seat_confirmed() must trust it even though
+    # the launched process has a brand-new session id with no record of
+    # its own yet -- otherwise a worker would be hidden from the very
+    # mail it was launched to handle.
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKET_SEAT=owner, TICKETS_DIR=board,
                TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
@@ -12431,7 +12736,13 @@ def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HA
     else:
         run_cmd = _worker_cmd(board, owner, model, "bypassPermissions", harness,
                               prompt_expr=shlex.quote(HARNESS_PROBE_PROMPT))
-    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+    # TICKET_SEAT alongside the legacy TICKET_AGENT: this launch is a
+    # deliberate assignment of the seat to the process it starts, not
+    # ambient inheritance, so seat_confirmed() must trust it even though
+    # the launched process has a brand-new session id with no record of
+    # its own yet -- otherwise a worker would be hidden from the very
+    # mail it was launched to handle.
+    env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKET_SEAT=owner, TICKETS_DIR=board,
                TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     started = _time.time()
@@ -14773,6 +15084,15 @@ def _pinned_hook_identity(board, owner):
 
     owner = _hook_agent(owner)
     os.environ["TICKET_AGENT"] = owner
+    # Also TICKET_SEAT: this owner was baked into the installed hook's own
+    # command bytes at install time, not merely inherited from a shell -- the
+    # same kind of deliberate, per-run assignment TICKET_SEAT exists for on
+    # watch/spawn. Without it, a hook whose payload carries no session_id
+    # (e.g. this event has none, or an ambient CLAUDE_CODE_SESSION_ID/etc
+    # from the shell that launched the hook leaks in) reads as an
+    # unconfirmed seat and the stop-hook refuses to hold a turn open for it,
+    # even though identity here was never a guess.
+    os.environ["TICKET_SEAT"] = owner
     os.environ["TICKETS_DIR"] = os.path.abspath(board)
     try:
         from ticket_coordination import run as coordination_run
@@ -15932,6 +16252,9 @@ def main():
                    help="only this agent's seat thread (same messages.jsonl; does not mark read)")
     c.add_argument("--limit", type=int, default=40)
     c.add_argument("--keep", action="store_true", help="do not mark as read")
+    c.add_argument("--quiet-if-unidentified", action="store_true",
+                   help="print nothing when this session has no recorded seat "
+                        "(for hooks: silence beats another seat's backlog)")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_inbox)
 
