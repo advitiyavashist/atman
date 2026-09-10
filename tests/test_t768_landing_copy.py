@@ -56,6 +56,10 @@ def test_no_brahman_or_research_jargon_on_public_landing():
         assert banned not in lowered, banned
     assert "research only" not in lowered
     assert "Brahman · research" not in LANDING
+    assert "research dump" not in lowered
+    assert "multi-agent framework" not in lowered
+    assert "shared memory" not in lowered
+    assert "model router" not in lowered
     assert "product-only" in README.lower() or "Do not present" in README
 
 

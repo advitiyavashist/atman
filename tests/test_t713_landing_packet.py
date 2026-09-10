@@ -100,7 +100,7 @@ def test_landing_is_product_only_without_research_layer():
     assert "prefill" not in lowered
     assert "Team knowledge" in LANDING
     assert "Decisions already made" in LANDING
-    assert "Artifacts (paths, SHAs, reports)" in LANDING
+    assert "Artifacts (paths, commits, reports)" in LANDING
     assert "Dependency notes on blocked work" in LANDING
     assert "Recovery: claim, blocker, next step" in LANDING
 
