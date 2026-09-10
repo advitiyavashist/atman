@@ -14,7 +14,7 @@ import uuid
 
 import pytest
 
-from conftest import in_process_opener, rid  # noqa: F401
+from tests.runner_helpers import in_process_opener, rid  # noqa: F401
 
 from ticket_board import worktrees  # noqa: E402
 from ticket_board.runners import RunnerClient  # noqa: E402
