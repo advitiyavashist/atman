@@ -115,9 +115,12 @@ def watch_env(board, shim, extra=None):
 
 
 def start_watch(tool, board, shim, *args, cwd=None):
+    # T-611 made `watch` default --max-runs 1. Idle-boundary hop only runs on
+    # the next loop iteration after a child exits, so loop tests must persist.
     repo = cwd or board.parent
+    argv = [sys.executable, str(tool), "watch", "--agent", "doc", "--persist", *args]
     return subprocess.Popen(
-        [sys.executable, str(tool), "watch", "--agent", "doc", *args],
+        argv,
         cwd=str(repo), env=watch_env(board, shim),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
@@ -352,7 +355,11 @@ def test_in_flight_run_is_not_interrupted(board, tmp_path):
                 break
             time.sleep(0.2)
         assert marker.read_text().strip() == "done"
-        assert hopped, cmdline_of(int(pid_file.read_text().strip() or "0") or pid)
+        try:
+            leftover = int(pid_file.read_text().strip() or "0") or pid
+        except (OSError, ValueError):
+            leftover = pid
+        assert hopped, cmdline_of(leftover)
     finally:
         stop_watch(board, "doc", proc)
 
@@ -388,7 +395,8 @@ def test_dev_checkout_watch_never_execv(board, tmp_path):
     env.pop("TICKETS_STOP_HOOK", None)
     env.pop("TICKETS_LIVE_SHIM", None)
     proc = subprocess.Popen(
-        [sys.executable, str(tool), "watch", "--agent", "doc", "--every", "1", "--exec", "true"],
+        [sys.executable, str(tool), "watch", "--agent", "doc", "--persist",
+         "--every", "1", "--exec", "true"],
         cwd=str(board.parent), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
