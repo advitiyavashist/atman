@@ -6,10 +6,12 @@ Atman is a runtime for teams of agents you already bring.
 
 | | |
 |---|---|
-| **IS** | Runtime for teams of agents you already bring. Feels like TEAM: objective → allocate → concurrent → handoffs → review → replan. North star = task completion in fewest turns. BYOA = bring-your-own-agent *harness*, not install our model. |
-| **NOT** | Multi-agent framework. Shared-memory product. One API for Claude/Codex. Model router alone. DAG toy. |
-| **Language** | teammates, lanes, next step, handoff — not nodes / edges / SDK. |
-| **Don't** | Promise a learned router or shadow optimizer as V1 brand. No compliance / shield / enforce chrome. Don't collapse Atman into tickets-CLI marketing — the product is the team runtime; the CLI is how it runs today. |
+| **IS** | Runtime for teams of agents you already bring. Feels like TEAM: objective → allocate → concurrent → handoffs → review → replan. First seat is **any** harness (Claude Code, Codex, Cursor, Grok Bot, custom). BYOA = bring-your-own-agent *harness*, not install our model. |
+| **NOT** | Agent swarms. Multi-agent framework. Shared-memory product. One API for Claude/Codex. Model router alone. DAG toy. A Claude-only onboarding. A Steer DLP / Try-the-API clone. |
+| **Language** | teammates, seats, lanes, next step, handoff — not nodes / edges / SDK / swarm. |
+| **Primary spike** | Clone → sit a first seat → `tickets ui`. |
+| **Secondary** | Task completion in fewest turns at least measured cost. Show `—` until a done ticket reports. |
+| **Don't** | Promise a learned router or shadow optimizer as V1 brand. No compliance / shield / enforce chrome. Don't collapse Atman into tickets-CLI marketing — the product is the team runtime; the CLI is how it runs today. Don't make Claude Code the only first seat. |
 
 Atman can sit next to a separate policy product (runtime checks for what an
 agent may see or say). Keep those jobs distinct: Atman is who works and how
@@ -68,9 +70,11 @@ See [atman-tokens.md](atman-tokens.md). Dark command-board roots. Status color i
 
 ## 4. Tone rules
 
-**Use:** teammates, seats, lanes, coverage, next step, handoff, intervene, objective, roster, BYOA, fewest turns, self ↔ whole.
+**Use:** teammates, seats, lanes, coverage, next step, handoff, intervene, objective, roster, BYOA, team runtime. Fewest turns / measured cost only as secondary honesty.
 
-**Ban:** DAG, nodes, edges, orchestration framework, "multi-agent SDK", fake telemetry walls, Purview / compliance / shield / enforce chrome, spiritual kitsch, pitch, field, football, Total Football, keeper, shirts, sports formation.
+**Ban:** swarm as the product noun, DAG, nodes, edges, orchestration framework, "multi-agent SDK", fake telemetry walls, Purview / compliance / shield / enforce chrome, Try the API, evaluate-as-hero, spiritual kitsch, pitch, field, football, Total Football, keeper, shirts, sports formation.
+
+See [T-713 acceptance](t713-brand-acceptance-2026-09-10.md).
 
 Team: *Who’s present. What’s uncovered.* Empty seat: *Open seat — uncovered work.* Coverage: *Coverage by work, not fixed role.* The operator intervenes; the product does not silently auto-promote.
 
