@@ -254,3 +254,7 @@ Do not launch with “100 agents,” “learned cheapest routing,” “persiste
 - No native X evidence was available. Reddit findings are indexed snippets because origin fetches were blocked; only HN is direct community evidence.
 - Orchestra remains unscored because several unrelated current projects use that name; Mosaic is explicitly tied to the conditional `mosaic.inc` identity. Marketing comparisons should omit an ambiguous name rather than guess.
 - Atman's organic scorecard is a small internal sample and demonstrates missing instrumentation, not a statistically sound ranking of agents.
+
+## Related receipts
+
+- **Graph execution vs Stripe Minions and Ramp Inspect (T-782):** steal unattended persist and success-starts-next; keep human review; isolate with worktrees. Ignore Slack-as-bus, hosted VM/Modal fleets, goose/OpenCode forks, and 400-tool MCP sheds. Durable write-up: [`stripe-minions-ramp-inspect.md`](stripe-minions-ramp-inspect.md). Code path: T-781. Do not change public landing copy from this comparison.
