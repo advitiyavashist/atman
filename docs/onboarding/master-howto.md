@@ -14,9 +14,24 @@ After they pick a name and integrations:
 ```
 tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
 tickets master log "onboarding: name=<name> integrations=<list>"
-tickets objective --set "<their sentence>"
-# one tickets create per task they named
+tickets objective "<their sentence>"
+tickets plan <<'EOF'
+[{"key":"api","title":"Build REST API","role":"backend","deps":[]},
+ {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
+EOF
+tickets graph
+tickets map
 ```
+
+Do **not** run one `tickets create` per title. Edges must be real `deps` /
+`--after` links. Mid-run: `tickets dep` / `tickets create --blocks`.
+Follow-up (master or CoS): `tickets update` / `here`, reopen silent >90m
+claims, `tickets drive` toward the objective, review queue. Prose-only
+blockers in a ticket body are not edges.
+
+CoS onboarding is the same catalog, then the same graph + follow-up loop
+(`tickets master cos <name>`). Do not dump a live-board plan. Auto-start of
+children after done is a separate success-trigger, not this step.
 
 You are opening a fresh Claude Code, Cursor, or Codex session that will run
 the board as **master**. This is the single read. After it you should be able
@@ -545,8 +560,14 @@ tickets master              # briefing
 tickets master take         # become it
 tickets master log "…"      # decision log
 tickets inbox               # messages to you
+tickets plan                # JSON keys + deps → real --after edges
+tickets dep T-004 --after T-003
 tickets map                 # sprint → epic → tickets
 tickets graph               # dependency tree
+tickets update T-002 "…"    # follow-up every 45m
+tickets here                # still here
+tickets reopen T-002        # silent >90m claims
+tickets drive               # toward the objective
 tickets dash --once         # status picture
 tickets route [--claim]     # suggest / assign owners
 tickets limits              # who is out (AUTH vs wait)

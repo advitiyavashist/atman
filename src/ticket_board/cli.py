@@ -2552,7 +2552,8 @@ This board is being set up. I will ask you four things, in order:
    know, and whether it is on this machine.)
 3. I will **announce that name** on the board with the integrations you
    picked.
-4. Then I will ask for **tasks and the objective**.
+4. Then I will ask for **tasks and the objective**, and turn tasks into a
+   `tickets plan` graph (real `--after` edges), not a flat list.
 
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
@@ -2577,10 +2578,92 @@ survives agent restarts and timeouts.
 ## ONBOARDING — startup (show the operator this first)
 
 """ + ONBOARDING_STARTUP + """
-Walk name → integrations (`tickets harness available`) → announce that name
-on the board → ask for tasks and the objective. Do not spawn until they
-answer. Codex stays in the catalog with zero usage. Do not spawn Gemini.
+Walk these four asks in order. Do not skip ahead. This is not a ticket claim
+and not a merge pass.
+
+### Step 1 — Name
+
+Ask: **What name do you want to give this board / team?** (one word or a
+short phrase; this is what everyone will see.)
+
+Record it here: `Onboarding name:` _(none yet — ask)_
+
+### Step 2 — Integrations (check all, then ask)
+
+Run `tickets harness available`. It probes `command -v` for every catalog
+entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
+`gemini`). Missing is a row, not a skip.
+
+Ask: **Which of these do you want to use?** Do not spawn until they answer.
+Codex stays in the catalog even with **no usage**. Do not spawn Gemini.
 No new Claude fable.
+
+### Step 3 — Announce that name on the board
+
+After they pick a name and integrations:
+
+```
+tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
+tickets master log "onboarding: name=<name> integrations=<list>"
+```
+
+Write the name into `Onboarding name:` above so successors do not re-ask.
+
+### Step 4 — Objective, then a real dependency graph
+
+Ask, in this order:
+
+1. **What is the objective?** (one sentence the master will drive toward)
+2. **What tasks** should be on the board now? (titles; split if they dump a list)
+3. **What depends on what?** (edges. A flat list is allowed only when they
+   said there are none.)
+
+Then set the objective and create the graph in one shot. `deps` may be a
+`key` from the same JSON or an existing `T-` id. Do **not** run one
+`tickets create` per title. Do not invent extra tickets. Do not leave
+blockers only in the ticket body.
+
+```
+tickets objective "<their sentence>"
+tickets plan <<'EOF'
+[{"key":"api","title":"Build REST API","role":"backend","deps":[]},
+ {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
+EOF
+tickets graph
+tickets map
+```
+
+Mid-run (same loop — not a second planner product):
+
+```
+tickets dep T-004 --after T-003
+tickets create "DB migration" --blocks T-002
+tickets create "Add rate limiting" --deps T-002
+```
+
+Follow-up every wake (master or CoS): `tickets update` / `tickets here`;
+reopen silent >90m claims (`tickets reopen`); `tickets drive` toward the
+objective; drain the review queue. Show `tickets graph` / `tickets map`.
+If HEALTH flags prose-only deps, wire `tickets dep` instead of leaving
+them in the body.
+
+Do not implement those tasks in this session. Spawning children when a
+parent is done is a separate success-trigger, not this onboarding step.
+Spawn seats only from the integrations they confirmed, one ticket each.
+
+## COS ONBOARDING — future (do not run on a living board unless asked)
+
+**You are onboarding as chief of staff.** Master plans and scopes. CoS
+reviews, unblocks, merges, and staffs. Same integration catalog as master.
+After the board has an objective and a `tickets plan` graph:
+
+1. `tickets graph` / `tickets map` — statuses and `--after` edges, not prose.
+2. Follow-up: `tickets update` / `here`; `tickets reopen` silent >90m claims;
+   `tickets drive` toward the objective; review queue.
+3. Mid-run graph edits: `tickets dep` / `tickets create --blocks`.
+4. Announce with `tickets master cos <name>` and `tickets msg --to everyone`.
+
+Do not dump a live-board plan. Do not invent a second planner.
 
 ## Mission
 (what we are building, one paragraph)
@@ -3771,6 +3854,10 @@ def cmd_connect(a, board):
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
     print("Ask which to integrate; do not spawn until they answer.")
+    print("Announce the board/team name with `tickets msg --to everyone`, then ask")
+    print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
+    print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
+    print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
