@@ -2544,11 +2544,43 @@ def cmd_sprint(a, board):
 
 # ---- master -------------------------------------------------------------
 
-MASTER_TEMPLATE = """# MASTER -- coordination node for this board
+ONBOARDING_STARTUP = """**You are onboarding.**
+
+This board is being set up. I will ask you four things, in order:
+1. **What name** should I announce on the board?
+2. **Which integrations** do you want to use? (I will list every one I
+   know, and whether it is on this machine.)
+3. I will **announce that name** on the board with the integrations you
+   picked.
+4. Then I will ask for **tasks and the objective**.
+
+I will not spawn workers or create tickets until you answer.
+Run `tickets harness available` to probe every catalog row (missing is a row).
+"""
+
+
+def print_onboarding_startup():
+    sys.stdout.write(ONBOARDING_STARTUP)
+    if not ONBOARDING_STARTUP.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stdout.write("\n")
+
+
+MASTER_TEMPLATE = """**You are onboarding.**
+
+# MASTER -- coordination node for this board
 
 Any agent can become master: run `tickets master take`, then `tickets master`
 to get the full briefing. Keep this file current; it is the memory that
 survives agent restarts and timeouts.
+
+## ONBOARDING — startup (show the operator this first)
+
+""" + ONBOARDING_STARTUP + """
+Walk name → integrations (`tickets harness available`) → announce that name
+on the board → ask for tasks and the objective. Do not spawn until they
+answer. Codex stays in the catalog with zero usage. Do not spawn Gemini.
+No new Claude fable.
 
 ## Mission
 (what we are building, one paragraph)
@@ -2613,6 +2645,7 @@ def cmd_master(a, board):
         print("logged")
         return
     # brief
+    print_onboarding_startup()
     tickets = load_all(board)
     m = current_master(board)
     print("=" * 72)
@@ -3735,6 +3768,10 @@ def cmd_retire(a, board):
 
 
 def cmd_connect(a, board):
+    print_onboarding_startup()
+    print("Then probe integrations: `tickets harness available`")
+    print("Ask which to integrate; do not spawn until they answer.")
+    print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
 

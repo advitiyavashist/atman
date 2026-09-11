@@ -1,5 +1,23 @@
 # Master how-to
 
+**You are onboarding.** Say that first. This is not a ticket claim and not a
+merge pass.
+
+A new board is set up in this order: **name → integrations → announce that
+name on the board → ask for tasks and the objective**. Probe every catalog
+row with `tickets harness available` (missing is a row). Ask which
+integrations to use; do not spawn until they answer. Codex stays in the
+catalog even with zero usage. Do not spawn Gemini. No new Claude fable.
+
+After they pick a name and integrations:
+
+```
+tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
+tickets master log "onboarding: name=<name> integrations=<list>"
+tickets objective --set "<their sentence>"
+# one tickets create per task they named
+```
+
 You are opening a fresh Claude Code, Cursor, or Codex session that will run
 the board as **master**. This is the single read. After it you should be able
 to install, take the seat, seed role context, set an objective, and wake

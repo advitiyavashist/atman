@@ -4484,11 +4484,111 @@ def cmd_sprint(a, board):
 
 # ---- master -------------------------------------------------------------
 
-MASTER_TEMPLATE = """# MASTER -- coordination node for this board
+ONBOARDING_STARTUP = """**You are onboarding.**
+
+This board is being set up. I will ask you four things, in order:
+1. **What name** should I announce on the board?
+2. **Which integrations** do you want to use? (I will list every one I
+   know, and whether it is on this machine.)
+3. I will **announce that name** on the board with the integrations you
+   picked.
+4. Then I will ask for **tasks and the objective**.
+
+I will not spawn workers or create tickets until you answer.
+Run `tickets harness available` to probe every catalog row (missing is a row).
+"""
+
+# Probe-only catalog for a new board. Codex stays listed with zero usage.
+# Gemini is listed only — never spawn. No new Claude fable.
+INTEGRATION_CATALOG = (
+    {"id": "cursor", "name": "Cursor", "binaries": ("agent", "cursor-agent"),
+     "if_yes": "tickets spawn <seat> --harness cursor --persist",
+     "policy": "ok to spawn if chosen"},
+    {"id": "agy", "name": "Antigravity", "binaries": ("agy",),
+     "if_yes": "tickets spawn <seat> --harness agy --persist",
+     "policy": "ok to spawn if chosen"},
+    {"id": "claude", "name": "Claude Code", "binaries": ("claude",),
+     "if_yes": "tickets spawn <seat> --harness claude",
+     "policy": "ok to spawn if chosen; no new Claude fable"},
+    {"id": "codex", "name": "Codex", "binaries": ("codex",),
+     "if_yes": "tickets spawn <seat> --harness codex",
+     "policy": "catalog even with zero usage; do not spawn unless they say usage is back"},
+    {"id": "devin", "name": "Devin", "binaries": ("devin",),
+     "if_yes": "tickets spawn <seat> --harness devin",
+     "policy": "list; spawn only if the operator confirms the harness exists"},
+    {"id": "gemini", "name": "Gemini CLI", "binaries": ("gemini",),
+     "if_yes": "(do not spawn)",
+     "policy": "list only; do not spawn"},
+)
+
+
+def print_onboarding_startup():
+    """First thing connect / boot / master brief show — not after MASTER.md history."""
+    sys.stdout.write(ONBOARDING_STARTUP)
+    if not ONBOARDING_STARTUP.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stdout.write("\n")
+
+
+MASTER_TEMPLATE = """**You are onboarding.**
+
+# MASTER -- coordination node for this board
 
 Any agent can become master: run `tickets master take`, then `tickets master`
 to get the full briefing. Keep this file current; it is the memory that
 survives agent restarts and timeouts.
+
+## ONBOARDING — startup (show the operator this first)
+
+""" + ONBOARDING_STARTUP + """
+Walk these four asks in order. Do not skip ahead. This is not a ticket claim
+and not a merge pass.
+
+### Step 1 — Name
+
+Ask: **What name do you want to give this board / team?** (one word or a
+short phrase; this is what everyone will see.)
+
+Record it here: `Onboarding name:` _(none yet — ask)_
+
+### Step 2 — Integrations (check all, then ask)
+
+Run `tickets harness available`. It probes `command -v` for every catalog
+entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
+`gemini`). Missing is a row, not a skip. If `~/.local/bin/codex` is stale,
+it retargets to the newest `openai.chatgpt-*` extension binary.
+
+Ask: **Which of these do you want to use?** Do not spawn until they answer.
+Codex stays in the catalog even with **no usage**. Do not spawn Gemini.
+No new Claude fable.
+
+### Step 3 — Announce that name on the board
+
+After they pick a name and integrations:
+
+```
+tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
+tickets master log "onboarding: name=<name> integrations=<list>"
+```
+
+Write the name into `Onboarding name:` above so successors do not re-ask.
+
+### Step 4 — Tasks and objective
+
+Ask, in this order:
+
+1. **What is the objective?** (one sentence the master will drive toward)
+2. **What tasks** should be on the board now? (titles; split if they dump a list)
+
+Then:
+
+```
+tickets objective --set "<their sentence>"
+# one tickets create per task they named; do not invent extras
+```
+
+Do not implement those tasks in this session. Spawn seats only from the
+integrations they confirmed, one ticket each.
 
 ## Mission
 (what we are building, one paragraph)
@@ -4568,6 +4668,7 @@ def cmd_master(a, board):
         print("logged")
         return
     # brief
+    print_onboarding_startup()
     tickets = load_all(board)
     m = current_master(board)
     print("=" * 72)
@@ -7081,6 +7182,12 @@ def cmd_retire(a, board):
 
 
 def cmd_connect(a, board):
+    print_onboarding_startup()
+    print("Then probe integrations: `tickets harness available`")
+    print("Ask which to integrate; do not spawn until they answer.")
+    print("Announce the board/team name with `tickets msg --to everyone`, then ask")
+    print("for the objective and tasks.")
+    print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
 
@@ -9845,6 +9952,7 @@ def cmd_boot(a, board):
     # 4. briefing
     p = pending_work(board, owner)
     m = current_master(board)
+    print_onboarding_startup()
     print("BOOT %s @ %s" % (owner, board))
     for s in steps:
         print("  - " + s)
@@ -10856,13 +10964,117 @@ def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HA
             "output": out[:400], "at": now()}
 
 
+def _chatgpt_codex_binaries(home):
+    hits = []
+    for rel in (
+        os.path.join(".vscode", "extensions", "openai.chatgpt-*", "bin", "*", "codex"),
+        os.path.join(".cursor", "extensions", "openai.chatgpt-*", "bin", "*", "codex"),
+    ):
+        hits.extend(glob.glob(os.path.join(home, rel)))
+    out = []
+    for p in hits:
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            out.append(p)
+    out.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return out
+
+
+def retarget_stale_local_codex(home):
+    """Point ~/.local/bin/codex at the newest openai.chatgpt-* binary when stale.
+
+    Stale means missing, a dangling symlink, or a symlink whose target is not
+    the newest extension binary. Never overwrite a regular (non-symlink) file.
+    """
+    newest_list = _chatgpt_codex_binaries(home)
+    if not newest_list:
+        return ""
+    newest = os.path.realpath(newest_list[0])
+    local_dir = os.path.join(home, ".local", "bin")
+    local = os.path.join(local_dir, "codex")
+    if os.path.lexists(local) and not os.path.islink(local):
+        return ""
+    if os.path.islink(local) and os.path.realpath(local) == newest:
+        return ""
+    os.makedirs(local_dir, exist_ok=True)
+    tmp = "%s.tmp-%s" % (local, os.getpid())
+    try:
+        os.symlink(newest, tmp)
+        os.replace(tmp, local)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return ""
+    return "retargeted %s -> %s" % (local, newest)
+
+
+def _which_on_path(name, search_path):
+    import shutil
+    return shutil.which(name, path=search_path)
+
+
+def probe_integration_catalog(home=None, search_path=None):
+    """Every catalog row, including missing binaries. Does not spawn."""
+    home = home if home is not None else os.path.expanduser("~")
+    search_path = search_path if search_path is not None else os.environ.get("PATH", "")
+    local_bin = os.path.join(home, ".local", "bin")
+    if local_bin not in search_path.split(os.pathsep):
+        search_path = local_bin + os.pathsep + search_path
+    note = retarget_stale_local_codex(home)
+    rows = []
+    for spec in INTEGRATION_CATALOG:
+        found = []
+        for b in spec["binaries"]:
+            loc = _which_on_path(b, search_path)
+            if loc:
+                found.append((b, loc))
+        rows.append({
+            "id": spec["id"],
+            "name": spec["name"],
+            "binaries": spec["binaries"],
+            "found": found,
+            "on_disk": bool(found),
+            "path": found[0][1] if found else "",
+            "if_yes": spec["if_yes"],
+            "policy": spec["policy"],
+        })
+    return rows, note
+
+
+def cmd_harness_available(a, board):
+    """Probe the integration catalog. Print every row. Do not spawn."""
+    home = os.path.expanduser("~")
+    rows, note = probe_integration_catalog(home=home)
+    print("INTEGRATIONS (probe only — do not spawn until the operator answers)")
+    if note:
+        print("codex: %s" % note)
+    print("%-8s %-14s %-22s %-8s %s" % ("id", "name", "binaries", "on_disk", "path / policy"))
+    for r in rows:
+        bins = ", ".join(r["binaries"])
+        print("%-8s %-14s %-22s %-8s %s" % (
+            r["id"], r["name"][:14], bins[:22], "yes" if r["on_disk"] else "no",
+            (r["path"] or "(missing)")))
+        print("         %s" % r["policy"])
+        print("         if they say yes: %s" % r["if_yes"])
+    print("")
+    print("Ask: Which of these do you want to use?")
+    print("Then ask the board/team name, then:")
+    print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
+    print("Then ask for the objective and tasks. Do not spawn until they answer.")
+    print("Codex stays in the catalog with zero usage. Do not spawn Gemini. No new Claude fable.")
+
+
 def cmd_harness(a, board):
-    """`tickets harness check <name>` / `tickets harness list`.
+    """`tickets harness check <name>` / `tickets harness list` / `available`.
 
     check: prove the agent's harness actually runs before a watcher spends a
     poll interval discovering it does not. The result is written to the agent
     record so `spawn --list` and the master can see who is really reachable.
+    available: probe command -v for every catalog integration (missing is a row).
     """
+    if a.harness_cmd == "available":
+        return cmd_harness_available(a, board)
     if a.harness_cmd == "auth":
         return cmd_harness_auth(a, board)
     if a.harness_cmd == "list":
@@ -13553,6 +13765,8 @@ def main():
     x.add_argument("--recover-stale", action="store_true", help="atomically reclaim a dead watcher pid lock")
     x.add_argument("--timeout", type=int, default=15)
     hs.add_parser("list", help="every registered agent, its harness and its last check")
+    hs.add_parser("available",
+                  help="probe command -v for every catalog integration (missing is a row; do not spawn)")
     c.set_defaults(fn=cmd_harness, harness_cmd="list", name="", harness="", cmd_template="", model="", cwd="",
                    timeout=HARNESS_CHECK_TIMEOUT, login=False, recover_stale=False)
 
