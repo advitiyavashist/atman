@@ -417,6 +417,14 @@ def test_hooks_agy_writes_agents_hooks_json(board, tmp_path):
     assert any('agy-stop' in h['command'] for h in entry['Stop'])
 
 
+def test_hook_run_accepts_agy_events(board):
+    r = run(board, "hook-run", "--help")
+    assert r.returncode == 0, r.stderr
+    help_text = r.stdout + r.stderr
+    assert "agy-inbox" in help_text
+    assert "agy-stop" in help_text
+
+
 def test_inherit_settings_copies_agents_dir(tmp_path):
     import importlib.util
     spec = importlib.util.spec_from_file_location('tickets', str(TOOL))

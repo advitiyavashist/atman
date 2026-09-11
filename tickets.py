@@ -13752,7 +13752,8 @@ def main():
     c = sub.add_parser("hook-run", help="(hook body) run one event under a baked agent identity")
     c.add_argument("--agent", required=True)
     c.add_argument("--event", required=True,
-                   choices=("identity", "session-start", "inbox", "stop", "task-wake"))
+                   choices=("identity", "session-start", "inbox", "stop", "task-wake",
+                            "agy-inbox", "agy-stop"))
     c.add_argument("--prompt-kind", default="", choices=("", "master", "cos"))
     c.set_defaults(fn=cmd_hook_run)
 
