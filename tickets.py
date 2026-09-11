@@ -5708,7 +5708,7 @@ def _harness_of_cmd(cmd):
     names the board already knows are claimed; anything else is `custom`,
     which is a fact, not a guess."""
     head = os.path.basename(shlex.split(cmd or "")[0]) if (cmd or "").strip() else ""
-    return head if head in ("claude", "codex", "cursor") else ("custom" if head else "")
+    return head if head in ("claude", "codex", "cursor", "agy", "antigravity") else ("custom" if head else "")
 
 
 def _round3(x):
@@ -9961,7 +9961,7 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 # runtime's side of the contract never changes -- it hands the harness a prompt
 # and a working directory, and reads the board afterwards. docs/byoa.md is the
 # operator-facing version of this.
-BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote")
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote", "agy", "antigravity")
 # Documented shell-template placeholders for custom harnesses. `harness check`
 # refuses templates with any other {name} token or without {prompt_file}.
 HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
@@ -10111,6 +10111,10 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         # Cursor CLI (`agent`): runs any model Cursor offers (gpt-5.5-high, claude-fable-5-1-thinking-high, ...)
         force = "--force" if permission_mode == "bypassPermissions" else ""
         return 'agent -p --output-format text %s%s %s' % (force, (" --model %s" % model) if model else "", prompt)
+    if tool in ("agy", "antigravity"):
+        flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
+                else "--mode accept-edits")
+        return 'agy -p %s %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
     if tool == "cursor+claude":
         # Fable through Cursor first; if that run errors, the same prompt through the
         # Claude CLI (opus). One identity, two engines -- the master never goes dark.
@@ -10124,21 +10128,23 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
 
 
 def _inherit_settings(root, wt):
-    """Copy the project's .claude settings into a new worktree so permission
+    """Copy the project's .claude and .agents settings into a new worktree so permission
     allow-lists and hooks are the same there (a worktree does not inherit the
-    root checkout's .claude/ directory)."""
+    root checkout's .claude/ or .agents/ directory)."""
     import shutil
-    src = os.path.join(root, ".claude")
-    dst = os.path.join(wt, ".claude")
-    if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
-        return []
     copied = []
-    os.makedirs(dst, exist_ok=True)
-    for name in ("settings.json", "settings.local.json"):
-        s, d = os.path.join(src, name), os.path.join(dst, name)
-        if os.path.isfile(s) and not os.path.exists(d):
-            shutil.copy2(s, d)
-            copied.append(name)
+    for dname, fnames in ((".claude", ("settings.json", "settings.local.json")),
+                          (".agents", ("hooks.json",))):
+        src = os.path.join(root, dname)
+        dst = os.path.join(wt, dname)
+        if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
+            continue
+        os.makedirs(dst, exist_ok=True)
+        for name in fnames:
+            s, d = os.path.join(src, name), os.path.join(dst, name)
+            if os.path.isfile(s) and not os.path.exists(d):
+                shutil.copy2(s, d)
+                copied.append(os.path.join(dname, name))
     return copied
 
 
@@ -12806,10 +12812,35 @@ def cmd_hook_run(a, board):
     if a.event == "session-start":
         cmd_board(argparse.Namespace(all=False, quiet=False), board)
         return
-    if a.event == "inbox":
+    if a.event in ("inbox", "agy-inbox"):
+        if a.event == "agy-inbox":
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_inbox(argparse.Namespace(owner=owner, seat="", all=False, limit=8, keep=True), board)
+            text = buf.getvalue().strip()
+            if text and "inbox empty" not in text:
+                print(json.dumps({"injectSteps": [{"ephemeralMessage": text}]}))
+            else:
+                print("{}")
+            return
         cmd_inbox(argparse.Namespace(owner=owner, seat="", all=False, limit=8, keep=True), board)
         return
-    if a.event == "stop":
+    if a.event in ("stop", "agy-stop"):
+        if a.event == "agy-stop":
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_stop_hook(a, board)
+            out = buf.getvalue().strip()
+            try:
+                res = json.loads(out or "{}")
+                if res.get("decision") == "block":
+                    res["decision"] = "continue"
+                print(json.dumps(res))
+            except Exception:
+                print("{}")
+            return
         cmd_stop_hook(a, board)
         return
     if a.event == "task-wake":
@@ -13027,6 +13058,33 @@ def cmd_hooks(a, board):
         _atomic_hook_write(hp, json.dumps(cfg, indent=2) + "\n", 0o600)
         print("Cursor: %s + %s for %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings."
               % (os.path.relpath(hp, cursor_root), os.path.relpath(sp, cursor_root), agent))
+        print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
+        return
+    if a.tool in ("agy", "antigravity"):
+        owner = _hook_agent(a.agent)
+        wt = os.path.abspath(getattr(a, "worktree", "") or os.getcwd())
+        agents_path = os.path.join(wt, ".agents")
+        os.makedirs(agents_path, exist_ok=True)
+        hp = os.path.join(agents_path, "hooks.json")
+        if getattr(a, "rollback", False):
+            rollback([hp])
+            return
+        try:
+            with open(hp) as f:
+                cfg = json.load(f)
+        except (IOError, ValueError):
+            cfg = {}
+        inbox_cmd = _hook_command(script, board, owner, "agy-inbox")
+        stop_cmd = _hook_command(script, board, owner, "agy-stop")
+        entry = cfg.setdefault("tickets-board", {})
+        entry["PreInvocation"] = [{"type": "command", "command": inbox_cmd, "timeout": 10}]
+        if getattr(a, "stop", True):
+            entry["Stop"] = [{"type": "command", "command": stop_cmd, "timeout": 15}]
+        else:
+            entry.pop("Stop", None)
+        _atomic_hook_write(hp, json.dumps(cfg, indent=2) + "\n", 0o600)
+        print("Antigravity hooks in %s for %s: PreInvocation -> inbox; Stop -> %s."
+              % (hp, owner, "keep working while board work remains" if getattr(a, "stop", True) else "off"))
         print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
         return
     if a.tool == "remote":
@@ -13804,7 +13862,7 @@ def main():
     c.set_defaults(fn=cmd_dash)
 
     c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex | remote")
-    c.add_argument("tool", choices=("claude", "cursor", "codex", "remote"))
+    c.add_argument("tool", choices=("claude", "cursor", "codex", "remote", "agy", "antigravity"))
     c.add_argument("--agent", default="", help="required agent name baked into every generated hook command")
     c.add_argument("--worktree", default="", help="codex/cursor: scope hooks to this worktree")
     c.add_argument("--settings", default="", help="claude: settings.json path (default ./.claude/settings.json)")

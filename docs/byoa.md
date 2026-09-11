@@ -58,7 +58,7 @@ board: /tmp/byoa2/repo/.tickets
 
 `--harness custom:<cmd>` is the same thing in one flag, for a spawn line in a
 shell script. `--tool` is the original spelling of `--harness` and still works.
-The built-in names -- `claude`, `codex`, `cursor`, `cursor+claude` -- need no
+The built-in names -- `claude`, `codex`, `cursor`, `cursor+claude`, `agy`, `antigravity` -- need no
 `--cmd`; they expand to that CLI's headless invocation.
 
 The command is a **shell template**, not an argv list: it is run through
