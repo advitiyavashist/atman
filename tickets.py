@@ -5304,6 +5304,8 @@ This board is being set up. I will ask you four things, in order:
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; missing remaining/reset is a FAIL row.
+When they name tasks, use `tickets plan` so deps are real `--after` edges.
+Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
 # Probe-only catalog for a new board. Codex stays listed with zero usage.
@@ -5583,8 +5585,9 @@ objective; drain the review queue. Show `tickets graph` / `tickets map`.
 If HEALTH flags prose-only deps, wire `tickets dep` instead of leaving
 them in the body.
 
-Capture / sound / dispatch (Fatih loop on this board, not a plans/ tree):
-`tickets capture`, `tickets sound`, CoS `tickets dispatch --harness …`,
+Unattended persist ends at `tickets review` (reviewable SHA); human review is
+the gate. Capture / sound / dispatch (Fatih loop on this board, not a plans/
+tree): `tickets capture`, `tickets sound`, CoS `tickets dispatch --harness …`,
 `tickets pr-sync` after the PR is merged. CEO does not `tickets next`.
 
 Do not implement those tasks in this session. Spawning children when a
@@ -8136,9 +8139,13 @@ Then the loop, until `tickets next` says nothing is ready:
     tickets update <id> "what changed, what is next"     # every {every} min
     tickets msg "..." --to <agent> --re <id>             # questions, blockers
     git add -A && git commit -m "..."                    # commit as you go
-    tickets done <id> --notes "paths, decisions"         # refuses on main / dirty
-    # merge or open a PR, then:
+    tickets review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
+    # human review is the gate; then:
     tickets next
+
+Plan dependent work with `tickets plan` so JSON `deps` become real `--after`
+edges (`tickets graph` to inspect). Unattended persist ends at that reviewable
+SHA. Merge is not silent auto-promote.
 
 Tool-specific:
 - Claude Code: `tickets hooks claude --agent claude-opus` installs a project
@@ -8552,6 +8559,7 @@ def cmd_connect(a, board):
     print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
     print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
     print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
+    print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
@@ -13670,7 +13678,7 @@ function renderOnboarding(ob){
     ['initialized','Board ready','tickets quickstart --agent <you>'],
     ['first_ticket','Work on the board','tickets quickstart'],
     ['first_agent','You registered','tickets quickstart --agent <you>'],
-    ['first_review','First review submitted','tickets review <id> --notes "..."'],
+    ['first_review','Reviewable SHA','tickets review <id> --notes "..."'],
     ['first_merge','First merge','tickets merge'],
     ['second_harness','Second harness','tickets join <name> --harness …'],
     ['objective_set','Objective set','tickets objective "..."']
@@ -13705,6 +13713,7 @@ function renderEmptyBoard(d){
       '<li><span class="n">3</span><div><b>Objective</b> — name what the team finishes.<div class="cta">tickets objective "…"</div></div></li>'+
     '</ol>'+
     '<p class="empty-honesty">Median turns and yield@cost stay — until a done ticket reports.</p>'+
+    '<p class="empty-honesty">Plan with tickets plan (real --after edges). Unattended persist ends at tickets review — a reviewable SHA, not a silent merge.</p>'+
     '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock.</p>';
 }
 function renderAttention(items){
@@ -13811,8 +13820,8 @@ def _next_step_hint(board, tickets, done_ids):
     review = [t for t in tickets if t.get("status") == "review"]
     if review:
         return {"kind": "merge", "label": "Review queue",
-                "message": "%d ticket(s) waiting for master to merge." % len(review),
-                "cmd": "tickets done %s --notes \"...\"" % review[0]["id"]}
+                "message": "%d ticket(s) at a reviewable SHA — human review is the gate." % len(review),
+                "cmd": "tickets merge"}
     agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
     workforce = load_workforce(board)
     if not (agents or workforce):
