@@ -7093,6 +7093,28 @@ def cmd_connect(a, board):
 
 STOP_HOOK_MAX_PER_HOUR = 4
 WATCH_MIN_INTERVAL = 5
+# T-509: notice SIGTERM / spawn --stop during the poll wait. PEP 475 retries
+# a single time.sleep after the handler returns, so one sleep(--every) would
+# delay the exit by up to --every. Event.wait + InterruptedError from the
+# same-thread handler was a deadlock hazard and still missed the stop-file.
+WATCH_STOP_SLICE = 0.2
+
+
+def _watch_poll_wait(wait, stop, board, owner):
+    """Sleep up to `wait` seconds. True = SIGTERM or spawn --stop file.
+
+    KeyboardInterrupt is not caught here (cmd_watch still breaks immediately).
+    """
+    import time as _time
+    deadline = _time.monotonic() + max(0.0, float(wait))
+    while not stop["now"]:
+        if os.path.exists(_stop_file(board, owner)):
+            return True
+        left = deadline - _time.monotonic()
+        if left <= 0:
+            return False
+        _time.sleep(min(WATCH_STOP_SLICE, left))
+    return True
 # Bounds so long-lived boards do not grow files without limit. All overridable
 # for tests; defaults are generous enough to never matter in normal use.
 WATCH_LOG_MAX_BYTES = int(os.environ.get("TICKETS_WATCH_LOG_MAX_BYTES", 5 * 1024 * 1024))
@@ -9405,7 +9427,9 @@ def cmd_watch(a, board):
     """Poll the board; when there is work for the agent, launch a worker command.
 
     One watcher per agent (pid lock), one run at a time, per-run timeout,
-    exponential backoff after failed runs, clean exit on SIGTERM/Ctrl-C.
+    exponential backoff after failed runs. SIGTERM and `tickets spawn --stop`
+    exit within a short poll slice (WATCH_STOP_SLICE), not delayed until
+    --every elapses; Ctrl-C still breaks the wait immediately.
     """
     import signal
     import time as _time
@@ -9477,8 +9501,6 @@ def cmd_watch(a, board):
     # attribution loss (T-259 defect 3).
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
-    import threading
-    stop_event = threading.Event()
     stop = {"now": False}
     persist = bool(getattr(a, "persist", False))
     max_runs = int(getattr(a, "max_runs", 1) or 0)
@@ -9487,9 +9509,9 @@ def cmd_watch(a, board):
     stop_cond = STOP_CONDITION if max_runs else "until spawn --stop or SIGTERM (--persist)"
 
     def _term(signum, frame):
+        # Flag only: sliced _watch_poll_wait observes this within WATCH_STOP_SLICE.
+        # Do not raise here — InterruptedError + Event.wait deadlocked the wait.
         stop["now"] = True
-        stop_event.set()
-        raise InterruptedError()
 
     signal.signal(signal.SIGTERM, _term)
 
@@ -9516,7 +9538,6 @@ def cmd_watch(a, board):
                     os.unlink(_stop_file(board, owner))
                 except OSError:
                     pass
-                stop_event.set()
                 print("stop requested via tickets spawn --stop")
                 break
             if not a.once:
@@ -9582,7 +9603,12 @@ def cmd_watch(a, board):
                             failures += 1
                             if a.once:
                                 sys.exit(1)
-                            _time.sleep(min(every * (2 ** min(failures, 5)), 900))
+                            try:
+                                if _watch_poll_wait(min(every * (2 ** min(failures, 5)), 900),
+                                                    stop, board, owner):
+                                    break
+                            except KeyboardInterrupt:
+                                break
                             continue
                     run_cmd = _expand_harness_cmd(cmd, agent=owner, cwd=cwd, prompt_file=pf)
                 # The trigger is recorded as the pending KEYS only: the values
@@ -9734,7 +9760,19 @@ def cmd_watch(a, board):
                 sys.exit(0 if actionable(p) else 1)
             wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
-            if stop_event.wait(timeout=wait):
+            try:
+                woken = _watch_poll_wait(wait, stop, board, owner)
+            except KeyboardInterrupt:
+                break
+            if stop["now"]:
+                break
+            if woken:
+                if os.path.exists(_stop_file(board, owner)):
+                    try:
+                        os.unlink(_stop_file(board, owner))
+                    except OSError:
+                        pass
+                    print("stop requested via tickets spawn --stop")
                 break
     except InterruptedError:
         pass
@@ -9920,7 +9958,8 @@ Safety rails (all on by default):
   - Stop hook: at most one extra continuation per user turn (stop_hook_active) and 4 per hour;
     off with TICKETS_STOP_HOOK=off; never fires without TICKET_AGENT; never for broadcasts only.
   - watch: one watcher per agent name (pid lock), one run at a time, --run-timeout, backoff on failures,
-    logs in .tickets/agents/<name>.watch.log, stops on SIGTERM.
+    logs in .tickets/agents/<name>.watch.log, stops on SIGTERM or spawn --stop
+    within a short poll slice (not delayed until --every).
   - An agent that recorded `tickets limit` is never woken until `tickets limit --clear`.
 
 Spawning a team from a master session (models per agent):
@@ -10149,9 +10188,11 @@ def _stop_file(board, owner):
 def cmd_spawn(a, board):
     """Bring up a persistent worker: register it, give it a worktree, and start a
     detached watcher that launches the tool (with the chosen model) whenever the
-    board has work for it. --stop asks the watcher to exit at its next poll;
-    --list shows who is running. The watcher lives until stopped, logout or
-    reboot; `tickets guide` shows how to make it a login item."""
+    board has work for it. --stop writes a stop file the watcher notices during
+    its poll sleep (within WATCH_STOP_SLICE, not delayed until --every) and
+    also SIGTERMs live loops; --list shows who is running. The watcher lives
+    until stopped, logout or reboot; `tickets guide` shows how to make it a
+    login item."""
     import subprocess
 
     root = os.path.dirname(board)
