@@ -223,6 +223,7 @@ The evidence supports a narrow wedge: a few concurrent coding agents become diff
 7. **Ship a credible collaborative surface.** The current dashboard is local/read-only and the checked-in capture is not a hosted demo. GitHub, Cursor and Claude offer stronger remote, mobile, issue, review and notification surfaces.
 8. **Publish a commercial boundary.** MIT source plus user-paid agents is clear; hosted, team, support and enterprise responsibilities are not. A buyer cannot compare total setup and operating cost without them.
 9. **Integrate policy enforcement rather than rebuilding it inside scheduling.** Sondera already supplies a deterministic coding-agent reference monitor. Atman should carry policy context and policy receipts with tickets and review, while allowing Sondera or Steer to own the action decision.
+10. **Close the graph on success (2026-09-11).** Stripe [Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents) one-shot unattended work to a reviewable PR; Ramp [Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent) background agents verify with the same tools a human has. **Steal:** unattended persist + skip-all; success of A starts B without a human `tickets next` (T-781); review remains a gate. **Ignore:** Stripe/Ramp hosted VMs as the product, Slack-as-control-plane, Modal sandboxes, forking goose/OpenCode, 400-tool MCP sheds. Atman stays the local board: claim, deps, mail, review — not a multi-agent framework or shared-memory brain.
 
 ## Defensible wedge and launch boundaries
 
