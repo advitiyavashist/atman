@@ -373,6 +373,16 @@ def live_endpoint(board, seat):
         if ep.get("mode") == "native" and not persist and not acp_live:
             ep = dict(ep)
             ep["mode"] = "supervised"
+    elif provider == "agy":
+        if pid_ok is False:
+            return _drop_observed()
+        if pid_ok is None and not _heartbeat_fresh(ep):
+            return None, True
+    elif provider == "devin":
+        if pid_ok is False:
+            return _drop_observed()
+        if pid_ok is None and not _heartbeat_fresh(ep):
+            return None, True
     else:
         return None, False
     return ep, False
@@ -431,8 +441,11 @@ def _cursor_persist_target():
 def _probe_codex():
     if not _which("codex"):
         return {"ok": False, "reason": "codex CLI not on PATH"}
-    r = subprocess.run(["codex", "queue", "--help"], capture_output=True, text=True)
-    if r.returncode != 0:
+    try:
+        r = subprocess.run(["codex", "queue", "--help"], capture_output=True, text=True, timeout=3)
+        if r.returncode != 0:
+            return {"ok": False, "reason": "codex queue subcommand unavailable"}
+    except (OSError, subprocess.SubprocessError):
         return {"ok": False, "reason": "codex queue subcommand unavailable"}
     sock = _codex_control_sock()
     if os.path.exists(sock):
@@ -487,12 +500,26 @@ def _probe_remote():
     return {"ok": True, "capabilities": {"native_inject": False, "transport": "schema-2 remote bridge"}}
 
 
+def _probe_agy():
+    if _which("agy"):
+        return {"ok": True, "capabilities": {"native_inject": False, "transport": "agy CLI + .agents hooks"}}
+    return {"ok": True, "capabilities": {"native_inject": False, "transport": ".agents hooks"}}
+
+
+def _probe_devin():
+    if _which("devin"):
+        return {"ok": True, "capabilities": {"native_inject": False, "transport": "devin CLI"}}
+    return {"ok": True, "capabilities": {"native_inject": False, "transport": "schema-2 remote bridge"}}
+
+
 def probe_provider(provider):
     probes = {
         "claude": _probe_claude,
         "codex": _probe_codex,
         "cursor": _probe_cursor,
         "remote": _probe_remote,
+        "agy": _probe_agy,
+        "devin": _probe_devin,
     }
     fn = probes.get(provider)
     if not fn:
@@ -505,6 +532,10 @@ def provider_for_harness(harness):
         return "claude"
     if harness in ("codex", "cursor", "remote"):
         return harness
+    if harness in ("agy", "antigravity"):
+        return "agy"
+    if harness in ("devin", "cognition"):
+        return "devin"
     return ""
 
 
@@ -583,6 +614,36 @@ def register_persistent(board, seat, harness, at_iso):
                 "transport": ("supervised (need agent persist + tmux, or a live ACP "
                               "control sock; agent -p --resume is a new paid run)"),
             }
+    elif provider == "agy":
+        conv_id = (os.environ.get("AGY_CONVERSATION_ID") or os.environ.get("ANTIGRAVITY_CONVERSATION_ID") or "").strip()
+        persist = (os.environ.get("AGY_PERSIST_SESSION") or "").strip()
+        if not persist and os.environ.get("TMUX") and _which("tmux"):
+            persist = _cursor_persist_target()
+        if conv_id:
+            record["conversation_id"] = conv_id
+        if persist:
+            record["persist_session"] = persist
+        if persist and _which("tmux"):
+            record["mode"] = "native"
+            record["capabilities"] = {
+                "native_inject": True,
+                "transport": "tmux send-keys into agy persist session",
+            }
+        else:
+            record["mode"] = "supervised"
+            record["capabilities"] = {
+                "native_inject": False,
+                "transport": "supervised (agy .agents hooks or watcher surfaces pending messages)",
+            }
+    elif provider == "devin":
+        session_id = (os.environ.get("DEVIN_SESSION_ID") or os.environ.get("COGNITION_SESSION_ID") or "").strip()
+        if session_id:
+            record["session_id"] = session_id
+        record["mode"] = "supervised"
+        record["capabilities"] = {
+            "native_inject": False,
+            "transport": "supervised (remote wrapper or devin poll surfaces messages)",
+        }
     committed = commit_endpoint(board, seat, record)
     if not committed.get("ok"):
         return committed
@@ -941,7 +1002,7 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     if expected and provider and expected != provider:
         remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
         return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
-    if provider not in ("claude", "codex", "cursor"):
+    if provider not in ("claude", "codex", "cursor", "agy", "devin"):
         return "unsupported provider"
     reserved, ep = _reserve_wake(board, seat, mid, lease, fence)
     if reserved != "reserved":
@@ -955,6 +1016,16 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     elif provider == "cursor":
         label = _cursor_pause_resume(ep, text)
         ok = label == "woken"
+    elif provider == "agy":
+        if ep.get("persist_session") and _which("tmux"):
+            ok = _poke_until(_poke_cursor, ep, text)
+            label = "woken" if ok else "refused"
+        else:
+            label = "supervised (agy .agents hooks surface inbox)"
+            ok = True
+    elif provider == "devin":
+        label = "supervised (devin wrapper or polling surfaces messages)"
+        ok = True
     else:
         label = _poke_codex_wake(ep, text)
         ok = label in ("woken", "queued-offline")

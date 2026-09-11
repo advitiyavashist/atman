@@ -440,3 +440,33 @@ def test_inherit_settings_copies_agents_dir(tmp_path):
     assert '.agents/hooks.json' in copied
     assert (wt / '.agents' / 'hooks.json').exists()
     assert json.loads((wt / '.agents' / 'hooks.json').read_text()) == {"test": True}
+
+
+def test_devin_builtin_harness_join_records_no_cmd(board):
+    r = run(board, 'join', 'devin-worker', '--roles', 'backend', '--harness', 'devin')
+    assert r.returncode == 0, r.stderr
+    entry = json.loads((board / 'workforce.json').read_text())['devin-worker']
+    assert entry['harness'] == 'devin'
+    assert entry.get('cmd') is None
+
+
+def test_devin_worker_cmd_shape(board):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tickets', str(TOOL))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    cmd = mod._worker_cmd(board, 'devin-worker', model='gpt-5',
+                          permission_mode='bypassPermissions', tool='devin')
+    assert cmd == 'devin --print "$(tickets prompt)" --dangerously-skip-permissions --model gpt-5'
+
+    cmd_safe = mod._worker_cmd(board, 'devin-worker', permission_mode='safe', tool='devin')
+    assert cmd_safe == 'devin --print "$(tickets prompt)"'
+
+
+def test_hooks_devin_writes_wrapper(board, tmp_path):
+    wrapper = tmp_path / 'tickets-devin'
+    r = run(board, 'hooks', 'devin', '--agent', 'devin-worker', '--wrapper', str(wrapper))
+    assert r.returncode == 0, r.stderr
+    assert wrapper.exists()
+    assert (tmp_path / 'tickets-devin.hooks.json').exists()

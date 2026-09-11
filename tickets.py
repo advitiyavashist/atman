@@ -5708,7 +5708,7 @@ def _harness_of_cmd(cmd):
     names the board already knows are claimed; anything else is `custom`,
     which is a fact, not a guess."""
     head = os.path.basename(shlex.split(cmd or "")[0]) if (cmd or "").strip() else ""
-    return head if head in ("claude", "codex", "cursor", "agy", "antigravity") else ("custom" if head else "")
+    return head if head in ("claude", "codex", "cursor", "agy", "antigravity", "devin", "cognition") else ("custom" if head else "")
 
 
 def _round3(x):
@@ -6285,8 +6285,10 @@ def fmt_msg(m):
 def _message_wakes_seat(board, seat, message):
     """Whether a posted message should attempt a native session wake for seat."""
     obj_state = objective_state(_safe(lambda: load_objective(board), {}))
+    is_persist = (load_workforce(board).get(seat, {}) or {}).get("lifecycle") == "persistent"
     return (_message_wakes(message, obj_state)
-            or _continuous_message_wakes(board, seat, message))
+            or _continuous_message_wakes(board, seat, message)
+            or (is_persist and not is_board_broadcast(message)))
 
 
 def _session_adapters():
@@ -6310,7 +6312,25 @@ def cmd_msg(a, board):
               % unknown)
     print("posted: " + fmt_msg(m))
     to = (m.get("to") or "").strip()
-    if to and _message_wakes_seat(board, to, m):
+    text = m.get("text") or ""
+    is_all = to in ("all", "everyone") or "@all" in text or "@everyone" in text
+    if is_all:
+        wf = load_workforce(board)
+        sa = _session_adapters()
+        mid = _msg_id(m)
+        for seat, srec in sorted(wf.items()):
+            if seat == sender:
+                continue
+            is_persist = srec.get("lifecycle") == "persistent"
+            has_native = sa.has_live_native_session(board, seat)
+            ep, _ = sa.live_endpoint(board, seat)
+            if is_persist or has_native or (ep is not None):
+                harness = srec.get("harness") or srec.get("tool") or "claude"
+                label = sa.wake_seat(board, seat, sa.wake_payload(fmt_msg, m), harness=harness,
+                                     message_id=mid)
+                print("wake: %s -> %s" % (seat, label))
+                _safe(lambda s=seat, l=label: _note_native_wake_result(board, s, l, mid), None)
+    elif to and _message_wakes_seat(board, to, m):
         harness = (load_workforce(board).get(to, {}) or {}).get("harness") or "claude"
         sa = _session_adapters()
         mid = _msg_id(m)
@@ -9961,7 +9981,7 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 # runtime's side of the contract never changes -- it hands the harness a prompt
 # and a working directory, and reads the board afterwards. docs/byoa.md is the
 # operator-facing version of this.
-BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote", "agy", "antigravity")
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote", "agy", "antigravity", "devin", "cognition")
 # Documented shell-template placeholders for custom harnesses. `harness check`
 # refuses templates with any other {name} token or without {prompt_file}.
 HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
@@ -10115,6 +10135,10 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
                 else "--mode accept-edits")
         return 'agy -p %s %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
+    if tool in ("devin", "cognition"):
+        flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
+                else "")
+        return 'devin --print %s%s%s' % (prompt, (" " + flag) if flag else "", (" --model %s" % model) if model else "")
     if tool == "cursor+claude":
         # Fable through Cursor first; if that run errors, the same prompt through the
         # Claude CLI (opus). One identity, two engines -- the master never goes dark.
@@ -12814,6 +12838,7 @@ def cmd_hook_run(a, board):
         return
     if a.event in ("inbox", "agy-inbox"):
         if a.event == "agy-inbox":
+            import io
             from contextlib import redirect_stdout
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -12828,6 +12853,7 @@ def cmd_hook_run(a, board):
         return
     if a.event in ("stop", "agy-stop"):
         if a.event == "agy-stop":
+            import io
             from contextlib import redirect_stdout
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -13086,6 +13112,13 @@ def cmd_hooks(a, board):
         print("Antigravity hooks in %s for %s: PreInvocation -> inbox; Stop -> %s."
               % (hp, owner, "keep working while board work remains" if getattr(a, "stop", True) else "off"))
         print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
+        return
+    if a.tool in ("devin", "cognition"):
+        owner = _hook_agent(a.agent)
+        a.tool = "remote"
+        a.prompt_kind = getattr(a, "prompt_kind", "") or ""
+        cmd_hooks(a, board)
+        print("Devin: identity-pinned hook wrapper configured for %s." % owner)
         return
     if a.tool == "remote":
         owner = _hook_agent(a.agent)
@@ -13863,7 +13896,7 @@ def main():
     c.set_defaults(fn=cmd_dash)
 
     c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex | remote")
-    c.add_argument("tool", choices=("claude", "cursor", "codex", "remote", "agy", "antigravity"))
+    c.add_argument("tool", choices=("claude", "cursor", "codex", "remote", "agy", "antigravity", "devin", "cognition"))
     c.add_argument("--agent", default="", help="required agent name baked into every generated hook command")
     c.add_argument("--worktree", default="", help="codex/cursor: scope hooks to this worktree")
     c.add_argument("--settings", default="", help="claude: settings.json path (default ./.claude/settings.json)")
