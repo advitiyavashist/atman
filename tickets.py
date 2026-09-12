@@ -4317,31 +4317,40 @@ def _watch_pid_uses_this_cli(pid):
     return tool in cmd and " watch" in cmd
 
 
-def _poke_persist_watch(board, owner):
+PERSIST_POKE_ATTEMPTS = 3
+_AUTONOMOUS_WAKE_LABELS = ("woken", "deduped", "watch-poked")
+
+
+def _poke_persist_watch(board, owner, attempts=None):
     """Nudge a live persist watcher: poke file + SIGUSR1 when this CLI owns it.
 
     Returns True when a live watcher pid exists for the seat on this board.
     Does not claim T-706 'woken'. Default SIGUSR1 would kill a watcher that
-    has no handler, so older shims get the poke file only.
+    has no handler, so older shims get the poke file only. Bounded retries
+    cover a pid that races teardown; they do not kill an in-flight child
+    (T-820 wakeup pipe).
     """
     import signal
 
-    pid = _watcher_pid(board, owner)
-    if not pid or not _pid_alive(pid):
-        return False
-    try:
-        with open(_watch_poke_file(board, owner), "w") as f:
-            f.write(now() + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-    except OSError:
-        return False
-    if _watch_pid_uses_this_cli(pid):
+    tries = PERSIST_POKE_ATTEMPTS if attempts is None else max(1, int(attempts))
+    for _ in range(tries):
+        pid = _watcher_pid(board, owner)
+        if not pid or not _pid_alive(pid):
+            continue
         try:
-            os.kill(pid, signal.SIGUSR1)
-        except (ProcessLookupError, OSError):
-            return False
-    return True
+            with open(_watch_poke_file(board, owner), "w") as f:
+                f.write(now() + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError:
+            continue
+        if _watch_pid_uses_this_cli(pid):
+            try:
+                os.kill(pid, signal.SIGUSR1)
+            except (ProcessLookupError, OSError):
+                continue
+        return True
+    return False
 
 
 def _finish_followup(board, tid, event):
@@ -7529,14 +7538,21 @@ def cmd_msg(a, board):
             continue
         if not _message_wakes_seat(board, to, m):
             continue
+        if _already_autonomous_wake(board, to, mid):
+            print("wake: %s -> deduped" % to)
+            continue
         harness = _seat_harness(board, to)
         if sa is None:
             sa = _session_adapters()
         label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
                              message_id=mid)
-        if _should_poke_persist(label) and _poke_persist_watch(board, to):
-            label = "watch-poked"
+        poked = False
+        if _should_poke_persist(label):
+            poked = _poke_persist_watch(board, to)
+            if poked:
+                label = "watch-poked"
         print("wake: %s -> %s" % (to, label))
+        _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
 
@@ -7548,10 +7564,58 @@ def _seat_harness(board, seat):
 
 
 def _should_poke_persist(label):
-    """Native inject missed; a live persist watcher is the remaining wake path."""
+    """Native inject missed or only queued in the host UI; persist-watch remains.
+
+    `queued-offline` / `supervised` is the T-808 case: Codex/Cursor show the
+    mail and wait for a keystroke. A live persist watcher is the autonomous
+    path. Remote bridge stays its own transport. Rebound leases belong to
+    another live session, so they are not stolen here.
+    """
     s = str(label or "")
-    return (s in ("no live endpoint", "endpoint stale (removed)", "unsupported provider")
-            or s.startswith("endpoint stale"))
+    if not s or s in ("woken", "deduped", "remote bridge required"):
+        return False
+    if s.startswith("stale (rebound"):
+        return False
+    return (
+        s in ("no live endpoint", "endpoint stale (removed)", "unsupported provider",
+              "queued-offline")
+        or s.startswith("endpoint stale")
+        or s.startswith("supervised")
+        or s.startswith("refused")
+    )
+
+
+def _already_autonomous_wake(board, seat, message_id):
+    mid = str(message_id or "")
+    if not mid:
+        return False
+    rec = _agent_rec(board, seat) or {}
+    wd = rec.get("wake_delivery") or {}
+    if wd.get("message_id") == mid and wd.get("label") in _AUTONOMOUS_WAKE_LABELS:
+        return True
+    return mid in (rec.get("wake_delivery_ids") or [])
+
+
+def _note_wake_delivery(board, seat, label, message_id, poked=False):
+    """Visible last-wake receipt on the agent record (idempotent per message_id)."""
+    if not seat:
+        return None
+    payload = {
+        "message_id": str(message_id or ""),
+        "label": str(label or ""),
+        "poked": bool(poked),
+        "at": now(),
+    }
+
+    def mutate(rec):
+        rec["wake_delivery"] = payload
+        mid = payload["message_id"]
+        if mid and payload["label"] in _AUTONOMOUS_WAKE_LABELS:
+            ids = [x for x in (rec.get("wake_delivery_ids") or []) if x != mid]
+            ids.append(mid)
+            rec["wake_delivery_ids"] = ids[-32:]
+
+    return _agent_update(board, seat, mutate)
 
 
 def _native_wake_succeeded(label):
@@ -14167,6 +14231,7 @@ def _board_snapshot_body(board, messages=40):
                            "adapter_retry_at": remote.get("retry_at", "") or local_failure.get("retry_at", ""),
                            "wake_pending": wake_pending,
                            "wake_reason": wake_reason_of(wake),
+                           "wake_delivery": rec.get("wake_delivery") or {},
                            "roles": roles.get(r["agent"]) or [],
                            "auth": (rec.get("auth_check") or {}).get("state", ""),
                            "auth_detail": (rec.get("auth_check") or {}).get("detail", ""),

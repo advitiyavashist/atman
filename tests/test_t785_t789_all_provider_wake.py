@@ -66,8 +66,15 @@ def test_seat_harness_prefers_tool_over_claude_default():
     tk = _mod()
     assert tk._should_poke_persist("no live endpoint")
     assert tk._should_poke_persist("unsupported provider")
+    assert tk._should_poke_persist("queued-offline")
+    assert tk._should_poke_persist(
+        "supervised (no persist/tmux or ACP control sock; agent -p --resume "
+        "is a new paid run, not pause-resume)")
+    assert tk._should_poke_persist("refused")
     assert not tk._should_poke_persist("woken")
+    assert not tk._should_poke_persist("deduped")
     assert not tk._should_poke_persist("remote bridge required")
+    assert not tk._should_poke_persist("stale (rebound before delivery)")
 
 
 def test_msg_honors_tool_not_claude(board, monkeypatch):
