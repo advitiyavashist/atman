@@ -220,7 +220,7 @@ def test_spawn_tool_flag_still_overrides(board, tmp_path):
     env = dict(PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""))
     assert run(board, "join", "qwen", "--roles", "docs", "--harness",
                "custom:%s {prompt_file}" % script).returncode == 0
-    r = run(board, "spawn", "qwen", "--tool", "codex", "--every", "3600", env=env)
+    r = run(board, "spawn", "qwen", "--tool", "codex", "--transfer", "--every", "3600", env=env)
     assert r.returncode == 0, r.stderr + r.stdout
     try:
         assert "codex exec" in r.stdout and str(script) not in r.stdout

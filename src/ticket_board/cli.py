@@ -3842,11 +3842,123 @@ the HEALTH section.
 """
 
 
+def _identity_harness_key(spec):
+    spec = (spec or "").strip()
+    if spec.startswith("custom:"):
+        return "custom"
+    return spec
+
+
+def aliases_path(board):
+    return os.path.join(board, "aliases.json")
+
+
+def load_aliases(board):
+    path = aliases_path(board)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def save_aliases(board, aliases):
+    os.makedirs(board, exist_ok=True)
+    path = aliases_path(board)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(aliases, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _unbind_aliases_for(board, owner):
+    aliases = load_aliases(board)
+    kept = dict((k, v) for k, v in aliases.items() if v != owner)
+    if kept != aliases:
+        save_aliases(board, kept)
+
+
+def _bound_identity_harness(board, owner):
+    entry = load_workforce(board).get(owner) or {}
+    return _identity_harness_key(entry.get("harness") or entry.get("tool") or "")
+
+
+def _identity_reuse_conflict(board, owner, incoming_harness):
+    incoming = _identity_harness_key(incoming_harness)
+    if not incoming:
+        return ""
+    prev = _bound_identity_harness(board, owner)
+    if not prev or prev == incoming:
+        return ""
+    return prev
+
+
+def _identity_reuse_error(owner, prev, incoming):
+    return (
+        "refusing: %s is bound to %s (auth/session/runner). "
+        "Join a unique provider-specific agent id and bind it with --alias ceo|cos, "
+        "or pass --transfer to audit handover of this name. "
+        "Historical aliases: tickets retire <name>."
+        % (owner, prev)
+    )
+
+
+def _strip_identity_bound_state(board, owner):
+    rec = _agent_rec(board, owner)
+    if rec:
+        for key in ("auth_check", "runner_context", "limit", "adapter_failure",
+                    "auth_resume_at", "harness_check"):
+            rec.pop(key, None)
+        rec["ticket"] = ""
+        os.makedirs(agents_dir(board), exist_ok=True)
+        path = os.path.join(agents_dir(board), owner + ".json")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+        os.replace(tmp, path)
+    try:
+        from session_adapters import remove_endpoint
+        remove_endpoint(board, owner)
+    except Exception:
+        pass
+
+
+def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias=""):
+    alias = (alias or "").strip().lower()
+    if alias and alias not in ("ceo", "cos"):
+        sys.exit("--alias must be one of: ceo, cos")
+    prev = _identity_reuse_conflict(board, owner, incoming_harness)
+    alias_holder = load_aliases(board).get(alias, "") if alias else ""
+    alias_clash = bool(alias and alias_holder and alias_holder != owner)
+    if prev and not transfer:
+        sys.exit(_identity_reuse_error(owner, prev, incoming_harness))
+    if alias_clash and not transfer:
+        sys.exit("refusing: alias %s is bound to %s. Pass --transfer to rebind, "
+                 "or join as that unique id." % (alias, alias_holder))
+    if prev and transfer:
+        if _agent_holds_ticket(board, owner):
+            sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
+        _strip_identity_bound_state(board, owner)
+        incoming = _identity_harness_key(incoming_harness)
+        post_message(
+            board, owner,
+            "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
+            % (owner, prev, incoming))
+        print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
+              % (owner, prev, incoming))
+
+
 def cmd_join(a, board):
     _refuse_join_tickets_dir_shadow(board)
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    incoming = (getattr(a, "harness", "") or a.tool or "").strip()
+    _guard_seat_identity(
+        board, owner, incoming,
+        transfer=bool(getattr(a, "transfer", False)),
+        alias=(getattr(a, "alias", "") or "").strip())
     # Before checkin(), which creates the record: only a genuinely new agent is
     # stamped, so a re-join never moves the watermark over unread mail.
     first_join = not _agent_rec(board, owner)
@@ -3869,7 +3981,12 @@ def cmd_join(a, board):
     os.replace(tmp, roles_path)
     wf = load_workforce(board)
     entry = wf.get(owner, {})
-    if a.tool:
+    harness = _identity_harness_key(getattr(a, "harness", "") or a.tool)
+    if harness:
+        entry["harness"] = harness
+        entry["tool"] = harness
+        entry["provider"] = harness
+    elif a.tool:
         entry["tool"] = a.tool
     if a.model:
         entry["model"] = a.model
@@ -3881,6 +3998,13 @@ def cmd_join(a, board):
         entry["best_for"] = a.best_for
     entry.setdefault("can", [])
     entry.setdefault("cost", "medium")
+    entry["agent_id"] = owner
+    alias = (getattr(a, "alias", "") or "").strip().lower()
+    if alias:
+        aliases = load_aliases(board)
+        aliases[alias] = owner
+        save_aliases(board, aliases)
+        entry["role_alias"] = alias
     wf[owner] = entry
     save_workforce(board, wf)
     rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""))
@@ -3961,6 +4085,7 @@ def cmd_retire(a, board):
         with open(tmp, "w") as f:
             json.dump(roles, f, indent=2)
         os.replace(tmp, roles_path)
+    _unbind_aliases_for(board, owner)
     retirer = whoami(getattr(a, "owner", None))
     post_message(board, retirer, "retired seat %s from the board" % owner)
     print("retired %s" % owner)
@@ -4408,8 +4533,12 @@ def main():
     c.add_argument("--can", default=None, help="docker,browser,own-machine,gpu")
     c.add_argument("--cost", choices=("low", "medium", "high"), default=None)
     c.add_argument("--tool", default="", help="claude|codex|cursor|grok")
+    c.add_argument("--harness", default="", help="same field as --tool")
     c.add_argument("--model", default="", help="e.g. opus, sonnet, gpt-5, grok-4")
     c.add_argument("--best-for", default="", help="free text; keywords are matched against ticket titles by `route`")
+    c.add_argument("--alias", default="", help="stable role alias (ceo or cos) pointing at this unique runtime identity")
+    c.add_argument("--transfer", action="store_true",
+                   help="audited handover when this name's provider/session/runner identity changes")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")

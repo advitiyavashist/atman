@@ -8049,6 +8049,141 @@ A session cannot be woken by a hook once its turn has ended, so use both:
 """
 
 
+STABLE_ROLE_ALIASES = ("ceo", "cos")
+IDENTITY_BOUND_AGENT_KEYS = (
+    "auth_check", "runner_context", "limit", "adapter_failure",
+    "auth_resume_at", "harness_check",
+)
+
+
+def aliases_path(board):
+    return os.path.join(board, "aliases.json")
+
+
+def load_aliases(board):
+    path = aliases_path(board)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def save_aliases(board, aliases):
+    os.makedirs(board, exist_ok=True)
+    path = aliases_path(board)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(aliases, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _unbind_aliases_for(board, owner):
+    aliases = load_aliases(board)
+    kept = dict((k, v) for k, v in aliases.items() if v != owner)
+    if kept != aliases:
+        save_aliases(board, kept)
+
+
+def _identity_harness_key(spec):
+    harness, _ = _split_harness(spec or "")
+    return (harness or "").strip()
+
+
+def _bound_identity_harness(board, owner):
+    entry = load_workforce(board).get(owner) or {}
+    return _identity_harness_key(entry.get("harness") or entry.get("tool") or "")
+
+
+def _identity_reuse_conflict(board, owner, incoming_harness):
+    incoming = _identity_harness_key(incoming_harness)
+    if not incoming:
+        return ""
+    prev = _bound_identity_harness(board, owner)
+    if not prev or prev == incoming:
+        return ""
+    return prev
+
+
+def _identity_reuse_error(owner, prev, incoming):
+    incoming = _identity_harness_key(incoming) or incoming
+    return (
+        "refusing: %s is bound to %s (auth/session/runner). "
+        "Join a unique provider-specific agent id and bind it with --alias ceo|cos, "
+        "or pass --transfer to audit handover of this name. "
+        "Historical aliases: tickets retire <name>."
+        % (owner, prev)
+    )
+
+
+def _strip_identity_bound_state(board, owner):
+    def clear(rec):
+        for key in IDENTITY_BOUND_AGENT_KEYS:
+            rec.pop(key, None)
+        rec["ticket"] = ""
+    if _agent_rec(board, owner):
+        _agent_update(board, owner, clear)
+    _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
+
+
+def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias=""):
+    """Refuse provider reuse, or audited-transfer that drops identity-bound state."""
+    alias = (alias or "").strip().lower()
+    if alias and alias not in STABLE_ROLE_ALIASES:
+        sys.exit("--alias must be one of: %s" % ", ".join(STABLE_ROLE_ALIASES))
+    prev = _identity_reuse_conflict(board, owner, incoming_harness)
+    alias_holder = load_aliases(board).get(alias, "") if alias else ""
+    alias_clash = bool(alias and alias_holder and alias_holder != owner)
+    if prev and not transfer:
+        sys.exit(_identity_reuse_error(owner, prev, incoming_harness))
+    if alias_clash and not transfer:
+        sys.exit("refusing: alias %s is bound to %s. Pass --transfer to rebind, "
+                 "or join as that unique id." % (alias, alias_holder))
+    if prev and transfer:
+        if _agent_holds_ticket(board, owner):
+            sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
+        _strip_identity_bound_state(board, owner)
+        incoming = _identity_harness_key(incoming_harness)
+        post_message(
+            board, owner,
+            "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
+            % (owner, prev, incoming))
+        print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
+              % (owner, prev, incoming))
+    return prev
+
+
+def _bind_role_alias(board, alias, owner):
+    alias = (alias or "").strip().lower()
+    if not alias:
+        return
+    aliases = load_aliases(board)
+    aliases[alias] = owner
+    save_aliases(board, aliases)
+
+
+def _join_namespace(a, owner):
+    """Every field cmd_join reads, so a new join flag fails here instead of at first-run."""
+    return argparse.Namespace(
+        name=owner,
+        roles=getattr(a, "roles", None),
+        can=getattr(a, "can", None),
+        cost=getattr(a, "cost", None),
+        tool=getattr(a, "tool", "") or "",
+        harness=getattr(a, "harness", "") or "",
+        cmd_template=getattr(a, "cmd_template", "") or "",
+        model=getattr(a, "model", "") or "",
+        best_for=getattr(a, "best_for", "") or "",
+        wake_mode=getattr(a, "wake_mode", None),
+        lifecycle=getattr(a, "lifecycle", None),
+        persistent=bool(getattr(a, "persistent", False)),
+        knowledge_dir=getattr(a, "knowledge_dir", "") or "",
+        transfer=bool(getattr(a, "transfer", False)),
+        alias=getattr(a, "alias", "") or "",
+    )
+
+
 def cmd_join(a, board):
     _refuse_join_tickets_dir_shadow(board)
     owner = a.name or whoami()
@@ -8065,6 +8200,11 @@ def cmd_join(a, board):
         if knowledge_errors:
             sys.exit("--knowledge-dir graph is invalid; run `tickets knowledge validate`: %s" %
                      knowledge_dir)
+    harness, inline_cmd = _split_harness(getattr(a, "harness", "") or a.tool)
+    _guard_seat_identity(
+        board, owner, harness,
+        transfer=bool(getattr(a, "transfer", False)),
+        alias=(getattr(a, "alias", "") or "").strip())
     # Read this BEFORE checkin(), which creates the record. Only a genuinely new
     # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
     # calls straight through here) must leave delivery completely alone.
@@ -8090,7 +8230,6 @@ def cmd_join(a, board):
     entry = wf.get(owner, {})
     # BYOA: --harness is the current spelling, --tool the original one; they are
     # the same field. `custom:<cmd>` folds the command into the harness flag.
-    harness, inline_cmd = _split_harness(getattr(a, "harness", "") or a.tool)
     cmd_template = (getattr(a, "cmd_template", "") or "").strip() or inline_cmd
     # A bare executable name still works (it is the command). "custom" with
     # nothing to run is a typo that would otherwise register an agent no
@@ -8136,6 +8275,12 @@ def cmd_join(a, board):
             sys.exit("--lifecycle must be one of: %s" % ", ".join(LIFECYCLES))
         entry["lifecycle"] = lifecycle
     entry["agent_id"] = owner
+    if harness:
+        entry["provider"] = harness
+    alias = (getattr(a, "alias", "") or "").strip().lower()
+    if alias:
+        _bind_role_alias(board, alias, owner)
+        entry["role_alias"] = alias
     if knowledge_dir:
         entry["knowledge_dir"] = knowledge_dir
     entry.setdefault("can", [])
@@ -8169,10 +8314,12 @@ def cmd_join(a, board):
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
     root = os.path.dirname(board)
-    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s  lifecycle=%s" % (
+    shown_alias = alias or next(
+        (name for name, holder in load_aliases(board).items() if holder == owner), "-")
+    print("joined as %s  roles=%s  can=%s  cost=%s  harness=%s  wake=%s  lifecycle=%s  alias=%s" % (
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"],
         entry.get("harness") or "claude (default)", wake_mode_of(board, owner, workforce=wf),
-        lifecycle_of(board, owner, workforce=wf)))
+        lifecycle_of(board, owner, workforce=wf), shown_alias or "-"))
     if entry.get("cmd"):
         print("cmd: %s" % entry["cmd"])
     if entry.get("knowledge_dir"):
@@ -8254,6 +8401,7 @@ def cmd_retire(a, board):
         with open(tmp, "w") as f:
             json.dump(roles, f, indent=2)
         os.replace(tmp, roles_path)
+    _unbind_aliases_for(board, owner)
     retirer = whoami(getattr(a, "owner", None))
     post_message(board, retirer, "retired seat %s from the board" % owner)
     print("retired %s" % owner)
@@ -11038,11 +11186,7 @@ def cmd_boot(a, board):
     roles = load_roles(board)
     if (owner not in wf or a.roles is not None or getattr(a, "wake_mode", None) is not None
             or getattr(a, "harness", "") or getattr(a, "cmd_template", "")):
-        ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
-                                harness=getattr(a, "harness", "") or "",
-                                cmd_template=getattr(a, "cmd_template", "") or "",
-                                model=a.model, best_for="",
-                                wake_mode=getattr(a, "wake_mode", None))
+        ns = _join_namespace(a, owner)
         _silent(lambda: cmd_join(ns, board))
         steps.append("joined as %s (roles=%s)" % (owner, a.roles or roles.get(owner, [])))
     else:
@@ -11452,11 +11596,19 @@ def cmd_spawn(a, board):
                 ", ".join(str(p) for p in busy), owner))
         post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
         return
+    requested_harness = getattr(a, "harness", "") or a.tool
+    incoming_harness, _ = _split_harness(requested_harness)
+    conflict = _identity_reuse_conflict(board, owner, incoming_harness)
+    if conflict:
+        if not getattr(a, "transfer", False):
+            sys.exit(_identity_reuse_error(owner, conflict, incoming_harness))
+        if _agent_holds_ticket(board, owner):
+            sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
+        _strip_identity_bound_state(board, owner)
     wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
     git_root, origin_err = _spawn_git_root(board, owner, wt)
     if origin_err:
         sys.exit(origin_err)
-    requested_harness = getattr(a, "harness", "") or a.tool
     resolved_harness, _ = harness_of(board, owner, requested_harness,
                                      getattr(a, "cmd_template", ""))
     sa = _session_adapters()
@@ -11475,11 +11627,7 @@ def cmd_spawn(a, board):
         if auth.get("state") != "ready":
             _print_auth_result(owner, auth)
             sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
-    ns = argparse.Namespace(name=owner, roles=a.roles, can=a.can, cost=a.cost, tool=a.tool,
-                            harness=getattr(a, "harness", "") or "",
-                            cmd_template=getattr(a, "cmd_template", "") or "",
-                            model=a.model, best_for=a.best_for or "",
-                            wake_mode=getattr(a, "wake_mode", None))
+    ns = _join_namespace(a, owner)
     _silent(lambda: cmd_join(ns, board))
     # --tool/--harness no longer defaults to "claude" in the parser: an absent
     # flag must mean "use what `tickets join` registered for this agent",
@@ -14240,9 +14388,9 @@ def cmd_quickstart(a, board):
     if agent and not agent.startswith("agent-"):
         # T-314 grew --harness/--cmd; pin every field cmd_join reads so a new
         # join flag fails this Namespace in tests instead of at first-run.
-        join_args = argparse.Namespace(
-            name=agent, roles=a.roles, tool="", model="",
-            can=None, cost=None, best_for="", harness="", cmd_template="")
+        join_args = _join_namespace(argparse.Namespace(
+            roles=a.roles, tool="", model="", can=None, cost=None, best_for="",
+            harness="", cmd_template=""), agent)
         # cmd_join prints a full worker briefing; quickstart has its own ending,
         # so keep the one line that matters and drop the rest.
         import io, contextlib
@@ -15236,6 +15384,11 @@ def main():
                    help="canonical repo-backed knowledge/ directory inherited by this seat")
     c.add_argument("--persistent", action="store_true",
                    help="lifecycle=persistent and register this interactive session's native wake endpoint (socket/queue/resume)")
+    c.add_argument("--alias", default="",
+                   help="stable role alias (ceo or cos) pointing at this unique runtime identity")
+    c.add_argument("--transfer", action="store_true",
+                   help="audited handover when this name's provider/session/runner identity changes; "
+                        "strips auth, endpoint, session, ticket pointer, and limits; keeps message history")
     c.set_defaults(fn=cmd_join)
 
     c = sub.add_parser("retire", help="remove a seat from the board (inverse of join)")
@@ -15478,6 +15631,11 @@ def main():
     c.add_argument("--exec", default="", help="override the worker command entirely")
     c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
     c.add_argument("--list", action="store_true")
+    c.add_argument("--alias", default="",
+                   help="stable role alias (ceo or cos) pointing at this unique runtime identity")
+    c.add_argument("--transfer", action="store_true",
+                   help="audited handover when this name's provider/session/runner identity changes; "
+                        "strips auth, endpoint, session, ticket pointer, and limits; keeps message history")
     c.set_defaults(fn=cmd_spawn)
 
     c = sub.add_parser("ui", help="local command board: http://localhost:8765 (auto-refresh + composer)")

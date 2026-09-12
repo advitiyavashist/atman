@@ -120,7 +120,7 @@ def test_byoa_spawn_tool_flag_reaped_without_pid_file(board, tmp_path):
     env = dict(PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""))
     run(board, "join", "qwen", "--roles", "docs", "--harness",
         "custom:%s {prompt_file}" % script, env=env)
-    pid = _spawn_qwen_watch(board, tmp_path, "--tool", "codex", "--every", "3600",
+    pid = _spawn_qwen_watch(board, tmp_path, "--tool", "codex", "--transfer", "--every", "3600",
                             "--persist", env=env)
     _assert_reaper_clears_qwen(board, tmp_path, pid)
 
