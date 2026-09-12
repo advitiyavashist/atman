@@ -14,7 +14,7 @@ Copy lock (T-787):
   sentence each, immediately after philosophy — not buried.
 - **Contact us:** GitHub issues (`CONTRIBUTING.md`). Do not invent an email.
 
-Spike **Clone → any first seat → `tickets ui`**. Fewest turns and measured cost
+Spike **Clone → `tickets connect` as `atman-<seat>` → `tickets ui`**. Fewest turns and measured cost
 stay `—` until a done ticket reports. The dashboard image is a checked-in product
 capture; the page does not point visitors at a machine-local demo.
 

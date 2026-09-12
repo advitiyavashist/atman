@@ -79,14 +79,15 @@ def test_provider_order_is_claude_codex_cursor_grok_custom():
 def test_quickstart_tabs_cover_ordered_providers():
     start = _start_block()
     assert "git clone https://github.com/advitiyavashist/atman.git" in start
-    assert "tickets quickstart --agent alice --roles backend" in start
-    assert "tickets hooks claude --agent alice" in start
-    assert "tickets hooks codex --agent alice" in start
-    assert "tickets hooks cursor --agent alice" in start
-    assert "tickets hooks remote --agent grok-worker --prompt-kind cos" in start
-    assert "tickets join qwen" in start
-    assert "--harness custom" in start
+    assert "tickets connect" in start
+    assert "atman-ceo" in start
+    assert "connect as Atman, not Claude" in start
+    assert "connect as Atman, not Codex" in start
+    assert "connect as Atman, not Cursor" in start
+    assert "connect as Atman, not Grok" in start
+    assert "custom is a catalog row" in start
     assert "tickets ui" in start
+    assert "alice" not in start
     assert 'id="seat-claude" checked' in start
 
 

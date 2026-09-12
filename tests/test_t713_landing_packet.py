@@ -69,12 +69,12 @@ def test_start_is_clone_any_seat_then_tickets_ui():
     term = _start_terminal()
     assert "git clone https://github.com/advitiyavashist/atman.git" in start
     assert "any first seat" in start.lower() or "any first seat" in LANDING.lower()
-    assert "tickets quickstart --agent alice --roles backend" in term
-    assert "tickets hooks claude --agent alice" in term
+    assert "tickets connect" in term
+    assert "atman-ceo" in term
     assert "tickets ui" in term
-    assert term.index("tickets quickstart") < term.index("tickets hooks claude")
-    assert term.index("tickets hooks claude") < term.index("tickets ui")
+    assert term.index("tickets connect") < term.index("tickets ui")
     assert "tickets next" not in term
+    assert "alice" not in term
     for name in SEATS:
         assert name in start or name in LANDING
 
