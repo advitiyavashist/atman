@@ -255,7 +255,7 @@ def test_error_fixtures_cover_every_error_code():
 
 def test_error_status_matches_the_code_family():
     families = {
-        400: {"malformed_request"},
+        400: {"malformed_request", "unsupported_transfer_encoding"},
         401: {"unauthenticated"},
         403: {"forbidden_scope", "agent_token_insufficient", "not_channel_member",
               "membership_revoked", "sender_identity_rejected"},
