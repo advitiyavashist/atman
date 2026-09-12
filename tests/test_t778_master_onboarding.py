@@ -129,7 +129,12 @@ def test_harness_available_prints_every_catalog_row_including_missing(tmp_path):
     assert r.stdout.count("\n         ") >= 12  # policy + if-yes per row
     assert "do not spawn" in r.stdout.lower()
     assert "Which of these do you want to use?" in r.stdout
-    assert "list only" in r.stdout
+    assert "list only" not in r.stdout
+    assert "gemini" in r.stdout
+    lines = r.stdout.splitlines()
+    gemini_idx = next(i for i, ln in enumerate(lines) if ln.startswith("gemini"))
+    policy = lines[gemini_idx + 1]
+    assert not policy.strip().startswith("FAIL"), policy
     # Documentation may mention spawn; the command itself must not create seats.
     agents = list((repo / ".tickets" / "agents").glob("*")) if (repo / ".tickets" / "agents").exists() else []
     assert agents == []

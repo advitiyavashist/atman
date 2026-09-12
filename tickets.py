@@ -2043,6 +2043,20 @@ def cmd_sound(a, board):
         print("  proof: %s" % t.get("proof"))
 
 
+def _dispatch_skip_product_spawn(harness):
+    """Why dispatch must not start a product job, or empty to allow spawn.
+
+    Gemini is a first-class harness (records harness=gemini) but persist/hooks
+    is the wake — never start a live Gemini product job from dispatch.
+    TICKETS_DISPATCH_NO_SPAWN=1 skips spawn for every harness.
+    """
+    if os.environ.get("TICKETS_DISPATCH_NO_SPAWN") == "1":
+        return "TICKETS_DISPATCH_NO_SPAWN=1"
+    if (harness or "").strip().lower() == "gemini":
+        return "gemini: persist/hooks wake; no product job"
+    return ""
+
+
 def cmd_dispatch(a, board):
     """Fatih /plan-dispatch: CoS staffs one ready ticket to one seat. Does not claim."""
     S = _sounding()
@@ -2088,8 +2102,9 @@ def cmd_dispatch(a, board):
     save(board, t)
     print("%s reserved for %s harness=%s (worker claims via tickets next / watch)"
           % (t["id"], seat, harness))
-    if os.environ.get("TICKETS_DISPATCH_NO_SPAWN") == "1":
-        print("spawn skipped (TICKETS_DISPATCH_NO_SPAWN=1)")
+    skip_spawn = _dispatch_skip_product_spawn(harness)
+    if skip_spawn:
+        print("spawn skipped (%s)" % skip_spawn)
         return
     if _live_watch_pids(seat, board=board):
         print("watcher already running for %s" % seat)
@@ -5163,7 +5178,7 @@ It auto-checks usage; missing remaining/reset is a FAIL row.
 """
 
 # Probe-only catalog for a new board. Codex stays listed with zero usage.
-# Gemini is listed only — never spawn. No new Claude fable.
+# Gemini dispatches like the others; persist/hooks is the wake. No new Claude fable.
 # usage_args: non-spawning status/about only. Never -p/--print/exec/prompt.
 INTEGRATION_CATALOG = (
     {"id": "cursor", "name": "Cursor", "binaries": ("agent", "cursor-agent"),
@@ -5187,13 +5202,14 @@ INTEGRATION_CATALOG = (
      "policy": "list; spawn only if the operator confirms the harness exists",
      "usage_args": ("auth", "status")},
     {"id": "gemini", "name": "Gemini CLI", "binaries": ("gemini",),
-     "if_yes": "(do not spawn)",
-     "policy": "list only; do not spawn",
+     "if_yes": "tickets dispatch T-id --to <seat> --harness gemini  # persist/hooks wake",
+     "policy": "ok to dispatch; persist/hooks wake; do not spawn a Gemini product job",
      "usage_args": ("--version",)},
     {"id": "grok", "name": "Grok (Cursor persist / grokbots)",
      "binaries": ("agent", "cursor-agent"),
      "if_yes": "tickets spawn <seat> --harness grok --persist",
-     "policy": "Cursor Grok seats and grok-worker; same persist wake as cursor"},
+     "policy": "Cursor Grok seats and grok-worker; same persist wake as cursor",
+     "usage_args": ("about", "--format", "json")},
 )
 
 
@@ -5385,7 +5401,8 @@ Missing remaining or reset is a FAIL row. If `~/.local/bin/codex` is stale,
 it retargets to the newest `openai.chatgpt-*` extension binary.
 
 Ask: **Which of these do you want to use?** Do not spawn until they answer.
-Codex stays in the catalog even with **no usage**. Do not spawn Gemini.
+Codex stays in the catalog even with **no usage**. Gemini dispatch records
+harness=gemini; persist/hooks is the wake (no Gemini product job).
 No new Claude fable.
 
 ### Step 3 — Announce that name on the board
@@ -12208,7 +12225,7 @@ def probe_integration_catalog(home=None, search_path=None):
             "path": found[0][1] if found else "",
             "if_yes": spec["if_yes"],
             "policy": spec["policy"],
-            "usage_status": "FAIL" if spec["id"] == "gemini" or "list only" in spec["policy"].lower() else "",
+            "usage_status": "",
         })
     return rows, note
 
@@ -12242,7 +12259,8 @@ def cmd_harness_usage(a, board):
             print("         FAIL %s" % r["policy"])
     print("")
     print("Missing remaining/reset is a FAIL row. Codex stays cataloged with zero usage.")
-    print("Do not spawn Gemini. No new Claude fable. Cursor is the only spawn this desk uses.")
+    print("Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job).")
+    print("No new Claude fable. Cursor is the only spawn this desk uses.")
 
 
 def cmd_harness_available(a, board):
@@ -12264,7 +12282,7 @@ def cmd_harness_available(a, board):
         print("Then ask the board/team name, then:")
         print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
         print("Then ask for the objective and tasks. Do not spawn until they answer.")
-    print("Codex stays in the catalog with zero usage. Do not spawn Gemini. No new Claude fable.")
+    print("Codex stays in the catalog with zero usage. Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job). No new Claude fable.")
 
 
 def cmd_harness(a, board):

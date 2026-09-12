@@ -8,7 +8,8 @@ name on the board → ask for tasks and the objective**. Probe every catalog
 row with `tickets harness available` (missing is a row). It auto-checks
 usage; missing remaining or reset is a FAIL row. Ask which
 integrations to use; do not spawn until they answer. Codex stays in the
-catalog even with zero usage. Do not spawn Gemini. No new Claude fable.
+catalog even with zero usage. Gemini dispatch records harness=gemini;
+persist/hooks is the wake (do not spawn a Gemini product job). No new Claude fable.
 
 After they pick a name and integrations:
 
