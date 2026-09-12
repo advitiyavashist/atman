@@ -31,6 +31,7 @@ import importlib.util
 import json
 import os
 import sys
+import uuid
 from datetime import datetime, timezone
 
 try:
@@ -526,11 +527,7 @@ def load_workforce(board):
 
 
 def save_workforce(board, w):
-    os.makedirs(board, exist_ok=True)
-    tmp = workforce_path(board) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(w, f, indent=2)
-    os.replace(tmp, workforce_path(board))
+    _atomic_json_dump(workforce_path(board), w)
 
 
 def can_do(board, owner, ticket):
@@ -750,6 +747,43 @@ def agents_dir(board):
 
 
 from ticket_board.agent_checkin import checkin  # canonical; no root tickets.py
+
+
+def _atomic_json_dump(path, obj):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = "%s.tmp.%d.%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+class _IdentityLock:
+    def __init__(self, board):
+        os.makedirs(agents_dir(board), exist_ok=True)
+        self.path = os.path.join(agents_dir(board), ".identity.json.lock")
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
 
 
 def _clear_agent_ticket(board, agent, tid):
@@ -3849,12 +3883,7 @@ def load_aliases(board):
 
 
 def save_aliases(board, aliases):
-    os.makedirs(board, exist_ok=True)
-    path = aliases_path(board)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(aliases, f, indent=2)
-    os.replace(tmp, path)
+    _atomic_json_dump(aliases_path(board), aliases)
 
 
 def _unbind_aliases_for(board, owner):
@@ -3896,17 +3925,9 @@ def _strip_identity_bound_state(board, owner):
                     "auth_resume_at", "harness_check"):
             rec.pop(key, None)
         rec["ticket"] = ""
-        os.makedirs(agents_dir(board), exist_ok=True)
         path = os.path.join(agents_dir(board), owner + ".json")
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(rec, f, indent=2)
-        os.replace(tmp, path)
-    try:
-        from session_adapters import remove_endpoint
-        remove_endpoint(board, owner)
-    except Exception:
-        pass
+        _atomic_json_dump(path, rec)
+    _session_adapters().remove_endpoint(board, owner)
 
 
 def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias=""):
@@ -3921,17 +3942,26 @@ def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias="
     if alias_clash and not transfer:
         sys.exit("refusing: alias %s is bound to %s. Pass --transfer to rebind, "
                  "or join as that unique id." % (alias, alias_holder))
-    if prev and transfer:
-        if _agent_holds_ticket(board, owner):
+    if transfer and (prev or alias_clash):
+        if prev and _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
         incoming = _identity_harness_key(incoming_harness)
-        post_message(
-            board, owner,
-            "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
-            % (owner, prev, incoming))
-        print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
-              % (owner, prev, incoming))
+        actor = whoami()
+        if prev:
+            post_message(
+                board, owner,
+                "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
+                % (owner, prev, incoming))
+            print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
+                  % (owner, prev, incoming))
+        if alias_clash:
+            post_message(
+                board, actor,
+                "transferred alias %s %s -> %s (actor %s; --transfer; stale role metadata cleared)"
+                % (alias, alias_holder, owner, actor))
+            print("transferred alias %s %s -> %s (--transfer; old holder cleared)"
+                  % (alias, alias_holder, owner))
 
 
 def cmd_join(a, board):
@@ -3939,6 +3969,11 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    with _IdentityLock(board):
+        _cmd_join_locked(a, board, owner)
+
+
+def _cmd_join_locked(a, board, owner):
     incoming = (getattr(a, "harness", "") or a.tool or "").strip()
     _guard_seat_identity(
         board, owner, incoming,
@@ -3959,11 +3994,7 @@ def cmd_join(a, board):
         roles[owner] = [r.strip() for r in a.roles.split(",") if r.strip()]
     elif owner not in roles and owner not in DEFAULT_ROLES:
         roles[owner] = []  # explicit: must pass --role until master assigns
-    os.makedirs(board, exist_ok=True)
-    tmp = roles_path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(roles, f, indent=2)
-    os.replace(tmp, roles_path)
+    _atomic_json_dump(roles_path, roles)
     wf = load_workforce(board)
     entry = wf.get(owner, {})
     harness = _identity_harness_key(getattr(a, "harness", "") or a.tool)
@@ -3986,6 +4017,9 @@ def cmd_join(a, board):
     entry["agent_id"] = owner
     alias = (getattr(a, "alias", "") or "").strip().lower()
     if alias:
+        for name, other in wf.items():
+            if name != owner and (other or {}).get("role_alias") == alias:
+                other.pop("role_alias", None)
         aliases = load_aliases(board)
         aliases[alias] = owner
         save_aliases(board, aliases)
@@ -3996,11 +4030,8 @@ def cmd_join(a, board):
     if first_join:
         jrec = _agent_rec(board, owner)
         jrec.setdefault("joined_at", now())
-        os.makedirs(agents_dir(board), exist_ok=True)
         jpath = os.path.join(agents_dir(board), owner + ".json")
-        with open(jpath + ".tmp", "w") as f:
-            json.dump(jrec, f, indent=2)
-        os.replace(jpath + ".tmp", jpath)
+        _atomic_json_dump(jpath, jrec)
     post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
         (" via %s" % a.tool) if a.tool else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
         rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
