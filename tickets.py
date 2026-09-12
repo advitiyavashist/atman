@@ -64,6 +64,23 @@ DEFAULT_ROLES = {
     "grok": [],
 }
 
+# T-809: one implementation, two PATH names. atm is the public CLI; tickets
+# is the compatibility alias. Behavior, board, and exit codes must not fork.
+PRIMARY_CLI_NAME = "atm"
+COMPAT_CLI_NAME = "tickets"
+
+
+def cli_prog(argv=None):
+    """argparse/help/error name from how this process was invoked."""
+    raw = (argv if argv is not None else sys.argv) or [""]
+    base = os.path.basename(str(raw[0]).replace("\\", "/"))
+    stem = os.path.splitext(base)[0].lower()
+    if stem == COMPAT_CLI_NAME:
+        return COMPAT_CLI_NAME
+    if stem == PRIMARY_CLI_NAME:
+        return PRIMARY_CLI_NAME
+    return PRIMARY_CLI_NAME
+
 
 # --------------------------------------------------------------------------
 # board location + io
@@ -8500,7 +8517,7 @@ def cmd_retire(a, board):
     """Remove a seat from the board (inverse of join). Refused while it holds a ticket."""
     owner = (a.name or whoami()).strip()
     if not owner:
-        sys.exit("usage: tickets retire <name>")
+        sys.exit("usage: %s retire <name>" % cli_prog())
     if owner.startswith("agent-"):
         sys.exit("give a real agent name")
     agent_path = os.path.join(agents_dir(board), owner + ".json")
@@ -9205,7 +9222,7 @@ def _watch_note_limit_from_log(board, owner, log_slice):
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
-TICKET_AGENT is already set in your environment; run `tickets ...` commands plainly (no env prefix).
+TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
 Rules: one ticket at a time; own git worktree, never main; `tickets sync` before `tickets review`;
 `tickets update <id> "..."` every 45 minutes; finish with `tickets review <id> --notes "paths, tests, decisions"`;
 never edit .tickets/ by hand; never run `tickets clear`. Board-only comms: `tickets msg`.
@@ -9223,7 +9240,7 @@ Do now, in order:
 {extra}"""
 
 MASTER_PROMPT = """You are {agent}, the MASTER of the shared ticket board at {board} (repo {root}).
-TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
+TICKET_AGENT is set; run `atm ...` plainly (`tickets` is the same CLI). You do not take feature tickets.
 This run: pick ONE concrete outcome (one unblock, one merge batch, or one routing act) and stop.
 Ordinary messages and ACKs are notification-only and must not extend the run.
 If there is no standing objective with a measurable --exit criterion, ask for one
@@ -15253,8 +15270,10 @@ PROTOCOL = """## Shared ticket board
 
 Work here is coordinated through a ticket board that Claude Code, Codex and
 Cursor all share. It lives in `.tickets/` and is driven only through the
-`tickets` CLI -- never edit files in `.tickets/` by hand, or atomic claiming
-breaks and two agents will do the same work.
+Atman CLI -- never edit files in `.tickets/` by hand, or atomic claiming
+breaks and two agents will do the same work. The primary public name is `atm`;
+`tickets` is a compatibility alias for the same implementation, arguments,
+exit codes, and board.
 
 Run `tickets board` for the current state, or `tickets graph` to see the whole
 dependency tree with each node's status and owner.
@@ -15475,14 +15494,20 @@ def cmd_self(a, board):
             probe = sa.probe_provider(sa.provider_for_harness(harness))
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
                 seat, probe.get("reason", "ok") if not probe.get("ok") else "transport available"))
-    on_path = shutil.which("tickets")
-    if on_path:
-        resolved = os.path.realpath(on_path)
-        print("PATH:   %s" % on_path)
-        if resolved != on_path:
+    print("cli:    primary=%s alias=%s (one implementation)" % (PRIMARY_CLI_NAME, COMPAT_CLI_NAME))
+    on_path = None
+    for path_name in (PRIMARY_CLI_NAME, COMPAT_CLI_NAME):
+        found = shutil.which(path_name)
+        if not found:
+            continue
+        resolved = os.path.realpath(found)
+        print("PATH:   %s (%s)" % (found, path_name))
+        if resolved != found:
             print("        -> %s" % resolved)
         if resolved != script:
             print("        running %s" % script)
+        if path_name == COMPAT_CLI_NAME:
+            on_path = found
         try:
             with open(resolved) as source:
                 launcher = source.read(512)
@@ -15497,7 +15522,7 @@ def cmd_self(a, board):
 
 def main():
     status = release_status()
-    p = _LoudArgumentParser(prog="tickets", description=__doc__.split("\n")[0],
+    p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
                            epilog=status)
     p.add_argument("--version", action="version", version=status)
     sub = p.add_subparsers(dest="cmd")

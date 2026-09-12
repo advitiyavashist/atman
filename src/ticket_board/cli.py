@@ -60,6 +60,23 @@ DEFAULT_ROLES = {
     "grok": [],
 }
 
+# T-809: one implementation, two PATH names. atm is the public CLI; tickets
+# is the compatibility alias. Behavior, board, and exit codes must not fork.
+PRIMARY_CLI_NAME = "atm"
+COMPAT_CLI_NAME = "tickets"
+
+
+def cli_prog(argv=None):
+    """argparse/help/error name from how this process was invoked."""
+    raw = (argv if argv is not None else sys.argv) or [""]
+    base = os.path.basename(str(raw[0]).replace("\\", "/"))
+    stem = os.path.splitext(base)[0].lower()
+    if stem == COMPAT_CLI_NAME:
+        return COMPAT_CLI_NAME
+    if stem == PRIMARY_CLI_NAME:
+        return PRIMARY_CLI_NAME
+    return PRIMARY_CLI_NAME
+
 
 # --------------------------------------------------------------------------
 # board location + io
@@ -4058,7 +4075,7 @@ def cmd_retire(a, board):
     """Remove a seat from the board (inverse of join). Refused while it holds a ticket."""
     owner = (a.name or whoami()).strip()
     if not owner:
-        sys.exit("usage: tickets retire <name>")
+        sys.exit("usage: %s retire <name>" % cli_prog())
     if owner.startswith("agent-"):
         sys.exit("give a real agent name")
     agent_path = os.path.join(agents_dir(board), owner + ".json")
@@ -4224,8 +4241,10 @@ PROTOCOL = """## Shared ticket board
 
 Work here is coordinated through a ticket board that Claude Code, Codex and
 Cursor all share. It lives in `.tickets/` and is driven only through the
-`tickets` CLI -- never edit files in `.tickets/` by hand, or atomic claiming
-breaks and two agents will do the same work.
+Atman CLI -- never edit files in `.tickets/` by hand, or atomic claiming
+breaks and two agents will do the same work. The primary public name is `atm`;
+`tickets` is a compatibility alias for the same implementation, arguments,
+exit codes, and board.
 
 Run `tickets board` for the current state, or `tickets graph` to see the whole
 dependency tree with each node's status and owner.
@@ -4459,7 +4478,7 @@ watch_idle_reexec._warned = set()
 
 
 def main():
-    p = argparse.ArgumentParser(prog="tickets", description=__doc__.split("\n")[0])
+    p = argparse.ArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
