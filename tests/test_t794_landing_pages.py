@@ -81,12 +81,24 @@ def test_engineering_roadmap_is_first_class():
     assert ">Later<" in block or ">Later</span>" in block
     assert "No invented ship dates" in block
     assert "claimable only after cause, change, and proof exist" in block
+    assert "median turns and measured cost only from done tickets" in block
+    assert "tickets hooks" in block
+    assert "atman-&lt;seat&gt;" in block
+    assert "not a pasted model setup" in block
+    assert "tickets next" in block
+    assert "--after" in block
+    assert "HOLD" in block
+    assert "tickets review" in block
+    assert "SHA on main" in block
+    assert "Load guidance only when the ticket needs it (handoff)" in block
+    assert "not always-on AGENTS.md" in block
     lowered = block.lower()
-    for banned in ("next week", "q1", "q2", "q3", "q4", "ship by"):
+    for banned in ("next week", "q1", "q2", "q3", "q4", "ship by", "astra", "gpt-6", "zodchiii", "openai"):
         assert banned not in lowered, banned
     assert "2026-" not in block
     assert "DAG" not in block
     assert "task graph" not in lowered
+    assert "multi-agent framework" not in lowered
 
 
 def test_pages_workflow_publishes_landing_directory():
