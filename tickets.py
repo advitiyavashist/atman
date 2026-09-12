@@ -629,12 +629,20 @@ def load_workforce(board):
         return {}
 
 
-def save_workforce(board, w):
-    os.makedirs(board, exist_ok=True)
-    tmp = workforce_path(board) + ".tmp"
+def _atomic_json_dump(path, obj):
+    """Unique temp + os.replace so concurrent join/transfer cannot steal a sibling .tmp."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = "%s.tmp.%d.%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
     with open(tmp, "w") as f:
-        json.dump(w, f, indent=2)
-    os.replace(tmp, workforce_path(board))
+        json.dump(obj, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def save_workforce(board, w):
+    _atomic_json_dump(workforce_path(board), w)
 
 
 def can_do(board, owner, ticket):
@@ -8200,12 +8208,7 @@ def load_aliases(board):
 
 
 def save_aliases(board, aliases):
-    os.makedirs(board, exist_ok=True)
-    path = aliases_path(board)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(aliases, f, indent=2)
-    os.replace(tmp, path)
+    _atomic_json_dump(aliases_path(board), aliases)
 
 
 def _unbind_aliases_for(board, owner):
@@ -8246,6 +8249,21 @@ def _identity_reuse_error(owner, prev, incoming):
     )
 
 
+def _fence_remote_adapter(board, owner):
+    """Drop a live remote lease immediately so transfer cannot keep the old bridge online."""
+    if not load_remote_state(board, owner):
+        return
+
+    def mutate(state):
+        state["fence"] = int(state.get("fence") or 0) + 1
+        state["lease"] = {}
+        state.pop("claim", None)
+        state["revoked_at"] = now()
+        return state.get("fence")
+
+    _safe(lambda: _remote_update(board, owner, mutate), None)
+
+
 def _strip_identity_bound_state(board, owner):
     def clear(rec):
         for key in IDENTITY_BOUND_AGENT_KEYS:
@@ -8254,6 +8272,7 @@ def _strip_identity_bound_state(board, owner):
     if _agent_rec(board, owner):
         _agent_update(board, owner, clear)
     _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
+    _fence_remote_adapter(board, owner)
 
 
 def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias=""):
@@ -8269,17 +8288,26 @@ def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias="
     if alias_clash and not transfer:
         sys.exit("refusing: alias %s is bound to %s. Pass --transfer to rebind, "
                  "or join as that unique id." % (alias, alias_holder))
-    if prev and transfer:
-        if _agent_holds_ticket(board, owner):
+    if transfer and (prev or alias_clash):
+        if prev and _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
         incoming = _identity_harness_key(incoming_harness)
-        post_message(
-            board, owner,
-            "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
-            % (owner, prev, incoming))
-        print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
-              % (owner, prev, incoming))
+        actor = whoami()
+        if prev:
+            post_message(
+                board, owner,
+                "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
+                % (owner, prev, incoming))
+            print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
+                  % (owner, prev, incoming))
+        if alias_clash:
+            post_message(
+                board, actor,
+                "transferred alias %s %s -> %s (actor %s; --transfer; stale role metadata cleared)"
+                % (alias, alias_holder, owner, actor))
+            print("transferred alias %s %s -> %s (--transfer; old holder cleared)"
+                  % (alias, alias_holder, owner))
     return prev
 
 
@@ -8318,6 +8346,11 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
+    with _AgentLock(board, ".identity"):
+        _cmd_join_locked(a, board, owner)
+
+
+def _cmd_join_locked(a, board, owner):
     knowledge_dir = (getattr(a, "knowledge_dir", "") or "").strip()
     if knowledge_dir:
         knowledge_dir = os.path.abspath(os.path.expanduser(knowledge_dir))
@@ -8351,10 +8384,7 @@ def cmd_join(a, board):
     elif owner not in roles and owner not in DEFAULT_ROLES:
         roles[owner] = []  # explicit: must pass --role until master assigns
     os.makedirs(board, exist_ok=True)
-    tmp = roles_path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(roles, f, indent=2)
-    os.replace(tmp, roles_path)
+    _atomic_json_dump(roles_path, roles)
     wf = load_workforce(board)
     entry = wf.get(owner, {})
     # BYOA: --harness is the current spelling, --tool the original one; they are
@@ -8408,6 +8438,9 @@ def cmd_join(a, board):
         entry["provider"] = harness
     alias = (getattr(a, "alias", "") or "").strip().lower()
     if alias:
+        for name, other in wf.items():
+            if name != owner and (other or {}).get("role_alias") == alias:
+                other.pop("role_alias", None)
         _bind_role_alias(board, alias, owner)
         entry["role_alias"] = alias
     if knowledge_dir:
@@ -11816,13 +11849,24 @@ def cmd_spawn(a, board):
             sys.exit(_identity_reuse_error(owner, conflict, incoming_harness))
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
-        _strip_identity_bound_state(board, owner)
-    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
-    git_root, origin_err = _spawn_git_root(board, owner, wt)
-    if origin_err:
-        sys.exit(origin_err)
-    resolved_harness, _ = harness_of(board, owner, requested_harness,
-                                     getattr(a, "cmd_template", ""))
+        wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
+        git_root, origin_err = _spawn_git_root(board, owner, wt)
+        if origin_err:
+            sys.exit(origin_err)
+        resolved_harness, _ = harness_of(board, owner, requested_harness,
+                                         getattr(a, "cmd_template", ""))
+        if _auth_gates_spawn(incoming_harness or resolved_harness) and not a.exec:
+            probe = harness_auth_probe(board, owner, requested_harness)
+            if probe.get("state") != "ready":
+                _print_auth_result(owner, probe)
+                sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
+    else:
+        wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
+        git_root, origin_err = _spawn_git_root(board, owner, wt)
+        if origin_err:
+            sys.exit(origin_err)
+        resolved_harness, _ = harness_of(board, owner, requested_harness,
+                                         getattr(a, "cmd_template", ""))
     sa = _session_adapters()
     if sa.has_live_native_session(board, owner):
         ep, _ = sa.live_endpoint(board, owner)
@@ -11834,7 +11878,7 @@ def cmd_spawn(a, board):
     # a sandboxed coordinator cannot clobber it. Built-in Claude/Codex/Cursor
     # must be ready before a watcher starts. Keep this before cmd_join so a
     # failed relaunch cannot alter roles/harness/worktree. --exec skips it.
-    if _auth_gates_spawn(resolved_harness) and not a.exec:
+    if (not conflict) and _auth_gates_spawn(resolved_harness) and not a.exec:
         auth = _refresh_auth_check(board, owner, requested_harness)
         if auth.get("state") != "ready":
             _print_auth_result(owner, auth)
