@@ -1,5 +1,6 @@
 #!/bin/sh
-# Install `tickets` on PATH and (optionally) the Claude Code SessionStart hook.
+# Install `atm` on PATH (primary) and `tickets` as the same-file compatibility alias.
+# Optionally install the Claude Code SessionStart hook.
 set -e
 # Production delivery uses immutable snapshots; the legacy mode below is for development.
 if [ "${1:-}" = "--live-release" ]; then
@@ -11,8 +12,10 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 BIN="${HOME}/.local/bin"
 mkdir -p "$BIN"
 chmod +x "$HERE/tickets.py"
+ln -sf "$HERE/tickets.py" "$BIN/atm"
 ln -sf "$HERE/tickets.py" "$BIN/tickets"
-echo "linked $BIN/tickets -> $HERE/tickets.py"
+echo "linked $BIN/atm -> $HERE/tickets.py (primary)"
+echo "linked $BIN/tickets -> $HERE/tickets.py (compatibility alias)"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "add $BIN to your PATH";; esac
 
 if [ "$1" = "--claude-hook" ]; then
@@ -22,4 +25,4 @@ if [ "$1" = "--claude-hook" ]; then
   fi
   "$HERE/tickets.py" hooks claude --agent "$TICKET_AGENT"
 fi
-echo "now: cd <your project> && tickets init"
+echo "now: cd <your project> && atm --help   # tickets is the same command"

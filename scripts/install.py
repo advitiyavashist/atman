@@ -30,16 +30,18 @@ shutil.copy2(source / "board_backup.py", dest_dir / "board_backup.py")
 mode = target.stat().st_mode if target.exists() else 0o755
 os.chmod(target, mode | 0o111)
 
-# Ensure ~/.local/bin/tickets points here if missing
-local_bin = Path.home() / ".local" / "bin" / "tickets"
-if not local_bin.exists():
-    local_bin.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        local_bin.symlink_to(target)
-    except OSError:
-        pass
+# Ensure ~/.local/bin/atm (primary) and tickets (alias) point here if missing
+local_dir = Path.home() / ".local" / "bin"
+local_dir.mkdir(parents=True, exist_ok=True)
+for name in ("atm", "tickets"):
+    local_bin = local_dir / name
+    if not local_bin.exists():
+        try:
+            local_bin.symlink_to(target)
+        except OSError:
+            pass
 
-print("Installed tickets CLI to", target)
+print("Installed atm CLI (tickets alias) to", target)
 print("Backup:", backup if backup.exists() else "(none)")
 print("Safe clear: fixture boards only (.fixture-board + --yes)")
 print("Also: tickets board-backup / board-restore")
