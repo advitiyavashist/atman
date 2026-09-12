@@ -1594,20 +1594,27 @@ def _bind_agent_ticket(board, agent, tid):
         checkin(board, agent, tid)
 
 
-def checkin(board, owner, ticket=None, note=""):
-    """Record where this agent is working: cwd, worktree root, branch, sha."""
-    _state, _mismatch = _git_state_raw()
+def checkin(board, owner, ticket=None, note="", cwd=None):
+    """Record where this agent is working: cwd, worktree root, branch, sha.
+
+    `cwd` is the tree to stamp. Spawn must pass the target --worktree here:
+    the launcher process cwd is a different checkout (T-839 live restart).
+    """
+    here = os.path.abspath(cwd) if cwd else os.getcwd()
+    _state, _mismatch = _git_state_raw(here)
     g = _state or {}
     # git_state and _current_ticket shell out; keep them off the critical section.
+    top = g.get("top", "")
     fields = {
         "owner": owner,
-        "cwd": os.getcwd(),
-        "worktree": g.get("top", ""),
+        "cwd": here,
+        "worktree": top or (here if cwd else ""),
         "branch": g.get("branch", ""),
         "sha": g.get("sha", ""),
         "dirty": g.get("dirty", 0),
-        # T-243: cwd above is recorded straight from os.getcwd() with no git
-        # resolution in its path, so it stays trustworthy even here.
+        # T-243: cwd above is recorded from the stamped tree (process cwd
+        # unless a caller such as spawn passes the target worktree) with no
+        # git resolution in its path, so it stays trustworthy even here.
         "git_mismatch": bool(_mismatch),
         "ticket": ticket if ticket is not None else _current_ticket(board, owner),
         "note": note,
@@ -8629,6 +8636,7 @@ def _join_namespace(a, owner):
         knowledge_dir=getattr(a, "knowledge_dir", "") or "",
         transfer=bool(getattr(a, "transfer", False)),
         alias=getattr(a, "alias", "") or "",
+        worktree=getattr(a, "worktree", "") or "",
     )
 
 
@@ -8758,7 +8766,9 @@ def cmd_join(a, board):
                 mode, reg.get("provider"), owner, extra))
         else:
             print("persistent: %s" % reg.get("reason", "registration failed"))
-    rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
+    join_cwd = os.path.abspath(getattr(a, "worktree", "") or "") or None
+    rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""),
+                  cwd=join_cwd)
     if harness:
         _safe(lambda: _clear_adapter_failure_on_provider_change(
             board, owner, harness, prev_harness), None)
@@ -12210,17 +12220,6 @@ def cmd_spawn(a, board):
         if auth.get("state") != "ready":
             _print_auth_result(owner, auth)
             sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
-    ns = _join_namespace(a, owner)
-    _silent(lambda: cmd_join(ns, board))
-    # --tool/--harness no longer defaults to "claude" in the parser: an absent
-    # flag must mean "use what `tickets join` registered for this agent",
-    # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
-    harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
-                                       getattr(a, "cmd_template", ""))
-    if harness == "remote" and not (cmd_template or a.exec):
-        sys.exit("remote adapter is offline; no local executable was selected. "
-                 "Run `tickets hooks remote --agent %s`, connect its long-poll/callback bridge, "
-                 "or pass --cmd for a local adapter. Pending wakes remain queued." % owner)
     if not os.path.isdir(wt):
         base = a.base or _trunk()
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
@@ -12231,6 +12230,19 @@ def cmd_spawn(a, board):
         if r.returncode != 0:
             sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
         print("worktree %s (branch %s)" % (wt, owner))
+    ns = _join_namespace(a, owner)
+    ns.worktree = wt
+    _silent(lambda: cmd_join(ns, board))
+    checkin(board, owner, None, "spawned", cwd=wt)
+    # --tool/--harness no longer defaults to "claude" in the parser: an absent
+    # flag must mean "use what `tickets join` registered for this agent",
+    # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
+    harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
+                                       getattr(a, "cmd_template", ""))
+    if harness == "remote" and not (cmd_template or a.exec):
+        sys.exit("remote adapter is offline; no local executable was selected. "
+                 "Run `tickets hooks remote --agent %s`, connect its long-poll/callback bridge, "
+                 "or pass --cmd for a local adapter. Pending wakes remain queued." % owner)
     if a.brief:
         bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
                                 role="", by=whoami())

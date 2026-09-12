@@ -14,7 +14,7 @@ ROOT = Path(HERE).parent
 TICKETS = str(ROOT / "tickets.py")
 
 
-def _run(board, args, env=None, session=None, agent=None, seat=None, entry="root"):
+def _run(board, args, env=None, session=None, agent=None, seat=None, entry="root", cwd=None):
     e = dict(os.environ)
     for var in (
         "TICKET_SESSION_ID",
@@ -42,7 +42,7 @@ def _run(board, args, env=None, session=None, agent=None, seat=None, entry="root
         cmd = [sys.executable, "-m", "ticket_board", *args]
     else:
         cmd = [sys.executable, TICKETS, *args]
-    return subprocess.run(cmd, cwd=board, env=e, capture_output=True, text=True)
+    return subprocess.run(cmd, cwd=cwd or board, env=e, capture_output=True, text=True)
 
 
 def _load_tickets():
@@ -136,3 +136,43 @@ def test_spawned_cursor_hooks_replace_canonical_role_hook(board, tmp_path):
     roles_after = json.loads((Path(tickets_dir) / "roles.json").read_text())
     assert roles_after.get("cursor") == ["verification"]
     assert "codex-to-cursor-a" not in json.dumps(roles_after.get("cursor"))
+
+
+def test_checkin_stamps_explicit_worktree_not_process_cwd(board, tmp_path, monkeypatch):
+    mod = _load_tickets()
+    launcher = tmp_path / "atman-runtime-current"
+    target = tmp_path / "cursor-cos-runtime-0912"
+    launcher.mkdir()
+    target.mkdir()
+    tickets_dir = os.path.join(board, ".tickets")
+    monkeypatch.chdir(launcher)
+    rec = mod.checkin(tickets_dir, "cursor", None, "spawned", cwd=str(target))
+    assert os.path.realpath(rec["cwd"]) == os.path.realpath(target)
+    assert os.path.realpath(rec["cwd"]) != os.path.realpath(launcher)
+    assert launcher.name not in rec["cwd"]
+
+
+def test_spawn_checkin_uses_worktree_not_launcher_cwd(board, tmp_path):
+    launcher = tmp_path / "atman-runtime-current"
+    target = tmp_path / "cursor-cos-runtime-0912"
+    launcher.mkdir()
+    target.mkdir()
+    _run(board, ["join", "cursor", "--roles", "verification"], session="cos",
+         agent="cursor", cwd=str(launcher))
+    spawned = _run(
+        board,
+        ["spawn", "cursor", "--exec", "true", "--every", "3600", "--max-runs", "1",
+         "--worktree", str(target)],
+        session="cos", agent="cursor", cwd=str(launcher),
+    )
+    try:
+        rec_path = Path(board) / ".tickets" / "agents" / "cursor.json"
+        rec = json.loads(rec_path.read_text())
+        assert spawned.returncode == 0, spawned.stdout + spawned.stderr
+        assert os.path.realpath(rec["cwd"]) == os.path.realpath(target), spawned.stdout + spawned.stderr
+        assert os.path.realpath(rec.get("worktree") or rec["cwd"]) == os.path.realpath(target)
+        assert "atman-runtime-current" not in (rec.get("cwd") or "")
+        assert "atman-runtime-current" not in (rec.get("worktree") or "")
+    finally:
+        _run(board, ["spawn", "cursor", "--stop"], session="cos", agent="cursor",
+             cwd=str(launcher))

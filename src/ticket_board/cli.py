@@ -4111,7 +4111,8 @@ def cmd_join(a, board):
         entry["role_alias"] = alias
     wf[owner] = entry
     save_workforce(board, wf)
-    rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""))
+    rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""),
+                  cwd=os.path.abspath(getattr(a, "worktree", "") or "") or None)
     if first_join:
         jrec = _agent_rec(board, owner)
         jrec.setdefault("joined_at", now())
