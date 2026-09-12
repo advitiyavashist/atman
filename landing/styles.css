@@ -723,6 +723,34 @@ footer > a:last-child:hover { color: var(--fg); }
   line-height: 1;
 }
 
+.horizon {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
+  margin: 2.2rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.horizon li {
+  min-width: 0;
+  padding: 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--card);
+}
+.horizon li:first-child {
+  border-color: rgb(196 180 154 / 38%);
+}
+.horizon span {
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 720;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.horizon h3 { margin: 0.65rem 0 0.45rem; font-size: 1.05rem; }
+.horizon p { margin: 0; color: var(--mute); font-size: 0.92rem; }
+
 .roadmap-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -813,6 +841,7 @@ footer > a:last-child:hover { color: var(--fg); }
   .product-heading > p { max-width: 40rem; }
   .lanes ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .workflow-map { grid-template-columns: 1fr; }
+  .horizon,
   .roadmap-grid { grid-template-columns: 1fr; }
   .ia-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -848,6 +877,7 @@ footer > a:last-child:hover { color: var(--fg); }
   .promise { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .trust { display: grid; grid-template-columns: 1fr 1fr; }
   .workflow-map,
+  .horizon,
   .roadmap-grid { grid-template-columns: 1fr; }
   .workflow-map li { min-height: 0; }
   .turns-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }

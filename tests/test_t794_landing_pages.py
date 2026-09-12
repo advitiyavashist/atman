@@ -76,6 +76,17 @@ def test_engineering_roadmap_is_first_class():
     assert "V4" in block
     assert "tickets route" in block
     assert "named prior" in block.lower() or "named prior" in block
+    assert ">Now<" in block or ">Now</span>" in block
+    assert ">Next<" in block or ">Next</span>" in block
+    assert ">Later<" in block or ">Later</span>" in block
+    assert "No invented ship dates" in block
+    assert "claimable only after cause, change, and proof exist" in block
+    lowered = block.lower()
+    for banned in ("next week", "q1", "q2", "q3", "q4", "ship by"):
+        assert banned not in lowered, banned
+    assert "2026-" not in block
+    assert "DAG" not in block
+    assert "task graph" not in lowered
 
 
 def test_pages_workflow_publishes_landing_directory():
