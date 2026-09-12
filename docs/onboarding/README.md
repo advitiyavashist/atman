@@ -12,4 +12,11 @@ Start here. Pick one file.
 | Seeding role context (know → inject → update) | [role-context.md](role-context.md) |
 | Adding or updating evidence, runbooks, and skills | [../knowledge/README.md](../knowledge/README.md) |
 
-Atman is a **team runtime**. You bring the harnesses. The board owns the objective, the shared state, the task graph, messaging, scheduling, and verification. The north star is **task completion in the fewest turns**.
+Atman is a **team runtime**. You bring the harnesses. The board owns the
+objective, the shared state, the task graph, messaging, scheduling, and
+verification. The north star is **task completion in the fewest turns**.
+
+Team intro, in order: probe integrations (`tickets harness available`),
+`tickets plan` with real `--after` edges, unattended persist to a reviewable SHA,
+then human review (`tickets review`) as the gate. See
+[master-howto.md](master-howto.md) and [first session](../first-session.md).
