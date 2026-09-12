@@ -4547,7 +4547,8 @@ This board is being set up. I will ask you four things, in order:
    know, and whether it is on this machine.)
 3. I will **announce that name** on the board with the integrations you
    picked.
-4. Then I will ask for **tasks and the objective**.
+4. Then I will ask for **tasks and the objective**, and turn tasks into a
+   `tickets plan` graph (real `--after` edges), not a flat list.
 
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
@@ -4583,6 +4584,154 @@ def print_onboarding_startup():
     if not ONBOARDING_STARTUP.endswith("\n"):
         sys.stdout.write("\n")
     sys.stdout.write("\n")
+
+
+CEO_ONBOARDING_STARTUP = """**You are onboarding as Atman CEO.**
+
+Connecting here is joining **Atman**, not Claude, Cursor, Codex, or any
+other provider. Board identity is `atman-<seat>` (example: `atman-ceo`).
+
+This is a living board. Do not invent a new team. Do not `tickets init`
+or `tickets clear`. CoS (`cursor`) staffs; you do not spawn, and you do
+not claim worker tickets.
+
+Product flow (this order):
+1. Catalog + usage
+2. Attach the living board / objective
+3. Join as `atman-<seat>`
+4. Announce the Atman role
+5. Ask the operator for feedback
+6. Show tasks you can actually run (`tickets graph` / `tickets map`)
+"""
+
+
+def board_is_living(board):
+    """True when this is an existing team, not a blank `tickets init`."""
+    if not board or not os.path.isdir(board):
+        return False
+    obj = _safe(lambda: load_objective(board), {}) or {}
+    if str(obj.get("text") or "").strip():
+        return True
+    tickets = _safe(lambda: load_all(board), []) or []
+    return bool(tickets)
+
+
+def atman_seat_name(seat="ceo"):
+    raw = (seat or "ceo").strip().lower()
+    if raw.startswith("atman-"):
+        raw = raw[len("atman-"):]
+    cleaned = []
+    for ch in raw:
+        cleaned.append(ch if (ch.isalnum() or ch == "-") else "-")
+    raw = "".join(cleaned).strip("-") or "ceo"
+    if raw in ("master", "everyone", "cursor"):
+        raw = "ceo"
+    return "atman-%s" % raw
+
+
+def _join_is_ceo_path(owner, roles):
+    owner = owner or ""
+    if isinstance(roles, str):
+        roles = [r.strip() for r in roles.split(",") if r.strip()]
+    roles = list(roles or [])
+    if owner.startswith("atman-"):
+        return True
+    if "master" in roles:
+        return True
+    return False
+
+
+def print_integration_catalog(rows, note=""):
+    print("INTEGRATIONS (probe only — do not spawn until the operator answers)")
+    if note:
+        print("codex: %s" % note)
+    print("%-8s %-14s %-22s %-8s %s" % ("id", "name", "binaries", "on_disk", "path / policy"))
+    for r in rows:
+        bins = ", ".join(r["binaries"])
+        print("%-8s %-14s %-22s %-8s %s" % (
+            r["id"], r["name"][:14], bins[:22], "yes" if r["on_disk"] else "no",
+            (r["path"] or "(missing)")))
+        print("         %s" % r["policy"])
+        print("         if they say yes: %s" % r["if_yes"])
+
+
+def print_recorded_usage(board):
+    print("USAGE (recorded limits; installed is not quota)")
+    any_ = False
+    for r in _safe(lambda: load_agents(board), []) or []:
+        lim = r.get("limit")
+        if lim:
+            any_ = True
+            print("  %-14s hit %s ago%s%s" % (
+                r["owner"], fmt_hours(hours_since(lim["at"])),
+                (", back %s" % lim["until"]) if lim.get("until") else "",
+                (" -- %s" % lim["note"]) if lim.get("note") else ""))
+    if not any_:
+        print("  none recorded (`tickets limit --until` is how a seat says it is out)")
+    print("Ask: which of these still have usage, and which should CoS start?")
+    print("Installed + no usage = stay on the catalog; CoS does not spawn them.")
+
+
+def print_ceo_connect(board, seat="ceo"):
+    """Executable product flow for any new CEO. Does not print tickets next."""
+    sys.stdout.write(CEO_ONBOARDING_STARTUP)
+    if not CEO_ONBOARDING_STARTUP.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stdout.write("\n")
+    name = atman_seat_name(seat)
+    root = os.path.dirname(os.path.abspath(board)) if board else os.getcwd()
+    rows, note = probe_integration_catalog()
+    print("1. CATALOG + USAGE")
+    print_integration_catalog(rows, note)
+    print("Codex stays in the catalog with zero usage. Do not spawn Gemini. No new Claude fable.")
+    print("Cursor-only spawns unless the operator says otherwise. CoS (`cursor`) staffs.")
+    print("")
+    print_recorded_usage(board)
+    print("")
+    print("2. LIVING BOARD (attach; do not invent a new team)")
+    print("board: %s" % (board or "(none)"))
+    obj = _safe(lambda: load_objective(board), {}) or {}
+    text = str(obj.get("text") or "").strip()
+    if text:
+        print("objective: %s" % text[:400])
+        print("Attach this objective. Do not `tickets objective --set` unless it is empty.")
+    else:
+        print("objective: (none yet — ask one sentence, then `tickets objective --set`)")
+    print("Do not tickets init. Do not tickets clear. Do not name a new team.")
+    print("")
+    print("3. JOIN AS `%s`" % name)
+    print("   export TICKET_AGENT=%s" % name)
+    print("   export TICKETS_DIR=%s" % (board or "$PWD/.tickets"))
+    print("   cd %s" % root)
+    print("   tickets join %s --roles master --can own-machine,browser --cost high --persistent --wake-mode continuous --harness cursor" % name)
+    print("   tickets hooks cursor --agent %s" % name)
+    print("   tickets hooks codex --agent %s     # mail follow-up is not Claude-only" % name)
+    print("   tickets hooks remote --agent %s" % name)
+    print("   tickets master take")
+    print("   tickets master")
+    print("   tickets inbox")
+    print("   tickets objective")
+    print("")
+    print("4. ANNOUNCE THE ATMAN ROLE")
+    print('   tickets msg --to everyone "%s is Atman CEO on this living board. CoS is cursor. Integrating: <list from step 1>. @everyone"' % name)
+    print('   tickets master log "ceo onboard: seat=%s integrations=<list>"' % name)
+    print("")
+    print("5. ASK FOR FEEDBACK")
+    print("   Ask the operator: what should change about this connect path?")
+    print('   tickets msg --to cursor "CEO %s onboarded. Operator feedback: <their answer>"' % name)
+    print("")
+    print("6. TASKS YOU CAN RUN (graph / map)")
+    print("   tickets graph")
+    print("   tickets map")
+    print("   tickets drive")
+    print("   tickets update / tickets here")
+    print("   Mid-run: tickets plan (JSON keys+deps), tickets dep, tickets create --blocks")
+    print("   CoS (cursor) staffs workers. CEO does not claim worker tickets.")
+    print("")
+    print("CoS is cursor. Mail: tickets msg --to cursor. Never Grok DMs.")
+    print("HOLD T-773 T-774. No tickets clear.")
+    print("If `tickets self` still points at sol-agy-harness, recut ~/.local/bin/tickets")
+    print("onto this checkout before trusting PATH `tickets connect`.")
 
 
 MASTER_TEMPLATE = """**You are onboarding.**
@@ -4628,22 +4777,84 @@ tickets master log "onboarding: name=<name> integrations=<list>"
 
 Write the name into `Onboarding name:` above so successors do not re-ask.
 
-### Step 4 — Tasks and objective
+### Step 4 — Objective, then a real dependency graph
 
 Ask, in this order:
 
 1. **What is the objective?** (one sentence the master will drive toward)
 2. **What tasks** should be on the board now? (titles; split if they dump a list)
+3. **What depends on what?** (edges. A flat list is allowed only when they
+   said there are none.)
 
-Then:
+Then set the objective and create the graph in one shot. `deps` may be a
+`key` from the same JSON or an existing `T-` id. Do **not** run one
+`tickets create` per title. Do not invent extra tickets. Do not leave
+blockers only in the ticket body.
 
 ```
-tickets objective --set "<their sentence>"
-# one tickets create per task they named; do not invent extras
+tickets objective "<their sentence>"
+tickets plan <<'EOF'
+[{"key":"api","title":"Build REST API","role":"backend","deps":[]},
+ {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
+EOF
+tickets graph
+tickets map
 ```
 
-Do not implement those tasks in this session. Spawn seats only from the
-integrations they confirmed, one ticket each.
+Mid-run (same loop — not a second planner product):
+
+```
+tickets dep T-004 --after T-003
+tickets create "DB migration" --blocks T-002
+tickets create "Add rate limiting" --deps T-002
+```
+
+Follow-up every wake (master or CoS): `tickets update` / `tickets here`;
+reopen silent >90m claims (`tickets reopen`); `tickets drive` toward the
+objective; drain the review queue. Show `tickets graph` / `tickets map`.
+If HEALTH flags prose-only deps, wire `tickets dep` instead of leaving
+them in the body.
+
+Do not implement those tasks in this session. Spawning children when a
+parent is done is a separate success-trigger, not this onboarding step.
+Spawn seats only from the integrations they confirmed, one ticket each.
+
+## COS ONBOARDING — future (do not run on a living board unless asked)
+
+**You are onboarding as chief of staff.** Master plans and scopes. CoS
+reviews, unblocks, merges, and staffs. Same integration catalog as master.
+After the board has an objective and a `tickets plan` graph:
+
+1. `tickets graph` / `tickets map` — statuses and `--after` edges, not prose.
+2. Follow-up: `tickets update` / `here`; `tickets reopen` silent >90m claims;
+   `tickets drive` toward the objective; review queue.
+3. Mid-run graph edits: `tickets dep` / `tickets create --blocks`.
+4. Announce with `tickets master cos <name>` and `tickets msg --to everyone`.
+
+Do not dump a live-board plan. Do not invent a second planner.
+
+## CEO ONBOARDING — living board (product flow)
+
+**You are onboarding as Atman CEO.** Connecting is joining Atman, not a
+provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
+staffs. CEO does not claim worker tickets on this path.
+
+Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
+
+1. Catalog + usage (`tickets harness available` + recorded limits)
+2. Attach the living board / objective — do not invent a new team
+3. `tickets join atman-<seat> --roles master ...`
+4. Announce the Atman role (`tickets msg --to everyone`)
+5. Ask the operator for feedback
+6. `tickets graph` / `tickets map` — tasks they can actually run
+
+Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
+title — `tickets plan` with real deps if they add work. Cursor-only
+spawns unless they say otherwise. Mail hooks are not Claude-only:
+`tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
+
+HANDOVER dated 2026-09-08 is historical, not live authority. Live:
+`tickets master`, `tickets role list`, the message board, this section.
 
 ## Mission
 (what we are building, one paragraph)
@@ -4723,7 +4934,8 @@ def cmd_master(a, board):
         print("logged")
         return
     # brief
-    print_onboarding_startup()
+    if not board_is_living(board):
+        print_onboarding_startup()
     tickets = load_all(board)
     m = current_master(board)
     print("=" * 72)
@@ -7183,10 +7395,16 @@ def cmd_join(a, board):
         if g:
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
-    print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
-          "tickets update <id> \"...\" (every %d min)  ->  tickets done <id> --notes \"...\"  "
-          "->  merge  ->  tickets next" % UPDATE_EVERY_MIN)
-    print("Full instructions: tickets connect")
+    if _join_is_ceo_path(owner, roles.get(owner, [])):
+        print("Atman CEO loop:  tickets inbox  ->  tickets objective  ->  "
+              "tickets graph / tickets map  ->  tickets drive  ->  "
+              "tickets msg --to cursor (CoS staffs). CEO does not claim worker tickets.")
+        print("Full instructions: tickets connect")
+    else:
+        print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
+              "tickets update <id> \"...\" (every %d min)  ->  tickets done <id> --notes \"...\"  "
+              "->  merge  ->  tickets next" % UPDATE_EVERY_MIN)
+        print("Full instructions: tickets connect --worker")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
     _safe(lambda: _enroll_runner_context(board, owner), None)
@@ -7239,11 +7457,20 @@ def cmd_retire(a, board):
 
 
 def cmd_connect(a, board):
+    worker = bool(getattr(a, "worker", False))
+    ceo = bool(getattr(a, "ceo", False))
+    seat = (getattr(a, "seat", None) or "ceo").strip() or "ceo"
+    living = board_is_living(board)
+    if ceo or (living and not worker):
+        print_ceo_connect(board, seat=seat)
+        return
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
     print("Ask which to integrate; do not spawn until they answer.")
     print("Announce the board/team name with `tickets msg --to everyone`, then ask")
-    print("for the objective and tasks.")
+    print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
+    print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
+    print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
@@ -8003,14 +8230,17 @@ def cmd_objective(a, board):
         _master_log(board, "objective %s: %s" % (label, evidence), by=whoami(a.by))
         print("objective marked %s" % state)
         return
-    if a.text:
+    if a.text and getattr(a, "set_text", ""):
+        sys.exit("objective: use positional text or --set, not both")
+    text = (a.text or getattr(a, "set_text", "") or "").strip()
+    if text:
         exit_c = (getattr(a, "exit_criterion", None) or "").strip()
-        rec = {"text": a.text, "set_by": whoami(a.by), "at": now(), "done": False,
+        rec = {"text": text, "set_by": whoami(a.by), "at": now(), "done": False,
                "state": "active", "exit_criterion": exit_c, "exit_missing": not bool(exit_c)}
         with open(path, "w") as f:
             json.dump(rec, f, indent=2)
-        post_message(board, whoami(a.by), "objective set: %s" % a.text[:200])
-        _master_log(board, "objective set: %s" % a.text, by=whoami(a.by))
+        post_message(board, whoami(a.by), "objective set: %s" % text[:200])
+        _master_log(board, "objective set: %s" % text, by=whoami(a.by))
         print("objective set")
         if rec["exit_missing"]:
             print("FLAG: no measurable exit criterion; add --exit \"<observable end state>\"")
@@ -10010,7 +10240,8 @@ def cmd_boot(a, board):
     # 4. briefing
     p = pending_work(board, owner)
     m = current_master(board)
-    print_onboarding_startup()
+    if not board_is_living(board):
+        print_onboarding_startup()
     print("BOOT %s @ %s" % (owner, board))
     for s in steps:
         print("  - " + s)
@@ -10021,8 +10252,11 @@ def cmd_boot(a, board):
         print("  - nothing pending: no messages, no held ticket, nothing ready in your lane")
     for k, v in p.items():
         print("  - %s: %s" % (k, "; ".join(v) if isinstance(v, list) else v))
-    nxt = ("tickets mine" if p.get("holding") else "tickets next") if actionable(p) else "tickets msg \"idle\""
-    print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
+    if _join_is_ceo_path(owner, roles_for(board, owner, None) or []):
+        print("NEXT: TICKET_AGENT=%s tickets connect" % owner)
+    else:
+        nxt = ("tickets mine" if p.get("holding") else "tickets next") if actionable(p) else "tickets msg \"idle\""
+        print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
     if a.watch:
         wn = argparse.Namespace(agent=owner, every=a.every, exec=a.exec, cwd=a.cwd or root,
                                 permission_mode="acceptEdits", allowed_tools="", max_runs=1,
@@ -11104,22 +11338,19 @@ def cmd_harness_available(a, board):
     """Probe the integration catalog. Print every row. Do not spawn."""
     home = os.path.expanduser("~")
     rows, note = probe_integration_catalog(home=home)
-    print("INTEGRATIONS (probe only — do not spawn until the operator answers)")
-    if note:
-        print("codex: %s" % note)
-    print("%-8s %-14s %-22s %-8s %s" % ("id", "name", "binaries", "on_disk", "path / policy"))
-    for r in rows:
-        bins = ", ".join(r["binaries"])
-        print("%-8s %-14s %-22s %-8s %s" % (
-            r["id"], r["name"][:14], bins[:22], "yes" if r["on_disk"] else "no",
-            (r["path"] or "(missing)")))
-        print("         %s" % r["policy"])
-        print("         if they say yes: %s" % r["if_yes"])
+    print_integration_catalog(rows, note)
     print("")
-    print("Ask: Which of these do you want to use?")
-    print("Then ask the board/team name, then:")
-    print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
-    print("Then ask for the objective and tasks. Do not spawn until they answer.")
+    print_recorded_usage(board)
+    print("")
+    if board_is_living(board):
+        print("This is a living board. Do not invent a new team.")
+        print("Announce the Atman role as atman-<seat>. CoS (cursor) staffs.")
+        print("CEO does not claim worker tickets.")
+    else:
+        print("Ask: Which of these do you want to use?")
+        print("Then ask the board/team name, then:")
+        print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
+        print("Then ask for the objective and tasks. Do not spawn until they answer.")
     print("Codex stays in the catalog with zero usage. Do not spawn Gemini. No new Claude fable.")
 
 
@@ -13859,7 +14090,13 @@ def main():
                    help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)
 
-    c = sub.add_parser("connect", help="print how any agent connects to this board")
+    c = sub.add_parser("connect", help="Atman product flow: CEO connect, or worker loop")
+    c.add_argument("--ceo", action="store_true",
+                   help="CEO path even on a blank board (catalog+usage → atman-<seat>)")
+    c.add_argument("--worker", action="store_true",
+                   help="worker claim loop (prints tickets next)")
+    c.add_argument("--seat", default="ceo",
+                   help="board identity suffix; join as atman-<seat> (default: ceo)")
     c.set_defaults(fn=cmd_connect)
 
     c = sub.add_parser("self", help="print which tickets.py is live (script path and install kind)")
@@ -13921,6 +14158,8 @@ def main():
 
     c = sub.add_parser("objective", help="set/show/close the standing objective the master drives toward")
     c.add_argument("text", nargs="?", default="")
+    c.add_argument("--set", dest="set_text", default="", metavar="TEXT",
+                   help="same as the positional text: tickets objective --set \"<sentence>\"")
     c.add_argument("--exit", dest="exit_criterion", default=None, metavar="CRITERION",
                    help="measurable exit criterion (observable end state)")
     c.add_argument("--done", "--achieved", dest="done", default=None, metavar="EVIDENCE",
