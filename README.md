@@ -63,16 +63,16 @@ There is no hidden shared-memory claim.
 - A separate repo-backed graph for reviewed decisions, evidence, failures,
   model pins, runbooks, and reusable skills.
 
-The control plane is the `tickets` CLI: one Python file, standard library only,
-with plain files under `.tickets/`. It does not require a hosted service,
-database, or agent SDK.
+The control plane is the `atm` CLI (`tickets` is a compatibility alias): one
+Python file, standard library only, with plain files under `.tickets/`. It
+does not require a hosted service, database, or agent SDK.
 
 Runtime commands such as `watch`, `spawn`, `hooks`, `ui`, `--wake-mode`, and
 `remote` are provided by the root/live `tickets.py` installed with
 `./install.sh` or `./install.sh --live-release`. The `pyproject.toml` console
-script still points at the smaller core-board CLI in `src/ticket_board/cli.py`;
-it does not yet provide runtime wake or remote-adapter parity. Do not use the
-pip entry point for those features.
+scripts `atm` and `tickets` both point at the smaller core-board CLI in
+`src/ticket_board/cli.py`; they do not yet provide runtime wake or remote-adapter
+parity. Do not use the pip entry point for those features.
 
 ## Context without repetition
 
@@ -107,13 +107,14 @@ pinned release on a team machine.
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
 cd atman
-./install.sh                              # symlinks repo/tickets.py -> ~/.local/bin/tickets
+./install.sh                              # symlinks repo/tickets.py -> ~/.local/bin/atm
+                                          # and the same file -> ~/.local/bin/tickets
 export PATH="$HOME/.local/bin:$PATH"
 
 cd /path/to/your-project                # an existing git repo (git init if not)
-tickets quickstart --agent alice --roles backend
-tickets msg "alice is online"
-tickets next
+atm quickstart --agent alice --roles backend
+atm msg "alice is online"
+atm next
 git worktree add .worktrees/alice -b alice
 cd .worktrees/alice
 tickets update T-001 "working on the data model"
