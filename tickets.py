@@ -1634,6 +1634,8 @@ def line(t, tickets=None):
         bits.append("owner=" + t["owner"])
     if (t.get("reserved_for") or "").strip():
         bits.append("reserved: " + t["reserved_for"].strip())
+    if _ticket_on_hold(t):
+        bits.append("HOLD")
     if t.get("deps"):
         if tickets is not None:
             done = set(x["id"] for x in tickets if x["status"] == "done")
@@ -2081,6 +2083,55 @@ def _reservation_blocks(t, owner, steal_id=""):
     return True
 
 
+def _ticket_on_hold(t):
+    """T-781: HOLD is a condition, not a claimable ready ticket.
+
+    First-class `hold` wins. Body that starts with HOLD (T-773/T-774 style)
+    is the same so next does not hand out tester-week parks.
+    """
+    if t.get("hold"):
+        return True
+    body = (t.get("body") or "").lstrip()
+    return body.upper().startswith("HOLD")
+
+
+def cmd_hold(a, board):
+    t = load(board, a.id)
+    if getattr(a, "clear", False):
+        t["hold"] = False
+        t.pop("hold_reason", None)
+        text = "hold cleared"
+    else:
+        t["hold"] = True
+        reason = (getattr(a, "reason", None) or "").strip()
+        if reason:
+            t["hold_reason"] = reason
+        text = "HOLD" + ((": " + reason) if reason else "")
+    t["notes"].append({"by": whoami(), "at": now(), "text": text})
+    save(board, t)
+    print("%s %s" % (a.id, text))
+
+
+def _start_successors(board, finished_id):
+    """T-781: a successful ticket starts unblocked children (no human next)."""
+    tickets = load_all(board)
+    children = [x for x in unblocked(board, tickets) if finished_id in x.get("deps", [])]
+    freed = [x["id"] for x in children]
+    started, held = [], []
+    for child in children:
+        if _ticket_on_hold(child):
+            held.append(child["id"])
+            continue
+        who = _reserved_agent(child) or (child.get("suggested") or "").strip()
+        text = "unblocked %s after %s -- start (success trigger)" % (child["id"], finished_id)
+        if who:
+            post_message(board, whoami(), text, to=who, re=child["id"], task=True)
+            started.append("%s -> %s" % (child["id"], who))
+        else:
+            started.append(child["id"])
+    return freed, started, held
+
+
 def _may_set_reservation(board, who):
     if who in ("optimizer", "planner"):
         return True
@@ -2117,6 +2168,7 @@ def cmd_next(a, board):
     ready_all = unblocked(board, tickets)
     ready = [t for t in _filter_ready(ready_all, roles) if can_do(board, owner, t)]
     ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
+    ready = [t for t in ready if not _ticket_on_hold(t)]
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -4200,10 +4252,13 @@ def cmd_done(a, board):
         a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
     if g:
         print("recorded %s" % t["commit"])
-    tickets = load_all(board)
-    freed = [x["id"] for x in unblocked(board, tickets) if a.id in x.get("deps", [])]
+    freed, started, held = _start_successors(board, a.id)
     if freed:
         print("unblocked: %s" % ", ".join(freed))
+    if started:
+        print("started: %s" % ", ".join(started))
+    if held:
+        print("held (not started): %s" % ", ".join(held))
 
 
 def cmd_block(a, board):
@@ -7076,6 +7131,8 @@ def cmd_route(a, board):
     def _needs_route(t):
         if t["status"] != "open":
             return False
+        if _ticket_on_hold(t):
+            return False
         if a.redo:
             return True
         if _deps_done(t):
@@ -7482,7 +7539,8 @@ def pending_work(board, owner):
     roles = _safe(lambda: roles_for(board, owner, None), None)
     ready = _safe(lambda: [t for t in _filter_ready(unblocked(board, tickets), roles)
                            if can_do(board, owner, t)
-                           and not _reservation_blocks(t, owner)], [])
+                           and not _reservation_blocks(t, owner)
+                           and not _ticket_on_hold(t)], [])
     mine_first = [t for t in ready if t.get("suggested") == owner or _reserved_agent(t) == owner]
     if mine_first:
         out["suggested_for_me"] = [t["id"] + " " + t.get("title", "")[:60] for t in mine_first[:3]]
@@ -13916,6 +13974,12 @@ def main():
     c.add_argument("--drop", action="store_true", help="clear reserved_for (anyone)")
     c.add_argument("--owner", "-o", default="")
     c.set_defaults(fn=cmd_reserve)
+
+    c = sub.add_parser("hold", help="park a ticket so next/route will not claim it (tester-week HOLD)")
+    c.add_argument("id")
+    c.add_argument("--reason", default="", help="why it is parked")
+    c.add_argument("--clear", action="store_true", help="allow next to claim it again")
+    c.set_defaults(fn=cmd_hold)
 
     c = sub.add_parser("epic", help="epics: create | list | show | done")
     es = c.add_subparsers(dest="epic_cmd")
