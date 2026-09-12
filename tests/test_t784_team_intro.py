@@ -117,7 +117,18 @@ def test_ui_and_master_template_name_persist_to_review():
 
 def test_landing_pins_untouched():
     landing = LANDING.read_text(encoding="utf-8")
-    assert "local control plane" in landing.lower()
-    assert "Bring the agents you already use" in landing
+    hero = landing[landing.index("<h1>") : landing.index("</h1>")]
+    assert "coordinates the agents you already run" in hero.lower()
+    assert "fewest turns" not in hero.lower()
+    assert "fewest turns" in landing.lower()
+    roster = landing[landing.index('class="roster"') : landing.index('class="lanes"')]
+    order = [
+        roster.index("<strong>Claude Code</strong>"),
+        roster.index("<strong>Codex</strong>"),
+        roster.index("<strong>Cursor</strong>"),
+        roster.index("<strong>Grok Bot</strong>"),
+        roster.index("<strong>Custom</strong>"),
+    ]
+    assert order == sorted(order)
     for word in BANNED_LANDING:
         assert word not in landing
