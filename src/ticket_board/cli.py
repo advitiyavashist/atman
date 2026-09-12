@@ -27,7 +27,6 @@ import argparse
 import errno
 import glob
 import hashlib
-import importlib.util
 import json
 import os
 import sys
@@ -746,7 +745,12 @@ def agents_dir(board):
     return os.path.join(board, "agents")
 
 
-from ticket_board.agent_checkin import checkin  # canonical; no root tickets.py
+try:
+    from .agent_checkin import checkin
+    from . import identity_transfer as _identity_transfer
+except ImportError:  # python src/ticket_board/cli.py
+    from agent_checkin import checkin
+    import identity_transfer as _identity_transfer
 
 
 def _atomic_json_dump(path, obj):
@@ -3919,12 +3923,47 @@ def _identity_reuse_error(owner, prev, incoming):
 
 
 def _strip_identity_bound_state(board, owner):
-    _root_tickets()._strip_identity_bound_state(board, owner)
+    _identity_transfer.strip_identity_bound_state(board, owner)
 
 
 def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias=""):
-    return _root_tickets()._guard_seat_identity(
-        board, owner, incoming_harness, transfer=transfer, alias=alias)
+    alias = (alias or "").strip().lower()
+    if alias and alias not in ("ceo", "cos"):
+        sys.exit("--alias must be one of: ceo, cos")
+    prev = _identity_reuse_conflict(board, owner, incoming_harness)
+    alias_holder = load_aliases(board).get(alias, "") if alias else ""
+    alias_clash = bool(alias and alias_holder and alias_holder != owner)
+    if prev and not transfer:
+        sys.exit(_identity_reuse_error(owner, prev, incoming_harness))
+    if alias_clash and not transfer:
+        sys.exit("refusing: alias %s is bound to %s. Pass --transfer to rebind, "
+                 "or join as that unique id." % (alias, alias_holder))
+    if transfer and prev and _agent_holds_ticket(board, owner):
+        sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
+    return prev, alias_clash, alias_holder
+
+
+def _commit_seat_transfer(board, owner, prev, alias_clash, alias, alias_holder,
+                          incoming_harness):
+    _strip_identity_bound_state(board, owner)
+
+
+def _audit_seat_transfer(board, owner, prev, alias_clash, alias, alias_holder,
+                         incoming_harness):
+    incoming = _identity_harness_key(incoming_harness)
+    actor = whoami()
+    if prev:
+        post_message(board, owner,
+                     "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
+                     % (owner, prev, incoming))
+        print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
+              % (owner, prev, incoming))
+    if alias_clash:
+        post_message(board, actor,
+                     "transferred alias %s %s -> %s (actor %s; --transfer; stale role metadata cleared)"
+                     % (alias, alias_holder, owner, actor))
+        print("transferred alias %s %s -> %s (--transfer; old holder cleared)"
+              % (alias, alias_holder, owner))
 
 
 def cmd_join(a, board):
@@ -3942,7 +3981,6 @@ def _cmd_join_locked(a, board, owner):
     cmd_template = (getattr(a, "cmd_template", "") or "").strip()
     if incoming_key == "custom" and not cmd_template:
         sys.exit("--harness custom needs --cmd '<shell template>'")
-    root = _root_tickets()
     prev, alias_clash, alias_holder = _guard_seat_identity(
         board, owner, incoming,
         transfer=bool(getattr(a, "transfer", False)),
@@ -3951,16 +3989,20 @@ def _cmd_join_locked(a, board, owner):
     transferring = bool(getattr(a, "transfer", False)) and (prev or alias_clash)
     try:
         if transferring:
-            snap = root._snapshot_identity_artifacts(board, owner)
-            root._commit_seat_transfer(
+            snap = _identity_transfer.snapshot_identity_artifacts(board, owner)
+            _commit_seat_transfer(
                 board, owner, prev, alias_clash,
                 (getattr(a, "alias", "") or "").strip().lower(),
                 alias_holder, incoming)
         _cmd_join_apply_locked(a, board, owner)
     except BaseException:
         if snap is not None:
-            root._restore_identity_artifacts(board, owner, snap)
+            _identity_transfer.restore_identity_artifacts(board, owner, snap)
         raise
+    if transferring:
+        _audit_seat_transfer(
+            board, owner, prev, alias_clash,
+            (getattr(a, "alias", "") or "").strip().lower(), alias_holder, incoming)
 
 
 def _cmd_join_apply_locked(a, board, owner):

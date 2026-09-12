@@ -8209,92 +8209,29 @@ def _identity_reuse_error(owner, prev, incoming):
     )
 
 
+def _identity_transfer():
+    """Load the packaged storage implementation, never a second checkout CLI."""
+    src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from ticket_board import identity_transfer
+    return identity_transfer
+
+
 def _fence_remote_adapter(board, owner):
-    """Drop a live remote lease immediately so transfer cannot keep the old bridge online."""
-    if not load_remote_state(board, owner):
-        return
-
-    def mutate(state):
-        state["fence"] = int(state.get("fence") or 0) + 1
-        state["lease"] = {}
-        state.pop("claim", None)
-        state["revoked_at"] = now()
-        return state.get("fence")
-
-    _safe(lambda: _remote_update(board, owner, mutate), None)
-
-
-def _identity_file_snapshot(path):
-    try:
-        with open(path, "rb") as handle:
-            return True, handle.read()
-    except OSError:
-        return False, None
-
-
-def _restore_identity_file(path, existed, payload):
-    if existed:
-        directory = os.path.dirname(path) or "."
-        os.makedirs(directory, exist_ok=True)
-        tmp = "%s.tmp.%d.%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
-        with open(tmp, "wb") as handle:
-            handle.write(payload or b"")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        return
-    try:
-        os.remove(path)
-    except OSError:
-        pass
+    return _identity_transfer().fence_remote_adapter(board, owner)
 
 
 def _snapshot_identity_artifacts(board, owner):
-    """Byte-for-byte copy of identity files plus the native endpoint record."""
-    files = {
-        "agent": os.path.join(agents_dir(board), owner + ".json"),
-        "remote": _remote_state_path(board, owner),
-        "workforce": os.path.join(board, "workforce.json"),
-        "aliases": aliases_path(board),
-        "roles": os.path.join(board, "roles.json"),
-    }
-    snap = {"files": {}}
-    for name, path in files.items():
-        existed, payload = _identity_file_snapshot(path)
-        snap["files"][name] = {"path": path, "existed": existed, "payload": payload}
-    try:
-        snap["endpoint"] = _session_adapters().read_endpoint(board, owner)
-        snap["endpoint_ok"] = True
-    except Exception:
-        snap["endpoint"] = None
-        snap["endpoint_ok"] = False
-    return snap
+    return _identity_transfer().snapshot_identity_artifacts(board, owner)
 
 
 def _restore_identity_artifacts(board, owner, snap):
-    if not snap:
-        return
-    for item in (snap.get("files") or {}).values():
-        _restore_identity_file(item["path"], item["existed"], item["payload"])
-    if not snap.get("endpoint_ok"):
-        return
-    sa = _session_adapters()
-    endpoint = snap.get("endpoint")
-    if endpoint:
-        _safe(lambda: sa.write_endpoint(board, owner, endpoint), None)
-    else:
-        _safe(lambda: sa.remove_endpoint(board, owner), None)
+    return _identity_transfer().restore_identity_artifacts(board, owner, snap)
 
 
 def _strip_identity_bound_state(board, owner):
-    def clear(rec):
-        for key in IDENTITY_BOUND_AGENT_KEYS:
-            rec.pop(key, None)
-        rec["ticket"] = ""
-    if _agent_rec(board, owner):
-        _agent_update(board, owner, clear)
-    _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
-    _fence_remote_adapter(board, owner)
+    return _identity_transfer().strip_identity_bound_state(board, owner)
 
 
 def _limit_provenance(board, owner, rec=None):
@@ -8369,8 +8306,13 @@ def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias="
 
 def _commit_seat_transfer(board, owner, prev, alias_clash, alias, alias_holder,
                          incoming_harness):
-    """Strip identity-bound state and audit after join validation has passed."""
+    """Strip identity state inside the rollback boundary."""
     _strip_identity_bound_state(board, owner)
+
+
+def _audit_seat_transfer(board, owner, prev, alias_clash, alias, alias_holder,
+                         incoming_harness):
+    """Publish success only after the replacement join has committed."""
     incoming = _identity_harness_key(incoming_harness)
     actor = whoami()
     if prev:
@@ -8474,6 +8416,10 @@ def _cmd_join_locked(a, board, owner):
         if snap is not None:
             _restore_identity_artifacts(board, owner, snap)
         raise
+    if transferring:
+        _audit_seat_transfer(
+            board, owner, prev, alias_clash,
+            (getattr(a, "alias", "") or "").strip().lower(), alias_holder, harness)
 
 
 def _cmd_join_apply_locked(a, board, owner, knowledge_dir, harness, inline_cmd):

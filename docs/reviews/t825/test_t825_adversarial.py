@@ -332,7 +332,8 @@ def test_failed_join_transfer_restores_identity_bytes(tool, tmp_path):
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=lambda p: p.name)
-def test_stale_provider_limit_does_not_suppress_ready_codex(tool, tmp_path):
+@pytest.mark.parametrize("limit_provider", ["claude", ""], ids=["old-provider", "legacy-unscoped"])
+def test_stale_provider_limit_does_not_suppress_ready_codex(tool, tmp_path, limit_provider):
     root = CANDIDATE / "tickets.py"
     repo, board, home = make_board(tmp_path)
     joined = run(
@@ -352,9 +353,9 @@ def test_stale_provider_limit_does_not_suppress_ready_codex(tool, tmp_path):
         "at": "2026-01-01T00:00:00Z",
         "until": "never",
         "note": "aborted: tests failed (1 failed, 333 passed)",
-        "provider": "claude",
-        "kind": "claude",
     }
+    if limit_provider:
+        rec["limit"].update(provider=limit_provider, kind=limit_provider)
     agent_path.write_text(json.dumps(rec))
     msg = run(
         root, repo, board, home, "msg", "directed CEO task",
@@ -489,4 +490,27 @@ def test_concurrent_same_provider_rejoin_is_lossless(tool, tmp_path):
     assert json.loads((board / "aliases.json").read_text()) == {"cos": "stable-seat"}
     workforce = json.loads((board / "workforce.json").read_text())
     assert workforce["stable-seat"]["harness"] == "cursor"
+    assert json.loads((board / "roles.json").read_text())["stable-seat"] == ["backend"]
+
+
+def test_mixed_entrypoint_concurrent_rejoin_is_lossless(tmp_path):
+    repo, board, home = make_board(tmp_path)
+    initial = run(
+        TOOLS[0], repo, board, home, "join", "stable-seat", "--roles", "backend",
+        "--harness", "cursor", "--alias", "cos",
+    )
+    assert initial.returncode == 0, initial.stderr + initial.stdout
+
+    def rejoin(index):
+        return run(
+            TOOLS[index % len(TOOLS)], repo, board, home, "join", "stable-seat",
+            "--roles", "backend", "--harness", "cursor", "--alias", "cos",
+        )
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        attempts = list(pool.map(rejoin, range(64)))
+    failures = [attempt.stderr + attempt.stdout for attempt in attempts if attempt.returncode]
+    assert not failures, failures
+    assert json.loads((board / "aliases.json").read_text()) == {"cos": "stable-seat"}
+    assert json.loads((board / "workforce.json").read_text())["stable-seat"]["harness"] == "cursor"
     assert json.loads((board / "roles.json").read_text())["stable-seat"] == ["backend"]
