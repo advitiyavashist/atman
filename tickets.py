@@ -3588,8 +3588,11 @@ def _live_watch_pids(owner=None, board=None):
 
     The pid file only tracks one loop per board; duplicates (interrupted pytest
     runs, races before lock) show up here. `owner` filters to one agent name.
-    When `board` is set, only loops whose --cwd lies under that repo count
-    (spawn/list/dash). Omit `board` for fleet-wide stop of every loop for the name.
+    When `board` is set, loops whose --cwd lies under that repo count, AND
+    loops whose agents/<name>.watch.pid on THIS board matches the live pid
+    even when --cwd is another repo (Steer board + Atman worktree). Foreign
+    cwd without this board's pid file is still excluded (T-554).
+    Omit `board` for fleet-wide stop of every loop for the name.
     Inside `_shared_watch_table`, every caller shares one `ps` snapshot.
     """
     repo = os.path.realpath(os.path.dirname(board)) if board else None
@@ -3602,17 +3605,34 @@ def _live_watch_pids(owner=None, board=None):
             continue
         if repo:
             watch_cwd = row.get("cwd") or ""
-            if not watch_cwd:
-                continue
-            try:
-                real = os.path.realpath(watch_cwd)
-                if real != repo and not real.startswith(repo + os.sep):
-                    continue
-            except OSError:
+            under_repo = False
+            if watch_cwd:
+                try:
+                    real = os.path.realpath(watch_cwd)
+                    under_repo = real == repo or real.startswith(repo + os.sep)
+                except OSError:
+                    under_repo = False
+            claimed = _watch_pid_claimed_on_board(board, agent, pid)
+            if not under_repo and not claimed:
                 continue
         if agent and (bound or _pid_alive(pid)):
             out.append(pid)
     return sorted(set(out))
+
+
+def _watch_pid_claimed_on_board(board, agent, pid):
+    """True when this board's agents/<agent>.watch.pid is that live pid.
+
+    Steer-board + Atman-worktree is the normal persist shape: --cwd is not
+    under the board repo, but the pid file still lives on this board.
+    """
+    if not board or not agent or not pid:
+        return False
+    try:
+        with open(os.path.join(agents_dir(board), agent + ".watch.pid")) as f:
+            return int((f.read() or "0").strip() or 0) == int(pid)
+    except (IOError, OSError, ValueError):
+        return False
 
 
 def _watcher_pid(board, owner):
@@ -3626,6 +3646,62 @@ def _watcher_pid(board, owner):
     except (IOError, OSError, ValueError):
         return 0
     return pid if pid and _pid_alive(pid) else 0
+
+
+def _watch_poke_file(board, owner):
+    return os.path.join(agents_dir(board), owner + ".watch.poke")
+
+
+def _process_command(pid):
+    import subprocess
+
+    try:
+        r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "command="],
+                           capture_output=True, text=True)
+    except (OSError, ValueError):
+        return ""
+    return (r.stdout or "").strip()
+
+
+def _watch_pid_uses_this_cli(pid):
+    """True when the live loop is executing THIS tickets.py.
+
+    SIGUSR1 is fatal (default terminate) on older watchers that never
+    installed a handler -- including the PATH sol-agy-harness shim. Only
+    poke those processes with the signal.
+    """
+    cmd = _process_command(pid)
+    if not cmd:
+        return False
+    tool = os.path.realpath(__file__)
+    return tool in cmd and " watch" in cmd
+
+
+def _poke_persist_watch(board, owner):
+    """Nudge a live persist watcher: poke file + SIGUSR1 when this CLI owns it.
+
+    Returns True when a live watcher pid exists for the seat on this board.
+    Does not claim T-706 'woken'. Default SIGUSR1 would kill a watcher that
+    has no handler, so older shims get the poke file only.
+    """
+    import signal
+
+    pid = _watcher_pid(board, owner)
+    if not pid or not _pid_alive(pid):
+        return False
+    try:
+        with open(_watch_poke_file(board, owner), "w") as f:
+            f.write(now() + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        return False
+    if _watch_pid_uses_this_cli(pid):
+        try:
+            os.kill(pid, signal.SIGUSR1)
+        except (ProcessLookupError, OSError):
+            return False
+    return True
 
 
 def _watcher_count(owner, board=None):
@@ -4574,6 +4650,10 @@ INTEGRATION_CATALOG = (
     {"id": "gemini", "name": "Gemini CLI", "binaries": ("gemini",),
      "if_yes": "(do not spawn)",
      "policy": "list only; do not spawn"},
+    {"id": "grok", "name": "Grok (Cursor persist / grokbots)",
+     "binaries": ("agent", "cursor-agent"),
+     "if_yes": "tickets spawn <seat> --harness grok --persist",
+     "policy": "Cursor Grok seats and grok-worker; same persist wake as cursor"},
 )
 
 
@@ -5860,11 +5940,16 @@ def _read_run_slice(log_path, offset, cap=None):
 
 
 def _harness_of_cmd(cmd):
-    """Best-effort harness name from the watch command line. Only the three
-    names the board already knows are claimed; anything else is `custom`,
-    which is a fact, not a guess."""
+    """Best-effort harness name from the watch command line."""
     head = os.path.basename(shlex.split(cmd or "")[0]) if (cmd or "").strip() else ""
-    return head if head in ("claude", "codex", "cursor") else ("custom" if head else "")
+    known = {
+        "claude": "claude", "codex": "codex", "cursor": "cursor", "agent": "cursor",
+        "agy": "agy", "antigravity": "agy", "devin": "devin", "cognition": "devin",
+        "gemini": "gemini", "grok": "grok",
+    }
+    if head in known:
+        return known[head]
+    return "custom" if head else ""
 
 
 def _round3(x):
@@ -6467,13 +6552,28 @@ def cmd_msg(a, board):
     print("posted: " + fmt_msg(m))
     to = (m.get("to") or "").strip()
     if to and _message_wakes_seat(board, to, m):
-        harness = (load_workforce(board).get(to, {}) or {}).get("harness") or "claude"
+        harness = _seat_harness(board, to)
         sa = _session_adapters()
         mid = _msg_id(m)
         label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
                              message_id=mid)
+        if _should_poke_persist(label) and _poke_persist_watch(board, to):
+            label = "watch-poked"
         print("wake: %s -> %s" % (to, label))
         _safe(lambda: _note_native_wake_result(board, to, label, mid), None)
+
+
+def _seat_harness(board, seat):
+    """Workforce harness, then tool. Empty means unknown -- never invent claude."""
+    entry = load_workforce(board).get(seat, {}) or {}
+    return (entry.get("harness") or entry.get("tool") or "").strip()
+
+
+def _should_poke_persist(label):
+    """Native inject missed; a live persist watcher is the remaining wake path."""
+    s = str(label or "")
+    return (s in ("no live endpoint", "endpoint stale (removed)", "unsupported provider")
+            or s.startswith("endpoint stale"))
 
 
 def _native_wake_succeeded(label):
@@ -6500,7 +6600,7 @@ def _note_native_wake_result(board, seat, label, message_id):
         return
     if not _native_injection_failed(label):
         return
-    harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+    harness = _seat_harness(board, seat)
     provider = _session_adapters().provider_for_harness(harness) or harness
     _agent_set(board, seat, adapter_failure={
         "state": "failed",
@@ -9641,6 +9741,7 @@ def cmd_watch(a, board):
     # fleet-launch env and stripping identity here would be a T-238-class
     # attribution loss (T-259 defect 3).
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     import threading
     stop_event = threading.Event()
@@ -9651,12 +9752,19 @@ def cmd_watch(a, board):
         max_runs = 0
     stop_cond = STOP_CONDITION if max_runs else "until spawn --stop or SIGTERM (--persist)"
 
+    class _WatchPoke(Exception):
+        """SIGUSR1: skip the rest of the poll wait; do not stop the loop."""
+
     def _term(signum, frame):
         stop["now"] = True
         stop_event.set()
         raise InterruptedError()
 
+    def _usr1(signum, frame):
+        raise _WatchPoke()
+
     signal.signal(signal.SIGTERM, _term)
+    signal.signal(signal.SIGUSR1, _usr1)
 
     def log(line):
         try:
@@ -9676,6 +9784,10 @@ def cmd_watch(a, board):
                 wake_mode, every)), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
+            try:
+                os.unlink(_watch_poke_file(board, owner))
+            except OSError:
+                pass
             if os.path.exists(_stop_file(board, owner)):
                 try:
                     os.unlink(_stop_file(board, owner))
@@ -9899,8 +10011,11 @@ def cmd_watch(a, board):
                 sys.exit(0 if actionable(p) else 1)
             wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
-            if stop_event.wait(timeout=wait):
-                break
+            try:
+                if stop_event.wait(timeout=wait):
+                    break
+            except _WatchPoke:
+                continue
     except InterruptedError:
         pass
     finally:
@@ -10127,7 +10242,12 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 # runtime's side of the contract never changes -- it hands the harness a prompt
 # and a working directory, and reads the board afterwards. docs/byoa.md is the
 # operator-facing version of this.
-BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote")
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote",
+                     "agy", "antigravity", "devin", "cognition", "gemini",
+                     "grok", "grokbots")
+HOOK_TOOLS = ("claude", "cursor", "codex", "remote",
+              "agy", "antigravity", "devin", "cognition", "gemini",
+              "grok", "grokbots")
 # Documented shell-template placeholders for custom harnesses. `harness check`
 # refuses templates with any other {name} token or without {prompt_file}.
 HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
@@ -10273,10 +10393,20 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         mode = ("--dangerously-bypass-approvals-and-sandbox" if permission_mode == "bypassPermissions"
                 else "-s workspace-write")
         return 'codex exec --skip-git-repo-check %s%s %s' % (mode, (" -m %s" % model) if model else "", prompt)
-    if tool == "cursor":
-        # Cursor CLI (`agent`): runs any model Cursor offers (gpt-5.5-high, claude-fable-5-1-thinking-high, ...)
+    if tool == "cursor" or tool in ("grok", "grokbots"):
+        # Cursor CLI (`agent`): Cursor Grok seats and grokbots use the same persist path.
         force = "--force" if permission_mode == "bypassPermissions" else ""
         return 'agent -p --output-format text %s%s %s' % (force, (" --model %s" % model) if model else "", prompt)
+    if tool in ("agy", "antigravity"):
+        flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
+                else "--mode accept-edits")
+        return 'agy -p %s %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
+    if tool in ("devin", "cognition"):
+        flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
+                else "")
+        return 'devin --print %s%s%s' % (prompt, (" " + flag) if flag else "", (" --model %s" % model) if model else "")
+    if tool == "gemini":
+        return 'gemini -p %s%s' % (prompt, (" --model %s" % model) if model else "")
     if tool == "cursor+claude":
         # Fable through Cursor first; if that run errors, the same prompt through the
         # Claude CLI (opus). One identity, two engines -- the master never goes dark.
@@ -10290,21 +10420,23 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
 
 
 def _inherit_settings(root, wt):
-    """Copy the project's .claude settings into a new worktree so permission
+    """Copy the project's .claude and .agents settings into a new worktree so permission
     allow-lists and hooks are the same there (a worktree does not inherit the
-    root checkout's .claude/ directory)."""
+    root checkout's .claude/ or .agents/ directory)."""
     import shutil
-    src = os.path.join(root, ".claude")
-    dst = os.path.join(wt, ".claude")
-    if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
-        return []
     copied = []
-    os.makedirs(dst, exist_ok=True)
-    for name in ("settings.json", "settings.local.json"):
-        s, d = os.path.join(src, name), os.path.join(dst, name)
-        if os.path.isfile(s) and not os.path.exists(d):
-            shutil.copy2(s, d)
-            copied.append(name)
+    for dname, fnames, prefixed in ((".claude", ("settings.json", "settings.local.json"), False),
+                                    (".agents", ("hooks.json",), True)):
+        src = os.path.join(root, dname)
+        dst = os.path.join(wt, dname)
+        if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
+            continue
+        os.makedirs(dst, exist_ok=True)
+        for name in fnames:
+            s, d = os.path.join(src, name), os.path.join(dst, name)
+            if os.path.isfile(s) and not os.path.exists(d):
+                shutil.copy2(s, d)
+                copied.append(os.path.join(dname, name) if prefixed else name)
     return copied
 
 
@@ -10487,6 +10619,7 @@ def cmd_spawn(a, board):
     # fleet-launch env and stripping identity here would be a T-238-class
     # attribution loss (T-259 defect 3).
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     with open(log_path, "a") as lf:
@@ -10999,6 +11132,7 @@ def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HA
         run_cmd = _worker_cmd(board, owner, model, "bypassPermissions", harness,
                               prompt_expr=shlex.quote(HARNESS_PROBE_PROMPT))
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     started = _time.time()
     out, rc, timed_out = "", None, False
@@ -13076,10 +13210,37 @@ def cmd_hook_run(a, board):
     if a.event == "session-start":
         cmd_board(argparse.Namespace(all=False, quiet=False), board)
         return
-    if a.event == "inbox":
+    if a.event in ("inbox", "agy-inbox"):
+        if a.event == "agy-inbox":
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_inbox(argparse.Namespace(owner=owner, seat="", all=False, limit=8, keep=True), board)
+            text = buf.getvalue().strip()
+            if text and "inbox empty" not in text:
+                print(json.dumps({"injectSteps": [{"ephemeralMessage": text}]}))
+            else:
+                print("{}")
+            return
         cmd_inbox(argparse.Namespace(owner=owner, seat="", all=False, limit=8, keep=True), board)
         return
-    if a.event == "stop":
+    if a.event in ("stop", "agy-stop"):
+        if a.event == "agy-stop":
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_stop_hook(a, board)
+            out = buf.getvalue().strip()
+            try:
+                res = json.loads(out or "{}")
+                if res.get("decision") == "block":
+                    res["decision"] = "continue"
+                print(json.dumps(res))
+            except Exception:
+                print("{}")
+            return
         cmd_stop_hook(a, board)
         return
     if a.event == "task-wake":
@@ -13298,6 +13459,46 @@ def cmd_hooks(a, board):
         print("Cursor: %s + %s for %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings."
               % (os.path.relpath(hp, cursor_root), os.path.relpath(sp, cursor_root), agent))
         print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
+        return
+    if a.tool in ("grok", "grokbots"):
+        a.tool = "cursor"
+        cmd_hooks(a, board)
+        print("Grok: Cursor persist hooks (grok-worker / grokbots / Cursor Grok seats).")
+        return
+    if a.tool in ("agy", "antigravity"):
+        owner = _hook_agent(a.agent)
+        wt = os.path.abspath(getattr(a, "worktree", "") or os.getcwd())
+        agents_path = os.path.join(wt, ".agents")
+        os.makedirs(agents_path, exist_ok=True)
+        hp = os.path.join(agents_path, "hooks.json")
+        if getattr(a, "rollback", False):
+            rollback([hp])
+            return
+        try:
+            with open(hp) as f:
+                cfg = json.load(f)
+        except (IOError, ValueError):
+            cfg = {}
+        inbox_cmd = _hook_command(script, board, owner, "agy-inbox")
+        stop_cmd = _hook_command(script, board, owner, "agy-stop")
+        entry = cfg.setdefault("tickets-board", {})
+        entry["PreInvocation"] = [{"type": "command", "command": inbox_cmd, "timeout": 10}]
+        if getattr(a, "stop", True):
+            entry["Stop"] = [{"type": "command", "command": stop_cmd, "timeout": 15}]
+        else:
+            entry.pop("Stop", None)
+        _atomic_hook_write(hp, json.dumps(cfg, indent=2) + "\n", 0o600)
+        print("Antigravity hooks in %s for %s: PreInvocation -> inbox; Stop -> %s."
+              % (hp, owner, "keep working while board work remains" if getattr(a, "stop", True) else "off"))
+        print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
+        return
+    if a.tool in ("devin", "cognition", "gemini"):
+        owner = _hook_agent(a.agent)
+        named = a.tool
+        a.tool = "remote"
+        a.prompt_kind = getattr(a, "prompt_kind", "") or ""
+        cmd_hooks(a, board)
+        print("%s: identity-pinned hook wrapper configured for %s." % (named, owner))
         return
     if a.tool == "remote":
         owner = _hook_agent(a.agent)
@@ -13972,7 +14173,8 @@ def main():
     c = sub.add_parser("hook-run", help="(hook body) run one event under a baked agent identity")
     c.add_argument("--agent", required=True)
     c.add_argument("--event", required=True,
-                   choices=("identity", "session-start", "inbox", "stop", "task-wake"))
+                   choices=("identity", "session-start", "inbox", "stop", "task-wake",
+                            "agy-inbox", "agy-stop"))
     c.add_argument("--prompt-kind", default="", choices=("", "master", "cos"))
     c.set_defaults(fn=cmd_hook_run)
 
@@ -13983,7 +14185,7 @@ def main():
 
     c = sub.add_parser("boot", help="every startup step: join, hooks, check-in, briefing (idempotent)")
     c.add_argument("--agent", default="")
-    c.add_argument("--tool", default="", help="claude | codex | cursor (installs that tool's hooks)")
+    c.add_argument("--tool", default="", help="claude | cursor | codex | agy | gemini | devin | grok | remote")
     c.add_argument("--harness", default="", help="harness to register for this agent (see `tickets join --harness`)")
     c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--roles", default=None)
@@ -14081,8 +14283,8 @@ def main():
     c.add_argument("--once", action="store_true")
     c.set_defaults(fn=cmd_dash)
 
-    c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex | remote")
-    c.add_argument("tool", choices=("claude", "cursor", "codex", "remote"))
+    c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex | agy | gemini | devin | grok | remote")
+    c.add_argument("tool", choices=HOOK_TOOLS)
     c.add_argument("--agent", default="", help="required agent name baked into every generated hook command")
     c.add_argument("--worktree", default="", help="codex/cursor: scope hooks to this worktree")
     c.add_argument("--settings", default="", help="claude: settings.json path (default ./.claude/settings.json)")
