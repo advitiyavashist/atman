@@ -11160,7 +11160,24 @@ def cmd_watch(a, board):
                 sys.exit(0 if actionable(p) else 1)
             wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
-            if select.select([poke_read], [], [], wait)[0]:
+            import time as _time
+            deadline = _time.monotonic() + wait
+            poked = False
+            while not stop["now"]:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    break
+                if select.select([poke_read], [], [], 0)[0]:
+                    poked = True
+                    break
+                if _watch_poll_wait(
+                    min(WATCH_STOP_SLICE, remaining), stop, board, owner
+                ):
+                    stop["now"] = True
+                    break
+            if stop["now"]:
+                break
+            if poked:
                 continue
     except InterruptedError:
         pass
