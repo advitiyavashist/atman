@@ -290,11 +290,92 @@ def test_failed_spawn_transfer_keeps_old_identity_state(tmp_path):
     assert after.get("limit") == before["limit"]
 
 
-def test_transfer_fences_remote_adapter_lease(tmp_path):
-    tool = CANDIDATE / "tickets.py"
+@pytest.mark.parametrize("tool", TOOLS, ids=lambda p: p.name)
+def test_failed_join_transfer_restores_identity_bytes(tool, tmp_path):
     repo, board, home = make_board(tmp_path)
     joined = run(
-        tool,
+        tool, repo, board, home, "join", "atman-ceo", "--roles", "master",
+        "--harness", "cursor",
+    )
+    assert joined.returncode == 0, joined.stderr + joined.stdout
+    agent_path = board / "agents" / "atman-ceo.json"
+    before = json.loads(agent_path.read_text())
+    before["auth_check"] = {
+        "state": "ready",
+        "harness": "cursor",
+        "identity_label": "cursor-user",
+    }
+    before["runner_context"] = {"runner_kind": "cursor", "hostname": "old-host"}
+    before["limit"] = {"until": "cursor-reset", "provider": "cursor"}
+    before["adapter_failure"] = {
+        "state": "failed",
+        "reason": "aborted: tests failed (1 failed, 333 passed)",
+        "provider": "cursor",
+    }
+    agent_path.write_text(json.dumps(before))
+    digest = hashlib.sha256(str(board.resolve()).encode()).hexdigest()[:16]
+    endpoint = home / "cache" / "sessions" / digest / "atman-ceo.json"
+    endpoint.parent.mkdir(parents=True, exist_ok=True)
+    endpoint.write_text(json.dumps({"provider": "cursor", "token": "old-secret"}))
+    before_bytes = agent_path.read_bytes()
+
+    failed = run(
+        tool, repo, board, home, "join", "atman-ceo", "--harness", "custom",
+        "--transfer",
+    )
+    assert failed.returncode != 0, failed.stdout + failed.stderr
+    assert agent_path.read_bytes() == before_bytes
+    assert json.loads(agent_path.read_text())["auth_check"]["harness"] == "cursor"
+    assert json.loads((board / "workforce.json").read_text())["atman-ceo"]["harness"] == "cursor"
+    assert endpoint.exists()
+    assert json.loads(endpoint.read_text())["token"] == "old-secret"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=lambda p: p.name)
+def test_stale_provider_limit_does_not_suppress_ready_codex(tool, tmp_path):
+    root = CANDIDATE / "tickets.py"
+    repo, board, home = make_board(tmp_path)
+    joined = run(
+        tool, repo, board, home, "join", "atman-ceo-codex", "--roles", "master",
+        "--harness", "codex",
+    )
+    assert joined.returncode == 0, joined.stderr + joined.stdout
+    agent_path = board / "agents" / "atman-ceo-codex.json"
+    rec = json.loads(agent_path.read_text())
+    rec["auth_check"] = {
+        "state": "ready",
+        "harness": "codex",
+        "identity_label": "codex-user",
+    }
+    rec["runner_context"] = {"runner_kind": "codex", "hostname": "codex-host"}
+    rec["limit"] = {
+        "at": "2026-01-01T00:00:00Z",
+        "until": "never",
+        "note": "aborted: tests failed (1 failed, 333 passed)",
+        "provider": "claude",
+        "kind": "claude",
+    }
+    agent_path.write_text(json.dumps(rec))
+    msg = run(
+        root, repo, board, home, "msg", "directed CEO task",
+        "--to", "atman-ceo-codex", agent="cursor",
+    )
+    assert msg.returncode == 0, msg.stderr + msg.stdout
+    pending = run(root, repo, board, home, "pending", "--json",
+                  agent="atman-ceo-codex")
+    payload = json.loads(pending.stdout)
+    assert "limited" not in payload
+    assert "limited" not in (payload.get("pending") or {})
+    blob = json.dumps(payload)
+    assert "directed CEO task" in blob or payload.get("messages_to_me") or payload.get("task_messages")
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=lambda p: p.name)
+def test_transfer_fences_remote_adapter_lease(tool, tmp_path):
+    root = CANDIDATE / "tickets.py"
+    repo, board, home = make_board(tmp_path)
+    joined = run(
+        root,
         repo,
         board,
         home,
@@ -307,7 +388,7 @@ def test_transfer_fences_remote_adapter_lease(tmp_path):
     )
     assert joined.returncode == 0, joined.stderr + joined.stdout
     registered = run(
-        tool,
+        root,
         repo,
         board,
         home,
@@ -335,7 +416,7 @@ def test_transfer_fences_remote_adapter_lease(tmp_path):
     )
     assert transferred.returncode == 0, transferred.stderr + transferred.stdout
     status = run(
-        tool,
+        root,
         repo,
         board,
         home,
@@ -349,7 +430,7 @@ def test_transfer_fences_remote_adapter_lease(tmp_path):
     assert json.loads(status.stdout)["online"] is False
 
     stale = run(
-        tool,
+        root,
         repo,
         board,
         home,

@@ -4526,7 +4526,7 @@ def agent_liveness(board, rec, peers=None):
     #    saying "I read the log". Keep it, but it is no longer the ONLY path
     #    to a limited render -- that is how an agent can look healthy while
     #    hard-limited for a long window.
-    lim = (rec or {}).get("limit")
+    lim = _seat_limit(board, owner, rec)
     if lim:
         out.update(state="limited", source="manual", heuristic=False,
                    detail="asserted by hand%s%s" % (
@@ -4696,7 +4696,8 @@ def cmd_limit(a, board):
         mutate = lambda rec: rec.pop("limit", None)
         msg = "%s is back (limit cleared)" % owner
     else:
-        limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
+        rec = _agent_rec(board, owner) or {}
+        limit = _stamp_limit(board, owner, rec, until=a.until or "", note=a.note or "")
         mutate = lambda rec: rec.update({"limit": limit})
         msg = "%s hit a usage limit%s%s" % (owner, (" until %s" % a.until) if a.until else "",
                                             (": %s" % a.note) if a.note else "")
@@ -6116,8 +6117,8 @@ def cmd_who(a, board):
         if r.get("git_mismatch"):
             print("%-14s !! git resolved a repo that does not contain this agent's cwd at its last "
                   "check-in -- branch/sha above are unreliable; cwd is ground truth (T-243)" % "")
-        if r.get("limit"):
-            lim = r["limit"]
+        if _seat_limit(board, r["owner"], r):
+            lim = _seat_limit(board, r["owner"], r)
             print("%-14s !! USAGE LIMIT hit %s ago%s" % ("", fmt_hours(hours_since(lim["at"])),
                                                         (", back %s" % lim["until"]) if lim.get("until") else ""))
         if r.get("note"):
@@ -8223,6 +8224,68 @@ def _fence_remote_adapter(board, owner):
     _safe(lambda: _remote_update(board, owner, mutate), None)
 
 
+def _identity_file_snapshot(path):
+    try:
+        with open(path, "rb") as handle:
+            return True, handle.read()
+    except OSError:
+        return False, None
+
+
+def _restore_identity_file(path, existed, payload):
+    if existed:
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = "%s.tmp.%d.%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
+        with open(tmp, "wb") as handle:
+            handle.write(payload or b"")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _snapshot_identity_artifacts(board, owner):
+    """Byte-for-byte copy of identity files plus the native endpoint record."""
+    files = {
+        "agent": os.path.join(agents_dir(board), owner + ".json"),
+        "remote": _remote_state_path(board, owner),
+        "workforce": os.path.join(board, "workforce.json"),
+        "aliases": aliases_path(board),
+        "roles": os.path.join(board, "roles.json"),
+    }
+    snap = {"files": {}}
+    for name, path in files.items():
+        existed, payload = _identity_file_snapshot(path)
+        snap["files"][name] = {"path": path, "existed": existed, "payload": payload}
+    try:
+        snap["endpoint"] = _session_adapters().read_endpoint(board, owner)
+        snap["endpoint_ok"] = True
+    except Exception:
+        snap["endpoint"] = None
+        snap["endpoint_ok"] = False
+    return snap
+
+
+def _restore_identity_artifacts(board, owner, snap):
+    if not snap:
+        return
+    for item in (snap.get("files") or {}).values():
+        _restore_identity_file(item["path"], item["existed"], item["payload"])
+    if not snap.get("endpoint_ok"):
+        return
+    sa = _session_adapters()
+    endpoint = snap.get("endpoint")
+    if endpoint:
+        _safe(lambda: sa.write_endpoint(board, owner, endpoint), None)
+    else:
+        _safe(lambda: sa.remove_endpoint(board, owner), None)
+
+
 def _strip_identity_bound_state(board, owner):
     def clear(rec):
         for key in IDENTITY_BOUND_AGENT_KEYS:
@@ -8234,8 +8297,60 @@ def _strip_identity_bound_state(board, owner):
     _fence_remote_adapter(board, owner)
 
 
+def _limit_provenance(board, owner, rec=None):
+    rec = rec if rec is not None else (_agent_rec(board, owner) or {})
+    auth = rec.get("auth_check") or {}
+    runner = rec.get("runner_context") or {}
+    wf = load_workforce(board).get(owner) or {}
+    provider = _identity_harness_key(
+        wf.get("harness") or wf.get("tool") or auth.get("harness") or "")
+    session = (auth.get("identity_label") or auth.get("session_id")
+               or runner.get("session_id") or "")
+    runner_id = runner.get("runner_kind") or runner.get("hostname") or ""
+    return provider, session, runner_id
+
+
+def _stamp_limit(board, owner, rec, until="", note=""):
+    provider, session, runner_id = _limit_provenance(board, owner, rec)
+    return {
+        "at": now(),
+        "until": until or "",
+        "note": note or "",
+        "provider": provider,
+        "session": session,
+        "runner": runner_id,
+    }
+
+
+def _seat_limit(board, owner, rec=None):
+    """Return a usage limit that still belongs to this seat, else None.
+
+    Provider/session/runner provenance is required after transfer. A leftover
+    claude limit must not hide a ready Codex seat. Legacy unscoped records
+    (no provider/session/runner) must not suppress an authenticated ready seat.
+    """
+    rec = rec if rec is not None else (_agent_rec(board, owner) or {})
+    lim = rec.get("limit") or {}
+    if not lim:
+        return None
+    provider, session, runner_id = _limit_provenance(board, owner, rec)
+    lim_provider = (lim.get("provider") or lim.get("kind") or "").strip()
+    lim_session = (lim.get("session") or "").strip()
+    lim_runner = (lim.get("runner") or "").strip()
+    auth_state = ((rec.get("auth_check") or {}).get("state") or "").strip()
+    if lim_provider and provider and lim_provider != provider:
+        return None
+    if lim_session and session and lim_session != session:
+        return None
+    if lim_runner and runner_id and lim_runner != runner_id:
+        return None
+    if not (lim_provider or lim_session or lim_runner) and auth_state == "ready":
+        return None
+    return lim
+
+
 def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias=""):
-    """Refuse provider reuse, or audited-transfer that drops identity-bound state."""
+    """Refuse provider reuse. Does not mutate; caller commits transfer after validation."""
     alias = (alias or "").strip().lower()
     if alias and alias not in STABLE_ROLE_ALIASES:
         sys.exit("--alias must be one of: %s" % ", ".join(STABLE_ROLE_ALIASES))
@@ -8247,27 +8362,31 @@ def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias="
     if alias_clash and not transfer:
         sys.exit("refusing: alias %s is bound to %s. Pass --transfer to rebind, "
                  "or join as that unique id." % (alias, alias_holder))
-    if transfer and (prev or alias_clash):
-        if prev and _agent_holds_ticket(board, owner):
-            sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
-        _strip_identity_bound_state(board, owner)
-        incoming = _identity_harness_key(incoming_harness)
-        actor = whoami()
-        if prev:
-            post_message(
-                board, owner,
-                "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
-                % (owner, prev, incoming))
-            print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
-                  % (owner, prev, incoming))
-        if alias_clash:
-            post_message(
-                board, actor,
-                "transferred alias %s %s -> %s (actor %s; --transfer; stale role metadata cleared)"
-                % (alias, alias_holder, owner, actor))
-            print("transferred alias %s %s -> %s (--transfer; old holder cleared)"
-                  % (alias, alias_holder, owner))
-    return prev
+    if transfer and prev and _agent_holds_ticket(board, owner):
+        sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
+    return prev, alias_clash, alias_holder
+
+
+def _commit_seat_transfer(board, owner, prev, alias_clash, alias, alias_holder,
+                         incoming_harness):
+    """Strip identity-bound state and audit after join validation has passed."""
+    _strip_identity_bound_state(board, owner)
+    incoming = _identity_harness_key(incoming_harness)
+    actor = whoami()
+    if prev:
+        post_message(
+            board, owner,
+            "transferred %s %s -> %s (--transfer; auth/session/limit/endpoint/ticket cleared; history kept)"
+            % (owner, prev, incoming))
+        print("transferred %s %s -> %s (--transfer; identity-bound state cleared, history kept)"
+              % (owner, prev, incoming))
+    if alias_clash:
+        post_message(
+            board, actor,
+            "transferred alias %s %s -> %s (actor %s; --transfer; stale role metadata cleared)"
+            % (alias, alias_holder, owner, actor))
+        print("transferred alias %s %s -> %s (--transfer; old holder cleared)"
+              % (alias, alias_holder, owner))
 
 
 def _bind_role_alias(board, alias, owner):
@@ -8322,10 +8441,42 @@ def _cmd_join_locked(a, board, owner):
             sys.exit("--knowledge-dir graph is invalid; run `tickets knowledge validate`: %s" %
                      knowledge_dir)
     harness, inline_cmd = _split_harness(getattr(a, "harness", "") or a.tool)
-    _guard_seat_identity(
+    cmd_template = (getattr(a, "cmd_template", "") or "").strip() or inline_cmd
+    if harness == "custom" and not cmd_template:
+        sys.exit("--harness custom needs --cmd '<shell template>' "
+                 "(placeholders: %s)" % " ".join(HARNESS_PLACEHOLDERS))
+    if cmd_template and not harness:
+        harness = "custom"
+    wake_mode = getattr(a, "wake_mode", None)
+    if wake_mode is not None and wake_mode not in WAKE_MODES:
+        sys.exit("--wake-mode must be one of: %s" % ", ".join(WAKE_MODES))
+    lifecycle = getattr(a, "lifecycle", None)
+    if getattr(a, "persistent", False) and lifecycle == "ephemeral":
+        sys.exit("--persistent cannot be combined with --lifecycle ephemeral")
+    if lifecycle is not None and lifecycle not in LIFECYCLES:
+        sys.exit("--lifecycle must be one of: %s" % ", ".join(LIFECYCLES))
+    prev, alias_clash, alias_holder = _guard_seat_identity(
         board, owner, harness,
         transfer=bool(getattr(a, "transfer", False)),
         alias=(getattr(a, "alias", "") or "").strip())
+    snap = None
+    transferring = bool(getattr(a, "transfer", False)) and (prev or alias_clash)
+    try:
+        if transferring:
+            snap = _snapshot_identity_artifacts(board, owner)
+            _commit_seat_transfer(
+                board, owner, prev, alias_clash,
+                (getattr(a, "alias", "") or "").strip().lower(),
+                alias_holder, harness)
+        _cmd_join_apply_locked(
+            a, board, owner, knowledge_dir, harness, inline_cmd)
+    except BaseException:
+        if snap is not None:
+            _restore_identity_artifacts(board, owner, snap)
+        raise
+
+
+def _cmd_join_apply_locked(a, board, owner, knowledge_dir, harness, inline_cmd):
     # Read this BEFORE checkin(), which creates the record. Only a genuinely new
     # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
     # calls straight through here) must leave delivery completely alone.
@@ -8349,12 +8500,6 @@ def _cmd_join_locked(a, board, owner):
     # BYOA: --harness is the current spelling, --tool the original one; they are
     # the same field. `custom:<cmd>` folds the command into the harness flag.
     cmd_template = (getattr(a, "cmd_template", "") or "").strip() or inline_cmd
-    # A bare executable name still works (it is the command). "custom" with
-    # nothing to run is a typo that would otherwise register an agent no
-    # watcher can ever start, so it is refused at the point of the mistake.
-    if harness == "custom" and not cmd_template:
-        sys.exit("--harness custom needs --cmd '<shell template>' "
-                 "(placeholders: %s)" % " ".join(HARNESS_PLACEHOLDERS))
     if cmd_template and not harness:
         harness = "custom"
     prev_harness = entry.get("harness") or entry.get("tool") or ""
@@ -8611,8 +8756,9 @@ def pending_work(board, owner):
     if not owner or not os.path.isdir(board):
         return out
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
-    if rec.get("limit"):
-        out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
+    lim = _seat_limit(board, owner, rec)
+    if lim:
+        out["limited"] = lim.get("until") or lim.get("at") or "yes"
         return out
     obj = _safe(lambda: load_objective(board), {})
     obj_state = objective_state(obj)
@@ -9193,8 +9339,9 @@ def _watch_note_limit_from_log(board, owner, log_slice):
     m = _re.search(r"resets?\s+([^\n\r\.]{3,40})", log_slice, _re.I)
     if m:
         until = m.group(1).strip()
-    lim = {"at": now(), "until": until, "note": note}
-    _agent_update(board, owner, lambda rec: rec.update({"limit": lim}))
+    def _record_watch_limit(rec):
+        rec["limit"] = _stamp_limit(board, owner, rec, until=until, note=note)
+    _agent_update(board, owner, _record_watch_limit)
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
