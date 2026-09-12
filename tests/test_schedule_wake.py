@@ -63,7 +63,25 @@ def boot(tmp_path):
 def test_schedule_help_and_no_plans():
     src = TOOL.read_text()
     assert 'sub.add_parser("schedule"' in src
+    assert src.count('sub.add_parser("plan-status"') == 1
     assert not (ROOT / "plans").exists()
+
+
+def test_schedule_graph_help_start():
+    """PATH tickets died on duplicate plan-status; these parsers must start."""
+    help_r = subprocess.run(
+        [sys.executable, str(TOOL), "--help"],
+        capture_output=True, text=True)
+    assert help_r.returncode == 0, help_r.stderr
+    blob = help_r.stdout + help_r.stderr
+    assert "schedule" in blob
+    assert "graph" in blob
+    assert "plan-status" in blob
+    for cmd in ("schedule", "graph"):
+        r = subprocess.run(
+            [sys.executable, str(TOOL), cmd, "--help"],
+            capture_output=True, text=True)
+        assert r.returncode == 0, cmd + " " + r.stderr + r.stdout
 
 
 def test_schedule_every_due_persist_pokes(tmp_path):

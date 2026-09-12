@@ -80,6 +80,24 @@ def test_no_plans_folder_tree():
     assert "`tickets pr-sync`" in ceo
 
 
+def test_sounding_parsers_start():
+    """Duplicate plan-status made argparse refuse to start; sounding cmds must parse."""
+    src = (ROOT / "tickets.py").read_text()
+    assert src.count('sub.add_parser("plan-status"') == 1
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--help"],
+        capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    blob = r.stdout
+    for name in ("sound", "dispatch", "plan-status", "graph", "schedule"):
+        assert name in blob
+    for cmd in ("sound", "dispatch", "plan-status"):
+        h = subprocess.run(
+            [sys.executable, str(TOOL), cmd, "--help"],
+            capture_output=True, text=True)
+        assert h.returncode == 0, cmd + " " + h.stderr + h.stdout
+
+
 def test_walk_capture_sound_dispatch_pr_sync_retro(tmp_path):
     repo, env = boot(tmp_path)
 

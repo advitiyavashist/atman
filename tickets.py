@@ -15711,8 +15711,6 @@ def main():
     c.set_defaults(fn=cmd_schedule)
 
     c = sub.add_parser("plan-status", help="capture / ready / waiting-on-merge / blocked-HOLD-discarded")
-
-    c = sub.add_parser("plan-status", help="capture / ready / waiting-on-merge / blocked-HOLD-discarded")
     c.add_argument("--write-master", action="store_true", help="write a Plan section into MASTER.md")
     c.set_defaults(fn=cmd_plan_status)
 
