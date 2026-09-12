@@ -694,7 +694,8 @@ def _alloc(directory, prefix, width, record):
         return record
 
 
-def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None):
+def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None,
+           plan_key=""):
     return _alloc(board, "T", 3, {
         "title": title,
         "body": body,
@@ -706,6 +707,10 @@ def create(board, title, body="", role="", deps=None, priority=2, epic="", sprin
         "sprint": sprint,
         "needs": needs or [],
         "owner": "",
+        # `plan` JSON `key` for this ticket. Persisted so a later `plan` call
+        # can depend on it by key, not only by id. First ticket to claim a key
+        # wins if the same key is reused across invocations.
+        "plan_key": plan_key,
         "created": now(),
         "updated": now(),
         "notes": [],
@@ -1886,20 +1891,29 @@ def cmd_plan(a, board):
     for it in items:
         t = create(board, it["title"], it.get("body", ""), it.get("role", defaults.get("role", "")),
                    [], it.get("priority", 2), it.get("epic", defaults.get("epic", "")),
-                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [])
+                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [],
+                   plan_key=it.get("key", ""))
         if it.get("key"):
             keymap[it["key"]] = t["id"]
         made.append(t)
     existing = set(x["id"] for x in load_all(board))
+    # Current-invocation keymap wins, then persisted plan_key, then raw id.
+    persisted_keys = {}
+    for x in load_all(board):
+        pk = x.get("plan_key")
+        if pk and pk not in persisted_keys:
+            persisted_keys[pk] = x["id"]
     pending = {}
     for it, t in zip(items, made):
         deps = []
         for d in it.get("deps", []) or []:
-            rid = keymap.get(d, d)
+            rid = keymap.get(d) or persisted_keys.get(d) or d
             if rid not in existing:
                 for x in made:
                     os.unlink(ticket_path(board, x["id"]))
-                sys.exit("plan references unknown ticket %r (no such key or id)" % d)
+                sys.exit("plan references unknown ticket %r (not a ticket id, not this "
+                         "invocation's key, and no earlier `plan` ticket recorded that "
+                         "key either)" % d)
             deps.append(rid)
         if deps:
             pending[t["id"]] = deps
@@ -14579,7 +14593,8 @@ def cmd_quickstart(a, board):
         keymap, made = {}, []
         for spec in QUICKSTART_TICKETS:
             t = create(board, spec["title"], spec["body"], spec.get("role", ""),
-                       [], spec.get("priority", 2), epic_id, "", [])
+                       [], spec.get("priority", 2), epic_id, "", [],
+                       plan_key=spec.get("key", ""))
             keymap[spec["key"]] = t["id"]
             made.append(t)
         for spec, t in zip(QUICKSTART_TICKETS, made):
