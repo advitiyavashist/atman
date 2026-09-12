@@ -45,11 +45,14 @@ def run(board, args, env=None, session=None, agent=None):
         e.pop(var, None)
     e.pop("TICKET_AGENT", None)
     e.pop("TICKET_SEAT", None)
+    e.pop("TICKETS_DIR", None)
     if session is not None:
         e["TICKET_SESSION_ID"] = session
     if agent is not None:
         e["TICKET_AGENT"] = agent
     e.update(env or {})
+    if "TICKETS_DIR" not in e:
+        e["TICKETS_DIR"] = os.path.join(board, ".tickets")
     return subprocess.run(
         [sys.executable, TICKETS] + args,
         cwd=board,
