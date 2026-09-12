@@ -13,6 +13,7 @@
   "agents/response-enrollment.json": "CreateEnrollmentResponse",
   "agents/response-session-credential.json": "SessionCredentialResponse",
   "errors/400-malformed-request.json": "ErrorResponse",
+  "errors/400-unsupported-transfer-encoding.json": "ErrorResponse",
   "errors/400-runners-jobs-missing-runner-id.json": "ErrorResponse",
   "errors/401-unauthenticated.json": "ErrorResponse",
   "errors/403-agent-token-insufficient.json": "ErrorResponse",
