@@ -146,6 +146,20 @@ harness (see `install.sh` and [Bring your own agent](docs/byoa.md)).
 `tickets ui` prints the local address for the read-only dashboard. For the full
 captured session, read [A first session](docs/first-session.md).
 
+## Team intro
+
+Same loop the dashboard onboarding strip names:
+
+1. Probe integrations: `tickets harness available` (missing is a row).
+2. Plan with `tickets plan` so JSON `deps` become real `--after` edges
+   (`tickets graph` to inspect).
+3. Unattended persist to a reviewable SHA on the agent's branch
+   (`tickets review`).
+4. Human review is the gate. Merge is not silent auto-promote.
+
+Start with [Agent onboarding](docs/onboarding/README.md). Community PR path
+is [Contributing](CONTRIBUTING.md).
+
 ## Connect a team
 
 Every harness uses the same small contract: Atman gives it a prompt file, a
@@ -272,7 +286,7 @@ tracked when the team needs them to survive clones; see the
 
 ## Read next
 
-- [First session](docs/first-session.md)
+- [First session](docs/first-session.md) — probe, plan/`--after`, persist-to-review
 - [Agent onboarding](docs/onboarding/README.md)
 - [CEO runbook (this Mac)](docs/onboarding/ceo-mac-runbook.md)
 - [Team knowledge](docs/knowledge/README.md)

@@ -839,33 +839,7 @@ def agents_dir(board):
     return os.path.join(board, "agents")
 
 
-def _root_tickets():
-    """Load the repo-root tickets.py delivery path (T-492).
-
-    The packaged console script must not keep a second checkin/_apply body.
-    Root tickets.py is not in the installed wheel, so fall back to the
-    checkout copy two directories above this file when `import tickets`
-    is unavailable.
-    """
-    existing = sys.modules.get("tickets")
-    if existing is not None and getattr(existing, "checkin", None) is not None:
-        return existing
-    try:
-        import tickets as root
-        return root
-    except ImportError:
-        pass
-    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tickets.py"))
-    spec = importlib.util.spec_from_file_location("tickets", path)
-    if spec is None or spec.loader is None or not os.path.isfile(path):
-        raise ImportError("T-492: cannot load root tickets.py from %s" % path)
-    root = importlib.util.module_from_spec(spec)
-    sys.modules["tickets"] = root
-    spec.loader.exec_module(root)
-    return root
-
-
-checkin = _root_tickets().checkin
+from ticket_board.agent_checkin import checkin  # canonical; no root tickets.py
 
 
 def _clear_agent_ticket(board, agent, tid):
@@ -2260,20 +2234,23 @@ def _scan_logs(paths, hours):
 def cmd_limit(a, board):
     """Record (or clear) that an agent hit a usage limit; shown in who/master."""
     owner = a.agent or whoami()
-    rec = _agent_rec(board, owner) or checkin(board, owner)
+    from ticket_board.agent_checkin import _agent_update as _locked_agent_update
+
+    def mutate(rec):
+        if a.clear:
+            rec.pop("limit", None)
+        else:
+            rec["limit"] = {"at": now(), "until": a.until or "", "note": a.note or ""}
+
+    rec = _locked_agent_update(board, owner, mutate)
+    if rec is None:
+        rec = checkin(board, owner)
+        rec = _locked_agent_update(board, owner, mutate)
     if a.clear:
-        rec.pop("limit", None)
         msg = "%s is back (limit cleared)" % owner
     else:
-        rec["limit"] = {"at": now(), "until": a.until or "", "note": a.note or ""}
         msg = "%s hit a usage limit%s%s" % (owner, (" until %s" % a.until) if a.until else "",
                                             (": %s" % a.note) if a.note else "")
-    os.makedirs(agents_dir(board), exist_ok=True)
-    path = os.path.join(agents_dir(board), owner + ".json")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f, indent=2)
-    os.replace(tmp, path)
     post_message(board, owner, msg)
     print(msg)
     held = [t for t in load_all(board) if t["status"] == "claimed" and t.get("owner") == owner]
@@ -2709,6 +2686,8 @@ This board is being set up. I will ask you four things, in order:
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; missing remaining/reset is a FAIL row.
+When they name tasks, use `tickets plan` so deps are real `--after` edges.
+Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
 
@@ -3926,9 +3905,13 @@ Then the loop, until `tickets next` says nothing is ready:
     tickets update <id> "what changed, what is next"     # every {every} min
     tickets msg "..." --to <agent> --re <id>             # questions, blockers
     git add -A && git commit -m "..."                    # commit as you go
-    tickets done <id> --notes "paths, decisions"         # refuses on main / dirty
-    # merge or open a PR, then:
+    tickets review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
+    # human review is the gate; then:
     tickets next
+
+Plan dependent work with `tickets plan` so JSON `deps` become real `--after`
+edges (`tickets graph` to inspect). Unattended persist ends at that reviewable
+SHA. Merge is not silent auto-promote.
 
 Tool-specific:
 - Claude Code: `TICKET_AGENT=claude-opus claude` -- the global SessionStart hook
@@ -4220,6 +4203,7 @@ def cmd_connect(a, board):
     print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
     print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
     print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
+    print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 

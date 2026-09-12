@@ -256,6 +256,7 @@ components:
       type: string
       enum:
         - malformed_request
+        - unsupported_transfer_encoding
         - unauthenticated
         - forbidden_scope
         - agent_token_insufficient

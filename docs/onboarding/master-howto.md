@@ -34,6 +34,10 @@ Follow-up (master or CoS): `tickets update` / `here`, reopen silent >90m
 claims, `tickets drive` toward the objective, review queue. Prose-only
 blockers in a ticket body are not edges.
 
+Workers persist unattended to a **reviewable SHA** (`tickets review`). Human review
+is the gate; `tickets merge` is not silent auto-promote. Success of a
+node can start the next unblocked child; HOLD is skipped by `tickets next`.
+
 Capture then sound, then CoS dispatch (`tickets capture` / `tickets sound` /
 `tickets dispatch --harness …`). CEO does not `tickets next`. The living
 board is the index; there is no `plans/` folder tree.

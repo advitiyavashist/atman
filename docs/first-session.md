@@ -150,6 +150,20 @@ tickets guide                                                # connect claude / 
 After `tickets ui`: median turns / yield stay `—` until a done ticket reports
 (unknown ≠ 0).
 
+## Team intro
+
+The sample chain (`T-002` after `T-001`) is the same contract as a real board:
+
+1. **Probe integrations** — `tickets harness available` (missing is a row).
+   Do not spawn until the operator answers.
+2. **Plan the graph** — `tickets plan` so JSON `deps` become real `--after`
+   edges. Inspect with `tickets graph`. Do not seed one `tickets create` per
+   title with no edges.
+3. **Unattended persist** — the worker runs to a **reviewable SHA** on its
+   own branch (`tickets review <id> --notes "..."`).
+4. **Human review is the gate** — `tickets merge` is not silent
+   auto-promote. Success of a node can start the next unblocked child.
+
 Then read the worker loop and master loop sections of
 [README.md](../README.md), and `tickets connect` for wiring a real agent to the
 board.

@@ -215,6 +215,37 @@ def test_chunked_encoding_is_refused_not_silently_dropped(live):
     assert raw.count(b"HTTP/1.") == 1, "connection desynced: %r" % raw[:200]
 
 
+def test_repeated_transfer_encoding_headers_are_refused(live):
+    """headers.get is first-wins; a later Transfer-Encoding must not skip refuse."""
+    identity_first = _refusal(
+        live,
+        "Transfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\n",
+    )
+    assert identity_first["status"] == 400, identity_first
+    assert json.loads(identity_first["body"])["error"]["code"] == (
+        "unsupported_transfer_encoding"
+    )
+
+    chunked_first = _refusal(
+        live,
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n",
+    )
+    assert chunked_first["status"] == 400, chunked_first
+    assert json.loads(chunked_first["body"])["error"]["code"] == (
+        "unsupported_transfer_encoding"
+    )
+
+    repeated_identity = _refusal(
+        live,
+        "Transfer-Encoding: identity\r\nTransfer-Encoding: identity\r\n"
+        "Content-Length: 0\r\n",
+    )
+    assert repeated_identity["status"] == 400, repeated_identity
+    assert json.loads(repeated_identity["body"])["error"]["code"] == (
+        "unsupported_transfer_encoding"
+    )
+
+
 def test_an_ordinary_request_still_works(live):
     """The control that keeps all of the above honest: a normal
     Content-Length-framed body must still reach the router untouched. A fix

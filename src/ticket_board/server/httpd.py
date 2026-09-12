@@ -96,6 +96,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
           in the socket buffer, where the next keep-alive request parsed them
           as a request line. Chunked decoding is not implemented, so it is
           refused explicitly instead of silently corrupting the connection.
+        * Repeated Transfer-Encoding headers are refused the same way as
+          conflicting Content-Length. ``headers.get`` is first-wins, so
+          ``identity`` then ``chunked`` used to skip the chunked refusal.
 
         Everything except the over-cap case is refused as 400, which the
         contract's closed ErrorResponse.status enum DOES declare -- so this
@@ -104,11 +107,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         """
         # Chunked framing first: it legitimately carries no Content-Length, so
         # checking length before framing would read it as a bodyless request.
-        encoding = (self.headers.get("Transfer-Encoding") or "").strip().lower()
-        if encoding and encoding != "identity":
+        encodings = self.headers.get_all("Transfer-Encoding") or []
+        tokens = []
+        for raw_te in encodings:
+            tokens.extend(
+                part.strip().lower()
+                for part in raw_te.split(",")
+                if part.strip()
+            )
+        if len(encodings) > 1 or any(token != "identity" for token in tokens):
+            shown = ", ".join(v.strip() for v in encodings) or ",".join(tokens)
             self._refuse(400, "unsupported_transfer_encoding",
                          "Transfer-Encoding %r is not supported; send a "
-                         "Content-Length-framed body." % encoding)
+                         "Content-Length-framed body." % shown)
             return None
 
         declared = self.headers.get_all("Content-Length") or []

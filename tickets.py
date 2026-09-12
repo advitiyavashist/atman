@@ -1595,67 +1595,12 @@ def _bind_agent_ticket(board, agent, tid):
 
 
 def checkin(board, owner, ticket=None, note="", cwd=None):
-    """Record where this agent is working: cwd, worktree root, branch, sha.
-
-    `cwd` is the tree to stamp. Spawn must pass the target --worktree here:
-    the launcher process cwd is a different checkout (T-839 live restart).
-    """
-    here = os.path.abspath(cwd) if cwd else os.getcwd()
-    _state, _mismatch = _git_state_raw(here)
-    g = _state or {}
-    # git_state and _current_ticket shell out; keep them off the critical section.
-    top = g.get("top", "")
-    fields = {
-        "owner": owner,
-        "cwd": here,
-        "worktree": top or (here if cwd else ""),
-        "branch": g.get("branch", ""),
-        "sha": g.get("sha", ""),
-        "dirty": g.get("dirty", 0),
-        # T-243: cwd above is recorded from the stamped tree (process cwd
-        # unless a caller such as spawn passes the target worktree) with no
-        # git resolution in its path, so it stays trustworthy even here.
-        "git_mismatch": bool(_mismatch),
-        "ticket": ticket if ticket is not None else _current_ticket(board, owner),
-        "note": note,
-        "seen": now(),
-    }
-
-    def _apply(rec):
-        # T-278 owns the WRITE (read-modify-write inside the flock); T-244 owns
-        # the inbox_seen STAMP. Resolving this toward the T-244 side would
-        # restore the unlocked json.dump/os.replace that T-278 exists to
-        # remove, so the stamp moves inside the lambda instead of the write
-        # moving back out.
-        rec.update(fields)
-        # NO inbox_seen STAMP HERE, and its absence is the fix, not an omission.
-        #
-        # T-244 stamped inbox_seen = now() at an agent's first check-in. Its
-        # target was real -- unread()'s `if since and (...)` treats since=""
-        # as "skip the archive check", which is backwards for the agent with
-        # the least history to fall back on -- but the mechanism overloaded
-        # inbox_seen to mean two different things: "the newest mail this agent
-        # has been SHOWN" (a receipt) and "when this agent APPEARED" (a clock).
-        #
-        # Once T-327 landed joined_at, that second meaning has its own field,
-        # and keeping the stamp is actively destructive: a message sent
-        # `--to <name>` BEFORE the seat joins is older than the stamp and is
-        # therefore never delivered. Posting the brief first is exactly how
-        # seats get briefed on this board, and T-327 measured and rejected
-        # this same regression (test_join_does_not_destroy_a_brief_posted_
-        # before_the_seat_existed, which the stamp turns red).
-        #
-        # So inbox_seen goes back to being a pure receipt that starts empty,
-        # T-327's joined_at owns the flood policy, and T-244's actual defect
-        # is fixed where its own docstring says it lives: at the since=""
-        # branch in _inbox_scan, which now reads the archives for an agent
-        # that has never read anything instead of skipping them.
-
-    # Other commands keep their own state in this record (inbox_seen, limit,
-    # stop_blocks); a check-in must not erase it or every watch poll re-wakes
-    # the agent. rec.update preserves them against the ORDERING hazard; the
-    # lock in _agent_update is what preserves them against the CONCURRENCY one.
-    return _agent_update(board, owner, _apply)
+    """Shim: canonical flocked checkin lives in the packaged wheel (T-836)."""
+    src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from ticket_board.agent_checkin import checkin as _packaged_checkin
+    return _packaged_checkin(board, owner, ticket=ticket, note=note, cwd=cwd)
 
 
 def _current_ticket(board, owner):
@@ -5580,6 +5525,8 @@ This board is being set up. I will ask you four things, in order:
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; missing remaining/reset is a FAIL row.
+When they name tasks, use `tickets plan` so deps are real `--after` edges.
+Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
 # Probe-only catalog for a new board. Codex stays listed with zero usage.
@@ -5859,8 +5806,9 @@ objective; drain the review queue. Show `tickets graph` / `tickets map`.
 If HEALTH flags prose-only deps, wire `tickets dep` instead of leaving
 them in the body.
 
-Capture / sound / dispatch (Fatih loop on this board, not a plans/ tree):
-`tickets capture`, `tickets sound`, CoS `tickets dispatch --harness …`,
+Unattended persist ends at `tickets review` (reviewable SHA); human review is
+the gate. Capture / sound / dispatch (Fatih loop on this board, not a plans/
+tree): `tickets capture`, `tickets sound`, CoS `tickets dispatch --harness …`,
 `tickets pr-sync` after the PR is merged. CEO does not `tickets next`.
 
 Do not implement those tasks in this session. Spawning children when a
@@ -8462,9 +8410,13 @@ Then the loop, until `tickets next` says nothing is ready:
     tickets update <id> "what changed, what is next"     # every {every} min
     tickets msg "..." --to <agent> --re <id>             # questions, blockers
     git add -A && git commit -m "..."                    # commit as you go
-    tickets done <id> --notes "paths, decisions"         # refuses on main / dirty
-    # merge or open a PR, then:
+    tickets review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
+    # human review is the gate; then:
     tickets next
+
+Plan dependent work with `tickets plan` so JSON `deps` become real `--after`
+edges (`tickets graph` to inspect). Unattended persist ends at that reviewable
+SHA. Merge is not silent auto-promote.
 
 Tool-specific:
 - Claude Code: `tickets hooks claude --agent claude-opus` installs a project
@@ -8889,6 +8841,7 @@ def cmd_connect(a, board):
     print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
     print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
     print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
+    print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
@@ -14063,7 +14016,7 @@ function renderOnboarding(ob){
     ['initialized','Board ready','tickets quickstart --agent <you>'],
     ['first_ticket','Work on the board','tickets quickstart'],
     ['first_agent','You registered','tickets quickstart --agent <you>'],
-    ['first_review','First review submitted','tickets review <id> --notes "..."'],
+    ['first_review','Reviewable SHA','tickets review <id> --notes "..."'],
     ['first_merge','First merge','tickets merge'],
     ['second_harness','Second harness','tickets join <name> --harness …'],
     ['objective_set','Objective set','tickets objective "..."']
@@ -14098,6 +14051,7 @@ function renderEmptyBoard(d){
       '<li><span class="n">3</span><div><b>Objective</b> — name what the team finishes.<div class="cta">tickets objective "…"</div></div></li>'+
     '</ol>'+
     '<p class="empty-honesty">Median turns and yield@cost stay — until a done ticket reports.</p>'+
+    '<p class="empty-honesty">Plan with tickets plan (real --after edges). Unattended persist ends at tickets review — a reviewable SHA, not a silent merge.</p>'+
     '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock.</p>';
 }
 function renderAttention(items){
@@ -14204,8 +14158,8 @@ def _next_step_hint(board, tickets, done_ids):
     review = [t for t in tickets if t.get("status") == "review"]
     if review:
         return {"kind": "merge", "label": "Review queue",
-                "message": "%d ticket(s) waiting for master to merge." % len(review),
-                "cmd": "tickets done %s --notes \"...\"" % review[0]["id"]}
+                "message": "%d ticket(s) at a reviewable SHA — human review is the gate." % len(review),
+                "cmd": "tickets merge"}
     agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
     workforce = load_workforce(board)
     if not (agents or workforce):
