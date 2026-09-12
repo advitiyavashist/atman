@@ -3511,16 +3511,26 @@ def _parse_watch_table():
 
 
 class _shared_watch_table:
-    """Bind one process-table snapshot for nested `_live_watch_pids` calls."""
+    """Bind one process-table snapshot for nested `_live_watch_pids` calls.
+
+    Nested contexts reuse the outer snapshot instead of re-running `ps`.
+    CEO/worker commands (`who`, `master`/`health`, `dash`, `spawn --list`)
+    used to call `_live_watch_pids` once per seat; on a board with ~N agents
+    that is O(N) process-table scans per pulse.
+    """
 
     def __enter__(self):
         self._prev_bound = getattr(_WATCH_TABLE, "bound", False)
         self._prev_rows = getattr(_WATCH_TABLE, "rows", None)
-        _WATCH_TABLE.rows = _parse_watch_table()
-        _WATCH_TABLE.bound = True
+        self._mine = not self._prev_bound
+        if self._mine:
+            _WATCH_TABLE.rows = _parse_watch_table()
+            _WATCH_TABLE.bound = True
         return _WATCH_TABLE.rows
 
     def __exit__(self, *exc):
+        if not self._mine:
+            return
         _WATCH_TABLE.bound = self._prev_bound
         _WATCH_TABLE.rows = self._prev_rows
 
@@ -3755,9 +3765,10 @@ def agent_liveness(board, rec, peers=None):
                    (rec or {}).get("worktree") or ""])
     cwd = cwds[0] if cwds else ""
     beat_age = _age_secs(run.get("beat"))
+    watchers = _watcher_count(owner, board)
     out = {"state": "unknown", "detail": "", "source": "none", "heuristic": True,
-           "watcher": _watcher_count(owner, board) > 0,
-           "watcher_count": _watcher_count(owner, board),
+           "watcher": watchers > 0,
+           "watcher_count": watchers,
            "run": run if run.get("active") else {},
            "seen_age": _age_secs((rec or {}).get("seen"))}
 
@@ -3987,12 +3998,13 @@ def cmd_limits(a, board):
     agents = load_agents(board)
     if not agents:
         print("  nobody has checked in yet")
-    for r in sorted(agents, key=lambda r: r.get("owner", "")):
-        lv = _safe(lambda r=r: agent_liveness(board, r, agents),
-                   {"state": "unknown", "detail": "liveness read failed",
-                    "source": "none", "heuristic": True})
-        print("  %-14s %-8s%s %-9s %s" % (r["owner"][:14], lv["state"], liveness_mark(lv),
-                                          "via " + (lv.get("source") or "none"), (lv.get("detail") or "")[:70]))
+    with _shared_watch_table():
+        for r in sorted(agents, key=lambda r: r.get("owner", "")):
+            lv = _safe(lambda r=r: agent_liveness(board, r, agents),
+                       {"state": "unknown", "detail": "liveness read failed",
+                        "source": "none", "heuristic": True})
+            print("  %-14s %-8s%s %-9s %s" % (r["owner"][:14], lv["state"], liveness_mark(lv),
+                                              "via " + (lv.get("source") or "none"), (lv.get("detail") or "")[:70]))
     print("  legend: ! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- read the log by hand")
     if getattr(a, "raw_scan", False):
         sources = {
@@ -4828,6 +4840,11 @@ def _trim_decision_log(board, path):
 
 def health(board, tickets):
     """Things a master must act on. Returns [(severity, message, fix)]."""
+    with _shared_watch_table():
+        return _health_body(board, tickets)
+
+
+def _health_body(board, tickets):
     out = []
     by_id = dict((t["id"], t) for t in tickets)
     done = set(t["id"] for t in tickets if t["status"] == "done")
@@ -5062,11 +5079,17 @@ def cmd_who(a, board):
         print("nobody has checked in yet (agents check in automatically on next/claim/update/done)")
         return
     tickets = dict((t["id"], t) for t in load_all(board))
-    live = {} if getattr(a, "no_liveness", False) else dict(
-        (r["owner"], _safe(lambda r=r: agent_liveness(board, r, agents),
-                           {"state": "unknown", "detail": "liveness read failed",
-                            "source": "none", "heuristic": True}))
-        for r in agents)
+    # One `ps` for the whole board: agent_liveness/_watcher_pid used to scan
+    # the process table once per seat (and twice more for watcher_count).
+    if getattr(a, "no_liveness", False):
+        live = {}
+    else:
+        with _shared_watch_table():
+            live = dict(
+                (r["owner"], _safe(lambda r=r: agent_liveness(board, r, agents),
+                                   {"state": "unknown", "detail": "liveness read failed",
+                                    "source": "none", "heuristic": True}))
+                for r in agents)
     wf = load_workforce(board)
     sa = _session_adapters()
     print("%-14s %-9s %-8s %-30s %-20s %s" % ("agent", "state", "loop-seen", "branch@sha", "ticket", "worktree"))
@@ -9068,6 +9091,7 @@ def cmd_dash(a, board):
     staleness, review queue, per-agent pending, health, last messages."""
     import time as _time
     while True:
+      with _shared_watch_table():
         tickets = load_all(board)
         cur = active_sprint(board)
         m = current_master(board)
@@ -10267,7 +10291,8 @@ def cmd_spawn(a, board):
         wf = load_workforce(board)
         print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
             "agent", "watcher", "harness", "wake", "model", "check", "seen", "worktree"))
-        for r in sorted(load_agents(board), key=lambda r: r["owner"]):
+        with _shared_watch_table():
+          for r in sorted(load_agents(board), key=lambda r: r["owner"]):
             pids = _live_watch_pids(r["owner"], board=board)
             wc = len(pids)
             wlabel = ("pid %d" % pids[0]) if wc == 1 else ("%d pids" % wc if wc else "-")
