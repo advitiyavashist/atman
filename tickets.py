@@ -8003,14 +8003,17 @@ def cmd_objective(a, board):
         _master_log(board, "objective %s: %s" % (label, evidence), by=whoami(a.by))
         print("objective marked %s" % state)
         return
-    if a.text:
+    text = (a.text or getattr(a, "set_text", "") or "").strip()
+    if a.text and getattr(a, "set_text", ""):
+        sys.exit("objective: use positional text or --set, not both")
+    if text:
         exit_c = (getattr(a, "exit_criterion", None) or "").strip()
-        rec = {"text": a.text, "set_by": whoami(a.by), "at": now(), "done": False,
+        rec = {"text": text, "set_by": whoami(a.by), "at": now(), "done": False,
                "state": "active", "exit_criterion": exit_c, "exit_missing": not bool(exit_c)}
         with open(path, "w") as f:
             json.dump(rec, f, indent=2)
-        post_message(board, whoami(a.by), "objective set: %s" % a.text[:200])
-        _master_log(board, "objective set: %s" % a.text, by=whoami(a.by))
+        post_message(board, whoami(a.by), "objective set: %s" % text[:200])
+        _master_log(board, "objective set: %s" % text, by=whoami(a.by))
         print("objective set")
         if rec["exit_missing"]:
             print("FLAG: no measurable exit criterion; add --exit \"<observable end state>\"")
@@ -13921,6 +13924,8 @@ def main():
 
     c = sub.add_parser("objective", help="set/show/close the standing objective the master drives toward")
     c.add_argument("text", nargs="?", default="")
+    c.add_argument("--set", dest="set_text", default="", metavar="TEXT",
+                   help="same as the positional text: tickets objective --set \"<sentence>\"")
     c.add_argument("--exit", dest="exit_criterion", default=None, metavar="CRITERION",
                    help="measurable exit criterion (observable end state)")
     c.add_argument("--done", "--achieved", dest="done", default=None, metavar="EVIDENCE",

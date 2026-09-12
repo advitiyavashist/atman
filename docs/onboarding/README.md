@@ -4,6 +4,7 @@ Start here. Pick one file.
 
 | If you are… | Read |
 |---|---|
+| A CEO on **this Mac** (absolute folders, Cursor only) | [ceo-mac-runbook.md](ceo-mac-runbook.md) |
 | Taking the **master** seat in a fresh Claude / Cursor / Codex session | [master-howto.md](master-howto.md) |
 | Running `tickets` for the first time as a worker | [../first-session.md](../first-session.md) |
 | Wiring Claude, Codex, or Cursor to a board that already exists | `tickets guide` or `tickets connect` |
