@@ -177,3 +177,66 @@ def test_poke_does_not_nameerror():
     tk = _mod()
     assert callable(tk._poke_persist_watch)
     assert tk._poke_persist_watch("/no-such-board", "nobody") is False
+
+
+PROVIDERS = ("cursor", "claude", "codex", "agy", "gemini", "devin", "grok")
+
+
+def test_msg_persist_pokes_each_harness(board, monkeypatch):
+    tk = _mod()
+    seen = []
+
+    def fake_wake(board_arg, seat, text, harness=None, message_id=""):
+        seen.append((seat, harness))
+        return "unsupported provider" if harness in ("agy", "gemini", "devin") else "no live endpoint"
+
+    monkeypatch.setattr(tk, "_session_adapters", lambda: type("SA", (), {
+        "wake_seat": staticmethod(fake_wake),
+        "wake_payload": staticmethod(lambda fmt, m: "payload"),
+        "provider_for_harness": staticmethod(lambda h: h or ""),
+    })())
+    monkeypatch.setattr(tk, "_poke_persist_watch", lambda board_arg, seat: True)
+    for harness in PROVIDERS:
+        seat = "wake-%s" % harness
+        assert run(board, "join", seat, "--roles", "backend",
+                   "--harness", harness).returncode == 0
+        captured = []
+        monkeypatch.setattr("builtins.print", lambda *a, **k: captured.append(" ".join(str(x) for x in a)))
+        ns = type("A", (), {
+            "owner": "lead", "text": "poke %s" % harness, "to": seat, "re": "", "task": True,
+        })()
+        tk.cmd_msg(ns, str(board))
+        assert seen[-1] == (seat, harness), seen[-1]
+        assert any("watch-poked" in line for line in captured), captured
+
+
+def test_review_and_done_followup_pokes_cos_and_ceo(board, monkeypatch):
+    """tickets review / done must inbox-poke CoS+CEO and persist-wake (any harness)."""
+    tk = _mod()
+    poked = []
+
+    def fake_poke(board_arg, seat):
+        poked.append(seat)
+        return True
+
+    monkeypatch.setattr(tk, "_poke_persist_watch", fake_poke)
+    assert run(board, "join", "atman-ceo", "--roles", "master", "--harness", "cursor",
+               "--persistent").returncode == 0
+    assert run(board, "join", "cursor", "--roles", "review", "--harness", "cursor",
+               "--persistent", agent="cursor").returncode == 0
+    assert run(board, "master", "take", agent="atman-ceo").returncode == 0
+    assert run(board, "master", "cos", "cursor", agent="atman-ceo").returncode == 0
+    tid = "T-001"
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda *a, **k: captured.append(" ".join(str(x) for x in a)))
+    tk._finish_followup(str(board), tid, "review")
+    tk._finish_followup(str(board), tid, "done")
+    blob = "\n".join(captured)
+    assert "wake: cursor -> watch-poked" in blob
+    assert "wake: atman-ceo -> watch-poked" in blob
+    assert poked.count("cursor") >= 2
+    assert poked.count("atman-ceo") >= 2
+    msgs = (board / "messages.jsonl").read_text()
+    assert "Coordinator follow-up" in msgs
+    assert '"to": "cursor"' in msgs
+    assert '"to": "atman-ceo"' in msgs
