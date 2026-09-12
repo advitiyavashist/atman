@@ -2567,6 +2567,40 @@ def print_onboarding_startup():
     sys.stdout.write("\n")
 
 
+CEO_ONBOARDING_STARTUP = """**You are onboarding as Atman CEO.**
+
+Connecting here is joining **Atman**, not Claude, Cursor, Codex, or any
+other provider. Board identity is `atman-<seat>` (example: `atman-ceo`).
+"""
+
+
+def board_is_living(board):
+    if not board or not os.path.isdir(board):
+        return False
+    obj_path = os.path.join(board, "objective.json")
+    try:
+        with open(obj_path) as f:
+            obj = json.load(f)
+        if str(obj.get("text") or "").strip():
+            return True
+    except (IOError, ValueError):
+        pass
+    try:
+        return bool(load_all(board))
+    except Exception:
+        return False
+
+
+def atman_seat_name(seat="ceo"):
+    raw = (seat or "ceo").strip().lower()
+    if raw.startswith("atman-"):
+        raw = raw[len("atman-"):]
+    raw = "".join(ch if (ch.isalnum() or ch == "-") else "-" for ch in raw).strip("-") or "ceo"
+    if raw in ("master", "everyone", "cursor"):
+        raw = "ceo"
+    return "atman-%s" % raw
+
+
 MASTER_TEMPLATE = """**You are onboarding.**
 
 # MASTER -- coordination node for this board
@@ -2665,6 +2699,29 @@ After the board has an objective and a `tickets plan` graph:
 
 Do not dump a live-board plan. Do not invent a second planner.
 
+## CEO ONBOARDING — living board (product flow)
+
+**You are onboarding as Atman CEO.** Connecting is joining Atman, not a
+provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
+staffs. CEO does not claim worker tickets on this path.
+
+Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
+
+1. Catalog + usage (`tickets harness available` + recorded limits)
+2. Attach the living board / objective — do not invent a new team
+3. `tickets join atman-<seat> --roles master ...`
+4. Announce the Atman role (`tickets msg --to everyone`)
+5. Ask the operator for feedback
+6. `tickets graph` / `tickets map` — tasks they can actually run
+
+Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
+title — `tickets plan` with real deps if they add work. Cursor-only
+spawns unless they say otherwise. Mail hooks are not Claude-only:
+`tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
+
+HANDOVER dated 2026-09-08 is historical, not live authority. Live:
+`tickets master`, `tickets role list`, the message board, this section.
+
 ## Mission
 (what we are building, one paragraph)
 
@@ -2728,7 +2785,8 @@ def cmd_master(a, board):
         print("logged")
         return
     # brief
-    print_onboarding_startup()
+    if not board_is_living(board):
+        print_onboarding_startup()
     tickets = load_all(board)
     m = current_master(board)
     print("=" * 72)
@@ -3851,6 +3909,21 @@ def cmd_retire(a, board):
 
 
 def cmd_connect(a, board):
+    worker = bool(getattr(a, "worker", False))
+    ceo = bool(getattr(a, "ceo", False))
+    seat = (getattr(a, "seat", None) or "ceo").strip() or "ceo"
+    if ceo or (board_is_living(board) and not worker):
+        name = atman_seat_name(seat)
+        sys.stdout.write(CEO_ONBOARDING_STARTUP)
+        if not CEO_ONBOARDING_STARTUP.endswith("\n"):
+            sys.stdout.write("\n")
+        print("")
+        print("Product flow: catalog + usage → living board → %s → announce → feedback → graph/map" % name)
+        print("Do not invent a new team. CEO does not claim worker tickets. CoS (cursor) staffs.")
+        print("Then probe: `tickets harness available`")
+        print("Join: tickets join %s --roles master --persistent --wake-mode continuous" % name)
+        print("Announce Atman role, ask for feedback, then tickets graph / tickets map.")
+        return
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
     print("Ask which to integrate; do not spawn until they answer.")
@@ -4304,7 +4377,13 @@ def main():
                    help="unimplemented (T-315); exits non-zero")
     c.set_defaults(fn=cmd_route)
 
-    c = sub.add_parser("connect", help="print how any agent connects to this board")
+    c = sub.add_parser("connect", help="Atman product flow: CEO connect, or worker loop")
+    c.add_argument("--ceo", action="store_true",
+                   help="CEO path even on a blank board (catalog+usage → atman-<seat>)")
+    c.add_argument("--worker", action="store_true",
+                   help="worker claim loop (prints tickets next)")
+    c.add_argument("--seat", default="ceo",
+                   help="board identity suffix; join as atman-<seat> (default: ceo)")
     c.set_defaults(fn=cmd_connect)
 
     c = sub.add_parser("here", help="check in: record my worktree, branch and ticket")
