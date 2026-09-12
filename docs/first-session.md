@@ -116,6 +116,12 @@ Dependency graph (2 open, 1 claimed)
       `- [ ] T-003 Sample: put a screen on the API  (console; waiting on T-002)
 ```
 
+The same tree is the default Work view in `tickets ui`
+(`http://127.0.0.1:8765/#graph`): ticket ids, status, and `waiting on` edges —
+not a dump of titles. `tickets map` is the sprint/epic listing with the same
+deps. Follow-up is `tickets update` / `tickets here`; silent >90m claims:
+`tickets reopen`; submit with `tickets review` then `tickets merge`.
+
 ## The thing that surprises people first
 
 Ask for another ticket as a second agent and you get:
@@ -137,7 +143,7 @@ Finish `T-001` and `T-002` becomes claimable.
 ```sh
 tickets review T-001 --notes "paths, tests run, decisions"   # hand it back with evidence
 tickets quickstart --remove                                  # delete the samples
-tickets ui                                                   # watch it live
+tickets ui                                                   # watch it live — Work → Graph (#graph)
 tickets guide                                                # connect claude / codex / cursor
 ```
 
