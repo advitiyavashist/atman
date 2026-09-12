@@ -15,8 +15,14 @@ After they pick a name and integrations:
 tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
 tickets master log "onboarding: name=<name> integrations=<list>"
 tickets objective --set "<their sentence>"
-# one tickets create per task they named
+# capture, then sound, then CoS dispatch — not one tickets create per title
+# tickets capture "idea"
+# tickets sound T-xxx --notes "cause=...; change=...; proof=...; deps=none"
+# tickets dispatch T-xxx --to <seat> --harness cursor
 ```
+
+CEO does not `tickets next`. The living board is the index; there is no
+`plans/` folder tree.
 
 You are opening a fresh Claude Code, Cursor, or Codex session that will run
 the board as **master**. This is the single read. After it you should be able
@@ -46,6 +52,12 @@ model router.
 6. Open `tickets ui` → <http://127.0.0.1:8765>. On the board, **`—` means
    unknown** (not measured yet) — it is not zero. Median turns / yield@cost
    stay `—` until a done ticket reports.
+7. **Sound before staff.** `tickets capture` dumps a thought (`lane=capture`,
+   invisible to `tickets next`). `tickets sound` is the high-reasoning write
+   (cause, change, proof commands, real `--after` deps, no open questions).
+   CoS `tickets dispatch` one ready ticket per Cursor seat. `tickets pr-sync`
+   after `tickets review --pr`. Master still `tickets done`. CEO does not
+   `tickets next`.
 
 ---
 
