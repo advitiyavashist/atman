@@ -13575,12 +13575,15 @@ def _promise_hero(turns, tickets, events):
     done_with_cost = 0
     done_no_cost = 0
     cost_for_done = 0.0
+    done_turns = []
     for row in (turns or {}).get("tickets") or []:
         tid = row.get("ticket")
         outcome = row.get("outcome")
         st = (idx.get(tid) or {}).get("status")
         if outcome not in ("done", "merge") and st != "done":
             continue
+        if row.get("turns") is not None:
+            done_turns.append(row["turns"])
         if tid in costs:
             done_with_cost += 1
             cost_for_done += costs[tid]
@@ -13590,7 +13593,7 @@ def _promise_hero(turns, tickets, events):
     if done_with_cost and cost_for_done > 0:
         yield_per_usd = round(done_with_cost / cost_for_done, 4)
     return {
-        "median_turns": agg.get("median"),
+        "median_turns": agg.get("median") if done_turns else None,
         "n_turns": agg.get("n") or 0,
         "n_unmeasured_turns": agg.get("n_unmeasured") or 0,
         "yield_per_usd": yield_per_usd,
