@@ -2608,6 +2608,7 @@ This board is being set up. I will ask you four things, in order:
 
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
+It auto-checks usage; missing remaining/reset is a FAIL row.
 """
 
 
@@ -2677,7 +2678,8 @@ Record it here: `Onboarding name:` _(none yet — ask)_
 
 Run `tickets harness available`. It probes `command -v` for every catalog
 entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
-`gemini`). Missing is a row, not a skip.
+`gemini`). Missing is a row, not a skip. Auto-checks usage; missing
+remaining/reset is FAIL.
 
 Ask: **Which of these do you want to use?** Do not spawn until they answer.
 Codex stays in the catalog even with **no usage**. Do not spawn Gemini.
@@ -3981,6 +3983,7 @@ def cmd_connect(a, board):
         return
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
+    print("It auto-checks usage; missing remaining/reset is a FAIL row.")
     print("Ask which to integrate; do not spawn until they answer.")
     print("Announce the board/team name with `tickets msg --to everyone`, then ask")
     print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
