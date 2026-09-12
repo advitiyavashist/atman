@@ -5,7 +5,8 @@ merge pass.
 
 A new board is set up in this order: **name → integrations → announce that
 name on the board → ask for tasks and the objective**. Probe every catalog
-row with `tickets harness available` (missing is a row). Ask which
+row with `tickets harness available` (missing is a row). It auto-checks
+usage; missing remaining or reset is a FAIL row. Ask which
 integrations to use; do not spawn until they answer. Codex stays in the
 catalog even with zero usage. Do not spawn Gemini. No new Claude fable.
 

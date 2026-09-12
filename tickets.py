@@ -4496,29 +4496,37 @@ This board is being set up. I will ask you four things, in order:
 
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
+It auto-checks usage; missing remaining/reset is a FAIL row.
 """
 
 # Probe-only catalog for a new board. Codex stays listed with zero usage.
 # Gemini is listed only — never spawn. No new Claude fable.
+# usage_args: non-spawning status/about only. Never -p/--print/exec/prompt.
 INTEGRATION_CATALOG = (
     {"id": "cursor", "name": "Cursor", "binaries": ("agent", "cursor-agent"),
      "if_yes": "tickets spawn <seat> --harness cursor --persist",
-     "policy": "ok to spawn if chosen"},
+     "policy": "ok to spawn if chosen",
+     "usage_args": ("about", "--format", "json")},
     {"id": "agy", "name": "Antigravity", "binaries": ("agy",),
      "if_yes": "tickets spawn <seat> --harness agy --persist",
-     "policy": "ok to spawn if chosen"},
+     "policy": "ok to spawn if chosen",
+     "usage_args": ("help",)},
     {"id": "claude", "name": "Claude Code", "binaries": ("claude",),
      "if_yes": "tickets spawn <seat> --harness claude",
-     "policy": "ok to spawn if chosen; no new Claude fable"},
+     "policy": "ok to spawn if chosen; no new Claude fable",
+     "usage_args": ("auth", "status", "--json")},
     {"id": "codex", "name": "Codex", "binaries": ("codex",),
      "if_yes": "tickets spawn <seat> --harness codex",
-     "policy": "catalog even with zero usage; do not spawn unless they say usage is back"},
+     "policy": "catalog even with zero usage; do not spawn unless they say usage is back",
+     "usage_args": ("login", "status")},
     {"id": "devin", "name": "Devin", "binaries": ("devin",),
      "if_yes": "tickets spawn <seat> --harness devin",
-     "policy": "list; spawn only if the operator confirms the harness exists"},
+     "policy": "list; spawn only if the operator confirms the harness exists",
+     "usage_args": ("auth", "status")},
     {"id": "gemini", "name": "Gemini CLI", "binaries": ("gemini",),
      "if_yes": "(do not spawn)",
-     "policy": "list only; do not spawn"},
+     "policy": "list only; do not spawn",
+     "usage_args": ("--version",)},
 )
 
 
@@ -4555,7 +4563,8 @@ Record it here: `Onboarding name:` _(none yet — ask)_
 
 Run `tickets harness available`. It probes `command -v` for every catalog
 entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
-`gemini`). Missing is a row, not a skip. If `~/.local/bin/codex` is stale,
+`gemini`) and auto-checks usage. Missing binary is a row, not a skip.
+Missing remaining or reset is a FAIL row. If `~/.local/bin/codex` is stale,
 it retargets to the newest `openai.chatgpt-*` extension binary.
 
 Ask: **Which of these do you want to use?** Do not spawn until they answer.
@@ -7184,6 +7193,7 @@ def cmd_retire(a, board):
 def cmd_connect(a, board):
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
+    print("It auto-checks usage; missing remaining/reset is a FAIL row.")
     print("Ask which to integrate; do not spawn until they answer.")
     print("Announce the board/team name with `tickets msg --to everyone`, then ask")
     print("for the objective and tasks.")
@@ -11014,6 +11024,181 @@ def _which_on_path(name, search_path):
     return shutil.which(name, path=search_path)
 
 
+# Status/about only. A usage probe that includes these would spawn a model.
+HARNESS_USAGE_SPAWN_TOKENS = frozenset({
+    "-p", "--print", "--prompt", "--prompt-interactive", "-i", "exec", "--yolo",
+})
+HARNESS_USAGE_TIMEOUT = 8
+_USAGE_REMAINING_KEYS = frozenset({
+    "remaining", "remaining_percent", "remainingpercent", "remaining_pct",
+    "remainingpct", "remaining_tokens", "remainingtokens", "percent_remaining",
+    "percentremaining", "quota_remaining", "quotaremaining",
+})
+_USAGE_RESET_KEYS = frozenset({
+    "reset", "reset_at", "resets_at", "resetsat", "resetat", "reset_time",
+    "resettime", "resets", "resets_on", "resetson",
+})
+
+
+def usage_probe_is_spawn(argv):
+    """True if argv would start a model session. Usage probes must stay False."""
+    for t in (str(x).lower() for x in (argv or ())):
+        if t in HARNESS_USAGE_SPAWN_TOKENS or t.split("=", 1)[0] in HARNESS_USAGE_SPAWN_TOKENS:
+            return True
+    return False
+
+
+def catalog_usage_argv(spec_or_id):
+    """Non-spawning usage argv for a catalog row (empty = no probe)."""
+    spec = spec_or_id
+    if isinstance(spec_or_id, str):
+        spec = next((s for s in INTEGRATION_CATALOG if s["id"] == spec_or_id), {})
+    args = tuple(spec.get("usage_args") or ())
+    if usage_probe_is_spawn(args):
+        return ()
+    return args
+
+
+def _usage_key_norm(key):
+    return str(key or "").replace("-", "").replace("_", "").lower()
+
+
+def _usage_field_str(value):
+    if value is None or value is False:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and value != value:  # NaN
+            return None
+        if float(value) == int(value):
+            return str(int(value))
+        return str(value)
+    text = str(value).strip()
+    if not text or text.lower() in ("none", "null", "missing", "unknown", "n/a", "-"):
+        return None
+    return text
+
+
+def _usage_fields_from_mapping(obj, remaining=None, reset=None):
+    """Pull remaining/reset from a dict. Never invent; first hit wins."""
+    if not isinstance(obj, dict):
+        return remaining, reset
+    for key, val in obj.items():
+        norm = _usage_key_norm(key)
+        if remaining is None and norm in _USAGE_REMAINING_KEYS:
+            remaining = _usage_field_str(val)
+        elif reset is None and norm in _USAGE_RESET_KEYS:
+            reset = _usage_field_str(val)
+    prefer = []
+    for key, val in obj.items():
+        if _usage_key_norm(key) in ("usage", "quota", "ratelimit", "ratelimits", "limits"):
+            prefer.append(val)
+    for val in prefer:
+        remaining, reset = _usage_fields_from_mapping(val, remaining, reset)
+        if remaining is not None and reset is not None:
+            return remaining, reset
+    for val in obj.values():
+        if isinstance(val, dict):
+            remaining, reset = _usage_fields_from_mapping(val, remaining, reset)
+        elif isinstance(val, list):
+            for item in val:
+                remaining, reset = _usage_fields_from_mapping(item, remaining, reset)
+        if remaining is not None and reset is not None:
+            return remaining, reset
+    return remaining, reset
+
+
+def parse_usage_remaining_reset(text):
+    """Extract remaining and reset when a harness reports them. Absent stays None."""
+    remaining, reset = None, None
+    for blob in _json_candidates(text):
+        try:
+            rec = json.loads(blob)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            remaining, reset = _usage_fields_from_mapping(rec, remaining, reset)
+            if remaining is not None and reset is not None:
+                return remaining, reset
+    raw = text or ""
+    if remaining is None:
+        m = re.search(r"remaining[:\s]+([^\n,;]+)", raw, re.I)
+        if m:
+            remaining = _usage_field_str(m.group(1))
+    if reset is None:
+        m = re.search(r"resets?\s+(?:at\s+)?([^\n]+)", raw, re.I)
+        if m:
+            reset = _usage_field_str(m.group(1).rstrip("."))
+    return remaining, reset
+
+
+def _run_usage_probe(argv, env, timeout=HARNESS_USAGE_TIMEOUT):
+    """Run a status/about probe. Never a model prompt. Returns (output, detail)."""
+    import subprocess
+
+    if not argv or usage_probe_is_spawn(argv):
+        return "", "spawn probe refused" if argv else "no usage probe"
+    try:
+        r = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, env=env)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        return out, ""
+    except FileNotFoundError:
+        return "", "probe binary missing"
+    except subprocess.TimeoutExpired:
+        return "", "usage probe timed out"
+    except OSError as e:
+        return "", str(e)
+
+
+def probe_catalog_usage(row, env=None, timeout=HARNESS_USAGE_TIMEOUT):
+    """Usage check for one catalog row. Missing remaining or reset is FAIL."""
+    spec = next((s for s in INTEGRATION_CATALOG if s["id"] == row.get("id")), {})
+    args = catalog_usage_argv(spec)
+    reason = ""
+    output = ""
+    if not row.get("on_disk") or not row.get("path"):
+        remaining, reset = None, None
+        reason = "missing binary"
+    elif not args:
+        remaining, reset = None, None
+        reason = "no usage probe"
+    else:
+        probe_env = dict(env if env is not None else os.environ)
+        argv = [row["path"]] + list(args)
+        output, err = _run_usage_probe(argv, probe_env, timeout=timeout)
+        remaining, reset = parse_usage_remaining_reset(output)
+        reason = err
+        if remaining is None or reset is None:
+            if not reason:
+                missing = []
+                if remaining is None:
+                    missing.append("remaining")
+                if reset is None:
+                    missing.append("reset")
+                reason = "missing " + " and ".join(missing)
+    ok = remaining is not None and reset is not None
+    return {
+        "usage": "ok" if ok else "FAIL",
+        "remaining": remaining,
+        "reset": reset,
+        "usage_reason": reason,
+        "usage_ok": ok,
+    }
+
+
+def attach_catalog_usage(rows, env=None, timeout=HARNESS_USAGE_TIMEOUT):
+    """Fill usage/remaining/reset on every catalog row. Does not spawn."""
+    for row in rows:
+        row.update(probe_catalog_usage(row, env=env, timeout=timeout))
+    return rows
+
+
+def _fmt_usage_field(value):
+    return value if value else "(missing)"
+
+
 def probe_integration_catalog(home=None, search_path=None):
     """Every catalog row, including missing binaries. Does not spawn."""
     home = home if home is not None else os.path.expanduser("~")
@@ -11042,10 +11227,40 @@ def probe_integration_catalog(home=None, search_path=None):
     return rows, note
 
 
-def cmd_harness_available(a, board):
-    """Probe the integration catalog. Print every row. Do not spawn."""
+def _print_catalog_usage_line(row):
+    print("         usage %-4s remaining=%s  reset=%s%s" % (
+        row.get("usage") or "FAIL",
+        _fmt_usage_field(row.get("remaining")),
+        _fmt_usage_field(row.get("reset")),
+        ("  (%s)" % row["usage_reason"]) if row.get("usage_reason") and row.get("usage") != "ok" else ""))
+
+
+def cmd_harness_usage(a, board):
+    """Auto-check remaining/reset for every catalog row. Do not spawn."""
     home = os.path.expanduser("~")
     rows, note = probe_integration_catalog(home=home)
+    attach_catalog_usage(rows)
+    print("USAGE (probe only — do not spawn)")
+    if note:
+        print("codex: %s" % note)
+    print("%-8s %-6s %-18s %s" % ("id", "usage", "remaining", "reset"))
+    for r in rows:
+        print("%-8s %-6s %-18s %s" % (
+            r["id"], r.get("usage") or "FAIL",
+            (_fmt_usage_field(r.get("remaining")))[:18],
+            _fmt_usage_field(r.get("reset"))))
+        if r.get("usage") != "ok" and r.get("usage_reason"):
+            print("         %s" % r["usage_reason"])
+    print("")
+    print("Missing remaining/reset is a FAIL row. Codex stays cataloged with zero usage.")
+    print("Do not spawn Gemini. No new Claude fable. Cursor is the only spawn this desk uses.")
+
+
+def cmd_harness_available(a, board):
+    """Probe the integration catalog and auto-check usage. Print every row. Do not spawn."""
+    home = os.path.expanduser("~")
+    rows, note = probe_integration_catalog(home=home)
+    attach_catalog_usage(rows)
     print("INTEGRATIONS (probe only — do not spawn until the operator answers)")
     if note:
         print("codex: %s" % note)
@@ -11057,7 +11272,9 @@ def cmd_harness_available(a, board):
             (r["path"] or "(missing)")))
         print("         %s" % r["policy"])
         print("         if they say yes: %s" % r["if_yes"])
+        _print_catalog_usage_line(r)
     print("")
+    print("USAGE: missing remaining/reset is a FAIL row. Do not spawn a FAIL seat.")
     print("Ask: Which of these do you want to use?")
     print("Then ask the board/team name, then:")
     print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
@@ -11066,15 +11283,19 @@ def cmd_harness_available(a, board):
 
 
 def cmd_harness(a, board):
-    """`tickets harness check <name>` / `tickets harness list` / `available`.
+    """`tickets harness check <name>` / `tickets harness list` / `available` / `usage`.
 
     check: prove the agent's harness actually runs before a watcher spends a
     poll interval discovering it does not. The result is written to the agent
     record so `spawn --list` and the master can see who is really reachable.
-    available: probe command -v for every catalog integration (missing is a row).
+    available: probe command -v for every catalog integration (missing is a row)
+    and auto-check usage (missing remaining/reset is FAIL). Does not spawn.
+    usage: the usage table alone (same probes as available).
     """
     if a.harness_cmd == "available":
         return cmd_harness_available(a, board)
+    if a.harness_cmd == "usage":
+        return cmd_harness_usage(a, board)
     if a.harness_cmd == "auth":
         return cmd_harness_auth(a, board)
     if a.harness_cmd == "list":
@@ -13766,7 +13987,9 @@ def main():
     x.add_argument("--timeout", type=int, default=15)
     hs.add_parser("list", help="every registered agent, its harness and its last check")
     hs.add_parser("available",
-                  help="probe command -v for every catalog integration (missing is a row; do not spawn)")
+                  help="probe command -v and usage remaining/reset for every catalog row (missing remaining/reset is FAIL; do not spawn)")
+    hs.add_parser("usage",
+                  help="auto-check remaining/reset for every catalog row (missing is FAIL; do not spawn)")
     c.set_defaults(fn=cmd_harness, harness_cmd="list", name="", harness="", cmd_template="", model="", cwd="",
                    timeout=HARNESS_CHECK_TIMEOUT, login=False, recover_stale=False)
 

@@ -2556,6 +2556,7 @@ This board is being set up. I will ask you four things, in order:
 
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
+It auto-checks usage; missing remaining/reset is a FAIL row.
 """
 
 
@@ -2579,7 +2580,8 @@ survives agent restarts and timeouts.
 """ + ONBOARDING_STARTUP + """
 Walk name → integrations (`tickets harness available`) → announce that name
 on the board → ask for tasks and the objective. Do not spawn until they
-answer. Codex stays in the catalog with zero usage. Do not spawn Gemini.
+answer. `harness available` auto-checks usage; missing remaining/reset is FAIL.
+Codex stays in the catalog with zero usage. Do not spawn Gemini.
 No new Claude fable.
 
 ## Mission
@@ -3770,6 +3772,7 @@ def cmd_retire(a, board):
 def cmd_connect(a, board):
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
+    print("It auto-checks usage; missing remaining/reset is a FAIL row.")
     print("Ask which to integrate; do not spawn until they answer.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
