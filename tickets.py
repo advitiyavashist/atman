@@ -6973,30 +6973,74 @@ def _registered_handles(board):
     return names
 
 
-def resolve_to_and_mentions(text, to="", registered=None):
+def _split_to_tokens(to):
+    """Comma-separated --to into first-seen tokens (whitespace stripped)."""
+    out, seen = [], set()
+    for part in str(to or "").split(","):
+        tok = part.strip()
+        if not tok:
+            continue
+        key = tok.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tok)
+    return out
+
+
+def _to_recipient_set(to):
+    return {t.lower() for t in _split_to_tokens(to)}
+
+
+def resolve_to_and_mentions(text, to="", registered=None, master_owner=""):
     """Empty --to + exactly one *registered* named mention becomes that recipient.
 
     Unknown handles stay in `mentions` (history unchanged) but do not become
-    implicit --to. Returns (to, mentions, unknown_implicit_handle_or_empty).
-    Explicit --to is never rewritten and never warns.
+    implicit --to. Returns
+    (to, mentions, unknown_implicit_or_empty, explicit_unknown, dropped_mentions).
+
+    Explicit --to is stored (spawn/probe) even when the name is unregistered;
+    comma lists become a recipient set. `--to master` aliases to master.json
+    owner when that name is set. Unknown named mentions are filtered out before
+    the one-registered-mention rule (T-497).
     """
     mentions = parse_mentions(text)
     to = (to or "").strip()
+    empty = []
     if to:
-        return to, mentions, ""
+        tokens = _split_to_tokens(to)
+        holder = (master_owner or "").strip()
+        if holder:
+            tokens = [holder if t.lower() == "master" else t for t in tokens]
+            tokens = _split_to_tokens(",".join(tokens))
+        stored = ",".join(tokens)
+        unknown_explicit = []
+        if registered is not None:
+            for tok in tokens:
+                if tok.lower() not in registered:
+                    unknown_explicit.append(tok)
+        return stored, mentions, "", unknown_explicit, empty
     named = [h for h in mentions if h.lower() not in _MENTION_BROADCAST]
-    if len(named) == 1 and len(named) == len(mentions):
-        handle = named[0]
-        if registered is not None and handle.lower() not in registered:
-            return "", mentions, handle
-        return handle, mentions, ""
-    return to, mentions, ""
+    if registered is None:
+        if len(named) == 1 and len(named) == len(mentions):
+            return named[0], mentions, "", empty, empty
+        return to, mentions, "", empty, empty
+    known = [h for h in named if h.lower() in registered]
+    unknown_named = [h for h in named if h.lower() not in registered]
+    if len(named) != len(mentions):
+        return to, mentions, "", empty, empty
+    if len(known) == 1:
+        return known[0], mentions, "", empty, unknown_named
+    if len(known) == 0 and len(named) == 1:
+        return "", mentions, named[0], empty, empty
+    return to, mentions, "", empty, empty
 
 
 def post_message(board, sender, text, to="", re="", kind="", task=False, source=""):
     _rotate_messages_if_big(board)
-    to, mentions, unknown = resolve_to_and_mentions(
-        text, to, _registered_handles(board))
+    holder = ((current_master(board) or {}) or {}).get("owner") or ""
+    to, mentions, unknown, explicit_unknown, dropped = resolve_to_and_mentions(
+        text, to, _registered_handles(board), master_owner=holder)
     rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
            "to": to, "re": re, "text": text}
     if mentions:
@@ -7021,6 +7065,10 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
                              to=to or "", text_len=len(text or "")), None)
     if unknown:
         rec["_unregistered_implicit"] = unknown
+    if explicit_unknown:
+        rec["_unregistered_explicit"] = explicit_unknown
+    if dropped:
+        rec["_unregistered_dropped"] = dropped
     return rec
 
 
@@ -7090,17 +7138,18 @@ def _addressed_to(msg, owner, registered=None):
     Unregistered mention handles are kept on the record for history (T-490)
     but do not address a mailbox. A body whose only mention is an unknown
     handle is therefore a broadcast once implicit --to is refused.
+    Comma-separated --to is a recipient set (T-497).
     """
-    to = (msg.get("to") or "").strip().lower()
+    recipients = _to_recipient_set(msg.get("to") or "")
     mentions = {h.lower() for h in (msg.get("mentions") or [])}
     if registered is not None:
         mentions = {h for h in mentions if h in registered}
     target = owner.lower()
-    if not to and not mentions:
+    if not recipients and not mentions:
         return True
-    if to in _MENTION_BROADCAST or mentions & _MENTION_BROADCAST:
+    if recipients & _MENTION_BROADCAST or mentions & _MENTION_BROADCAST:
         return True
-    return to == target or target in mentions
+    return target in recipients or target in mentions
 
 
 def is_board_broadcast(msg):
@@ -7109,11 +7158,11 @@ def is_board_broadcast(msg):
     Advitiya PRIORITY agent chats: directed `--to` / named @mentions are seat
     threads, not this board channel. Same messages.jsonl either way.
     """
-    to = (msg.get("to") or "").strip().lower()
+    recipients = _to_recipient_set(msg.get("to") or "")
     mentions = {h.lower() for h in (msg.get("mentions") or [])}
-    if to in _MENTION_BROADCAST or mentions & _MENTION_BROADCAST:
+    if recipients & _MENTION_BROADCAST or mentions & _MENTION_BROADCAST:
         return True
-    return not to and not mentions
+    return not recipients and not mentions
 
 
 def message_involves_seat(msg, seat):
@@ -7125,10 +7174,10 @@ def message_involves_seat(msg, seat):
     target = (seat or "").strip().lower()
     if not target:
         return False
-    to = (msg.get("to") or "").strip().lower()
+    recipients = _to_recipient_set(msg.get("to") or "")
     frm = (msg.get("from") or "").strip().lower()
     mentions = {h.lower() for h in (msg.get("mentions") or [])}
-    if to == target or target in mentions:
+    if target in recipients or target in mentions:
         return True
     return frm == target and not is_board_broadcast(msg)
 
@@ -7208,7 +7257,9 @@ def _visible_after_join(msgs, owner, joined):
     """
     if not joined:
         return msgs  # every pre-existing agent: unchanged, by construction
-    return [m for m in msgs if m.get("to") == owner or m.get("at", "") >= joined]
+    target = (owner or "").lower()
+    return [m for m in msgs
+            if target in _to_recipient_set(m.get("to")) or m.get("at", "") >= joined]
 
 
 def _seen_counts(seen_ids):
@@ -7459,21 +7510,35 @@ def cmd_msg(a, board):
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
                      task=bool(getattr(a, "task", False)))
     unknown = m.pop("_unregistered_implicit", None)
+    explicit_unknown = m.pop("_unregistered_explicit", None) or []
+    dropped = m.pop("_unregistered_dropped", None) or []
     if unknown:
         print("WARNING: @handle %s is not a registered agent, message broadcast."
               % unknown)
+    for handle in explicit_unknown:
+        print("WARNING: --to %s is not a registered agent." % handle)
+    dest = (m.get("to") or "").strip()
+    for handle in dropped:
+        print("WARNING: @handle %s is not a registered agent, directed to %s."
+              % (handle, dest))
     print("posted: " + fmt_msg(m))
-    to = (m.get("to") or "").strip()
-    if to and _message_wakes_seat(board, to, m):
+    sa = None
+    mid = _msg_id(m)
+    for to in _split_to_tokens(m.get("to") or ""):
+        if to.lower() in _MENTION_BROADCAST:
+            continue
+        if not _message_wakes_seat(board, to, m):
+            continue
         harness = _seat_harness(board, to)
-        sa = _session_adapters()
-        mid = _msg_id(m)
+        if sa is None:
+            sa = _session_adapters()
         label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
                              message_id=mid)
         if _should_poke_persist(label) and _poke_persist_watch(board, to):
             label = "watch-poked"
         print("wake: %s -> %s" % (to, label))
-        _safe(lambda: _note_native_wake_result(board, to, label, mid), None)
+        _safe(lambda to=to, label=label: _note_native_wake_result(
+            board, to, label, mid), None)
 
 
 def _seat_harness(board, seat):
@@ -13875,10 +13940,10 @@ def _epics_snapshot(board, tickets):
 
 
 def _message_recipients(msg):
-    to = (msg.get("to") or "").strip()
+    tokens = _split_to_tokens(msg.get("to") or "")
     mentions = msg.get("mentions") or []
-    if to:
-        return [to]
+    if tokens:
+        return tokens
     if mentions:
         return list(mentions)
     return []
