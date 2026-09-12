@@ -10891,8 +10891,10 @@ def cmd_watch(a, board):
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
                TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
-    import threading
-    stop_event = threading.Event()
+    import select
+    poke_read, poke_write = os.pipe()
+    os.set_blocking(poke_read, False)
+    os.set_blocking(poke_write, False)
     stop = {"now": False}
     persist = bool(getattr(a, "persist", False))
     max_runs = int(getattr(a, "max_runs", 1) or 0)
@@ -10900,19 +10902,30 @@ def cmd_watch(a, board):
         max_runs = 0
     stop_cond = STOP_CONDITION if max_runs else "until spawn --stop or SIGTERM (--persist)"
 
-    class _WatchPoke(Exception):
-        """SIGUSR1: skip the rest of the poll wait; do not stop the loop."""
-
     def _term(signum, frame):
         stop["now"] = True
-        stop_event.set()
         raise InterruptedError()
 
     def _usr1(signum, frame):
-        raise _WatchPoke()
+        # The interpreter writes this signal to poke_write through
+        # set_wakeup_fd below. Returning normally is essential: raising here
+        # used to let _WatchPoke escape proc.wait() and kill the watcher.
+        pass
 
     signal.signal(signal.SIGTERM, _term)
     signal.signal(signal.SIGUSR1, _usr1)
+    previous_wakeup_fd = signal.set_wakeup_fd(poke_write, warn_on_full_buffer=False)
+
+    def drain_pokes():
+        """Coalesce all queued SIGUSR1 bytes into one board rescan."""
+        while True:
+            try:
+                if not os.read(poke_read, 4096):
+                    return
+            except BlockingIOError:
+                return
+            except OSError:
+                return
 
     def log(line):
         try:
@@ -10932,6 +10945,10 @@ def cmd_watch(a, board):
                 wake_mode, every)), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
+            # Consume every queued edge at the start of one scan. A signal that
+            # races this drain remains readable and forces another scan after
+            # the current child, while the message itself stays durable.
+            drain_pokes()
             try:
                 os.unlink(_watch_poke_file(board, owner))
             except OSError:
@@ -11159,14 +11176,14 @@ def cmd_watch(a, board):
                 sys.exit(0 if actionable(p) else 1)
             wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
-            try:
-                if stop_event.wait(timeout=wait):
-                    break
-            except _WatchPoke:
+            if select.select([poke_read], [], [], wait)[0]:
                 continue
     except InterruptedError:
         pass
     finally:
+        signal.set_wakeup_fd(previous_wakeup_fd)
+        os.close(poke_read)
+        os.close(poke_write)
         _safe(lambda: _finalize_active_watch_run(board, owner), None)
         if lock:
             try:
