@@ -151,8 +151,8 @@ def test_concurrent_checkins_do_not_lose_a_write(board, monkeypatch):
     try:
         t = threading.Thread(target=lambda: pkg.checkin(b, "bob"), name="heartbeat")
         t.start()
-        assert b_read.wait(5), "packaged checkin never reached the root read"
-        owning.cmd_limit(Args(), b)
+        assert b_read.wait(5), "packaged checkin never reached the agent record read"
+        pkg.cmd_limit(Args(), b)
         writer_done.set()
         t.join(10)
         assert not t.is_alive(), "heartbeat thread hung"
@@ -178,11 +178,12 @@ def test_cli_py_defines_no_second_checkin_or_apply_body():
             pytest.fail("cli.py still carries %s" % node.name)
 
 
-def test_packaged_checkin_is_the_root_function():
+def test_packaged_checkin_is_the_canonical_module():
     pkg = _load_pkg()
     src = Path(pkg.checkin.__code__.co_filename).resolve()
-    assert src == (ROOT / "tickets.py").resolve(), src
+    assert src == (ROOT / "src" / "ticket_board" / "agent_checkin.py").resolve(), src
     assert pkg.checkin.__name__ == "checkin"
+    assert pkg.checkin.__module__ == "ticket_board.agent_checkin"
 
 
 def test_python_m_ticket_board_checkin_preserves_six_fields(board):

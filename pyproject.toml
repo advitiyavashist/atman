@@ -19,6 +19,9 @@ contracts = ["pytest>=7", "jsonschema>=4.18", "pyyaml>=6"]
 [project.scripts]
 tickets = "ticket_board.cli:main"
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -1344,60 +1344,12 @@ def _bind_agent_ticket(board, agent, tid):
 
 
 def checkin(board, owner, ticket=None, note=""):
-    """Record where this agent is working: cwd, worktree root, branch, sha."""
-    _state, _mismatch = _git_state_raw()
-    g = _state or {}
-    # git_state and _current_ticket shell out; keep them off the critical section.
-    fields = {
-        "owner": owner,
-        "cwd": os.getcwd(),
-        "worktree": g.get("top", ""),
-        "branch": g.get("branch", ""),
-        "sha": g.get("sha", ""),
-        "dirty": g.get("dirty", 0),
-        # T-243: cwd above is recorded straight from os.getcwd() with no git
-        # resolution in its path, so it stays trustworthy even here.
-        "git_mismatch": bool(_mismatch),
-        "ticket": ticket if ticket is not None else _current_ticket(board, owner),
-        "note": note,
-        "seen": now(),
-    }
-
-    def _apply(rec):
-        # T-278 owns the WRITE (read-modify-write inside the flock); T-244 owns
-        # the inbox_seen STAMP. Resolving this toward the T-244 side would
-        # restore the unlocked json.dump/os.replace that T-278 exists to
-        # remove, so the stamp moves inside the lambda instead of the write
-        # moving back out.
-        rec.update(fields)
-        # NO inbox_seen STAMP HERE, and its absence is the fix, not an omission.
-        #
-        # T-244 stamped inbox_seen = now() at an agent's first check-in. Its
-        # target was real -- unread()'s `if since and (...)` treats since=""
-        # as "skip the archive check", which is backwards for the agent with
-        # the least history to fall back on -- but the mechanism overloaded
-        # inbox_seen to mean two different things: "the newest mail this agent
-        # has been SHOWN" (a receipt) and "when this agent APPEARED" (a clock).
-        #
-        # Once T-327 landed joined_at, that second meaning has its own field,
-        # and keeping the stamp is actively destructive: a message sent
-        # `--to <name>` BEFORE the seat joins is older than the stamp and is
-        # therefore never delivered. Posting the brief first is exactly how
-        # seats get briefed on this board, and T-327 measured and rejected
-        # this same regression (test_join_does_not_destroy_a_brief_posted_
-        # before_the_seat_existed, which the stamp turns red).
-        #
-        # So inbox_seen goes back to being a pure receipt that starts empty,
-        # T-327's joined_at owns the flood policy, and T-244's actual defect
-        # is fixed where its own docstring says it lives: at the since=""
-        # branch in _inbox_scan, which now reads the archives for an agent
-        # that has never read anything instead of skipping them.
-
-    # Other commands keep their own state in this record (inbox_seen, limit,
-    # stop_blocks); a check-in must not erase it or every watch poll re-wakes
-    # the agent. rec.update preserves them against the ORDERING hazard; the
-    # lock in _agent_update is what preserves them against the CONCURRENCY one.
-    return _agent_update(board, owner, _apply)
+    """Shim: canonical flocked checkin lives in the packaged wheel (T-836)."""
+    src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from ticket_board.agent_checkin import checkin as _packaged_checkin
+    return _packaged_checkin(board, owner, ticket=ticket, note=note)
 
 
 def _current_ticket(board, owner):
