@@ -1,0 +1,287 @@
+{
+  "contract_version": "atman-core/v1",
+  "oracle_revision": "7b49b4aa3bab82793e56d8696ab8ab9606327927",
+  "corpus_sha256": "d104d850369aa04bbd89c102c57a96b1b4d5619c9394b4e4bab03ee7521c796c",
+  "implementation_command": [
+    "python3",
+    "${REPO}/tickets.py"
+  ],
+  "storage_adapter_command": [
+    "python3",
+    "${REPO}/tools/python_storage_oracle.py"
+  ],
+  "cases": [
+    {
+      "id": "atomic-claim-eight-way",
+      "area": "storage.atomic-claims",
+      "captures": {
+        "race": {
+          "successes": 1,
+          "failures": 7,
+          "exit_codes": [
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        "claimed-state": {
+          "json": {
+            "status": "claimed"
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "dependency-ordering",
+      "area": "dependencies",
+      "captures": {
+        "blocked-detail": {
+          "json": {
+            "status": "open",
+            "deps.0": "T-001"
+          }
+        },
+        "unblocked-detail": {
+          "json": {
+            "status": "claimed",
+            "deps.0": "T-001"
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "bounded-objective",
+      "area": "objectives",
+      "captures": {
+        "set": {
+          "files": {
+            "${BOARD}/objective.json": {
+              "state": "active",
+              "done": false,
+              "exit_criterion": "all conformance cases pass"
+            }
+          }
+        },
+        "achieve": {
+          "files": {
+            "${BOARD}/objective.json": {
+              "state": "achieved",
+              "done": true,
+              "evidence": "golden report passed"
+            }
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "task-message-wake-ack",
+      "area": "messages.mentions.wakes",
+      "captures": {
+        "pending": {
+          "json": {
+            "pending": true,
+            "wake_reason": "task_messages"
+          }
+        },
+        "after-ack": {
+          "exit_code": 1,
+          "json": {
+            "pending": false,
+            "wake_reason": "none"
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "durable-identity-and-remote-hook",
+      "area": "identity.hooks",
+      "captures": {
+        "identity": {
+          "json": {
+            "agent_id": "grok-worker"
+          }
+        },
+        "install": {
+          "files": {
+            "${ROOT}/tickets-grok-worker.hooks.json": {
+              "agent": "grok-worker"
+            }
+          }
+        },
+        "wrong-ambient": {
+          "json": {
+            "agent_id": "grok-worker"
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "duplicate-delivery",
+      "area": "messages.duplicate-delivery",
+      "captures": {
+        "replay": {
+          "json": {
+            "request_replay_equal": true,
+            "delivery_count": 1,
+            "wake_job_count": 1,
+            "wake_deduplicated": true
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "runner-lease-fencing",
+      "area": "leases.clock-skew",
+      "captures": {
+        "lease": {
+          "json": {
+            "first_epoch": 1,
+            "live_conflict": "run_already_active",
+            "takeover_epoch": 2,
+            "stale_heartbeat": "run_already_active",
+            "holder": "rnr_second01"
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "crash-orphan-partial-write",
+      "area": "storage.crash-recovery",
+      "captures": {
+        "read": {
+          "output_tokens": {
+            "T-001": true,
+            "Committed work": true
+          },
+          "files": {
+            "${BOARD}/T-001.json": {
+              "status": "open"
+            }
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "backup-restore-recovery",
+      "area": "recovery",
+      "captures": {
+        "restored-list": {
+          "output_tokens": {
+            "Before snapshot": true,
+            "After snapshot": false
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "knowledge-reference",
+      "area": "knowledge.references",
+      "captures": {
+        "exact-ref": {
+          "json": {
+            "nodes.0.id": "failure.conformance"
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "knowledge-path-containment",
+      "area": "knowledge.symlink-path",
+      "captures": {
+        "reject": {
+          "exit_code": 1,
+          "output_tokens": {
+            "symlink escapes the knowledge graph root": true
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "knowledge-future-clock",
+      "area": "knowledge.clock-skew",
+      "captures": {
+        "reject": {
+          "exit_code": 1,
+          "output_tokens": {
+            "future": true
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "legacy-board-read",
+      "area": "backwards-compatibility",
+      "captures": {
+        "list": {
+          "output_tokens": {
+            "T-001": true,
+            "Legacy task": true
+          }
+        },
+        "show": {
+          "json": {
+            "id": "T-001",
+            "status": "open",
+            "title": "Legacy task",
+            "deps": []
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "cli-json-and-errors",
+      "area": "cli.json-errors",
+      "captures": {
+        "show": {
+          "json": {
+            "id": "T-001",
+            "status": "open",
+            "role": "backend"
+          }
+        },
+        "missing": {
+          "exit_code": 1,
+          "output_tokens": {
+            "T-999": true
+          }
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "board-read-performance",
+      "area": "performance",
+      "captures": {},
+      "metrics": {
+        "warm-board": {
+          "samples": 7,
+          "p50_ms": 128.89,
+          "p95_ms": 141.705,
+          "p95_under_ms": 1000.0
+        }
+      }
+    }
+  ],
+  "summary": {
+    "passed": 15,
+    "failed": 0
+  }
+}

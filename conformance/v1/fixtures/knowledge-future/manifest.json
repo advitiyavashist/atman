@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "name": "atman-core-future-clock",
+  "context_budget_chars": 1200
+}
