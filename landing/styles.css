@@ -770,6 +770,11 @@ footer > a:last-child:hover { color: var(--fg); }
   .bar, main, footer { padding-left: 1rem; padding-right: 1rem; }
   .trust li { overflow-wrap: anywhere; }
   nav a:not(.nav-contact) { display: none; }
+  .product-jumps {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.45rem 0.75rem;
+  }
   .product-jumps a { white-space: nowrap; }
   nav {
     position: absolute;
