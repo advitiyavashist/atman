@@ -277,6 +277,9 @@ tracked when the team needs them to survive clones; see the
 - [Messages and runners](docs/messages-and-runners.md)
 - [Design notes](docs/design-notes.md)
 - [Contributing](CONTRIBUTING.md)
+- [Community](docs/community.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Atman Core architecture decision](docs/architecture/ADR-001-go-core.md)
 
-Atman is MIT licensed.
+[License](LICENSE) (MIT). Public testers: fork, branch off `main`, and open a
+PR — see [Community](docs/community.md).
