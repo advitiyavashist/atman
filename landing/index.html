@@ -24,9 +24,10 @@
       <span class="wordmark">atman</span>
     </a>
     <nav aria-label="Page">
-      <a href="#philosophy">Philosophy</a>
-      <a href="#how">How it works</a>
-      <a href="#start">Start</a>
+      <a href="#workflow">Graph</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="#app">App</a>
+      <a href="#per-turn">Efficiency</a>
       <a class="nav-contact" href="https://github.com/advitiyavashist/atman/issues" rel="noopener">Contact us</a>
       <a class="nav-github" href="https://github.com/advitiyavashist/atman" rel="noopener">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
@@ -48,6 +49,12 @@
           <li>Human review</li>
           <li>MIT licensed</li>
         </ul>
+        <p class="product-jumps" aria-label="First-class product areas">
+          <a href="#workflow">Workflow graph</a>
+          <a href="#roadmap">Engineering roadmap</a>
+          <a href="#app">The app</a>
+          <a href="#per-turn">Per-turn efficiency</a>
+        </p>
       </div>
 
       <aside class="command-board" id="board" aria-label="Example Atman command board and team roster">
@@ -163,6 +170,105 @@
       </ul>
     </section>
 
+    <section id="workflow" class="feature" aria-labelledby="workflow-title">
+      <div class="section-heading">
+        <p class="eyebrow">workflow dependency graph</p>
+        <h2 id="workflow-title">Work stays invisible until its dependencies are done.</h2>
+        <p>The live view is <code>tickets ui</code> Work → Graph. Edges are real <code>--after</code> links, not a title dump. This page is not a hosted board — the graph runs on your machine.</p>
+      </div>
+      <ol class="workflow-map" aria-label="Example workflow dependency graph">
+        <li class="done">
+          <span class="wid">T-001</span>
+          <strong>Land the runtime</strong>
+          <span class="wstate">done</span>
+        </li>
+        <li class="ready">
+          <span class="edge" aria-hidden="true"></span>
+          <span class="wid">T-002</span>
+          <strong>Connect a first seat</strong>
+          <span class="wstate">ready · after T-001</span>
+        </li>
+        <li class="wait">
+          <span class="edge" aria-hidden="true"></span>
+          <span class="wid">T-003</span>
+          <strong>Review the handoff</strong>
+          <span class="wstate">waiting on T-002</span>
+        </li>
+      </ol>
+    </section>
+
+    <section id="app" class="feature" aria-labelledby="app-title">
+      <div class="product-heading">
+        <div class="section-heading">
+          <p class="eyebrow">the app · first session</p>
+          <h2 id="app-title">tickets ui is the app. It stays on your machine.</h2>
+        </div>
+        <p>Clone, <code>tickets connect</code> as <code>atman-&lt;seat&gt;</code>, then <code>tickets ui</code>. Objective, Team, Work, Intervene. This is a product capture, not a hosted demo and not fabricated activity.</p>
+      </div>
+      <figure class="product-frame">
+        <div class="frame-bar" aria-hidden="true">
+          <span></span><span></span><span></span>
+          <p>tickets ui · local</p>
+        </div>
+        <img src="assets/t732-dashboard-1440.png" srcset="assets/t732-dashboard-390.png 390w, assets/t732-dashboard-768.png 768w, assets/t732-dashboard-1440.png 1440w" sizes="(max-width: 940px) 100vw, min(74rem, 92vw)" alt="Atman dashboard showing the objective, agent team, work lanes, and review queue" width="1440" height="1000">
+        <figcaption>Checked-in product capture. No fabricated activity or cloud telemetry. The live board is not on this site.</figcaption>
+      </figure>
+    </section>
+
+    <section id="per-turn" class="feature" aria-labelledby="per-turn-title">
+      <div class="section-heading">
+        <p class="eyebrow">per-turn efficiency</p>
+        <h2 id="per-turn-title">Unknown is not zero until a done ticket reports.</h2>
+        <p>Median turns and measured cost stay blank on purpose. A missing number is unmeasured, not a win. No sample scores.</p>
+      </div>
+      <dl class="turns-panel" aria-label="Per-turn efficiency, unmeasured until a done ticket reports">
+        <div>
+          <dt>median turns</dt>
+          <dd>—</dd>
+        </div>
+        <div>
+          <dt>measured cost</dt>
+          <dd>—</dd>
+        </div>
+      </dl>
+      <p class="promise-note">Unknown until a done ticket reports. Unknown is not zero.</p>
+    </section>
+
+    <section id="roadmap" class="feature" aria-labelledby="roadmap-title">
+      <div class="section-heading">
+        <p class="eyebrow">engineering roadmap</p>
+        <h2 id="roadmap-title">The control plane stays. The intelligence behind route improves.</h2>
+        <p><code>tickets route</code> is stable. Later levels unlock only when the trajectory log can support them. No invented ship dates.</p>
+      </div>
+      <ol class="roadmap-grid">
+        <li>
+          <span>V0 · today</span>
+          <h3>Rules, with a named prior when data is thin</h3>
+          <p>Role, cost, and load pick the seat. Shadow compares that rule to a learned or prior pick. Support n=0 prints the prior — it does not invent a median.</p>
+        </li>
+        <li>
+          <span>V1</span>
+          <h3>Capability + cost + task → agent</h3>
+          <p>Still a published rule, with richer features. Needs stable <code>needs</code> / <code>can</code> and enough finished tickets that an ablation is not noise.</p>
+        </li>
+        <li>
+          <span>V2</span>
+          <h3>Learned router</h3>
+          <p>The model behind <code>route</code> is fit on trajectories, not a median table. Organic <code>run_end</code> only — unmeasured stays omitted.</p>
+        </li>
+        <li>
+          <span>V3</span>
+          <h3>Model and reasoning effort</h3>
+          <p>The router also picks model and effort when those fields are present on events, not omitted.</p>
+        </li>
+        <li>
+          <span>V4</span>
+          <h3>Agent, model, compute, text vs latent</h3>
+          <p>Budget and comms-mode fields when the harness reports them. A field that does not exist yet is not defaulted.</p>
+        </li>
+      </ol>
+    </section>
+
     <section id="surfaces" class="surfaces" aria-labelledby="surfaces-title">
       <div class="section-heading">
         <p class="eyebrow">the team surface</p>
@@ -199,24 +305,6 @@
           <p>When a session ends or a seat hits a limit, the claim, blocker, and next step stay on the board. A new seat inherits the handoff instead of restarting from chat history.</p>
         </li>
       </ul>
-    </section>
-
-    <section class="product" aria-labelledby="product-title">
-      <div class="product-heading">
-        <div class="section-heading">
-          <p class="eyebrow">checked-in capture</p>
-          <h2 id="product-title">The live board stays on your machine.</h2>
-        </div>
-        <p>Follow the objective, see who holds what, read the handoff, and clear the blocker. This is a product capture, not a hosted demo and not fabricated activity.</p>
-      </div>
-      <figure class="product-frame">
-        <div class="frame-bar" aria-hidden="true">
-          <span></span><span></span><span></span>
-          <p>atman / overview</p>
-        </div>
-        <img src="assets/t732-dashboard-1440.png" srcset="assets/t732-dashboard-390.png 390w, assets/t732-dashboard-768.png 768w, assets/t732-dashboard-1440.png 1440w" sizes="(max-width: 940px) 100vw, min(74rem, 92vw)" alt="Atman dashboard showing the objective, agent team, work lanes, and review queue" width="1440" height="1000">
-        <figcaption>Checked-in product capture. No fabricated activity or cloud telemetry.</figcaption>
-      </figure>
     </section>
 
     <section class="boundary" aria-labelledby="boundary-title">

@@ -12,6 +12,8 @@
 
 <p align="center">
   <a href="https://github.com/advitiyavashist/atman/issues">Contact us</a>
+  ·
+  <a href="https://advitiyavashist.github.io/atman/">Site</a>
 </p>
 
 - **Integration.** Connect Claude Code, Codex, Cursor, or your own harness — the seat should feel like using Atman, not the provider.

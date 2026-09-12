@@ -4,6 +4,13 @@ Static page. No build step, no JavaScript, no framework. First-seat examples
 use CSS radio tabs so the ordered providers (Claude Code, Codex, Cursor, Grok
 Bot, custom) can be inspected without a script.
 
+**Live URL (renders as HTML, including mobile Safari):**
+https://advitiyavashist.github.io/atman/
+
+Do not use jsDelivr, raw GitHub, or `landing/index.html` as the public URL —
+those serve `text/plain`. GitHub Pages publishes this directory as the site
+root (`text/html`).
+
 Copy lock (T-787):
 
 - **Promise:** Atman coordinates the agents you already run.
@@ -13,6 +20,17 @@ Copy lock (T-787):
 - **Integration / product flow / efficiency / workflow dependency graph:** one
   sentence each, immediately after philosophy — not buried.
 - **Contact us:** GitHub issues (`CONTRIBUTING.md`). Do not invent an email.
+
+First-class sections (T-794), not buried in the four-sentence grid:
+
+1. **Workflow dependency graph** — Work stays invisible until its dependencies
+   are done. Live view is local `tickets ui` Work → Graph.
+2. **Engineering roadmap** — V0 today through V4. Control plane stays;
+   intelligence behind `tickets route` improves. No invented ship dates.
+3. **The app** — `tickets ui` / first session (`tickets connect` as
+   `atman-<seat>`). Local BYOA, not a hosted cloud demo.
+4. **Per-turn efficiency** — `—` until a done ticket reports. Unknown is not
+   zero.
 
 Spike **Clone → `tickets connect` as `atman-<seat>` → `tickets ui`**. Fewest turns and measured cost
 stay `—` until a done ticket reports. The dashboard image is a checked-in product
@@ -24,8 +42,8 @@ Formation-dot mark. No lime, grid wallpaper, or Claude-only onboarding.
 The dashboard image lives under `landing/assets/` so a deploy that publishes
 only this directory can still load the capture.
 
-**No custom domain is registered.** Public URL is the GitHub repo; serve
-`landing/` locally for preview.
+**No custom domain is registered.** The public site is GitHub Pages on
+`advitiyavashist/atman`.
 
 ## Open locally
 
@@ -39,7 +57,9 @@ Then open `/` on the address printed by Python. This is local preview only.
 
 ## Deploy static
 
-Publish the `landing/` directory as the site root. The product capture is
-`assets/t732-dashboard-1440.png` next to `index.html`. GitHub Pages is optional.
+GitHub Actions (`.github/workflows/pages.yml`) publishes `landing/` as the
+GitHub Pages root. The product capture is `assets/t732-dashboard-1440.png`
+next to `index.html`.
 
-**No custom domain is registered.** Do not invent one.
+**No custom domain is registered.** Do not invent one. Do not restore
+`atman-ai.vercel.app`.
