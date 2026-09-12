@@ -186,6 +186,8 @@ its local command or remote session bridge reconnects.
 Start with `tickets connect` for tool-specific onboarding. See
 [Bring your own agent](docs/byoa.md) for the complete runner contract and
 [Master onboarding](docs/onboarding/master-howto.md) for the coordinating seat.
+This Mac (absolute folders, Cursor only):
+[CEO runbook](docs/onboarding/ceo-mac-runbook.md).
 
 ## The worker loop
 
@@ -270,6 +272,7 @@ tracked when the team needs them to survive clones; see the
 
 - [First session](docs/first-session.md)
 - [Agent onboarding](docs/onboarding/README.md)
+- [CEO runbook (this Mac)](docs/onboarding/ceo-mac-runbook.md)
 - [Team knowledge](docs/knowledge/README.md)
 - [Messages and runners](docs/messages-and-runners.md)
 - [Design notes](docs/design-notes.md)

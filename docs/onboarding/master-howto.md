@@ -3,6 +3,9 @@
 **You are onboarding.** Say that first. This is not a ticket claim and not a
 merge pass.
 
+On this Mac, copy-paste [ceo-mac-runbook.md](ceo-mac-runbook.md) (`python3`
+on a real `tickets.py`; PATH `tickets` is a stale shim).
+
 A new board is set up in this order: **name → integrations → announce that
 name on the board → ask for tasks and the objective**. Probe every catalog
 row with `tickets harness available` (missing is a row). It auto-checks
