@@ -42,21 +42,20 @@ def _start_terminal():
 
 def test_hero_is_control_plane_not_turns_or_cost():
     lowered = HERO.lower()
-    assert "local control plane" in lowered
-    assert "one repo" in lowered
+    assert "coordinates the agents you already run" in lowered
     assert "fewest turns" not in lowered
     assert "measured cost" not in lowered
 
 
 def test_turns_and_cost_are_secondary_honesty_not_fake_metrics():
-    promise = LANDING[LANDING.index('class="promise"') : LANDING.index('class="trust"')]
-    assert "fewest turns" in promise.lower()
-    assert "measured cost" in promise.lower()
-    assert promise.count("—") >= 2
-    assert "$0" not in promise
-    assert "0.0" not in promise
-    assert "Unknown until a done ticket reports" in promise
-    assert HERO not in promise or "fewest turns" not in HERO.lower()
+    efficiency = LANDING[LANDING.index('id="efficiency"') : LANDING.index('id="graph"')]
+    assert "fewest turns" in efficiency.lower()
+    assert "measured cost" in efficiency.lower()
+    assert efficiency.count("—") >= 2
+    assert "$0" not in efficiency
+    assert "0.0" not in efficiency
+    assert "Unknown until a done ticket reports" in efficiency
+    assert "fewest turns" not in HERO.lower()
 
 
 def test_first_seat_examples_appear_in_order():
@@ -70,12 +69,12 @@ def test_start_is_clone_any_seat_then_tickets_ui():
     term = _start_terminal()
     assert "git clone https://github.com/advitiyavashist/atman.git" in start
     assert "any first seat" in start.lower() or "any first seat" in LANDING.lower()
-    assert "tickets quickstart --agent alice --roles backend" in term
-    assert "tickets hooks claude --agent alice" in term
+    assert "tickets connect" in term
+    assert "atman-ceo" in term
     assert "tickets ui" in term
-    assert term.index("tickets quickstart") < term.index("tickets hooks claude")
-    assert term.index("tickets hooks claude") < term.index("tickets ui")
+    assert term.index("tickets connect") < term.index("tickets ui")
     assert "tickets next" not in term
+    assert "alice" not in term
     for name in SEATS:
         assert name in start or name in LANDING
 
@@ -93,8 +92,9 @@ def test_example_roster_does_not_lock_claude_as_the_only_first_seat():
 
 
 def test_brahman_is_research_not_required():
-    assert "Brahman · research" in LANDING
-    assert "not required" in LANDING.lower()
+    assert "Brahman · research" not in LANDING
+    assert "multi-agent framework" in LANDING.lower()
+    assert "not required for the first win" not in LANDING.lower()
 
 
 def test_keeps_local_mit_formation_dots_and_distinct_dark_brand():
