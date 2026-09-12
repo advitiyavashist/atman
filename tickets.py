@@ -1553,6 +1553,18 @@ def _sounding():
         return m
 
 
+def _seat_schedule():
+    try:
+        from ticket_board import seat_schedule as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import seat_schedule as m
+        return m
+
+
 def _ticket_lane(t):
     return _sounding().ticket_lane(t)
 
@@ -2224,6 +2236,114 @@ def cmd_plan_status(a, board):
             with open(path, "w") as f:
                 f.write(body)
             print("wrote Plan section to %s" % path)
+
+
+def cmd_schedule(a, board):
+    """Cron recurring wake for a named seat. Persist/hooks poke; no product spawn."""
+    S = _seat_schedule()
+    data = S.load_schedule(board)
+    seats = data.setdefault("seats", {})
+    seat = (getattr(a, "seat", "") or "").strip()
+    cron = (getattr(a, "cron", "") or "").strip()
+    every_spec = (getattr(a, "every", "") or "").strip()
+    if getattr(a, "uninstall", False):
+        found = S.remove_crontab(board)
+        print("crontab %s for this board" % ("removed" if found else "had no tickets-schedule line"))
+        return
+    if getattr(a, "due", False):
+        now_iso = now()
+        due = S.due_seats(data, now_iso)
+        if not due:
+            print("no due schedules")
+            return
+        now_dt = S.parse_iso(now_iso)
+        for name in due:
+            wf = load_workforce(board)
+            if name not in wf:
+                print("schedule: skip %s (not joined)" % name)
+                continue
+            ns = argparse.Namespace(
+                owner="", text="scheduled wake", to=name,
+                re=getattr(a, "re", "") or "", task=True)
+            cmd_msg(ns, board)
+            entry = seats.setdefault(name, {})
+            entry["last"] = now_iso
+            entry["next"] = S.bump_next(entry, now_dt)
+            entry["enabled"] = True
+        S.save_schedule(board, data)
+        return
+    if getattr(a, "list", False) or (
+            not seat and not cron and not every_spec
+            and not getattr(a, "remove", False)
+            and not getattr(a, "install", False)):
+        if not seats:
+            print("no scheduled seats")
+            return
+        print("%-16s %-22s %-22s %s" % ("seat", "when", "next", "last"))
+        for name, e in sorted(seats.items()):
+            when = ("every %ss" % e["every_sec"]) if e.get("every_sec") else (e.get("cron") or "-")
+            print("%-16s %-22s %-22s %s" % (
+                name, when[:22], (e.get("next") or "-"), (e.get("last") or "-")))
+        return
+    if getattr(a, "remove", False):
+        if not seat:
+            sys.exit("schedule --remove needs a seat")
+        if seat not in seats:
+            sys.exit("schedule: no entry for %s" % seat)
+        seats.pop(seat, None)
+        S.save_schedule(board, data)
+        print("removed schedule for %s" % seat)
+        if not seats:
+            S.remove_crontab(board)
+        return
+    if getattr(a, "install", False) and not seat and not cron and not every_spec:
+        path, line = S.upsert_crontab(board, os.path.realpath(__file__), sys.executable)
+        print("installed crontab (%s)" % path)
+        print(line)
+        return
+    if not seat:
+        sys.exit("schedule SEAT --cron '*/15 * * * *'  or  schedule SEAT --every 15m")
+    wf = load_workforce(board)
+    if seat not in wf:
+        sys.exit("schedule: unknown seat %s (tickets join first)" % seat)
+    if cron and every_spec:
+        sys.exit("schedule: pass --cron or --every, not both")
+    if not cron and not every_spec:
+        sys.exit("schedule %s needs --cron or --every" % seat)
+    every_sec = 0
+    if every_spec:
+        try:
+            every_sec = S.parse_every(every_spec)
+        except ValueError as e:
+            sys.exit(str(e))
+        if every_sec <= 0:
+            sys.exit("schedule --every must be > 0")
+    if cron:
+        try:
+            S.cron_match(cron, datetime.now(timezone.utc))
+        except ValueError as e:
+            sys.exit("schedule: %s" % e)
+    now_iso = now()
+    now_dt = S.parse_iso(now_iso)
+    entry = seats.get(seat) or {}
+    entry["enabled"] = True
+    entry["by"] = whoami()
+    entry["at"] = now_iso
+    if every_sec:
+        entry["every_sec"] = every_sec
+        entry.pop("cron", None)
+    else:
+        entry["cron"] = cron
+        entry.pop("every_sec", None)
+    entry["next"] = now_iso  # due on the next `schedule --due`
+    seats[seat] = entry
+    S.save_schedule(board, data)
+    print("scheduled %s %s next=%s (persist/hooks wake; no product spawn)" % (
+        seat, ("every %s" % every_spec) if every_spec else "cron %s" % cron, entry["next"]))
+    if getattr(a, "install", False):
+        path, line = S.upsert_crontab(board, os.path.realpath(__file__), sys.executable)
+        print("installed crontab (%s)" % path)
+        print(line)
 
 
 def cmd_discard(a, board):
@@ -15577,6 +15697,20 @@ def main():
     c = sub.add_parser("pr-sync", help="IN REVIEW + PR: merged+ancestor → ready to close (does not tickets done)")
     c.add_argument("id", nargs="?", default="")
     c.set_defaults(fn=cmd_pr_sync)
+
+    c = sub.add_parser("schedule", help="cron recurring wake for a named seat (persist poke; no product spawn)")
+    c.add_argument("seat", nargs="?", default="", help="seat to wake")
+    c.add_argument("--cron", default="", help='5-field UTC cron, e.g. "*/15 * * * *"')
+    c.add_argument("--every", default="", help="interval: 30s, 15m, 1h")
+    c.add_argument("--list", action="store_true")
+    c.add_argument("--remove", action="store_true")
+    c.add_argument("--due", action="store_true", help="fire due entries (crontab runs this)")
+    c.add_argument("--install", action="store_true", help="install crontab line for schedule --due")
+    c.add_argument("--uninstall", action="store_true")
+    c.add_argument("--re", default="", help="ticket id on the wake message")
+    c.set_defaults(fn=cmd_schedule)
+
+    c = sub.add_parser("plan-status", help="capture / ready / waiting-on-merge / blocked-HOLD-discarded")
 
     c = sub.add_parser("plan-status", help="capture / ready / waiting-on-merge / blocked-HOLD-discarded")
     c.add_argument("--write-master", action="store_true", help="write a Plan section into MASTER.md")

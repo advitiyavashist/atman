@@ -112,8 +112,10 @@ leaves the wake queued and visible in `tickets ui`; reconnecting can claim it.
 Atman never substitutes Cursor, Claude, or Codex for a remote identity. Use
 `--wake-mode task-only` when the seat should run only for explicit `--task`
 messages, or `scheduled` when heartbeat and explicit task gates should drive a
-persistent adapter without ordinary DMs spending a turn. `scheduled` does not
-create a schedule; configure a heartbeat or external cadence separately.
+persistent adapter without ordinary DMs spending a turn. Recurring cadence
+is `tickets schedule SEAT --cron '*/15 * * * *'` (or `--every 15m`); crontab
+runs `tickets schedule --due`, which persist-pokes the seat and does not
+spawn a product job.
 
 This adapter protocol is part of the root/live `tickets.py` installed by
 `install.sh`. The current `pyproject.toml` entry point is the smaller core-board
