@@ -189,16 +189,19 @@ def test_walk_capture_sound_dispatch_pr_sync_retro(tmp_path):
 
     r = run(repo, "dispatch", tid, "--to", "worker-a", "--harness", "gemini",
             env=env, tmp_path=tmp_path)
-    # tid is done; use a fresh ready ticket for FAIL harness.
-    r = run(repo, "capture", "gemini should fail dispatch", env=env, tmp_path=tmp_path)
+    # tid is done; worker-a is free. Gemini records like the others.
+    r = run(repo, "capture", "gemini should record dispatch", env=env, tmp_path=tmp_path)
     gtid = r.stdout.split()[1]
     run(repo, "sound", gtid, "--notes",
         "cause=x; change=y; proof=pytest -q; deps=none; questions=",
         env=env, tmp_path=tmp_path)
     r = run(repo, "dispatch", gtid, "--to", "worker-a", "--harness", "gemini",
             env=env, tmp_path=tmp_path)
-    assert r.returncode != 0
-    assert "FAIL" in (r.stderr + r.stdout)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "harness=gemini" in (r.stderr + r.stdout)
+    assert "FAIL" not in (r.stderr + r.stdout)
+    show = run(repo, "show", gtid, env=env, tmp_path=tmp_path)
+    assert "harness=gemini" in show.stdout
 
 
 def test_plan_defaults_to_capture(tmp_path):
@@ -224,16 +227,21 @@ def test_plan_defaults_to_capture(tmp_path):
     assert "lane=ready" in r.stdout
 
 
-def test_harness_available_marks_gemini_fail(tmp_path):
+def test_harness_available_does_not_fail_gemini(tmp_path):
     repo, env = boot(tmp_path)
     env = dict(env)
     env["PATH"] = str(tmp_path / "empty-bin")
     (tmp_path / "empty-bin").mkdir(exist_ok=True)
     r = run(repo, "harness", "available", env=env, tmp_path=tmp_path)
     assert r.returncode == 0, r.stderr
-    assert "FAIL" in r.stdout
-    assert "list only" in r.stdout
     assert "gemini" in r.stdout
+    assert "list only" not in r.stdout
+    gemini_block = r.stdout[r.stdout.find("gemini"):]
+    assert "FAIL" not in gemini_block.split("\n")[0]
+    assert "FAIL" not in gemini_block.split("\n")[1]
+    env["TICKETS_HARNESS_FAIL"] = "gemini"
+    r = run(repo, "harness", "available", env=env, tmp_path=tmp_path)
+    assert "FAIL" in r.stdout
 
 
 PROVIDERS = ("cursor", "claude", "codex", "agy", "gemini", "devin", "grok")
@@ -267,11 +275,8 @@ def test_dispatch_records_each_catalog_harness(tmp_path):
         r = run(repo, "dispatch", tid, "--to", "seat-" + harness, "--harness", harness,
                 env=env, tmp_path=tmp_path)
         blob = r.stderr + r.stdout
-        if harness == "gemini":
-            assert r.returncode != 0, blob
-            assert "FAIL" in blob
-            continue
         assert r.returncode == 0, blob
+        assert "FAIL" not in blob
         assert "harness=%s" % harness in blob
         show = run(repo, "show", tid, env=env, tmp_path=tmp_path)
         assert "harness=%s" % harness in show.stdout
@@ -293,3 +298,29 @@ def test_hold_is_not_dispatchable(tmp_path):
     assert "HOLD" in (r.stderr + r.stdout)
     n = run(repo, "next", "--owner", "worker-a", env=env, tmp_path=tmp_path)
     assert tid not in n.stdout or n.returncode != 0
+
+
+def test_gemini_dispatch_records_without_product_spawn(tmp_path):
+    repo, env = boot(tmp_path)
+    env = dict(env)
+    env.pop("TICKETS_DISPATCH_NO_SPAWN", None)
+    r = run(repo, "join", "seat-gemini", "--roles", "backend",
+            "--harness", "gemini", env=env, tmp_path=tmp_path)
+    assert r.returncode == 0, r.stderr
+    r = run(repo, "capture", "gemini persist wake", env=env, tmp_path=tmp_path)
+    tid = r.stdout.split()[1]
+    run(repo, "sound", tid, "--notes",
+        "cause=x; change=y; proof=pytest -q; deps=none; questions=",
+        env=env, tmp_path=tmp_path)
+    r = run(repo, "dispatch", tid, "--to", "seat-gemini", "--harness", "gemini",
+            env=env, tmp_path=tmp_path)
+    blob = r.stdout + r.stderr
+    assert r.returncode == 0, blob
+    assert "harness=gemini" in blob
+    assert "spawn skipped" in blob
+    assert "no product job" in blob
+    assert "FAIL" not in blob
+    # Did not mint a persist watch / gemini product process.
+    agents = repo / ".tickets" / "agents"
+    if agents.exists():
+        assert not list(agents.glob("seat-gemini.watch.pid"))

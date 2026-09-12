@@ -31,8 +31,9 @@ tickets plan-status
 tickets dispatch T-NNN --to atman-foo --harness cursor
 ```
 
-Cursor-only spawns unless the operator chose another harness. `tickets harness
-available` FAIL rows (Gemini list-only; usage FAIL) are refused by dispatch.
+Cursor-only product-spawns unless the operator chose another harness. Gemini
+dispatch records `harness=gemini`; persist/hooks is the wake (no Gemini
+product job). `TICKETS_HARNESS_FAIL` usage rows are still refused.
 
 Workers still `tickets next` (atomic claim), implement, `tickets sync`,
 `tickets review T-id --notes "..." --pr N`. Coordinators do not write the

@@ -199,15 +199,17 @@ def fail_ids_from_env():
 
 
 def catalog_dispatch_fail(row):
-    """Return a reason string if this catalog row must not be dispatched."""
+    """Return a reason string if this catalog row must not be dispatched.
+
+    Gemini is not a special FAIL. TICKETS_HARNESS_FAIL / usage_status=FAIL
+    still refuse a seat. Dispatch of gemini records harness; persist/hooks
+    is the wake (no product job).
+    """
     hid = (row.get("id") or "").strip().lower()
     if hid in fail_ids_from_env():
         return "FAIL usage (%s in TICKETS_HARNESS_FAIL)" % hid
     if (row.get("usage_status") or "").upper() == "FAIL":
         return "FAIL usage row"
-    pol = (row.get("policy") or "").lower()
-    if hid == "gemini" or "list only" in pol:
-        return "FAIL list-only harness"
     return ""
 
 

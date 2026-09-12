@@ -2630,7 +2630,8 @@ survives agent restarts and timeouts.
 """ + ONBOARDING_STARTUP + """
 Walk name → integrations (`tickets harness available`) → announce that name
 on the board → ask for tasks and the objective. Do not spawn until they
-answer. Codex stays in the catalog with zero usage. Do not spawn Gemini.
+answer. Codex stays in the catalog with zero usage. Gemini dispatch records
+harness=gemini; persist/hooks is the wake (do not spawn a Gemini product job).
 No new Claude fable.
 
 ## Mission
