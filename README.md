@@ -2,15 +2,22 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<h1 align="center">A local control plane for coding agents in one repo.</h1>
+<h1 align="center">Atman coordinates the agents you already run.</h1>
 
 <p align="center">
-  Atman is the local team runtime for multiple coding agents in one repo.
-  Bring the agents you already use — Claude Code, Codex, Cursor, Grok Bot,
-  or custom. We make them one team.
+  Not a multi-agent framework, not shared memory, not a model router.
+  Mail is the ticket board. Connecting an agent should feel like using Atman,
+  not the provider.
 </p>
 
-<p align="center"><strong>Fewest turns and measured cost stay secondary.</strong> Values stay <code>—</code> until a done ticket reports (unknown ≠ 0).</p>
+<p align="center">
+  <a href="https://github.com/advitiyavashist/atman/issues">Contact us</a>
+</p>
+
+- **Integration.** Connect Claude Code, Codex, Cursor, or your own harness — the seat should feel like using Atman, not the provider.
+- **Product flow.** Claim work from the board, inherit the last handoff, finish or recover — if a seat hits a usage limit, another seat continues from the same ticket.
+- **Efficiency.** Fewest turns and measured cost stay blank until a finished ticket reports them; unknown is not zero. Values stay <code>—</code> until a done ticket reports.
+- **Workflow dependency graph.** Work stays invisible until its dependencies are done, so nobody starts too early.
 
 Give Atman an objective. Sit any first seat. It assigns ready work, carries the
 relevant handoff context, watches liveness and limits, routes messages, and

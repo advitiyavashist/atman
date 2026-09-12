@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Atman · local control plane for coding agents</title>
-  <meta name="description" content="A local control plane and team runtime for multiple coding agents in one repo. Sit any first seat: Claude Code, Codex, Cursor, Grok Bot, or custom. MIT.">
+  <title>Atman · coordinates the agents you already run</title>
+  <meta name="description" content="Atman coordinates the agents you already run. Not a multi-agent framework, not shared memory, not a model router. Mail is the ticket board. MIT.">
   <meta name="theme-color" content="#0c0e12">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
@@ -24,9 +24,10 @@
       <span class="wordmark">atman</span>
     </a>
     <nav aria-label="Page">
-      <a href="#surfaces">Surfaces</a>
-      <a href="#board">Team</a>
+      <a href="#philosophy">Philosophy</a>
+      <a href="#how">How it works</a>
       <a href="#start">Start</a>
+      <a class="nav-contact" href="https://github.com/advitiyavashist/atman/issues" rel="noopener">Contact us</a>
       <a class="nav-github" href="https://github.com/advitiyavashist/atman" rel="noopener">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
   </header>
@@ -34,24 +35,13 @@
   <main id="main">
     <section class="hero">
       <div class="hero-copy">
-        <p class="kicker">local team runtime · control plane</p>
-        <h1>A local control plane for coding agents in one repo.</h1>
-        <p class="lede">Bring the agents you already use. We make them one team. Sit any first seat — Claude Code, Codex, Cursor, Grok Bot, or custom. Atman holds the objective, shared state, messages, scheduling, verification, and durable handoffs. Recover when a seat hits a usage limit. No cloud signup.</p>
+        <p class="kicker">local · the agents you already run</p>
+        <h1>Atman coordinates the agents you already run.</h1>
+        <p class="lede">Bring Claude Code, Codex, Cursor, or your own harness. Mail is the ticket board. No cloud signup.</p>
         <p class="ctas">
           <a class="btn" href="#start">Choose a first seat <span aria-hidden="true">→</span></a>
-          <a class="ghost" href="https://github.com/advitiyavashist/atman" rel="noopener">View source</a>
+          <a class="ghost" href="https://github.com/advitiyavashist/atman/issues" rel="noopener">Contact us</a>
         </p>
-        <dl class="promise" aria-label="Operational outcomes, unmeasured until a done ticket reports">
-          <div>
-            <dt>median turns</dt>
-            <dd>—</dd>
-          </div>
-          <div>
-            <dt>measured cost</dt>
-            <dd>—</dd>
-          </div>
-        </dl>
-        <p class="promise-note">Fewest turns and measured cost are secondary outcomes. Unknown until a done ticket reports. Unknown is not zero.</p>
         <ul class="trust" aria-label="Product properties">
           <li>Plain local state</li>
           <li>Any first seat</li>
@@ -126,6 +116,53 @@
       </aside>
     </section>
 
+    <section id="philosophy" class="philosophy" aria-labelledby="philosophy-title">
+      <p class="eyebrow">philosophy</p>
+      <h2 id="philosophy-title">Not a multi-agent framework, not shared memory, not a model router.</h2>
+      <p>Mail is the ticket board. Connecting an agent should feel like using Atman, not the provider.</p>
+    </section>
+
+    <section id="how" class="pillars" aria-labelledby="how-title">
+      <div class="section-heading">
+        <p class="eyebrow">how it works</p>
+        <h2 id="how-title">Integration, product flow, efficiency, and the workflow dependency graph.</h2>
+      </div>
+      <ul class="pillar-grid">
+        <li id="integration">
+          <h3>Integration</h3>
+          <p>Connect Claude Code, Codex, Cursor, or your own harness — the seat should feel like using Atman, not the provider.</p>
+        </li>
+        <li id="flow">
+          <h3>Product flow</h3>
+          <p>Claim work from the board, inherit the last handoff, finish or recover — if a seat hits a usage limit, another seat continues from the same ticket.</p>
+        </li>
+        <li id="efficiency">
+          <h3>Efficiency</h3>
+          <p>Fewest turns and measured cost stay blank until a finished ticket reports them; unknown is not zero.</p>
+          <dl class="promise" aria-label="Operational outcomes, unmeasured until a done ticket reports">
+            <div>
+              <dt>median turns</dt>
+              <dd>—</dd>
+            </div>
+            <div>
+              <dt>measured cost</dt>
+              <dd>—</dd>
+            </div>
+          </dl>
+          <p class="promise-note">Unknown until a done ticket reports. Unknown is not zero.</p>
+        </li>
+        <li id="graph">
+          <h3>Workflow dependency graph</h3>
+          <p>Work stays invisible until its dependencies are done, so nobody starts too early.</p>
+          <ol class="dep-graph" aria-label="Example workflow dependency graph">
+            <li class="done">T-001 <span>done</span></li>
+            <li class="ready">T-002 <span>ready</span></li>
+            <li class="wait">T-003 <span>waiting</span></li>
+          </ol>
+        </li>
+      </ul>
+    </section>
+
     <section id="surfaces" class="surfaces" aria-labelledby="surfaces-title">
       <div class="section-heading">
         <p class="eyebrow">the team surface</p>
@@ -177,22 +214,28 @@
           <span></span><span></span><span></span>
           <p>atman / overview</p>
         </div>
-        <img src="assets/t732-dashboard-1440.png" alt="Atman dashboard showing the objective, agent team, work lanes, and review queue" width="1440" height="1000">
+        <img src="assets/t732-dashboard-1440.png" srcset="assets/t732-dashboard-390.png 390w, assets/t732-dashboard-768.png 768w, assets/t732-dashboard-1440.png 1440w" sizes="(max-width: 940px) 100vw, min(74rem, 92vw)" alt="Atman dashboard showing the objective, agent team, work lanes, and review queue" width="1440" height="1000">
         <figcaption>Checked-in product capture. No fabricated activity or cloud telemetry.</figcaption>
       </figure>
     </section>
 
     <section class="boundary" aria-labelledby="boundary-title">
       <div class="section-heading">
-        <p class="eyebrow">clear boundaries</p>
-        <h2 id="boundary-title">A control plane for a team of agents.</h2>
-        <p>Atman coordinates who works and how the team finishes. It is not a multi-agent framework, not shared memory, not one API for Claude and Codex, and not a model router alone.</p>
+        <p class="eyebrow">same product</p>
+        <h2 id="boundary-title">Seats you already run, one local board, a handoff the next seat can pick up.</h2>
+        <p>Atman coordinates who works and how the team finishes. It is not a multi-agent framework, not shared memory, not a model router.</p>
       </div>
       <div class="layers">
         <article class="layer-current">
           <p class="status">Atman · available now</p>
           <h3>Team runtime</h3>
           <p>Objective, ownership, dependencies, messages, liveness, review, recovery, and measured turns/cost when the board has them.</p>
+          <ol class="product-flow">
+            <li><strong>Sit a seat.</strong> Clone, pick Claude Code, Codex, Cursor, Grok Bot, or custom.</li>
+            <li><strong>Take ready work.</strong> The board shows blocked, ready, in flight, and review.</li>
+            <li><strong>Read the handoff.</strong> Notes, decisions, and artifacts travel with the ticket.</li>
+            <li><strong>Review or recover.</strong> If a seat hits a usage limit, another seat continues from the board.</li>
+          </ol>
           <ul>
             <li>Claude Code</li>
             <li>Codex</li>
@@ -201,15 +244,10 @@
             <li>Custom agents</li>
           </ul>
         </article>
-        <article>
-          <p class="status">separate layer</p>
+        <article class="layer-knowledge">
+          <p class="status">Atman · shipped</p>
           <h3>Team knowledge</h3>
-          <p>Maps decisions and artifacts so a new seat can inherit relevant context without repeating discovery.</p>
-        </article>
-        <article>
-          <p class="status">Brahman · research</p>
-          <h3>Model communication</h3>
-          <p>Measures text, prefill, KV-cache, and learned latent transfer between models. Research only — not required for the first win.</p>
+          <p>Tickets keep who owns the work. Knowledge keeps the facts a new or returning seat needs for that work.</p>
         </article>
       </div>
     </section>
@@ -222,6 +260,7 @@
         <p class="start-links">
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/first-session.md">Read the first session <span aria-hidden="true">↗</span></a>
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/byoa.md">Bring your own agent <span aria-hidden="true">↗</span></a>
+          <a href="https://github.com/advitiyavashist/atman/issues">Contact us <span aria-hidden="true">↗</span></a>
         </p>
       </div>
 
@@ -315,6 +354,7 @@ tickets ui</code></pre>
       <span class="wordmark">atman</span>
     </a>
     <p>Open source · local by default · MIT</p>
+    <a href="https://github.com/advitiyavashist/atman/issues" rel="noopener">Contact us</a>
     <a href="https://github.com/advitiyavashist/atman" rel="noopener">GitHub <span aria-hidden="true">↗</span></a>
   </footer>
 </body>

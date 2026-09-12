@@ -34,19 +34,17 @@ def _start_block():
 def test_hero_leads_with_category_then_team_runtime_line():
     hero = LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
     lede = LANDING[LANDING.index('class="lede"') : LANDING.index('class="ctas"')]
-    assert "local control plane" in hero.lower()
-    assert "one repo" in hero.lower()
-    assert "Bring the agents you already use" in lede
-    assert "We make them one team" in lede
+    assert "coordinates the agents you already run" in hero.lower()
+    assert "Mail is the ticket board" in lede
     assert "fewest turns" not in hero.lower()
 
 
 def test_fewest_turns_and_cost_are_secondary_dashes():
-    promise = LANDING[LANDING.index('class="promise"') : LANDING.index('class="trust"')]
-    assert promise.count("—") >= 2
-    assert "$0" not in promise
-    assert "0.0" not in promise
-    assert "Unknown until a done ticket reports" in promise
+    efficiency = LANDING[LANDING.index('id="efficiency"') : LANDING.index('id="graph"')]
+    assert efficiency.count("—") >= 2
+    assert "$0" not in efficiency
+    assert "0.0" not in efficiency
+    assert "Unknown until a done ticket reports" in efficiency
     assert "fewest turns" in LANDING.lower()
     assert "measured cost" in LANDING.lower()
 

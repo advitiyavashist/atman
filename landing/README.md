@@ -4,18 +4,28 @@ Static page. No build step, no JavaScript, no framework. First-seat examples
 use CSS radio tabs so the ordered providers (Claude Code, Codex, Cursor, Grok
 Bot, custom) can be inspected without a script.
 
-Copy follows the T-713 / T-726 lock: **local control plane / team runtime for
-multiple coding agents in one repo.** Then *Bring the agents you already use.
-We make them one team.* Spike **Clone → any first seat → `tickets ui`**.
-Fewest turns and measured cost stay `—` until a done ticket reports. The
-dashboard image is a checked-in product capture; the page does not point
-visitors at a machine-local demo.
+Copy lock (T-787):
+
+- **Promise:** Atman coordinates the agents you already run.
+- **Philosophy:** Not a multi-agent framework, not shared memory, not a model
+  router. Mail is the ticket board. Connecting an agent should feel like using
+  Atman, not the provider.
+- **Integration / product flow / efficiency / workflow dependency graph:** one
+  sentence each, immediately after philosophy — not buried.
+- **Contact us:** GitHub issues (`CONTRIBUTING.md`). Do not invent an email.
+
+Spike **Clone → any first seat → `tickets ui`**. Fewest turns and measured cost
+stay `—` until a done ticket reports. The dashboard image is a checked-in product
+capture; the page does not point visitors at a machine-local demo.
 
 Visual: dark `#0c0e12`, bone type, brass CTA — command-board / team roster.
 Formation-dot mark. No lime, grid wallpaper, or Claude-only onboarding.
 
 The dashboard image lives under `landing/assets/` so a deploy that publishes
 only this directory can still load the capture.
+
+**No custom domain is registered.** Public URL is the GitHub repo; serve
+`landing/` locally for preview.
 
 ## Open locally
 
