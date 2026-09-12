@@ -1495,6 +1495,9 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    if _ticket_lane(t) != "ready":
+        os.unlink(lock)
+        return None
     prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
@@ -1538,13 +1541,35 @@ def timing(t):
     return out
 
 
+def _sounding():
+    try:
+        from ticket_board import sounding as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import sounding as m
+        return m
+
+
+def _ticket_lane(t):
+    return _sounding().ticket_lane(t)
+
+
 def unblocked(board, tickets):
-    """Open tickets whose dependencies are all done."""
+    """Open tickets whose dependencies are all done and whose lane is ready.
+
+    Capture and discarded tickets stay on the graph but are invisible to
+    `tickets next` until a sound pass promotes them (Fatih write gate).
+    """
     done = set(t["id"] for t in tickets if t["status"] == "done")
     return [
         t
         for t in tickets
-        if t["status"] == "open" and all(d in done for d in t.get("deps", []))
+        if t["status"] == "open"
+        and _ticket_lane(t) == "ready"
+        and all(d in done for d in t.get("deps", []))
     ]
 
 
@@ -1632,6 +1657,9 @@ def line(t, tickets=None):
         bits.append("needs " + ",".join(t["needs"]))
     if t.get("owner"):
         bits.append("owner=" + t["owner"])
+    lane = _ticket_lane(t)
+    if lane != "ready" or t.get("lane"):
+        bits.append("lane=" + lane)
     if (t.get("reserved_for") or "").strip():
         bits.append("reserved: " + t["reserved_for"].strip())
     if _ticket_on_hold(t):
@@ -1724,6 +1752,22 @@ def detail(board, t, tickets):
         if t["status"] == "claimed" and tm["since_update"] is not None:
             stamp += ", last update %s ago" % fmt_hours(tm["since_update"])
         out.append("Time: " + stamp)
+    out.append("lane: %s" % _ticket_lane(t))
+    if t.get("sounded_at"):
+        out.append("sounded: %s by %s" % (t.get("sounded_at"), t.get("sounded_by") or "?"))
+    if t.get("cause"):
+        out.append("Cause: %s" % t["cause"])
+    if t.get("change"):
+        out.append("Change: %s" % t["change"])
+    if t.get("proof"):
+        out.append("Proof: %s" % t["proof"])
+    qs = t.get("open_questions")
+    if qs:
+        out.append("Open questions: %s" % (", ".join(qs) if isinstance(qs, list) else qs))
+    if t.get("pr"):
+        out.append("PR: %s" % t["pr"])
+    if t.get("discarded_reason"):
+        out.append("discarded: %s" % t["discarded_reason"])
     if t.get("body"):
         out.append("")
         out.append(t["body"])
@@ -1855,8 +1899,374 @@ def cmd_plan(a, board):
         raise
     for tid, deps in pending.items():
         set_deps(board, tid, deps)
-    for t in made:
-        print("created %s  %s" % (t["id"], t["title"]))
+    S = _sounding()
+    who = whoami()
+    for it, t0 in zip(items, made):
+        t = load(board, t0["id"])
+        if it.get("sounded"):
+            fields = S.merge_sound_fields(t.get("body") or it.get("body") or "", "")
+            qs = S._questions_list(fields.get("open_questions"))
+            if (not S.sound_fields_complete(fields) or qs
+                    or S.is_no_change(fields.get("change"))):
+                for x in made:
+                    os.unlink(ticket_path(board, x["id"]))
+                sys.exit("plan: %r marked sounded but needs cause/change/proof/deps and empty open questions"
+                         % (it.get("key") or t["id"]))
+            _apply_sounded(board, t, fields, who)
+        else:
+            t["lane"] = "capture"
+            save(board, t)
+        print("created %s  %s  lane=%s" % (t["id"], t["title"], _ticket_lane(t)))
+
+
+def _apply_sounded(board, t, fields, who):
+    S = _sounding()
+    qs = S._questions_list(fields.get("open_questions"))
+    t["cause"] = (fields.get("cause") or "").strip()
+    t["change"] = (fields.get("change") or "").strip()
+    t["proof"] = (fields.get("proof") or "").strip()
+    t["open_questions"] = qs
+    t["body"] = S.format_sound_body(t.get("body") or "", fields)
+    deps_text = (fields.get("deps") or "").strip()
+    t.setdefault("notes", [])
+    t["notes"].append({"by": who, "at": now(), "text": "sound: deps=%s" % (deps_text or "none")})
+    if qs or S.is_no_change(fields.get("change")):
+        t["lane"] = "capture"
+        t["sounded_at"] = None
+        t["sounded_by"] = None
+    else:
+        t["lane"] = "ready"
+        t["sounded_at"] = now()
+        t["sounded_by"] = who
+    return save(board, t)
+
+
+def _capture_snapshot(board, thought):
+    S = _sounding()
+    tickets = load_all(board)
+    obj = load_objective(board) or {}
+    obj_text = (obj.get("text") or "(none)").strip().replace("\n", " ")[:400]
+    ready_ids = [t["id"] for t in unblocked(board, tickets)]
+    capture_ids = [t["id"] for t in tickets if _ticket_lane(t) == "capture"]
+    related = S.related_done_notes(tickets, thought)
+    lines = [
+        thought.strip(),
+        "",
+        "## Surroundings",
+        "Objective: %s" % obj_text,
+        "Graph: %s" % S.graph_snapshot(tickets, ready_ids, capture_ids),
+    ]
+    if related:
+        lines.append("Related done:")
+        for _score, tid, title, last in related:
+            lines.append("- %s %s -- %s" % (tid, title, last or "(no note)"))
+    else:
+        lines.append("Related done: (none)")
+    return "\n".join(lines).strip() + "\n"
+
+
+def cmd_capture(a, board):
+    """Fatih /plan-add: a thought, not yet a claimable ticket."""
+    S = _sounding()
+    thought = (a.thought or "").strip()
+    if getattr(a, "from_msg", ""):
+        mid = a.from_msg.strip()
+        msg = None
+        for m in load_messages(board, include_archives=True):
+            if m.get("id") == mid:
+                msg = m
+                break
+        if not msg:
+            sys.exit("capture: no such message %s" % mid)
+        thought = thought or (msg.get("text") or "").strip()
+        if not thought:
+            sys.exit("capture: message %s has no text" % mid)
+    if not thought:
+        sys.exit('capture: tickets capture "a thought"  (or --from-msg <id>)')
+    title = S.capture_title(thought, getattr(a, "area", "") or "")
+    body = _capture_snapshot(board, thought)
+    t = create(board, title, body, getattr(a, "role", "") or "", [],
+               getattr(a, "priority", 2) or 2, "", "", [])
+    t["lane"] = "capture"
+    t["open_questions"] = ["not yet sounded"]
+    t["notes"] = t.get("notes") or []
+    t["notes"].append({"by": whoami(), "at": now(),
+                       "text": "captured (not claimable until tickets sound)"})
+    save(board, t)
+    print("captured %s  %s  lane=capture" % (t["id"], t["title"]))
+    print("  not visible to tickets next until `tickets sound %s`" % t["id"])
+
+
+def cmd_sound(a, board):
+    """Fatih /plan-write: high-reasoning gate. Master/CoS/operator, not the coder."""
+    S = _sounding()
+    t = load(board, a.id)
+    who = whoami()
+    if t.get("status") == "claimed" and (t.get("owner") or "") == who:
+        sys.exit("sound: the implementer of %s cannot sound it; master/CoS/operator does"
+                 % t["id"])
+    if _ticket_lane(t) == "discarded":
+        sys.exit("%s is discarded; reopen or capture a new ticket" % t["id"])
+    fields = S.merge_sound_fields(t.get("body") or "", getattr(a, "notes", "") or "")
+    qs = S._questions_list(fields.get("open_questions"))
+    missing = [k for k in ("cause", "change", "proof", "deps")
+               if not (fields.get(k) or "").strip()]
+    if missing:
+        sys.exit("sound: missing %s -- pass --notes \"cause=...; change=...; proof=...; deps=none\""
+                 % ", ".join(missing))
+    deps_text = (fields.get("deps") or "").strip()
+    existing = set(x["id"] for x in load_all(board))
+    if deps_text.lower() not in ("none", "(none)", "n/a", "-"):
+        dep_ids = []
+        for tok in re.split(r"[,\s]+", deps_text):
+            if not tok:
+                continue
+            if tok not in existing:
+                sys.exit("sound: deps must be real ticket ids or 'none' (unknown %s)" % tok)
+            if tok != t["id"] and tok not in (t.get("deps") or []):
+                dep_ids.append(tok)
+        if dep_ids:
+            new_deps = list(t.get("deps") or []) + dep_ids
+            check_graph(board, {t["id"]: new_deps})
+            t["deps"] = new_deps
+    t = _apply_sounded(board, t, fields, who)
+    if qs:
+        print("%s stays lane=capture (open questions remain)" % t["id"])
+    elif S.is_no_change(fields.get("change")):
+        print("%s stays lane=capture (investigation with no code change; discard if abandoned)"
+              % t["id"])
+    else:
+        print("%s -> lane=ready (sounded by %s)" % (t["id"], who))
+        print("  CoS: tickets dispatch %s --to <seat> --harness cursor" % t["id"])
+        print("  cause: %s" % t.get("cause"))
+        print("  change: %s" % t.get("change"))
+        print("  proof: %s" % t.get("proof"))
+
+
+def cmd_dispatch(a, board):
+    """Fatih /plan-dispatch: CoS staffs one ready ticket to one seat. Does not claim."""
+    S = _sounding()
+    t = load(board, a.id)
+    seat = (a.to or "").strip()
+    harness = (getattr(a, "harness", "") or "cursor").strip()
+    if not seat:
+        sys.exit("dispatch: tickets dispatch T-123 --to <seat> --harness cursor")
+    if _ticket_lane(t) != "ready":
+        sys.exit("dispatch: %s is lane=%s; sound it first" % (t["id"], _ticket_lane(t)))
+    if S.ticket_on_hold(t):
+        sys.exit("dispatch: %s is on HOLD" % t["id"])
+    if t.get("status") != "open":
+        sys.exit("dispatch: %s is %s; only open ready tickets" % (t["id"], t.get("status")))
+    done = set(x["id"] for x in load_all(board) if x["status"] == "done")
+    pending = [d for d in (t.get("deps") or []) if d not in done]
+    if pending:
+        sys.exit("dispatch: %s still waits on %s" % (t["id"], ", ".join(pending)))
+    rows, _note = probe_integration_catalog()
+    row = None
+    for r in rows:
+        if r["id"] == harness:
+            row = r
+            break
+    if harness != "custom" and not harness.startswith("custom:"):
+        if row is None:
+            sys.exit("dispatch: unknown harness %s (tickets harness available)" % harness)
+        reason = S.catalog_dispatch_fail(row)
+        if reason:
+            sys.exit("dispatch: %s -- will not spawn a FAIL seat" % reason)
+    tickets = load_all(board)
+    if (t.get("reserved_for") or "").strip() == seat:
+        sys.exit("dispatch: %s already reserved for %s" % (t["id"], seat))
+    busy = S.worker_busy(tickets, seat, except_id=t["id"])
+    if busy:
+        sys.exit("dispatch: %s already staffed with %s (one ticket per worker)"
+                 % (seat, ", ".join(busy)))
+    who = whoami()
+    t["reserved_for"] = seat
+    t["notes"] = t.get("notes") or []
+    t["notes"].append({"by": who, "at": now(),
+                       "text": "dispatch: reserved for %s harness=%s" % (seat, harness)})
+    save(board, t)
+    print("%s reserved for %s harness=%s (worker claims via tickets next / watch)"
+          % (t["id"], seat, harness))
+    if os.environ.get("TICKETS_DISPATCH_NO_SPAWN") == "1":
+        print("spawn skipped (TICKETS_DISPATCH_NO_SPAWN=1)")
+        return
+    if _live_watch_pids(seat, board=board):
+        print("watcher already running for %s" % seat)
+        return
+    ns = argparse.Namespace(
+        name=seat, list=False, stop=False, worktree=getattr(a, "worktree", "") or "",
+        harness=harness, tool="", cmd_template=getattr(a, "cmd_template", "") or "",
+        roles=None, can=None, cost=None, model="", best_for="", wake_mode=None,
+        brief="", exec=getattr(a, "exec", "") or "", master=False, cos=False,
+        safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
+        max_runs=getattr(a, "max_runs", None),
+    )
+    try:
+        cmd_spawn(ns, board)
+    except SystemExit:
+        t2 = load(board, a.id)
+        t2.pop("reserved_for", None)
+        t2.setdefault("notes", []).append(
+            {"by": who, "at": now(), "text": "dispatch: spawn failed; reservation dropped"})
+        save(board, t2)
+        raise
+
+
+def cmd_pr_sync(a, board):
+    """Fatih /plan-sync: PR merged + pin on trunk → ready to close. Does not self-done."""
+    S = _sounding()
+    tickets = load_all(board)
+    wanted = (getattr(a, "id", "") or "").strip()
+    review = [t for t in tickets if t.get("status") == "review"]
+    if wanted:
+        review = [t for t in review if t["id"] == wanted]
+        if not review:
+            t = load(board, wanted)
+            sys.exit("%s is %s, not IN REVIEW" % (wanted, t.get("status")))
+    if not review:
+        print("no IN REVIEW tickets")
+        return
+    for t in review:
+        pr = t.get("pr") or ""
+        code = S.review_requires_pr(t) or bool(t.get("sounded_at"))
+        if not pr:
+            tag = "ask: code ticket in review has no --pr; not closable" if code else (
+                "ask: IN REVIEW with no PR field")
+            print("%s  %s" % (t["id"], tag))
+            continue
+        state = S.gh_pr_state(pr)
+        owner = t.get("owner") or ""
+        if state == "merged":
+            if S.pin_is_trunk_ancestor(git, _trunk, t):
+                print("%s  ready to close (PR %s merged; pin is trunk ancestor). "
+                      "Master: tickets done %s --notes \"...\"" % (t["id"], pr, t["id"]))
+            else:
+                print("%s  waiting: PR %s merged but pin %s is not a trunk ancestor"
+                      % (t["id"], pr, t.get("commit") or "(none)"))
+        elif state == "waiting":
+            print("%s  waiting: PR %s still open / CI or review in flight" % (t["id"], pr))
+            if owner:
+                post_message(board, whoami(),
+                             "pr-sync: %s still waiting on PR %s" % (t["id"], pr),
+                             to=owner, re=t["id"])
+                print("  bounced to %s via tickets msg" % owner)
+        else:
+            print("%s  ask: could not read PR %s (missing, 403, or no gh)" % (t["id"], pr))
+
+
+def cmd_plan_status(a, board):
+    """Fatih /plan-status: capture / ready / waiting-on-merge / blocked-HOLD-discarded."""
+    S = _sounding()
+    tickets = load_all(board)
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    capture, ready, waiting, parked = [], [], [], []
+    for t in tickets:
+        lane = _ticket_lane(t)
+        if lane == "capture":
+            capture.append(t)
+        elif lane == "discarded":
+            parked.append(t)
+        elif t.get("status") == "review":
+            waiting.append(t)
+        elif t.get("status") == "blocked" or S.ticket_on_hold(t):
+            parked.append(t)
+        elif (t.get("status") == "open" and lane == "ready"
+              and all(d in done for d in t.get("deps") or [])
+              and not S.ticket_on_hold(t)):
+            ready.append(t)
+    def _emit(title, rows):
+        print(title)
+        if not rows:
+            print("  (none)")
+            return
+        for t in rows:
+            extra = ""
+            if t.get("pr"):
+                extra = " pr=%s" % t["pr"]
+            if _ticket_lane(t) != "ready":
+                extra += " lane=%s" % _ticket_lane(t)
+            print("  %s  %s%s" % (t["id"], t["title"][:70], extra))
+    _emit("Capture (sound these)", capture)
+    _emit("Ready (dispatchable)", ready)
+    _emit("Waiting on merge", waiting)
+    _emit("Blocked / HOLD / discarded", parked)
+    if getattr(a, "write_master", False):
+        path = master_path(board)
+        if os.path.exists(path):
+            body = open(path).read()
+            section = ("\n## Plan\n\n"
+                       "capture=%d ready=%d waiting-on-merge=%d parked=%d\n"
+                       "(written by tickets plan-status --write-master)\n"
+                       % (len(capture), len(ready), len(waiting), len(parked)))
+            marker = "\n## Plan\n"
+            if marker in body:
+                pre, rest = body.split(marker, 1)
+                nxt = rest.find("\n## ")
+                body = pre + section + (rest[nxt:] if nxt != -1 else "")
+            else:
+                body = body.rstrip() + "\n" + section
+            with open(path, "w") as f:
+                f.write(body)
+            print("wrote Plan section to %s" % path)
+
+
+def cmd_discard(a, board):
+    """Move a ticket to lane=discarded so retro can see it. Not done."""
+    t = load(board, a.id)
+    reason = (a.reason or "").strip()
+    if not reason:
+        sys.exit('discard needs --reason "why this was abandoned"')
+    if t.get("status") == "done":
+        sys.exit("%s is already done" % t["id"])
+    t["lane"] = "discarded"
+    t["discarded_reason"] = reason
+    t["status"] = "open"
+    t["owner"] = ""
+    t.pop("reserved_for", None)
+    t["notes"] = t.get("notes") or []
+    t["notes"].append({"by": whoami(), "at": now(), "text": "discarded: %s" % reason})
+    save(board, t)
+    print("%s -> lane=discarded (%s)" % (t["id"], reason))
+
+
+def cmd_retro(a, board):
+    """Fatih /plan-retro: file a capture ticket proposing a brief/skill edit, or nothing."""
+    S = _sounding()
+    tickets = load_all(board)
+    cutoff = S.since_cutoff(getattr(a, "since", "") or "")
+    repeats = S.retro_repeats(tickets, cutoff)
+    if not repeats:
+        print("no retro ticket")
+        return
+    n, gram, ids = repeats[0]
+    body = (
+        "Repeated misunderstanding: %r appears in %s.\n\n"
+        "Proposed edit (do not apply silently): add a paragraph to "
+        ".tickets/briefs/_shared.md or the named role brief that states this "
+        "once, in plain English.\n\n"
+        "Proof: tickets show %s\n\n"
+        "## Cause or spec\n"
+        "The same misunderstanding repeated across finished/discarded work.\n\n"
+        "## Change\n"
+        "(sound this ticket, then a worker edits the brief)\n\n"
+        "## Proof\n"
+        "tickets show %s; the brief paragraph is present\n\n"
+        "## Deps\n"
+        "none\n\n"
+        "## Open questions\n"
+        "Which brief file should gain the paragraph?\n"
+        % (gram, ", ".join(ids), ", ".join(ids), ", ".join(ids))
+    )
+    t = create(board, "Retro: %s" % gram[:50], body, "docs", [], 2, "", "", [])
+    t["lane"] = "capture"
+    t["open_questions"] = ["Which brief file should gain the paragraph?"]
+    t["notes"] = t.get("notes") or []
+    t["notes"].append({"by": whoami(), "at": now(),
+                       "text": "retro from %s" % ", ".join(ids)})
+    save(board, t)
+    print("captured %s  %s  lane=capture" % (t["id"], t["title"]))
+    print("  CoS/master: tickets sound %s after choosing the brief" % t["id"])
 
 
 def cmd_list(a, board):
@@ -2026,6 +2436,9 @@ def cmd_graph(a, board):
             bits.append(t["role"])
         if t.get("owner"):
             bits.append("@" + t["owner"])
+        lane = _ticket_lane(t)
+        if lane != "ready":
+            bits.append("lane=" + lane)
         waiting = [d for d in t.get("deps", []) if d not in done]
         if waiting and t["status"] == "open":
             bits.append("waiting on " + ",".join(waiting))
@@ -2326,6 +2739,11 @@ def cmd_next(a, board):
 
 def cmd_claim(a, board):
     owner = whoami(a.owner)
+    t = load(board, a.id)
+    lane = _ticket_lane(t)
+    if lane != "ready":
+        sys.exit("%s is lane=%s; sound it before claiming (tickets sound %s)"
+                 % (a.id, lane, a.id))
     got = try_claim(board, a.id, owner)
     if not got:
         sys.exit("%s is already taken" % a.id)
@@ -2344,6 +2762,8 @@ def cmd_review(a, board):
         sys.exit("%s is %s; only in-progress work can be submitted" % (a.id, LABEL[t["status"]]))
     if not a.notes:
         sys.exit('review needs --notes "what to look at: paths, tests run, decisions"')
+    if _sounding().review_requires_pr(t) and not (a.pr or "").strip():
+        sys.exit('review: sounded code tickets require --pr N (or role=docs|pm and body says "no PR")')
     # T-272: every probe below asks the tree the DELIVERABLE is in, which is
     # not the tree the command was run from whenever --artifact is passed.
     art = artifact_tree(a)
@@ -2409,6 +2829,7 @@ def cmd_review(a, board):
         who = "master%s notified" % ((" (%s)" % master_name) if master_name else "")
     print("%s -> IN REVIEW after %s of work; %s. Claim your next ticket." % (
         t["id"], fmt_hours(tm["active"]), who))
+    _finish_followup(board, t["id"], "review")
 
 
 def _trunk(cwd=None):
@@ -2897,6 +3318,7 @@ def cmd_merge(a, board):
             ("; skipped " + ", ".join(str(b) for b, _ in skipped)) if skipped else ""), by=owner)
         post_message(board, owner, "%s is now %s (merged %s). Everyone: run `tickets sync` in your worktree "
                      "before your next `tickets review`." % (trunk, sha, ", ".join(merged_branches)))
+        _finish_followup(board, ",".join(closed) if closed else "merge", "done")
 
 
 # ---- liveness truth (T-237, implementing the T-230 spec) ----------------
@@ -3671,8 +4093,11 @@ def _live_watch_pids(owner=None, board=None):
 
     The pid file only tracks one loop per board; duplicates (interrupted pytest
     runs, races before lock) show up here. `owner` filters to one agent name.
-    When `board` is set, only loops whose --cwd lies under that repo count
-    (spawn/list/dash). Omit `board` for fleet-wide stop of every loop for the name.
+    When `board` is set, loops whose --cwd lies under that repo count, AND
+    loops whose agents/<name>.watch.pid on THIS board matches the live pid
+    even when --cwd is another repo (Steer board + Atman worktree). Foreign
+    cwd without this board's pid file is still excluded (T-554).
+    Omit `board` for fleet-wide stop of every loop for the name.
     Inside `_shared_watch_table`, every caller shares one `ps` snapshot.
     """
     repo = os.path.realpath(os.path.dirname(board)) if board else None
@@ -3685,17 +4110,34 @@ def _live_watch_pids(owner=None, board=None):
             continue
         if repo:
             watch_cwd = row.get("cwd") or ""
-            if not watch_cwd:
-                continue
-            try:
-                real = os.path.realpath(watch_cwd)
-                if real != repo and not real.startswith(repo + os.sep):
-                    continue
-            except OSError:
+            under_repo = False
+            if watch_cwd:
+                try:
+                    real = os.path.realpath(watch_cwd)
+                    under_repo = real == repo or real.startswith(repo + os.sep)
+                except OSError:
+                    under_repo = False
+            claimed = _watch_pid_claimed_on_board(board, agent, pid)
+            if not under_repo and not claimed:
                 continue
         if agent and (bound or _pid_alive(pid)):
             out.append(pid)
     return sorted(set(out))
+
+
+def _watch_pid_claimed_on_board(board, agent, pid):
+    """True when this board's agents/<agent>.watch.pid is that live pid.
+
+    Steer-board + Atman-worktree is the normal persist shape: --cwd is not
+    under the board repo, but the pid file still lives on this board.
+    """
+    if not board or not agent or not pid:
+        return False
+    try:
+        with open(os.path.join(agents_dir(board), agent + ".watch.pid")) as f:
+            return int((f.read() or "0").strip() or 0) == int(pid)
+    except (IOError, OSError, ValueError):
+        return False
 
 
 def _watcher_pid(board, owner):
@@ -3709,6 +4151,85 @@ def _watcher_pid(board, owner):
     except (IOError, OSError, ValueError):
         return 0
     return pid if pid and _pid_alive(pid) else 0
+
+
+def _watch_poke_file(board, owner):
+    return os.path.join(agents_dir(board), owner + ".watch.poke")
+
+
+def _process_command(pid):
+    import subprocess
+
+    try:
+        r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "command="],
+                           capture_output=True, text=True)
+    except (OSError, ValueError):
+        return ""
+    return (r.stdout or "").strip()
+
+
+def _watch_pid_uses_this_cli(pid):
+    """True when the live loop is executing THIS tickets.py.
+
+    SIGUSR1 is fatal (default terminate) on older watchers that never
+    installed a handler -- including the PATH sol-agy-harness shim. Only
+    poke those processes with the signal.
+    """
+    cmd = _process_command(pid)
+    if not cmd:
+        return False
+    tool = os.path.realpath(__file__)
+    return tool in cmd and " watch" in cmd
+
+
+def _poke_persist_watch(board, owner):
+    """Nudge a live persist watcher: poke file + SIGUSR1 when this CLI owns it.
+
+    Returns True when a live watcher pid exists for the seat on this board.
+    Does not claim T-706 'woken'. Default SIGUSR1 would kill a watcher that
+    has no handler, so older shims get the poke file only.
+    """
+    import signal
+
+    pid = _watcher_pid(board, owner)
+    if not pid or not _pid_alive(pid):
+        return False
+    try:
+        with open(_watch_poke_file(board, owner), "w") as f:
+            f.write(now() + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        return False
+    if _watch_pid_uses_this_cli(pid):
+        try:
+            os.kill(pid, signal.SIGUSR1)
+        except (ProcessLookupError, OSError):
+            return False
+    return True
+
+
+def _finish_followup(board, tid, event):
+    """After review/done/merge: inbox-poke CoS+CEO and persist-wake their watchers.
+
+    Harness-neutral (T-785 poke path). Not Claude-only: any seat with a live
+    persist watcher on this CLI gets SIGUSR1; others still get the board msg.
+    """
+    m = current_master(board) or {}
+    seats = []
+    for name in ((m or {}).get("cos"), (m or {}).get("owner"), "cursor", "atman-ceo"):
+        n = (name or "").strip()
+        if n and n not in seats:
+            seats.append(n)
+    author = whoami()
+    body = ("%s %s. Coordinator follow-up: inbox poke + persist wake "
+            "(pr-sync after SHA is on origin/main)." % (tid, event))
+    for seat in seats:
+        post_message(board, author, body, to=seat, re=tid if str(tid).startswith("T-") else "",
+                     kind="task", source=event)
+        poked = _poke_persist_watch(board, seat)
+        print("wake: %s -> %s" % (seat, "watch-poked" if poked else "inbox-posted"))
+    return seats
 
 
 def _watcher_count(owner, board=None):
@@ -4344,6 +4865,7 @@ def cmd_done(a, board):
         print("started: %s" % ", ".join(started))
     if held:
         print("held (not started): %s" % ", ".join(held))
+    _finish_followup(board, a.id, "done")
 
 
 def cmd_block(a, board):
@@ -4668,6 +5190,10 @@ INTEGRATION_CATALOG = (
      "if_yes": "(do not spawn)",
      "policy": "list only; do not spawn",
      "usage_args": ("--version",)},
+    {"id": "grok", "name": "Grok (Cursor persist / grokbots)",
+     "binaries": ("agent", "cursor-agent"),
+     "if_yes": "tickets spawn <seat> --harness grok --persist",
+     "policy": "Cursor Grok seats and grok-worker; same persist wake as cursor"},
 )
 
 
@@ -4911,6 +5437,10 @@ objective; drain the review queue. Show `tickets graph` / `tickets map`.
 If HEALTH flags prose-only deps, wire `tickets dep` instead of leaving
 them in the body.
 
+Capture / sound / dispatch (Fatih loop on this board, not a plans/ tree):
+`tickets capture`, `tickets sound`, CoS `tickets dispatch --harness …`,
+`tickets pr-sync` after the PR is merged. CEO does not `tickets next`.
+
 Do not implement those tasks in this session. Spawning children when a
 parent is done is a separate success-trigger, not this onboarding step.
 Spawn seats only from the integrations they confirmed, one ticket each.
@@ -4973,8 +5503,15 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
    milestone. Silence longer than that is treated as a timeout.
 6. `done --notes` must include branch@sha (added automatically), the paths
    you touched, and every decision a dependent ticket must match. Then merge
-   (or open the PR) before claiming the next ticket.
+   (or open the PR) before claiming the next ticket. Workers submit
+   `tickets review` (sounded code tickets need `--pr`); master `tickets merge`
+   then `tickets done`. `tickets pr-sync` reports ready-to-close and does not
+   self-done.
 7. Set `TICKET_AGENT` to your own name so the board can tell agents apart.
+8. Sound before staff: `tickets capture` is not claimable. `tickets sound`
+   fills cause/change/proof/deps. CoS `tickets dispatch`. CEO does not
+   `tickets next`.
+
 
 ## Sprint plan
 (goals per sprint; `tickets sprint list` has the live numbers)
@@ -6179,11 +6716,16 @@ def _read_run_slice(log_path, offset, cap=None):
 
 
 def _harness_of_cmd(cmd):
-    """Best-effort harness name from the watch command line. Only the three
-    names the board already knows are claimed; anything else is `custom`,
-    which is a fact, not a guess."""
+    """Best-effort harness name from the watch command line."""
     head = os.path.basename(shlex.split(cmd or "")[0]) if (cmd or "").strip() else ""
-    return head if head in ("claude", "codex", "cursor") else ("custom" if head else "")
+    known = {
+        "claude": "claude", "codex": "codex", "cursor": "cursor", "agent": "cursor",
+        "agy": "agy", "antigravity": "agy", "devin": "devin", "cognition": "devin",
+        "gemini": "gemini", "grok": "grok",
+    }
+    if head in known:
+        return known[head]
+    return "custom" if head else ""
 
 
 def _round3(x):
@@ -6786,13 +7328,28 @@ def cmd_msg(a, board):
     print("posted: " + fmt_msg(m))
     to = (m.get("to") or "").strip()
     if to and _message_wakes_seat(board, to, m):
-        harness = (load_workforce(board).get(to, {}) or {}).get("harness") or "claude"
+        harness = _seat_harness(board, to)
         sa = _session_adapters()
         mid = _msg_id(m)
         label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
                              message_id=mid)
+        if _should_poke_persist(label) and _poke_persist_watch(board, to):
+            label = "watch-poked"
         print("wake: %s -> %s" % (to, label))
         _safe(lambda: _note_native_wake_result(board, to, label, mid), None)
+
+
+def _seat_harness(board, seat):
+    """Workforce harness, then tool. Empty means unknown -- never invent claude."""
+    entry = load_workforce(board).get(seat, {}) or {}
+    return (entry.get("harness") or entry.get("tool") or "").strip()
+
+
+def _should_poke_persist(label):
+    """Native inject missed; a live persist watcher is the remaining wake path."""
+    s = str(label or "")
+    return (s in ("no live endpoint", "endpoint stale (removed)", "unsupported provider")
+            or s.startswith("endpoint stale"))
 
 
 def _native_wake_succeeded(label):
@@ -6819,7 +7376,7 @@ def _note_native_wake_result(board, seat, label, message_id):
         return
     if not _native_injection_failed(label):
         return
-    harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+    harness = _seat_harness(board, seat)
     provider = _session_adapters().provider_for_harness(harness) or harness
     _agent_set(board, seat, adapter_failure={
         "state": "failed",
@@ -7239,6 +7796,8 @@ def cmd_route(a, board):
         if t["status"] != "open":
             return False
         if _ticket_on_hold(t):
+            return False
+        if _ticket_lane(t) != "ready":
             return False
         if a.redo:
             return True
@@ -9980,6 +10539,7 @@ def cmd_watch(a, board):
     # fleet-launch env and stripping identity here would be a T-238-class
     # attribution loss (T-259 defect 3).
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     import threading
     stop_event = threading.Event()
@@ -9990,12 +10550,19 @@ def cmd_watch(a, board):
         max_runs = 0
     stop_cond = STOP_CONDITION if max_runs else "until spawn --stop or SIGTERM (--persist)"
 
+    class _WatchPoke(Exception):
+        """SIGUSR1: skip the rest of the poll wait; do not stop the loop."""
+
     def _term(signum, frame):
         stop["now"] = True
         stop_event.set()
         raise InterruptedError()
 
+    def _usr1(signum, frame):
+        raise _WatchPoke()
+
     signal.signal(signal.SIGTERM, _term)
+    signal.signal(signal.SIGUSR1, _usr1)
 
     def log(line):
         try:
@@ -10015,6 +10582,10 @@ def cmd_watch(a, board):
                 wake_mode, every)), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
+            try:
+                os.unlink(_watch_poke_file(board, owner))
+            except OSError:
+                pass
             if os.path.exists(_stop_file(board, owner)):
                 try:
                     os.unlink(_stop_file(board, owner))
@@ -10238,8 +10809,11 @@ def cmd_watch(a, board):
                 sys.exit(0 if actionable(p) else 1)
             wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
-            if stop_event.wait(timeout=wait):
-                break
+            try:
+                if stop_event.wait(timeout=wait):
+                    break
+            except _WatchPoke:
+                continue
     except InterruptedError:
         pass
     finally:
@@ -10470,7 +11044,12 @@ Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
 # runtime's side of the contract never changes -- it hands the harness a prompt
 # and a working directory, and reads the board afterwards. docs/byoa.md is the
 # operator-facing version of this.
-BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote")
+BUILTIN_HARNESSES = ("claude", "codex", "cursor", "cursor+claude", "remote",
+                     "agy", "antigravity", "devin", "cognition", "gemini",
+                     "grok", "grokbots")
+HOOK_TOOLS = ("claude", "cursor", "codex", "remote",
+              "agy", "antigravity", "devin", "cognition", "gemini",
+              "grok", "grokbots")
 # Documented shell-template placeholders for custom harnesses. `harness check`
 # refuses templates with any other {name} token or without {prompt_file}.
 HARNESS_PLACEHOLDERS = ("{prompt_file}", "{cwd}", "{agent}")
@@ -10616,10 +11195,20 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         mode = ("--dangerously-bypass-approvals-and-sandbox" if permission_mode == "bypassPermissions"
                 else "-s workspace-write")
         return 'codex exec --skip-git-repo-check %s%s %s' % (mode, (" -m %s" % model) if model else "", prompt)
-    if tool == "cursor":
-        # Cursor CLI (`agent`): runs any model Cursor offers (gpt-5.5-high, claude-fable-5-1-thinking-high, ...)
+    if tool == "cursor" or tool in ("grok", "grokbots"):
+        # Cursor CLI (`agent`): Cursor Grok seats and grokbots use the same persist path.
         force = "--force" if permission_mode == "bypassPermissions" else ""
         return 'agent -p --output-format text %s%s %s' % (force, (" --model %s" % model) if model else "", prompt)
+    if tool in ("agy", "antigravity"):
+        flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
+                else "--mode accept-edits")
+        return 'agy -p %s %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
+    if tool in ("devin", "cognition"):
+        flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
+                else "")
+        return 'devin --print %s%s%s' % (prompt, (" " + flag) if flag else "", (" --model %s" % model) if model else "")
+    if tool == "gemini":
+        return 'gemini -p %s%s' % (prompt, (" --model %s" % model) if model else "")
     if tool == "cursor+claude":
         # Fable through Cursor first; if that run errors, the same prompt through the
         # Claude CLI (opus). One identity, two engines -- the master never goes dark.
@@ -10633,21 +11222,23 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
 
 
 def _inherit_settings(root, wt):
-    """Copy the project's .claude settings into a new worktree so permission
+    """Copy the project's .claude and .agents settings into a new worktree so permission
     allow-lists and hooks are the same there (a worktree does not inherit the
-    root checkout's .claude/ directory)."""
+    root checkout's .claude/ or .agents/ directory)."""
     import shutil
-    src = os.path.join(root, ".claude")
-    dst = os.path.join(wt, ".claude")
-    if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
-        return []
     copied = []
-    os.makedirs(dst, exist_ok=True)
-    for name in ("settings.json", "settings.local.json"):
-        s, d = os.path.join(src, name), os.path.join(dst, name)
-        if os.path.isfile(s) and not os.path.exists(d):
-            shutil.copy2(s, d)
-            copied.append(name)
+    for dname, fnames, prefixed in ((".claude", ("settings.json", "settings.local.json"), False),
+                                    (".agents", ("hooks.json",), True)):
+        src = os.path.join(root, dname)
+        dst = os.path.join(wt, dname)
+        if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
+            continue
+        os.makedirs(dst, exist_ok=True)
+        for name in fnames:
+            s, d = os.path.join(src, name), os.path.join(dst, name)
+            if os.path.isfile(s) and not os.path.exists(d):
+                shutil.copy2(s, d)
+                copied.append(os.path.join(dname, name) if prefixed else name)
     return copied
 
 
@@ -10831,6 +11422,7 @@ def cmd_spawn(a, board):
     # fleet-launch env and stripping identity here would be a T-238-class
     # attribution loss (T-259 defect 3).
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     with open(log_path, "a") as lf:
@@ -11343,6 +11935,7 @@ def harness_probe(board, owner, harness="", cmd="", model="", cwd="", timeout=HA
         run_cmd = _worker_cmd(board, owner, model, "bypassPermissions", harness,
                               prompt_expr=shlex.quote(HARNESS_PROBE_PROMPT))
     env = dict(_clean_git_env(), TICKET_AGENT=owner, TICKETS_DIR=board,
+               TICKETS_PY=os.path.realpath(__file__),
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     started = _time.time()
     out, rc, timed_out = "", None, False
@@ -11615,6 +12208,7 @@ def probe_integration_catalog(home=None, search_path=None):
             "path": found[0][1] if found else "",
             "if_yes": spec["if_yes"],
             "policy": spec["policy"],
+            "usage_status": "FAIL" if spec["id"] == "gemini" or "list only" in spec["policy"].lower() else "",
         })
     return rows, note
 
@@ -11643,6 +12237,9 @@ def cmd_harness_usage(a, board):
             _fmt_usage_field(r.get("reset"))))
         if r.get("usage") != "ok" and r.get("usage_reason"):
             print("         %s" % r["usage_reason"])
+        fail = _sounding().catalog_dispatch_fail(r)
+        if fail:
+            print("         FAIL %s" % r["policy"])
     print("")
     print("Missing remaining/reset is a FAIL row. Codex stays cataloged with zero usage.")
     print("Do not spawn Gemini. No new Claude fable. Cursor is the only spawn this desk uses.")
@@ -13701,10 +14298,37 @@ def cmd_hook_run(a, board):
     if a.event == "session-start":
         cmd_board(argparse.Namespace(all=False, quiet=False), board)
         return
-    if a.event == "inbox":
+    if a.event in ("inbox", "agy-inbox"):
+        if a.event == "agy-inbox":
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_inbox(argparse.Namespace(owner=owner, seat="", all=False, limit=8, keep=True), board)
+            text = buf.getvalue().strip()
+            if text and "inbox empty" not in text:
+                print(json.dumps({"injectSteps": [{"ephemeralMessage": text}]}))
+            else:
+                print("{}")
+            return
         cmd_inbox(argparse.Namespace(owner=owner, seat="", all=False, limit=8, keep=True), board)
         return
-    if a.event == "stop":
+    if a.event in ("stop", "agy-stop"):
+        if a.event == "agy-stop":
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_stop_hook(a, board)
+            out = buf.getvalue().strip()
+            try:
+                res = json.loads(out or "{}")
+                if res.get("decision") == "block":
+                    res["decision"] = "continue"
+                print(json.dumps(res))
+            except Exception:
+                print("{}")
+            return
         cmd_stop_hook(a, board)
         return
     if a.event == "task-wake":
@@ -13923,6 +14547,46 @@ def cmd_hooks(a, board):
         print("Cursor: %s + %s for %s (sessionStart, beforeSubmitPrompt, stop). Enable Hooks in Cursor settings."
               % (os.path.relpath(hp, cursor_root), os.path.relpath(sp, cursor_root), agent))
         print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
+        return
+    if a.tool in ("grok", "grokbots"):
+        a.tool = "cursor"
+        cmd_hooks(a, board)
+        print("Grok: Cursor persist hooks (grok-worker / grokbots / Cursor Grok seats).")
+        return
+    if a.tool in ("agy", "antigravity"):
+        owner = _hook_agent(a.agent)
+        wt = os.path.abspath(getattr(a, "worktree", "") or os.getcwd())
+        agents_path = os.path.join(wt, ".agents")
+        os.makedirs(agents_path, exist_ok=True)
+        hp = os.path.join(agents_path, "hooks.json")
+        if getattr(a, "rollback", False):
+            rollback([hp])
+            return
+        try:
+            with open(hp) as f:
+                cfg = json.load(f)
+        except (IOError, ValueError):
+            cfg = {}
+        inbox_cmd = _hook_command(script, board, owner, "agy-inbox")
+        stop_cmd = _hook_command(script, board, owner, "agy-stop")
+        entry = cfg.setdefault("tickets-board", {})
+        entry["PreInvocation"] = [{"type": "command", "command": inbox_cmd, "timeout": 10}]
+        if getattr(a, "stop", True):
+            entry["Stop"] = [{"type": "command", "command": stop_cmd, "timeout": 15}]
+        else:
+            entry.pop("Stop", None)
+        _atomic_hook_write(hp, json.dumps(cfg, indent=2) + "\n", 0o600)
+        print("Antigravity hooks in %s for %s: PreInvocation -> inbox; Stop -> %s."
+              % (hp, owner, "keep working while board work remains" if getattr(a, "stop", True) else "off"))
+        print("Identity is baked into the hook; the launching shell's TICKET_AGENT is ignored.")
+        return
+    if a.tool in ("devin", "cognition", "gemini"):
+        owner = _hook_agent(a.agent)
+        named = a.tool
+        a.tool = "remote"
+        a.prompt_kind = getattr(a, "prompt_kind", "") or ""
+        cmd_hooks(a, board)
+        print("%s: identity-pinned hook wrapper configured for %s." % (named, owner))
         return
     if a.tool == "remote":
         owner = _hook_agent(a.agent)
@@ -14607,7 +15271,8 @@ def main():
     c = sub.add_parser("hook-run", help="(hook body) run one event under a baked agent identity")
     c.add_argument("--agent", required=True)
     c.add_argument("--event", required=True,
-                   choices=("identity", "session-start", "inbox", "stop", "task-wake"))
+                   choices=("identity", "session-start", "inbox", "stop", "task-wake",
+                            "agy-inbox", "agy-stop"))
     c.add_argument("--prompt-kind", default="", choices=("", "master", "cos"))
     c.set_defaults(fn=cmd_hook_run)
 
@@ -14618,7 +15283,7 @@ def main():
 
     c = sub.add_parser("boot", help="every startup step: join, hooks, check-in, briefing (idempotent)")
     c.add_argument("--agent", default="")
-    c.add_argument("--tool", default="", help="claude | codex | cursor (installs that tool's hooks)")
+    c.add_argument("--tool", default="", help="claude | cursor | codex | agy | gemini | devin | grok | remote")
     c.add_argument("--harness", default="", help="harness to register for this agent (see `tickets join --harness`)")
     c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--roles", default=None)
@@ -14716,8 +15381,8 @@ def main():
     c.add_argument("--once", action="store_true")
     c.set_defaults(fn=cmd_dash)
 
-    c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex | remote")
-    c.add_argument("tool", choices=("claude", "cursor", "codex", "remote"))
+    c = sub.add_parser("hooks", help="wire a tool to the board: claude | cursor | codex | agy | gemini | devin | grok | remote")
+    c.add_argument("tool", choices=HOOK_TOOLS)
     c.add_argument("--agent", default="", help="required agent name baked into every generated hook command")
     c.add_argument("--worktree", default="", help="codex/cursor: scope hooks to this worktree")
     c.add_argument("--settings", default="", help="claude: settings.json path (default ./.claude/settings.json)")
@@ -14865,8 +15530,48 @@ def main():
     c.add_argument("--all", action="store_true", help="include done tickets and closed sprints")
     c.set_defaults(fn=cmd_map)
 
-    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin")
+    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin (default lane=capture until sounded)")
     c.set_defaults(fn=cmd_plan)
+
+    c = sub.add_parser("capture", help="capture a thought as lane=capture (not claimable until tickets sound)")
+    c.add_argument("thought", nargs="?", default="", help="the raw idea; no decisions yet")
+    c.add_argument("--area", default="", help="optional prefix for the title slug")
+    c.add_argument("--from-msg", dest="from_msg", default="", help="board message id to turn into a capture")
+    c.add_argument("--role", "-r", default="")
+    c.add_argument("--priority", "-p", type=int, default=2)
+    c.set_defaults(fn=cmd_capture)
+
+    c = sub.add_parser("sound", help="turn a capture into an implementable ticket (cause/change/proof/deps)")
+    c.add_argument("id")
+    c.add_argument("--notes", "-n", default="",
+                   help='cause=...; change=...; proof=...; deps=none; questions=')
+    c.set_defaults(fn=cmd_sound)
+
+    c = sub.add_parser("dispatch", help="CoS: reserve one ready ticket for one seat; spawn if needed")
+    c.add_argument("id")
+    c.add_argument("--to", required=True, help="seat that will tickets next")
+    c.add_argument("--harness", default="cursor", help="default cursor; FAIL usage rows are refused")
+    c.add_argument("--cmd", dest="cmd_template", default="")
+    c.add_argument("--exec", default="")
+    c.add_argument("--worktree", default="")
+    c.set_defaults(fn=cmd_dispatch)
+
+    c = sub.add_parser("pr-sync", help="IN REVIEW + PR: merged+ancestor → ready to close (does not tickets done)")
+    c.add_argument("id", nargs="?", default="")
+    c.set_defaults(fn=cmd_pr_sync)
+
+    c = sub.add_parser("plan-status", help="capture / ready / waiting-on-merge / blocked-HOLD-discarded")
+    c.add_argument("--write-master", action="store_true", help="write a Plan section into MASTER.md")
+    c.set_defaults(fn=cmd_plan_status)
+
+    c = sub.add_parser("discard", help="abandon a ticket (lane=discarded, not done)")
+    c.add_argument("id")
+    c.add_argument("--reason", required=True)
+    c.set_defaults(fn=cmd_discard)
+
+    c = sub.add_parser("retro", help="from done+discarded, file a capture proposing a brief/skill edit")
+    c.add_argument("--since", default="", help="7d, 24h, or ISO timestamp")
+    c.set_defaults(fn=cmd_retro)
 
     c = sub.add_parser("list", help="list tickets")
     c.add_argument("--status", choices=STATUSES)

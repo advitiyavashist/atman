@@ -171,6 +171,22 @@ def test_cwd_board_filter_still_excludes_another_repo(tk, loops, repo, tmp_path)
     assert allpids == sorted([mine.pid, theirs.pid])
 
 
+def test_atman_cwd_counts_when_board_pid_file_matches(tk, loops, repo, tmp_path):
+    """Steer board + Atman worktree: --cwd is not under the board repo, but
+    agents/<seat>.watch.pid on this board still identifies the live loop."""
+    other_repo = tmp_path / "atman-worktree"
+    other_repo.mkdir()
+    theirs = loops(SHA_B, SEAT, other_repo)
+    board = str(repo / ".tickets")
+    (repo / ".tickets" / "agents" / (SEAT + ".watch.pid")).write_text(str(theirs.pid))
+    got = _settle(lambda: tk._live_watch_pids(SEAT, board=board), [theirs.pid])
+    assert got == [theirs.pid]
+    stray = tmp_path / "unrelated"
+    stray.mkdir()
+    ghost = loops(SHA_A, SEAT, stray)
+    assert ghost.pid not in tk._live_watch_pids(SEAT, board=board)
+
+
 def test_owner_filter_still_separates_seats(tk, loops, repo):
     mine = loops(SHA_A, SEAT, repo)
     loops(SHA_B, SEAT + "-other", repo)

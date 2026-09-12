@@ -32,15 +32,13 @@ Confirm:
 
 ```sh
 tickets self
-# script: must be this checkout (cursor-ceo-connect) or Atman origin/main
-# after merge — not sol-agy-harness
+# script: must be this checkout or Atman origin/main after merge — not sol-agy-harness
 ```
 
-Recut (already applied on this Mac when T-788 recut the shim):
+Recut after merge to origin/main:
 
 ```sh
-TICKETS_PY=/Users/kavana/Downloads/atman/.worktrees/cursor-ceo-connect/tickets.py
-# After merge to origin/main: TICKETS_PY=/Users/kavana/Downloads/atman/tickets.py
+TICKETS_PY=/Users/kavana/Downloads/atman/tickets.py
 cat > ~/.claude/tools/tickets.py <<EOF
 #!/usr/bin/env python3
 import os, sys
@@ -101,3 +99,43 @@ HANDOVER 2026-09-08 is historical. Live authority is `tickets master`,
 `tickets connect` (no `--ceo`) still prints the T-778/T-780 new-board
 script: name → integrations → announce → `tickets plan`. Workers who need
 the claim loop: `tickets connect --worker`.
+
+---
+
+## Sound then dispatch (Fatih loop on this board)
+
+The board **is** the plan index. There is no `plans/drafts/next/open/done`
+tree.
+
+| Fatih | Atman |
+|---|---|
+| `/plan-add` | `tickets capture "thought"` (`lane=capture`) |
+| `/plan-write` | `tickets sound T-id --notes "cause=...; change=...; proof=...; deps=none"` |
+| `/plan-dispatch` | `tickets dispatch T-id --to atman-api --harness cursor` |
+| `/plan-status` | `tickets plan-status` |
+| `/plan-sync` | `tickets pr-sync` then master `tickets done` |
+| `/plan-retro` | `tickets retro` (files a capture; does not edit briefs itself) |
+
+CEO sounds, CoS dispatches. CEO does **not** `tickets next`.
+
+```sh
+tickets capture "foo returns 500; maybe last week's deploy"
+tickets sound T-NNN --notes "cause=last deploy; change=tighter foo client timeout; proof=pytest -q tests/foo; deps=none"
+tickets plan-status
+# CoS, not the CEO:
+tickets dispatch T-NNN --to atman-foo --harness cursor
+```
+
+Cursor-only spawns unless the operator chose another harness. `tickets harness
+available` FAIL rows (Gemini list-only; usage FAIL) are refused by dispatch.
+
+Workers still `tickets next` (atomic claim), implement, `tickets sync`,
+`tickets review T-id --notes "..." --pr N`. Coordinators do not write the
+product code. `tickets pr-sync` prints `ready to close` when the recorded PR
+is merged and the pin is a trunk ancestor; it never self-dones.
+
+On PR CI or a review comment: run `tickets pr-sync T-id` (or `tickets pr-sync`
+for every IN REVIEW ticket). That bounces a `tickets msg` to the owner when
+the PR is still waiting.
+
+`tickets discard T-id --reason "..."` keeps abandoned work for `tickets retro`.

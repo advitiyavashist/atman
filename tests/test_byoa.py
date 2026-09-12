@@ -375,3 +375,114 @@ def test_custom_harness_with_no_command_refuses_to_launch(board):
     r = run(board, "watch", "--agent", "qwen", "--once", "--cwd", str(board.parent))
     assert r.returncode != 0
     assert "custom harness with no command" in (r.stderr + r.stdout)
+
+
+# ---- agy / Devin / gemini / grok built-in harness & hooks (T-772 / T-789) -
+
+def test_join_records_agy_harness(board):
+    r = run(board, "join", "agy-worker", "--roles", "backend", "--harness", "agy")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads((board / "workforce.json").read_text())["agy-worker"]
+    assert entry["harness"] == "agy"
+    assert entry.get("cmd") is None
+
+
+def test_agy_worker_cmd_shape(board):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tickets", str(TOOL))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    cmd = mod._worker_cmd(str(board), "agy-worker", model="gemini-3.8-flash-high",
+                          permission_mode="bypassPermissions", tool="agy")
+    assert cmd == 'agy -p "$(tickets prompt)" --dangerously-skip-permissions --model gemini-3.8-flash-high'
+
+    cmd_safe = mod._worker_cmd(str(board), "agy-worker", permission_mode="acceptEdits", tool="agy")
+    assert cmd_safe == 'agy -p "$(tickets prompt)" --mode accept-edits'
+
+
+def test_hooks_agy_writes_agents_hooks_json(board, tmp_path):
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+    r = run(board, "hooks", "agy", "--agent", "agy-worker", "--worktree", str(wt))
+    assert r.returncode == 0, r.stderr
+    hooks_file = wt / ".agents" / "hooks.json"
+    assert hooks_file.exists()
+    cfg = json.loads(hooks_file.read_text())
+    assert "tickets-board" in cfg
+    entry = cfg["tickets-board"]
+    assert "PreInvocation" in entry
+    assert "Stop" in entry
+    assert any("agy-inbox" in h["command"] for h in entry["PreInvocation"])
+    assert any("agy-stop" in h["command"] for h in entry["Stop"])
+
+
+def test_hook_run_accepts_agy_events(board):
+    r = run(board, "hook-run", "--help")
+    assert r.returncode == 0, r.stderr
+    help_text = r.stdout + r.stderr
+    assert "agy-inbox" in help_text
+    assert "agy-stop" in help_text
+
+
+def test_inherit_settings_copies_agents_dir(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tickets", str(TOOL))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    root = tmp_path / "root"
+    wt = tmp_path / "wt"
+    (root / ".agents").mkdir(parents=True)
+    (root / ".agents" / "hooks.json").write_text('{"test": true}')
+
+    copied = mod._inherit_settings(str(root), str(wt))
+    assert ".agents/hooks.json" in copied
+    assert (wt / ".agents" / "hooks.json").exists()
+    assert json.loads((wt / ".agents" / "hooks.json").read_text()) == {"test": True}
+
+
+def test_devin_builtin_harness_join_records_no_cmd(board):
+    r = run(board, "join", "devin-worker", "--roles", "backend", "--harness", "devin")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads((board / "workforce.json").read_text())["devin-worker"]
+    assert entry["harness"] == "devin"
+    assert entry.get("cmd") is None
+
+
+def test_devin_worker_cmd_shape(board):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tickets", str(TOOL))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    cmd = mod._worker_cmd(str(board), "devin-worker", model="gpt-5",
+                          permission_mode="bypassPermissions", tool="devin")
+    assert cmd == 'devin --print "$(tickets prompt)" --dangerously-skip-permissions --model gpt-5'
+
+    cmd_safe = mod._worker_cmd(str(board), "devin-worker", permission_mode="safe", tool="devin")
+    assert cmd_safe == 'devin --print "$(tickets prompt)"'
+
+
+def test_hooks_devin_writes_wrapper(board, tmp_path):
+    wrapper = tmp_path / "tickets-devin"
+    r = run(board, "hooks", "devin", "--agent", "devin-worker", "--wrapper", str(wrapper))
+    assert r.returncode == 0, r.stderr
+    assert wrapper.exists()
+    assert (tmp_path / "tickets-devin.hooks.json").exists()
+
+
+def test_hooks_gemini_and_grok_are_valid_tools(board, tmp_path):
+    r = run(board, "hooks", "--help")
+    help_text = r.stdout + r.stderr
+    for name in ("agy", "gemini", "devin", "grok", "cursor", "claude", "codex"):
+        assert name in help_text
+    wrapper = tmp_path / "tickets-gemini"
+    r = run(board, "hooks", "gemini", "--agent", "gem-seat", "--wrapper", str(wrapper))
+    assert r.returncode == 0, r.stderr
+    assert wrapper.exists()
+    wt = tmp_path / "grok-wt"
+    wt.mkdir()
+    r = run(board, "hooks", "grok", "--agent", "grok-worker", "--worktree", str(wt))
+    assert r.returncode == 0, r.stderr
+    assert (wt / ".cursor" / "hooks.json").exists()

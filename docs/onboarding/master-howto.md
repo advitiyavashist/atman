@@ -30,6 +30,10 @@ Follow-up (master or CoS): `tickets update` / `here`, reopen silent >90m
 claims, `tickets drive` toward the objective, review queue. Prose-only
 blockers in a ticket body are not edges.
 
+Capture then sound, then CoS dispatch (`tickets capture` / `tickets sound` /
+`tickets dispatch --harness …`). CEO does not `tickets next`. The living
+board is the index; there is no `plans/` folder tree.
+
 CoS onboarding is the same catalog, then the same graph + follow-up loop
 (`tickets master cos <name>`). Do not dump a live-board plan. Auto-start of
 children after done is a separate success-trigger, not this step.
@@ -62,6 +66,12 @@ model router.
 6. Open `tickets ui` → <http://127.0.0.1:8765>. On the board, **`—` means
    unknown** (not measured yet) — it is not zero. Median turns / yield@cost
    stay `—` until a done ticket reports.
+7. **Sound before staff.** `tickets capture` dumps a thought (`lane=capture`,
+   invisible to `tickets next`). `tickets sound` is the high-reasoning write
+   (cause, change, proof commands, real `--after` deps, no open questions).
+   CoS `tickets dispatch` one ready ticket per Cursor seat. `tickets pr-sync`
+   after `tickets review --pr`. Master still `tickets done`. CEO does not
+   `tickets next`.
 
 ---
 
