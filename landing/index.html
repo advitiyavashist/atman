@@ -4,8 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Atman · coordinates the agents you already run</title>
-  <meta name="description" content="Atman coordinates the agents you already run. Not a multi-agent framework, not shared memory, not a model router. Mail is the ticket board. MIT.">
+  <meta name="description" content="Atman coordinates the agents you already run. tickets ui is Objective, Team, Work, Intervene — a local product capture, not a hosted board.">
   <meta name="theme-color" content="#0c0e12">
+  <meta property="og:title" content="Atman · tickets ui">
+  <meta property="og:description" content="Objective, Team, Work, Intervene. The board stays on your machine.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://advitiyavashist.github.io/atman/">
+  <meta property="og:image" content="https://advitiyavashist.github.io/atman/assets/t732-dashboard-1440.png">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -24,9 +30,9 @@
       <span class="wordmark">atman</span>
     </a>
     <nav aria-label="Page">
+      <a href="#app">App</a>
       <a href="#workflow">Graph</a>
       <a href="#roadmap">Roadmap</a>
-      <a href="#app">App</a>
       <a href="#per-turn">Efficiency</a>
       <a class="nav-contact" href="https://github.com/advitiyavashist/atman/issues" rel="noopener">Contact us</a>
       <a class="nav-github" href="https://github.com/advitiyavashist/atman" rel="noopener">GitHub <span aria-hidden="true">↗</span></a>
@@ -40,8 +46,8 @@
         <h1>Atman coordinates the agents you already run.</h1>
         <p class="lede">Bring Claude Code, Codex, Cursor, or your own harness. Mail is the ticket board. No cloud signup.</p>
         <p class="ctas">
-          <a class="btn" href="#start">Connect as Atman <span aria-hidden="true">→</span></a>
-          <a class="ghost" href="https://github.com/advitiyavashist/atman/issues" rel="noopener">Contact us</a>
+          <a class="btn" href="#app">See tickets ui <span aria-hidden="true">→</span></a>
+          <a class="ghost" href="#start">Connect as Atman</a>
         </p>
         <ul class="trust" aria-label="Product properties">
           <li>Plain local state</li>
@@ -50,12 +56,52 @@
           <li>MIT licensed</li>
         </ul>
         <p class="product-jumps" aria-label="First-class product areas">
+          <a href="#app">The app</a>
           <a href="#workflow">Workflow graph</a>
           <a href="#roadmap">Engineering roadmap</a>
-          <a href="#app">The app</a>
           <a href="#per-turn">Per-turn efficiency</a>
         </p>
       </div>
+    </section>
+
+    <section id="app" class="capture" aria-labelledby="app-title">
+      <div class="section-heading">
+        <p class="eyebrow">tickets ui · product capture</p>
+        <h2 id="app-title">Objective, Team, Work, Intervene.</h2>
+        <p>The shareable board. This is a checked-in capture, not a hosted demo and not fabricated activity. Clone, <code>tickets connect</code> as <code>atman-&lt;seat&gt;</code>, then <code>tickets ui</code> on your machine.</p>
+      </div>
+      <ol class="ia-strip" aria-label="tickets ui surfaces">
+        <li>
+          <h3>Objective</h3>
+          <p>Standing mission. Met / not met from the board.</p>
+        </li>
+        <li>
+          <h3>Team</h3>
+          <p>Who’s present. What’s uncovered.</p>
+        </li>
+        <li>
+          <h3>Work</h3>
+          <p>Blocked, Ready, In flight, Review.</p>
+        </li>
+        <li>
+          <h3>Intervene</h3>
+          <p>Route, unblock, reassign, nudge, msg. No silent auto-promote.</p>
+        </li>
+      </ol>
+      <figure class="product-frame ui-capture">
+        <div class="frame-bar" aria-hidden="true">
+          <span></span><span></span><span></span>
+          <p>tickets ui · local</p>
+        </div>
+        <p class="ui-tabs" aria-hidden="true">
+          <span>Objective</span>
+          <span>Team</span>
+          <span class="on">Work</span>
+          <span>Intervene</span>
+        </p>
+        <img src="assets/t732-dashboard-1440.png" srcset="assets/t732-dashboard-390.png 390w, assets/t732-dashboard-768.png 768w, assets/t732-dashboard-1440.png 1440w" sizes="(max-width: 940px) 100vw, min(74rem, 92vw)" alt="tickets ui capture on Work: objective, team seats, blocked ready in-flight review lanes, and intervene" width="1440" height="1000">
+        <figcaption>Checked-in product capture. No fabricated activity or cloud telemetry. The live board is not on this site.</figcaption>
+      </figure>
 
       <aside class="command-board" id="board" aria-label="Example Atman command board and team roster">
         <div class="board-topline">
@@ -195,24 +241,6 @@
           <span class="wstate">waiting on T-002</span>
         </li>
       </ol>
-    </section>
-
-    <section id="app" class="feature" aria-labelledby="app-title">
-      <div class="product-heading">
-        <div class="section-heading">
-          <p class="eyebrow">the app · first session</p>
-          <h2 id="app-title">tickets ui is the app. It stays on your machine.</h2>
-        </div>
-        <p>Clone, <code>tickets connect</code> as <code>atman-&lt;seat&gt;</code>, then <code>tickets ui</code>. Objective, Team, Work, Intervene. This is a product capture, not a hosted demo and not fabricated activity.</p>
-      </div>
-      <figure class="product-frame">
-        <div class="frame-bar" aria-hidden="true">
-          <span></span><span></span><span></span>
-          <p>tickets ui · local</p>
-        </div>
-        <img src="assets/t732-dashboard-1440.png" srcset="assets/t732-dashboard-390.png 390w, assets/t732-dashboard-768.png 768w, assets/t732-dashboard-1440.png 1440w" sizes="(max-width: 940px) 100vw, min(74rem, 92vw)" alt="Atman dashboard showing the objective, agent team, work lanes, and review queue" width="1440" height="1000">
-        <figcaption>Checked-in product capture. No fabricated activity or cloud telemetry. The live board is not on this site.</figcaption>
-      </figure>
     </section>
 
     <section id="per-turn" class="feature" aria-labelledby="per-turn-title">

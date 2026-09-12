@@ -21,14 +21,19 @@ Copy lock (T-787):
   sentence each, immediately after philosophy — not buried.
 - **Contact us:** GitHub issues (`CONTRIBUTING.md`). Do not invent an email.
 
+The shareable surface is **tickets ui**: Objective / Team / Work / Intervene
+on https://advitiyavashist.github.io/atman/ (`#app`), as a checked-in product
+capture — not a hosted live board.
+
 First-class sections (T-794), not buried in the four-sentence grid:
 
-1. **Workflow dependency graph** — Work stays invisible until its dependencies
+1. **The app** — `tickets ui` capture first: Objective, Team, Work, Intervene.
+   First session is `tickets connect` as `atman-<seat>`. Local BYOA, not a
+   hosted cloud demo.
+2. **Workflow dependency graph** — Work stays invisible until its dependencies
    are done. Live view is local `tickets ui` Work → Graph.
-2. **Engineering roadmap** — V0 today through V4. Control plane stays;
+3. **Engineering roadmap** — V0 today through V4. Control plane stays;
    intelligence behind `tickets route` improves. No invented ship dates.
-3. **The app** — `tickets ui` / first session (`tickets connect` as
-   `atman-<seat>`). Local BYOA, not a hosted cloud demo.
 4. **Per-turn efficiency** — `—` until a done ticket reports. Unknown is not
    zero.
 

@@ -13,16 +13,32 @@ PAGES = "https://advitiyavashist.github.io/atman/"
 def test_first_class_section_ids_and_order():
     for needed in ("workflow", "app", "per-turn", "roadmap"):
         assert 'id="%s"' % needed in LANDING, needed
+    assert LANDING.index('id="app"') < LANDING.index('id="philosophy"')
     how = LANDING.index('id="how"')
     assert how < LANDING.index('id="workflow"')
-    assert LANDING.index('id="workflow"') < LANDING.index('id="app"')
-    assert LANDING.index('id="app"') < LANDING.index('id="per-turn"')
+    assert LANDING.index('id="workflow"') < LANDING.index('id="per-turn"')
     assert LANDING.index('id="per-turn"') < LANDING.index('id="roadmap"')
     assert LANDING.index('id="roadmap"') < LANDING.index('id="start"')
 
 
+def test_tickets_ui_capture_is_shareable():
+    block = LANDING[LANDING.index('id="app"') : LANDING.index('id="philosophy"')]
+    for surface in ("Objective", "Team", "Work", "Intervene"):
+        assert surface in block, surface
+    assert "assets/t732-dashboard-1440.png" in block
+    assert "not a hosted demo" in block.lower()
+    assert "not fabricated activity" in block.lower()
+    assert "tickets connect" in block
+    assert "atman-&lt;seat&gt;" in block
+    assert "tickets ui" in block
+    assert "og:image" in LANDING
+    assert PAGES + "assets/t732-dashboard-1440.png" in LANDING
+    assert "127.0.0.1" not in LANDING
+    assert "localhost" not in LANDING.lower()
+
+
 def test_workflow_graph_is_first_class():
-    block = LANDING[LANDING.index('id="workflow"') : LANDING.index('id="app"')]
+    block = LANDING[LANDING.index('id="workflow"') : LANDING.index('id="per-turn"')]
     assert "Work stays invisible until its dependencies are done" in block
     assert "tickets ui" in block
     assert "T-001" in block
@@ -33,7 +49,7 @@ def test_workflow_graph_is_first_class():
 
 
 def test_app_is_tickets_ui_first_session_not_cloud_demo():
-    block = LANDING[LANDING.index('id="app"') : LANDING.index('id="per-turn"')]
+    block = LANDING[LANDING.index('id="app"') : LANDING.index('id="philosophy"')]
     assert "tickets ui" in block
     assert "tickets connect" in block
     assert "atman-&lt;seat&gt;" in block
