@@ -9,11 +9,10 @@ regression this file exists to pin:
     `TICKET_AGENT=alice tickets note T-001 "..."` a working per-invocation
     override even inside a session that separately joined as someone else.
 
-  * session_seat(board, explicit): who is THIS SESSION. explicit > this
-    session's own recorded identity > TICKET_SEAT > TICKET_AGENT > pid. Only
-    four surfaces need this: `board`'s "you:" line, the stop-hook,
-    `msg`'s sender, and `inbox`'s owner, all with no --owner given -- because
-    for those, "who is sending/reading this" IS "who is this session".
+  * session_seat(board, explicit): who is THIS SESSION. explicit > TICKET_SEAT
+    > this session's own recorded identity > TICKET_AGENT > pid. TICKET_SEAT
+    must beat a recorded join keyed off an inherited/forged session id so a
+    spawned worker cannot become the parent seat.
 
 Widening either function to answer the other's question was tried and
 reverted: making whoami() consult the board broke the documented
