@@ -1926,6 +1926,79 @@ def cmd_board(a, board):
             print(inherited)
 
 
+def workflow_graph(tickets, include_done=False):
+    """JSON twin of `tickets graph` for the command board.
+
+    Active tickets plus the specific deps they wait on. Edges are real
+    `--after` links, not a dump of titles and not prose blockers.
+    """
+    by_id = dict((t["id"], t) for t in tickets)
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    kids = {}
+    for t in tickets:
+        for d in t.get("deps") or []:
+            kids.setdefault(d, []).append(t["id"])
+    if include_done:
+        keep = set(by_id)
+    else:
+        keep = set(t["id"] for t in tickets if t["status"] in ("open", "claimed", "blocked", "review"))
+        for tid in list(keep):
+            for d in (by_id.get(tid) or {}).get("deps") or []:
+                if d in by_id:
+                    keep.add(d)
+    order = [t["id"] for t in tickets if t["id"] in keep]
+
+    def node_of(tid):
+        t = by_id[tid]
+        deps = list(t.get("deps") or [])
+        waiting = [d for d in deps if d not in done]
+        return {
+            "id": tid,
+            "title": t.get("title", ""),
+            "status": t["status"],
+            "label": LABEL.get(t["status"], t["status"]),
+            "mark": MARK.get(t["status"], "[?]"),
+            "owner": t.get("owner") or "",
+            "role": t.get("role") or "",
+            "deps": deps,
+            "waiting": waiting,
+            "children": [c for c in kids.get(tid, []) if c in keep],
+        }
+
+    nodes = [node_of(tid) for tid in order]
+    edges = []
+    for n in nodes:
+        for d in n["deps"]:
+            if d in keep:
+                edges.append({"from": d, "to": n["id"], "waiting": d not in done})
+    seen = set()
+
+    def walk(tid):
+        n = node_of(tid)
+        if tid in seen:
+            return {"id": tid, "repeat": True, "children": []}
+        seen.add(tid)
+        return {"id": tid, "children": [walk(c) for c in n["children"]]}
+
+    roots = [t["id"] for t in tickets
+             if t["id"] in keep and not [d for d in (t.get("deps") or []) if d in keep]]
+    forest = [walk(r) for r in roots]
+    orphans = [tid for tid in order if tid not in seen]
+    counts = {}
+    for t in tickets:
+        if t["id"] in keep:
+            counts[t["status"]] = counts.get(t["status"], 0) + 1
+    return {
+        "view": "all" if include_done else "active",
+        "counts": counts,
+        "nodes": nodes,
+        "edges": edges,
+        "forest": forest,
+        "roots": roots,
+        "orphans": orphans,
+    }
+
+
 def cmd_graph(a, board):
     tickets = load_all(board)
     if not tickets:
@@ -11194,8 +11267,27 @@ body[data-tab=objective] #pane-objective,body[data-tab=board] #pane-board,body[d
 body[data-empty-board][data-tab=board] .kanban,
 body[data-empty-board][data-tab=board] #objectivePromise,
 body[data-empty-board][data-tab=board] #turnsPanel,
-body[data-empty-board][data-tab=board] #onboardBox{display:none}
+body[data-empty-board][data-tab=board] #onboardBox,
+body[data-empty-board][data-tab=board] #workflowGraph,
+body[data-empty-board][data-tab=board] #workViews,
+body[data-empty-board][data-tab=board] #graphLede{display:none}
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
+body[data-work-view=graph] .kanban{display:none}
+body[data-work-view=columns] #workflowGraph,
+body[data-work-view=columns] #graphLede{display:none}
+.work-views{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.work-views button{appearance:none;background:transparent;border:1px solid var(--line);color:var(--mute);padding:4px 10px;font:12px/1 inherit;font-weight:650;border-radius:6px;cursor:pointer}
+.work-views button.on{color:var(--fg);border-color:var(--acc);background:var(--chip)}
+.graph-lede{margin:0;font-size:12px;color:var(--mute);max-width:720px}
+.graph-lede b{color:var(--fg)}
+.workflow-graph{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.g-roots,.g-kids{list-style:none;margin:0;padding:0}
+.g-kids{margin:4px 0 0 14px;padding-left:12px;border-left:1px solid var(--line)}
+.g-node{margin:6px 0}
+.g-row{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline}
+.g-row .mark{font:12px/1.3 ui-monospace,Menlo,monospace;color:var(--mute)}
+.g-title{font-weight:600;font-size:13px}
+.graph-empty{margin:0 0 10px;font-size:12px;color:var(--mute)}
 @media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
 .col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
 .col h2{margin:0;padding:10px 12px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
@@ -11341,7 +11433,7 @@ body[data-empty-board][data-tab=board] #onboardBox{display:none}
   .portfolio-menu{position:fixed;left:12px;right:12px;top:auto;width:auto}
 }
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
-</style></head><body data-tab="board">
+</style></head><body data-tab="board" data-work-view="graph">
 <header class="cmd">
   <div class="brand">
     <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="atman">
@@ -11413,6 +11505,12 @@ body[data-empty-board][data-tab=board] #onboardBox{display:none}
       <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">Done tickets per USD of harness-reported cost</div></article>
     </div>
   </section>
+  <div class="work-views" id="workViews" role="tablist" aria-label="Work view">
+    <button type="button" id="view-graph" data-work-view="graph" class="on" aria-selected="true">Graph</button>
+    <button type="button" id="view-columns" data-work-view="columns" aria-selected="false">Columns</button>
+  </div>
+  <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">tickets graph</span> / <span class="mono">tickets map</span> — not a list of titles. Follow-up: <span class="mono">tickets update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">tickets reopen</span>. Review: <span class="mono">tickets review</span> then <span class="mono">tickets merge</span>.</p>
+  <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"></div>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
@@ -11624,6 +11722,43 @@ function setTab(name){
     b.tabIndex=on?0:-1;
   });
 }
+function setWorkView(name, persistHash){
+  if(name!=='columns')name='graph';
+  document.body.dataset.workView=name;
+  try{localStorage.setItem('tickets-ui-work-view',name)}catch(e){}
+  document.querySelectorAll('#workViews [data-work-view]').forEach(b=>{
+    const on=b.dataset.workView===name;
+    b.classList.toggle('on',on);
+    b.setAttribute('aria-selected',on?'true':'false');
+  });
+  if(persistHash){
+    try{history.replaceState(null,'','#'+name)}catch(e){}
+  }
+}
+function renderGraph(g){
+  const host=document.getElementById('workflowGraph');
+  if(!host)return;
+  const by={};(g&&g.nodes||[]).forEach(n=>{by[n.id]=n});
+  const edges=(g&&g.edges)||[];
+  if(!g||!(g.nodes||[]).length){
+    host.innerHTML='<p class="graph-empty">No workflow yet. <span class="mono">tickets plan</span> creates real --after edges.</p>';
+    return;
+  }
+  const notice=edges.length?'':'<p class="graph-empty">No --after edges on the active board. <span class="mono">tickets plan</span> with deps, or <span class="mono">tickets dep T-002 --after T-001</span>.</p>';
+  function row(n){
+    const wait=(n.waiting||[]).length?'<span class="wait">waiting on '+esc(n.waiting.join(', '))+'</span>':((n.deps||[]).length?'<span class="mute">after '+esc(n.deps.join(', '))+'</span>':'');
+    const own=n.owner?'<span class="mute">@'+esc(n.owner)+'</span>':'';
+    const role=n.role?'<span class="mute">'+esc(n.role)+'</span>':'';
+    return '<div class="g-row"><span class="mark">'+esc(n.mark||'')+'</span><span class="id">'+esc(n.id)+'</span><span class="g-title">'+esc(n.title)+'</span><span class="tag">'+esc(n.label||n.status||'')+'</span>'+role+own+wait+'</div>';
+  }
+  function walk(fr){
+    const n=by[fr.id]||{id:fr.id,title:'',waiting:[],deps:[]};
+    const kids=(fr.children||[]).map(walk).join('');
+    const rpt=fr.repeat?'<span class="mute"> [shown above]</span>':'';
+    return '<li class="g-node" data-id="'+esc(n.id)+'">'+row(n)+rpt+(kids?'<ul class="g-kids">'+kids+'</ul>':'')+'</li>';
+  }
+  host.innerHTML=notice+'<ul class="g-roots" id="graphTree">'+(g.forest||[]).map(walk).join('')+'</ul>';
+}
 document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
 document.querySelector('nav.tabs').addEventListener('keydown',e=>{
   if(e.key!=='ArrowLeft'&&e.key!=='ArrowRight')return;
@@ -11636,6 +11771,16 @@ document.querySelector('nav.tabs').addEventListener('keydown',e=>{
   setTab(next.dataset.tabBtn);next.focus();
 });
 try{const saved=localStorage.getItem('tickets-ui-tab');if(saved)setTab(saved)}catch(e){}
+document.querySelectorAll('#workViews [data-work-view]').forEach(b=>b.addEventListener('click',()=>setWorkView(b.dataset.workView,true)));
+try{const wv=localStorage.getItem('tickets-ui-work-view');if(wv)setWorkView(wv)}catch(e){}
+(function applyWorkHash(){
+  const h=(location.hash||'').replace('#','');
+  if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
+})();
+window.addEventListener('hashchange',()=>{
+  const h=(location.hash||'').replace('#','');
+  if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
+});
 let AGENTS=[];
 let THREAD_SEAT='';
 try{THREAD_SEAT=localStorage.getItem('tickets-ui-seat')||''}catch(e){}
@@ -11844,6 +11989,7 @@ async function load(manual){
   fillCol('ready',ready,ready.map(t=>card(t)).join(''));
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
   fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
+  renderGraph(d.graph);
   renderEmptyBoard(d);
   renderAttention(d.attention);
   renderEpics(d.epics);
@@ -12549,6 +12695,7 @@ def _board_snapshot_body(board, messages=40):
             "stop_condition": STOP_CONDITION,
         },
         "coverage": coverage,
+        "graph": workflow_graph(tickets),
     }
 
 
