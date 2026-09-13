@@ -4312,10 +4312,18 @@ def _finish_followup(board, tid, event):
     persist watcher on this CLI gets SIGUSR1; others still get the board msg.
     """
     m = current_master(board) or {}
+    on_board = set(load_workforce(board) or {})
+    on_board.update(r.get("owner") or "" for r in load_agents(board))
+    on_board.discard("")
     seats = []
-    for name in ((m or {}).get("cos"), (m or {}).get("owner"), "cursor", "atman-ceo"):
+    candidates = [((m or {}).get("cos") or ""), ((m or {}).get("owner") or "")]
+    # Live fleet aliases only if this board actually enrolled them (T-883).
+    for name in ("cursor", "atman-ceo"):
+        if name in on_board:
+            candidates.append(name)
+    for name in candidates:
         n = (name or "").strip()
-        if n and n not in seats:
+        if n and n in on_board and n not in seats:
             seats.append(n)
     author = whoami()
     body = ("%s %s. Coordinator follow-up: inbox poke + persist wake "
