@@ -1,0 +1,74 @@
+name: release-homebrew
+
+# Tag -> tarball -> GitHub Release -> Homebrew formula bump PR (T-865).
+#
+# Needs, as repo/environment setup this workflow cannot create for itself:
+#   - the tag pushed here to point at a commit already reviewed and merged
+#     to main (this workflow does not gate that; `tickets review`/`merge` do);
+#   - a HOMEBREW_TAP_TOKEN secret: a PAT with push access to
+#     advitiyavashist/homebrew-tap, used only for the bump-PR step below.
+# Until that secret exists the release/tarball/sha256 steps still run and
+# publish the GitHub Release; only the tap PR step is skipped.
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build the release tarball
+        id: build
+        run: |
+          python3 scripts/build_release_tarball.py --ref "$GITHUB_REF_NAME" --outdir dist --json > dist/release.json
+          python3 -c "
+          import json
+          r = json.load(open('dist/release.json'))
+          print('tarball=%s' % r['tarball'])
+          print('sha256=%s' % r['sha256'])
+          print('version=%s' % r['version'])
+          " >> "$GITHUB_OUTPUT"
+      - name: Prove the tarball installs and passes the acceptance smoke
+        run: |
+          mkdir -p /tmp/atman-extract
+          tar -xzf "${{ steps.build.outputs.tarball }}" -C /tmp/atman-extract
+          EXTRACTED=$(find /tmp/atman-extract -maxdepth 1 -type d -name 'atman-*')
+          python3 "$EXTRACTED/tickets.py" --version | grep -q 'verified release'
+          TICKETS_DIR="$RUNNER_TEMP/board" TICKET_AGENT=release-ci HOME="$RUNNER_TEMP" \
+            python3 "$EXTRACTED/tickets.py" join release-ci-seat --roles backend | grep -q 'joined as'
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build.outputs.tarball }}
+          fail_on_unmatched_files: true
+      - name: Bump the tap formula
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/advitiyavashist/homebrew-tap.git" /tmp/tap
+          BRANCH="bump-atman-${{ steps.build.outputs.version }}"
+          cd /tmp/tap
+          git checkout -b "$BRANCH"
+          sed -i.bak \
+            -e "s|^  url \".*atman-.*\.tar\.gz\"|  url \"https://github.com/advitiyavashist/atman/releases/download/${GITHUB_REF_NAME}/atman-${{ steps.build.outputs.version }}.tar.gz\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"${{ steps.build.outputs.sha256 }}\"|" \
+            Formula/atman.rb
+          rm -f Formula/atman.rb.bak
+          git -c user.name="atman-release-bot" -c user.email="release@atman.dev" \
+            commit -am "atman ${{ steps.build.outputs.version }} (${GITHUB_REF_NAME})" \
+            Formula/atman.rb
+          git push origin "$BRANCH"
+          gh pr create --repo advitiyavashist/homebrew-tap \
+            --title "atman ${{ steps.build.outputs.version }}" \
+            --body "Automated bump from advitiyavashist/atman@${GITHUB_REF_NAME}. Tarball sha256 ${{ steps.build.outputs.sha256 }}." \
+            --head "$BRANCH" --base main
+        shell: bash
