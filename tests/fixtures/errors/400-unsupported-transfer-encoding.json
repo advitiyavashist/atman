@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "unsupported_transfer_encoding",
+    "status": 400,
+    "message": "Transfer-Encoding 'chunked' is not supported; send a Content-Length-framed body.",
+    "request_id": "1a2b3c4d-5e6f-4071-8899-aabbccddeeff"
+  }
+}

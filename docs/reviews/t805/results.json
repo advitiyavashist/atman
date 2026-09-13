@@ -1,0 +1,908 @@
+{
+  "corpus": {
+    "corpus": [
+      {
+        "case": "atomic-claim-eight-way",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "dependency-ordering",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/blocked-detail/board_tree/digest",
+          "/steps/blocked-detail/board_tree/entries/2/sha256",
+          "/steps/blocked-next/board_tree/digest",
+          "/steps/blocked-next/board_tree/entries/2/sha256",
+          "/steps/finish-upstream/board_tree/digest",
+          "/steps/finish-upstream/board_tree/entries/2/sha256",
+          "/steps/first-claim/board_tree/digest",
+          "/steps/first-claim/board_tree/entries/2/sha256",
+          "/steps/join/board_tree/digest",
+          "/steps/join/board_tree/entries/2/sha256",
+          "/steps/second-claim/board_tree/digest",
+          "/steps/second-claim/board_tree/entries/2/sha256",
+          "/steps/unblocked-detail/board_tree/digest",
+          "/steps/unblocked-detail/board_tree/entries/2/sha256"
+        ],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 14
+      },
+      {
+        "case": "bounded-objective",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/achieve/board_tree/digest",
+          "/steps/achieve/board_tree/entries/0/sha256",
+          "/steps/set/board_tree/digest",
+          "/steps/set/board_tree/entries/0/sha256"
+        ],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 4
+      },
+      {
+        "case": "task-message-wake-ack",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/ack/board_tree/digest",
+          "/steps/ack/board_tree/entries/1/sha256",
+          "/steps/after-ack/board_tree/digest",
+          "/steps/after-ack/board_tree/entries/1/sha256",
+          "/steps/join/board_tree/digest",
+          "/steps/join/board_tree/entries/1/sha256",
+          "/steps/pending/board_tree/digest",
+          "/steps/pending/board_tree/entries/1/sha256",
+          "/steps/send/board_tree/digest",
+          "/steps/send/board_tree/entries/1/sha256"
+        ],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 10
+      },
+      {
+        "case": "durable-identity-and-remote-hook",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/identity/board_tree/digest",
+          "/steps/identity/board_tree/entries/1/sha256",
+          "/steps/identity/board_tree/entries/2/sha256",
+          "/steps/identity/stdout",
+          "/steps/install/board_tree/digest",
+          "/steps/install/board_tree/entries/1/sha256",
+          "/steps/install/board_tree/entries/2/sha256",
+          "/steps/join/board_tree/digest",
+          "/steps/join/board_tree/entries/1/sha256",
+          "/steps/rollback/board_tree/digest",
+          "/steps/rollback/board_tree/entries/1/sha256",
+          "/steps/rollback/board_tree/entries/2/sha256",
+          "/steps/wrong-ambient/board_tree/digest",
+          "/steps/wrong-ambient/board_tree/entries/1/sha256",
+          "/steps/wrong-ambient/board_tree/entries/2/sha256",
+          "/steps/wrong-ambient/stdout"
+        ],
+        "metrics": {},
+        "stream_samples": [
+          {
+            "path": "/steps/identity/stdout",
+            "expected": "{\n  \"agent_id\": \"grok-worker\",\n  \"branch\": \"?\",\n  \"dirty\": 1,\n  \"instance_id\": \"<uuid>\",\n  \"main_tree\": true,\n  \"repo\": \"${ROOT}/.git\",\n  \"sha\": \"?\",\n  \"top\": \"${ROOT}\"\n}\n",
+            "actual": "{\n  \"agent_id\": \"grok-worker\",\n  \"branch\": \"?\",\n  \"dirty\": 2,\n  \"instance_id\": \"<uuid>\",\n  \"main_tree\": true,\n  \"repo\": \"${ROOT}/.git\",\n  \"sha\": \"?\",\n  \"top\": \"${ROOT}\"\n}\n"
+          },
+          {
+            "path": "/steps/wrong-ambient/stdout",
+            "expected": "{\n  \"agent_id\": \"grok-worker\",\n  \"branch\": \"?\",\n  \"dirty\": 5,\n  \"instance_id\": \"<uuid>\",\n  \"main_tree\": true,\n  \"repo\": \"${ROOT}/.git\",\n  \"sha\": \"?\",\n  \"top\": \"${ROOT}\"\n}\n",
+            "actual": "{\n  \"agent_id\": \"grok-worker\",\n  \"branch\": \"?\",\n  \"dirty\": 6,\n  \"instance_id\": \"<uuid>\",\n  \"main_tree\": true,\n  \"repo\": \"${ROOT}/.git\",\n  \"sha\": \"?\",\n  \"top\": \"${ROOT}\"\n}\n"
+          }
+        ],
+        "difference_count": 16
+      },
+      {
+        "case": "duplicate-delivery",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "runner-lease-fencing",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "crash-orphan-partial-write",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "backup-restore-recovery",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "knowledge-reference",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "knowledge-path-containment",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "knowledge-future-clock",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "legacy-board-read",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "cli-json-and-errors",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "wake-mode-matrix",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/clock-gap/board_tree/digest",
+          "/steps/clock-gap/board_tree/entries/1/sha256",
+          "/steps/clock-gap/board_tree/entries/2/sha256",
+          "/steps/clock-gap/board_tree/entries/3/sha256",
+          "/steps/dm-continuous/board_tree/digest",
+          "/steps/dm-continuous/board_tree/entries/1/sha256",
+          "/steps/dm-continuous/board_tree/entries/2/sha256",
+          "/steps/dm-continuous/board_tree/entries/3/sha256",
+          "/steps/dm-scheduled/board_tree/digest",
+          "/steps/dm-scheduled/board_tree/entries/1/sha256",
+          "/steps/dm-scheduled/board_tree/entries/2/sha256",
+          "/steps/dm-scheduled/board_tree/entries/3/sha256",
+          "/steps/dm-task-only/board_tree/digest",
+          "/steps/dm-task-only/board_tree/entries/1/sha256",
+          "/steps/dm-task-only/board_tree/entries/2/sha256",
+          "/steps/dm-task-only/board_tree/entries/3/sha256",
+          "/steps/join-continuous/board_tree/digest",
+          "/steps/join-continuous/board_tree/entries/1/sha256",
+          "/steps/join-scheduled/board_tree/digest",
+          "/steps/join-scheduled/board_tree/entries/1/sha256",
+          "/steps/join-scheduled/board_tree/entries/2/sha256",
+          "/steps/join-scheduled/board_tree/entries/3/sha256",
+          "/steps/join-task-only/board_tree/digest",
+          "/steps/join-task-only/board_tree/entries/1/sha256",
+          "/steps/join-task-only/board_tree/entries/2/sha256",
+          "/steps/pending-continuous-dm/board_tree/digest",
+          "/steps/pending-continuous-dm/board_tree/entries/1/sha256",
+          "/steps/pending-continuous-dm/board_tree/entries/2/sha256",
+          "/steps/pending-continuous-dm/board_tree/entries/3/sha256",
+          "/steps/pending-scheduled-dm/board_tree/digest",
+          "/steps/pending-scheduled-dm/board_tree/entries/1/sha256",
+          "/steps/pending-scheduled-dm/board_tree/entries/2/sha256",
+          "/steps/pending-scheduled-dm/board_tree/entries/3/sha256",
+          "/steps/pending-scheduled-task/board_tree/digest",
+          "/steps/pending-scheduled-task/board_tree/entries/1/sha256",
+          "/steps/pending-scheduled-task/board_tree/entries/2/sha256",
+          "/steps/pending-scheduled-task/board_tree/entries/3/sha256",
+          "/steps/pending-task-only-dm/board_tree/digest",
+          "/steps/pending-task-only-dm/board_tree/entries/1/sha256",
+          "/steps/pending-task-only-dm/board_tree/entries/2/sha256",
+          "/steps/pending-task-only-dm/board_tree/entries/3/sha256",
+          "/steps/pending-task-only-task/board_tree/digest",
+          "/steps/pending-task-only-task/board_tree/entries/1/sha256",
+          "/steps/pending-task-only-task/board_tree/entries/2/sha256",
+          "/steps/pending-task-only-task/board_tree/entries/3/sha256",
+          "/steps/task-scheduled/board_tree/digest",
+          "/steps/task-scheduled/board_tree/entries/1/sha256",
+          "/steps/task-scheduled/board_tree/entries/2/sha256",
+          "/steps/task-scheduled/board_tree/entries/3/sha256",
+          "/steps/task-task-only/board_tree/digest"
+        ],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 53
+      },
+      {
+        "case": "board-read-performance",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {
+          "warm-board": {
+            "samples": 7,
+            "p50_ms": 184.144,
+            "p95_ms": 208.702,
+            "p95_under_ms": 1000.0
+          }
+        },
+        "stream_samples": [],
+        "difference_count": 0
+      }
+    ],
+    "combined-corpus": [
+      {
+        "case": "atomic-claim-eight-way",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/join-a/stdout",
+          "/steps/join-b/stdout",
+          "/steps/join-c/stdout",
+          "/steps/join-d/stdout",
+          "/steps/join-e/stdout",
+          "/steps/join-f/stdout",
+          "/steps/join-g/stdout",
+          "/steps/join-h/stdout"
+        ],
+        "metrics": {},
+        "stream_samples": [
+          {
+            "path": "/steps/join-a/stdout",
+            "expected": "joined as worker-a  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/worker-a-work -b worker-a-work\n  cd ${ROOT}/.worktrees/worker-a-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n",
+            "actual": "joined as worker-a  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/worker-a-work -b worker-a-work\n  cd ${ROOT}/.worktrees/worker-a-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect --worker\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n"
+          },
+          {
+            "path": "/steps/join-b/stdout",
+            "expected": "joined as worker-b  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/worker-b-work -b worker-b-work\n  cd ${ROOT}/.worktrees/worker-b-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n",
+            "actual": "joined as worker-b  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/worker-b-work -b worker-b-work\n  cd ${ROOT}/.worktrees/worker-b-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect --worker\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n"
+          }
+        ],
+        "difference_count": 8
+      },
+      {
+        "case": "dependency-ordering",
+        "assertions": "FAIL",
+        "error": "first-claim: exit 1 not in [0]\nstdout: no ticket ready: 2 open, all waiting on unfinished work\n\nstderr: "
+      },
+      {
+        "case": "bounded-objective",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/achieve/board_tree/digest",
+          "/steps/achieve/board_tree/entries/0/bytes",
+          "/steps/achieve/board_tree/entries/0/sha256",
+          "/steps/set/board_tree/digest",
+          "/steps/set/board_tree/entries/0/bytes",
+          "/steps/set/board_tree/entries/0/sha256"
+        ],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 6
+      },
+      {
+        "case": "task-message-wake-ack",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/ack/board_tree/digest",
+          "/steps/ack/board_tree/entries/1/bytes",
+          "/steps/ack/board_tree/entries/1/sha256",
+          "/steps/after-ack/board_tree/digest",
+          "/steps/after-ack/board_tree/entries/1/bytes",
+          "/steps/after-ack/board_tree/entries/1/sha256",
+          "/steps/join/board_tree/digest",
+          "/steps/join/board_tree/entries/1/bytes",
+          "/steps/join/board_tree/entries/1/sha256",
+          "/steps/join/stdout",
+          "/steps/pending/board_tree/digest",
+          "/steps/pending/board_tree/entries/1/bytes",
+          "/steps/pending/board_tree/entries/1/sha256",
+          "/steps/send/board_tree/digest",
+          "/steps/send/board_tree/entries/1/bytes",
+          "/steps/send/board_tree/entries/1/sha256"
+        ],
+        "metrics": {},
+        "stream_samples": [
+          {
+            "path": "/steps/join/stdout",
+            "expected": "joined as worker  roles=['docs']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/worker-work -b worker-work\n  cd ${ROOT}/.worktrees/worker-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n",
+            "actual": "joined as worker  roles=['docs']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/worker-work -b worker-work\n  cd ${ROOT}/.worktrees/worker-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect --worker\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n"
+          }
+        ],
+        "difference_count": 16
+      },
+      {
+        "case": "durable-identity-and-remote-hook",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/identity/board_tree/digest",
+          "/steps/identity/board_tree/entries/1/bytes",
+          "/steps/identity/board_tree/entries/1/sha256",
+          "/steps/identity/board_tree/entries/2/sha256",
+          "/steps/identity/stdout",
+          "/steps/install/board_tree/digest",
+          "/steps/install/board_tree/entries/1/bytes",
+          "/steps/install/board_tree/entries/1/sha256",
+          "/steps/install/board_tree/entries/2/sha256",
+          "/steps/join/board_tree/digest",
+          "/steps/join/board_tree/entries/1/bytes",
+          "/steps/join/board_tree/entries/1/sha256",
+          "/steps/join/stdout",
+          "/steps/rollback/board_tree/digest",
+          "/steps/rollback/board_tree/entries/1/bytes",
+          "/steps/rollback/board_tree/entries/1/sha256",
+          "/steps/rollback/board_tree/entries/2/sha256",
+          "/steps/wrong-ambient/board_tree/digest",
+          "/steps/wrong-ambient/board_tree/entries/1/bytes",
+          "/steps/wrong-ambient/board_tree/entries/1/sha256",
+          "/steps/wrong-ambient/board_tree/entries/2/sha256",
+          "/steps/wrong-ambient/stdout"
+        ],
+        "metrics": {},
+        "stream_samples": [
+          {
+            "path": "/steps/identity/stdout",
+            "expected": "{\n  \"agent_id\": \"grok-worker\",\n  \"branch\": \"?\",\n  \"dirty\": 1,\n  \"instance_id\": \"<uuid>\",\n  \"main_tree\": true,\n  \"repo\": \"${ROOT}/.git\",\n  \"sha\": \"?\",\n  \"top\": \"${ROOT}\"\n}\n",
+            "actual": "{\n  \"agent_id\": \"grok-worker\",\n  \"branch\": \"?\",\n  \"dirty\": 2,\n  \"instance_id\": \"<uuid>\",\n  \"main_tree\": true,\n  \"repo\": \"${ROOT}/.git\",\n  \"sha\": \"?\",\n  \"top\": \"${ROOT}\"\n}\n"
+          },
+          {
+            "path": "/steps/join/stdout",
+            "expected": "joined as grok-worker  roles=['review']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/grok-worker-work -b grok-worker-work\n  cd ${ROOT}/.worktrees/grok-worker-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n",
+            "actual": "joined as grok-worker  roles=['review']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/grok-worker-work -b grok-worker-work\n  cd ${ROOT}/.worktrees/grok-worker-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect --worker\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n"
+          }
+        ],
+        "difference_count": 22
+      },
+      {
+        "case": "duplicate-delivery",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "runner-lease-fencing",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "crash-orphan-partial-write",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "backup-restore-recovery",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "knowledge-reference",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "knowledge-path-containment",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "knowledge-future-clock",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "legacy-board-read",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "cli-json-and-errors",
+        "assertions": "PASS",
+        "golden": "PASS",
+        "differences": [],
+        "metrics": {},
+        "stream_samples": [],
+        "difference_count": 0
+      },
+      {
+        "case": "wake-mode-matrix",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/clock-gap/board_tree/digest",
+          "/steps/clock-gap/board_tree/entries/1/bytes",
+          "/steps/clock-gap/board_tree/entries/1/sha256",
+          "/steps/clock-gap/board_tree/entries/2/bytes",
+          "/steps/clock-gap/board_tree/entries/2/sha256",
+          "/steps/clock-gap/board_tree/entries/3/bytes",
+          "/steps/clock-gap/board_tree/entries/3/sha256",
+          "/steps/dm-continuous/board_tree/digest",
+          "/steps/dm-continuous/board_tree/entries/1/bytes",
+          "/steps/dm-continuous/board_tree/entries/1/sha256",
+          "/steps/dm-continuous/board_tree/entries/2/bytes",
+          "/steps/dm-continuous/board_tree/entries/2/sha256",
+          "/steps/dm-continuous/board_tree/entries/3/bytes",
+          "/steps/dm-continuous/board_tree/entries/3/sha256",
+          "/steps/dm-scheduled/board_tree/digest",
+          "/steps/dm-scheduled/board_tree/entries/1/bytes",
+          "/steps/dm-scheduled/board_tree/entries/1/sha256",
+          "/steps/dm-scheduled/board_tree/entries/2/bytes",
+          "/steps/dm-scheduled/board_tree/entries/2/sha256",
+          "/steps/dm-scheduled/board_tree/entries/3/bytes",
+          "/steps/dm-scheduled/board_tree/entries/3/sha256",
+          "/steps/dm-task-only/board_tree/digest",
+          "/steps/dm-task-only/board_tree/entries/1/bytes",
+          "/steps/dm-task-only/board_tree/entries/1/sha256",
+          "/steps/dm-task-only/board_tree/entries/2/bytes",
+          "/steps/dm-task-only/board_tree/entries/2/sha256",
+          "/steps/dm-task-only/board_tree/entries/3/bytes",
+          "/steps/dm-task-only/board_tree/entries/3/sha256",
+          "/steps/join-continuous/board_tree/digest",
+          "/steps/join-continuous/board_tree/entries/1/bytes",
+          "/steps/join-continuous/board_tree/entries/1/sha256",
+          "/steps/join-continuous/stdout",
+          "/steps/join-scheduled/board_tree/digest",
+          "/steps/join-scheduled/board_tree/entries/1/bytes",
+          "/steps/join-scheduled/board_tree/entries/1/sha256",
+          "/steps/join-scheduled/board_tree/entries/2/bytes",
+          "/steps/join-scheduled/board_tree/entries/2/sha256",
+          "/steps/join-scheduled/board_tree/entries/3/bytes",
+          "/steps/join-scheduled/board_tree/entries/3/sha256",
+          "/steps/join-scheduled/stdout",
+          "/steps/join-task-only/board_tree/digest",
+          "/steps/join-task-only/board_tree/entries/1/bytes",
+          "/steps/join-task-only/board_tree/entries/1/sha256",
+          "/steps/join-task-only/board_tree/entries/2/bytes",
+          "/steps/join-task-only/board_tree/entries/2/sha256",
+          "/steps/join-task-only/stdout",
+          "/steps/pending-continuous-dm/board_tree/digest",
+          "/steps/pending-continuous-dm/board_tree/entries/1/bytes",
+          "/steps/pending-continuous-dm/board_tree/entries/1/sha256",
+          "/steps/pending-continuous-dm/board_tree/entries/2/bytes"
+        ],
+        "metrics": {},
+        "stream_samples": [
+          {
+            "path": "/steps/join-continuous/stdout",
+            "expected": "joined as continuous-seat  roles=['docs']  can=-  cost=medium  harness=claude (default)  wake=continuous  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/continuous-seat-work -b continuous-seat-work\n  cd ${ROOT}/.worktrees/continuous-seat-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n",
+            "actual": "joined as continuous-seat  roles=['docs']  can=-  cost=medium  harness=claude (default)  wake=continuous  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/continuous-seat-work -b continuous-seat-work\n  cd ${ROOT}/.worktrees/continuous-seat-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect --worker\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n"
+          },
+          {
+            "path": "/steps/join-scheduled/stdout",
+            "expected": "joined as sched-seat  roles=['docs']  can=-  cost=medium  harness=claude (default)  wake=scheduled  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/sched-seat-work -b sched-seat-work\n  cd ${ROOT}/.worktrees/sched-seat-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n",
+            "actual": "joined as sched-seat  roles=['docs']  can=-  cost=medium  harness=claude (default)  wake=scheduled  lifecycle=ephemeral\nboard: ${BOARD}\nmaster: nobody -- `tickets master take` if you are it\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C ${ROOT} worktree add .worktrees/sched-seat-work -b sched-seat-work\n  cd ${ROOT}/.worktrees/sched-seat-work\n\nLoop:  tickets master  ->  tickets next  ->  work + commit  ->  tickets update <id> \"...\" (every 45 min)  ->  tickets done <id> --notes \"...\"  ->  merge  ->  tickets next\nFull instructions: tickets connect --worker\n(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)\n"
+          }
+        ],
+        "difference_count": 95
+      },
+      {
+        "case": "board-read-performance",
+        "assertions": "PASS",
+        "golden": "FAIL",
+        "differences": [
+          "/steps/bulk/board_tree/digest",
+          "/steps/bulk/board_tree/entries/0/bytes",
+          "/steps/bulk/board_tree/entries/0/mode",
+          "/steps/bulk/board_tree/entries/0/sha256",
+          "/steps/bulk/board_tree/entries/1/bytes",
+          "/steps/bulk/board_tree/entries/1/mode",
+          "/steps/bulk/board_tree/entries/1/sha256",
+          "/steps/bulk/board_tree/entries/2/bytes",
+          "/steps/bulk/board_tree/entries/2/mode",
+          "/steps/bulk/board_tree/entries/2/sha256",
+          "/steps/bulk/board_tree/entries/3/bytes",
+          "/steps/bulk/board_tree/entries/3/mode",
+          "/steps/bulk/board_tree/entries/3/sha256",
+          "/steps/bulk/board_tree/entries/4/bytes",
+          "/steps/bulk/board_tree/entries/4/mode",
+          "/steps/bulk/board_tree/entries/4/sha256",
+          "/steps/bulk/board_tree/entries/5/bytes",
+          "/steps/bulk/board_tree/entries/5/mode",
+          "/steps/bulk/board_tree/entries/5/sha256",
+          "/steps/bulk/board_tree/entries/6/bytes",
+          "/steps/bulk/board_tree/entries/6/mode",
+          "/steps/bulk/board_tree/entries/6/sha256",
+          "/steps/bulk/board_tree/entries/7/bytes",
+          "/steps/bulk/board_tree/entries/7/mode",
+          "/steps/bulk/board_tree/entries/7/sha256",
+          "/steps/bulk/board_tree/entries/8/bytes",
+          "/steps/bulk/board_tree/entries/8/mode",
+          "/steps/bulk/board_tree/entries/8/sha256",
+          "/steps/bulk/board_tree/entries/9/bytes",
+          "/steps/bulk/board_tree/entries/9/mode",
+          "/steps/bulk/board_tree/entries/9/sha256",
+          "/steps/bulk/board_tree/entries/10/bytes",
+          "/steps/bulk/board_tree/entries/10/mode",
+          "/steps/bulk/board_tree/entries/10/sha256",
+          "/steps/bulk/board_tree/entries/11/bytes",
+          "/steps/bulk/board_tree/entries/11/mode",
+          "/steps/bulk/board_tree/entries/11/sha256",
+          "/steps/bulk/board_tree/entries/12/bytes",
+          "/steps/bulk/board_tree/entries/12/mode",
+          "/steps/bulk/board_tree/entries/12/sha256",
+          "/steps/bulk/board_tree/entries/13/bytes",
+          "/steps/bulk/board_tree/entries/13/mode",
+          "/steps/bulk/board_tree/entries/13/sha256",
+          "/steps/bulk/board_tree/entries/14/bytes",
+          "/steps/bulk/board_tree/entries/14/mode",
+          "/steps/bulk/board_tree/entries/14/sha256",
+          "/steps/bulk/board_tree/entries/15/bytes",
+          "/steps/bulk/board_tree/entries/15/mode",
+          "/steps/bulk/board_tree/entries/15/sha256",
+          "/steps/bulk/board_tree/entries/16/bytes"
+        ],
+        "metrics": {
+          "warm-board": {
+            "samples": 7,
+            "p50_ms": 196.806,
+            "p95_ms": 343.312,
+            "p95_under_ms": 1000.0
+          }
+        },
+        "stream_samples": [
+          {
+            "path": "/steps/bulk/stdout",
+            "expected": "created T-001  Performance fixture 0000\ncreated T-002  Performance fixture 0001\ncreated T-003  Performance fixture 0002\ncreated T-004  Performance fixture 0003\ncreated T-005  Performance fixture 0004\ncreated T-006  Performance fixture 0005\ncreated T-007  Performance fixture 0006\ncreated T-008  Performance fixture 0007\ncreated T-009  Performance fixture 0008\ncreated T-010  Performance fixture 0009\ncreated T-011  Performance fixture 0010\ncreated T-012  Performance fixture 0011\ncreated T-013  Performance fixture 0012\ncreated T-014  Performance fixture 0013\ncreated T-015  Performance fixture 0014\ncreated T-016  Performance fixture 0015\ncreated T-017  Performance fixture 0016\ncreated T-018  Performance fixture 0017\ncreated T-019  Performance fixture 0018\ncreated T-020  Performance fixture 0019\ncreated T-021  Performance fixture 0020\ncreated T-022  Performance fixture 0021\ncreated T-023  Performance fixture 0022\ncreated T-024  Performance fixture 0023\ncreated T-025  Performance fixture 0024\ncreated T-026  Performance fixture 0025\ncreated T-027  Performance fixture 0026\ncreated T-028  Performance fixture 0027\ncreated T-029  Performance fixture 0028\ncreated T-030  Performance fixture 0029\ncreated T-031  Performance fixture 0030\ncreated T-032  Performance fixture 0031\ncreated T-033  Performance fixture 0032\ncreated T-034  Performance fixture 0033\ncreated T-035  Performance fixture 0034\ncreated T-036  Performance fixture 0035\ncreated T-037  Performance fixture 0036\ncreated T-038  Performance fixture 0037\ncreated T-039  Performance fixture 0038\ncreated T-040  Performance fixture 0039\ncreated T-041  Performance fixture 0040\ncreated T-042  Performance fixture 0041\ncreated T-043  Performance fixture 0042\ncreated T-044  Performance fixture 0043\ncreated T-045  Performance fixture 0044\ncreated T-046  Performance fixture 0045\ncreated T-047  Performance fixture 0046\ncreated T-048  Performance fixture 0047\ncreated T-049  Performance fixture 0048\ncreated T-050  Performance fixture 0049\n\n[truncated by review reporter]\n",
+            "actual": "created T-001  Performance fixture 0000  lane=capture\ncreated T-002  Performance fixture 0001  lane=capture\ncreated T-003  Performance fixture 0002  lane=capture\ncreated T-004  Performance fixture 0003  lane=capture\ncreated T-005  Performance fixture 0004  lane=capture\ncreated T-006  Performance fixture 0005  lane=capture\ncreated T-007  Performance fixture 0006  lane=capture\ncreated T-008  Performance fixture 0007  lane=capture\ncreated T-009  Performance fixture 0008  lane=capture\ncreated T-010  Performance fixture 0009  lane=capture\ncreated T-011  Performance fixture 0010  lane=capture\ncreated T-012  Performance fixture 0011  lane=capture\ncreated T-013  Performance fixture 0012  lane=capture\ncreated T-014  Performance fixture 0013  lane=capture\ncreated T-015  Performance fixture 0014  lane=capture\ncreated T-016  Performance fixture 0015  lane=capture\ncreated T-017  Performance fixture 0016  lane=capture\ncreated T-018  Performance fixture 0017  lane=capture\ncreated T-019  Performance fixture 0018  lane=capture\ncreated T-020  Performance fixture 0019  lane=capture\ncreated T-021  Performance fixture 0020  lane=capture\ncreated T-022  Performance fixture 0021  lane=capture\ncreated T-023  Performance fixture 0022  lane=capture\ncreated T-024  Performance fixture 0023  lane=capture\ncreated T-025  Performance fixture 0024  lane=capture\ncreated T-026  Performance fixture 0025  lane=capture\ncreated T-027  Performance fixture 0026  lane=capture\ncreated T-028  Performance fixture 0027  lane=capture\ncreated T-029  Performance fixture 0028  lane=capture\ncreated T-030  Performance fixture 0029  lane=capture\ncreated T-031  Performance fixture 0030  lane=capture\ncreated T-032  Performance fixture 0031  lane=capture\ncreated T-033  Performance fixture 0032  lane=capture\ncreated T-034  Performance fixture 0033  lane=capture\ncreated T-035  Performance fixture 0034  lane=capture\ncreated T-036  Performance fixture 0035  lane=capture\ncreated T-037  Performance fixture 0036  lane=capture\ncr\n[truncated by review reporter]\n"
+          },
+          {
+            "path": "/steps/warm-board/stdout",
+            "expected": "Ticket board (${BOARD}): 250 open\n  master: nobody (tickets master take)\n  [ ] TO DO       T-001  Performance fixture 0000  (role=backend)\n  [ ] TO DO       T-002  Performance fixture 0001  (role=backend)\n  [ ] TO DO       T-003  Performance fixture 0002  (role=backend)\n  [ ] TO DO       T-004  Performance fixture 0003  (role=backend)\n  [ ] TO DO       T-005  Performance fixture 0004  (role=backend)\n  [ ] TO DO       T-006  Performance fixture 0005  (role=backend)\n  [ ] TO DO       T-007  Performance fixture 0006  (role=backend)\n  [ ] TO DO       T-008  Performance fixture 0007  (role=backend)\n  [ ] TO DO       T-009  Performance fixture 0008  (role=backend)\n  [ ] TO DO       T-010  Performance fixture 0009  (role=backend)\n  [ ] TO DO       T-011  Performance fixture 0010  (role=backend)\n  [ ] TO DO       T-012  Performance fixture 0011  (role=backend)\n  [ ] TO DO       T-013  Performance fixture 0012  (role=backend)\n  [ ] TO DO       T-014  Performance fixture 0013  (role=backend)\n  [ ] TO DO       T-015  Performance fixture 0014  (role=backend)\n  [ ] TO DO       T-016  Performance fixture 0015  (role=backend)\n  [ ] TO DO       T-017  Performance fixture 0016  (role=backend)\n  [ ] TO DO       T-018  Performance fixture 0017  (role=backend)\n  [ ] TO DO       T-019  Performance fixture 0018  (role=backend)\n  [ ] TO DO       T-020  Performance fixture 0019  (role=backend)\n  [ ] TO DO       T-021  Performance fixture 0020  (role=backend)\n  [ ] TO DO       T-022  Performance fixture 0021  (role=backend)\n  [ ] TO DO       T-023  Performance fixture 0022  (role=backend)\n  [ ] TO DO       T-024  Performance fixture 0023  (role=backend)\n  [ ] TO DO       T-025  Performance fixture 0024  (role=backend)\n  [ ] TO DO       T-026  Performance fixture 0025  (role=backend)\n  [ ] TO DO       T-027  Performance fixture 0026  (role=backend)\n  [ ] TO DO       T-028  Performance fixture 0027  (role=backend)\n  [ ] TO DO       T-029  Performance fixture 0028  (role=backend)\n  [ ] TO DO  \n[truncated by review reporter]\n",
+            "actual": "Ticket board (${BOARD}): 250 open\n  master: nobody (tickets master take)\n  [ ] TO DO       T-001  Performance fixture 0000  (role=backend; lane=capture)\n  [ ] TO DO       T-002  Performance fixture 0001  (role=backend; lane=capture)\n  [ ] TO DO       T-003  Performance fixture 0002  (role=backend; lane=capture)\n  [ ] TO DO       T-004  Performance fixture 0003  (role=backend; lane=capture)\n  [ ] TO DO       T-005  Performance fixture 0004  (role=backend; lane=capture)\n  [ ] TO DO       T-006  Performance fixture 0005  (role=backend; lane=capture)\n  [ ] TO DO       T-007  Performance fixture 0006  (role=backend; lane=capture)\n  [ ] TO DO       T-008  Performance fixture 0007  (role=backend; lane=capture)\n  [ ] TO DO       T-009  Performance fixture 0008  (role=backend; lane=capture)\n  [ ] TO DO       T-010  Performance fixture 0009  (role=backend; lane=capture)\n  [ ] TO DO       T-011  Performance fixture 0010  (role=backend; lane=capture)\n  [ ] TO DO       T-012  Performance fixture 0011  (role=backend; lane=capture)\n  [ ] TO DO       T-013  Performance fixture 0012  (role=backend; lane=capture)\n  [ ] TO DO       T-014  Performance fixture 0013  (role=backend; lane=capture)\n  [ ] TO DO       T-015  Performance fixture 0014  (role=backend; lane=capture)\n  [ ] TO DO       T-016  Performance fixture 0015  (role=backend; lane=capture)\n  [ ] TO DO       T-017  Performance fixture 0016  (role=backend; lane=capture)\n  [ ] TO DO       T-018  Performance fixture 0017  (role=backend; lane=capture)\n  [ ] TO DO       T-019  Performance fixture 0018  (role=backend; lane=capture)\n  [ ] TO DO       T-020  Performance fixture 0019  (role=backend; lane=capture)\n  [ ] TO DO       T-021  Performance fixture 0020  (role=backend; lane=capture)\n  [ ] TO DO       T-022  Performance fixture 0021  (role=backend; lane=capture)\n  [ ] TO DO       T-023  Performance fixture 0022  (role=backend; lane=capture)\n  [ ] TO DO       T-024  Performance fixture 0023  (role=backend; lane=capture)\n  [ ] T\n[truncated by review reporter]\n"
+          }
+        ],
+        "difference_count": 1504
+      }
+    ]
+  },
+  "adversarial": [
+    {
+      "revision": "main",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "board",
+        "--quiet"
+      ],
+      "exit": 0,
+      "stdout": "Ticket board (/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-4cux1gbj/.tickets): 1 open\n  master: nobody (tickets master take)\n  [ ] TO DO       T-001  T-001\n  -> ready to claim: T-001\n",
+      "stderr": "",
+      "changed": []
+    },
+    {
+      "revision": "main",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "graph"
+      ],
+      "exit": 0,
+      "stdout": "Dependency graph (1 open)\n`- [ ] T-001 T-001\n",
+      "stderr": "",
+      "changed": []
+    },
+    {
+      "revision": "main",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "create",
+        "Should not land"
+      ],
+      "exit": 0,
+      "stdout": "created T-003  Should not land\n",
+      "stderr": "",
+      "changed": [
+        "T-003.json"
+      ]
+    },
+    {
+      "revision": "main",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "claim",
+        "T-001"
+      ],
+      "exit": 0,
+      "stdout": "[>] IN PROGRESS T-001  T-001  (owner=worker)\n\nBoard: /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3/.tickets  (cwd is /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3)\nTime: active 0m, waited 3.7d before claim, last update 0m ago\nlane: ready\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3 worktree add .worktrees/worker-work -b worker-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3/.worktrees/worker-work\n",
+      "stderr": "",
+      "changed": [
+        "T-001.json",
+        "T-001.lock",
+        "agents/worker.json",
+        "agents/worker.json.lock",
+        "trajectories.jsonl"
+      ]
+    },
+    {
+      "revision": "main",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "status",
+        "T-001",
+        "in-progress"
+      ],
+      "exit": 0,
+      "stdout": "T-001 -> IN PROGRESS (@worker)\n",
+      "stderr": "",
+      "changed": [
+        "T-001.json",
+        "T-001.lock",
+        "agents/worker.json",
+        "agents/worker.json.lock",
+        "trajectories.jsonl"
+      ]
+    },
+    {
+      "revision": "main",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "assign",
+        "T-001",
+        "--owner",
+        "worker"
+      ],
+      "exit": 0,
+      "stdout": "T-001: claimed for worker\n",
+      "stderr": "",
+      "changed": [
+        "T-001.json",
+        "T-001.lock",
+        "agents/worker.json",
+        "agents/worker.json.lock",
+        "trajectories.jsonl"
+      ]
+    },
+    {
+      "revision": "main",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "update",
+        "T-001",
+        "probe"
+      ],
+      "exit": 0,
+      "stdout": "noted on T-001\n",
+      "stderr": "",
+      "changed": [
+        "T-001.json",
+        "trajectories.jsonl"
+      ]
+    },
+    {
+      "revision": "main",
+      "fixture": "unfinished-dependency",
+      "argv": [
+        "claim",
+        "T-002"
+      ],
+      "exit": 0,
+      "stdout": "[>] IN PROGRESS T-002  T-002  (owner=worker; after T-001)\n\nBoard: /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct/.tickets  (cwd is /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct)\nTime: active 0m, waited 3.7d before claim, last update 0m ago\nlane: ready\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct worktree add .worktrees/worker-work -b worker-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct/.worktrees/worker-work\n",
+      "stderr": "",
+      "changed": [
+        "T-002.json",
+        "T-002.lock",
+        "agents/worker.json",
+        "agents/worker.json.lock",
+        "trajectories.jsonl"
+      ]
+    },
+    {
+      "revision": "main",
+      "fixture": "dangling-symlink",
+      "argv": [
+        "board",
+        "--quiet"
+      ],
+      "exit": 0,
+      "stdout": "Ticket board (/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-yw67wqjm/.tickets): 1 open\n  master: nobody (tickets master take)\n  [ ] TO DO       T-001  T-001\n  -> ready to claim: T-001\n",
+      "stderr": "",
+      "changed": []
+    },
+    {
+      "revision": "main",
+      "fixture": "orphan-partial",
+      "argv": [
+        "list"
+      ],
+      "exit": 0,
+      "stdout": "[ ] TO DO       T-001  T-001\n",
+      "stderr": "",
+      "changed": []
+    },
+    {
+      "revision": "repairs",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "board",
+        "--quiet"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "corrupt ticket T-002: Expecting value: line 1 column 7 (char 6)\n",
+      "changed": []
+    },
+    {
+      "revision": "repairs",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "graph"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "corrupt ticket T-002: Expecting value: line 1 column 7 (char 6)\n",
+      "changed": []
+    },
+    {
+      "revision": "repairs",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "create",
+        "Should not land"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "corrupt ticket T-002: Expecting value: line 1 column 7 (char 6)\n",
+      "changed": []
+    },
+    {
+      "revision": "repairs",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "claim",
+        "T-001"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "corrupt ticket T-002: Expecting value: line 1 column 7 (char 6)\n",
+      "changed": [
+        "T-001.lock"
+      ]
+    },
+    {
+      "revision": "repairs",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "status",
+        "T-001",
+        "in-progress"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "corrupt ticket T-002: Expecting value: line 1 column 7 (char 6)\n",
+      "changed": [
+        "T-001.lock"
+      ]
+    },
+    {
+      "revision": "repairs",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "assign",
+        "T-001",
+        "--owner",
+        "worker"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "corrupt ticket T-002: Expecting value: line 1 column 7 (char 6)\n",
+      "changed": [
+        "T-001.lock"
+      ]
+    },
+    {
+      "revision": "repairs",
+      "fixture": "corrupt-neighbor",
+      "argv": [
+        "update",
+        "T-001",
+        "probe"
+      ],
+      "exit": 0,
+      "stdout": "noted on T-001\n",
+      "stderr": "",
+      "changed": [
+        "T-001.json",
+        "trajectories.jsonl"
+      ]
+    },
+    {
+      "revision": "repairs",
+      "fixture": "unfinished-dependency",
+      "argv": [
+        "claim",
+        "T-002"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "T-002 has unfinished dependencies: T-001\n",
+      "changed": []
+    },
+    {
+      "revision": "repairs",
+      "fixture": "dangling-symlink",
+      "argv": [
+        "board",
+        "--quiet"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 13351, in <module>\n    main()\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 13347, in main\n    a.fn(a, board)\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 1905, in cmd_board\n    tickets = load_all(board)\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 603, in load_all\n    out.append(read_ticket_file(path))\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 572, in read_ticket_file\n    with open(path) as f:\nFileNotFoundError: [Errno 2] No such file or directory: '/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-xnlmg6k2/.tickets/T-002.json'\n",
+      "changed": []
+    },
+    {
+      "revision": "repairs",
+      "fixture": "orphan-partial",
+      "argv": [
+        "list"
+      ],
+      "exit": 0,
+      "stdout": "[ ] TO DO       T-001  T-001\n",
+      "stderr": "",
+      "changed": []
+    }
+  ]
+}

@@ -505,6 +505,8 @@ def provider_for_harness(harness):
         return "claude"
     if harness in ("codex", "cursor", "remote"):
         return harness
+    if harness in ("grok", "grokbots"):
+        return "cursor"
     return ""
 
 

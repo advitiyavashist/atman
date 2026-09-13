@@ -276,13 +276,13 @@ def test_the_messaging_routes_are_no_longer_stubs(operator):
         "owner_ticket" not in (response.json()["error"].get("details") or {})
 
 
-def test_the_runner_routes_are_no_longer_stubs(enrolled):
-    """T-188 landed; GET /runners/jobs is not an owner_ticket stub.
+def test_list_wake_jobs_without_runner_id_is_malformed_request(enrolled):
+    """Primary T-502 pin: missing runner_id is 400 with rejected_fields.
 
-    A bare GET without runner_id is 400 malformed_request with
-    rejected_fields=["runner_id"], not 404 owner_ticket T-188. This is the
-    live shape the original T-502 rewrite asserted; kept as its own test so
-    the still-correct T-187 /messages guard above is not deleted.
+    T-523 dropped the dead inverse `test_the_runner_routes_are_no_longer_stubs`,
+    which asserted the same 400 and therefore stayed green if the route 404'd
+    without details (M3). This test is the remaining guard; do not weaken it
+    to a stub-absence check.
     """
     response = enrolled["client"].get("/runners/jobs")
     assert response.status == 400

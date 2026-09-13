@@ -1195,7 +1195,7 @@ def test_native_failure_clears_on_remote_rejoin_and_live_lease_is_online(
     assert rec.get("adapter_failure", {}).get("provider") == "claude"
 
     _run(board, "join", "grok-worker", "--roles", "docs", "--harness", "remote",
-         "--wake-mode", "continuous")
+         "--wake-mode", "continuous", "--transfer")
     rec = tk._agent_rec(str(board), "grok-worker") or {}
     assert "adapter_failure" not in rec, rec
 
@@ -1248,7 +1248,7 @@ def test_unscoped_watcher_failure_clears_on_codex_and_cursor_rejoin(board):
     row = next(a for a in snap["agents"] if a["name"] == "cx")
     assert row["adapter_state"] == "failed"
 
-    _run(board, "join", "cx", "--roles", "docs", "--harness", "codex")
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "codex", "--transfer")
     rec = tk._agent_rec(str(board), "cx") or {}
     assert "adapter_failure" not in rec, rec
     snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)
@@ -1256,13 +1256,13 @@ def test_unscoped_watcher_failure_clears_on_codex_and_cursor_rejoin(board):
     assert row["adapter_state"] != "failed"
 
     _run(board, "join", "cx", "--roles", "docs", "--harness", "custom",
-         "--cmd", "true {prompt_file}")
+         "--cmd", "true {prompt_file}", "--transfer")
     tk._agent_set(str(board), "cx", adapter_failure={
         "state": "failed",
         "reason": "local harness exit 1",
         "at": "now",
     })
-    _run(board, "join", "cx", "--roles", "docs", "--harness", "cursor")
+    _run(board, "join", "cx", "--roles", "docs", "--harness", "cursor", "--transfer")
     rec = tk._agent_rec(str(board), "cx") or {}
     assert "adapter_failure" not in rec, rec
     snap = json.loads(_run(board, "ui", "--json", agent="sender").stdout)

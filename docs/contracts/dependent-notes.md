@@ -434,6 +434,15 @@ Non-obvious requirements:
 
 ## Amendments after freeze
 
+- **T-523, additive response, no `info.version` bump**: `GET /runners/jobs`
+  (`listWakeJobs`) now declares `400` `malformed_request` with
+  `details.rejected_fields` containing `runner_id` when that required query
+  is missing or malformed. The live handler already returned that shape
+  (T-502); the contract previously listed only 200/403/409. Fixture
+  `errors/400-runners-jobs-missing-runner-id.json`. Not a breaking change:
+  clients that already handled 400 keep working; clients that assumed only
+  200/403/409 now have the missing status documented.
+
 - **T-210, fixture-only, no schema change**: `tests/fixtures/tickets/{request-review,detail-accepted,detail-review-pending,detail-review-rejected}.json`
   and `tests/fixtures/overview/populated.json` had `"repository": "advitiyavashist/tickets"`
   (the real project's identity, not a demo value) baked into the `repository`

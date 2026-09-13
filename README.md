@@ -2,15 +2,24 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<h1 align="center">A local control plane for coding agents in one repo.</h1>
+<h1 align="center">Atman coordinates the agents you already run.</h1>
 
 <p align="center">
-  Atman is the local team runtime for multiple coding agents in one repo.
-  Bring the agents you already use — Claude Code, Codex, Cursor, Grok Bot,
-  or custom. We make them one team.
+  Not a multi-agent framework, not shared memory, not a model router.
+  Mail is the ticket board. Connecting an agent should feel like using Atman,
+  not the provider.
 </p>
 
-<p align="center"><strong>Fewest turns and measured cost stay secondary.</strong> Values stay <code>—</code> until a done ticket reports (unknown ≠ 0).</p>
+<p align="center">
+  <a href="https://github.com/advitiyavashist/atman/issues">Contact us</a>
+  ·
+  <a href="https://advitiyavashist.github.io/atman/">Site</a>
+</p>
+
+- **Integration.** Connect Claude Code, Codex, Cursor, or your own harness — the seat should feel like using Atman, not the provider.
+- **Product flow.** Claim work from the board, inherit the last handoff, finish or recover — if a seat hits a usage limit, another seat continues from the same ticket.
+- **Efficiency.** Fewest turns and measured cost stay blank until a finished ticket reports them; unknown is not zero. Values stay <code>—</code> until a done ticket reports.
+- **Workflow dependency graph.** Work stays invisible until its dependencies are done, so nobody starts too early.
 
 Give Atman an objective. Sit any first seat. It assigns ready work, carries the
 relevant handoff context, watches liveness and limits, routes messages, and
@@ -112,6 +121,11 @@ tickets review T-001 --notes "paths changed, tests run, decisions"
 tickets ui
 ```
 
+`install.sh` refuses to overwrite an existing `~/.local/bin/tickets` that
+isn't already a symlink to this checkout (a pinned live release, or an
+unrelated tool) — pass `--prefix DIR` (or `PREFIX=DIR`) to install somewhere
+isolated instead, or `--force` to replace it anyway.
+
 `quickstart` creates a local board, registers the first agent, and adds three
 sample tasks in a real dependency chain. It is safe to run twice. Run it inside
 an existing git repo — `git init` first if `your-project` is not one yet — so
@@ -131,11 +145,38 @@ cd ~/tickets
 Check what is actually running: `tickets self` (script path, PATH entry, release
 status). `tickets --version` prints the pinned commit or flags drift.
 
+**macOS (Homebrew)** — same pinned-release mechanism, packaged as a formula
+(T-865; not yet published — see `packaging/homebrew/README.md`):
+
+```sh
+brew install advitiyavashist/homebrew-tap/atman
+atm --version   # verified release, same check as tickets self
+atm join <name> --roles backend
+atm ui
+```
+
+`brew uninstall atman` removes the CLI only; it does not touch any
+`~/.claude` or `~/.codex` hook configuration you installed separately.
+
 Any first seat: hook Claude Code, Codex, Cursor, Grok Bot, or a custom
 harness (see `install.sh` and [Bring your own agent](docs/byoa.md)).
 
 `tickets ui` prints the local address for the read-only dashboard. For the full
 captured session, read [A first session](docs/first-session.md).
+
+## Team intro
+
+Same loop the dashboard onboarding strip names:
+
+1. Probe integrations: `tickets harness available` (missing is a row).
+2. Plan with `tickets plan` so JSON `deps` become real `--after` edges
+   (`tickets graph` to inspect).
+3. Unattended persist to a reviewable SHA on the agent's branch
+   (`tickets review`).
+4. Human review is the gate. Merge is not silent auto-promote.
+
+Start with [Agent onboarding](docs/onboarding/README.md). Community PR path
+is [Contributing](CONTRIBUTING.md).
 
 ## Connect a team
 
@@ -179,6 +220,8 @@ its local command or remote session bridge reconnects.
 Start with `tickets connect` for tool-specific onboarding. See
 [Bring your own agent](docs/byoa.md) for the complete runner contract and
 [Master onboarding](docs/onboarding/master-howto.md) for the coordinating seat.
+This Mac (absolute folders, Cursor only):
+[CEO runbook](docs/onboarding/ceo-mac-runbook.md).
 
 ## The worker loop
 
@@ -261,12 +304,16 @@ tracked when the team needs them to survive clones; see the
 
 ## Read next
 
-- [First session](docs/first-session.md)
+- [First session](docs/first-session.md) — probe, plan/`--after`, persist-to-review
 - [Agent onboarding](docs/onboarding/README.md)
+- [CEO runbook (this Mac)](docs/onboarding/ceo-mac-runbook.md)
 - [Team knowledge](docs/knowledge/README.md)
 - [Messages and runners](docs/messages-and-runners.md)
 - [Design notes](docs/design-notes.md)
 - [Contributing](CONTRIBUTING.md)
+- [Community](docs/community.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Atman Core architecture decision](docs/architecture/ADR-001-go-core.md)
 
-Atman is MIT licensed.
+[License](LICENSE) (MIT). Public testers: fork, branch off `main`, and open a
+PR — see [Community](docs/community.md).

@@ -74,3 +74,11 @@ architecture, the smallest reproducible fixture, expected and actual behavior,
 and redacted command output. Security issues should follow the repository's
 security reporting policy once published rather than include sensitive details
 in a public issue.
+
+## Pull requests and conduct
+
+Public path: [Community](docs/community.md) (fork, branch off `main`, PR
+template, review bar). Use
+[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md). License
+contributions under the existing [MIT License](LICENSE); there is no CLA
+service. [Code of Conduct](CODE_OF_CONDUCT.md).

@@ -116,6 +116,12 @@ Dependency graph (2 open, 1 claimed)
       `- [ ] T-003 Sample: put a screen on the API  (console; waiting on T-002)
 ```
 
+The same tree is the default Work view in `tickets ui`
+(`http://127.0.0.1:8765/#graph`): ticket ids, status, and `waiting on` edges —
+not a dump of titles. `tickets map` is the sprint/epic listing with the same
+deps. Follow-up is `tickets update` / `tickets here`; silent >90m claims:
+`tickets reopen`; submit with `tickets review` then `tickets merge`.
+
 ## The thing that surprises people first
 
 Ask for another ticket as a second agent and you get:
@@ -137,12 +143,26 @@ Finish `T-001` and `T-002` becomes claimable.
 ```sh
 tickets review T-001 --notes "paths, tests run, decisions"   # hand it back with evidence
 tickets quickstart --remove                                  # delete the samples
-tickets ui                                                   # watch it live
+tickets ui                                                   # watch it live — Work → Graph (#graph)
 tickets guide                                                # connect claude / codex / cursor
 ```
 
 After `tickets ui`: median turns / yield stay `—` until a done ticket reports
 (unknown ≠ 0).
+
+## Team intro
+
+The sample chain (`T-002` after `T-001`) is the same contract as a real board:
+
+1. **Probe integrations** — `tickets harness available` (missing is a row).
+   Do not spawn until the operator answers.
+2. **Plan the graph** — `tickets plan` so JSON `deps` become real `--after`
+   edges. Inspect with `tickets graph`. Do not seed one `tickets create` per
+   title with no edges.
+3. **Unattended persist** — the worker runs to a **reviewable SHA** on its
+   own branch (`tickets review <id> --notes "..."`).
+4. **Human review is the gate** — `tickets merge` is not silent
+   auto-promote. Success of a node can start the next unblocked child.
 
 Then read the worker loop and master loop sections of
 [README.md](../README.md), and `tickets connect` for wiring a real agent to the

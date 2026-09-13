@@ -54,14 +54,16 @@ def test_two_registered_mentions_stay_untargeted_to(board):
     assert "pair on this" not in run(board, "inbox", agent="bystander").stdout
 
 
-def test_explicit_to_unknown_name_directs_without_warning(board):
+def test_explicit_to_unknown_name_directs_with_warning(board):
     run(board, "join", "cursor", agent="cursor")
     r = run(board, "msg", "probe mailbox", "--to", "deadbee", agent="alice")
     assert r.returncode == 0, r.stderr
-    assert "WARNING:" not in r.stdout
+    assert "WARNING:" in r.stdout
+    assert "--to deadbee is not a registered agent" in r.stdout
     assert "-> deadbee" in r.stdout
     rec = _last(board)
     assert rec.get("to") == "deadbee"
+    assert "_unregistered_explicit" not in rec
     assert "probe mailbox" not in run(board, "inbox", agent="cursor").stdout
     assert "probe mailbox" not in run(board, "inbox", agent="bystander").stdout
 

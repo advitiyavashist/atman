@@ -58,8 +58,11 @@ board: /tmp/byoa2/repo/.tickets
 
 `--harness custom:<cmd>` is the same thing in one flag, for a spawn line in a
 shell script. `--tool` is the original spelling of `--harness` and still works.
-The built-in names -- `claude`, `codex`, `cursor`, `cursor+claude` -- need no
-`--cmd`; they expand to that CLI's headless invocation.
+The built-in names -- `claude`, `codex`, `cursor`, `cursor+claude`, `agy`,
+`antigravity`, `devin`, `cognition`, `gemini`, `grok`, `grokbots` -- need no
+`--cmd`; they expand to that CLI's headless invocation. See
+[connect-agy.md](connect-agy.md), [connect-devin.md](connect-devin.md),
+[connect-grok.md](connect-grok.md), and [connect-gemini.md](connect-gemini.md).
 
 The command is a **shell template**, not an argv list: it is run through
 `/bin/sh`, so pipes, redirection and `&&` all work. Placeholders are
@@ -109,8 +112,10 @@ leaves the wake queued and visible in `tickets ui`; reconnecting can claim it.
 Atman never substitutes Cursor, Claude, or Codex for a remote identity. Use
 `--wake-mode task-only` when the seat should run only for explicit `--task`
 messages, or `scheduled` when heartbeat and explicit task gates should drive a
-persistent adapter without ordinary DMs spending a turn. `scheduled` does not
-create a schedule; configure a heartbeat or external cadence separately.
+persistent adapter without ordinary DMs spending a turn. Recurring cadence
+is `tickets schedule SEAT --cron '*/15 * * * *'` (or `--every 15m`); crontab
+runs `tickets schedule --due`, which persist-pokes the seat and does not
+spawn a product job.
 
 This adapter protocol is part of the root/live `tickets.py` installed by
 `install.sh`. The current `pyproject.toml` entry point is the smaller core-board

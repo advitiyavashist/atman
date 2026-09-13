@@ -1,5 +1,51 @@
 # Master how-to
 
+**You are onboarding.** Say that first. This is not a ticket claim and not a
+merge pass.
+
+On this Mac, copy-paste [ceo-mac-runbook.md](ceo-mac-runbook.md) (`python3`
+on a real `tickets.py`; PATH `tickets` is a stale shim).
+
+A new board is set up in this order: **name → integrations → announce that
+name on the board → ask for tasks and the objective**. Probe every catalog
+row with `tickets harness available` (missing is a row). It auto-checks
+usage; missing remaining or reset is a FAIL row. Ask which
+integrations to use; do not spawn until they answer. Codex stays in the
+catalog even with zero usage. Gemini dispatch records harness=gemini;
+persist/hooks is the wake (do not spawn a Gemini product job). No new Claude fable.
+
+After they pick a name and integrations:
+
+```
+tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
+tickets master log "onboarding: name=<name> integrations=<list>"
+tickets objective "<their sentence>"
+tickets plan <<'EOF'
+[{"key":"api","title":"Build REST API","role":"backend","deps":[]},
+ {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
+EOF
+tickets graph
+tickets map
+```
+
+Do **not** run one `tickets create` per title. Edges must be real `deps` /
+`--after` links. Mid-run: `tickets dep` / `tickets create --blocks`.
+Follow-up (master or CoS): `tickets update` / `here`, reopen silent >90m
+claims, `tickets drive` toward the objective, review queue. Prose-only
+blockers in a ticket body are not edges.
+
+Workers persist unattended to a **reviewable SHA** (`tickets review`). Human review
+is the gate; `tickets merge` is not silent auto-promote. Success of a
+node can start the next unblocked child; HOLD is skipped by `tickets next`.
+
+Capture then sound, then CoS dispatch (`tickets capture` / `tickets sound` /
+`tickets dispatch --harness …`). CEO does not `tickets next`. The living
+board is the index; there is no `plans/` folder tree.
+
+CoS onboarding is the same catalog, then the same graph + follow-up loop
+(`tickets master cos <name>`). Do not dump a live-board plan. Auto-start of
+children after done is a separate success-trigger, not this step.
+
 You are opening a fresh Claude Code, Cursor, or Codex session that will run
 the board as **master**. This is the single read. After it you should be able
 to install, take the seat, seed role context, set an objective, and wake
@@ -28,6 +74,12 @@ model router.
 6. Open `tickets ui` → <http://127.0.0.1:8765>. On the board, **`—` means
    unknown** (not measured yet) — it is not zero. Median turns / yield@cost
    stay `—` until a done ticket reports.
+7. **Sound before staff.** `tickets capture` dumps a thought (`lane=capture`,
+   invisible to `tickets next`). `tickets sound` is the high-reasoning write
+   (cause, change, proof commands, real `--after` deps, no open questions).
+   CoS `tickets dispatch` one ready ticket per Cursor seat. `tickets pr-sync`
+   after `tickets review --pr`. Master still `tickets done`. CEO does not
+   `tickets next`.
 
 ---
 
@@ -527,8 +579,14 @@ tickets master              # briefing
 tickets master take         # become it
 tickets master log "…"      # decision log
 tickets inbox               # messages to you
+tickets plan                # JSON keys + deps → real --after edges
+tickets dep T-004 --after T-003
 tickets map                 # sprint → epic → tickets
 tickets graph               # dependency tree
+tickets update T-002 "…"    # follow-up every 45m
+tickets here                # still here
+tickets reopen T-002        # silent >90m claims
+tickets drive               # toward the objective
 tickets dash --once         # status picture
 tickets route [--claim]     # suggest / assign owners
 tickets limits              # who is out (AUTH vs wait)
