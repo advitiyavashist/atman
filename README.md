@@ -121,6 +121,11 @@ tickets review T-001 --notes "paths changed, tests run, decisions"
 tickets ui
 ```
 
+`install.sh` refuses to overwrite an existing `~/.local/bin/tickets` that
+isn't already a symlink to this checkout (a pinned live release, or an
+unrelated tool) — pass `--prefix DIR` (or `PREFIX=DIR`) to install somewhere
+isolated instead, or `--force` to replace it anyway.
+
 `quickstart` creates a local board, registers the first agent, and adds three
 sample tasks in a real dependency chain. It is safe to run twice. Run it inside
 an existing git repo — `git init` first if `your-project` is not one yet — so
