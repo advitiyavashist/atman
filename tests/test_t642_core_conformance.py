@@ -148,3 +148,19 @@ def test_relative_command_is_resolved_before_fixture_cwd():
     )
     assert result.returncode == 0, result.stderr + result.stdout
     assert "cli-json-and-errors" in result.stdout
+
+
+def test_board_tree_golden_is_stable_across_two_runs(tmp_path):
+    env = dict(os.environ, PYTHONPYCACHEPREFIX="/tmp/atman-t642-pycache")
+    records = []
+    for i in range(2):
+        dest = tmp_path / ("run-%d.json" % i)
+        result = subprocess.run(
+            [sys.executable, str(RUNNER), "--case", "dependency-ordering",
+             "--record", str(dest)],
+            cwd=str(REPO), env=env, text=True, capture_output=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        records.append(json.loads(dest.read_text())["cases"][0]["steps"]["join"]["board_tree"])
+    assert records[0]["digest"] == records[1]["digest"]
+    assert "mode" not in records[0]["entries"][0]

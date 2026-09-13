@@ -17,7 +17,6 @@ import os
 import re
 import shutil
 import statistics
-import stat
 import subprocess
 import sys
 import tempfile
@@ -50,10 +49,13 @@ VOLATILE_JSON_KEYS = {
     "loop_seen",
     "seen",
     "seen_at",
+    "sha",
     "started_at",
     "ts",
     "updated",
     "updated_at",
+    "dirty",
+    "git_mismatch",
 }
 SKIP_TREE_NAMES = {".git", "__pycache__", ".DS_Store"}
 SKIP_TREE_FILES = {"trajectories.jsonl"}
@@ -233,12 +235,10 @@ def _board_tree_snapshot(
             if any(rel == prefix or rel.startswith(prefix) for prefix in names_only):
                 entries.append({"path": rel, "kind": "file"})
                 continue
-            mode = stat.S_IMODE(path.stat().st_mode)
             payload = _canonical_file_bytes(path, variables, redact_keys)
             entries.append({
                 "path": rel,
                 "kind": "file",
-                "mode": mode,
                 "bytes": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest(),
             })
