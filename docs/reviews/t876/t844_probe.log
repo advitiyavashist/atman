@@ -1,0 +1,16 @@
+ARTIFACT_ROOT /private/tmp/atman-t844-probes-6twvequd
+root EXPLICIT_SEAT_OVERRIDES_FORGED_SID=PASS
+root FORGED_SID_WITHOUT_ASSIGNED_SEAT_LEAK= True
+root GENUINE_RECORDED_SESSION_PRECEDENCE=PASS
+wheel EXPLICIT_SEAT_OVERRIDES_FORGED_SID=PASS
+wheel FORGED_SID_WITHOUT_ASSIGNED_SEAT_LEAK= True
+wheel GENUINE_RECORDED_SESSION_PRECEDENCE=PASS
+ROOT_GENERATED_WORKER_HOOK_IDENTITY=PASS output= {"user_message": "2 new ticket-board message(s) for worker-seat", "additional_context": "Ticket board identity verification failed for worker-seat.\nTicket board: 2 new message(s) for worker-seat. Reply with `tickets msg`.\n- 09-13T12:25 parent-seat 
+ROOT_REAL_SPAWN_WORKTREE_REGISTRATION=PASS /private/tmp/atman-t844-probes-6twvequd/worker-tree
+DISPOSABLE_WATCHER_STOP 0 stopped 1 watcher(s) for spawn-worker (pids 52671)
+NO_CURSOR_MODEL_OR_LIVE_WAKE_EXECUTED
+baseline REMOTE_WRAPPER_INHERITED_SID 0 PARENT_SECRET_LEAK= False WORKER_MAIL_VISIBLE= True
+baseline REMOTE_WRAPPER_INHERITED_ASSIGNED_SEAT_SENDER= worker-seat
+root REMOTE_WRAPPER_INHERITED_SID 0 PARENT_SECRET_LEAK= False WORKER_MAIL_VISIBLE= True
+root REMOTE_WRAPPER_INHERITED_ASSIGNED_SEAT_SENDER= worker-seat
+CLAUDE_SETTINGS_LOCAL_CANONICAL_HOOK_SURVIVES_WORKER_PIN=False PASS copied= ['settings.local.json']

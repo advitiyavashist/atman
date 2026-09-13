@@ -1,0 +1,9 @@
+Processing /private/tmp/t876-independent-wheel/dist/ticket_board-0.2.0-py3-none-any.whl
+Installing collected packages: ticket-board
+Successfully installed ticket-board-0.2.0
+3.9.6 (default, Jan  9 2026, 11:03:41) 
+[Clang 17.0.0 (clang-1700.6.4.2)]
+/private/tmp/t876-independent-wheel/venv/lib/python3.9/site-packages/ticket_board/cli.py
+/private/tmp/t876-independent-wheel/venv/lib/python3.9/site-packages/ticket_board/session_boundary.py
+Wheel bytes: 274490
+SHA256: ae964756661c74b43c6dd564102ba8ab385479cae7fd9d5eb5af217f722bf585

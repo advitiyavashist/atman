@@ -1,0 +1,5 @@
+SCRATCH /private/tmp/t847-prior-comparison-4o_15y9u
+prior-feca2f5 remote_parent_leak= True worker_mail= False sender= parent-seat
+prior-feca2f5 claude_parent_hook_survives= True parent_bytes_unchanged= True
+candidate-2a942f0 remote_parent_leak= False worker_mail= True sender= worker-seat
+candidate-2a942f0 claude_parent_hook_survives= False parent_bytes_unchanged= True

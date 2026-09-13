@@ -1,0 +1,13 @@
+Processing /Users/kavana/Downloads/atman/.worktrees/atman-verify-t839-astra-0913
+  DEPRECATION: A future pip version will change local packages to be built in-place without first copying to a temporary directory. We recommend you use --use-feature=in-tree-build to test your packages with this new behavior before it becomes the default.
+   pip 21.3 will remove support for this functionality. You can find discussion regarding this at https://github.com/pypa/pip/issues/7555.
+    Preparing wheel metadata: started
+    Preparing wheel metadata: finished with status 'done'
+Building wheels for collected packages: ticket-board
+  Building wheel for ticket-board (PEP 517): started
+  Building wheel for ticket-board (PEP 517): finished with status 'done'
+  Created wheel for ticket-board: filename=ticket_board-0.2.0-py3-none-any.whl size=274490 sha256=ae964756661c74b43c6dd564102ba8ab385479cae7fd9d5eb5af217f722bf585
+  Stored in directory: /Users/kavana/Library/Caches/pip/wheels/0f/c9/8a/30de90ee438f62cfa32b02c839e25c70589c8013b6eb01d132
+Successfully built ticket-board
+WARNING: You are using pip version 21.2.4; however, version 26.0.1 is available.
+You should consider upgrading via the '/Applications/Xcode.app/Contents/Developer/usr/bin/python3 -m pip install --upgrade pip' command.

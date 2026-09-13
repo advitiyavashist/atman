@@ -1,0 +1,5 @@
+COMMAND: /usr/bin/python3 -m pytest -q tests/test_wakeup.py tests/test_byoa.py tests/test_t327_join_inbox_watermark.py tests/test_t808_persist_delivery.py tests/test_t836_packaged_checkin.py tests/test_done_repo_identity.py tests/test_identity_precedence.py tests/test_identity_session_scope.py tests/test_merge_repo_identity.py tests/test_t606_family_identity.py tests/test_t633_hook_identity.py tests/test_t732_dashboard_identity.py tests/test_t804_identity_isolation.py tests/test_t839_launch_identity.py tests/test_t839_boundary_adapters.py tests/test_t839_launch_identity.py
+........................................................................ [ 37%]
+........................................................................ [ 75%]
+...............................................                          [ 95%]
+191 passed in 838.33s (0:13:58)
