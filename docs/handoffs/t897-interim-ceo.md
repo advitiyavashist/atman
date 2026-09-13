@@ -37,7 +37,8 @@ flowchart LR
   Auth["T-687: auth readiness acceptance"] --> Remote
   Metrics["T-811 / T-874: correct evidence metrics"] --> Scorecard["T-831: independent replay"]
   Scorecard --> AppRelease
-  Corpus["Steer T-814: per-control scoring repair"] --> Labels["T-854: independent labels"]
+  Protocol["T-813 / T-833 / T-871: completed packet and protocol"] --> Labels["T-854: independent labels"]
+  Corpus["Steer T-814: per-control scoring repair"] --> Efficacy
   Labels --> Efficacy["T-815: pack efficacy gates"]
   Efficacy --> Improve["T-855: bounded improvement loop"]
 ```
@@ -49,34 +50,74 @@ Do not create a second ticket registry or duplicate the existing units.
 ## Active owners and endpoints
 
 - **App:** `atman-ui-t810-cursor-0913`, unique author. T-810 correction is
-  IN PROGRESS. `38819eb` ignores every equal-second post, including newer ones;
-  repair real ordering or report ambiguity. Independent reviewer found two
+  IN REVIEW at PR #125 **`c2f7dd5`**. `3d221b1` replaced the defective
+  equal-timestamp comparison with recorded message IDs seen at reopen;
+  legacy equal-time messages without ordering evidence remain unknown.
+  Independent reviewer found two
   additional issues on `d92d064`: wake label erases inbox-read evidence, and
-  initial deep-link selection does not bind mobile jump/compose. Fold genuine
-  failures into one new candidate, then verify its exact SHA.
+  initial deep-link selection does not bind mobile jump/compose. `c2f7dd5`
+  addresses both, with 59 focused author tests. Final independent acceptance
+  remains pending; author passes are not the release verdict.
 - **App review:** `atman-ui-review-cursor-t896-0913`, independently claimed
   T-896 after its first run safely stopped on inherited identity. Report
   `b3a61e8` is FIX on `d92d064`, not an acceptance of a newer head. Preserve
-  findings and perform narrow correction confirmation; final consequential
-  acceptance also requires one clean full suite with relative baseline evidence.
+  findings; the same review ticket is now IN PROGRESS on `c2f7dd5`, in a
+  single 25-minute run. Final consequential acceptance also requires one clean
+  full suite with relative baseline evidence. Produce a report-only branch
+  from main: an evidence branch based on candidate code must not accidentally
+  merge the unaccepted implementation.
 - **CLI:** `atman-atm-recovery-cursor-t809-0913`, exclusive recovery owner.
   Prepared from prior Claude `3a585b6` plus its two unfinished author files;
-  the original worktree remains untouched. Finish wheel parity and old hooks
-  proof, disclose unsupported packaged commands, commit/push an exact artifact,
-  then T-877 independent verification. Do not treat old `a8a48f3` as current.
+  the original worktree remains untouched. Candidate **PR #129 `26ff79f`**
+  supersedes #113 `a8a48f3`, with 20 focused author tests. Independent
+  `atman-atm-verify-cursor-t877-0913` owns T-877 in one 25-minute run. Its
+  clean installed-wheel smoke and 26 targeted checks pass; full candidate/main
+  suite comparison is pending. Wheel `atm` and `tickets` have identical entry
+  behavior; wheel hooks, version and self commands are unsupported. Source
+  `install.sh --prefix` supports the full runtime and legacy hooks. Public
+  onboarding must clearly distinguish those paths.
+- **Test portability:** `atman-suite-repair-agy-t890-0913` owns T-890 on an
+  isolated main-based worktree. Only replace real operator-home test literals
+  with portable assertions, preserving the test contract. Do not touch the
+  prior Claude owner's separate unfinished T-866 production changes. Agy's
+  first command failed before model execution because `-p` consumed the next
+  flag; one corrected cataloged Gemini Flash run uses attached `-p=...`,
+  accept-edits and a 15-minute run timeout. No repair artifact exists yet.
 - **Agy:** T-819 owner `agy-pm`, T-824 owner `agy-mail`. Their recurring
   five-minute partial-output watcher loops were stopped from relaunching;
   checkpoints requested, ownership retained. Resume one explicit bounded task
   when capacity frees, using a sufficiently bounded execution/continuation
   policy rather than restarting on every partial timeout.
 
-Each active Cursor launch is task-only, maximum one run and twenty-minute run
-timeout. Both `TICKET_AGENT` and `TICKET_SEAT` are pinned to the unique worker
+Each active worker launch is task-only, maximum one run with a bounded timeout
+(25 minutes for final verification, 15 for the small Agy repair). Both
+`TICKET_AGENT` and `TICKET_SEAT` are pinned to the unique worker
 in its scoped execution command; inherited provider session variables stripped;
 worktree hooks scoped and private files excluded from git. Never bake worker or
 leadership identity into user-global hooks. Explicitly prefix both variables on
 every board call if the harness overwrites ambient state. Canonical `cursor`
 must not absorb another worker's ownership or messages.
+
+## Steer label sequencing
+
+T-814 is engineering acceptance of the frozen corpus, protocol and scorer;
+T-854 owns actual independent labels and adjudication. Its dependencies are
+the completed T-813/T-833/T-871, allowing labeling alongside scorer repair.
+T-815 still requires BOTH T-814 and T-854 and every existing efficacy gate.
+No unlabeled semantic class becomes eligible through this scheduling change.
+
+Freeze the 120 request rows from
+`66402a9:docs/evals/fixtures/launch-holdout-v1/semantic-reviewer-requests.jsonl`:
+SHA-256 `86aab319d924c88509270b85132b37f1346af8a20f9d10be9d4f6b6af9b011cf`.
+Record actual independent authors/reviewers, qualification, prediction blindness,
+agreement, adjudication and custody. Model-assisted labels are not represented
+as legal expert review. Do not staff this fourth worker while three bounded
+worker runs and the interim desk are active.
+
+T-814's specific independent FIX remains: positive recall and hard negatives
+must use the named control's actual fire; semantic-only review cannot be
+counted as a correct block without deterministic blocking evidence. Preserve
+the frozen eligible denominator, exact citations and missing-coverage failures.
 
 ## Merge and measurement rules
 
