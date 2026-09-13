@@ -7,11 +7,13 @@ dirs 0700, files 0600). Falls back to supervised watch or the T-640 remote
 bridge when native injection is unavailable.
 """
 
+import base64
 import fcntl
 import hashlib
 import json
 import os
 import socket
+import struct
 import subprocess
 import time
 import uuid
@@ -549,12 +551,13 @@ def register_persistent(board, seat, harness, at_iso):
         record["thread"] = thread
         sock = default_codex_control_socket()
         record["socket"] = sock
-        live = bool(sock and os.path.exists(sock))
+        hosted = bool(thread and _codex_thread_is_loaded(thread))
+        live = bool(sock and os.path.exists(sock) and hosted)
         record["mode"] = "native" if live else "supervised"
         record["capabilities"] = {
             "native_inject": live,
             "transport": ("codex app-server turn/start" if live
-                          else "codex queue mailbox only (poll unless app-server socket is live)"),
+                          else "codex queue mailbox only (thread not loaded on app-server)"),
         }
     elif provider == "cursor":
         session_id = (os.environ.get("CURSOR_CONVERSATION_ID") or os.environ.get("CURSOR_SESSION_ID") or "").strip()
@@ -619,34 +622,155 @@ def _poke_claude(ep, text):
             pass
 
 
-def _codex_app_server_rpc(method, params, timeout=5):
-    """JSON-RPC one-shot via `codex app-server proxy`. None if unavailable."""
-    sock = _codex_control_sock()
-    if not sock or not os.path.exists(sock):
-        return None
-    if not _which("codex"):
-        return None
-    req = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
-    try:
-        r = subprocess.run(
-            ["codex", "app-server", "proxy", "--sock", sock],
-            input=json.dumps(req) + "\n",
-            capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if r.returncode != 0:
-        return None
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+_WS_GUID = "258EAFA5-E914-47DA-95AA-C5AB0DC85B11"
+
+
+def _ws_mask_frame(payload):
+    mask = os.urandom(4)
+    n = len(payload)
+    if n < 126:
+        header = bytes([0x81, 0x80 | n])
+    elif n < 65536:
+        header = bytes([0x81, 0x80 | 126]) + struct.pack(">H", n)
+    else:
+        header = bytes([0x81, 0x80 | 127]) + struct.pack(">Q", n)
+    return header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+
+
+def _ws_recv_json(sock, buf, deadline):
+    """Read one WebSocket text frame. Returns (obj_or_None, remaining_buf)."""
+    while time.time() < deadline:
+        if len(buf) >= 2:
+            opcode = buf[0] & 0x0F
+            masked = bool(buf[1] & 0x80)
+            ncode = buf[1] & 0x7F
+            header_ok = (
+                ncode < 126
+                or (ncode == 126 and len(buf) >= 4)
+                or (ncode == 127 and len(buf) >= 10)
+            )
+            if header_ok:
+                n = ncode
+                off = 2
+                if n == 126:
+                    n = struct.unpack(">H", buf[2:4])[0]
+                    off = 4
+                elif n == 127:
+                    n = struct.unpack(">Q", buf[2:10])[0]
+                    off = 10
+                mask_len = 4 if masked else 0
+                if len(buf) >= off + mask_len + n:
+                    payload = buf[off + mask_len:off + mask_len + n]
+                    if masked:
+                        mask = buf[off:off + 4]
+                        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+                    rest = buf[off + mask_len + n:]
+                    if opcode == 0x8:
+                        return None, rest
+                    if opcode == 0x1:
+                        return json.loads(payload.decode("utf-8")), rest
+                    buf = rest
+                    continue
+        sock.settimeout(max(0.05, deadline - time.time()))
         try:
-            msg = json.loads(line)
-        except ValueError:
-            continue
-        if msg.get("id") == 1:
-            return msg
-    return None
+            chunk = sock.recv(65536)
+        except (OSError, socket.timeout):
+            break
+        if not chunk:
+            break
+        buf += chunk
+    return None, buf
+
+
+def _codex_ws_rpc(method, params, timeout=5):
+    """JSON-RPC after HTTP Upgrade on the Codex app-server Unix socket."""
+    sock_path = _codex_control_sock()
+    if not sock_path or not os.path.exists(sock_path):
+        return None
+    deadline = time.time() + max(1, float(timeout))
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(max(0.2, deadline - time.time()))
+        s.connect(sock_path)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        s.sendall((
+            "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
+            "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n" % key
+        ).encode("ascii"))
+        buf = b""
+        while b"\r\n\r\n" not in buf and time.time() < deadline:
+            s.settimeout(max(0.05, deadline - time.time()))
+            chunk = s.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+        if b"\r\n\r\n" not in buf:
+            return None
+        header, buf = buf.split(b"\r\n\r\n", 1)
+        first = header.split(b"\r\n", 1)[0].decode("ascii", "replace")
+        if "101" not in first:
+            return None
+
+        def send_obj(obj):
+            s.sendall(_ws_mask_frame(json.dumps(obj, separators=(",", ":")).encode("utf-8")))
+
+        send_obj({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                  "params": {"clientInfo": {"name": "atman-tickets", "version": "0"}}})
+        init_msg, buf = _ws_recv_json(s, buf, deadline)
+        while init_msg is not None and init_msg.get("id") != 0 and time.time() < deadline:
+            init_msg, buf = _ws_recv_json(s, buf, deadline)
+        if not init_msg or init_msg.get("id") != 0 or init_msg.get("error"):
+            return None
+        send_obj({"jsonrpc": "2.0", "method": "initialized"})
+        send_obj({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
+        while time.time() < deadline:
+            msg, buf = _ws_recv_json(s, buf, deadline)
+            if msg is None:
+                return None
+            if msg.get("id") == 1:
+                return msg
+        return None
+    except (OSError, ValueError, socket.timeout):
+        return None
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _codex_app_server_rpc(method, params, timeout=5):
+    """JSON-RPC one-shot on the control socket. WebSocket handshake required."""
+    return _codex_ws_rpc(method, params, timeout=timeout)
+
+
+def _thread_ids_from_loaded_result(resp):
+    ids = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                if key in ("id", "threadId", "thread_id") and isinstance(val, str):
+                    ids.append(val)
+                else:
+                    walk(val)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk((resp or {}).get("result"))
+    return ids
+
+
+def _codex_thread_is_loaded(thread):
+    thread = (thread or "").strip()
+    if not thread:
+        return False
+    resp = _codex_app_server_rpc("thread/loaded/list", {})
+    if not resp or resp.get("error"):
+        return False
+    return thread in _thread_ids_from_loaded_result(resp)
 
 
 def _codex_queue_start(thread):
@@ -688,8 +812,11 @@ def _poke_codex_wake(ep, text):
         queued = False
     if not queued:
         return "refused"
+    # Do not thread/resume a VS Code-owned session. turn/start only when hosted.
+    if not _codex_thread_is_loaded(thread):
+        return "queued-offline"
     for _ in range(max(1, int(NATIVE_POKE_ATTEMPTS))):
-        if _codex_queue_start(thread) or _codex_turn_start(thread, text):
+        if _codex_turn_start(thread, text):
             return "woken"
     return "queued-offline"
 
@@ -788,7 +915,7 @@ def native_wake_online(board, seat):
         return False
     provider = ep.get("provider") or ""
     if provider == "codex":
-        return os.path.exists(_codex_control_sock())
+        return _codex_thread_is_loaded((ep.get("thread") or "").strip())
     if provider == "cursor":
         persist = (ep.get("persist_session") or "").strip()
         acp = (ep.get("socket") or "").strip()
@@ -979,7 +1106,7 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         ok = label == "woken"
     else:
         label = _poke_codex_wake(ep, text)
-        ok = label in ("woken", "queued-offline")
+        ok = label == "woken"
     return _commit_wake(board, seat, mid, lease, fence, label, ok)
 
 
@@ -995,11 +1122,7 @@ def has_live_native_session(board, seat):
         return False
     provider = ep.get("provider") or ""
     if provider == "codex":
-        # Live wake requires managed app-server control sock (queue/start) or
-        # a still-alive session pid that owns the endpoint.
-        if os.path.exists(_codex_control_sock()):
-            return True
-        return _endpoint_pid_ok(ep.get("pid")) is True
+        return _codex_thread_is_loaded((ep.get("thread") or "").strip())
     if provider == "cursor":
         persist = (ep.get("persist_session") or "").strip()
         acp = (ep.get("socket") or "").strip()
