@@ -776,6 +776,26 @@ def _cursor_pause_resume(ep, text):
             "is a new paid run, not pause-resume)")
 
 
+def native_wake_online(board, seat):
+    """True when a native poke can resume this seat now.
+
+    Shared by `tickets who` and `tickets msg` so a Codex thread record or a
+    PID-less session is not reported reachable=yes while wake returns
+    queued-offline. Persistent lifecycle is not a transport.
+    """
+    ep, _ = live_endpoint(board, seat)
+    if ep is None or ep.get("mode") != "native":
+        return False
+    provider = ep.get("provider") or ""
+    if provider == "codex":
+        return os.path.exists(_codex_control_sock())
+    if provider == "cursor":
+        persist = (ep.get("persist_session") or "").strip()
+        acp = (ep.get("socket") or "").strip()
+        return bool(persist) or bool(acp and os.path.exists(acp))
+    return True
+
+
 def is_reachable(native_online=False, watcher_online=False, remote_online=False):
     """Persistent is identity, not reachability. Need a live transport."""
     return bool(native_online or watcher_online or remote_online)
@@ -992,7 +1012,7 @@ def public_adapter_state(board, seat, harness, adapter_online, wake_pending):
     provider = provider_for_harness(harness) or "custom"
     mode = adapter_mode_for(board, seat, harness)
     ep, _ = live_endpoint(board, seat)
-    native_online = bool(ep) and ep.get("mode") == "native"
+    native_online = native_wake_online(board, seat)
     if mode == "remote":
         online = bool(adapter_online)
     else:

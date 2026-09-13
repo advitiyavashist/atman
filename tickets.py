@@ -5657,6 +5657,8 @@ def cmd_master(a, board):
         _master_log(board, "chief of staff set to %s (master %s keeps planning/scope; cos reviews, unblocks, merges)"
                     % (prev["cos"] or "none", prev["owner"]))
         print("chief of staff: %s" % (prev["cos"] or "none"))
+        if prev.get("cos"):
+            warn_leadership_offline(board, prev["cos"], "chief of staff")
         return
     if sub == "take":
         owner = whoami(a.owner)
@@ -5666,6 +5668,7 @@ def cmd_master(a, board):
         _master_log(board, "%s took over as master%s" % (
             owner, (" from %s" % prev["owner"]) if prev and prev.get("owner") != owner else ""))
         print("%s is master now. Run `tickets master` for the briefing." % owner)
+        warn_leadership_offline(board, owner, "master")
         return
     if sub == "release":
         if os.path.exists(master_state_path(board)):
@@ -6128,7 +6131,7 @@ def cmd_who(a, board):
         harness_name = entry.get("harness") or entry.get("tool") or "claude"
         ep, _ = sa.live_endpoint(board, r["owner"])
         life = lifecycle_of(board, r["owner"], workforce=wf)
-        native = bool(ep) and (ep or {}).get("mode") == "native"
+        native = sa.native_wake_online(board, r["owner"])
         watcher_on = bool(lv.get("watcher") if lv else False)
         remote_on = False
         if harness_name == "remote":
@@ -7015,8 +7018,22 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
     holder = ((current_master(board) or {}) or {}).get("owner") or ""
     to, mentions, unknown, explicit_unknown, dropped = resolve_to_and_mentions(
         text, to, _registered_handles(board), master_owner=holder)
+    forwarded = None
+    if to and "," not in to:
+        fwd = _forward_retired_recipient(board, to)
+        if fwd:
+            holder_name, via, retired_name = fwd
+            forwarded = {"from": retired_name, "to": holder_name, "role": via,
+                         "state": "forwarded"}
+            to = holder_name
+            explicit_unknown = [t for t in explicit_unknown
+                                if t.lower() != retired_name.lower()]
     rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
            "to": to, "re": re, "text": text}
+    if forwarded:
+        rec["forwarded_from"] = forwarded["from"]
+        rec["forward_role"] = forwarded["role"]
+        rec["delivery"] = "forwarded"
     if mentions:
         rec["mentions"] = mentions
     kind = (kind or "").strip()
@@ -7043,6 +7060,8 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
         rec["_unregistered_explicit"] = explicit_unknown
     if dropped:
         rec["_unregistered_dropped"] = dropped
+    if forwarded:
+        rec["_forwarded"] = forwarded
     return rec
 
 
@@ -7486,6 +7505,7 @@ def cmd_msg(a, board):
     unknown = m.pop("_unregistered_implicit", None)
     explicit_unknown = m.pop("_unregistered_explicit", None) or []
     dropped = m.pop("_unregistered_dropped", None) or []
+    forwarded = m.pop("_forwarded", None)
     if unknown:
         print("WARNING: @handle %s is not a registered agent, message broadcast."
               % unknown)
@@ -7496,6 +7516,10 @@ def cmd_msg(a, board):
         print("WARNING: @handle %s is not a registered agent, directed to %s."
               % (handle, dest))
     print("posted: " + fmt_msg(m))
+    if forwarded:
+        print("forward: %s -> %s [%s] receipt=%s" % (
+            forwarded.get("from"), forwarded.get("to"),
+            forwarded.get("role") or "-", forwarded.get("state") or "forwarded"))
     sa = None
     mid = _msg_id(m)
     for to in _split_to_tokens(m.get("to") or ""):
@@ -8148,6 +8172,141 @@ A session cannot be woken by a hook once its turn has ended, so use both:
 
 
 STABLE_ROLE_ALIASES = ("ceo", "cos")
+_LEADERSHIP_ROLE_IDS = frozenset({
+    "steer.ceo", "steer.cto", "steer.chief-of-staff", "steer.master",
+})
+_LEADERSHIP_ROLE_SUFFIXES = (".ceo", ".cto", ".chief-of-staff", ".master")
+
+
+def _is_leadership_role(role_id):
+    r = (role_id or "").strip().lower()
+    if r in _LEADERSHIP_ROLE_IDS:
+        return True
+    return any(r.endswith(s) for s in _LEADERSHIP_ROLE_SUFFIXES)
+
+
+def retired_path(board):
+    return os.path.join(board, "retired.json")
+
+
+def load_retired(board):
+    path = retired_path(board)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def save_retired(board, retired):
+    os.makedirs(board, exist_ok=True)
+    path = retired_path(board)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(retired, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _durable_roles_held_by(board, owner):
+    roles = []
+    try:
+        path = os.path.join(board, "coordination", "state.json")
+        state = json.loads(open(path).read())
+        for role_id, rec in (state.get("roles") or {}).items():
+            if (rec or {}).get("holder") == owner:
+                roles.append(role_id)
+    except (IOError, ValueError):
+        pass
+    return roles
+
+
+def _record_retired_seat(board, owner, alias=""):
+    aliases = load_aliases(board)
+    bound = alias or next((name for name, holder in aliases.items() if holder == owner), "")
+    retired = load_retired(board)
+    retired[owner] = {
+        "at": now(),
+        "alias": bound,
+        "durable_roles": _durable_roles_held_by(board, owner),
+    }
+    save_retired(board, retired)
+
+
+def _current_durable_holder(board, role_id="", alias=""):
+    if role_id:
+        try:
+            path = os.path.join(board, "coordination", "state.json")
+            state = json.loads(open(path).read())
+            holder = ((state.get("roles") or {}).get(role_id) or {}).get("holder") or ""
+            registered = _registered_handles(board)
+            if holder and holder.lower() in registered:
+                return holder, role_id
+            for item in reversed(state.get("history") or []):
+                if item.get("role") != role_id:
+                    continue
+                cand = item.get("holder") or ""
+                if cand and cand.lower() in registered:
+                    return cand, role_id
+        except (IOError, ValueError):
+            pass
+    if alias:
+        holder = load_aliases(board).get(alias, "")
+        if holder and holder.lower() in _registered_handles(board):
+            return holder, alias
+        if alias == "ceo":
+            holder = ((current_master(board) or {}) or {}).get("owner") or ""
+            if holder and holder.lower() in _registered_handles(board):
+                return holder, "master"
+        if alias == "cos":
+            holder = ((current_master(board) or {}) or {}).get("cos") or ""
+            if holder and holder.lower() in _registered_handles(board):
+                return holder, "cos"
+    return "", ""
+
+
+def _forward_retired_recipient(board, dest):
+    """If dest is a retired unique seat, return (holder, role, retired_name)."""
+    dest = (dest or "").strip()
+    if not dest or dest.lower() in _MENTION_BROADCAST:
+        return None
+    if dest.lower() in _registered_handles(board):
+        return None
+    rec = None
+    for name, info in load_retired(board).items():
+        if name.lower() == dest.lower():
+            rec = info or {}
+            dest = name
+            break
+    if rec is None:
+        return None
+    for role_id in rec.get("durable_roles") or []:
+        holder, via = _current_durable_holder(board, role_id=role_id)
+        if holder:
+            return holder, via, dest
+    holder, via = _current_durable_holder(board, alias=(rec.get("alias") or ""))
+    if holder:
+        return holder, via, dest
+    return None
+
+
+def warn_leadership_offline(board, owner, role_label):
+    """Printed after leadership role take when the taker cannot be woken."""
+    label = (role_label or "").strip()
+    if not (_is_leadership_role(label) or label.lower() in ("master", "chief of staff", "cos")):
+        return
+    sa = _session_adapters()
+    wf = load_workforce(board)
+    entry = wf.get(owner) or {}
+    harness_name = entry.get("harness") or entry.get("tool") or ""
+    native = sa.native_wake_online(board, owner)
+    remote_on = harness_name == "remote" and _remote_lease_online(load_remote_state(board, owner))
+    rec = _agent_rec(board, owner) or {}
+    watcher_on = bool(rec.get("watcher"))
+    if sa.is_reachable(native_online=native, watcher_online=watcher_on, remote_online=remote_on):
+        return
+    print("WARNING: %s took %s with no live endpoint. Mail stays queued until a native session or persist watcher is online."
+          % (owner, label))
 IDENTITY_BOUND_AGENT_KEYS = (
     "auth_check", "runner_context", "limit", "adapter_failure",
     "auth_resume_at", "harness_check",
@@ -8499,6 +8658,7 @@ def cmd_retire(a, board):
         with open(tmp, "w") as f:
             json.dump(roles, f, indent=2)
         os.replace(tmp, roles_path)
+    _record_retired_seat(board, owner)
     _unbind_aliases_for(board, owner)
     retirer = whoami(getattr(a, "owner", None))
     post_message(board, retirer, "retired seat %s from the board" % owner)
@@ -14150,7 +14310,7 @@ def _board_snapshot_body(board, messages=40):
         failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
         adapter_extra = sa.public_adapter_state(
             board, r["agent"], harness_name, False, wake_pending)
-        native_online = bool(adapter_extra.get("adapter_native_online"))
+        native_online = sa.native_wake_online(board, r["agent"])
         remote_online = bool(remote.get("online")) if harness_name == "remote" else False
         watcher_online = wc == 1
         if wc > 1 or (harness_name == "remote" and wc > 0) or (native_online and wc > 0):
