@@ -1,0 +1,55 @@
+{
+  "ticket": "T-911",
+  "purpose": "one complete matched f19 baseline after T-909 environment reuse",
+  "verdict": "NOT_ACCEPT",
+  "full_suite": true,
+  "timeout": false,
+  "tested_sha": "f19bdab093f14930e990141eaf5c8eed4858de93",
+  "merge_bases": {
+    "cli_26ff79f1612bf3e756a91d30bfad46f0f9d29d16": "f19bdab093f14930e990141eaf5c8eed4858de93",
+    "app_c2f7dd59009451da5d7667c2c1930a10af12d884": "f19bdab093f14930e990141eaf5c8eed4858de93"
+  },
+  "python": {
+    "version": "3.9.6",
+    "executable": "/private/tmp/t909-preflight/origins/baseline-t891-raw/source-venv/bin/python"
+  },
+  "bootstrap": {
+    "pip": "25.3",
+    "setuptools": "75.9.1",
+    "wheel": "0.45.1"
+  },
+  "pytest": {
+    "version": "8.4.2",
+    "class": "venv"
+  },
+  "deselect": [
+    "tests/test_contracts.py::test_no_test_file_names_a_real_operator_home"
+  ],
+  "deselect_reason": "same single operator-home exclusion as T-891; known fixed T-890 on later main; not rerun",
+  "counts": {
+    "failed": 8,
+    "passed": 2126,
+    "skipped": 9,
+    "deselected": 1,
+    "xfailed": 11,
+    "pytest_seconds": 2039.33,
+    "wrapper_seconds": 2169.2,
+    "wrapper_exit": 1
+  },
+  "raw_digest_sha256": "1d21c4ecb1f95dcf2aa6fb1a43be5d5abdc40b2f1a08f9eb6bd9a861b1efe509",
+  "private_receipt": "/private/tmp/t911-baseline",
+  "reuse": {
+    "venv": "/private/tmp/t909-preflight/origins/baseline-t891-raw/source-venv",
+    "do_not_run_preflight_script": true,
+    "do_not_recreate_venv": true,
+    "bind": "pip install -e YOUR_WORKTREE --no-deps --no-build-isolation",
+    "keep_f19_worktree_at_tested_sha": "/Users/kavana/Downloads/atman/.worktrees/atman-matched-baseline-cursor-t911-0914"
+  },
+  "t891_distinction": {
+    "raw_receipt_sha": "f19bdab093f14930e990141eaf5c8eed4858de93",
+    "raw_receipt_digest": "55b014fde225dcbc4af1c8e9bf12c25492f18aeb631cb6d1066a1d29e4b767ce",
+    "raw_counts": "61 failed / 2072 passed",
+    "comparable_as_environment_diagnostic_only": true,
+    "not_candidate_equivalence": true
+  }
+}

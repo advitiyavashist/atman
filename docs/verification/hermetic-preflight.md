@@ -63,9 +63,11 @@ entry. Do not file a packaging ticket from T-891 child import errors alone.
 
 ## Reuse
 
-T-911 and candidate verifiers must:
+T-911 sealed one complete matched f19 suite against this environment. See
+`docs/verification/matched-f19-baseline.md`. Candidate verifiers must:
 
-- invoke this script (or the same env it records) before any full suite
+- reuse the accepted baseline source-venv; do not rerun this script (it recreates environments)
+- bind the candidate worktree with `pip install -e WT --no-deps --no-build-isolation`
 - use the venv absolute interpreter for parent and children
 - keep sanitized `HOME`/`TMPDIR` and no operator `PYTHONPATH`
-- compare failure IDs only across receipts that share this manifest
+- compare failure IDs only against the T-911 receipt, not T-891's 61-fail log
