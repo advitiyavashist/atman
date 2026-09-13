@@ -1,0 +1,18 @@
+[
+  {
+    "key": "orchestration-pilot",
+    "title": "Run frozen T894 orchestration pilot on spare capacity",
+    "role": "research",
+    "priority": 3,
+    "deps": ["T-894"],
+    "body": "Apply only after CEO accepts docs/research/t894-orchestration-preregistration.md. CoS staffs a unique experiment operator using accepted runners; this is not a leadership/implementation takeover. Freeze three matched task pairs (six attempts), exact baselines/briefs/gates, model+harness+effort, blinded reviewer, order seed, account allowance/budget and registration digest before any results. Arm A one continuous Fable alone; B fixed cheaper coordinator plus same continuous Fable. Max three worker rounds, 30 minutes elapsed per attempt including QA/review, 180 aggregate enrolled minutes, same total per-attempt budget; count all roles and failures. No identity/auth/wake/security work, no launch dependency, no permanent bot fleet. Start only on spare capacity; stop scheduling on launch contention and by 2026-09-16 18:00 +08. Export joined raw outcome/quality/cost/coverage/time/intervention evidence, including unmeasured fields and stopped attempts. Do not change routing or merge experimental artifacts. Done means all planned attempts accounted for or documented protocol stop, replayable export and result handoff; a stopped pilot is not a positive result."
+  },
+  {
+    "key": "orchestration-analysis",
+    "title": "Independently analyze T894 matched pilot without savings overclaims",
+    "role": "evals",
+    "priority": 3,
+    "deps": ["orchestration-pilot"],
+    "body": "Independent reviewer replays the frozen registration and all pilot attempts. Produce all six rows or explicitly missing/not-run rows, paired deltas, exact acceptance evidence, rubric/hard checks, first-review ACCEPT, correction rounds, all-role reported cost versus API-equivalent estimates, provenance and missing coverage, elapsed censoring, interventions and stop reasons. Retain failures; never call unknown USD zero or cheap failure an efficiency win. Three pairs are not a powered public savings claim. Apply the protocol decision rule and return exactly no adoption / instrumentation repair needed / register confirmation, with uncertainty and any protocol deviations. CEO decides routing; no implementation rewrite or automatic router adoption. Done means an independently reviewed replayable report with terminal recommendation, not another optimization backlog."
+  }
+]
