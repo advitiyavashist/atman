@@ -2849,11 +2849,13 @@ def cmd_review(a, board):
         sys.exit("%s is %s; only in-progress work can be submitted" % (a.id, LABEL[t["status"]]))
     if not a.notes:
         sys.exit('review needs --notes "what to look at: paths, tests run, decisions"')
-    if _sounding().review_requires_pr(t) and not (a.pr or "").strip():
-        sys.exit('review: sounded code tickets require --pr N (or role=docs|pm and body says "no PR")')
+    art = artifact_tree(a)
+    origin = git("config", "--get", "remote.origin.url", cwd=art) or ""
+    if _sounding().review_requires_pr(
+            t, origin=origin, notes=a.notes, force=bool(a.force), pr=a.pr) and not (a.pr or "").strip():
+        sys.exit('review: sounded code tickets on GitHub require --pr N (or --force / "no PR" in notes)')
     # T-272: every probe below asks the tree the DELIVERABLE is in, which is
     # not the tree the command was run from whenever --artifact is passed.
-    art = artifact_tree(a)
     g = git_state(cwd=art)
     if g and g["branch"] in ("main", "master") and not a.force:
         sys.exit("RULE: submit from your own worktree branch, not %r (or --force)" % g["branch"])

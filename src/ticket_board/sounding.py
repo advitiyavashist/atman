@@ -270,12 +270,24 @@ def pin_is_trunk_ancestor(git_fn, trunk_fn, t):
     return git_fn("merge-base", "--is-ancestor", sha, trunk, cwd=art) is not None
 
 
-def review_requires_pr(t):
+def review_requires_pr(t, origin="", notes="", force=False, pr=""):
+    """GitHub-hosted sounded code work needs a PR id.
+
+    Local first-run boards (no origin) and `--force` / explicit no-PR do not.
+    """
+    if force:
+        return False
+    if (pr or "").strip().lower() in ("none", "no", "n/a", "0", "-"):
+        return False
     if not t.get("sounded_at"):
         return False
-    role = (t.get("role") or "").strip()
-    body = t.get("body") or ""
-    if role in ("docs", "pm") and re.search(r"\bno PR\b", body, re.I):
+    blob = "%s\n%s" % (t.get("body") or "", notes or "")
+    if re.search(r"\bno PR\b", blob, re.I):
+        return False
+    origin = (origin or "").strip().lower()
+    if not origin:
+        return False
+    if "github.com" not in origin and not origin.startswith("github:"):
         return False
     return True
 
