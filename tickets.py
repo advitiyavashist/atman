@@ -8410,12 +8410,15 @@ def _cmd_join_locked(a, board, owner):
                 board, owner, prev, alias_clash,
                 (getattr(a, "alias", "") or "").strip().lower(),
                 alias_holder, harness)
-        _cmd_join_apply_locked(
+        announcement = _cmd_join_apply_locked(
             a, board, owner, knowledge_dir, harness, inline_cmd)
     except BaseException:
         if snap is not None:
             _restore_identity_artifacts(board, owner, snap)
         raise
+    # Identity is committed only after every fallible apply/briefing step.
+    # Never roll back shared message history: other agents may append to it.
+    post_message(board, owner, announcement)
     if transferring:
         _audit_seat_transfer(
             board, owner, prev, alias_clash,
@@ -8522,9 +8525,9 @@ def _cmd_join_apply_locked(a, board, owner, knowledge_dir, harness, inline_cmd):
         # setdefault, not update: if two joins race, the earlier stamp wins and
         # neither can move the watermark forward over unread mail.
         _agent_update(board, owner, lambda r: r.setdefault("joined_at", now()))
-    post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
+    announcement = "joined the board%s; roles=%s; at %s [%s]" % (
         (" via %s" % harness) if harness else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
-        rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
+        rec["worktree"] or rec["cwd"], rec["branch"] or "?")
     root = os.path.dirname(board)
     shown_alias = alias or next(
         (name for name, holder in load_aliases(board).items() if holder == owner), "-")
@@ -8570,6 +8573,7 @@ def _cmd_join_apply_locked(a, board, owner, knowledge_dir, harness, inline_cmd):
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
     _safe(lambda: _enroll_runner_context(board, owner), None)
+    return announcement
 
 
 def _agent_holds_ticket(board, owner):

@@ -126,6 +126,10 @@ def test_installed_committed_transfer_fences_old_transports(tmp_path, installed)
     assert remote["revoked_at"]
     assert json.loads((board / "workforce.json").read_text())["seat"]["harness"] == "codex"
     assert history in (board / "messages.jsonl").read_bytes()
+    new_messages = [json.loads(line) for line in
+                    (board / "messages.jsonl").read_bytes()[len(history):].splitlines()]
+    assert sum("joined the board" in m["text"] for m in new_messages) == 1
+    assert sum(m["text"].startswith("transferred seat ") for m in new_messages) == 1
 
 
 def test_installed_late_failure_restores_raw_endpoint_without_success_audit(tmp_path, installed):
@@ -144,3 +148,47 @@ def test_installed_late_failure_restores_raw_endpoint_without_success_audit(tmp_
     assert result.returncode != 0
     assert "injected late join failure" in result.stderr
     assert snapshot(paths) == before
+
+
+@pytest.mark.parametrize("entrypoint", ["root", "wheel"])
+@pytest.mark.parametrize("boundary", ["checkin", "unread"])
+@pytest.mark.parametrize("other_message", [False, True])
+def test_replacement_failure_has_no_join_event_and_preserves_other_messages(
+        tmp_path, installed, entrypoint, boundary, other_message):
+    python, _, repo, board, env, paths = make_case(tmp_path, installed)
+    for index, path in enumerate(paths[:-1]):
+        path.chmod(0o600 if index % 2 else 0o640)
+    before = snapshot(paths)
+    if entrypoint == "wheel":
+        load = "import ticket_board.cli as c\n"
+    else:
+        load = ("import importlib.util\n"
+                "spec = importlib.util.spec_from_file_location('root_tickets', %r)\n"
+                "c = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(c)\n" % str(ROOT / "tickets.py"))
+    code = "import argparse\n" + load + (
+        "original_post = c.post_message\n"
+        "def fail(*args, **kwargs):\n"
+        + ("    original_post(c.board_dir(), 'other-agent', 'concurrent progress')\n"
+           if other_message else "")
+        + "    raise RuntimeError('late replacement failure')\n"
+        "c.%s = fail\n" % boundary
+        + "a = argparse.Namespace(name='seat', tool='', harness='codex', alias='', "
+        "transfer=True, roles='backend', model='', can=None, cost='', best_for='')\n"
+        "c.cmd_join(a, c.board_dir())\n"
+    )
+    result = subprocess.run([str(python), "-c", code], capture_output=True,
+                            text=True, cwd=str(repo), env=env)
+    assert result.returncode != 0
+    assert "late replacement failure" in result.stderr
+    assert snapshot(paths[:-1]) == {str(p): before[str(p)] for p in paths[:-1]}
+    history = before[str(paths[-1])][0]
+    messages = (board / "messages.jsonl").read_bytes()
+    assert messages.startswith(history)
+    additions = [json.loads(line) for line in messages[len(history):].splitlines()]
+    if other_message:
+        assert len(additions) == 1
+        assert additions[0]["from"] == "other-agent"
+        assert additions[0]["text"] == "concurrent progress"
+    else:
+        assert messages == history

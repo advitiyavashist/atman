@@ -3994,11 +3994,14 @@ def _cmd_join_locked(a, board, owner):
                 board, owner, prev, alias_clash,
                 (getattr(a, "alias", "") or "").strip().lower(),
                 alias_holder, incoming)
-        _cmd_join_apply_locked(a, board, owner)
+        announcement = _cmd_join_apply_locked(a, board, owner)
     except BaseException:
         if snap is not None:
             _identity_transfer.restore_identity_artifacts(board, owner, snap)
         raise
+    # Identity is committed only after every fallible apply/briefing step.
+    # Never roll back shared message history: other agents may append to it.
+    post_message(board, owner, announcement)
     if transferring:
         _audit_seat_transfer(
             board, owner, prev, alias_clash,
@@ -4060,9 +4063,9 @@ def _cmd_join_apply_locked(a, board, owner):
         jrec.setdefault("joined_at", now())
         jpath = os.path.join(agents_dir(board), owner + ".json")
         _atomic_json_dump(jpath, jrec)
-    post_message(board, owner, "joined the board%s; roles=%s; at %s [%s]" % (
+    announcement = "joined the board%s; roles=%s; at %s [%s]" % (
         (" via %s" % a.tool) if a.tool else "", roles.get(owner, DEFAULT_ROLES.get(owner, [])),
-        rec["worktree"] or rec["cwd"], rec["branch"] or "?"))
+        rec["worktree"] or rec["cwd"], rec["branch"] or "?")
     root = os.path.dirname(board)
     print("joined as %s  roles=%s  can=%s  cost=%s" % (
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"]))
@@ -4087,6 +4090,7 @@ def _cmd_join_apply_locked(a, board, owner):
     print("Full instructions: tickets connect")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
+    return announcement
 
 
 def _agent_holds_ticket(board, owner):
