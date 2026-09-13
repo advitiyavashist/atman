@@ -17,10 +17,13 @@ authors = [{ name = "Atman contributors" }]
 contracts = ["pytest>=7", "jsonschema>=4.18", "pyyaml>=6"]
 
 [project.scripts]
-tickets = "ticket_board.cli:main"
+tickets = "ticket_board.entry:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.data-files]
+"share/ticket-board" = ["tickets.py"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
