@@ -81,3 +81,14 @@ def test_shell_verdict_is_evidence_not_status(board):
     assert tk._ticket_verdict(done) == "Marked done; verification not recorded"
     stale = dict(t, commit="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
     assert "historical" in tk._ticket_verdict(stale)
+
+
+def test_reopen_stamps_reopened_at_for_work_view(board):
+    assert run(board, "master", "take", agent="boss").returncode == 0
+    assert run(board, "create", "Will reopen", "--role", "backend", agent="boss").returncode == 0
+    assert run(board, "next", agent="boss").returncode == 0
+    assert run(board, "reopen", "T-001", "--notes", "wrong owner",
+               agent="boss").returncode == 0
+    t = json.loads((board / "T-001.json").read_text())
+    assert t.get("reopened_at")
+    assert t["status"] == "open"

@@ -34,6 +34,7 @@ def test_work_objective_sits_above_summary_and_names_done_when():
     assert obj < now < graph
     assert 'id="workDoneWhen"' in ui
     assert 'id="workDoneWhenText"' in ui
+    assert 'data-done-when' in ui
     assert "function renderObjective" in ui
     assert "workDoneWhenText" in ui
     assert "no exit criterion yet" in ui
@@ -71,7 +72,8 @@ def test_light_theme_uses_readable_action_token():
     light = ui[ui.index("body[data-theme=light]"):ui.index("body[data-theme=light]") + 400]
     assert "--acc:#6b5344" in light
     assert "--on-acc:#fcfaf6" in light
-    assert "body[data-theme=light] .ph-dispatched{--wv-c:var(--flight)}" in ui
+    assert "ph-reserved" in ui
+    assert "ph-posted{--wv-c:var(--flight)}" in ui
 
 
 def test_first_screen_payload_names_objective_blocker_and_next(board):
@@ -93,9 +95,11 @@ def test_first_screen_payload_names_objective_blocker_and_next(board):
     fs = d["first_screen"]
     assert fs["finishing"]["title"] == "Ready work"
     assert fs["finishing"]["owner"] == "alice"
-    assert fs["blocker"]["kind"] in ("deps", "hold", "waiting")
+    assert fs["blocker"]["kind"] in ("deps", "hold", "waiting", "capture")
     assert fs["blocker"]["title"]
+    assert fs["blocker"]["kind"] == "hold" or fs["blocker"]["phase"] in ("hold", "waiting")
     assert fs["blocker_count"] >= 2
+    assert any(w.get("id") for w in (fs.get("waiting") or []))
     assert fs["next"]["id"]
     assert fs["next"]["title"]
     assert fs["next"]["phase"] in ("ready", "reserved", "posted", "dispatched")

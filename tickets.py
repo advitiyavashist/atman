@@ -6048,6 +6048,9 @@ def cmd_reopen(a, board):
     prev_owner = t.get("owner", "")
     t["status"] = "open"
     t["owner"] = ""
+    # T-889 hook: Work treats task posts and triggers older than this as the
+    # ticket's previous life, never as current dispatch evidence.
+    t["reopened_at"] = now()
     save(board, t)
     _safe(lambda: traj_event(board, "reopen", agent=whoami(getattr(a, "by", "")),
                              ticket=t, state_before=before, state_after="open",
@@ -12871,7 +12874,9 @@ UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</tit
 <style>
 :root{color-scheme:dark;--bg:#0c0e12;--fg:#ece8e1;--mute:#9a958c;--line:#2a2d34;--card:#161820;--surface:#12141a;--chip:#1c2028;--acc:#c4b49a;--on-acc:#14120e;--ok:#6f9e96;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#9a958c;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
 body[data-theme=light]{color-scheme:light;--bg:#f4f1eb;--fg:#14120e;--mute:#6e6a63;--line:#d8d3ca;--card:#fcfaf6;--surface:#eeeae3;--chip:#e8e3d9;--acc:#6b5344;--on-acc:#fcfaf6;--ok:#3d6e68;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6e6a63;--flight:#93610a;--review:#6954a5;--progress:#789396}
-body[data-theme=light] .ph-dispatched{--wv-c:var(--flight)}
+body[data-theme=light] .ph-dispatched,
+body[data-theme=light] .ph-reserved,
+body[data-theme=light] .ph-posted{--wv-c:var(--flight)}
 *{box-sizing:border-box}html,body{height:100%;overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
 body.loading main{opacity:.55;pointer-events:none}
@@ -13226,7 +13231,7 @@ body[data-work-view=columns] #workJump{display:none}
   <section class="work-objective" id="workObjective">
     <p class="hero-eyebrow">Objective</p>
     <p class="v" id="workObjectiveText">—</p>
-    <p class="work-done-when" id="workDoneWhen"><span class="k">Done when</span> <span id="workDoneWhenText">—</span></p>
+    <p class="work-done-when" id="workDoneWhen" data-done-when><span class="k">Done when</span> <span id="workDoneWhenText">—</span></p>
     <p class="empty-honesty" id="workObjectiveMissing" hidden>No standing objective — <span class="mono">tickets objective --set "what we are finishing"</span></p>
   </section>
   <section class="now-strip" id="nowStrip" aria-label="What the team is finishing">
@@ -13707,13 +13712,16 @@ function renderNow(d){
     setTxt('nowFinishing','');
     document.getElementById('nowFinishing').innerHTML=pickHtml(finish.id,(finish.id||'')+(title?' '+shortTitle(title):'')+(finish.owner?' · @'+finish.owner:''));
   }else setTxt('nowFinishing','—');
-  const blockers=nodes.filter(n=>n.phase==='blocked'||n.phase==='waiting'||n.phase==='capture'||n.phase==='hold');
-  const blk=fs.blocker||blockers[0];
-  const blkN=fs.blocker_count||blockers.length;
+  const waiting=fs.waiting||(w.summary&&w.summary.waiting_on)||nodes.filter(n=>n.phase==='waiting');
+  const blk=fs.blocker;
+  const blkN=fs.blocker_count||((blk?1:0)+waiting.length);
   if(blk){
-    const text=blk.text||(blk.wait&&blk.wait.text)||(blk.id+' · '+(blk.kind||blk.phase||'blocked'));
+    const kind=blk.kind||blk.phase||'blocked';
+    const text=blk.text||(blk.wait&&blk.wait.text)||(kind+' · '+blk.id);
+    const waitN=waiting.length;
     const more=blkN>1?(' · '+blkN+' blockers'):'';
-    document.getElementById('nowBlocked').innerHTML=pickHtml(blk.id,(blk.id||'')+' '+shortTitle(blk.title||'')+' · '+text)+esc(more);
+    const waitBit=(kind!=='deps'&&waitN)?(' · '+waitN+' waiting on deps'):'';
+    document.getElementById('nowBlocked').innerHTML=pickHtml(blk.id,(blk.id||'')+' '+shortTitle(blk.title||'')+' · '+text)+esc(waitBit+more);
   }else setTxt('nowBlocked','—');
   const nxt=fs.next||(w.summary&&w.summary.next);
   if(nxt){
@@ -14677,9 +14685,18 @@ def _board_snapshot_body(board, messages=40):
         "exit_missing": bool(obj) and objective_exit_missing(obj),
     }
     all_msgs = _safe(lambda: load_messages(board), []) or []
-    work = _safe(lambda: _work_view().work_payload(
-        tickets, graph, all_msgs, objective=objective_view,
-        acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who))), None)
+    def _work_payload():
+        fn = _work_view().work_payload
+        kwargs = dict(
+            objective=objective_view,
+            acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who)),
+        )
+        try:
+            return fn(tickets, graph, all_msgs, agents=agents, **kwargs)
+        except TypeError:
+            # 9f50606 work_payload has no agents=; revised T-889 does.
+            return fn(tickets, graph, all_msgs, **kwargs)
+    work = _safe(_work_payload, None)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -14718,26 +14735,98 @@ def _board_snapshot_body(board, messages=40):
 
 
 def _first_screen(work):
-    """T-810 #1: finishing / named blocker / next ticket from the shared work payload."""
+    """T-810 #1: finishing / named blocker / next ticket from the shared work payload.
+
+    Prefers T-889 ``work.summary`` (finishing / blocked / waiting_on / next).
+    Old 9f50606 summaries lack titles and fold hold/capture into nodes only.
+    """
     if not work:
-        return {"finishing": None, "blocker": None, "blocker_count": 0, "next": None}
+        return {"finishing": None, "blocker": None, "blocker_count": 0, "waiting": [], "next": None}
     nodes = work.get("nodes") or []
-    working = [n for n in nodes if n.get("phase") == "working"]
-    blockers = [n for n in nodes if n.get("phase") in ("blocked", "waiting", "capture", "hold")]
-    nxt = (work.get("summary") or {}).get("next")
+    summary = work.get("summary") or {}
+    by = dict((n.get("id"), n) for n in nodes if n.get("id"))
+
+    def _node(tid):
+        return by.get(tid) or {}
+
+    finishing_rows = list(summary.get("finishing") or [])
     finish = None
-    if working:
-        n = working[0]
-        finish = {"id": n["id"], "title": n.get("title") or "", "owner": n.get("owner") or "",
-                  "phase": "working"}
-    blocker = None
-    if blockers:
-        n = blockers[0]
-        wait = n.get("wait") or {}
-        blocker = {"id": n["id"], "title": n.get("title") or "",
-                   "kind": wait.get("kind") or n.get("phase") or "",
-                   "text": wait.get("text") or "", "phase": n.get("phase") or ""}
-    return {"finishing": finish, "blocker": blocker, "blocker_count": len(blockers), "next": nxt}
+    if finishing_rows:
+        n = finishing_rows[0]
+        node = _node(n.get("id"))
+        finish = {
+            "id": n.get("id"),
+            "title": n.get("title") or node.get("title") or "",
+            "owner": n.get("owner") or n.get("who") or node.get("owner") or "",
+            "phase": n.get("phase") or node.get("phase") or "working",
+        }
+    else:
+        working = [n for n in nodes if n.get("phase") == "working"]
+        if working:
+            n = working[0]
+            finish = {"id": n["id"], "title": n.get("title") or "",
+                      "owner": n.get("owner") or "", "phase": "working"}
+
+    blocked = []
+    for row in (summary.get("blocked") or []):
+        node = _node(row.get("id"))
+        wait = node.get("wait") or {}
+        blocked.append({
+            "id": row.get("id"),
+            "title": row.get("title") or node.get("title") or "",
+            "kind": row.get("kind") or wait.get("kind") or node.get("phase") or "",
+            "text": row.get("text") or wait.get("text") or "",
+            "phase": row.get("phase") or node.get("phase") or "",
+            "cmd": row.get("cmd") or wait.get("cmd") or "",
+        })
+    listed = set(r["id"] for r in blocked if r.get("id"))
+    for n in nodes:
+        if n.get("phase") in ("hold", "capture", "blocked") and n.get("id") not in listed:
+            wait = n.get("wait") or {}
+            blocked.append({
+                "id": n["id"], "title": n.get("title") or "",
+                "kind": wait.get("kind") or n.get("phase") or "",
+                "text": wait.get("text") or "", "phase": n.get("phase") or "",
+                "cmd": wait.get("cmd") or "",
+            })
+
+    waiting = list(summary.get("waiting_on") or [])
+    if not waiting:
+        waiting = [{"id": n["id"], "title": n.get("title") or "",
+                    "on": n.get("waiting") or n.get("deps") or []}
+                   for n in nodes if n.get("phase") == "waiting"]
+
+    blocker = blocked[0] if blocked else None
+    if not blocker and waiting:
+        w = waiting[0]
+        node = _node(w.get("id"))
+        wait = node.get("wait") or {}
+        ons = w.get("on") or []
+        blocker = {
+            "id": w.get("id"),
+            "title": w.get("title") or node.get("title") or "",
+            "kind": wait.get("kind") or "deps",
+            "text": wait.get("text") or (("waiting on " + ", ".join(ons)) if ons else "waiting on deps"),
+            "phase": "waiting",
+            "cmd": wait.get("cmd") or "",
+        }
+
+    nxt = summary.get("next")
+    if nxt:
+        node = _node(nxt.get("id"))
+        nxt = dict(nxt)
+        nxt.setdefault("title", node.get("title") or "")
+        nxt.setdefault("phase", node.get("phase") or "")
+        nxt.setdefault("who", nxt.get("who") or node.get("who") or node.get("owner") or "")
+        nxt.setdefault("who_kind", nxt.get("who_kind") or node.get("who_kind") or "")
+
+    return {
+        "finishing": finish,
+        "blocker": blocker,
+        "blocker_count": len(blocked) + len(waiting),
+        "waiting": waiting,
+        "next": nxt,
+    }
 
 
 _UI_MSG_MAX_BYTES = 65536
