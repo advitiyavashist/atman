@@ -222,15 +222,25 @@ def test_walk_capture_sound_dispatch_pr_sync_retro(tmp_path):
     assert "harness=gemini" in show.stdout
 
 
-def test_plan_defaults_to_capture(tmp_path):
+def test_plan_defaults_to_ready_unless_capture_flag(tmp_path):
     repo, env = boot(tmp_path)
     payload = json.dumps([{"key": "a", "title": "bare title", "role": "backend"}])
     r = run(repo, "plan", env=env, tmp_path=tmp_path, stdin=payload)
     assert r.returncode == 0, r.stderr
-    assert "lane=capture" in r.stdout
+    assert "lane=ready" in r.stdout
     tid = r.stdout.split()[1]
     n = run(repo, "next", "--owner", "worker-a", env=env, tmp_path=tmp_path)
-    assert n.returncode != 0
+    assert n.returncode == 0, n.stderr + n.stdout
+    assert tid in n.stdout
+
+    payload = json.dumps([{"key": "c", "title": "still a thought", "role": "backend",
+                            "capture": True}])
+    r = run(repo, "plan", env=env, tmp_path=tmp_path, stdin=payload)
+    assert r.returncode == 0, r.stderr
+    assert "lane=capture" in r.stdout
+    cap_id = [ln.split()[1] for ln in r.stdout.splitlines() if ln.startswith("created")][0]
+    n = run(repo, "next", "--owner", "worker-a", env=env, tmp_path=tmp_path)
+    assert cap_id not in n.stdout
 
     body = (
         "## Cause or spec\nfoo\n\n## Change\nbar\n\n## Proof\npytest -q\n\n"

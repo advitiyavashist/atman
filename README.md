@@ -248,6 +248,10 @@ endless model turn open.
 
 ## Plan dependent work
 
+JSON `deps` become real `--after` edges. Planned tickets are **ready** (claimable
+when their deps are done). Use `"capture": true` on an item, or `tickets capture`,
+when the thought still needs `tickets sound`.
+
 ```sh
 tickets epic create "Auth" -b "..."
 tickets sprint create "Ship auth" --activate
@@ -260,8 +264,9 @@ tickets plan <<'EOF'
 EOF
 ```
 
-Use `tickets map` for sprint and epic progress, `tickets graph` for dependency
-diagnosis, and `tickets who` for live ownership and worktrees.
+After `tickets done` on Schema, Auth API is offered by `tickets next` — it does
+not stay in capture. Use `tickets map` for sprint and epic progress, `tickets graph`
+for dependency diagnosis, and `tickets who` for live ownership and worktrees.
 
 ## Inspectable by design
 

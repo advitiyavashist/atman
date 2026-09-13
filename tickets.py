@@ -1867,7 +1867,10 @@ def cmd_plan(a, board):
     who = whoami()
     for it, t0 in zip(items, made):
         t = load(board, t0["id"])
-        if it.get("sounded"):
+        if it.get("capture"):
+            t["lane"] = "capture"
+            save(board, t)
+        elif it.get("sounded"):
             fields = S.merge_sound_fields(t.get("body") or it.get("body") or "", "")
             qs = S._questions_list(fields.get("open_questions"))
             if (not S.sound_fields_complete(fields) or qs
@@ -1878,8 +1881,18 @@ def cmd_plan(a, board):
                          % (it.get("key") or t["id"]))
             _apply_sounded(board, t, fields, who)
         else:
-            t["lane"] = "capture"
-            save(board, t)
+            # README / first-run: planned JSON is already a graph. Capture is
+            # `tickets capture` (or plan item `"capture": true`). Otherwise B
+            # waits on A via deps, not because it is still unsounded (T-879).
+            dep_keys = it.get("deps") or []
+            fields = {
+                "cause": (it.get("cause") or "planned in tickets plan").strip(),
+                "change": (it.get("change") or it.get("title") or t["title"]).strip(),
+                "proof": (it.get("proof") or "finish the ticket; tickets done with notes").strip(),
+                "deps": ", ".join(dep_keys) if dep_keys else "none",
+                "open_questions": (it.get("open_questions") or it.get("questions") or "").strip(),
+            }
+            _apply_sounded(board, t, fields, who)
         print("created %s  %s  lane=%s" % (t["id"], t["title"], _ticket_lane(t)))
 
 
@@ -16003,7 +16016,7 @@ def main():
     c.add_argument("--all", action="store_true", help="include done tickets and closed sprints")
     c.set_defaults(fn=cmd_map)
 
-    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin (default lane=capture until sounded)")
+    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin (ready; set capture:true to hold for sound)")
     c.set_defaults(fn=cmd_plan)
 
     c = sub.add_parser("capture", help="capture a thought as lane=capture (not claimable until tickets sound)")
