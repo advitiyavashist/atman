@@ -76,7 +76,11 @@ def _msg_id(m):
 
 
 def _epoch_of(t):
-    """Messages older than this belong to the ticket's previous life (reopen)."""
+    """Messages at or before this stamp belong to the previous life (reopen).
+
+    ``tickets.now()`` is second-precision, so a task post and ``reopen`` in the
+    same UTC second must not keep the old recipient as current intent.
+    """
     return (t.get("reopened_at") or "").strip()
 
 
@@ -288,7 +292,7 @@ def _dispatch_of(t, task_msgs, acked, agents, now):
         to = (m.get("to") or "").strip()
         if not to or to.lower() in ("all", "everyone"):
             continue
-        if epoch and (m.get("at") or "") < epoch:
+        if epoch and (m.get("at") or "") <= epoch:
             ignored += 1
             continue
         if reserved and to != reserved:
@@ -459,8 +463,8 @@ def progress_of(t, by_id, done_ids, task_msgs, acked, agents, now):
         m_at = m.get("at") or ""
         if at and m_at < at:
             continue          # a trigger from an earlier completion of the same parent
-        if epoch and m_at < epoch:
-            continue          # posted before the ticket was reopened
+        if epoch and m_at <= epoch:
+            continue          # posted at or before the ticket was reopened
         to = (m.get("to") or "").strip()
         trigger = {"to": to, "from": m.get("from") or "", "at": m_at,
                    "age_h": _hours_since(m_at, now), "msg_id": _msg_id(m)}

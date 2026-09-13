@@ -313,6 +313,11 @@ def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
     n = by["T-001"]
     assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
     assert "1 earlier task post ignored" in n["evidence"]
+    # same UTC second as reopen (tickets.now() is %Y-%m-%dT%H:%M:%SZ): still stale
+    same = dict(old, at="2026-09-13T00:00:00Z")
+    _, by = _pure([_t("T-001", reopened_at="2026-09-13T00:00:00Z")], [same])
+    n = by["T-001"]
+    assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
     # reassigned by reservation: a post to another seat does not name the current recipient
     _, by = _pure([_t("T-001", reserved_for="bob")], [old])
     n = by["T-001"]
