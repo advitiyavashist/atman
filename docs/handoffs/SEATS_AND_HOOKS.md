@@ -10,6 +10,8 @@ User-approved responsibility split: Opus CEO, Sonnet CoS, Sol/Codex planner/assi
 
 The planner's legacy ID does not confer CEO authority. Keep it for this running session so pending messages reach it; a replacement planner chooses a fresh ID. At packet creation the live CEO/CTO/master still pointed to that ID and CoS to `cursor`; new seats must explicitly activate from their own sessions. Preserve delivery continuity until takeover ACK, then retire the old CoS watcher. Do not register another agent from your cwd.
 
+The CLI currently accepts friendly aliases only `ceo` and `cos`; `--alias planner` is unsupported. Address the planner by its full unique ID. Its planner/review roles and persistent continuous native Codex endpoint are registered, and durable `steer.planner` is recorded. The legacy executive role/alias routing changes when the new CEO self-enrolls; endpoint registration alone is not end-to-end wake acceptance.
+
 Repos: `/Users/kavana/Downloads/atman` -> `advitiyavashist/atman`; `/Users/kavana/Downloads/steer` -> `advitiyavashist/steer`. Shared board for both: `/Users/kavana/Downloads/steer/.tickets`. Never initialize a second board or edit its JSON. Ticket repo evidence and deliverable origin matter more than folder names.
 
 Current CLI: `/Users/kavana/.local/bin/tickets` -> `/Users/kavana/Downloads/atman/.worktrees/atman-runtime-current/tickets.py`, snapshot `3679053`. `atm` rename is T-809 IN REVIEW; use the existing `tickets` or explicit runtime script until its actual install is proven. Update the clean runtime only after approved, tested integration. Never blindly use `tickets merge`: its integration cleanup can delete branches; preserve all foreign branches.
