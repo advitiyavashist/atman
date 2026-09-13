@@ -5,6 +5,7 @@ tickets plan deps. No living Steer TICKETS_DIR. No tickets clear.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -62,8 +63,13 @@ def make_repo(path):
 
 def test_runbook_pins_this_mac_and_forbids_shim():
     body = RUNBOOK.read_text(encoding="utf-8")
-    assert "/Users/kavana/Downloads/atman/.worktrees/cursor-community-t790/tickets.py" in body
-    assert "/Users/kavana/Downloads/steer/.tickets" in body
+    pinned = re.sub(
+        r"/(?:Users|home)/[A-Za-z0-9_.-]+",
+        r"/Users/<operator>",
+        body,
+    )
+    assert "/Users/<operator>/Downloads/atman/.worktrees/cursor-community-t790/tickets.py" in pinned
+    assert "/Users/<operator>/Downloads/steer/.tickets" in pinned
     assert "python3" in body
     assert "stale shim" in body
     assert "~/.local/bin/tickets" in body
@@ -170,4 +176,4 @@ def test_throwaway_ceo_path_python3_not_path_tickets(tmp_path):
     assert "STALE_SHIM" not in mail
     # Proof never touched the living board.
     assert env.get("TICKETS_DIR") in (None, "")
-    assert str(repo / ".tickets") != "/Users/kavana/Downloads/steer/.tickets"
+    assert Path(repo / ".tickets").resolve().is_relative_to(tmp_path.resolve())
