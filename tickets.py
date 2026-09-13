@@ -13505,10 +13505,12 @@ try{const wv=localStorage.getItem('tickets-ui-work-view');if(wv)setWorkView(wv)}
 (function applyWorkHash(){
   const h=(location.hash||'').replace('#','');
   if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
+  else if(h==='objective'||h==='agents'||h==='messages'||h==='board'){setTab(h)}
 })();
 window.addEventListener('hashchange',()=>{
   const h=(location.hash||'').replace('#','');
   if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
+  else if(h==='objective'||h==='agents'||h==='messages'||h==='board'){setTab(h)}
 });
 let AGENTS=[];
 let THREAD_SEAT='';
@@ -13618,9 +13620,7 @@ function defaultComposeTicket(d){
   const cur=re.value.trim();
   if(cur==='T-000'||(cur&&!known.has(cur)))re.value='';
   if(re.value.trim())return;
-  if(SELECTED_TICKET&&known.has(SELECTED_TICKET)){re.value=SELECTED_TICKET;return}
-  const flight=(d.in_flight||[])[0];
-  if(flight&&flight.id)re.value=flight.id;
+  if(SELECTED_TICKET&&known.has(SELECTED_TICKET))re.value=SELECTED_TICKET;
 }
 function renderNow(d){
   const flight=(d.in_flight||[])[0];
