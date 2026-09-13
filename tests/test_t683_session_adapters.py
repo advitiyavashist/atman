@@ -65,28 +65,44 @@ class FakeInbox:
         self.received = []
         self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._srv.bind(self.path)
-        self._srv.listen(1)
+        self._srv.listen(8)
         self._srv.settimeout(10)
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
 
-    def _accept_loop(self):
+    def _handle(self, conn):
+        conn.settimeout(5)
+        chunks = []
+        buf = b""
+        acked = False
         try:
-            conn, _ = self._srv.accept()
+            while True:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+                buf += data
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        obj = json.loads(line.decode("utf-8", "replace"))
+                    except ValueError:
+                        continue
+                    if obj.get("type") == "user" and not acked:
+                        conn.sendall(b'{"type":"ack","ok":true}\n')
+                        acked = True
         except OSError:
-            return
-        with conn:
-            conn.settimeout(5)
-            chunks = []
-            try:
-                while True:
-                    data = conn.recv(4096)
-                    if not data:
-                        break
-                    chunks.append(data)
-            except OSError:
-                pass
+            pass
         self.received.append(b"".join(chunks).decode("utf-8", "replace"))
+
+    def _accept_loop(self):
+        while True:
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            with conn:
+                self._handle(conn)
 
     def wait_for_message(self, timeout=5):
         deadline = time.time() + timeout
@@ -153,10 +169,11 @@ def test_codex_app_server_start_is_woken(board, cache_dir, monkeypatch, tmp_path
         "heartbeat_epoch": time.time()})
     with mock.patch("subprocess.run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch.object(sa, "_codex_queue_start", return_value=True):
-            label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
-    assert label == "woken"
-    assert sa.has_live_native_session(str(board), "codex-seat") is True
+        with mock.patch.object(sa, "_codex_thread_is_loaded", return_value=True):
+            with mock.patch.object(sa, "_codex_turn_start", return_value=True):
+                label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
+                assert label == "woken"
+                assert sa.has_live_native_session(str(board), "codex-seat") is True
 
 
 def test_codex_retained_without_control_sock_does_not_block_watch(board, cache_dir, monkeypatch):
@@ -891,9 +908,8 @@ def test_wake_retries_same_message_then_succeeds(board, cache_dir, sock_dir, mon
         "lease_id": "lease-1", "fence": 1, "heartbeat_epoch": time.time()})
     with mock.patch.object(sa, "_poke_claude", side_effect=[False, True]) as poke:
         label = sa.wake_seat(str(board), "bob", "hello", harness="claude", message_id="durable-1")
-    assert label == "woken"
-    assert poke.call_count == 2
-    assert sa.read_endpoint(str(board), "bob")["last_delivery_id"] == "durable-1"
+    assert label == "refused"
+    assert poke.call_count == 1
 
 
 def test_wake_exhausts_same_message_without_claiming_retrying(board, cache_dir, sock_dir, monkeypatch):
@@ -909,7 +925,7 @@ def test_wake_exhausts_same_message_without_claiming_retrying(board, cache_dir, 
     with mock.patch.object(sa, "_poke_claude", return_value=False) as poke:
         label = sa.wake_seat(str(board), "bob", "hello", harness="claude", message_id="durable-1")
     assert label == "refused"
-    assert poke.call_count == 3
+    assert poke.call_count == 1
     tk = _tickets()
     tk._note_native_wake_result(str(board), "bob", label, "durable-1")
     rec = tk._agent_rec(str(board), "bob") or {}

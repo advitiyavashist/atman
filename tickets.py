@@ -7561,7 +7561,8 @@ def _should_poke_persist(label):
     another live session, so they are not stolen here.
     """
     s = str(label or "")
-    if not s or s in ("woken", "deduped", "remote bridge required"):
+    if not s or s in ("woken", "deduped", "remote bridge required",
+                      "delivered-unconfirmed"):
         return False
     if s.startswith("stale (rebound"):
         return False

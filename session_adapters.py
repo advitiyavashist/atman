@@ -600,26 +600,88 @@ def wake_payload(fmt_msg, message):
     return "tickets board message -- %s\n(see `tickets inbox` for the rest)" % fmt_msg(message)
 
 
-def _poke_claude(ep, text):
-    sock_path = ep.get("socket") or ""
-    if not sock_path:
+def _claude_user_envelope(text):
+    """Claude Code UDS inbox is JSONL, not a raw text line.
+
+    Documented inject (claude 2.1.263): auth frame, then
+    {"type":"user","message":{"role":"user","content":...}}.
+    A raw second line is ignored after auth, so write-success is not a wake.
+    """
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _claude_ack_ok(obj):
+    if not isinstance(obj, dict):
         return False
+    if obj.get("ok") is True:
+        return True
+    if obj.get("type") in ("ack", "ok"):
+        return True
+    if obj.get("status") in ("delivered", "ok", "accepted"):
+        return True
+    if obj.get("type") == "control" and obj.get("action") == "peer_message_status":
+        return obj.get("status") in ("delivered", "held")
+    return False
+
+
+def _recv_json_line(sock, deadline):
+    buf = b""
+    while time.time() < deadline:
+        sock.settimeout(max(0.05, deadline - time.time()))
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            break
+        except OSError:
+            return None
+        if not chunk:
+            break
+        buf += chunk
+        if b"\n" in buf:
+            line = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+            if not line:
+                return None
+            try:
+                return json.loads(line)
+            except ValueError:
+                return None
+    return None
+
+
+def _poke_claude_wake(ep, text):
+    """Inject a Claude UDS user envelope. woken only on a same-connection ack.
+
+    Live Claude Code does not write an ack on the injector socket; that is
+    delivered-unconfirmed, not woken. Raw text after auth is never a wake.
+    """
+    sock_path = ep.get("socket") or ""
+    if not sock_path or not os.path.exists(sock_path):
+        return "queued-offline"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(2)
+    wrote = False
     try:
         s.connect(sock_path)
         token = ep.get("token") or ""
         if token:
             s.sendall((json.dumps({"type": "auth", "token": token}) + "\n").encode("utf-8"))
-        s.sendall((text + "\n").encode("utf-8"))
-        return True
+        s.sendall((json.dumps(_claude_user_envelope(text)) + "\n").encode("utf-8"))
+        wrote = True
+        ack = _recv_json_line(s, time.time() + 2)
+        if _claude_ack_ok(ack):
+            return "woken"
+        return "delivered-unconfirmed"
     except OSError:
-        return False
+        return "queued-offline" if not wrote else "delivered-unconfirmed"
     finally:
         try:
             s.close()
         except OSError:
             pass
+
+
+def _poke_claude(ep, text):
+    return _poke_claude_wake(ep, text)
 
 
 _WS_GUID = "258EAFA5-E914-47DA-95AA-C5AB0DC85B11"
@@ -920,6 +982,9 @@ def native_wake_online(board, seat):
         persist = (ep.get("persist_session") or "").strip()
         acp = (ep.get("socket") or "").strip()
         return bool(persist) or bool(acp and os.path.exists(acp))
+    if provider == "claude":
+        sock = (ep.get("socket") or "").strip()
+        return bool(sock and os.path.exists(sock))
     return True
 
 
@@ -1045,16 +1110,18 @@ def _commit_wake(board, seat, mid, lease, fence, label, ok):
             return "stale (rebound before delivery)"
         ep.pop("last_inflight_id", None)
         ep.pop("last_inflight_epoch", None)
+        delivered = label in ("woken", "queued-offline", "delivered-unconfirmed")
+        if mid and delivered:
+            ep["last_delivery_id"] = mid
+            ep["last_delivery_status"] = label
         if ok:
-            if mid:
-                ep["last_delivery_id"] = mid
-                ep["last_delivery_status"] = label
             ep["heartbeat_epoch"] = time.time()
             ep["heartbeat_at"] = ep.get("at") or ""
             write_endpoint(board, seat, ep)
             return label
-        ep["last_attempt_id"] = mid
-        ep["last_attempt_status"] = label
+        if not delivered:
+            ep["last_attempt_id"] = mid
+            ep["last_attempt_status"] = label
         write_endpoint(board, seat, ep)
         if label == "refused":
             try:
@@ -1099,8 +1166,15 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         return "no live endpoint"
     lease, fence = _endpoint_lease_fence(ep)
     if provider == "claude":
-        ok = _poke_until(_poke_claude, ep, text)
-        label = "woken" if ok else "refused"
+        # One inject. Mocked _poke_claude may still return True/False.
+        poked = _poke_claude(ep, text)
+        if poked is True:
+            label = "woken"
+        elif poked is False:
+            label = "refused"
+        else:
+            label = str(poked or "queued-offline")
+        ok = label == "woken"
     elif provider == "cursor":
         label = _cursor_pause_resume(ep, text)
         ok = label == "woken"
@@ -1127,6 +1201,9 @@ def has_live_native_session(board, seat):
         persist = (ep.get("persist_session") or "").strip()
         acp = (ep.get("socket") or "").strip()
         return bool(persist) or bool(acp and os.path.exists(acp))
+    if provider == "claude":
+        sock = (ep.get("socket") or "").strip()
+        return bool(sock and os.path.exists(sock))
     return True
 
 
