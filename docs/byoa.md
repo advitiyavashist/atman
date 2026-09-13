@@ -221,8 +221,11 @@ up. Do not cache its path.
 
 - **One ticket at a time.** `tickets next` claims atomically with an O_EXCL
   lock; two harnesses racing for the same ticket cannot both win.
-- **Its own worktree and branch.** `spawn` creates `.worktrees/<agent>` on
-  branch `<agent>` and starts the harness there. Nothing else runs in it.
+- **Its own worktree and branch.** `spawn` creates `<repo>/.worktrees/<agent>`
+  on branch `<agent>` and starts the harness there. Nothing else runs in it.
+  Cross-repo boards must pass `--repo` so the worktree is derived from the
+  deliverable checkout, not `dirname(board)`. See
+  [t824-spawn-target-repo.md](t824-spawn-target-repo.md).
 - **The same prompt every other agent gets.** One renderer produces the worker,
   master and chief-of-staff prompts; a BYOA harness reads the identical text.
 - **Identity on every write.** Notes, messages, claims and reviews are attributed

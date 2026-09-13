@@ -18,6 +18,9 @@ T-688 owns live provider smoke.
 - `dirname(board)` is not git identity. When `workforce.expected_origin` or
   `ATMAN_EXPECTED_ORIGIN` is set, `git worktree add` uses a root whose origin
   matches. Boards with no origin keep local throwaway identity (`local/<sha>`).
+  T-824 adds explicit `spawn --repo` / `--base` and fails closed when
+  `--worktree` sits under a different origin than the board. See
+  [t824-spawn-target-repo.md](t824-spawn-target-repo.md).
 - Persistent no-spend states pause with `retry_model=false` and one `alert_id`.
   Matching ready clears pause/alert and resumes a durable wake once.
 - Profile metadata is `prf_` tokens under `$TICKETS_CACHE_DIR` or
