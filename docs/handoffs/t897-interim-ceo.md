@@ -31,6 +31,8 @@ flowchart LR
   AppFix["T-810: chronology + read/wake + initial selected-detail fixes"] --> AppReview["T-896: independent final artifact UX review"]
   Cli["T-809: recovered atm wheel parity"] --> CliReview["T-877: independent installed-wheel proof"]
   CliReview --> AppRelease["T-812: full release acceptance"]
+  CliReview --> Brew["T-898: publish pinned tap + fresh-user install"]
+  Brew --> AppRelease
   AppReview --> AppRelease
   Identity["T-839 / T-876: next-head full-suite identity gate"] --> Remote["T-818: authenticated remote work proof"]
   Remote --> AppRelease
@@ -76,13 +78,22 @@ Do not create a second ticket registry or duplicate the existing units.
   behavior; wheel hooks, version and self commands are unsupported. Source
   `install.sh --prefix` supports the full runtime and legacy hooks. Public
   onboarding must clearly distinguish those paths.
-- **Test portability:** `atman-suite-repair-agy-t890-0913` owns T-890 on an
+- **Test portability:** `atman-suite-repair-cursor-t890-0913` owns T-890 on an
   isolated main-based worktree. Only replace real operator-home test literals
   with portable assertions, preserving the test contract. Do not touch the
   prior Claude owner's separate unfinished T-866 production changes. Agy's
   first command failed before model execution because `-p` consumed the next
   flag; one corrected cataloged Gemini Flash run uses attached `-p=...`,
-  accept-edits and a 15-minute run timeout. No repair artifact exists yet.
+  accept-edits and a 15-minute run timeout. That corrected run returned an
+  explicit individual quota error at 23:13, with no file changes; the watcher
+  stopped. Ownership was exclusively moved to one 15-minute Cursor run.
+  Preserve the quota receipt; do not relaunch or switch Agy models to bypass it.
+- **Distribution:** T-865's code is merged, but its receipt explicitly excludes
+  a published tap/token, live `brew install/test`, and a final merged-main pin.
+  New T-898 captures only those release side effects and independent fresh-user
+  proof, after T-809/T-865 and before T-812. Prepare a concrete publication
+  packet for CEO review. Do not rewrite T-865 or advertise an unpublished
+  formula as an available customer installation.
 - **Agy:** T-819 owner `agy-pm`, T-824 owner `agy-mail`. Their recurring
   five-minute partial-output watcher loops were stopped from relaunching;
   checkpoints requested, ownership retained. Resume one explicit bounded task
@@ -106,9 +117,14 @@ the completed T-813/T-833/T-871, allowing labeling alongside scorer repair.
 T-815 still requires BOTH T-814 and T-854 and every existing efficacy gate.
 No unlabeled semantic class becomes eligible through this scheduling change.
 
-Freeze the 120 request rows from
+Retain the 120 seed request rows from
 `66402a9:docs/evals/fixtures/launch-holdout-v1/semantic-reviewer-requests.jsonl`:
 SHA-256 `86aab319d924c88509270b85132b37f1346af8a20f9d10be9d4f6b6af9b011cf`.
+These are 40 semantic candidates per pack, one semantic family each; they are
+not the complete action/control/applicability holdout. An independent author
+may select, rewrite and extend a new versioned final request packet, retaining
+seed provenance and change records. Freeze final bytes before independent
+review and sealing. Do not waive the required coverage floors to fit 120 seeds.
 Record actual independent authors/reviewers, qualification, prediction blindness,
 agreement, adjudication and custody. Model-assisted labels are not represented
 as legal expert review. Do not staff this fourth worker while three bounded
