@@ -24,13 +24,13 @@ In each new session's own worktree, substitute its identity and roles:
 export TICKETS_DIR=/Users/kavana/Downloads/steer/.tickets
 export TICKET_AGENT=atman-ceo-opus-0913
 export TICKET_SEAT="$TICKET_AGENT"
-tickets join "$TICKET_AGENT" --roles master,review --can own-machine,network --harness claude --model opus --lifecycle persistent --wake-mode continuous
+tickets join "$TICKET_AGENT" --roles master,review --can own-machine,network --harness claude --model opus --alias ceo --lifecycle persistent --wake-mode continuous
 tickets hooks claude --agent "$TICKET_AGENT" --settings "$PWD/.claude/settings.json"
 tickets self
 tickets inbox
 ```
 
-Sonnet uses `atman-cos-sonnet-0913`, `--roles cos,ops,review`, `--model sonnet`; register browser capability only if actually available. Validate both project settings and any effective global/local Claude settings for stale board commands. Preserve custom hooks/permissions. The T-839 corrected code removes parent board-hook inheritance; do not claim its protection is live before activating that reviewed runtime.
+Sonnet uses `atman-cos-sonnet-0913`, `--roles cos,ops,review`, `--model sonnet`, `--alias cos`; register browser capability only if actually available. Validate both project settings and any effective global/local Claude settings for stale board commands. Preserve custom hooks/permissions. The T-839 corrected code removes parent board-hook inheritance; do not claim its protection is live before activating that reviewed runtime.
 
 Install hooks before a new/reloaded Claude session so it reads them. The generated SessionStart hook brings board context, UserPromptSubmit checks inbox, and Stop keeps work going while actionable board work remains. These lifecycle hooks do not by themselves wake an idle session from a new message.
 
