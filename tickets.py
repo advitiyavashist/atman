@@ -1343,13 +1343,13 @@ def _bind_agent_ticket(board, agent, tid):
         checkin(board, agent, tid)
 
 
-def checkin(board, owner, ticket=None, note=""):
+def checkin(board, owner, ticket=None, note="", cwd=None):
     """Shim: canonical flocked checkin lives in the packaged wheel (T-836)."""
     src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
     if src not in sys.path:
         sys.path.insert(0, src)
     from ticket_board.agent_checkin import checkin as _packaged_checkin
-    return _packaged_checkin(board, owner, ticket=ticket, note=note)
+    return _packaged_checkin(board, owner, ticket=ticket, note=note, cwd=cwd)
 
 
 def _current_ticket(board, owner):
@@ -1414,9 +1414,9 @@ def load_agents(board):
     return _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else []
 
 
-def worktree_warning(owner):
+def worktree_warning(owner, cwd=None):
     """Text telling an agent on main / the primary tree to move to its own tree."""
-    g = git_state()
+    g = git_state(cwd)
     if not g:
         return None
     on_trunk = g["branch"] in ("main", "master")
@@ -8269,6 +8269,7 @@ def _join_namespace(a, owner):
         knowledge_dir=getattr(a, "knowledge_dir", "") or "",
         transfer=bool(getattr(a, "transfer", False)),
         alias=getattr(a, "alias", "") or "",
+        checkin_cwd=getattr(a, "checkin_cwd", "") or "",
     )
 
 
@@ -8390,7 +8391,8 @@ def cmd_join(a, board):
                 mode, reg.get("provider"), owner, extra))
         else:
             print("persistent: %s" % reg.get("reason", "registration failed"))
-    rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""))
+    rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""),
+                  cwd=(getattr(a, "checkin_cwd", None) or None))
     if harness:
         _safe(lambda: _clear_adapter_failure_on_provider_change(
             board, owner, harness, prev_harness), None)
@@ -8424,12 +8426,13 @@ def cmd_join(a, board):
     n = len(unread(board, owner))
     if n:
         print("inbox: %d unread (tickets inbox)" % n)
-    warn = worktree_warning(owner)
+    seat_cwd = getattr(a, "checkin_cwd", None) or None
+    warn = worktree_warning(owner, cwd=seat_cwd)
     print("")
     if warn:
         print(warn)
     else:
-        g = git_state()
+        g = git_state(seat_cwd)
         if g:
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
@@ -11013,7 +11016,7 @@ def cmd_watch(a, board):
             print("watching %s for %s every %ds; wake=%s; cwd=%s; cmd=%s" % (
                 board, owner, every, wake_mode, cwd, cmd))
             _safe(lambda: checkin(board, owner, None, "watch loop online (%s, every %ds)" % (
-                wake_mode, every)), None)
+                wake_mode, every), cwd=cwd), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
             # Consume every queued edge at the start of one scan. A signal that
@@ -11699,6 +11702,108 @@ def _stop_file(board, owner):
     return os.path.join(agents_dir(board), owner + ".watch.stop")
 
 
+def _load_spawn_config(board, owner):
+    rec = _agent_rec(board, owner) or {}
+    cfg = rec.get("spawn")
+    return dict(cfg) if isinstance(cfg, dict) else {}
+
+
+def _restore_spawn_args(a, board, owner):
+    """Fill absent spawn flags from the last successful spawn (T-875)."""
+    saved = _load_spawn_config(board, owner)
+    if not saved:
+        return a
+    for key in ("model", "harness", "tool", "cmd_template", "best_for", "brief",
+                "worktree", "base", "exec", "alias"):
+        if not getattr(a, key, "") and saved.get(key):
+            setattr(a, key, saved[key])
+    for key in ("roles", "can", "cost", "wake_mode"):
+        if getattr(a, key, None) is None and saved.get(key) not in (None, ""):
+            setattr(a, key, saved[key])
+    if getattr(a, "max_runs", None) is None and saved.get("max_runs") is not None:
+        a.max_runs = saved["max_runs"]
+    if saved.get("every") is not None and getattr(a, "every", 60) == 60:
+        a.every = int(saved["every"])
+    if saved.get("run_timeout") is not None and getattr(a, "run_timeout", 90) == 90:
+        a.run_timeout = int(saved["run_timeout"])
+    if saved.get("heartbeat") and not getattr(a, "heartbeat", 0):
+        a.heartbeat = int(saved["heartbeat"])
+    for key in ("persist", "safe", "master", "cos"):
+        if saved.get(key) and not getattr(a, key, False):
+            setattr(a, key, True)
+    return a
+
+
+def _save_spawn_config(board, owner, a, worktree, harness, model):
+    roles = getattr(a, "roles", None)
+    if not roles:
+        assigned = load_roles(board).get(owner) or []
+        if assigned and assigned != list(DEFAULT_ROLES.get(owner, [])):
+            roles = ",".join(assigned)
+        elif assigned:
+            roles = ",".join(assigned)
+        else:
+            roles = ""
+    cfg = {
+        "harness": harness or "",
+        "tool": getattr(a, "tool", "") or "",
+        "cmd_template": getattr(a, "cmd_template", "") or "",
+        "model": model or "",
+        "roles": roles or "",
+        "can": getattr(a, "can", None) or "",
+        "cost": getattr(a, "cost", None) or "",
+        "best_for": getattr(a, "best_for", "") or "",
+        "wake_mode": getattr(a, "wake_mode", None) or "",
+        "brief": getattr(a, "brief", "") or agent_brief(board, owner) or "",
+        "worktree": os.path.abspath(worktree),
+        "base": getattr(a, "base", "") or "",
+        "every": int(getattr(a, "every", 60) or 60),
+        "run_timeout": int(getattr(a, "run_timeout", 90) or 90),
+        "heartbeat": int(getattr(a, "heartbeat", 0) or 0),
+        "persist": bool(getattr(a, "persist", False)),
+        "max_runs": getattr(a, "max_runs", None),
+        "safe": bool(getattr(a, "safe", False)),
+        "master": bool(getattr(a, "master", False)),
+        "cos": bool(getattr(a, "cos", False)),
+        "exec": getattr(a, "exec", "") or "",
+        "alias": getattr(a, "alias", "") or "",
+    }
+
+    def _apply(rec):
+        rec["spawn"] = cfg
+        rec["worktree"] = os.path.abspath(worktree)
+
+    _agent_update(board, owner, _apply)
+
+
+def _watch_log_tail(log_path, n=40):
+    try:
+        lines = open(log_path).read().splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[-n:])
+
+
+def _confirm_watcher_started(board, owner, log_path, persist_loop):
+    """Fail closed when a persist watcher dies immediately (T-875 Codex case)."""
+    import time as _time
+    deadline = _time.time() + 3.0
+    pid = 0
+    while _time.time() < deadline:
+        pid = _watcher_pid(board, owner)
+        if pid:
+            break
+        _time.sleep(0.1)
+    if persist_loop:
+        _time.sleep(0.8)
+        pid = _watcher_pid(board, owner)
+        if not pid:
+            tail = _watch_log_tail(log_path)
+            sys.exit("watcher for %s died after start (no live process); log %s\n%s" % (
+                owner, log_path, tail))
+    return pid
+
+
 def cmd_spawn(a, board):
     """Bring up a persistent worker: register it, give it a worktree, and start a
     detached watcher that launches the tool (with the chosen model) whenever the
@@ -11768,6 +11873,7 @@ def cmd_spawn(a, board):
                 ", ".join(str(p) for p in busy), owner))
         post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
         return
+    _restore_spawn_args(a, board, owner)
     requested_harness = getattr(a, "harness", "") or a.tool
     incoming_harness, _ = _split_harness(requested_harness)
     conflict = _identity_reuse_conflict(board, owner, incoming_harness)
@@ -11781,6 +11887,18 @@ def cmd_spawn(a, board):
     git_root, origin_err = _spawn_git_root(board, owner, wt)
     if origin_err:
         sys.exit(origin_err)
+    if not os.path.isdir(wt):
+        base = a.base or _trunk()
+        r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, owner],
+                               capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit("could not create worktree %s from %s: %s" % (
+                wt, git_root, (r.stderr or r.stdout).strip()))
+        print("worktree %s (branch %s, git-root %s)" % (wt, owner, git_root))
+    a.checkin_cwd = wt
     resolved_harness, _ = harness_of(board, owner, requested_harness,
                                      getattr(a, "cmd_template", ""))
     sa = _session_adapters()
@@ -11810,21 +11928,11 @@ def cmd_spawn(a, board):
         sys.exit("remote adapter is offline; no local executable was selected. "
                  "Run `tickets hooks remote --agent %s`, connect its long-poll/callback bridge, "
                  "or pass --cmd for a local adapter. Pending wakes remain queued." % owner)
-    if not os.path.isdir(wt):
-        base = a.base or _trunk()
-        r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, owner],
-                               capture_output=True, text=True)
-        if r.returncode != 0:
-            sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
-        print("worktree %s (branch %s)" % (wt, owner))
     if a.brief:
         bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
-                                role="", by=whoami())
+                                role="", by=whoami(), knowledge_id="")
         _silent(lambda: cmd_brief(bn, board))
-    inherited = _inherit_settings(root, wt)
+    inherited = _inherit_settings(git_root, wt)
     if inherited:
         print("inherited project settings into the worktree: %s" % ", ".join(inherited))
     if a.master:
@@ -11885,10 +11993,10 @@ def cmd_spawn(a, board):
     with open(log_path, "a") as lf:
         subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
                          stdin=subprocess.DEVNULL, start_new_session=True)
-    import time as _time
-    _time.sleep(1.0)
-    pid = _watcher_pid(board, owner)
+    persist_loop = max_runs == 0
+    pid = _confirm_watcher_started(board, owner, log_path, persist_loop)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
+    _save_spawn_config(board, owner, a, wt, harness, model)
     print("watcher for %s started%s; harness=%s; model=%s; wake=%s; persist=%s; max-runs=%s; log %s" % (
         owner, (" (pid %d)" % pid) if pid else "", harness, model,
         effective_wake_mode, "yes" if max_runs == 0 else "no", max_runs, log_path))
@@ -12224,6 +12332,10 @@ def _spawn_git_root(board, owner, worktree):
                                      worktree_exists=exists):
             return git_root, "repo_mismatch: worktree origin does not match %s" % expected
         return git_root, ""
+    probe = worktree if exists else os.path.dirname(os.path.abspath(worktree))
+    wt_repo = _init_cwd_worktree_root(probe) if probe else ""
+    if wt_repo:
+        return wt_repo, ""
     return board_root, ""
 
 
