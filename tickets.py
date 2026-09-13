@@ -615,6 +615,26 @@ def roles_for(board, owner, explicit=None):
     return None  # None = any role
 
 
+def _role_holder(board, role_id):
+    """Current durable coordination role holder, or empty."""
+    path = os.path.join(board, "coordination", "state.json")
+    try:
+        state = json.loads(open(path).read())
+    except (IOError, ValueError):
+        return ""
+    rec = (state.get("roles") or {}).get(role_id) or {}
+    return (rec.get("holder") or "").strip()
+
+
+def _cos_seat_name(board):
+    """Live CoS seat: durable steer.chief-of-staff, else master_state.cos."""
+    holder = _role_holder(board, "steer.chief-of-staff")
+    if holder:
+        return holder
+    m = current_master(board) or {}
+    return ((m or {}).get("cos") or "").strip()
+
+
 def workforce_path(board):
     return os.path.join(board, "workforce.json")
 
@@ -4311,13 +4331,20 @@ def _finish_followup(board, tid, event):
     Harness-neutral (T-785 poke path). Not Claude-only: any seat with a live
     persist watcher on this CLI gets SIGUSR1; others still get the board msg.
     """
-    m = current_master(board) or {}
-    seats = []
-    for name in ((m or {}).get("cos"), (m or {}).get("owner"), "cursor", "atman-ceo"):
-        n = (name or "").strip()
-        if n and n not in seats:
-            seats.append(n)
     author = whoami()
+    seats = []
+    seen = []
+    for name in (
+        _role_holder(board, "steer.ceo"),
+        _role_holder(board, "steer.chief-of-staff"),
+        (current_master(board) or {}).get("cos"),
+        (current_master(board) or {}).get("owner"),
+    ):
+        n = (name or "").strip()
+        if not n or n == author or n in seen:
+            continue
+        seen.append(n)
+        seats.append(n)
     body = ("%s %s. Coordinator follow-up: inbox poke + persist wake "
             "(pr-sync after SHA is on origin/main)." % (tid, event))
     for seat in seats:
@@ -8434,9 +8461,10 @@ def cmd_join(a, board):
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
     if _join_is_ceo_path(owner, roles.get(owner, [])):
+        cos = _cos_seat_name(board) or "<steer.chief-of-staff holder>"
         print("Atman CEO loop:  tickets inbox  ->  tickets objective  ->  "
               "tickets graph / tickets map  ->  tickets drive  ->  "
-              "tickets msg --to cursor (CoS staffs). CEO does not claim worker tickets.")
+              "tickets msg --to %s (CoS staffs). CEO does not claim worker tickets." % cos)
         print("Full instructions: tickets connect")
     else:
         print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
@@ -9295,6 +9323,16 @@ def cmd_objective(a, board):
             label, cur.get("text", "")[:120], evidence))
         _master_log(board, "objective %s: %s" % (label, evidence), by=whoami(a.by))
         print("objective marked %s" % state)
+        return
+    exit_only = (getattr(a, "exit_criterion", None) or "").strip()
+    if exit_only and not (a.text or getattr(a, "set_text", "") or "").strip():
+        if not cur:
+            sys.exit("no objective set; `tickets objective \"<what done looks like>\" --exit \"<observable end>\"`")
+        cur["exit_criterion"] = exit_only
+        cur["exit_missing"] = False
+        with open(path, "w") as f:
+            json.dump(cur, f, indent=2)
+        print("objective exit criterion set")
         return
     if a.text and getattr(a, "set_text", ""):
         sys.exit("objective: use positional text or --set, not both")
@@ -15411,31 +15449,52 @@ release_version = release_status
 
 
 def cmd_self(a, board):
-    """Print which tickets.py is executing and how it was installed."""
+    """Print which tickets.py is executing, plus registered identity/roles/endpoint."""
     import shutil
     script = os.path.realpath(__file__)
     print("script: %s" % script)
     print("status: %s" % release_status())
+    if not board:
+        env_board = (os.environ.get("TICKETS_DIR") or "").strip()
+        if env_board and os.path.isdir(env_board):
+            board = env_board
     seat = whoami()
-    if board and seat and not seat.startswith("agent-"):
+    named = bool(seat) and not str(seat).startswith("agent-")
+    print("identity: %s" % (seat if named else "(unset)"))
+    if board and named:
+        roles = load_roles(board).get(seat)
+        if roles is None:
+            roles = []
+        print("roles: %s" % (", ".join(roles) if roles else "(none)"))
+        aliases = [name for name, holder in load_aliases(board).items() if holder == seat]
+        print("alias: %s" % (", ".join(aliases) if aliases else "(none)"))
         harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+        print("harness: %s" % harness)
         sa = _session_adapters()
         ep, was_stale = sa.live_endpoint(board, seat)
         stored = sa.read_endpoint(board, seat)
         if ep:
+            print("endpoint: native %s pid %s registered %s" % (
+                ep.get("provider"), ep.get("pid", "?"), ep.get("at", "?")))
             print("persistent: yes -- seat %s native %s endpoint (pid %s, registered %s)" % (
                 seat, ep.get("provider"), ep.get("pid", "?"), ep.get("at", "?")))
         elif stored and was_stale:
+            print("endpoint: retained but offline after TTL")
             print("persistent: no -- seat %s native identity is retained but offline after TTL "
                   "(reconnect with `tickets join %s --persistent` or a session heartbeat)"
                   % (seat, seat))
         elif was_stale:
+            print("endpoint: stale")
             print("persistent: no -- seat %s had a native endpoint but it went stale "
                   "(re-register with `tickets join %s --persistent`)" % (seat, seat))
         else:
             probe = sa.probe_provider(sa.provider_for_harness(harness))
+            print("endpoint: (none)")
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
                 seat, probe.get("reason", "ok") if not probe.get("ok") else "transport available"))
+    elif not named:
+        print("roles: (unset TICKET_AGENT)")
+        print("endpoint: (unset TICKET_AGENT)")
     on_path = shutil.which("tickets")
     if on_path:
         resolved = os.path.realpath(on_path)
@@ -15559,7 +15618,8 @@ def main():
     c.add_argument("--persistent", action="store_true",
                    help="lifecycle=persistent and register this interactive session's native wake endpoint (socket/queue/resume)")
     c.add_argument("--alias", default="",
-                   help="stable role alias (ceo or cos) pointing at this unique runtime identity")
+                   help="stable role alias (ceo or cos) pointing at this unique runtime identity; "
+                        "if the alias is already bound, pass --transfer to rebind")
     c.add_argument("--transfer", action="store_true",
                    help="audited handover when this name's provider/session/runner identity changes; "
                         "strips auth, endpoint, session, ticket pointer, and limits; keeps message history")
@@ -15627,7 +15687,7 @@ def main():
                    help="board identity suffix; join as atman-<seat> (default: ceo)")
     c.set_defaults(fn=cmd_connect)
 
-    c = sub.add_parser("self", help="print which tickets.py is live (script path and install kind)")
+    c = sub.add_parser("self", help="print live script, identity, roles, and endpoint")
     c.set_defaults(fn=cmd_self)
 
     c = sub.add_parser("pending", help="exit 0 if there is work for the agent (messages, held or ready ticket)")
@@ -15806,7 +15866,8 @@ def main():
     c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
     c.add_argument("--list", action="store_true")
     c.add_argument("--alias", default="",
-                   help="stable role alias (ceo or cos) pointing at this unique runtime identity")
+                   help="stable role alias (ceo or cos) pointing at this unique runtime identity; "
+                        "if the alias is already bound, pass --transfer to rebind")
     c.add_argument("--transfer", action="store_true",
                    help="audited handover when this name's provider/session/runner identity changes; "
                         "strips auth, endpoint, session, ticket pointer, and limits; keeps message history")

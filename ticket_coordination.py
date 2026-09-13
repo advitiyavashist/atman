@@ -87,7 +87,11 @@ def register(sub, api):
 
 def run(command, args, board, api):
     try:
-        actor = safe(os.environ.get("TICKET_AGENT", ""))
+        raw_actor = (os.environ.get("TICKET_AGENT") or "").strip()
+        if command == "role" and getattr(args, "operation", "") in ("list", "show"):
+            actor = raw_actor
+        else:
+            actor = safe(raw_actor)
         if command == "identity":
 
             def identify(state):

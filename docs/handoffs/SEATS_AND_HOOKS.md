@@ -27,8 +27,12 @@ export TICKETS_DIR=/Users/kavana/Downloads/steer/.tickets
 export TICKET_AGENT=atman-ceo-opus-0913
 export TICKET_SEAT="$TICKET_AGENT"
 tickets join "$TICKET_AGENT" --roles master,review --can own-machine,network --harness claude --model opus --alias ceo --lifecycle persistent --wake-mode continuous
+# If `ceo`/`cos` is already bound to another unique id, rebind with --transfer
+# (refused while that name holds a ticket): 
+# tickets join "$TICKET_AGENT" --alias ceo --transfer --roles master,review ...
 tickets hooks claude --agent "$TICKET_AGENT" --settings "$PWD/.claude/settings.json"
 tickets self
+# must print identity, roles, alias, and endpoint — not only install paths
 tickets inbox
 ```
 
