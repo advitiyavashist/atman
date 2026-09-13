@@ -522,21 +522,34 @@ def seat_confirmed(board):
 
 
 def session_seat(board, explicit=None):
-    """Who THIS SESSION is. explicit > TICKET_SEAT > recorded join > TICKET_AGENT."""
+    """Who THIS SESSION is.
+
+    explicit > TICKET_SEAT > a SESSION-KEYED recorded join > TICKET_AGENT >
+    the flat legacy recorded identity > pid. A recorded identity outranks the
+    ambient TICKET_AGENT only when it is keyed to THIS session; the flat
+    legacy file belongs to whichever agent joined last on this machine, so an
+    explicit TICKET_AGENT beats it. Must match tickets.py:session_seat().
+    """
     if explicit:
         return explicit
     seat = (os.environ.get("TICKET_SEAT") or "").strip()
     if seat:
         return seat
+    keyed = bool(agent_session_key())
+    recorded = None
     if board:
         try:
             recorded = read_identity(board)
         except Exception:
             recorded = None
-        if recorded:
-            return recorded
-    return (os.environ.get("TICKET_AGENT")
-            or "agent-%d" % os.getpid())
+    if keyed and recorded:
+        return recorded
+    env_agent = (os.environ.get("TICKET_AGENT") or "").strip()
+    if env_agent:
+        return env_agent
+    if recorded:
+        return recorded
+    return "agent-%d" % os.getpid()
 
 
 def now():

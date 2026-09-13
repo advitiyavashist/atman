@@ -10,9 +10,11 @@ regression this file exists to pin:
     override even inside a session that separately joined as someone else.
 
   * session_seat(board, explicit): who is THIS SESSION. explicit > TICKET_SEAT
-    > this session's own recorded identity > TICKET_AGENT > pid. TICKET_SEAT
-    must beat a recorded join keyed off an inherited/forged session id so a
-    spawned worker cannot become the parent seat.
+    > this session's own (SESSION-KEYED) recorded identity > TICKET_AGENT >
+    the flat legacy record > pid. TICKET_SEAT must beat a recorded join keyed
+    off an inherited/forged session id so a spawned worker cannot become the
+    parent seat; and when there is no session key at all, the only record
+    available is machine-wide, so it yields to an explicit TICKET_AGENT.
 
 Widening either function to answer the other's question was tried and
 reverted: making whoami() consult the board broke the documented
@@ -157,3 +159,40 @@ def test_addressing_someone_else_is_unaffected(board):
     r = run(board, ["msg", "--to", "worker-1", "do the thing"], session="s1")
     assert r.returncode == 0, r.stderr
     assert _senders(board)[-1] == "planner"
+
+
+def test_no_session_key_lets_an_explicit_env_var_beat_a_prior_join(board):
+    """The flat legacy record belongs to whoever joined last, not to us.
+
+    When the harness exposes no per-session id, `read_identity` falls back to
+    the single `.agent-identity` file shared by every agent on the machine.
+    Letting that outrank the caller's own TICKET_AGENT makes a master resolve
+    as the worker that joined a moment earlier: `TICKET_AGENT=master tickets
+    msg --to worker` is then refused as self-addressed, which is how a whole
+    class of schedule/wake/onboarding flows broke. Session-keyed records are
+    different -- those really are this session (pinned above) -- so only the
+    keyless fallback yields to the env var.
+    """
+    assert run(board, ["join", "worker-seat", "--roles", "backend"]).returncode == 0
+    r = run(board, ["msg", "--to", "worker-seat", "ping from the master"],
+            agent="master-seat")
+    assert r.returncode == 0, r.stderr
+    assert "OWN identity" not in (r.stdout + r.stderr)
+    assert _senders(board)[-1] == "master-seat"
+
+
+def test_no_session_key_and_no_env_var_still_falls_back_to_the_record(board):
+    """The flat file is still better than a pid when nothing else names us."""
+    assert run(board, ["join", "worker-seat", "--roles", "backend"]).returncode == 0
+    r = run(board, ["msg", "hello"])
+    assert r.returncode == 0, r.stderr
+    assert _senders(board)[-1] == "worker-seat"
+
+
+def test_ticket_seat_still_outranks_everything_below_explicit(board):
+    """The launch gate: a supervisor-assigned seat beats record and env var."""
+    assert run(board, ["join", "worker-seat", "--roles", "backend"]).returncode == 0
+    r = run(board, ["msg", "hello"], env={"TICKET_SEAT": "spawned-worker"},
+            agent="master-seat")
+    assert r.returncode == 0, r.stderr
+    assert _senders(board)[-1] == "spawned-worker"

@@ -24,8 +24,11 @@ claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
 launched. Session-scoped surfaces (`board`'s "you:" line, the stop-hook,
 `msg`/`inbox` with no --owner) resolve through session_seat(): an explicit
 --owner, then a supervisor TICKET_SEAT (authoritative for launched workers),
-then this session's `tickets join` record, then ambient TICKET_AGENT. Default
-roles for those names can be overridden by .tickets/roles.json.
+then this session's OWN `tickets join` record, then ambient TICKET_AGENT. A
+join is only "this session's own" when the harness gave us a session id to key
+it by; without one the record is a machine-wide legacy file that any agent may
+have written last, so an explicit TICKET_AGENT beats it. Default roles for
+those names can be overridden by .tickets/roles.json.
 """
 
 import argparse
@@ -779,29 +782,48 @@ def session_seat(board, explicit=None):
     identity (from `tickets join`) precisely because nobody is passing an
     explicit name on that particular call.
 
-    Precedence: explicit > TICKET_SEAT > this session's own recorded identity >
-    TICKET_AGENT > pid. TICKET_SEAT is a supervisor's assignment for the
-    process it launched; it must outrank a recorded join keyed off an
-    inherited or forged TICKET_SESSION_ID, or a unique worker becomes the
-    parent seat (canonical cursor claiming the child's work). Recorded
-    identity still outranks ambient TICKET_AGENT -- that is the downward
-    leak join exists to stop. Use this for "who is this session", and
-    whoami() for "who does this one command act as".
+    Precedence: explicit > TICKET_SEAT > a SESSION-KEYED recorded identity >
+    TICKET_AGENT > the flat legacy recorded identity > pid.
+
+    TICKET_SEAT is a supervisor's assignment for the process it launched; it
+    must outrank a recorded join keyed off an inherited or forged
+    TICKET_SESSION_ID, or a unique worker becomes the parent seat (canonical
+    cursor claiming the child's work).
+
+    A recorded identity outranks ambient TICKET_AGENT only when it is
+    session-keyed, i.e. it is THIS session's own join. That is the downward
+    leak join exists to stop. When the harness gives us no session key at
+    all, the only record available is the flat legacy file, which belongs to
+    whichever agent on this machine joined last -- so an explicit
+    TICKET_AGENT in the caller's own environment must beat it, exactly as it
+    does in whoami(). Without that, `TICKET_AGENT=master tickets msg --to
+    worker` run after the worker joined resolves the master as the worker and
+    the message is refused as self-addressed. The flat file is still better
+    than a pid when nothing names us at all.
+
+    Use this for "who is this session", and whoami() for "who does this one
+    command act as".
     """
     if explicit:
         return explicit
     seat = (os.environ.get("TICKET_SEAT") or "").strip()
     if seat:
         return seat
+    keyed = bool(agent_session_key())
+    recorded = None
     if board:
         try:
             recorded = read_identity(board)
         except Exception:
             recorded = None
-        if recorded:
-            return recorded
-    return (os.environ.get("TICKET_AGENT")
-            or "agent-%d" % os.getpid())
+    if keyed and recorded:
+        return recorded
+    env_agent = (os.environ.get("TICKET_AGENT") or "").strip()
+    if env_agent:
+        return env_agent
+    if recorded:
+        return recorded
+    return "agent-%d" % os.getpid()
 
 
 def now():
