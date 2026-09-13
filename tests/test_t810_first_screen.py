@@ -56,10 +56,14 @@ def test_shell_listens_for_work_select_and_has_mobile_jump():
     ui = _ui_html()
     assert "atman:work-select" in ui
     assert "function applyWorkSelect" in ui
+    assert "extra.who_kind" in ui
+    assert "ensureToOption(extra.to)" in ui
     assert 'id="workJump"' in ui
     assert 'id="workJumpCompose"' in ui
     assert "setTab('messages')" in ui
     assert "max-width:700px" in ui
+    assert "Reserved for @" in ui
+    assert "Task posted to @" in ui
 
 
 def test_light_theme_uses_readable_action_token():
@@ -94,11 +98,11 @@ def test_first_screen_payload_names_objective_blocker_and_next(board):
     assert fs["blocker_count"] >= 2
     assert fs["next"]["id"]
     assert fs["next"]["title"]
-    assert fs["next"]["phase"] in ("ready", "dispatched")
+    assert fs["next"]["phase"] in ("ready", "reserved", "posted", "dispatched")
     by = dict((n["id"], n) for n in d["work"]["nodes"])
     nxt = by[fs["next"]["id"]]
     assert nxt["title"]
-    assert nxt["phase"] in ("ready", "dispatched")
+    assert nxt["phase"] in ("ready", "reserved", "posted", "dispatched")
 
 
 def test_missing_objective_is_an_explicit_empty_state(board):

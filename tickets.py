@@ -1542,16 +1542,25 @@ def _last_handoff(t):
 
 
 def _ticket_verdict(t):
-    st = t.get("status")
-    if st == "done":
-        return "accepted"
-    if st == "review":
-        return "awaiting review"
+    """Review evidence only — never inferred from ticket status (T-892 #4)."""
+    artifact = (t.get("commit") or t.get("sha") or "").strip()
+    latest = ""
+    latest_sha = ""
     for n in reversed(t.get("notes") or []):
         text = (n.get("text") or "").strip()
         low = text.lower()
-        if low.startswith("review:") or "request fix" in low:
-            return text[:160]
+        if (low.startswith("review:") or "request fix" in low or "verdict" in low
+                or low.startswith("merged into")):
+            latest = text[:160]
+            found = re.findall(r"\b[0-9a-f]{7,40}\b", text)
+            latest_sha = found[-1] if found else ""
+            break
+    if latest:
+        if artifact and latest_sha and not artifact.startswith(latest_sha) and not latest_sha.startswith(artifact[:7]):
+            return latest + " (historical — artifact is %s)" % artifact[:12]
+        return latest
+    if t.get("status") == "done":
+        return "Marked done; verification not recorded"
     return ""
 
 
@@ -1582,7 +1591,7 @@ def _ticket_phase(t, waiting):
     if waiting:
         return "waiting"
     if _reserved_agent(t):
-        return "dispatched"
+        return "reserved"
     return "ready"
 
 
@@ -13291,7 +13300,7 @@ body[data-work-view=columns] #workJump{display:none}
   <div class="chat-layout">
     <nav class="chat-rail" id="chatRail" aria-label="Threads"></nav>
     <div class="chat-main">
-      <p class="seats-lede empty-honesty" id="channelHonesty">Board thread is broadcast. Named channels are planned — not routed yet. Delivery badges are receipts, not ticket progress.</p>
+      <p class="seats-lede empty-honesty" id="channelHonesty">Board thread is broadcast. Named channels are planned — not routed yet. Delivery badges are receipts (posted / inbox read / wake), never an agent ACK and never ticket progress.</p>
       <div class="chat-head" id="chatHead"></div>
       <div class="msgs" id="msgs"></div>
       <section id="composer">
@@ -13678,8 +13687,8 @@ function phaseLabel(n){
   if(!n)return '';
   if(n.phase==='ready')return n.owner?('Ready · @'+n.owner):'Ready · unassigned';
   if(n.phase==='working')return 'Claimed by @'+(n.owner||'?');
-  if(n.dispatch&&n.dispatch.to)return 'Task posted to @'+n.dispatch.to+' · not claimed';
-  if(n.reserved_for)return 'Reserved for @'+n.reserved_for;
+  if(n.phase==='posted'||(n.dispatch&&n.dispatch.to))return 'Task posted to @'+((n.dispatch&&n.dispatch.to)||'?')+' · not claimed';
+  if(n.phase==='reserved'||n.reserved_for)return 'Reserved for @'+(n.reserved_for||'?')+' · no task posted';
   if(n.phase==='waiting')return 'Waiting on deps';
   if(n.phase==='capture')return 'Capture';
   if(n.phase==='hold')return 'Hold';
@@ -13715,12 +13724,18 @@ function renderNow(d){
     setTxt('nowWho',((ns.label||'—')+' — '+(ns.message||'')).trim());
   }
 }
-function applyWorkSelect(id){
+function applyWorkSelect(id, extra){
+  extra=extra||{};
   SELECTED_TICKET=id||'';
   const re=document.getElementById('cRe');
   if(re){
     if(id&&/^T-\d+$/.test(id))re.value=id;
     else if(re.value.trim()==='T-000')re.value='';
+  }
+  const to=document.getElementById('cTo');
+  if(to&&extra.to&&extra.who_kind&&extra.who_kind!=='suggested'){
+    ensureToOption(extra.to);
+    to.value=extra.to;
   }
   const jump=document.getElementById('workJump');
   if(jump){
@@ -13736,7 +13751,8 @@ function applyWorkSelect(id){
   }
 }
 document.addEventListener('atman:work-select',e=>{
-  applyWorkSelect((e.detail&&e.detail.id)||'');
+  const det=e.detail||{};
+  applyWorkSelect(det.id||'',det);
 });
 const workJumpDetail=document.getElementById('workJumpDetail');
 if(workJumpDetail)workJumpDetail.addEventListener('click',e=>{
@@ -14021,12 +14037,18 @@ function deliveryTags(m){
   if((m.kind||'message')==='task')tags.push('<span class="tag task">task</span>');
   const d=m.delivery||{};
   if(d.status==='broadcast')tags.push('<span class="tag">broadcast</span>');
-  else if((d.acks||[]).length){
-    const all=d.acks.every(a=>a.acked);
-    const any=d.acks.some(a=>a.acked);
-    if(all)tags.push('<span class="tag ack">acked</span>');
-    else if(any)tags.push('<span class="tag pending">partial ack</span>');
-    else tags.push('<span class="tag pending">pending</span>');
+  else{
+    const recs=d.receipts||[];
+    if(recs.length){
+      const labels=recs.map(r=>r.label).filter(Boolean);
+      const allSame=labels.length&&labels.every(x=>x===labels[0]);
+      tags.push('<span class="tag'+(labels.some(x=>x.indexOf('wake confirmed')===0)?' ack':' pending')+'">'+esc(allSame?labels[0]:(labels.filter(x=>x.indexOf('not read')!==0).length?'partial receipt':'not read, wake unconfirmed'))+'</span>');
+    }else if((d.acks||[]).length){
+      const seen=d.acks.filter(a=>a.acked).length;
+      if(seen===d.acks.length)tags.push('<span class="tag pending">inbox read, not acknowledged</span>');
+      else if(seen)tags.push('<span class="tag pending">partial inbox read</span>');
+      else tags.push('<span class="tag pending">not read, wake unconfirmed</span>');
+    }
   }
   return tags.join(' ');
 }
@@ -14320,16 +14342,52 @@ def _agent_acked_message(board, agent, msg, rec=None):
     return not _is_unread(msg, since, remaining)
 
 
+def _message_wake_receipt(rec, msg):
+    """Last-wake receipt for this message, if any. Inbox read is not wake."""
+    if not rec:
+        return None
+    mid = _msg_id(msg)
+    wd = rec.get("wake_delivery") or {}
+    if mid and str(wd.get("message_id") or "") == str(mid):
+        label = wd.get("label") or ""
+        return {"label": label, "confirmed": label in ("woken", "deduped"),
+                "poked": bool(wd.get("poked")), "at": wd.get("at") or ""}
+    if mid and str(mid) in [str(x) for x in (rec.get("wake_delivery_ids") or [])]:
+        return {"label": "recorded", "confirmed": True, "poked": False, "at": ""}
+    return None
+
+
+def _delivery_receipt_label(seen, wake):
+    if wake and wake.get("confirmed"):
+        return "wake confirmed"
+    if wake and wake.get("label"):
+        return "wake: %s" % wake["label"]
+    if seen:
+        return "inbox read, not acknowledged"
+    if seen is False:
+        return "not read, wake unconfirmed"
+    return "delivery unknown"
+
+
 def _message_delivery(board, msg, agents_by=None):
-    """Delivery/ack status for the UI composer thread."""
+    """Delivery receipts for the UI thread.
+
+    ``acked`` stays the inbox-seen bit for existing snapshot consumers.
+    It is not an agent acknowledgement. UI labels use ``receipts``.
+    """
     recipients = _message_recipients(msg)
     if not recipients:
         return {"status": "broadcast"}
     acks = []
+    receipts = []
     for r in recipients:
         rec = (agents_by or {}).get(r)
-        acks.append({"agent": r, "acked": _agent_acked_message(board, r, msg, rec=rec)})
-    return {"status": "direct", "acks": acks}
+        seen = _agent_acked_message(board, r, msg, rec=rec)
+        wake = _message_wake_receipt(rec, msg)
+        acks.append({"agent": r, "acked": seen})
+        receipts.append({"agent": r, "seen": seen, "wake": wake,
+                         "label": _delivery_receipt_label(seen, wake)})
+    return {"status": "direct", "acks": acks, "receipts": receipts}
 
 
 def _attention_snapshot(health_items, coverage):
