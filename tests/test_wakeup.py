@@ -480,12 +480,44 @@ def test_spawn_lifecycle_with_stub_command(board):
 
 
 def test_spawn_inherits_project_settings(board):
+    # The project file carries BOTH a permission allow-list the worker needs
+    # to work unattended and a board hook pinned to somebody else's seat.
+    # Exactly one of those may cross into the worktree (T-839).
     (board.parent / ".claude").mkdir()
-    (board.parent / ".claude" / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(pytest:*)"]}}))
+    parent_hook = ("env TICKET_AGENT=master TICKET_SEAT=master %s hook-run "
+                   "--agent master --event inbox" % TOOL)
+    (board.parent / ".claude" / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(pytest:*)"]},
+        "hooks": {
+            "UserPromptSubmit": [{"hooks": [
+                {"type": "command", "command": parent_hook},
+                {"type": "command", "command": "printf custom-check"},
+            ]}],
+        },
+    }))
     r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist", agent="master")
-    assert "inherited project settings" in r.stdout
+    assert "inherited project settings" in r.stdout, r.stderr
     inherited = json.loads((board.parent / ".worktrees" / "doc" / ".claude" / "settings.json").read_text())
-    assert inherited["permissions"]["allow"] == ["Bash(pytest:*)"]
+
+    # 1. The project allow-list survives, alongside the worker's own pinned
+    # board permissions -- without it a spawned worker stalls on a prompt.
+    allow = inherited["permissions"]["allow"]
+    assert "Bash(pytest:*)" in allow, allow
+    assert "Bash(tickets:*)" in allow, allow
+
+    # 2. No hook pinned to the parent seat comes across, while an unrelated
+    # command in that same entry is left alone.
+    commands = [h["command"] for entries in inherited.get("hooks", {}).values()
+                for e in entries for h in e.get("hooks", []) if "command" in h]
+    assert parent_hook not in commands, commands
+    assert not any("--agent master" in c for c in commands), commands
+    assert "printf custom-check" in commands, commands
+    # ...and the worker still got its OWN identity-pinned hooks.
+    assert any("--agent doc" in c for c in commands), commands
+
+    # 3. The project file itself is never rewritten by the spawn.
+    parent = json.loads((board.parent / ".claude" / "settings.json").read_text())
+    assert parent["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == parent_hook
     run(board, "spawn", "doc", "--stop", agent="master")
 
 

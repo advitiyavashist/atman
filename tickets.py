@@ -12044,13 +12044,17 @@ def _sanitize_worker_claude_settings(path):
 def _inherit_settings(root, wt):
     """Copy permission allow-lists into a new worktree.
 
-    Never copies identity-pinned hooks (.cursor, .agents/hooks.json, or
-    .claude settings that embed tickets hook-run). A unique worker must not
-    inherit a canonical role hook -- that is the T-839 spawn gate.
+    Both .claude settings files come across so a spawned worker keeps the
+    project's permission allow-list and can work unattended; each is filtered
+    through the shipped sanitizer first. Never copies identity-pinned hooks
+    (.cursor, .agents/hooks.json, or any .claude entry that embeds a tickets
+    hook-run): a unique worker must not inherit a canonical role hook -- that
+    is the T-839 spawn gate. The worker's own pinned hooks are merged on top
+    afterwards by _pin_spawned_worker_hooks.
     """
     import shutil
     copied = []
-    for dname, fnames, prefixed in ((".claude", ("settings.local.json",), False),):
+    for dname, fnames, prefixed in ((".claude", ("settings.json", "settings.local.json"), False),):
         src = os.path.join(root, dname)
         dst = os.path.join(wt, dname)
         if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
