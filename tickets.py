@@ -1493,6 +1493,19 @@ def timing(t):
     return out
 
 
+def _work_view():
+    """T-889 Work view module (payload + CSS/HTML/JS); packaged with sounding."""
+    try:
+        from ticket_board import work_view as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import work_view as m
+        return m
+
+
 def _sounding():
     try:
         from ticket_board import sounding as m
@@ -12848,7 +12861,8 @@ UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</tit
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{color-scheme:dark;--bg:#0c0e12;--fg:#ece8e1;--mute:#9a958c;--line:#2a2d34;--card:#161820;--surface:#12141a;--chip:#1c2028;--acc:#c4b49a;--on-acc:#14120e;--ok:#6f9e96;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#9a958c;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
-body[data-theme=light]{color-scheme:light;--bg:#f4f1eb;--fg:#14120e;--mute:#6e6a63;--line:#d8d3ca;--card:#fcfaf6;--surface:#eeeae3;--chip:#e8e3d9;--on-acc:#14120e;--ok:#3d6e68;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6e6a63;--flight:#93610a;--review:#6954a5;--progress:#789396}
+body[data-theme=light]{color-scheme:light;--bg:#f4f1eb;--fg:#14120e;--mute:#6e6a63;--line:#d8d3ca;--card:#fcfaf6;--surface:#eeeae3;--chip:#e8e3d9;--acc:#6b5344;--on-acc:#fcfaf6;--ok:#3d6e68;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6e6a63;--flight:#93610a;--review:#6954a5;--progress:#789396}
+body[data-theme=light] .ph-dispatched{--wv-c:var(--flight)}
 *{box-sizing:border-box}html,body{height:100%;overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
 body.loading main{opacity:.55;pointer-events:none}
@@ -12934,14 +12948,18 @@ body[data-empty-board][data-tab=board] #workViews,
 body[data-empty-board][data-tab=board] #graphLede,
 body[data-empty-board][data-tab=board] #nowStrip,
 body[data-empty-board][data-tab=board] #workObjective,
+body[data-empty-board][data-tab=board] #workJump,
 body[data-empty-board][data-tab=board] #graphDetail{display:none}
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
-body[data-work-view=graph] .kanban{display:none}
+body[data-work-view=graph] .kanban,
+body[data-work-view=list] .kanban{display:none}
 body[data-work-view=columns] #workflowGraph,
-body[data-work-view=columns] #graphLede{display:none}
+body[data-work-view=columns] #graphLede,
+body[data-work-view=columns] #workJump{display:none}
 .work-views{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .work-views button{appearance:none;background:transparent;border:1px solid var(--line);color:var(--mute);padding:4px 10px;font:12px/1 inherit;font-weight:650;border-radius:6px;cursor:pointer}
 .work-views button.on{color:var(--fg);border-color:var(--acc);background:var(--chip)}
+#workViews ~ #workflowGraph .wv-modes{display:none}
 .graph-lede{margin:0;font-size:12px;color:var(--mute);max-width:720px}
 .graph-lede b{color:var(--fg)}
 .workflow-graph{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
@@ -12958,6 +12976,14 @@ body[data-work-view=columns] #graphLede{display:none}
 .now-strip .v{margin-top:4px;font-size:14px;font-weight:650}
 .work-objective{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:0 0 12px}
 .work-objective .v{font-size:15px;font-weight:650}
+.work-done-when{margin:8px 0 0;font-size:13px}
+.work-done-when .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650;margin-right:8px}
+.work-done-when.missing{color:var(--warn)}
+.now-pick{appearance:none;background:transparent;border:0;padding:0;color:inherit;font:inherit;font-weight:650;text-align:left;cursor:pointer}
+.now-pick:hover{text-decoration:underline}
+.work-jump{display:none;gap:10px;flex-wrap:wrap;margin:0 0 12px}
+.work-jump a{font-size:12px;font-weight:650;color:var(--acc)}
+@media(max-width:700px){.work-jump:not([hidden]){display:flex}.work-jump{position:sticky;bottom:0;z-index:3;padding:8px 0;background:var(--bg);border-top:1px solid var(--line)}}
 .g-node{cursor:pointer}
 .g-node:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .g-node.on .g-row{border-color:var(--acc)}
@@ -13113,6 +13139,7 @@ body[data-work-view=columns] #graphLede{display:none}
   .portfolio-menu{position:fixed;left:12px;right:12px;top:auto;width:auto}
 }
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+<!--WORK_VIEW:css-->
 </style></head><body data-tab="board" data-work-view="graph">
 <header class="cmd">
   <div class="brand">
@@ -13187,16 +13214,21 @@ body[data-work-view=columns] #graphLede{display:none}
 </div>
 <div class="pane" id="pane-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0">
   <div id="emptyBoard" class="empty-board" hidden></div>
+  <section class="work-objective" id="workObjective">
+    <p class="hero-eyebrow">Objective</p>
+    <p class="v" id="workObjectiveText">—</p>
+    <p class="work-done-when" id="workDoneWhen"><span class="k">Done when</span> <span id="workDoneWhenText">—</span></p>
+    <p class="empty-honesty" id="workObjectiveMissing" hidden>No standing objective — <span class="mono">tickets objective --set "what we are finishing"</span></p>
+  </section>
   <section class="now-strip" id="nowStrip" aria-label="What the team is finishing">
     <article><div class="k">Finishing</div><div class="v" id="nowFinishing">—</div></article>
     <article><div class="k">Blocked</div><div class="v" id="nowBlocked">—</div></article>
     <article><div class="k">Next step</div><div class="v" id="nowWho">—</div></article>
   </section>
-  <section class="work-objective" id="workObjective">
-    <p class="hero-eyebrow">Standing objective</p>
-    <p class="v" id="workObjectiveText">—</p>
-    <p class="empty-honesty">read-only — set via <span class="mono">tickets objective</span></p>
-  </section>
+  <nav class="work-jump" id="workJump" hidden>
+    <a href="#graphDetail" id="workJumpDetail">Open selected detail</a>
+    <a href="#composer" id="workJumpCompose">Compose about this ticket</a>
+  </nav>
   <section id="epicsPanel" class="epics" hidden aria-label="Epic progress"></section>
   <section id="objectivePromise" data-fold="objective">
     <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
@@ -13205,12 +13237,13 @@ body[data-work-view=columns] #graphLede{display:none}
       <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">Done tickets per USD of harness-reported cost</div></article>
     </div>
   </section>
-  <div class="work-views" id="workViews" role="tablist" aria-label="Work view">
-    <button type="button" id="view-graph" data-work-view="graph" class="on" aria-selected="true">Graph</button>
-    <button type="button" id="view-columns" data-work-view="columns" aria-selected="false">Columns</button>
+  <div class="work-views" id="workViews" role="group" aria-label="Work layout">
+    <button type="button" id="view-graph" data-work-view="graph" class="on" aria-pressed="true">Graph</button>
+    <button type="button" id="view-list" data-work-view="list" aria-pressed="false">List</button>
+    <button type="button" id="view-columns" data-work-view="columns" aria-pressed="false">Columns</button>
   </div>
-  <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">tickets graph</span> / <span class="mono">tickets map</span> — not a list of titles. Ready, dispatched, and working are distinct. Success trigger: children start when a parent is accepted. Follow-up: <span class="mono">tickets update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">tickets reopen</span>. Review: <span class="mono">tickets review</span> then <span class="mono">tickets merge</span>.</p>
-  <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"></div>
+  <p class="graph-lede" id="graphLede"><b>Follow the work.</b> Select a ticket for its blockers, handoff, and review. Same <span class="mono">--after</span> edges as <span class="mono">tickets graph</span> / <span class="mono">tickets map</span> — not a list of titles.</p>
+  <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"><!--WORK_VIEW:html--></div>
   <aside id="graphDetail" class="graph-detail" hidden role="region" aria-label="Ticket detail"></aside>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
@@ -13343,7 +13376,17 @@ function renderObjective(o){
   const one=text?text.slice(0,180):'(no standing objective — tickets objective "…")';
   setTxt('missionOne',one);
   setTxt('objectiveText',text||'No standing objective yet.');
-  setTxt('workObjectiveText',text||'—');
+  setTxt('workObjectiveText',text||'No standing objective yet.');
+  const exit=(o&&o.exit_criterion)||'';
+  setTxt('workDoneWhenText',exit||(text?'no exit criterion yet':'—'));
+  const dw=document.getElementById('workDoneWhen');
+  if(dw)dw.classList.toggle('missing',!!(text&&!exit));
+  const miss=document.getElementById('workObjectiveMissing');
+  if(miss){
+    if(!text){miss.hidden=false;miss.innerHTML='No standing objective — <span class="mono">tickets objective --set "what we are finishing"</span>'}
+    else if(!exit){miss.hidden=false;miss.innerHTML='Done when is missing — <span class="mono">tickets objective --set "…" --exit "…"</span>'}
+    else miss.hidden=true;
+  }
   setTxt('objectiveExit',(o&&o.exit_criterion)||((o&&o.exit_missing)?'FLAG: no exit criterion':'—'));
   setTxt('objectiveState',(o&&o.state)||'—');
   if(!line)return;
@@ -13439,21 +13482,31 @@ function setTab(name){
   });
 }
 function setWorkView(name, persistHash){
-  if(name!=='columns')name='graph';
+  if(name!=='columns'&&name!=='list')name='graph';
   document.body.dataset.workView=name;
   try{localStorage.setItem('tickets-ui-work-view',name)}catch(e){}
   document.querySelectorAll('#workViews [data-work-view]').forEach(b=>{
     const on=b.dataset.workView===name;
     b.classList.toggle('on',on);
-    b.setAttribute('aria-selected',on?'true':'false');
+    b.setAttribute('aria-pressed',on?'true':'false');
+    b.removeAttribute('aria-selected');
   });
+  if(window.AtmanWork&&window.AtmanWork.setMode&&(name==='graph'||name==='list')){
+    window.AtmanWork.setMode(name,true);
+  }
   if(persistHash){
     try{history.replaceState(null,'','#'+name)}catch(e){}
   }
 }
-function renderGraph(g){
+<!--WORK_VIEW:js-->
+function renderGraph(g,d){
   const host=document.getElementById('workflowGraph');
   if(!host)return;
+  if(window.AtmanWork&&d&&d.work){
+    const gd=document.getElementById('graphDetail');
+    if(gd){gd.hidden=true;gd.innerHTML=''}
+    window.AtmanWork.render(d,host);return
+  }
   const by={};(g&&g.nodes||[]).forEach(n=>{by[n.id]=n});
   GRAPH_BY=by;
   const edges=(g&&g.edges)||[];
@@ -13504,12 +13557,12 @@ document.querySelectorAll('#workViews [data-work-view]').forEach(b=>b.addEventLi
 try{const wv=localStorage.getItem('tickets-ui-work-view');if(wv)setWorkView(wv)}catch(e){}
 (function applyWorkHash(){
   const h=(location.hash||'').replace('#','');
-  if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
+  if(h==='graph'||h==='list'||h==='columns'){setTab('board');setWorkView(h)}
   else if(h==='objective'||h==='agents'||h==='messages'||h==='board'){setTab(h)}
 })();
 window.addEventListener('hashchange',()=>{
   const h=(location.hash||'').replace('#','');
-  if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
+  if(h==='graph'||h==='list'||h==='columns'){setTab('board');setWorkView(h)}
   else if(h==='objective'||h==='agents'||h==='messages'||h==='board'){setTab(h)}
 });
 let AGENTS=[];
@@ -13588,15 +13641,10 @@ function loadAgentPickers(){
   else{to.disabled=false;if(AGENTS.includes(prevTo))to.value=prevTo}
 }
 function showGraphDetail(id){
-  SELECTED_TICKET=id||'';
+  applyWorkSelect(id||'');
   const n=GRAPH_BY[id];
   const el=document.getElementById('graphDetail');
   document.querySelectorAll('.g-node').forEach(li=>li.classList.toggle('on',li.dataset.id===id));
-  const re=document.getElementById('cRe');
-  if(re){
-    if(id&&/^T-\d+$/.test(id))re.value=id;
-    else if(re.value.trim()==='T-000')re.value='';
-  }
   if(!el)return;
   if(!n){el.hidden=true;el.innerHTML='';return}
   const waiting=n.wait_reason==='capture'?'capture (not claimable until tickets sound)':n.wait_reason==='hold'?'HOLD':((n.waiting||[]).length?('deps: '+n.waiting.join(', ')):'—');
@@ -13622,15 +13670,98 @@ function defaultComposeTicket(d){
   if(re.value.trim())return;
   if(SELECTED_TICKET&&known.has(SELECTED_TICKET))re.value=SELECTED_TICKET;
 }
-function renderNow(d){
-  const flight=(d.in_flight||[])[0];
-  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||t.phase==='blocked'||t.phase==='waiting'||t.wait_reason);
-  const ns=d.next_step||{};
-  setTxt('nowFinishing',flight?(flight.id+(flight.owner?' · @'+flight.owner:'')):'—');
-  setTxt('nowBlocked',blocked.length?(blocked[0].id+' · '+(blocked[0].wait_reason||blocked[0].phase||'blocked')):'—');
-  setTxt('nowWho',((ns.label||'—')+' — '+(ns.message||'')).trim());
+function shortTitle(t){
+  const s=String(t||'').trim();
+  return s.length>42?s.slice(0,40)+'…':s;
 }
+function phaseLabel(n){
+  if(!n)return '';
+  if(n.phase==='ready')return n.owner?('Ready · @'+n.owner):'Ready · unassigned';
+  if(n.phase==='working')return 'Claimed by @'+(n.owner||'?');
+  if(n.dispatch&&n.dispatch.to)return 'Task posted to @'+n.dispatch.to+' · not claimed';
+  if(n.reserved_for)return 'Reserved for @'+n.reserved_for;
+  if(n.phase==='waiting')return 'Waiting on deps';
+  if(n.phase==='capture')return 'Capture';
+  if(n.phase==='hold')return 'Hold';
+  return n.phase||'';
+}
+function pickHtml(id,label){
+  return '<button type="button" class="now-pick" data-work-pick="'+esc(id)+'">'+esc(label)+'</button>';
+}
+function renderNow(d){
+  const w=d.work||{},nodes=w.nodes||[],by={};
+  nodes.forEach(n=>{by[n.id]=n});
+  const fs=d.first_screen||{};
+  const finish=fs.finishing||nodes.filter(n=>n.phase==='working')[0]||(d.in_flight||[])[0];
+  if(finish){
+    const title=finish.title||(by[finish.id]&&by[finish.id].title)||'';
+    setTxt('nowFinishing','');
+    document.getElementById('nowFinishing').innerHTML=pickHtml(finish.id,(finish.id||'')+(title?' '+shortTitle(title):'')+(finish.owner?' · @'+finish.owner:''));
+  }else setTxt('nowFinishing','—');
+  const blockers=nodes.filter(n=>n.phase==='blocked'||n.phase==='waiting'||n.phase==='capture'||n.phase==='hold');
+  const blk=fs.blocker||blockers[0];
+  const blkN=fs.blocker_count||blockers.length;
+  if(blk){
+    const text=blk.text||(blk.wait&&blk.wait.text)||(blk.id+' · '+(blk.kind||blk.phase||'blocked'));
+    const more=blkN>1?(' · '+blkN+' blockers'):'';
+    document.getElementById('nowBlocked').innerHTML=pickHtml(blk.id,(blk.id||'')+' '+shortTitle(blk.title||'')+' · '+text)+esc(more);
+  }else setTxt('nowBlocked','—');
+  const nxt=fs.next||(w.summary&&w.summary.next);
+  if(nxt){
+    const node=by[nxt.id]||nxt;
+    document.getElementById('nowWho').innerHTML=pickHtml(nxt.id,(nxt.id||'')+' '+shortTitle(node.title||nxt.title||'')+' · '+phaseLabel(node));
+  }else{
+    const ns=d.next_step||{};
+    setTxt('nowWho',((ns.label||'—')+' — '+(ns.message||'')).trim());
+  }
+}
+function applyWorkSelect(id){
+  SELECTED_TICKET=id||'';
+  const re=document.getElementById('cRe');
+  if(re){
+    if(id&&/^T-\d+$/.test(id))re.value=id;
+    else if(re.value.trim()==='T-000')re.value='';
+  }
+  const jump=document.getElementById('workJump');
+  if(jump){
+    jump.hidden=!id;
+    const d=document.getElementById('workJumpDetail');
+    const c=document.getElementById('workJumpCompose');
+    if(d)d.textContent=id?('Open '+id+' detail'):'Open selected detail';
+    if(c)c.textContent=id?('Compose about '+id):'Compose about this ticket';
+  }
+  if(id&&window.matchMedia('(max-width:700px)').matches){
+    const det=document.querySelector('#workflowGraph .wv-detail')||document.getElementById('graphDetail');
+    if(det&&!det.hidden)det.scrollIntoView({block:'nearest'});
+  }
+}
+document.addEventListener('atman:work-select',e=>{
+  applyWorkSelect((e.detail&&e.detail.id)||'');
+});
+const workJumpDetail=document.getElementById('workJumpDetail');
+if(workJumpDetail)workJumpDetail.addEventListener('click',e=>{
+  e.preventDefault();
+  setTab('board');
+  const det=document.querySelector('#workflowGraph .wv-detail')||document.getElementById('graphDetail');
+  if(det){det.hidden=false;det.scrollIntoView({block:'nearest'})}
+});
+const workJumpCompose=document.getElementById('workJumpCompose');
+if(workJumpCompose)workJumpCompose.addEventListener('click',e=>{
+  e.preventDefault();
+  setTab('messages');
+  const box=document.getElementById('composer');
+  if(box)box.scrollIntoView({block:'nearest'});
+  const ta=document.getElementById('cText');
+  if(ta)ta.focus();
+});
 document.addEventListener('click',e=>{
+  const pick=e.target.closest('[data-work-pick]');
+  if(pick){
+    const id=pick.dataset.workPick||'';
+    if(window.AtmanWork&&window.AtmanWork.select)window.AtmanWork.select(id,{focus:true});
+    else showGraphDetail(id);
+    return;
+  }
   const node=e.target.closest('.g-node');
   if(node){showGraphDetail(node.dataset.id||'');return}
   const btn=e.target.closest('[data-seat-chat]');
@@ -13774,7 +13905,7 @@ async function load(manual){
   fillCol('ready',ready,ready.map(t=>card(t)).join(''));
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
   fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
-  renderGraph(d.graph);
+  renderGraph(d.graph,d);
   renderEmptyBoard(d);
   renderAttention(d.attention);
   renderEpics(d.epics);
@@ -14480,6 +14611,17 @@ def _board_snapshot_body(board, messages=40):
     coverage = _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
                                 open_rows, in_flight, review, out_agents)
     attention = _attention_snapshot(health_items, coverage)
+    graph = workflow_graph(tickets)
+    objective_view = {
+        "text": (obj or {}).get("text", ""),
+        "state": objective_state(obj) if obj else "",
+        "exit_criterion": (obj or {}).get("exit_criterion") or "",
+        "exit_missing": bool(obj) and objective_exit_missing(obj),
+    }
+    all_msgs = _safe(lambda: load_messages(board), []) or []
+    work = _safe(lambda: _work_view().work_payload(
+        tickets, graph, all_msgs, objective=objective_view,
+        acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who))), None)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -14505,16 +14647,39 @@ def _board_snapshot_body(board, messages=40):
         "usage": usage,
         "promise": promise,
         "objective": {
-            "text": (obj or {}).get("text", ""),
-            "state": objective_state(obj) if obj else "",
-            "exit_criterion": (obj or {}).get("exit_criterion") or "",
-            "exit_missing": bool(obj) and objective_exit_missing(obj),
+            **objective_view,
             "wake_gates": "continuous seats: directed DM/@mention; task-only/scheduled seats: explicit tasks; all: stuck/blocked, held, assigned work",
             "stop_condition": STOP_CONDITION,
         },
         "coverage": coverage,
-        "graph": workflow_graph(tickets),
+        "graph": graph,
+        # T-889 hook: the Work view payload (objective, phases, node detail).
+        "work": work,
+        "first_screen": _first_screen(work),
     }
+
+
+def _first_screen(work):
+    """T-810 #1: finishing / named blocker / next ticket from the shared work payload."""
+    if not work:
+        return {"finishing": None, "blocker": None, "blocker_count": 0, "next": None}
+    nodes = work.get("nodes") or []
+    working = [n for n in nodes if n.get("phase") == "working"]
+    blockers = [n for n in nodes if n.get("phase") in ("blocked", "waiting", "capture", "hold")]
+    nxt = (work.get("summary") or {}).get("next")
+    finish = None
+    if working:
+        n = working[0]
+        finish = {"id": n["id"], "title": n.get("title") or "", "owner": n.get("owner") or "",
+                  "phase": "working"}
+    blocker = None
+    if blockers:
+        n = blockers[0]
+        wait = n.get("wait") or {}
+        blocker = {"id": n["id"], "title": n.get("title") or "",
+                   "kind": wait.get("kind") or n.get("phase") or "",
+                   "text": wait.get("text") or "", "phase": n.get("phase") or ""}
+    return {"finishing": finish, "blocker": blocker, "blocker_count": len(blockers), "next": nxt}
 
 
 _UI_MSG_MAX_BYTES = 65536
@@ -14546,6 +14711,18 @@ def _ui_msg_origin_ok(headers):
     return parsed.netloc.lower() == host.lower()
 
 
+def _ui_page():
+    """T-889 hook: UI_HTML with the Work view module spliced in at its three
+    named placeholders. Missing module -> the shell's own fallback graph."""
+    mod = _safe(_work_view, None)
+    css = getattr(mod, "WORK_CSS", "") if mod else ""
+    html = getattr(mod, "WORK_HTML", "") if mod else ""
+    js = getattr(mod, "WORK_JS", "") if mod else ""
+    return (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
+            .replace("<!--WORK_VIEW:html-->", html)
+            .replace("<!--WORK_VIEW:js-->", js))
+
+
 def cmd_ui(a, board):
     """Local status UI: serves an auto-refreshing page, /board.json, and a
     composer POST at /msg that posts through post_message() -- same board,
@@ -14571,7 +14748,7 @@ def cmd_ui(a, board):
                 })).encode()
                 ctype = "application/json"
             else:
-                body = UI_HTML.encode()
+                body = _ui_page().encode()
                 ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
