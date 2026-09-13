@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tickets.py"
 PKG = ROOT / "src" / "ticket_board" / "cli.py"
@@ -48,6 +50,9 @@ def test_pyproject_scripts_share_one_entry():
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'atm = "ticket_board.cli:main"' in text
     assert 'tickets = "ticket_board.cli:main"' in text
+    cfg = (ROOT / "setup.cfg").read_text(encoding="utf-8")
+    assert "atm = ticket_board.cli:main" in cfg
+    assert "tickets = ticket_board.cli:main" in cfg
 
 
 def test_help_prog_matches_invoked_name(tmp_path):
@@ -137,6 +142,83 @@ def test_worker_prompt_names_atm_primary_and_tickets_alias():
     assert "`atm ...`" in root.WORKER_PROMPT
     assert "compatibility alias" in root.WORKER_PROMPT
     assert "tickets next" in root.WORKER_PROMPT
+
+
+@pytest.mark.skipif(
+    subprocess.run([sys.executable, "-m", "pip", "--version"], capture_output=True).returncode != 0,
+    reason="pip is required for the clean-wheel acceptance",
+)
+def test_clean_venv_atm_and_tickets_are_the_same_install(tmp_path):
+    """Real pip wheel, isolated venv: atm and tickets are one console script pair
+    from one entry point, and they see one board.
+
+    `hooks` (and most subcommands) install via the dev-mode tickets.py path per
+    install.sh, not the packaged wheel -- the wheel's command surface is a
+    smaller, still-growing subset (E-016). That "old hooks fire" proof lives in
+    test_old_hooks_still_install_tickets_commands above, against the same file
+    atm/tickets alias to."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    built = subprocess.run(
+        [sys.executable, "-m", "pip", "wheel", str(ROOT), "--no-deps", "-w", str(dist)],
+        capture_output=True, text=True, cwd=str(tmp_path),
+    )
+    assert built.returncode == 0, built.stdout + built.stderr
+    wheels = sorted(dist.glob("ticket_board-*.whl"))
+    assert wheels, "expected ticket_board-*.whl, got %s\n%s" % (
+        list(dist.iterdir()), built.stdout + built.stderr)
+
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    pip = venv / "bin" / "pip"
+    atm = venv / "bin" / "atm"
+    tickets = venv / "bin" / "tickets"
+    installed = subprocess.run(
+        [str(pip), "install", str(wheels[0]), "--no-deps", "--no-cache-dir"],
+        capture_output=True, text=True,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    assert atm.is_file(), "atm console script missing from isolated venv"
+    assert tickets.is_file(), "tickets console script missing from isolated venv"
+    # setuptools generates both scripts from the same "ticket_board.cli:main"
+    # entry point; identical bytes proves there is no second implementation.
+    assert atm.read_bytes() == tickets.read_bytes()
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home), TICKET_AGENT="t809-wheel",
+               TICKETS_DIR=str(repo / ".tickets"))
+    env.pop("TICKETS_STOP_HOOK", None)
+
+    created = subprocess.run(
+        [str(atm), "create", "wheel-install-proof", "--role", "backend"],
+        capture_output=True, text=True, env=env, cwd=str(repo))
+    assert created.returncode == 0, created.stderr
+    shown = subprocess.run(
+        [str(tickets), "show", "T-001"],
+        capture_output=True, text=True, env=env, cwd=str(repo))
+    assert shown.returncode == 0, shown.stderr
+    assert "wheel-install-proof" in shown.stdout
+
+    help_atm = subprocess.run([str(atm), "--help"], capture_output=True, text=True,
+                               env=env, cwd=str(repo))
+    help_tickets = subprocess.run([str(tickets), "--help"], capture_output=True, text=True,
+                                   env=env, cwd=str(repo))
+    assert "usage: atm" in help_atm.stdout
+    assert "usage: tickets" in help_tickets.stdout
+
+    # Honest packaged-surface limit: `hooks` lives on root tickets.py / install.sh,
+    # not on ticket_board.cli. Do not claim the wheel installs old hooks.
+    hooks = subprocess.run(
+        [str(atm), "hooks", "cursor", "--agent", "t809-wheel"],
+        capture_output=True, text=True, env=env, cwd=str(repo))
+    assert hooks.returncode != 0
+    err = (hooks.stdout + hooks.stderr).lower()
+    assert "invalid choice" in err or "unrecognized arguments" in err
+    assert "hooks" in err
 
 
 def test_live_installer_writes_atm_alias(tmp_path):
