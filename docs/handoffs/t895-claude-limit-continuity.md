@@ -19,8 +19,12 @@ durable CEO/CoS takeover. Existing objective and independent release gates stand
   branch/worktree at `d92d064`, stripped inherited Codex session variables,
   and launched `atman-ui-review-cursor-t896-0913` through Atman: task-only,
   maximum one run, twenty-minute run timeout, no Claude or helper calls.
-  Watcher startup was observed. Claim, review and ACCEPT/FIX are pending;
-  startup alone does not prove them.
+  Initial watcher startup was observed, but the reviewer stopped at its identity
+  gate: canonical Cursor/parent Sol identity had leaked into the execution.
+  It claimed nothing. One corrected launch pins both worker identity variables
+  in the execution command and generates only that worktree's Cursor hooks.
+  A non-model identity check resolved to the unique reviewer before retry.
+  Claim, review and ACCEPT/FIX are still pending; startup is not task success.
 - The reviewer is instructed to claim T-896 explicitly, verify its own identity,
   inspect the five T-892 fixes and use a throwaway UI board. Its report must
   name the exact artifact, actual probes and smallest remaining failure. No
@@ -46,6 +50,11 @@ The recorded reset is 00:30 Singapore time; it is a provider/board receipt,
 not a guarantee that all model/account buckets resume then.
 
 ## Atman friction exposed
+
+The initial reviewer safely refused canonical/parent identity. Scoped launch
+environment and hook corrections were used for one retry; no global provider
+settings were changed. Generated local hook files are excluded from git so
+private runtime metadata cannot accidentally become the review deliverable.
 
 The reserve command denied this strategic advisor as non-master/planner despite
 its intended planning role. No role or authorization bypass was used. The
