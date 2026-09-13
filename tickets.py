@@ -1493,6 +1493,19 @@ def timing(t):
     return out
 
 
+def _work_view():
+    """T-889 Work view module (payload + CSS/HTML/JS); packaged with sounding."""
+    try:
+        from ticket_board import work_view as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import work_view as m
+        return m
+
+
 def _sounding():
     try:
         from ticket_board import sounding as m
@@ -13024,6 +13037,7 @@ body[data-work-view=columns] #graphLede{display:none}
   .portfolio-menu{position:fixed;left:12px;right:12px;top:auto;width:auto}
 }
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+<!--WORK_VIEW:css-->
 </style></head><body data-tab="board" data-work-view="graph">
 <header class="cmd">
   <div class="brand">
@@ -13101,7 +13115,7 @@ body[data-work-view=columns] #graphLede{display:none}
     <button type="button" id="view-columns" data-work-view="columns" aria-selected="false">Columns</button>
   </div>
   <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">tickets graph</span> / <span class="mono">tickets map</span> — not a list of titles. Follow-up: <span class="mono">tickets update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">tickets reopen</span>. Review: <span class="mono">tickets review</span> then <span class="mono">tickets merge</span>.</p>
-  <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"></div>
+  <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"><!--WORK_VIEW:html--></div>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
@@ -13326,9 +13340,12 @@ function setWorkView(name, persistHash){
     try{history.replaceState(null,'','#'+name)}catch(e){}
   }
 }
-function renderGraph(g){
+<!--WORK_VIEW:js-->
+function renderGraph(g,d){
   const host=document.getElementById('workflowGraph');
   if(!host)return;
+  // T-889 hook: the Work view module owns this pane when its payload is present.
+  if(window.AtmanWork&&d&&d.work){window.AtmanWork.render(d,host);return}
   const by={};(g&&g.nodes||[]).forEach(n=>{by[n.id]=n});
   const edges=(g&&g.edges)||[];
   if(!g||!(g.nodes||[]).length){
@@ -13580,7 +13597,7 @@ async function load(manual){
   fillCol('ready',ready,ready.map(t=>card(t)).join(''));
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
   fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
-  renderGraph(d.graph);
+  renderGraph(d.graph,d);
   renderEmptyBoard(d);
   renderAttention(d.attention);
   renderEpics(d.epics);
@@ -14236,8 +14253,9 @@ def _board_snapshot_body(board, messages=40):
                   "waiting": [d for d in t.get("deps", []) if d not in done]}
                  for t in tickets if t["status"] in ("open", "blocked")]
     turns, usage, promise = _cached_turns_usage_promise(board, tickets)
+    all_msgs = load_messages(board)
     raw_msgs = []
-    for x in load_messages(board)[-messages:]:
+    for x in all_msgs[-messages:]:
         row = {"id": _msg_id(x), "at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
                "kind": x.get("kind") or "message",
@@ -14258,6 +14276,13 @@ def _board_snapshot_body(board, messages=40):
     health_items = [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12]
     coverage = _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
                                 open_rows, in_flight, review, out_agents)
+    graph = workflow_graph(tickets)
+    objective_view = {
+        "text": (obj or {}).get("text", ""),
+        "state": objective_state(obj) if obj else "",
+        "exit_criterion": (obj or {}).get("exit_criterion") or "",
+        "exit_missing": bool(obj) and objective_exit_missing(obj),
+    }
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -14283,15 +14308,16 @@ def _board_snapshot_body(board, messages=40):
         "usage": usage,
         "promise": promise,
         "objective": {
-            "text": (obj or {}).get("text", ""),
-            "state": objective_state(obj) if obj else "",
-            "exit_criterion": (obj or {}).get("exit_criterion") or "",
-            "exit_missing": bool(obj) and objective_exit_missing(obj),
+            **objective_view,
             "wake_gates": "continuous seats: directed DM/@mention; task-only/scheduled seats: explicit tasks; all: stuck/blocked, held, assigned work",
             "stop_condition": STOP_CONDITION,
         },
         "coverage": coverage,
-        "graph": workflow_graph(tickets),
+        "graph": graph,
+        # T-889 hook: the Work view payload (objective, phases, node detail).
+        "work": _safe(lambda: _work_view().work_payload(
+            tickets, graph, all_msgs, objective=objective_view,
+            acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who))), None),
     }
 
 
@@ -14324,6 +14350,18 @@ def _ui_msg_origin_ok(headers):
     return parsed.netloc.lower() == host.lower()
 
 
+def _ui_page():
+    """T-889 hook: UI_HTML with the Work view module spliced in at its three
+    named placeholders. Missing module -> the shell's own fallback graph."""
+    mod = _safe(_work_view, None)
+    css = getattr(mod, "WORK_CSS", "") if mod else ""
+    html = getattr(mod, "WORK_HTML", "") if mod else ""
+    js = getattr(mod, "WORK_JS", "") if mod else ""
+    return (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
+            .replace("<!--WORK_VIEW:html-->", html)
+            .replace("<!--WORK_VIEW:js-->", js))
+
+
 def cmd_ui(a, board):
     """Local status UI: serves an auto-refreshing page, /board.json, and a
     composer POST at /msg that posts through post_message() -- same board,
@@ -14349,7 +14387,7 @@ def cmd_ui(a, board):
                 })).encode()
                 ctype = "application/json"
             else:
-                body = UI_HTML.encode()
+                body = _ui_page().encode()
                 ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
