@@ -1,5 +1,9 @@
 # Master how-to
 
+Use [coordination and success](coordination-and-success.md) for accepted-merge
+endpoints, batch message handling, master/CoS ownership, and honest efficiency
+measurement. It governs ongoing coordination after onboarding.
+
 **You are onboarding.** Say that first. This is not a ticket claim and not a
 merge pass.
 
