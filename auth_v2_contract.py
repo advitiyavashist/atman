@@ -689,3 +689,152 @@ def profile_store_path(cache_root, board_hash, profile_ref):
 
 def dumps_board_safe(record):
     return json.dumps(redact_auth_check(record), sort_keys=True)
+
+
+AUTH_STATE_LABELS = {
+    "ready": "Ready",
+    "login_required": "Login required",
+    "expired": "Credential expired",
+    "quota": "Usage quota",
+    "network": "Network",
+    "unavailable": "Unavailable",
+    "unsupported": "Unsupported",
+}
+
+
+def execution_context_line(ctx):
+    """One-line host/binary/origin for Team/Connect. No secrets."""
+    ctx = ctx or {}
+    if not (ctx.get("hostname") or ctx.get("username") or ctx.get("origin_url")):
+        return ""
+    origin = ctx.get("origin_url") or ctx.get("expected_origin") or ""
+    return ("%s@%s %s %s" % (
+        ctx.get("username") or "?",
+        ctx.get("hostname") or "?",
+        ctx.get("runner_kind") or "?",
+        origin,
+    )).strip()
+
+
+def on_enrolled_runner_host(enrolled_ctx, local_ctx):
+    """True when this process may run a reconnect *probe* (never a secret form).
+
+    Dashboard argv0 is `tickets`, the provider CLI is `agent`/`claude`/`codex`,
+    so this is hostname + username + runner_kind — not the full fingerprint.
+    A sandbox UI never executes host reconnect (T-830: login stays local/host).
+    """
+    enrolled = enrolled_ctx or {}
+    local = local_ctx or {}
+    if not enrolled.get("hostname") or not enrolled.get("username"):
+        return False
+    if enrolled.get("hostname") != local.get("hostname"):
+        return False
+    if enrolled.get("username") != local.get("username"):
+        return False
+    ek = enrolled.get("runner_kind") or ""
+    lk = local.get("runner_kind") or ""
+    if ek == "sandbox" or lk == "sandbox":
+        return False
+    if ek and lk and ek != lk:
+        return False
+    return True
+
+
+def auth_readiness_surface(auth, enrolled_ctx=None, local_ctx=None, resume_at="",
+                           harness="", agent_id=""):
+    """T-687 Team/Connect payload. Never reports Ready unless authoritative."""
+    rec = redact_auth_check(auth or {})
+    ctx = rec.get("execution_context") or {}
+    enrolled = enrolled_ctx or {}
+    agent = agent_id or enrolled.get("agent_id") or ctx.get("agent_id") or ""
+    stored_state = rec.get("state") if rec.get("state") in AUTH_STATES else ""
+    authoritative = rec.get("authoritative") is True and context_is_complete(ctx)
+    if enrolled and context_is_complete(enrolled):
+        if context_is_complete(ctx):
+            same = contexts_match(ctx, enrolled) or on_enrolled_runner_host(enrolled, ctx)
+            authoritative = authoritative and same
+        else:
+            authoritative = False
+    ready = stored_state == "ready" and authoritative
+    display_state = stored_state if not (stored_state == "ready" and not authoritative) else ""
+    pause = rec.get("pause") or {}
+    paused = bool(pause.get("paused")) and not ready
+    operator_path = "ready" if ready else (pause.get("operator_path") or OPERATOR_PATH.get(display_state, ""))
+    on_host = on_enrolled_runner_host(enrolled or ctx, local_ctx or {})
+    login_cmd = rec.get("login_cmd") or ""
+    probe_cmd = ("tickets harness auth %s" % agent) if agent else "tickets harness auth <agent>"
+    if display_state in ("login_required", "expired"):
+        recovery_kind = "login"
+        recovery_cmd = login_cmd or probe_cmd
+        recovery_copy = (
+            "Run this on the enrolled runner host. Atman never collects provider secrets.")
+    elif display_state == "quota":
+        recovery_kind = "quota"
+        recovery_cmd = probe_cmd
+        recovery_copy = "Usage quota is not a login failure. Recheck after the provider window resets."
+    elif display_state == "network":
+        recovery_kind = "network"
+        recovery_cmd = probe_cmd
+        recovery_copy = "Retry the status check on the enrolled runner host."
+    elif display_state == "unavailable":
+        recovery_kind = "unavailable"
+        recovery_cmd = probe_cmd
+        recovery_copy = "Fix runner, binary, or seat identity on the enrolled host, then recheck."
+    elif display_state == "unsupported":
+        recovery_kind = "unsupported"
+        recovery_cmd = ""
+        recovery_copy = "This adapter has no zero-model auth check. Do not treat as login."
+    elif ready:
+        recovery_kind = "ready"
+        recovery_cmd = probe_cmd
+        recovery_copy = "Auth is ready on the enrolled runner. Recheck does not start a model."
+    else:
+        recovery_kind = "unchecked"
+        recovery_cmd = probe_cmd
+        recovery_copy = "No authoritative probe yet. Recheck on the enrolled runner host."
+    execute_here = bool(on_host and agent and recovery_kind != "unsupported")
+    retained = bool(pause.get("retain_queue")) and (paused or display_state in NO_SPEND_STATES)
+    if ready and resume_at:
+        queue_copy = (
+            "Queued work is eligible to resume (auth recovered at %s). "
+            "That is not proof a model turn already ran." % resume_at)
+        retained = False
+    elif ready:
+        queue_copy = (
+            "Auth is ready. Queued work may resume; nothing here confirms it already ran.")
+    elif retained:
+        queue_copy = "Queued work is retained and has not run."
+    else:
+        queue_copy = ""
+    return {
+        "state": display_state,
+        "stored_state": stored_state,
+        "label": AUTH_STATE_LABELS.get(display_state) if display_state else "Not checked",
+        "ready": ready,
+        "authoritative": bool(authoritative),
+        "paused": paused,
+        "provider": rec.get("harness") or harness or "",
+        "profile_kind": rec.get("profile_kind") or "",
+        "identity_label": rec.get("identity_label") or "",
+        "checked_at": rec.get("at") or "",
+        "detail": rec.get("detail") or "",
+        "context": execution_context_line(ctx) or execution_context_line(enrolled),
+        "runner_id": ctx.get("runner_id") or enrolled.get("runner_id") or "",
+        "hostname": ctx.get("hostname") or enrolled.get("hostname") or "",
+        "login_cmd": login_cmd if operator_path == "login" else "",
+        "recovery": {
+            "kind": recovery_kind,
+            "cmd": recovery_cmd,
+            "copy": recovery_copy,
+            "execute_here": execute_here,
+            "on_enrolled_host": on_host,
+        },
+        "queue": {
+            "retained": retained,
+            "resumed_at": resume_at or "",
+            "ran": False,
+            "copy": queue_copy,
+        },
+        "credential_profile_ref": rec.get("credential_profile_ref") or "",
+        "operator_path": operator_path,
+    }
