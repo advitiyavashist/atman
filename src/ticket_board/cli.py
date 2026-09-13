@@ -2587,7 +2587,7 @@ This board is being set up. I will ask you four things, in order:
 
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
-It auto-checks usage; missing remaining/reset is a FAIL row.
+It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
 When they name tasks, use `tickets plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
@@ -4094,7 +4094,7 @@ def cmd_connect(a, board):
         return
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
-    print("It auto-checks usage; missing remaining/reset is a FAIL row.")
+    print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
     print("Announce the board/team name with `tickets msg --to everyone`, then ask")
     print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")

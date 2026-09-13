@@ -208,8 +208,11 @@ def catalog_dispatch_fail(row):
     hid = (row.get("id") or "").strip().lower()
     if hid in fail_ids_from_env():
         return "FAIL usage (%s in TICKETS_HARNESS_FAIL)" % hid
-    if (row.get("usage_status") or "").upper() == "FAIL":
+    usage = (row.get("usage") or row.get("usage_status") or "").strip().lower()
+    if usage == "fail":
         return "FAIL usage row"
+    if usage == "exhausted":
+        return "exhausted quota"
     return ""
 
 

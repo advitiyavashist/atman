@@ -26,9 +26,7 @@ Local checks: `agent`, `cursor-agent`, `codex`, `claude`, and `agy` resolve on P
 
 Runtime inspected: `atman-runtime-current/tickets.py`, T-793 catalog implementation, with source paths also checked in `src/ticket_board/cli.py`.
 
-`INTEGRATION_CATALOG` around line 5266 configures quota probes using Cursor about, Agy help, Claude auth status, Codex login status, Devin auth status and Gemini version. `probe_catalog_usage` around line 12597 returns `usage=FAIL` whenever remaining or reset is absent. `cmd_harness_available` prints that such a seat must not spawn. T-793's recorded live sample says every installed catalog row fails this check because these commands do not supply the fields.
-
-This is a product bug: unsupported or missing quota is not exhausted quota. Extend the existing catalog; do not create a second provider registry or a second board. Preserve runtime identity fixes and source/installed-package parity. Current board restrictions and the operator's provider permissions remain in force until CEO changes them; a new generic onboarding flow must not silently overwrite them.
+`INTEGRATION_CATALOG` around line 5266 configures quota probes using Cursor about, Agy help, Claude auth status, Codex login status, Devin auth status and Gemini version. T-862 classifies unsupported or missing remaining/reset as `unknown`, not FAIL/exhausted. Auth/login errors stay FAIL. Genuine remaining 0 is exhausted. `catalog_dispatch_fail` refuses FAIL and exhausted only; unknown does not block spawn. T-793's live sample used to fail every installed row because those commands do not supply remaining/reset. Extend the existing catalog; do not create a second provider registry or a second board. Preserve runtime identity fixes and source/installed-package parity. Current board restrictions and the operator's provider permissions remain in force until CEO changes them; a new generic onboarding flow must not silently overwrite them.
 
 ## Onboarding flow for the local app and `atm`
 
