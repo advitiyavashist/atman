@@ -6,11 +6,11 @@ User-approved responsibility split: Opus CEO, Sonnet CoS, Sol/Codex planner/assi
 |---|---|---|
 | Opus CEO | `atman-ceo-opus-0913` | `steer.ceo` and technical desk `steer.cto` |
 | Sonnet CoS | `atman-cos-sonnet-0913` | `steer.chief-of-staff` |
-| Sol planner | existing `atman-ceo-codex-0912` | `steer.planner` |
+| Sol planner | `sol-planner-codex-0913` | `steer.planner` |
 
-The planner's legacy ID does not confer CEO authority. Keep it for this running session so pending messages reach it; a replacement planner chooses a fresh ID. At packet creation the live CEO/CTO/master still pointed to that ID and CoS to `cursor`; new seats must explicitly activate from their own sessions. Preserve delivery continuity until takeover ACK, then retire the old CoS watcher. Do not register another agent from your cwd.
+Current activation: Opus has CEO/CTO/master and Sonnet has CoS. Sol's legacy `atman-ceo-codex-0912` seat is retired; T-850 moved the planner role, pending review ownership and native endpoint to `sol-planner-codex-0913`. History remains archived, without rewriting sender evidence or pretending old-address messages are forwarded. Do not register another agent from your cwd.
 
-The CLI currently accepts friendly aliases only `ceo` and `cos`; `--alias planner` is unsupported. Address the planner by its full unique ID. Its planner/review roles and persistent continuous native Codex endpoint are registered, and durable `steer.planner` is recorded. The legacy executive role/alias routing changes when the new CEO self-enrolls; endpoint registration alone is not end-to-end wake acceptance.
+The CLI currently accepts friendly aliases only `ceo` and `cos`; `--alias planner` is unsupported. Address the planner by its full unique ID. Its planner/review roles and persistent continuous native Codex endpoint are registered, and durable `steer.planner` is recorded. Endpoint registration alone is not end-to-end idle-wake acceptance. Sol's generated Codex hooks are pinned to its own transfer worktree, not all Downloads; native transport delivers to the session independently of lifecycle context hooks.
 
 Repos: `/Users/kavana/Downloads/atman` -> `advitiyavashist/atman`; `/Users/kavana/Downloads/steer` -> `advitiyavashist/steer`. Shared board for both: `/Users/kavana/Downloads/steer/.tickets`. Never initialize a second board or edit its JSON. Ticket repo evidence and deliverable origin matter more than folder names.
 
@@ -42,6 +42,8 @@ Use [native session adapter evidence](../t683-native-session-adapters.md), [hook
 
 ## Activate authority after self-registration
 
+Opus and Sonnet already completed these role takeovers on 2026-09-13. The commands below document initial activation; do not rerun stale expected-holder values or replace a current holder. New successors inspect current role history first.
+
 Opus, from its own seat:
 
 ```sh
@@ -64,7 +66,7 @@ If handoff files are not on your new branch yet, pass their actual readable abso
 ```sh
 tickets msg "Decision needed: exact option, evidence and next action" --to atman-ceo-opus-0913 --re T-839
 tickets msg "Please unblock: concrete blocker and recovery action" --to atman-cos-sonnet-0913 --re T-811
-tickets msg "Planning request: objective, constraints and acceptance gap" --to atman-ceo-codex-0912 --re T-810
+tickets msg "Planning request: objective, constraints and acceptance gap" --to sol-planner-codex-0913 --re T-810
 ```
 
 Send one recipient per command. Replies name the original ticket/message; do not reply-loop an ACK. Read available messages in a batch and consult live ticket status before acting. Workers use `tickets update` for milestone evidence and `tickets review --notes ... --pr N` for exact deliverables. Master/CoS do not buy model turns just to report unchanged status. Regular heartbeat/progress obligations still apply during active work.
