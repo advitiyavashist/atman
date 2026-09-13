@@ -1521,6 +1521,58 @@ def _ticket_lane(t):
     return _sounding().ticket_lane(t)
 
 
+def _last_handoff(t):
+    notes = t.get("notes") or []
+    if not notes:
+        return ""
+    return ((notes[-1].get("text") or "").strip())[:240]
+
+
+def _ticket_verdict(t):
+    st = t.get("status")
+    if st == "done":
+        return "accepted"
+    if st == "review":
+        return "awaiting review"
+    for n in reversed(t.get("notes") or []):
+        text = (n.get("text") or "").strip()
+        low = text.lower()
+        if low.startswith("review:") or "request fix" in low:
+            return text[:160]
+    return ""
+
+
+def _wait_reason(t, waiting):
+    if _ticket_lane(t) == "capture":
+        return "capture"
+    if _ticket_on_hold(t):
+        return "hold"
+    if waiting:
+        return "deps"
+    return ""
+
+
+def _ticket_phase(t, waiting):
+    st = t.get("status")
+    if st == "done":
+        return "done"
+    if st == "review":
+        return "review"
+    if st == "claimed":
+        return "working"
+    if st == "blocked":
+        return "blocked"
+    if _ticket_lane(t) == "capture":
+        return "capture"
+    if _ticket_on_hold(t):
+        return "hold"
+    if waiting:
+        return "waiting"
+    if _reserved_agent(t):
+        return "dispatched"
+    return "ready"
+
+
 def unblocked(board, tickets):
     """Open tickets whose dependencies are all done and whose lane is ready.
 
@@ -2451,6 +2503,13 @@ def workflow_graph(tickets, include_done=False):
         t = by_id[tid]
         deps = list(t.get("deps") or [])
         waiting = [d for d in deps if d not in done]
+        children = [c for c in kids.get(tid, []) if c in keep]
+        success_starts = []
+        for cid in children:
+            child = by_id.get(cid) or {}
+            leftover = [d for d in (child.get("deps") or []) if d not in done and d != tid]
+            if not leftover and child.get("status") in ("open", "blocked"):
+                success_starts.append(cid)
         return {
             "id": tid,
             "title": t.get("title", ""),
@@ -2459,9 +2518,20 @@ def workflow_graph(tickets, include_done=False):
             "mark": MARK.get(t["status"], "[?]"),
             "owner": t.get("owner") or "",
             "role": t.get("role") or "",
+            "lane": _ticket_lane(t),
+            "phase": _ticket_phase(t, waiting),
+            "wait_reason": _wait_reason(t, waiting),
+            "reserved_for": _reserved_agent(t),
+            "hold": _ticket_on_hold(t),
+            "proof": (t.get("proof") or "").strip(),
+            "cause": (t.get("cause") or "").strip(),
+            "change": (t.get("change") or "").strip(),
+            "handoff": _last_handoff(t),
+            "verdict": _ticket_verdict(t),
+            "success_starts": success_starts,
             "deps": deps,
             "waiting": waiting,
-            "children": [c for c in kids.get(tid, []) if c in keep],
+            "children": children,
         }
 
     nodes = [node_of(tid) for tid in order]
@@ -12861,7 +12931,10 @@ body[data-empty-board][data-tab=board] #turnsPanel,
 body[data-empty-board][data-tab=board] #onboardBox,
 body[data-empty-board][data-tab=board] #workflowGraph,
 body[data-empty-board][data-tab=board] #workViews,
-body[data-empty-board][data-tab=board] #graphLede{display:none}
+body[data-empty-board][data-tab=board] #graphLede,
+body[data-empty-board][data-tab=board] #nowStrip,
+body[data-empty-board][data-tab=board] #workObjective,
+body[data-empty-board][data-tab=board] #graphDetail{display:none}
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
 body[data-work-view=graph] .kanban{display:none}
 body[data-work-view=columns] #workflowGraph,
@@ -12879,6 +12952,22 @@ body[data-work-view=columns] #graphLede{display:none}
 .g-row .mark{font:12px/1.3 ui-monospace,Menlo,monospace;color:var(--mute)}
 .g-title{font-weight:600;font-size:13px}
 .graph-empty{margin:0 0 10px;font-size:12px;color:var(--mute)}
+.now-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0 0 12px}
+.now-strip article{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.now-strip .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
+.now-strip .v{margin-top:4px;font-size:14px;font-weight:650}
+.work-objective{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:0 0 12px}
+.work-objective .v{font-size:15px;font-weight:650}
+.g-node{cursor:pointer}
+.g-node:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.g-node.on .g-row{border-color:var(--acc)}
+.g-row{border:1px solid transparent;border-radius:8px;padding:4px 6px}
+.graph-detail{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:10px;font-size:13px}
+.graph-detail .kv{display:grid;grid-template-columns:120px 1fr;gap:4px 10px;margin-top:8px}
+.graph-detail dt{color:var(--mute)}
+.phase-ready{color:var(--ready)}.phase-dispatched{color:var(--flight)}.phase-working{color:var(--flight)}
+.phase-capture,.phase-waiting,.phase-hold{color:var(--warn)}
+@media(max-width:700px){.now-strip{grid-template-columns:1fr}}
 @media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
 .col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
 .col h2{margin:0;padding:10px 12px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
@@ -13074,7 +13163,7 @@ body[data-work-view=columns] #graphLede{display:none}
   <div class="attn-list" id="attnList"></div></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
 <div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span><span id="wakeGates" hidden></span></div>
-<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/7</span></summary>
+<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/8</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs" role="tablist" aria-label="Atman workspace">
   <button type="button" id="tab-objective" role="tab" aria-controls="pane-objective" aria-selected="false" data-tab-btn="objective">Objective</button>
@@ -13084,10 +13173,30 @@ body[data-work-view=columns] #graphLede{display:none}
 </nav>
 <main>
 <div class="pane" id="pane-objective" role="tabpanel" aria-labelledby="tab-objective" tabindex="0">
-  <details class="mission" id="missionBox" open><summary><span class="k">Standing objective</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
+  <section class="promise-panel" id="objectiveCard">
+    <h2>Standing objective</h2>
+    <p class="hero-eyebrow" id="missionOne"></p>
+    <p id="objectiveText" data-testid="objective-text"></p>
+    <div class="kv" style="margin-top:8px">
+      <dt>Exit</dt><dd id="objectiveExit">—</dd>
+      <dt>State</dt><dd id="objectiveState">—</dd>
+    </div>
+    <p class="empty-honesty">read-only — set via <span class="mono">tickets objective</span>. Unknown metrics stay —.</p>
+  </section>
+  <details class="mission" id="missionBox"><summary><span class="k">Board memo</span> MASTER.md (not the standing objective)</summary><pre id="goals"></pre></details>
 </div>
 <div class="pane" id="pane-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0">
   <div id="emptyBoard" class="empty-board" hidden></div>
+  <section class="now-strip" id="nowStrip" aria-label="What the team is finishing">
+    <article><div class="k">Finishing</div><div class="v" id="nowFinishing">—</div></article>
+    <article><div class="k">Blocked</div><div class="v" id="nowBlocked">—</div></article>
+    <article><div class="k">Next step</div><div class="v" id="nowWho">—</div></article>
+  </section>
+  <section class="work-objective" id="workObjective">
+    <p class="hero-eyebrow">Standing objective</p>
+    <p class="v" id="workObjectiveText">—</p>
+    <p class="empty-honesty">read-only — set via <span class="mono">tickets objective</span></p>
+  </section>
   <section id="epicsPanel" class="epics" hidden aria-label="Epic progress"></section>
   <section id="objectivePromise" data-fold="objective">
     <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
@@ -13100,8 +13209,9 @@ body[data-work-view=columns] #graphLede{display:none}
     <button type="button" id="view-graph" data-work-view="graph" class="on" aria-selected="true">Graph</button>
     <button type="button" id="view-columns" data-work-view="columns" aria-selected="false">Columns</button>
   </div>
-  <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">tickets graph</span> / <span class="mono">tickets map</span> — not a list of titles. Follow-up: <span class="mono">tickets update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">tickets reopen</span>. Review: <span class="mono">tickets review</span> then <span class="mono">tickets merge</span>.</p>
+  <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">tickets graph</span> / <span class="mono">tickets map</span> — not a list of titles. Ready, dispatched, and working are distinct. Success trigger: children start when a parent is accepted. Follow-up: <span class="mono">tickets update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">tickets reopen</span>. Review: <span class="mono">tickets review</span> then <span class="mono">tickets merge</span>.</p>
   <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"></div>
+  <aside id="graphDetail" class="graph-detail" hidden role="region" aria-label="Ticket detail"></aside>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
@@ -13126,7 +13236,7 @@ body[data-work-view=columns] #graphLede{display:none}
     <div>
       <h2 class="seats-title">Team</h2>
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
-      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">tickets msg --to</span>.</p>
+      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">tickets msg --to</span>. Runtime id is unique; role is coverage.</p>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -13148,13 +13258,14 @@ body[data-work-view=columns] #graphLede{display:none}
   <div class="chat-layout">
     <nav class="chat-rail" id="chatRail" aria-label="Threads"></nav>
     <div class="chat-main">
+      <p class="seats-lede empty-honesty" id="channelHonesty">Board thread is broadcast. Named channels are planned — not routed yet. Delivery badges are receipts, not ticket progress.</p>
       <div class="chat-head" id="chatHead"></div>
       <div class="msgs" id="msgs"></div>
       <section id="composer">
         <div id="composerRow">
           <label class="who"><small>from</small> <select id="cFrom"></select></label>
           <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
-          <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+          <label class="who"><small>re</small> <input id="cRe" placeholder="ticket id" size="8" style="width:88px" autocomplete="off"></label>
           <label class="who"><small>type</small> <select id="cKind"><option value="message">message</option><option value="task">task</option></select></label>
         </div>
         <textarea id="cText" aria-label="Message" placeholder="Message the board or a seat. Type @ to tag an agent."></textarea>
@@ -13199,12 +13310,13 @@ function staleClass(t){
   return '';
 }
 function card(t,extra){
-  const waiting=(t.waiting||[]).length?'<div class="wait">waiting on '+esc((t.waiting||[]).join(', '))+'</div>':'';
+  const waiting=(t.waiting||[]).length?'<div class="wait">waiting on '+esc((t.waiting||[]).join(', '))+(t.wait_reason==='deps'?' (deps)':'')+'</div>':(t.wait_reason==='capture'?'<div class="wait">waiting: capture — sound before claim</div>':(t.wait_reason==='hold'?'<div class="wait">HOLD</div>':''));
   const owner=t.owner?who(t.owner):'<span class="mute">unassigned</span>';
   const pri=t.priority!=null?'<span class="pri">P'+esc(t.priority)+'</span>':'';
   const age=t.since_update!=null?'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>':'';
-  const msg=t.owner?'<button type="button" class="intervene" data-seat-chat="'+esc(t.owner)+'" data-testid="card-msg-'+esc(t.id)+'">Msg</button>':'';
-  return '<article class="card '+staleClass(t)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+msg+(extra||'')+'</article>';
+  const phase=t.phase?'<span class="tag phase-'+esc(t.phase)+'">'+esc(t.phase)+'</span>':'';
+  const msg=t.owner?'<button type="button" class="intervene" data-seat-chat="'+esc(t.owner)+'" data-ticket="'+esc(t.id)+'" data-testid="card-msg-'+esc(t.id)+'">Msg</button>':'';
+  return '<article class="card '+staleClass(t)+'" data-ticket="'+esc(t.id)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+phase+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+msg+(extra||'')+'</article>';
 }
 function fillCol(id,items,html){
   document.getElementById('n-'+id).textContent=items.length;
@@ -13227,9 +13339,16 @@ function renderObjective(o){
   const line=document.getElementById('promiseStripLine');
   const gates=document.getElementById('wakeGates');
   if(gates)gates.textContent=(o&&o.wake_gates)||'';
+  const text=(o&&o.text)||'';
+  const one=text?text.slice(0,180):'(no standing objective — tickets objective "…")';
+  setTxt('missionOne',one);
+  setTxt('objectiveText',text||'No standing objective yet.');
+  setTxt('workObjectiveText',text||'—');
+  setTxt('objectiveExit',(o&&o.exit_criterion)||((o&&o.exit_missing)?'FLAG: no exit criterion':'—'));
+  setTxt('objectiveState',(o&&o.state)||'—');
   if(!line)return;
-  if(!o||!o.text){line.textContent='Fewest turns. Max output at least cost.';return;}
-  const bits=[(o.state||'active'), o.text];
+  if(!text){line.textContent='Fewest turns. Max output at least cost.';return;}
+  const bits=[(o.state||'active'), text];
   if(o.exit_criterion)bits.push('exit: '+o.exit_criterion);
   else if(o.exit_missing)bits.push('FLAG: no exit criterion');
   if(o.stop_condition)bits.push('stop: '+o.stop_condition);
@@ -13269,15 +13388,21 @@ function renderUsage(u){
   const by=u.by_agent||[];
   tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
 }
-function seatChip(name,cover,kind){
+function seatChip(name,cover,kind,meta){
+  meta=meta||{};
   const chat=kind==='ghost'?'':' data-seat-chat="'+esc(name)+'"';
   const act=kind==='ghost'?'':'<button type="button" class="intervene" data-seat-chat="'+esc(name)+'">Msg</button>';
-  return '<article class="seat '+(kind||'cover')+'"'+chat+'><div class="top"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span></div><span class="cov">'+esc(cover||'')+'</span>'+act+'</article>';
+  const id=meta.agent_id&&meta.agent_id!==name?meta.agent_id:'';
+  const role=(meta.roles&&meta.roles.length)?meta.roles.join('/'):'';
+  const prov=meta.adapter_provider||meta.harness||'';
+  const reach=meta.reachable===false?'unreachable':(meta.adapter_reason||'');
+  return '<article class="seat '+(kind||'cover')+'"'+chat+'><div class="top"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span></div><span class="cov">'+esc(cover||'')+'</span>'+(id?'<span class="cov mono">id '+esc(id)+'</span>':'')+(role?'<span class="cov">role '+esc(role)+'</span>':'')+(prov?'<span class="cov">'+esc(prov)+'</span>':'')+(reach?'<span class="cov">'+esc(reach)+'</span>':'')+act+'</article>';
 }
 function renderSeats(d){
   const placed=new Set();
+  const by={};(d.agents||[]).forEach(a=>{if(a.name)by[a.name]=a});
   const operator=[],review=[],flight=[],ready=[],idle=[];
-  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(seatChip(name,cover,kind))};
+  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(seatChip(name,cover,kind,by[name]||{}))};
   add(operator,d.master,'master','operator');
   add(operator,d.cos,'CoS','operator');
   (d.review||[]).forEach(t=>add(review,t.owner,t.id+' · review','cover'));
@@ -13330,25 +13455,38 @@ function renderGraph(g){
   const host=document.getElementById('workflowGraph');
   if(!host)return;
   const by={};(g&&g.nodes||[]).forEach(n=>{by[n.id]=n});
+  GRAPH_BY=by;
   const edges=(g&&g.edges)||[];
   if(!g||!(g.nodes||[]).length){
     host.innerHTML='<p class="graph-empty">No workflow yet. <span class="mono">tickets plan</span> creates real --after edges.</p>';
+    showGraphDetail('');
     return;
   }
   const notice=edges.length?'':'<p class="graph-empty">No --after edges on the active board. <span class="mono">tickets plan</span> with deps, or <span class="mono">tickets dep T-002 --after T-001</span>.</p>';
+  function waitCopy(n){
+    if(n.wait_reason==='capture')return '<span class="wait">waiting: capture</span>';
+    if(n.wait_reason==='hold')return '<span class="wait">HOLD</span>';
+    if((n.waiting||[]).length)return '<span class="wait">waiting on '+esc(n.waiting.join(', '))+'</span>';
+    if((n.deps||[]).length)return '<span class="mute">after '+esc(n.deps.join(', '))+'</span>';
+    return '';
+  }
   function row(n){
-    const wait=(n.waiting||[]).length?'<span class="wait">waiting on '+esc(n.waiting.join(', '))+'</span>':((n.deps||[]).length?'<span class="mute">after '+esc(n.deps.join(', '))+'</span>':'');
+    const wait=waitCopy(n);
     const own=n.owner?'<span class="mute">@'+esc(n.owner)+'</span>':'';
     const role=n.role?'<span class="mute">'+esc(n.role)+'</span>':'';
-    return '<div class="g-row"><span class="mark">'+esc(n.mark||'')+'</span><span class="id">'+esc(n.id)+'</span><span class="g-title">'+esc(n.title)+'</span><span class="tag">'+esc(n.label||n.status||'')+'</span>'+role+own+wait+'</div>';
+    const phase='<span class="tag phase-'+esc(n.phase||'')+'">'+esc(n.phase||n.label||n.status||'')+'</span>';
+    const trig=(n.success_starts||[]).length?'<span class="mute">success starts '+esc(n.success_starts.join(', '))+'</span>':'';
+    return '<div class="g-row"><span class="mark">'+esc(n.mark||'')+'</span><span class="id">'+esc(n.id)+'</span><span class="g-title">'+esc(n.title)+'</span>'+phase+role+own+wait+trig+'</div>';
   }
   function walk(fr){
     const n=by[fr.id]||{id:fr.id,title:'',waiting:[],deps:[]};
     const kids=(fr.children||[]).map(walk).join('');
     const rpt=fr.repeat?'<span class="mute"> [shown above]</span>':'';
-    return '<li class="g-node" data-id="'+esc(n.id)+'">'+row(n)+rpt+(kids?'<ul class="g-kids">'+kids+'</ul>':'')+'</li>';
+    const on=SELECTED_TICKET===n.id?' on':'';
+    return '<li class="g-node'+on+'" data-id="'+esc(n.id)+'" tabindex="0" role="button">'+row(n)+rpt+(kids?'<ul class="g-kids">'+kids+'</ul>':'')+'</li>';
   }
   host.innerHTML=notice+'<ul class="g-roots" id="graphTree">'+(g.forest||[]).map(walk).join('')+'</ul>';
+  if(SELECTED_TICKET&&by[SELECTED_TICKET])showGraphDetail(SELECTED_TICKET);
 }
 document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
 document.querySelector('nav.tabs').addEventListener('keydown',e=>{
@@ -13374,6 +13512,8 @@ window.addEventListener('hashchange',()=>{
 });
 let AGENTS=[];
 let THREAD_SEAT='';
+let GRAPH_BY={};
+let SELECTED_TICKET='';
 try{THREAD_SEAT=localStorage.getItem('tickets-ui-seat')||''}catch(e){}
 const BROADCAST=new Set(['','all','everyone']);
 function isBoardBroadcast(m){
@@ -13445,12 +13585,67 @@ function loadAgentPickers(){
   if(THREAD_SEAT){ensureToOption(THREAD_SEAT);to.value=THREAD_SEAT;to.disabled=true}
   else{to.disabled=false;if(AGENTS.includes(prevTo))to.value=prevTo}
 }
+function showGraphDetail(id){
+  SELECTED_TICKET=id||'';
+  const n=GRAPH_BY[id];
+  const el=document.getElementById('graphDetail');
+  document.querySelectorAll('.g-node').forEach(li=>li.classList.toggle('on',li.dataset.id===id));
+  const re=document.getElementById('cRe');
+  if(re){
+    if(id&&/^T-\d+$/.test(id))re.value=id;
+    else if(re.value.trim()==='T-000')re.value='';
+  }
+  if(!el)return;
+  if(!n){el.hidden=true;el.innerHTML='';return}
+  const waiting=n.wait_reason==='capture'?'capture (not claimable until tickets sound)':n.wait_reason==='hold'?'HOLD':((n.waiting||[]).length?('deps: '+n.waiting.join(', ')):'—');
+  el.hidden=false;
+  el.innerHTML='<strong>'+esc(n.id)+'</strong> '+esc(n.title||'')+
+    '<dl class="kv">'+
+    '<dt>Status</dt><dd>'+esc(n.label||n.status||'—')+'</dd>'+
+    '<dt>Phase</dt><dd>'+esc(n.phase||'—')+'</dd>'+
+    '<dt>Owner</dt><dd>'+esc(n.owner||'unassigned')+'</dd>'+
+    '<dt>Waiting</dt><dd>'+esc(waiting)+'</dd>'+
+    '<dt>Acceptance</dt><dd>'+esc(n.proof||'—')+'</dd>'+
+    '<dt>Handoff</dt><dd>'+esc(n.handoff||'—')+'</dd>'+
+    '<dt>Verdict</dt><dd>'+esc(n.verdict||'—')+'</dd>'+
+    '<dt>Success trigger</dt><dd>'+esc((n.success_starts||[]).join(', ')||'—')+'</dd>'+
+    '</dl>';
+}
+function defaultComposeTicket(d){
+  const re=document.getElementById('cRe');
+  if(!re)return;
+  const known=new Set(((d.graph&&d.graph.nodes)||[]).map(n=>n.id));
+  const cur=re.value.trim();
+  if(cur==='T-000'||(cur&&!known.has(cur)))re.value='';
+  if(re.value.trim())return;
+  if(SELECTED_TICKET&&known.has(SELECTED_TICKET)){re.value=SELECTED_TICKET;return}
+  const flight=(d.in_flight||[])[0];
+  if(flight&&flight.id)re.value=flight.id;
+}
+function renderNow(d){
+  const flight=(d.in_flight||[])[0];
+  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||t.phase==='blocked'||t.phase==='waiting'||t.wait_reason);
+  const ns=d.next_step||{};
+  setTxt('nowFinishing',flight?(flight.id+(flight.owner?' · @'+flight.owner:'')):'—');
+  setTxt('nowBlocked',blocked.length?(blocked[0].id+' · '+(blocked[0].wait_reason||blocked[0].phase||'blocked')):'—');
+  setTxt('nowWho',((ns.label||'—')+' — '+(ns.message||'')).trim());
+}
 document.addEventListener('click',e=>{
+  const node=e.target.closest('.g-node');
+  if(node){showGraphDetail(node.dataset.id||'');return}
   const btn=e.target.closest('[data-seat-chat]');
   if(!btn||btn.closest('#composer'))return;
   e.preventDefault();
+  if(btn.dataset.ticket)showGraphDetail(btn.dataset.ticket);
   openSeatChat(btn.dataset.seatChat||'');
   load();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ')return;
+  const node=e.target.closest('.g-node');
+  if(!node||e.target!==node)return;
+  e.preventDefault();
+  showGraphDetail(node.dataset.id||'');
 });
 function mentionQueryAt(text,caret){
   const upto=text.slice(0,caret);const m=upto.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
@@ -13565,17 +13760,16 @@ async function load(manual){
   sprintEl.innerHTML=s
     ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
     :'';
-  const crit=(d.health||[]).filter(x=>x.sev==='CRIT').length;
-  const warn=(d.health||[]).filter(x=>x.sev==='WARN').length;
+  const goals=d.goals||'(no MASTER.md yet -- tickets master init)';
+  document.getElementById('goals').textContent=goals;
+  const crit=(d.attention||[]).filter(x=>x.sev==='CRIT').length;
+  const warn=(d.attention||[]).filter(x=>x.sev==='WARN').length;
   const pulse=document.getElementById('pulse');
   pulse.className='health'+(crit?' bad':warn?' warn':'');
   pulse.innerHTML='<i></i><span>'+(crit?'Critical · '+crit:warn?'Warning · '+warn:'No alerts')+'</span>';
   tickClock();
-  const goals=d.goals||'(no MASTER.md yet -- tickets master init)';
-  document.getElementById('goals').textContent=goals;
-  document.getElementById('missionOne').textContent=missionLine(goals);
-  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length);
-  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length||t.phase==='capture'||t.phase==='hold'||t.phase==='waiting');
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length&&t.phase!=='capture'&&t.phase!=='hold'&&t.phase!=='waiting');
   fillCol('blocked',blocked,blocked.map(t=>card(t)).join(''));
   fillCol('ready',ready,ready.map(t=>card(t)).join(''));
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
@@ -13585,6 +13779,7 @@ async function load(manual){
   renderAttention(d.attention);
   renderEpics(d.epics);
   if(!d.error)renderNextStep(d.next_step);
+  renderNow(d);
   renderOnboarding(d.onboarding);
   renderPromise(d.promise);
   renderObjective(d.objective);
@@ -13592,6 +13787,7 @@ async function load(manual){
   renderUsage(d.usage);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
+  defaultComposeTicket(d);
   renderChatRail(d);renderChatHead();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
@@ -13610,7 +13806,7 @@ async function load(manual){
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
     const onlineDot=(a.reachable!==false && a.adapter_online)?' ●':'';
     return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+auth+expired+network+unavail+unsup+pausedAuth+quota+lim+wake+'</div>'+
-      '<div class="mute mono">'+esc(a.agent_id||a.name)+' · '+esc(a.adapter_provider||a.harness||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.adapter_delivery||'offline')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
+      '<div class="mute mono">runtime '+esc(a.agent_id||a.name)+' · role '+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+' · '+esc(a.adapter_provider||a.harness||'—')+' · reach '+(a.reachable===false?'no · ':'yes · ')+esc(a.adapter_reason||a.adapter_delivery||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
@@ -13628,6 +13824,7 @@ function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
   const steps=[
     ['initialized','Board ready','tickets quickstart --agent <you>'],
+    ['coordinator','Coordinator seated','tickets master take'],
     ['first_ticket','Work on the board','tickets quickstart'],
     ['first_agent','You registered','tickets quickstart --agent <you>'],
     ['first_review','Reviewable SHA','tickets review <id> --notes "..."'],
@@ -13746,8 +13943,10 @@ def _onboarding_checklist(board, tickets):
         if rec.get("name"):
             names.add(rec["name"])
     names.update(workforce)
+    master = current_master(board) or {}
     return {
         "initialized": initialized,
+        "coordinator": bool((master.get("owner") or "").strip()),
         "first_ticket": any(t.get("claimed_at") for t in tickets),
         "first_agent": bool(names),
         "second_harness": len(names) >= 2,
@@ -13757,7 +13956,7 @@ def _onboarding_checklist(board, tickets):
     }
 
 
-def _next_step_hint(board, tickets, done_ids):
+def _next_step_hint(board, tickets, done_ids, health_items=None):
     """One-line guidance for the persistent next-step strip."""
     if not tickets:
         return {"kind": "start", "label": "Get started",
@@ -13781,12 +13980,19 @@ def _next_step_hint(board, tickets, done_ids):
                 "message": "No agents on the board yet — register one to claim work.",
                 "cmd": "tickets join <name> --roles backend"}
     ready = [t for t in tickets if t.get("status") == "open"
-             and all(d in done_ids for d in t.get("deps", []))]
+             and all(d in done_ids for d in t.get("deps", []))
+             and _ticket_lane(t) == "ready"]
     unowned = [t for t in ready if not t.get("owner")]
     if unowned:
         return {"kind": "route", "label": "Route work",
                 "message": "Ready tickets are unowned — claim or assign them.",
                 "cmd": "tickets next"}
+    alerts = [h for h in (health_items or []) if h.get("sev") in ("CRIT", "WARN")]
+    if alerts:
+        top = alerts[0]
+        return {"kind": "attention", "label": "Needs attention",
+                "message": top.get("msg") or "The board has warnings.",
+                "cmd": "tickets show"}
     return {"kind": "ok", "label": "On track",
             "message": "Workers are moving — post updates every 45 minutes.",
             "cmd": "tickets update <id> \"...\""}
@@ -14226,15 +14432,30 @@ def _board_snapshot_body(board, messages=40):
     util_rows = [r for r in rows if r["state"] != "DOWN"]
     in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
                   "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
-                  "waiting": [d for d in t.get("deps", []) if d not in done]}
+                  "waiting": [d for d in t.get("deps", []) if d not in done],
+                  "phase": "working", "lane": _ticket_lane(t),
+                  "handoff": _last_handoff(t), "verdict": _ticket_verdict(t)}
                  for t in tickets if t["status"] == "claimed"]
     review = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
-               "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", "")}
+               "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", ""),
+               "phase": "review", "lane": _ticket_lane(t),
+               "handoff": _last_handoff(t), "verdict": _ticket_verdict(t)}
               for t in tickets if t["status"] == "review"]
-    open_rows = [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2),
-                  "title": t["title"], "role": t.get("role", ""), "owner": t.get("owner", ""),
-                  "waiting": [d for d in t.get("deps", []) if d not in done]}
-                 for t in tickets if t["status"] in ("open", "blocked")]
+    open_rows = []
+    for t in tickets:
+        if t["status"] not in ("open", "blocked"):
+            continue
+        waiting = [d for d in t.get("deps", []) if d not in done]
+        open_rows.append({
+            "id": t["id"], "status": LABEL.get(t["status"], t["status"]),
+            "priority": t.get("priority", 2), "title": t["title"],
+            "role": t.get("role", ""), "owner": t.get("owner", ""),
+            "waiting": waiting, "phase": _ticket_phase(t, waiting),
+            "lane": _ticket_lane(t), "wait_reason": _wait_reason(t, waiting),
+            "reserved_for": _reserved_agent(t),
+            "handoff": _last_handoff(t), "verdict": _ticket_verdict(t),
+            "proof": (t.get("proof") or "").strip(),
+        })
     turns, usage, promise = _cached_turns_usage_promise(board, tickets)
     raw_msgs = []
     for x in load_messages(board)[-messages:]:
@@ -14258,6 +14479,7 @@ def _board_snapshot_body(board, messages=40):
     health_items = [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12]
     coverage = _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
                                 open_rows, in_flight, review, out_agents)
+    attention = _attention_snapshot(health_items, coverage)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -14268,7 +14490,7 @@ def _board_snapshot_body(board, messages=40):
         "open": open_rows,
         "agents": out_agents,
         "epics": _epics_snapshot(board, tickets),
-        "attention": _attention_snapshot(health_items, coverage),
+        "attention": attention,
         "health": health_items,
         # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
         # so the UI can render it in whatever timezone the viewer's browser is
@@ -14277,7 +14499,7 @@ def _board_snapshot_body(board, messages=40):
         # Advitiya PRIORITY agent chats: per-seat thread rail from the same log.
         "seat_threads": seat_thread_summaries(raw_msgs, seat_names),
         "onboarding": _onboarding_checklist(board, tickets),
-        "next_step": _next_step_hint(board, tickets, done),
+        "next_step": _next_step_hint(board, tickets, done, attention),
         "empty_board": counts["total"] == 0,
         "turns": turns,
         "usage": usage,
