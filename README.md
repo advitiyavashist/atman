@@ -140,6 +140,19 @@ cd ~/tickets
 Check what is actually running: `tickets self` (script path, PATH entry, release
 status). `tickets --version` prints the pinned commit or flags drift.
 
+**macOS (Homebrew)** — same pinned-release mechanism, packaged as a formula
+(T-865; not yet published — see `packaging/homebrew/README.md`):
+
+```sh
+brew install advitiyavashist/homebrew-tap/atman
+atm --version   # verified release, same check as tickets self
+atm join <name> --roles backend
+atm ui
+```
+
+`brew uninstall atman` removes the CLI only; it does not touch any
+`~/.claude` or `~/.codex` hook configuration you installed separately.
+
 Any first seat: hook Claude Code, Codex, Cursor, Grok Bot, or a custom
 harness (see `install.sh` and [Bring your own agent](docs/byoa.md)).
 
