@@ -75,13 +75,39 @@ def _msg_id(m):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _epoch_of(t):
-    """Messages at or before this stamp belong to the previous life (reopen).
+LIFE_PREVIOUS = "previous"
+LIFE_CURRENT = "current"
+LIFE_UNKNOWN = "unknown"
 
-    ``tickets.now()`` is second-precision, so a task post and ``reopen`` in the
-    same UTC second must not keep the old recipient as current intent.
-    """
+
+def _epoch_of(t):
+    """Second-precision reopen stamp. Prefer ``_life_of`` for current vs previous."""
     return (t.get("reopened_at") or "").strip()
+
+
+def _life_of(t, m):
+    """Is this message from the ticket's previous life, current life, or unknown?
+
+    Event order is the recorded ``reopened_seen`` message-id cutoff stamped at
+    reopen. UUID lexical order is never used. Without a cutoff, a strictly
+    earlier stamp is previous and a strictly later stamp is current; equal
+    second-precision stamps are unknown, not current dispatch and not ignored
+    history.
+    """
+    seen = t.get("reopened_seen")
+    if isinstance(seen, list):
+        return LIFE_PREVIOUS if _msg_id(m) in set(seen) else LIFE_CURRENT
+    epoch = _epoch_of(t)
+    if not epoch:
+        return LIFE_CURRENT
+    at = (m.get("at") or "").strip()
+    if not at:
+        return LIFE_UNKNOWN
+    if at < epoch:
+        return LIFE_PREVIOUS
+    if at > epoch:
+        return LIFE_CURRENT
+    return LIFE_UNKNOWN
 
 
 # --- review evidence --------------------------------------------------------
@@ -283,27 +309,42 @@ def delivery_text(d):
 def _dispatch_of(t, task_msgs, acked, agents, now):
     """Newest task message about this ticket that is current: after any reopen,
     and addressed to the reserved seat when a reservation exists. Older or
-    other-recipient posts are counted as ``ignored`` history, never as intent."""
+    other-recipient posts are counted as ``ignored`` history, never as intent.
+    Equal-timestamp posts with no event-order cutoff are ``unknown``."""
     tid = t.get("id", "")
     reserved = (t.get("reserved_for") or "").strip()
-    epoch = _epoch_of(t)
     ignored = 0
+    unknown = 0
+    current = None
     for m in reversed(task_msgs.get(tid) or []):
         to = (m.get("to") or "").strip()
         if not to or to.lower() in ("all", "everyone"):
             continue
-        if epoch and (m.get("at") or "") <= epoch:
+        life = _life_of(t, m)
+        if life == LIFE_PREVIOUS:
             ignored += 1
+            continue
+        if life == LIFE_UNKNOWN:
+            unknown += 1
             continue
         if reserved and to != reserved:
             ignored += 1
             continue
+        if current is not None:
+            continue
         d = _receipts(to, m, acked, agents, now)
         d.update({"to": to, "from": m.get("from") or "", "at": m.get("at") or "",
                   "age_h": _hours_since(m.get("at") or "", now), "msg_id": _msg_id(m),
-                  "text": (m.get("text") or "").strip()[:160], "ignored": ignored})
-        return d
-    return None if not ignored else {"ignored": ignored, "to": "", "msg_id": "", "seen": None, "wake": None}
+                  "text": (m.get("text") or "").strip()[:160]})
+        current = d
+    if current is not None:
+        current["ignored"] = ignored
+        current["unknown"] = unknown
+        return current
+    if not ignored and not unknown:
+        return None
+    return {"ignored": ignored, "unknown": unknown, "to": "", "msg_id": "",
+            "seen": None, "wake": None}
 
 
 def phase_of(t, waiting, dispatch):
@@ -404,6 +445,11 @@ def evidence_of(t, phase, dispatch, progress, now):
     if phase == "reserved":
         return "Reserved for @%s · no task posted · not claimed" % reserved + hist
     if phase == "ready":
+        unknown = (dispatch or {}).get("unknown") or 0
+        if unknown:
+            text = ("Task post at the reopen second has unknown order · "
+                    "not treated as current dispatch")
+            return text + hist
         text = "Unblocked · no reservation, no task posted · tickets next claims it"
         if progress and progress.get("became_ready"):
             text = "Became ready when %s finished %s · no reservation, no task posted · tickets next claims it" % (
@@ -454,8 +500,8 @@ def progress_of(t, by_id, done_ids, task_msgs, acked, agents, now):
     elif ticket_on_hold(t):
         gate = "hold"
     became_ready = bool(all_done and not gate and st in ("open", "claimed", "review", "done"))
-    epoch = _epoch_of(t)
     trigger = None
+    trigger_unknown = 0
     for m in reversed(task_msgs.get(tid) or []):
         text = m.get("text") or ""
         if not _trigger_text_matches(text, tid, parent):
@@ -463,8 +509,12 @@ def progress_of(t, by_id, done_ids, task_msgs, acked, agents, now):
         m_at = m.get("at") or ""
         if at and m_at < at:
             continue          # a trigger from an earlier completion of the same parent
-        if epoch and m_at <= epoch:
-            continue          # posted at or before the ticket was reopened
+        life = _life_of(t, m)
+        if life == LIFE_PREVIOUS:
+            continue          # posted in a previous life
+        if life == LIFE_UNKNOWN:
+            trigger_unknown += 1
+            continue          # equal second, no event-order cutoff
         to = (m.get("to") or "").strip()
         trigger = {"to": to, "from": m.get("from") or "", "at": m_at,
                    "age_h": _hours_since(m_at, now), "msg_id": _msg_id(m)}
@@ -491,7 +541,8 @@ def progress_of(t, by_id, done_ids, task_msgs, acked, agents, now):
             "done_deps": [{"id": d, "title": by_id[d].get("title") or "", "at": by_id[d].get("done_at") or ""}
                           for d in sorted(done_deps, key=lambda d: by_id[d].get("done_at") or "")],
             "pending": pending, "all_done": all_done, "gate": gate,
-            "became_ready": became_ready, "trigger": trigger, "claim": claim}
+            "became_ready": became_ready, "trigger": trigger,
+            "trigger_unknown": trigger_unknown, "claim": claim}
 
 
 def _starts_of(t, kids, by_id, done_ids, phases, dispatches):
@@ -673,6 +724,7 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
             "wait": wait_of(t, ph, waiting),
             "dispatch": disp if (disp and disp.get("to")) else None,
             "stale_posts": (disp or {}).get("ignored") or 0,
+            "unknown_posts": (disp or {}).get("unknown") or 0,
             "progress": progress,
             "starts": _starts_of(t, kids, by_id, done_ids, phases, dispatches) if ph == "done" else [],
             "acceptance": {

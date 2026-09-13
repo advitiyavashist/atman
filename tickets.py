@@ -6048,9 +6048,13 @@ def cmd_reopen(a, board):
     prev_owner = t.get("owner", "")
     t["status"] = "open"
     t["owner"] = ""
-    # T-889 hook: Work treats task posts and triggers older than this as the
-    # ticket's previous life, never as current dispatch evidence.
+    # T-889/T-810 hook: Work treats posts recorded in reopened_seen as the
+    # previous life. Event order, not UUID lexical order or equal timestamps.
     t["reopened_at"] = now()
+    t["reopened_seen"] = [
+        _msg_id(m) for m in load_messages(board)
+        if (m.get("re") or "").strip() == t["id"]
+    ]
     save(board, t)
     _safe(lambda: traj_event(board, "reopen", agent=whoami(getattr(a, "by", "")),
                              ticket=t, state_before=before, state_after="open",

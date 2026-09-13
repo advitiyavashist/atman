@@ -91,4 +91,5 @@ def test_reopen_stamps_reopened_at_for_work_view(board):
                agent="boss").returncode == 0
     t = json.loads((board / "T-001.json").read_text())
     assert t.get("reopened_at")
+    assert isinstance(t.get("reopened_seen"), list)
     assert t["status"] == "open"

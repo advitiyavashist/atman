@@ -313,11 +313,14 @@ def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
     n = by["T-001"]
     assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
     assert "1 earlier task post ignored" in n["evidence"]
-    # same UTC second as reopen (tickets.now() is %Y-%m-%dT%H:%M:%SZ): still stale
-    same = dict(old, at="2026-09-13T00:00:00Z")
+    # same UTC second, no event-order cutoff: unknown, not posted and not "no task posted"
+    same = dict(old, id="m-eq", at="2026-09-13T00:00:00Z")
     _, by = _pure([_t("T-001", reopened_at="2026-09-13T00:00:00Z")], [same])
     n = by["T-001"]
-    assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
+    assert n["phase"] != "posted" and n["dispatch"] is None
+    assert n["unknown_posts"] == 1 and n["stale_posts"] == 0
+    assert "unknown order" in n["evidence"]
+    assert "no task posted" not in n["evidence"]
     # reassigned by reservation: a post to another seat does not name the current recipient
     _, by = _pure([_t("T-001", reserved_for="bob")], [old])
     n = by["T-001"]
@@ -339,6 +342,58 @@ def test_reopen_stamps_reopened_at_so_old_posts_drop_out(board):
     n = by["T-001"]
     assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
     assert n["reopened_at"] == t["reopened_at"]
+    assert "reopened_seen" in t and isinstance(t["reopened_seen"], list)
+    assert t["reopened_seen"]  # the pre-reopen task post is in the cutoff
+
+
+def test_same_second_post_order_uses_seen_cutoff_not_uuid():
+    # ids chosen so lexical UUID order would get the chronology backwards
+    before = {"id": "zzz-after-lexically", "kind": "task", "re": "T-001", "to": "carol",
+              "from": "planner", "at": T0, "text": "take T-001 before reopen"}
+    after = {"id": "aaa-before-lexically", "kind": "task", "re": "T-001", "to": "alice",
+             "from": "planner", "at": T0, "text": "take T-001 after reopen"}
+    # post-before-reopen: id recorded in the cutoff, even though it sorts last
+    _, by = _pure([_t("T-001", reopened_at=T0, reopened_seen=["zzz-after-lexically"])], [before])
+    n = by["T-001"]
+    assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
+    assert n["unknown_posts"] == 0
+    assert "1 earlier task post ignored" in n["evidence"]
+    # post-after-reopen: id not in the cutoff, even though it sorts first
+    _, by = _pure([_t("T-001", reopened_at=T0, reopened_seen=["zzz-after-lexically"])], [after])
+    n = by["T-001"]
+    assert n["phase"] == "posted" and n["dispatch"]["to"] == "alice"
+    assert n["stale_posts"] == 0 and n["unknown_posts"] == 0
+    assert "Task posted to @alice" in n["evidence"]
+    # both lives in one log: current post wins; previous-life still counted
+    _, by = _pure([_t("T-001", reopened_at=T0, reopened_seen=["zzz-after-lexically"])],
+                  [before, after])
+    n = by["T-001"]
+    assert n["phase"] == "posted" and n["dispatch"]["to"] == "alice"
+    assert n["stale_posts"] == 1 and n["unknown_posts"] == 0
+    assert "1 earlier task post ignored" in n["evidence"]
+
+
+def test_reopen_then_immediate_post_is_current_even_same_second(board):
+    _team(board)
+    assert run(board, "msg", "take T-001", "--to", "bob", "--re", "T-001", "--task",
+               agent="planner").returncode == 0
+    assert run(board, "reopen", "T-001", "--notes", "bob lost the seat",
+               agent="planner").returncode == 0
+    t = json.loads((board / "T-001.json").read_text())
+    seen = list(t.get("reopened_seen") or [])
+    assert seen
+    assert run(board, "msg", "take T-001 now", "--to", "alice", "--re", "T-001", "--task",
+               agent="planner").returncode == 0
+    t2 = json.loads((board / "T-001.json").read_text())
+    by = _nodes(board)
+    n = by["T-001"]
+    assert n["phase"] == "posted" and n["dispatch"]["to"] == "alice"
+    assert n["stale_posts"] == 1
+    # new post is not in the reopen cutoff even if at == reopened_at
+    msgs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    newest = [m for m in msgs if m.get("re") == "T-001" and m.get("to") == "alice"][-1]
+    assert work_view._msg_id(newest) not in seen
+    assert t2.get("reopened_at") == t["reopened_at"]
 
 
 # --- T-892 item 3: the success-to-next story --------------------------------
@@ -426,6 +481,36 @@ def test_trigger_causality_needs_matching_completion_then_claim():
     s = by["T-001"]["starts"][0]
     assert s["who_kind"] == "posted" and s["began"] is False
     assert "told" not in work_view.WORK_JS
+
+
+def test_same_second_trigger_order_uses_seen_cutoff_not_uuid():
+    a = _t("T-001", status="done", owner="x", done_at=T0)
+    # lexical order of these ids is the opposite of event order
+    after = {"id": "aaa-before-lexically", "kind": "task", "re": "T-002", "to": "bob",
+             "from": "x", "at": T0,
+             "text": "unblocked T-002 after T-001 -- start (success trigger)"}
+    before = dict(after, id="zzz-after-lexically")
+    c = _t("T-002", status="claimed", owner="bob", deps=["T-001"],
+           claimed_at="2026-09-13T00:00:01Z", reopened_at=T0,
+           reopened_seen=["zzz-after-lexically"])
+    _, by = _pure([a, c], [after])
+    p = by["T-002"]["progress"]
+    assert p["trigger"]["to"] == "bob" and p["trigger"]["msg_id"] == "aaa-before-lexically"
+    assert p["trigger_unknown"] == 0
+    assert p["claim"]["causality"] == "after_trigger"
+    # same-second trigger already in the cutoff is previous-life, not current
+    open_child = _t("T-002", deps=["T-001"], reopened_at=T0,
+                    reopened_seen=["zzz-after-lexically"])
+    _, by = _pure([a, open_child], [before])
+    p = by["T-002"]["progress"]
+    assert p["trigger"] is None and p["trigger_unknown"] == 0
+    # equal timestamp, no cutoff: unknown, not a current trigger
+    claimed = _t("T-002", status="claimed", owner="bob", deps=["T-001"],
+                 claimed_at="2026-09-13T00:00:01Z", reopened_at=T0)
+    _, by = _pure([a, claimed], [after])
+    p = by["T-002"]["progress"]
+    assert p["trigger"] is None and p["trigger_unknown"] == 1
+    assert p["claim"]["causality"] == "unverified"
 
 
 # --- T-892 item 4: review evidence for the exact artifact --------------------
