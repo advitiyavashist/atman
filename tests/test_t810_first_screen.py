@@ -61,6 +61,8 @@ def test_shell_listens_for_work_select_and_has_mobile_jump():
     assert "ensureToOption(extra.to)" in ui
     assert 'id="workJump"' in ui
     assert 'id="workJumpCompose"' in ui
+    assert "jump.hidden=!id" in ui
+    assert "!extra.initial" in ui
     assert "setTab('messages')" in ui
     assert "max-width:700px" in ui
     assert "Reserved for @" in ui

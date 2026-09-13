@@ -13757,7 +13757,7 @@ function applyWorkSelect(id, extra){
     if(d)d.textContent=id?('Open '+id+' detail'):'Open selected detail';
     if(c)c.textContent=id?('Compose about '+id):'Compose about this ticket';
   }
-  if(id&&window.matchMedia('(max-width:700px)').matches){
+  if(id&&!extra.initial&&window.matchMedia('(max-width:700px)').matches){
     const det=document.querySelector('#workflowGraph .wv-detail')||document.getElementById('graphDetail');
     if(det&&!det.hidden)det.scrollIntoView({block:'nearest'});
   }
@@ -14054,7 +14054,7 @@ function deliveryTags(m){
     if(recs.length){
       const labels=recs.map(r=>r.label).filter(Boolean);
       const allSame=labels.length&&labels.every(x=>x===labels[0]);
-      tags.push('<span class="tag'+(labels.some(x=>x.indexOf('wake confirmed')===0)?' ack':' pending')+'">'+esc(allSame?labels[0]:(labels.filter(x=>x.indexOf('not read')!==0).length?'partial receipt':'not read, wake unconfirmed'))+'</span>');
+      tags.push('<span class="tag'+(labels.some(x=>x.indexOf('wake confirmed')!==-1)?' ack':' pending')+'">'+esc(allSame?labels[0]:(labels.filter(x=>x.indexOf('not read')!==0).length?'partial receipt':'not read, wake unconfirmed'))+'</span>');
     }else if((d.acks||[]).length){
       const seen=d.acks.filter(a=>a.acked).length;
       if(seen===d.acks.length)tags.push('<span class="tag pending">inbox read, not acknowledged</span>');
@@ -14370,15 +14370,18 @@ def _message_wake_receipt(rec, msg):
 
 
 def _delivery_receipt_label(seen, wake):
-    if wake and wake.get("confirmed"):
-        return "wake confirmed"
-    if wake and wake.get("label"):
-        return "wake: %s" % wake["label"]
+    """Read and wake stay distinct; an unconfirmed wake label never hides inbox-read."""
+    bits = []
+    has_wake = bool(wake and (wake.get("confirmed") or wake.get("label")))
     if seen:
-        return "inbox read, not acknowledged"
-    if seen is False:
-        return "not read, wake unconfirmed"
-    return "delivery unknown"
+        bits.append("inbox read, not acknowledged")
+    elif seen is False:
+        bits.append("not read" if has_wake else "not read, wake unconfirmed")
+    if wake and wake.get("confirmed"):
+        bits.append("wake confirmed")
+    elif wake and wake.get("label"):
+        bits.append("wake: %s" % wake["label"])
+    return " · ".join(bits) if bits else "delivery unknown"
 
 
 def _message_delivery(board, msg, agents_by=None):

@@ -294,6 +294,7 @@ def test_posted_read_woken_and_claimed_carry_different_labels():
     _, by = _pure([_t("T-001")], [msg], acked=lambda who, m: True, agents=agents)
     assert by["T-001"]["dispatch"]["wake"]["confirmed"] is False
     assert "wake: queued-offline" in by["T-001"]["evidence"]
+    assert "inbox read, not acknowledged" in by["T-001"]["evidence"]
     # a receipt for a different message proves nothing about this one
     agents["bob"]["wake_delivery"] = {"message_id": "other", "label": "woken", "at": T0}
     _, by = _pure([_t("T-001")], [msg], acked=lambda who, m: True, agents=agents)
@@ -303,6 +304,25 @@ def test_posted_read_woken_and_claimed_carry_different_labels():
     assert by["T-001"]["phase"] == "working"
     assert by["T-001"]["evidence"].startswith("Claimed by @bob")
     assert by["T-001"]["dispatch"] is None
+
+
+def test_inbox_read_stays_visible_beside_unconfirmed_wake():
+    msg = {"id": "m9", "kind": "task", "re": "T-009", "to": "carol", "from": "planner",
+           "at": "2026-09-13T00:00:01Z", "text": "please take T-009"}
+    agents = {"carol": {"owner": "carol", "wake_delivery": {
+        "message_id": "m9", "label": "no live endpoint", "at": "2026-09-13T00:00:02Z"}}}
+    _, before = _pure([_t("T-009")], [msg], acked=lambda who, m: False, agents=agents)
+    _, after = _pure([_t("T-009")], [msg], acked=lambda who, m: True, agents=agents)
+    assert "wake: no live endpoint" in before["T-009"]["evidence"]
+    assert "inbox read, not acknowledged" not in before["T-009"]["evidence"]
+    assert "not read" in before["T-009"]["evidence"]
+    ev = after["T-009"]["evidence"]
+    assert "inbox read, not acknowledged" in ev
+    assert "wake: no live endpoint" in ev
+    assert ev != before["T-009"]["evidence"]
+    assert work_view.delivery_text({"seen": True, "wake": {
+        "label": "no live endpoint", "confirmed": False}}) == (
+        "inbox read, not acknowledged · wake: no live endpoint")
 
 
 def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
@@ -602,6 +622,21 @@ def test_module_uses_semantic_status_tokens_and_readable_light_focus():
     # stacked layout reaches the detail and returns to the node
     assert "data-wv-back" in js and "scrollIntoView" in js
     assert "Follow the work. Select a ticket for its blockers, handoff, and review." in js
+
+
+def test_initial_deeplink_or_stored_sel_notifies_shell_once():
+    js = work_view.WORK_JS
+    assert "q.get('work')" in js and "LS_SEL" in js
+    assert "function emitWorkSelect" in js
+    assert "emitWorkSelect({initial:true})" in js
+    assert "if(SEL!==SHELL_SEL)" in js
+    assert "initial:!!opts.initial" in js
+    # click path still emits without the restore flag; restore does not focus
+    assert "emitWorkSelect();" in js
+    assert "opts.focus&&SEL" in js
+    # wake label and inbox-read stay composed in the module copy
+    assert "inbox read, not acknowledged" in js
+    assert "hasWake?'not read':'not read, wake unconfirmed'" in js
 
 
 def test_work_payload_is_pure_and_survives_bad_ack():

@@ -292,18 +292,20 @@ def _receipts(to, m, acked, agents, now):
 
 
 def delivery_text(d):
-    """One honest phrase for a task message's receipts."""
+    """Posted/read/wake facts together; a wake label never hides inbox-read."""
     wake = d.get("wake") if d else None
-    if wake and wake.get("confirmed"):
-        return "wake confirmed" + (" " + _fmt_age(wake.get("age_h")) if wake.get("at") else "")
-    if wake and wake.get("label"):
-        return "wake: %s" % wake["label"]
     seen = d.get("seen") if d else None
+    bits = []
+    has_wake = bool(wake and (wake.get("confirmed") or wake.get("label")))
     if seen is True:
-        return "inbox read, not acknowledged"
-    if seen is False:
-        return "not read, wake unconfirmed"
-    return "delivery unknown"
+        bits.append("inbox read, not acknowledged")
+    elif seen is False:
+        bits.append("not read" if has_wake else "not read, wake unconfirmed")
+    if wake and wake.get("confirmed"):
+        bits.append("wake confirmed" + (" " + _fmt_age(wake.get("age_h")) if wake.get("at") else ""))
+    elif wake and wake.get("label"):
+        bits.append("wake: %s" % wake["label"])
+    return " · ".join(bits) if bits else "delivery unknown"
 
 
 def _dispatch_of(t, task_msgs, acked, agents, now):
@@ -907,7 +909,7 @@ WORK_HTML = r"""<div class="wv" id="workView"><p class="graph-empty" id="workVie
 WORK_JS = r"""
 window.AtmanWork=(function(){
   const LS_MODE='tickets-ui-work-mode',LS_SEL='tickets-ui-work-selected';
-  let MODE='graph',SEL='',W=null,HOST=null,SIG='';
+  let MODE='graph',SEL='',W=null,HOST=null,SIG='',SHELL_SEL=null;
   try{MODE=localStorage.getItem(LS_MODE)==='list'?'list':'graph';SEL=localStorage.getItem(LS_SEL)||''}catch(e){}
   // deep links: /?work=T-012 opens that node; /?mode=list opens the list fallback
   try{const q=new URLSearchParams(location.search);if(q.get('mode'))MODE=q.get('mode')==='list'?'list':'graph';if(/^T-\d+$/.test(q.get('work')||''))SEL=q.get('work')}catch(e){}
@@ -918,22 +920,25 @@ window.AtmanWork=(function(){
   const stacked=()=>{try{return window.matchMedia('(max-width: 900px)').matches}catch(e){return false}};
   function ago(h){if(h==null)return '—';if(h<1/60)return 'just now';if(h<1)return Math.round(h*60)+'m ago';if(h<48)return (h<10?h.toFixed(1):Math.round(h))+'h ago';return Math.round(h/24)+'d ago'}
   function cmd(s){return '<code class="wv-cmd">'+esc(s)+'</code>'}
-  // receipts are separate facts: wake receipt > inbox read > nothing; none of them is a claim
+  // receipts are separate facts shown together; a wake label never hides inbox-read
   function delivery(d){
     if(!d)return 'delivery unknown';
-    if(d.wake&&d.wake.confirmed)return 'wake confirmed'+(d.wake.at?' '+ago(d.wake.age_h):'');
-    if(d.wake&&d.wake.label)return 'wake: '+d.wake.label;
-    if(d.seen===true)return 'inbox read, not acknowledged';
-    if(d.seen===false)return 'not read, wake unconfirmed';
-    return 'delivery unknown';
+    const bits=[];
+    const hasWake=d.wake&&(d.wake.confirmed||d.wake.label);
+    if(d.seen===true)bits.push('inbox read, not acknowledged');
+    else if(d.seen===false)bits.push(hasWake?'not read':'not read, wake unconfirmed');
+    if(d.wake&&d.wake.confirmed)bits.push('wake confirmed'+(d.wake.at?' '+ago(d.wake.age_h):''));
+    else if(d.wake&&d.wake.label)bits.push('wake: '+d.wake.label);
+    return bits.length?bits.join(' · '):'delivery unknown';
   }
   function shortDelivery(d){
     if(!d)return '';
-    if(d.wake&&d.wake.confirmed)return ' · woken';
-    if(d.wake&&d.wake.label)return ' · wake: '+d.wake.label;
-    if(d.seen===true)return ' · read';
-    if(d.seen===false)return ' · unread';
-    return '';
+    const bits=[];
+    if(d.seen===true)bits.push('read');
+    else if(d.seen===false)bits.push('unread');
+    if(d.wake&&d.wake.confirmed)bits.push('woken');
+    else if(d.wake&&d.wake.label)bits.push('wake: '+d.wake.label);
+    return bits.length?' · '+bits.join(' · '):'';
   }
   function who(n,full){
     if(!n.who)return n.phase==='working'||n.phase==='review'||n.phase==='done'?'unowned':'';
@@ -1072,6 +1077,12 @@ window.AtmanWork=(function(){
     }).join('');
   }
   function nodeOf(id){return W&&W.nodes.find(n=>n.id===id)}
+  function emitWorkSelect(opts){
+    opts=opts||{};
+    const n=SEL?nodeOf(SEL):null;
+    SHELL_SEL=SEL;
+    try{document.dispatchEvent(new CustomEvent('atman:work-select',{detail:{id:SEL,title:n?n.title:'',phase:n?n.phase:'',to:n?(n.who_kind==='suggested'?'':n.who):'',who_kind:n?n.who_kind:'',initial:!!opts.initial}}))}catch(e){}
+  }
   function renderDetail(){
     const body=HOST.querySelector('.wv-body'),el=HOST.querySelector('.wv-detail');
     const n=SEL?nodeOf(SEL):null;
@@ -1092,7 +1103,7 @@ window.AtmanWork=(function(){
     const n=SEL?nodeOf(SEL):null;
     if(SEL!==prev)announce(n?n.id+' detail open: '+n.title+'. '+(PH[n.phase]||n.phase)+'.':'Detail closed');
     // the shell's composer follows the selection: who to address and about what
-    try{document.dispatchEvent(new CustomEvent('atman:work-select',{detail:{id:SEL,title:n?n.title:'',phase:n?n.phase:'',to:n?(n.who_kind==='suggested'?'':n.who):'',who_kind:n?n.who_kind:''}}))}catch(e){}
+    emitWorkSelect();
     if(opts.focus&&SEL){const b=HOST.querySelector('.wv-node[data-id="'+SEL+'"]');if(b)b.focus()}
     // stacked layout (≤900px): the detail sits below the graph; bring it into view, Back returns
     if(SEL&&SEL!==prev&&stacked()&&!opts.noScroll){const el=HOST.querySelector('.wv-detail');if(el)el.scrollIntoView({block:'start',behavior:reduced()?'auto':'smooth'})}
@@ -1124,6 +1135,8 @@ window.AtmanWork=(function(){
     HOST.innerHTML='<div class="wv">'+objective(w.objective)+'<p class="wv-lead">Follow the work. Select a ticket for its blockers, handoff, and review.</p><div class="wv-bar">'+legend+modes+'</div><div class="wv-body"><div class="wv-main">'+main+'</div><aside class="wv-detail" aria-label="Ticket detail" hidden></aside></div><div class="wv-sr" aria-live="polite" data-wv-live></div></div>';
     if(SEL&&!nodeOf(SEL))SEL='';
     renderDetail();drawEdges();
+    // stored / deep-linked SEL never goes through select(); tell the shell once, no focus
+    if(SEL!==SHELL_SEL)emitWorkSelect({initial:true});
     if(focusId){const b=HOST.querySelector('.wv-node[data-id="'+focusId+'"]');if(b)b.focus()}
     else if(focusClose){const c=HOST.querySelector('[data-wv-close]');if(c)c.focus()}
     else if(focusBack){const c=HOST.querySelector('[data-wv-back]');if(c)c.focus()}

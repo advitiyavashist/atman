@@ -21,6 +21,19 @@ def _snap(board):
     return json.loads(r.stdout)
 
 
+def test_receipt_label_keeps_inbox_read_beside_unconfirmed_wake():
+    assert tk._delivery_receipt_label(True, {
+        "label": "no live endpoint", "confirmed": False}) == (
+        "inbox read, not acknowledged · wake: no live endpoint")
+    assert tk._delivery_receipt_label(False, {
+        "label": "no live endpoint", "confirmed": False}) == (
+        "not read · wake: no live endpoint")
+    assert tk._delivery_receipt_label(True, None) == "inbox read, not acknowledged"
+    assert tk._delivery_receipt_label(True, {
+        "label": "woken", "confirmed": True}) == (
+        "inbox read, not acknowledged · wake confirmed")
+
+
 def test_delivery_tags_never_call_inbox_read_acked():
     ui = _ui_html()
     chunk = ui[ui.index("function deliveryTags"):ui.index("function setConn")]
