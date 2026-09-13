@@ -2,7 +2,8 @@
 
 Connecting is joining **Atman**, not Claude, Cursor, Codex, or another
 provider. Board identity is `atman-<seat>` (example `atman-ceo`). CoS is
-`cursor` and staffs. Cursor-only spawns unless the operator says otherwise.
+the current `steer.chief-of-staff` holder (not a hardcoded `cursor`
+seat). Cursor-only spawns unless the operator says otherwise.
 
 This is the launch pillar. A new CEO types `tickets connect` on a living
 board and gets an executable path, in this order:
@@ -33,6 +34,7 @@ Confirm:
 ```sh
 tickets self
 # script: must be this checkout or Atman origin/main after merge — not sol-agy-harness
+# also prints identity, roles, alias, and endpoint for the current TICKET_AGENT
 ```
 
 Recut after merge to origin/main:
@@ -54,7 +56,10 @@ tickets connect
 
 ## Exact commands a new CEO runs
 
-Living Steer board. `atman-ceo` is master. CoS is `cursor`.
+Living Steer board. Join as a unique `atman-<seat>`. If `--alias ceo` is
+already bound, pass `--transfer` to rebind (tickets alias behavior is
+unchanged: refuse without `--transfer`). CoS is the
+`steer.chief-of-staff` holder.
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
