@@ -839,7 +839,10 @@ def agents_dir(board):
     return os.path.join(board, "agents")
 
 
-from ticket_board.agent_checkin import checkin  # canonical; no root tickets.py
+try:
+    from .agent_checkin import checkin  # canonical; no root tickets.py
+except ImportError:  # python src/ticket_board/cli.py
+    from agent_checkin import checkin
 
 
 def _clear_agent_ticket(board, agent, tid):
