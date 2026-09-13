@@ -5969,6 +5969,9 @@ def cmd_reopen(a, board):
     prev_owner = t.get("owner", "")
     t["status"] = "open"
     t["owner"] = ""
+    # T-889 hook: the Work view treats task posts and triggers older than this
+    # as the ticket's previous life, never as current dispatch evidence.
+    t["reopened_at"] = now()
     save(board, t)
     _safe(lambda: traj_event(board, "reopen", agent=whoami(getattr(a, "by", "")),
                              ticket=t, state_before=before, state_after="open",
@@ -14317,7 +14320,8 @@ def _board_snapshot_body(board, messages=40):
         # T-889 hook: the Work view payload (objective, phases, node detail).
         "work": _safe(lambda: _work_view().work_payload(
             tickets, graph, all_msgs, objective=objective_view,
-            acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who))), None),
+            acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who)),
+            agents=agents), None),
     }
 
 
