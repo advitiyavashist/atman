@@ -3085,6 +3085,98 @@ def _order_shas_by_ancestry(sh, cwd, shas):
     return ordered
 
 
+def _train_mod():
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import train_stack as mod
+    return mod
+
+
+def cmd_train(a, board):
+    """Stack PRs on one branch, verify once, land each at its exact SHA."""
+    tr = _train_mod()
+    sub = getattr(a, "train_cmd", "") or ""
+    root = artifact_tree(a) or os.path.dirname(board)
+    if sub == "build":
+        refs = []
+        for raw in (getattr(a, "refs", "") or "").split(","):
+            raw = raw.strip()
+            if raw:
+                refs.append({"ref": raw, "sha": "", "pr": None})
+        gh = os.environ.get("TICKETS_GH") or "gh"
+        gh_repo = tr.github_repo((tr.repo_bind(root).get("origin") if root else "") or "")
+        for raw in (getattr(a, "prs", "") or "").split(","):
+            raw = raw.strip()
+            if raw:
+                refs.append(tr.gh_pr_ref(raw, gh_bin=gh, root=root, repo=gh_repo or None))
+        trunk = (getattr(a, "trunk", "") or "").strip() or _trunk(cwd=root)
+        rec = tr.build_train(root, refs, branch=getattr(a, "branch", "") or "train/stack",
+                             trunk=trunk)
+        tr.save_train(board, rec)
+        print("train %s @%s  members=%s" % (
+            rec["train_branch"], rec["train_sha"][:12],
+            ",".join((str(m.get("pr") or m.get("ref")) for m in rec["members"]))))
+        return
+    if sub == "verify":
+        rec = tr.load_train(board)
+        if not rec.get("train_sha"):
+            sys.exit("train verify: no train.json; run tickets train build first")
+        main_path = getattr(a, "main_failures", "") or ""
+        train_path = getattr(a, "train_failures", "") or ""
+        if not main_path or not train_path:
+            sys.exit("train verify: pass --main-failures and --train-failures "
+                     "(hermetic suite logs). Do not land without an ACCEPT verdict.")
+        with open(main_path) as f:
+            main_text = f.read()
+        with open(train_path) as f:
+            train_text = f.read()
+        ran = tr.suite_evidence(main_text) and tr.suite_evidence(train_text)
+        main_ids = tr.failure_ids(main_text)
+        train_ids = tr.failure_ids(train_text)
+        diff = tr.verdict_from_failures(main_ids, train_ids, suite_ran=ran)
+        rec.update(diff)
+        rec["evidence"] = {
+            "main": tr.completed_run_receipt(
+                main_text, source=os.path.realpath(main_path),
+                repo=rec.get("repo"), sha=rec.get("main_sha"), kind="main"),
+            "train": tr.completed_run_receipt(
+                train_text, source=os.path.realpath(train_path),
+                repo=rec.get("repo"), sha=rec.get("train_sha"), kind="train"),
+        }
+        tr.save_train(board, rec)
+        print("train verify %s  new=%s  train=%s  main=%s" % (
+            rec["verdict"], rec["train_sha"][:12], rec["main_sha"][:12],
+            ",".join(rec["new_failures"]) or "-"))
+        if rec["verdict"] == "UNKNOWN":
+            sys.exit("train verify UNKNOWN: logs must include suite-ran evidence")
+        if rec["verdict"] != "ACCEPT":
+            sys.exit("train verify REJECT: new failures: %s" % (
+                ", ".join(rec["new_failures"])))
+        return
+    if sub == "land":
+        rec = tr.load_train(board)
+        owner = whoami(getattr(a, "owner", "") or "")
+        require_integrator(board, owner, force_master=getattr(a, "force_master", False))
+        root = artifact_tree(a)
+        if not root:
+            sys.exit("train land: pass --artifact at the repo recorded in train.json")
+        for member in rec.get("members") or []:
+            if member.get("repo") and not tr.same_repo(member["repo"], tr.repo_bind(root)):
+                sys.exit("train land refused: member %s is bound to another repo" % (
+                    member.get("pr") or member.get("ref") or member.get("sha")))
+        gh = os.environ.get("TICKETS_GH") or "gh"
+        landed = tr.land_train(rec, executor_ok=True, gh_bin=gh, root=root,
+                              trunk=_trunk(cwd=root))
+        rec["landed"] = landed
+        tr.save_train(board, rec)
+        print("train land %s  %s" % (
+            rec.get("verdict"),
+            ",".join("%s@%s" % (m["pr"], m["sha"][:12]) for m in landed)))
+        return
+    sys.exit("usage: tickets train build|verify|land")
+
+
 def cmd_merge(a, board):
     """Master side: integrate pinned review SHAs into main behind a green test run.
 
@@ -15981,6 +16073,24 @@ def main():
     c.add_argument("--force", action="store_true")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_merge)
+
+    c = sub.add_parser("train", help="stack ready PRs, verify once, land each at its exact SHA")
+    ts = c.add_subparsers(dest="train_cmd")
+    x = ts.add_parser("build", help="no-ff merge --prs/--refs in order; stop on the conflicting pair")
+    x.add_argument("--prs", default="", help="comma-separated GitHub PR numbers")
+    x.add_argument("--refs", default="", help="comma-separated local refs (tests / already-fetched SHAs)")
+    x.add_argument("--branch", default="train/stack")
+    x.add_argument("--trunk", default="")
+    x.add_argument("--artifact", default="")
+    x = ts.add_parser("verify", help="failure-id diff of train vs main; ACCEPT only if no new failures")
+    x.add_argument("--main-failures", default="", help="file of failure ids from main")
+    x.add_argument("--train-failures", default="", help="file of failure ids from the train SHA")
+    x.add_argument("--artifact", default="")
+    x = ts.add_parser("land", help="gh merge --match-head-commit each member after ACCEPT")
+    x.add_argument("--owner", "-o", default="")
+    x.add_argument("--force-master", action="store_true")
+    x.add_argument("--artifact", default="")
+    c.set_defaults(fn=cmd_train, train_cmd="")
 
     c = sub.add_parser("limit", help="record that an agent hit a usage limit (or --clear)")
     c.add_argument("agent", nargs="?", default="")
