@@ -12,6 +12,9 @@ from unittest import mock
 from test_t683_session_adapters import (  # noqa: F401
     FakeInbox, _adapters, _run, board, cache_dir, sock_dir,
 )
+from test_t861_cursor_agy_wake import (  # noqa: F401
+    SESSION, _endpoint, cursor_seat,
+)
 
 
 class FakeAcp:
@@ -102,28 +105,23 @@ def test_codex_queue_without_app_server_is_queued_offline(board, cache_dir, monk
     assert run_mock.call_args[0][0][:4] == ["codex", "queue", "--thread", "thread-abc"]
 
 
-def test_cursor_tmux_persist_is_woken(board, cache_dir, monkeypatch):
-    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+def test_cursor_tmux_persist_is_woken(board, cursor_seat):
+    """Pause->wake parity for Cursor: typed line, Enter, and a real turn.
+
+    T-861 moved this onto the managed `agent persist` tmux server (tmux -L
+    cursor-agent) and made "woken" wait for the line to land in the chat store;
+    the old shape mocked a bare `tmux send-keys` on the default server.
+    """
     sa = _adapters()
-    sa.write_endpoint(str(board), "grok-worker", {
-        "seat": "grok-worker", "provider": "cursor", "mode": "native",
-        "session_id": "chat-1", "persist_session": "persist-grok",
-        "pid": os.getpid(), "at": "now", "heartbeat_epoch": time.time()})
-    calls = []
-
-    def fake_which(cmd):
-        return "/usr/bin/tmux" if cmd == "tmux" else None
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    with mock.patch.object(sa, "_which", side_effect=fake_which):
-        with mock.patch("subprocess.run", side_effect=fake_run):
-            label = sa.wake_seat(str(board), "grok-worker", "wake now", harness="cursor")
+    cursor_seat["install"]()
+    _endpoint(sa, board)
+    label = sa.wake_seat(str(board), "grok-worker", "wake now", harness="cursor")
     assert label == "woken", label
-    assert calls[0][:4] == ["tmux", "send-keys", "-t", "persist-grok"]
-    assert calls[1] == ["tmux", "send-keys", "-t", "persist-grok", "Enter"]
+    calls = cursor_seat["calls"]()
+    typed = [c for c in calls if "send-keys" in c and "-l" in c]
+    enter = [c for c in calls if "send-keys" in c and c[-1] == "Enter"]
+    assert typed and typed[0][5:] == ["send-keys", "-t", SESSION + ":", "-l", "wake now"]
+    assert enter and enter[0][5:] == ["send-keys", "-t", SESSION + ":", "Enter"]
 
 
 def test_cursor_without_persist_is_not_native_pass(board, cache_dir, monkeypatch):

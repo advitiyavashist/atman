@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -367,12 +368,15 @@ def live_endpoint(board, seat):
             return _drop_observed()
         if pid_ok is None and not _heartbeat_fresh(ep):
             return None, True
-        # Native inject needs persist+tmux or a live ACP control sock.
-        # Identity-only CURSOR_CONVERSATION_ID stays supervised.
+        # Native inject needs a *managed* persist session that is still on the
+        # cursor-agent tmux server, or an operator ACP control sock. A stored
+        # session name whose pane is gone is identity, not reachability, and
+        # identity-only CURSOR_CONVERSATION_ID stays supervised.
         persist = (ep.get("persist_session") or "").strip()
         acp = (ep.get("socket") or "").strip()
         acp_live = bool(acp and os.path.exists(acp))
-        if ep.get("mode") == "native" and not persist and not acp_live:
+        persist_live = bool(persist) and _cursor_managed_session(persist) is not None
+        if ep.get("mode") == "native" and not persist_live and not acp_live:
             ep = dict(ep)
             ep["mode"] = "supervised"
     else:
@@ -405,29 +409,224 @@ def default_cursor_acp_socket():
 
 
 def _cursor_acp_sock():
-    """Managed ACP control socket (not `agent -p --resume`, not worker.sock)."""
-    override = (os.environ.get("CURSOR_ACP_CONTROL_SOCK") or "").strip()
-    if override:
-        return override
-    return os.path.join(os.path.expanduser("~"), ".cursor", "acp-control",
-                        "acp-control.sock")
+    """Operator-asserted ACP control socket. Empty unless one is configured.
+
+    T-861 evidence: cursor-agent 2026.09.10 ships `agent acp` as a *hidden*
+    command that starts the agent as an ACP server on stdio
+    (index.js: `command("acp", {hidden:!0})` -> `runAcp`), i.e. a new process.
+    The bundle contains no "acp-control" string and opens no control socket, so
+    the old default ~/.cursor/acp-control/acp-control.sock could never exist: it
+    only made `native_inject` look reachable on a seat with no transport. A live
+    ACP bridge is something an operator runs, so it must be named explicitly.
+    """
+    return (os.environ.get("CURSOR_ACP_CONTROL_SOCK") or "").strip()
+
+
+# --- Cursor `agent persist` transport (T-861, verified against 2026.09.10) ---
+# `agent persist` does NOT live on the user's default tmux server.
+# src/persistence/persistent-session.ts runs every tmux call as
+#   tmux -u -L <CURSOR_AGENT_TMUX_SERVER_NAME|cursor-agent> -f /dev/null ...
+# with a scrubbed env (PATH/HOME/SHELL/USER/LOGNAME/LANG/TERM/COLORTERM, LC_*)
+# and TMUX_TMPDIR=/tmp, and tags each managed session @cursor_managed=1,
+# @cursor_session_version=1, @cursor_workspace_hash=<32 hex>, @cursor_chat_id.
+# Inside a persist pane the CLI exports CURSOR_AGENT_PERSIST_SESSION=<name>.
+# Reading $TMUX / `tmux display-message` (the pre-T-861 code) asked the default
+# server instead: send-keys either failed or typed the board's mail into an
+# unrelated user session that happened to share the name.
+CURSOR_PERSIST_TMUX_SERVER = "cursor-agent"
+CURSOR_PERSIST_TMUX_TMPDIR = "/tmp"
+CURSOR_PERSIST_ENV = "CURSOR_AGENT_PERSIST_SESSION"
+CURSOR_SESSIONS_TTL_SECS = float(os.environ.get("TICKETS_CURSOR_SESSIONS_TTL_SECS", "2"))
+# Seconds to wait for the injected line to land in the chat store as a turn.
+CURSOR_EVIDENCE_SECS = float(os.environ.get("TICKETS_CURSOR_EVIDENCE_SECS", "6"))
+_CURSOR_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_CURSOR_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_CURSOR_LIST_FIELDS = ("#{session_name}", "#{session_attached}", "#{@cursor_managed}",
+                       "#{@cursor_workspace_hash}", "#{@cursor_session_version}",
+                       "#{@cursor_chat_id}")
+_cursor_sessions_cache = {"at": 0.0, "rows": []}
+
+
+def _cursor_tmux_binary():
+    for var in ("CURSOR_AGENT_TMUX_PATH",):
+        path = (os.environ.get(var) or "").strip()
+        if path:
+            return path
+    root = (os.environ.get("AGENT_TMUX_ROOT_PATH") or "").strip()
+    if root:
+        return os.path.join(root, "bin", "tmux")
+    return "tmux"
+
+
+def _cursor_tmux_server():
+    name = (os.environ.get("CURSOR_AGENT_TMUX_SERVER_NAME") or "").strip()
+    if name and _CURSOR_SERVER_NAME_RE.match(name):
+        return name
+    return CURSOR_PERSIST_TMUX_SERVER
+
+
+def _cursor_tmux_env():
+    """The same scrubbed env the CLI hands tmux. $TMUX must not leak in:
+    an inherited $TMUX would point the client at whatever server this process
+    happens to run under instead of the managed one."""
+    keep = ("PATH", "HOME", "SHELL", "USER", "LOGNAME", "LANG", "TERM", "COLORTERM")
+    env = dict((k, os.environ[k]) for k in keep if os.environ.get(k) is not None)
+    for key, value in os.environ.items():
+        if key.startswith("LC_"):
+            env[key] = value
+    env["TMUX_TMPDIR"] = ((os.environ.get("CURSOR_AGENT_TMUX_TMPDIR") or "").strip()
+                          or CURSOR_PERSIST_TMUX_TMPDIR)
+    return env
+
+
+def _cursor_tmux(args, timeout=5):
+    """One tmux call against the managed cursor-agent server. None on failure."""
+    binary = _cursor_tmux_binary()
+    if binary == "tmux" and not _which("tmux"):
+        return None
+    cmd = [binary, "-u", "-L", _cursor_tmux_server(), "-f", "/dev/null"] + list(args)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              env=_cursor_tmux_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def cursor_persist_sessions(refresh=False):
+    """Managed `agent persist` sessions, as the CLI itself enumerates them.
+
+    Untagged sessions on the same server are other people's; they are dropped
+    so a wake can never type into a session cursor-agent does not own.
+    """
+    now_ts = time.time()
+    if not refresh and (now_ts - float(_cursor_sessions_cache["at"] or 0)) < CURSOR_SESSIONS_TTL_SECS:
+        return list(_cursor_sessions_cache["rows"])
+    r = _cursor_tmux(["list-sessions", "-F", "\t".join(_CURSOR_LIST_FIELDS)])
+    rows = []
+    if r is not None and r.returncode == 0:
+        for line in (r.stdout or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) < 6:
+                continue
+            name, attached, managed, ws_hash, version, chat_id = [p.strip() for p in parts[:6]]
+            if managed != "1" or version != "1" or not ws_hash:
+                continue
+            if not _CURSOR_SESSION_NAME_RE.match(name):
+                continue
+            try:
+                clients = int(attached or "0")
+            except ValueError:
+                clients = 0
+            rows.append({"name": name, "attached_clients": clients,
+                         "workspace_hash": ws_hash, "chat_id": chat_id})
+    _cursor_sessions_cache["at"] = now_ts
+    _cursor_sessions_cache["rows"] = rows
+    return list(rows)
+
+
+def _cursor_managed_session(name, refresh=False):
+    name = (name or "").strip()
+    if not name or not _CURSOR_SESSION_NAME_RE.match(name):
+        return None
+    for row in cursor_persist_sessions(refresh=refresh):
+        if row.get("name") == name:
+            return row
+    return None
 
 
 def _cursor_persist_target():
-    named = (os.environ.get("CURSOR_PERSIST_SESSION") or "").strip()
-    if named:
-        return named
-    if not os.environ.get("TMUX") or not _which("tmux"):
+    """Managed persist session this process runs inside, if any.
+
+    CURSOR_AGENT_PERSIST_SESSION is exported by cursor-agent itself, so it is
+    the seat's own statement of which session it is. CURSOR_PERSIST_SESSION
+    stays as the operator override for wiring a seat by hand.
+    """
+    for var in ("CURSOR_PERSIST_SESSION", CURSOR_PERSIST_ENV):
+        named = (os.environ.get(var) or "").strip()
+        if named and _CURSOR_SESSION_NAME_RE.match(named):
+            return named
+    return ""
+
+
+def _cursor_chats_root():
+    override = (os.environ.get("CURSOR_CHATS_DIR") or "").strip()
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".cursor", "chats")
+
+
+def _cursor_chat_store(ep):
+    """~/.cursor/chats/<workspace hash>/<chat id>/store.db, or ''.
+
+    The chat store is where a submitted prompt becomes a turn: each message is
+    one plaintext-JSON row in `blobs`. It is the only local artifact that says
+    a keystroke actually started a turn rather than landing in a dialog.
+    The @cursor_workspace_hash tmux tag is NOT the chats directory name, so the
+    chat id is what locates the store.
+    """
+    chat_id = ((ep or {}).get("chat_id") or (ep or {}).get("session_id") or "").strip()
+    if not chat_id or "/" in chat_id or chat_id in (".", ".."):
         return ""
+    root = _cursor_chats_root()
+    names = []
+    ws_hash = ((ep or {}).get("workspace_hash") or "").strip()
+    if ws_hash and "/" not in ws_hash:
+        names.append(ws_hash)
     try:
-        r = subprocess.run(
-            ["tmux", "display-message", "-p", "#{session_name}"],
-            capture_output=True, text=True, timeout=2)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    if r.returncode != 0:
-        return ""
-    return (r.stdout or "").strip()
+        names.extend(sorted(os.listdir(root)))
+    except OSError:
+        pass
+    for name in names:
+        path = os.path.join(root, name, chat_id, "store.db")
+        if os.path.exists(path):
+            return path
+    return ""
+
+
+def _cursor_blob_hits(store, needle):
+    """Chat-store rows containing this line. -1 when the store is unreadable."""
+    if not store or not needle:
+        return -1
+    import sqlite3
+    from urllib.request import pathname2url
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % pathname2url(store), uri=True, timeout=1.0)
+    except (sqlite3.Error, OSError, ValueError):
+        return -1
+    try:
+        row = con.execute("select count(*) from blobs where instr(data, ?) > 0",
+                          (needle.encode("utf-8"),)).fetchone()
+        return int(row[0]) if row else 0
+    except (sqlite3.Error, OSError, ValueError):
+        return -1
+    finally:
+        try:
+            con.close()
+        except sqlite3.Error:
+            pass
+
+
+def _cursor_turn_started(ep, needle, before, wait_secs=None):
+    """True only once the injected line shows up as a NEW chat-store row.
+
+    `before` is the count taken before typing, so a retry of an already
+    delivered line cannot be read as a fresh turn.
+    """
+    if before is None or before < 0:
+        return False
+    end = time.time() + max(0.0, CURSOR_EVIDENCE_SECS if wait_secs is None else wait_secs)
+    store = _cursor_chat_store(ep)
+    while True:
+        if _cursor_blob_hits(store, needle) > before:
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.25)
+
+
+def _cursor_single_line(text):
+    """send-keys types literally: an embedded newline submits half a prompt."""
+    return " ".join(str(text or "").split())
 
 
 def _probe_codex():
@@ -449,32 +648,46 @@ def _probe_codex():
     }}
 
 
+def _cursor_supervised_reason(persist=""):
+    if persist:
+        return ("supervised (%s is not a managed `agent persist` session on "
+                "tmux -L %s; `agent -p --resume` is a new run, not pause-resume)"
+                % (persist, _cursor_tmux_server()))
+    return ("supervised (no managed `agent persist` session and no operator ACP "
+            "bridge; `agent -p --resume` is a new run, not pause-resume)")
+
+
 def _probe_cursor():
-    if not _which("agent"):
+    if not _which("agent") and not _which("cursor-agent"):
         return {"ok": False, "reason": "cursor agent CLI not on PATH"}
     r = subprocess.run(["agent", "--help"], capture_output=True, text=True)
     help_text = r.stdout + r.stderr
     if r.returncode != 0 or "--resume" not in help_text:
         return {"ok": False, "reason": "cursor agent --resume unavailable"}
     persist = _cursor_persist_target()
-    if persist and _which("tmux"):
+    row = _cursor_managed_session(persist, refresh=True) if persist else None
+    if row is not None:
         return {"ok": True, "capabilities": {
             "native_inject": True,
-            "transport": "tmux send-keys into agent persist session",
+            "transport": ("tmux -L %s send-keys into the managed agent persist session"
+                          % _cursor_tmux_server()),
             "persist_session": persist,
+            "chat_id": row.get("chat_id", ""),
+            "workspace_hash": row.get("workspace_hash", ""),
+            "turn_evidence": "injected line appears in the cursor chat store",
         }}
     sock = _cursor_acp_sock()
     if sock and os.path.exists(sock):
         return {"ok": True, "capabilities": {
             "native_inject": True,
-            "transport": "ACP session/load + session/prompt on live control sock",
+            "transport": ("ACP session/load + session/prompt on an operator-provided "
+                          "control sock (unverified against a shipped Cursor build)"),
             "control_socket": sock,
             "control_socket_live": True,
         }}
     return {"ok": True, "capabilities": {
         "native_inject": False,
-        "transport": ("supervised (need agent persist + tmux, or a live ACP "
-                      "control sock; agent -p --resume is a new paid run)"),
+        "transport": _cursor_supervised_reason(persist),
     }}
 
 
@@ -498,8 +711,33 @@ def probe_provider(provider):
     }
     fn = probes.get(provider)
     if not fn:
+        supervised = supervised_harness(provider)
+        if supervised:
+            return {"ok": True, "capabilities": {
+                "native_inject": False, "supervised": True,
+                "transport": "supervised: %s" % supervised[1],
+            }}
         return {"ok": False, "reason": "no native adapter for %s" % provider}
     return fn()
+
+
+# Harnesses with a board integration but no live-session injection. Evidence
+# lives in docs/wake-recipients.md; the receipt must say supervised, not wake.
+SUPERVISED_HARNESSES = {
+    "agy": ("Antigravity (agy)",
+            "agy 1.2.2 exposes no live-session injection: the binary opens no local "
+            "control socket or RPC, `remote-control` is a cloud (WebRTC-signalled) "
+            "daemon for the Antigravity app, and `-p/--prompt`, `-i` and "
+            "`--conversation <id>` each start a new run. Board mail reaches the seat "
+            "through the PreInvocation/Stop hooks (`tickets hooks agy`) or a persist "
+            "watcher"),
+}
+SUPERVISED_HARNESSES["antigravity"] = SUPERVISED_HARNESSES["agy"]
+
+
+def supervised_harness(harness):
+    """(name, why) for a harness that is supervised by design, else None."""
+    return SUPERVISED_HARNESSES.get((harness or "").strip().lower())
 
 
 def provider_for_harness(harness):
@@ -526,6 +764,10 @@ def register_persistent(board, seat, harness, at_iso):
     """Register a native session endpoint from the current harness environment."""
     provider = provider_for_harness(harness)
     if not provider:
+        supervised = supervised_harness(harness)
+        if supervised:
+            return {"ok": False, "reason": "%s is a supervised seat: %s"
+                    % (supervised[0], supervised[1])}
         return {"ok": False, "reason": "harness %r has no native session adapter" % harness}
     if provider == "remote":
         return {"ok": False, "reason": "remote seats use the schema-2 bridge, not join --persistent"}
@@ -565,28 +807,35 @@ def register_persistent(board, seat, harness, at_iso):
             return {"ok": False, "reason": "CURSOR_CONVERSATION_ID not set"}
         record["session_id"] = session_id
         persist = _cursor_persist_target()
-        if persist:
-            record["persist_session"] = persist
+        # A name is not a transport: the session has to be on the managed
+        # server and carry cursor-agent's own @cursor_managed tag.
+        row = _cursor_managed_session(persist, refresh=True) if persist else None
         sock = _cursor_acp_sock()
-        if persist and _which("tmux"):
+        if row is not None:
+            record["persist_session"] = persist
+            record["workspace_hash"] = row.get("workspace_hash", "")
+            chat_id = (row.get("chat_id") or "").strip()
+            if chat_id:
+                record["chat_id"] = chat_id
             record["mode"] = "native"
             record["capabilities"] = {
                 "native_inject": True,
-                "transport": "tmux send-keys into agent persist session",
+                "transport": ("tmux -L %s send-keys into the managed agent persist session"
+                              % _cursor_tmux_server()),
             }
         elif sock and os.path.exists(sock):
             record["socket"] = sock
             record["mode"] = "native"
             record["capabilities"] = {
                 "native_inject": True,
-                "transport": "ACP session/load + session/prompt on live control sock",
+                "transport": ("ACP session/load + session/prompt on an operator-provided "
+                              "control sock (unverified against a shipped Cursor build)"),
             }
         else:
             record["mode"] = "supervised"
             record["capabilities"] = {
                 "native_inject": False,
-                "transport": ("supervised (need agent persist + tmux, or a live ACP "
-                              "control sock; agent -p --resume is a new paid run)"),
+                "transport": _cursor_supervised_reason(persist),
             }
     committed = commit_endpoint(board, seat, record)
     if not committed.get("ok"):
@@ -942,22 +1191,21 @@ def _poke_codex(ep, text):
 
 
 def _poke_cursor(ep, text):
-    """Inject into a paused persist session. Never spawn agent -p --resume."""
+    """Type one line into the managed persist pane. Never `agent -p --resume`.
+
+    Keys go to the cursor-agent tmux server only, and only to a session that
+    server reports as managed, so the board can never type its mail into an
+    unrelated tmux session that happens to share the name.
+    """
     session = (ep.get("persist_session") or "").strip()
-    if not session or not _which("tmux"):
+    if _cursor_managed_session(session) is None:
         return False
-    try:
-        typed = subprocess.run(
-            ["tmux", "send-keys", "-t", session, "-l", text],
-            capture_output=True, text=True, timeout=5)
-        if typed.returncode != 0:
-            return False
-        enter = subprocess.run(
-            ["tmux", "send-keys", "-t", session, "Enter"],
-            capture_output=True, text=True, timeout=5)
-        return enter.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+    target = session + ":"
+    typed = _cursor_tmux(["send-keys", "-t", target, "-l", _cursor_single_line(text)])
+    if typed is None or typed.returncode != 0:
         return False
+    enter = _cursor_tmux(["send-keys", "-t", target, "Enter"])
+    return enter is not None and enter.returncode == 0
 
 
 def _cursor_acp_rpc(method, params, sock=None, timeout=5):
@@ -965,24 +1213,35 @@ def _cursor_acp_rpc(method, params, sock=None, timeout=5):
     sock = (sock or _cursor_acp_sock() or "").strip()
     if not sock or not os.path.exists(sock):
         return None
-    req = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
+    rid = uuid.uuid4().hex
+    req = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
         s.connect(sock)
         s.sendall((json.dumps(req) + "\n").encode("utf-8"))
         buf = b""
-        while True:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                # ACP is bidirectional: session/update notifications and
+                # permission requests share the stream, so only an id match is
+                # this call's answer.
+                if isinstance(msg, dict) and msg.get("id") == rid:
+                    return msg
             chunk = s.recv(4096)
             if not chunk:
-                break
+                return None
             buf += chunk
-            if b"\n" in buf:
-                break
-        line = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
-        if not line:
-            return None
-        return json.loads(line)
+        return None
     except (OSError, ValueError):
         return None
     finally:
@@ -1010,12 +1269,26 @@ def _poke_cursor_acp(ep, text):
 
 
 def _cursor_pause_resume(ep, text):
-    if _poke_until(_poke_cursor, ep, text):
+    """Receipt follows evidence: `woken` needs the line to become a turn.
+
+    send-keys exits 0 as soon as tmux writes to the pane's tty. That says
+    nothing about what the agent did with it -- a modal, a dropped keystroke or
+    a dead pane all still exit 0 -- so the label is `delivered-unconfirmed`
+    until the injected line shows up in the chat store as a new message.
+    """
+    line = _cursor_single_line(text)
+    persist = (ep.get("persist_session") or "").strip()
+    if persist and _cursor_managed_session(persist, refresh=True) is not None:
+        before = _cursor_blob_hits(_cursor_chat_store(ep), line)
+        if not _poke_until(_poke_cursor, ep, line):
+            return "refused (persist session %s did not take keys)" % persist
+        if _cursor_turn_started(ep, line, before):
+            return "woken"
+        return "delivered-unconfirmed"
+    sock = _cursor_acp_sock()
+    if sock and os.path.exists(sock) and _poke_until(_poke_cursor_acp, ep, line):
         return "woken"
-    if _poke_until(_poke_cursor_acp, ep, text):
-        return "woken"
-    return ("supervised (no persist/tmux or ACP control sock; agent -p --resume "
-            "is a new paid run, not pause-resume)")
+    return _cursor_supervised_reason(persist)
 
 
 def native_wake_online(board, seat):
@@ -1189,6 +1462,11 @@ def _commit_wake(board, seat, mid, lease, fence, label, ok):
 def wake_seat(board, seat, text, harness=None, message_id=""):
     """Best-effort native wake. Returns a short label; never raises."""
     expected = provider_for_harness(harness) if harness else ""
+    if not expected and supervised_harness(harness):
+        # Never "no live endpoint": the seat has no injection path by design,
+        # and the receipt has to say which delivery it actually got.
+        return ("supervised (%s has no live-session injection; mail waits for its "
+                "next hook or persist run)" % (harness or "").strip().lower())
     if expected == "remote" or harness == "remote":
         leftover = read_endpoint(board, seat)
         if leftover:
@@ -1244,9 +1522,14 @@ def has_live_native_session(board, seat):
     if provider == "codex":
         return _codex_thread_is_loaded((ep.get("thread") or "").strip())
     if provider == "cursor":
+        # Same proof as live_endpoint: the managed session has to still exist.
         persist = (ep.get("persist_session") or "").strip()
         acp = (ep.get("socket") or "").strip()
-        return bool(persist) or bool(acp and os.path.exists(acp))
+        if persist and _cursor_managed_session(persist) is not None:
+            return True
+        if acp and os.path.exists(acp):
+            return True
+        return False
     if provider == "claude":
         sock = (ep.get("socket") or "").strip()
         return bool(sock and os.path.exists(sock))
