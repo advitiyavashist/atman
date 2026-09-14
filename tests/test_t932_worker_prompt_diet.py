@@ -1,8 +1,13 @@
 """T-932: worker show/prompt is ticket-scoped; leadership keeps the wide view."""
 
+import ast
 import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 from test_byoa import board, run  # noqa: F401
+from test_t620_knowledge_graph import inherited_lines
 
 
 EPIC_BODY = (
@@ -122,25 +127,62 @@ def test_prompt_manifest_has_revisions_sections_and_null_tokens(board, tmp_path)
     assert man["chars"] == len(r.stdout.rstrip("\n")) or man["chars"] == len(r.stdout)
 
 
-def test_prompt_manifest_marks_truncated_knowledge(board, tmp_path):
+def _truncated_prompt(board, tmp_path):
     from test_t620_knowledge_graph import graph_env, write_graph
     from test_t931_field_guide import lesson
 
-    nodes = [
-        lesson("lesson.long-a", "A" * 300, ["backend"], ["tickets.py"]),
-        lesson("lesson.long-b", "B" * 300, ["backend"], ["tickets.py"]),
-        lesson("lesson.long-c", "C" * 300, ["backend"], ["tickets.py"]),
-    ]
-    graph = write_graph(tmp_path / "graph", nodes, budget=500)
-    env = graph_env(graph)
-    assert run(board, "join", "backend-seat", "--roles", "backend",
-               "--harness", "codex", env=env).returncode == 0
-    r = run(board, "prompt", "--agent", "backend-seat",
-            "--extra", "repair tickets.py", env=env)
-    assert r.returncode == 0, r.stderr
-    man = _prompt_manifests(board)[-1]
+    nodes = [lesson("lesson.long-" + key, key * 300, ["backend"], ["tickets.py"])
+             for key in ["a", "b", "c"]]
+    env = graph_env(write_graph(tmp_path / "graph", nodes, budget=500))
+    assert run(board, "join", "backend-worker", "--roles", "backend",
+               env=env).returncode == 0
+    output = run(board, "prompt", "--agent", "backend-worker",
+                 "--extra", "repair tickets.py", env=env)
+    assert output.returncode == 0, output.stderr
+    return output.stdout, _prompt_manifests(board)[-1]
+
+
+def test_prompt_manifest_marks_truncated_knowledge(board, tmp_path):
+    _output, man = _truncated_prompt(board, tmp_path)
     assert man["truncated"] is True
     assert man["budget_chars"] == 500
+
+
+def test_receipt_distinguishes_retrieved_from_rendered_knowledge(board, tmp_path):
+    output, manifest = _truncated_prompt(board, tmp_path)
+    rendered_ids = {line.split()[1].removeprefix("knowledge:")
+                    for line in inherited_lines(output)}
+    delivered = manifest.get("rendered_knowledge", manifest["knowledge"])
+    assert {item["id"] for item in delivered} == rendered_ids
+    assert len(manifest["knowledge"]) >= len(delivered)
+    assert {item["id"] for item in delivered} <= {item["id"] for item in manifest["knowledge"]}
+
+
+def test_knowledge_budget_includes_its_emitted_selection_footer(board, tmp_path):
+    output, manifest = _truncated_prompt(board, tmp_path)
+    assert manifest["section_chars"]["lessons"] <= manifest["budget_chars"]
+    assert len(output) >= manifest["section_chars"]["lessons"]
+
+
+def test_non_model_token_count_has_explicit_tokenizer_provenance(monkeypatch):
+    source = ast.parse((Path(__file__).resolve().parents[1] / "tickets.py").read_text())
+    names = {"_prompt_token_count", "_infer_prompt_sections", "_log_prompt_diet"}
+    functions = [node for node in source.body
+                 if isinstance(node, ast.FunctionDef) and node.name in names]
+    events = []
+    scope = {"json": json, "traj_event": lambda *args, **kwargs: events.append(kwargs)}
+    exec(compile(ast.Module(body=functions, type_ignores=[]),
+                 "candidate-prompt-functions", "exec"), scope)
+    monkeypatch.setitem(sys.modules, "tiktoken", SimpleNamespace(
+        get_encoding=lambda name: SimpleNamespace(encode=lambda text: [1, 2, 3])))
+    scope["_log_prompt_diet"]("disposable-board", "claude-worker",
+                              "synthetic context", "compact")
+    manifest = json.loads(events[-1]["prompt_manifest"])
+    assert manifest["tokens"] is None or manifest.get("tokenizer") or manifest.get("token_encoding")
+    assert manifest.get("token_encoding") == "cl100k_base"
+    assert manifest.get("token_kind") == "proxy"
+    assert manifest.get("tokenizer") == "tiktoken"
+    assert manifest["tokens"] is None
 
 
 def test_worker_prompt_still_has_required_instructions(board):

@@ -1715,7 +1715,12 @@ def _ticket_scope_notes(t):
 
 
 def _prompt_token_count(text):
-    """Count tokens only when a known tokenizer is already importable."""
+    """Proxy token count via tiktoken cl100k_base when that package is importable.
+
+    This is not a model-matched or provider-usage figure. Callers must label
+    the encoding and kind; model token usage stays null unless a known model
+    tokenizer is available.
+    """
     try:
         import tiktoken
     except ImportError:
@@ -1747,17 +1752,26 @@ def _log_prompt_diet(board, owner, text, view, ticket=None, sections=None,
     sections = list(sections or _infer_prompt_sections(text, ticket))
     knowledge = knowledge or {}
     selected = list(knowledge.get("knowledge") or [])
+    rendered = list(knowledge.get("rendered_knowledge") or [])
+    proxy = _prompt_token_count(text)
     manifest = {
         "knowledge": selected,
+        "rendered_knowledge": rendered,
         "section_chars": {k: int(v) for k, v in (section_chars or {}).items()},
         "budget_chars": int(knowledge.get("budget_chars") or 0),
         "truncated": bool(knowledge.get("truncated")),
         "missing": list(knowledge.get("missing") or []),
         "stale": list(knowledge.get("stale") or []),
-        "tokens": _prompt_token_count(text),
+        # Model-matched usage stays null; cl100k_base is a labeled proxy only.
+        "tokens": None,
         "view": view,
         "chars": len(text or ""),
     }
+    if proxy is not None:
+        manifest["proxy_tokens"] = int(proxy)
+        manifest["token_encoding"] = "cl100k_base"
+        manifest["tokenizer"] = "tiktoken"
+        manifest["token_kind"] = "proxy"
     if knowledge.get("error"):
         manifest["error"] = knowledge["error"]
     traj_event(board, "prompt", agent=owner, ticket=ticket,
@@ -10124,6 +10138,17 @@ def _lesson_in_scope(node, scopes, terms, text):
     return any(token in hay for token in files)
 
 
+def _lesson_auto_eligible(node, scopes, terms, text, explicit):
+    """Automatic inheritance: in-scope and not superseded, unless named."""
+    if node.get("type") != "lesson":
+        return True
+    if node["id"] in explicit:
+        return True
+    if node.get("verification") == "superseded":
+        return False
+    return _lesson_in_scope(node, scopes, terms, text)
+
+
 def _knowledge_query(root, text="", scopes=None, max_nodes=12):
     nodes, edges, errors = _knowledge_records(root)
     if errors:
@@ -10136,11 +10161,8 @@ def _knowledge_query(root, text="", scopes=None, max_nodes=12):
     explicit = {n["id"] for n in nodes if n["id"].lower() in referenced}
     scored = {}
     for node in nodes:
-        if node.get("type") == "lesson" and node["id"] not in explicit:
-            if node.get("verification") == "superseded":
-                continue
-            if not _lesson_in_scope(node, scopes, terms, text):
-                continue
+        if not _lesson_auto_eligible(node, scopes, terms, text, explicit):
+            continue
         fields = " ".join(_knowledge_strings({
             "id": node.get("id"), "type": node.get("type"), "title": node.get("title"),
             "summary": node.get("summary"), "tags": node.get("tags"),
@@ -10161,16 +10183,23 @@ def _knowledge_query(root, text="", scopes=None, max_nodes=12):
             scored[node["id"]] = score
     # Bring the evidence, failure or runbook connected to a direct match. This
     # is the useful part of a graph: a failure can carry its corrective command
-    # without copying the command into every ticket or brief.
+    # without copying the command into every ticket or brief. Lessons still
+    # need the same eligibility rule; a UI decision must not pull a
+    # backend-only or superseded lesson across the edge.
     direct = set(scored)
     direct_scores = dict(scored)
     for edge in edges:
+        neighbours = []
         if edge["from"] in direct and edge["to"] in by_id:
-            scored[edge["to"]] = max(scored.get(edge["to"], 0),
-                                     direct_scores[edge["from"]] - 1)
+            neighbours.append((edge["to"], edge["from"]))
         if edge["to"] in direct and edge["from"] in by_id:
-            scored[edge["from"]] = max(scored.get(edge["from"], 0),
-                                       direct_scores[edge["to"]] - 1)
+            neighbours.append((edge["from"], edge["to"]))
+        for neighbour_id, source_id in neighbours:
+            neighbour = by_id[neighbour_id]
+            if not _lesson_auto_eligible(neighbour, scopes, terms, text, explicit):
+                continue
+            scored[neighbour_id] = max(scored.get(neighbour_id, 0),
+                                       direct_scores[source_id] - 1)
     type_bias = {"lesson": 6, "failure": 5, "runbook": 4, "skill": 3, "decision": 2,
                  "artifact": 1, "experiment": 1}
     ranked = sorted((by_id[nid] for nid in scored), key=lambda n: (
@@ -10193,50 +10222,92 @@ def _knowledge_budget(root, requested=None):
     return max(500, min(budget, _KNOWLEDGE_MAX_BUDGET))
 
 
-def _knowledge_render(nodes, edges, max_chars):
+_KNOWLEDGE_HEADER = "Inherited knowledge (repo-backed; open a source before changing a fact):"
+_KNOWLEDGE_MARKER = "...(knowledge budget reached; run `tickets knowledge query ...`)"
+
+
+def _knowledge_fact_line(node, relation):
+    age = "STALE" if _knowledge_stale(node) else node["verification"].upper()
+    summary = (" ".join(node["title"].split()) + ": " +
+               " ".join(node["summary"].split()))[:330]
+    source = node.get("source", {}).get("ref", "")[:170]
+    rels = ",".join(sorted(relation.get(node["id"], [])))[:170]
+    line = "- knowledge:%s [%s; confidence %.2f] %s" % (
+        node["id"], age, float(node["confidence"]), summary)
+    if rels:
+        line += " relations=" + rels
+    if source:
+        line += " source=" + source
+    return line[:620]
+
+
+def _knowledge_selection_footer(nodes, body_chars):
+    ids = ",".join("%s@%s" % (n["id"], n.get("revision") or 0) for n in nodes)
+    return "(knowledge selected: %s; %d chars)" % (ids, body_chars)
+
+
+def _knowledge_pack(nodes, edges, max_chars, with_footer=False):
+    """Pack header + fact lines [+ marker] [+ footer] into max_chars.
+
+    Returns (text, rendered_nodes). rendered_nodes are the facts that appear
+    as knowledge: lines. When with_footer is true the footer lists every
+    retrieved node (the caller-supplied set) so the receipt can distinguish
+    retrieval from rendered fact bodies.
+    """
     if not nodes:
-        return ""
+        return "", []
     relation = {}
     for edge in edges:
         relation.setdefault(edge["from"], []).append("%s→%s" % (edge["type"], edge["to"]))
-    lines = ["Inherited knowledge (repo-backed; open a source before changing a fact):"]
-    for node in nodes:
-        age = "STALE" if _knowledge_stale(node) else node["verification"].upper()
-        summary = (" ".join(node["title"].split()) + ": " +
-                   " ".join(node["summary"].split()))[:330]
-        source = node.get("source", {}).get("ref", "")[:170]
-        rels = ",".join(sorted(relation.get(node["id"], [])))[:170]
-        line = "- knowledge:%s [%s; confidence %.2f] %s" % (
-            node["id"], age, float(node["confidence"]), summary)
-        if rels:
-            line += " relations=" + rels
-        if source:
-            line += " source=" + source
-        lines.append(line[:620])
-    text = "\n".join(lines)
-    if len(text) <= max_chars:
-        return text
-    kept = [lines[0]]
-    marker = "\n...(knowledge budget reached; run `tickets knowledge query ...`)"
-    for line in lines[1:]:
-        candidate = "\n".join(kept + [line]) + marker
-        if len(candidate) > max_chars:
-            # A single verbose fact should still be useful under the minimum
-            # budget. Fit a visibly truncated line instead of returning only a
-            # budget notice.
-            if len(kept) == 1:
-                room = max_chars - len("\n".join(kept)) - len(marker) - 2
-                if room > 40:
-                    kept.append(line[:room - 3] + "...")
-            break
-        kept.append(line)
-    return "\n".join(kept) + marker
+    pairs = [(node, _knowledge_fact_line(node, relation)) for node in nodes]
+
+    def assemble(kept_pairs, truncated):
+        parts = [_KNOWLEDGE_HEADER] + [line for _, line in kept_pairs]
+        if truncated:
+            parts.append(_KNOWLEDGE_MARKER)
+        body = "\n".join(parts)
+        if with_footer:
+            return body + "\n" + _knowledge_selection_footer(nodes, len(body))
+        return body
+
+    full = assemble(pairs, truncated=False)
+    if len(full) <= max_chars:
+        return full, [node for node, _ in pairs]
+
+    kept = []
+    for item in pairs:
+        trial = kept + [item]
+        if len(assemble(trial, truncated=True)) <= max_chars:
+            kept = trial
+            continue
+        if not kept:
+            node, line = item
+            lo, hi, best = 40, len(line), None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                clipped = line if mid >= len(line) else (line[:mid - 3] + "...")
+                candidate = assemble([(node, clipped)], truncated=True)
+                if len(candidate) <= max_chars:
+                    best = [(node, clipped)]
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            if best:
+                kept = best
+        break
+    return assemble(kept, truncated=True), [node for node, _ in kept]
+
+
+def _knowledge_render(nodes, edges, max_chars):
+    text, _kept = _knowledge_pack(nodes, edges, max_chars, with_footer=False)
+    return text
 
 
 def knowledge_context(board, owner, extra="", max_chars=None, meta=None):
     """Compact task/seat inheritance shared by every prompt-file harness."""
     state = {
         "knowledge": [],
+        "rendered_knowledge": [],
         "budget_chars": 0,
         "truncated": False,
         "missing": [],
@@ -10278,16 +10349,18 @@ def knowledge_context(board, owner, extra="", max_chars=None, meta=None):
         return _finish("Knowledge graph invalid; run `tickets knowledge validate`.")
     budget = _knowledge_budget(root, max_chars)
     state["budget_chars"] = budget
-    rendered = _knowledge_render(nodes, edges, budget)
+    rendered, kept = _knowledge_pack(nodes, edges, budget, with_footer=True)
     selected_l = {n["id"].lower() for n in nodes}
     state["knowledge"] = [{"id": n["id"], "revision": int(n.get("revision") or 0)} for n in nodes]
+    state["rendered_knowledge"] = [
+        {"id": n["id"], "revision": int(n.get("revision") or 0)} for n in kept
+    ]
     state["missing"] = sorted(r for r in refs if r not in selected_l)
     state["stale"] = [n["id"] for n in nodes if _knowledge_stale(n)]
     state["truncated"] = "knowledge budget reached" in (rendered or "")
     if not rendered:
         return _finish("")
-    ids = ",".join("%s@%s" % (n["id"], n.get("revision") or 0) for n in nodes)
-    return _finish(rendered + "\n(knowledge selected: %s; %d chars)" % (ids, len(rendered)))
+    return _finish(rendered)
 
 
 def _parse_knowledge_frontmatter(text):

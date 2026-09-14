@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from test_byoa import board, run  # noqa: F401
 from test_t620_knowledge_graph import graph_env, inherited_lines, write_graph
 
@@ -100,6 +102,51 @@ def test_frozen_relevance_unrelated_ui_ticket_gets_no_lessons(board, tmp_path):
     assert inherited == []
     assert "lesson.codex-deaf" not in prompt.stdout
     assert "lesson.full-suite" not in prompt.stdout
+
+
+@pytest.mark.parametrize("kind", ["out_of_scope", "retired"])
+def test_graph_edges_cannot_bypass_lesson_eligibility(board, tmp_path, kind):
+    from test_t620_knowledge_graph import record
+
+    ui = record("decision.ui-layout", "UI layout uses formation dots", applies_to=["ui"])
+    ui.update(type="decision", tags=["ui"])
+    excluded = lesson(
+        "lesson.excluded", "EXCLUDED LESSON CANARY",
+        ["backend"] if kind == "out_of_scope" else ["ui"],
+        ["backend-only.py"],
+        verification="verified" if kind == "out_of_scope" else "superseded",
+    )
+    edge = {
+        "kind": "edge", "id": "edge.ui-lesson", "type": "requires",
+        "from": ui["id"], "to": excluded["id"], "owner": "test",
+        "source": {"kind": "test", "ref": "fixture:edge.ui-lesson"},
+        "recorded_at": "2026-09-09T03:00:00Z", "last_verified_at": "2026-09-09T03:00:00Z",
+        "verification": "verified", "confidence": 1.0, "stale_after_days": 90,
+    }
+    graph = write_graph(tmp_path / "graph", [ui, excluded], [edge], budget=2000)
+    env = graph_env(graph)
+    assert run(board, "knowledge", "validate", env=env).returncode == 0
+    assert run(board, "join", "ui-worker", "--roles", "ui", "--harness", "cursor",
+               env=env).returncode == 0
+    output = run(board, "prompt", "--agent", "ui-worker", "--extra", "Fix UI layout",
+                 env=env)
+    assert output.returncode == 0, output.stderr
+    assert "EXCLUDED LESSON CANARY" not in output.stdout
+    assert "knowledge:lesson.excluded" not in output.stdout
+
+
+def test_explicit_knowledge_ref_injects_out_of_scope_lesson(board, tmp_path):
+    excluded = lesson("lesson.excluded", "EXPLICIT LESSON CANARY",
+                      ["backend"], ["backend-only.py"])
+    graph = write_graph(tmp_path / "graph", [excluded], budget=2000)
+    env = graph_env(graph)
+    assert run(board, "join", "ui-worker", "--roles", "ui", "--harness", "cursor",
+               env=env).returncode == 0
+    output = run(board, "prompt", "--agent", "ui-worker",
+                 "--extra", "Fix UI layout knowledge:lesson.excluded", env=env)
+    assert output.returncode == 0, output.stderr
+    assert "EXPLICIT LESSON CANARY" in output.stdout
+    assert "knowledge:lesson.excluded" in output.stdout
 
 
 def test_retired_lesson_is_not_auto_injected(board, tmp_path):
