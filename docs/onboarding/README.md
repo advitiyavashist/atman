@@ -11,6 +11,7 @@ Start here. Pick one file.
 | Registering a custom / local harness | [../byoa.md](../byoa.md) |
 | Seeding role context (know → inject → update) | [role-context.md](role-context.md) |
 | Adding or updating evidence, runbooks, and skills | [../knowledge/README.md](../knowledge/README.md) |
+| Tracking repository reach and release downloads | [../github-reach.md](../github-reach.md) |
 
 Atman is a **team runtime**. You bring the harnesses. The board owns the
 objective, the shared state, the task graph, messaging, scheduling, and
