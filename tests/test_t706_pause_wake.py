@@ -200,7 +200,8 @@ def test_claude_socket_regression(board, cache_dir, sock_dir):
     sent = _run(board, "msg", "please act", "--to", "claude-gold", "--task",
                 agent="sender", env={"TICKETS_CACHE_DIR": cache_dir})
     assert sent.returncode == 0, sent.stderr
-    assert "wake: claude-gold -> woken" in sent.stdout
+    # Claude Code writes no receipt on the injector socket.
+    assert "wake: claude-gold -> delivered-unconfirmed" in sent.stdout
     payload = inbox.wait_for_message()
     inbox.close()
     assert payload and "please act" in payload

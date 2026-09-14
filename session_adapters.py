@@ -7,11 +7,13 @@ dirs 0700, files 0600). Falls back to supervised watch or the T-640 remote
 bridge when native injection is unavailable.
 """
 
+import base64
 import fcntl
 import hashlib
 import json
 import os
 import socket
+import struct
 import subprocess
 import time
 import uuid
@@ -549,12 +551,13 @@ def register_persistent(board, seat, harness, at_iso):
         record["thread"] = thread
         sock = default_codex_control_socket()
         record["socket"] = sock
-        live = bool(sock and os.path.exists(sock))
+        hosted = bool(thread and _codex_thread_is_loaded(thread))
+        live = bool(sock and os.path.exists(sock) and hosted)
         record["mode"] = "native" if live else "supervised"
         record["capabilities"] = {
             "native_inject": live,
             "transport": ("codex app-server turn/start" if live
-                          else "codex queue mailbox only (poll unless app-server socket is live)"),
+                          else "codex queue mailbox only (thread not loaded on app-server)"),
         }
     elif provider == "cursor":
         session_id = (os.environ.get("CURSOR_CONVERSATION_ID") or os.environ.get("CURSOR_SESSION_ID") or "").strip()
@@ -597,21 +600,254 @@ def wake_payload(fmt_msg, message):
     return "tickets board message -- %s\n(see `tickets inbox` for the rest)" % fmt_msg(message)
 
 
-def _poke_claude(ep, text):
-    sock_path = ep.get("socket") or ""
-    if not sock_path:
+def _claude_user_envelope(text, msg_id=""):
+    """Claude Code UDS inbox is JSONL, not a raw text line.
+
+    Verified frame (claude 2.1.263/2.1.266): auth frame, then one JSON object
+    carrying msgV/msg_id/type/message/priority. A raw second line is ignored
+    after auth, so write-success is not a wake. The receiver dedupes by
+    msg_id, which is why a retry must reuse the id it already sent.
+    """
+    return {
+        "msgV": 1,
+        "msg_id": str(msg_id or uuid.uuid4()),
+        "type": "user",
+        "message": {"role": "user", "content": text},
+        "priority": "next",
+    }
+
+
+def _claude_ack_ok(obj):
+    if not isinstance(obj, dict):
         return False
+    if obj.get("ok") is True:
+        return True
+    if obj.get("type") in ("ack", "ok"):
+        return True
+    if obj.get("status") in ("delivered", "ok", "accepted"):
+        return True
+    if obj.get("type") == "control" and obj.get("action") == "peer_message_status":
+        return obj.get("status") in ("delivered", "held")
+    return False
+
+
+def _recv_json_line(sock, deadline):
+    """One JSON line, waiting no longer than `deadline`.
+
+    Always makes one attempt, non-blocking when the deadline has already
+    passed, so a receipt that is already sitting in the buffer still counts.
+    """
+    buf = b""
+    while True:
+        remaining = deadline - time.time()
+        sock.settimeout(max(0.0, remaining))
+        try:
+            chunk = sock.recv(4096)
+        except (socket.timeout, BlockingIOError):
+            return None
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf += chunk
+        if b"\n" in buf:
+            line = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+            if not line:
+                return None
+            try:
+                return json.loads(line)
+            except ValueError:
+                return None
+        if remaining <= 0:
+            return None
+
+
+# Claude Code sends no receipt on the injector socket, so blocking for one
+# only stalls every wake. Read whatever already arrived and return. Tests
+# raise this to exercise the receipt branch.
+CLAUDE_ACK_WAIT_SECS = 0.0
+
+
+def _poke_claude_wake(ep, text, msg_id=""):
+    """Inject a Claude UDS user envelope. woken only on a real receipt.
+
+    Live Claude Code does not write an ack on the injector socket, so the
+    honest receipt is delivered-unconfirmed: the bytes left here, nobody
+    confirmed a turn. Raw text after auth is never a wake. Only a failure to
+    connect or to finish the write is a connection error worth retrying --
+    a completed write must never be sent twice under a fresh id.
+    """
+    sock_path = ep.get("socket") or ""
+    if not sock_path or not os.path.exists(sock_path):
+        return "queued-offline"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(2)
+    wrote = False
     try:
         s.connect(sock_path)
         token = ep.get("token") or ""
         if token:
             s.sendall((json.dumps({"type": "auth", "token": token}) + "\n").encode("utf-8"))
-        s.sendall((text + "\n").encode("utf-8"))
-        return True
+        s.sendall((json.dumps(_claude_user_envelope(text, msg_id)) + "\n").encode("utf-8"))
+        wrote = True
+        try:
+            s.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        ack = _recv_json_line(s, time.time() + CLAUDE_ACK_WAIT_SECS)
+        if _claude_ack_ok(ack):
+            return "woken"
+        return "delivered-unconfirmed"
     except OSError:
-        return False
+        return "queued-offline" if not wrote else "delivered-unconfirmed"
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _poke_claude(ep, text, msg_id=""):
+    return _poke_claude_wake(ep, text, msg_id)
+
+
+# Only these mean "the bytes never left"; anything else is a delivery outcome.
+CLAUDE_RETRYABLE = ("queued-offline",)
+
+
+def _poke_claude_until(ep, text, attempts=None):
+    """Retry one inject on connection errors only, reusing the same msg_id.
+
+    The receiver dedupes by msg_id, so resending the id it may already hold is
+    safe; minting a new one per attempt is what would double-post a turn.
+    """
+    attempts = NATIVE_POKE_ATTEMPTS if attempts is None else attempts
+    msg_id = str(uuid.uuid4())
+    label = "queued-offline"
+    for _ in range(max(1, int(attempts))):
+        poked = _poke_claude(ep, text, msg_id)
+        # Older mocks answer True/False rather than a label.
+        if poked is True:
+            return "woken"
+        if poked is False:
+            return "refused"
+        label = str(poked or "queued-offline")
+        if label not in CLAUDE_RETRYABLE:
+            return label
+    return label
+
+
+_WS_GUID = "258EAFA5-E914-47DA-95AA-C5AB0DC85B11"
+
+
+def _ws_mask_frame(payload):
+    mask = os.urandom(4)
+    n = len(payload)
+    if n < 126:
+        header = bytes([0x81, 0x80 | n])
+    elif n < 65536:
+        header = bytes([0x81, 0x80 | 126]) + struct.pack(">H", n)
+    else:
+        header = bytes([0x81, 0x80 | 127]) + struct.pack(">Q", n)
+    return header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+
+
+def _ws_recv_json(sock, buf, deadline):
+    """Read one WebSocket text frame. Returns (obj_or_None, remaining_buf)."""
+    while time.time() < deadline:
+        if len(buf) >= 2:
+            opcode = buf[0] & 0x0F
+            masked = bool(buf[1] & 0x80)
+            ncode = buf[1] & 0x7F
+            header_ok = (
+                ncode < 126
+                or (ncode == 126 and len(buf) >= 4)
+                or (ncode == 127 and len(buf) >= 10)
+            )
+            if header_ok:
+                n = ncode
+                off = 2
+                if n == 126:
+                    n = struct.unpack(">H", buf[2:4])[0]
+                    off = 4
+                elif n == 127:
+                    n = struct.unpack(">Q", buf[2:10])[0]
+                    off = 10
+                mask_len = 4 if masked else 0
+                if len(buf) >= off + mask_len + n:
+                    payload = buf[off + mask_len:off + mask_len + n]
+                    if masked:
+                        mask = buf[off:off + 4]
+                        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+                    rest = buf[off + mask_len + n:]
+                    if opcode == 0x8:
+                        return None, rest
+                    if opcode == 0x1:
+                        return json.loads(payload.decode("utf-8")), rest
+                    buf = rest
+                    continue
+        sock.settimeout(max(0.05, deadline - time.time()))
+        try:
+            chunk = sock.recv(65536)
+        except (OSError, socket.timeout):
+            break
+        if not chunk:
+            break
+        buf += chunk
+    return None, buf
+
+
+def _codex_ws_rpc(method, params, timeout=5):
+    """JSON-RPC after HTTP Upgrade on the Codex app-server Unix socket."""
+    sock_path = _codex_control_sock()
+    if not sock_path or not os.path.exists(sock_path):
+        return None
+    deadline = time.time() + max(1, float(timeout))
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(max(0.2, deadline - time.time()))
+        s.connect(sock_path)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        s.sendall((
+            "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
+            "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n" % key
+        ).encode("ascii"))
+        buf = b""
+        while b"\r\n\r\n" not in buf and time.time() < deadline:
+            s.settimeout(max(0.05, deadline - time.time()))
+            chunk = s.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+        if b"\r\n\r\n" not in buf:
+            return None
+        header, buf = buf.split(b"\r\n\r\n", 1)
+        first = header.split(b"\r\n", 1)[0].decode("ascii", "replace")
+        if "101" not in first:
+            return None
+
+        def send_obj(obj):
+            s.sendall(_ws_mask_frame(json.dumps(obj, separators=(",", ":")).encode("utf-8")))
+
+        send_obj({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                  "params": {"clientInfo": {"name": "atman-tickets", "version": "0"}}})
+        init_msg, buf = _ws_recv_json(s, buf, deadline)
+        while init_msg is not None and init_msg.get("id") != 0 and time.time() < deadline:
+            init_msg, buf = _ws_recv_json(s, buf, deadline)
+        if not init_msg or init_msg.get("id") != 0 or init_msg.get("error"):
+            return None
+        send_obj({"jsonrpc": "2.0", "method": "initialized"})
+        send_obj({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
+        while time.time() < deadline:
+            msg, buf = _ws_recv_json(s, buf, deadline)
+            if msg is None:
+                return None
+            if msg.get("id") == 1:
+                return msg
+        return None
+    except (OSError, ValueError, socket.timeout):
+        return None
     finally:
         try:
             s.close()
@@ -620,33 +856,36 @@ def _poke_claude(ep, text):
 
 
 def _codex_app_server_rpc(method, params, timeout=5):
-    """JSON-RPC one-shot via `codex app-server proxy`. None if unavailable."""
-    sock = _codex_control_sock()
-    if not sock or not os.path.exists(sock):
-        return None
-    if not _which("codex"):
-        return None
-    req = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
-    try:
-        r = subprocess.run(
-            ["codex", "app-server", "proxy", "--sock", sock],
-            input=json.dumps(req) + "\n",
-            capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if r.returncode != 0:
-        return None
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            continue
-        if msg.get("id") == 1:
-            return msg
-    return None
+    """JSON-RPC one-shot on the control socket. WebSocket handshake required."""
+    return _codex_ws_rpc(method, params, timeout=timeout)
+
+
+def _thread_ids_from_loaded_result(resp):
+    ids = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                if key in ("id", "threadId", "thread_id") and isinstance(val, str):
+                    ids.append(val)
+                else:
+                    walk(val)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk((resp or {}).get("result"))
+    return ids
+
+
+def _codex_thread_is_loaded(thread):
+    thread = (thread or "").strip()
+    if not thread:
+        return False
+    resp = _codex_app_server_rpc("thread/loaded/list", {})
+    if not resp or resp.get("error"):
+        return False
+    return thread in _thread_ids_from_loaded_result(resp)
 
 
 def _codex_queue_start(thread):
@@ -688,8 +927,11 @@ def _poke_codex_wake(ep, text):
         queued = False
     if not queued:
         return "refused"
+    # Do not thread/resume a VS Code-owned session. turn/start only when hosted.
+    if not _codex_thread_is_loaded(thread):
+        return "queued-offline"
     for _ in range(max(1, int(NATIVE_POKE_ATTEMPTS))):
-        if _codex_queue_start(thread) or _codex_turn_start(thread, text):
+        if _codex_turn_start(thread, text):
             return "woken"
     return "queued-offline"
 
@@ -774,6 +1016,29 @@ def _cursor_pause_resume(ep, text):
         return "woken"
     return ("supervised (no persist/tmux or ACP control sock; agent -p --resume "
             "is a new paid run, not pause-resume)")
+
+
+def native_wake_online(board, seat):
+    """True when a native poke can resume this seat now.
+
+    Shared by `tickets who` and `tickets msg` so a Codex thread record or a
+    PID-less session is not reported reachable=yes while wake returns
+    queued-offline. Persistent lifecycle is not a transport.
+    """
+    ep, _ = live_endpoint(board, seat)
+    if ep is None or ep.get("mode") != "native":
+        return False
+    provider = ep.get("provider") or ""
+    if provider == "codex":
+        return _codex_thread_is_loaded((ep.get("thread") or "").strip())
+    if provider == "cursor":
+        persist = (ep.get("persist_session") or "").strip()
+        acp = (ep.get("socket") or "").strip()
+        return bool(persist) or bool(acp and os.path.exists(acp))
+    if provider == "claude":
+        sock = (ep.get("socket") or "").strip()
+        return bool(sock and os.path.exists(sock))
+    return True
 
 
 def is_reachable(native_online=False, watcher_online=False, remote_online=False):
@@ -898,16 +1163,18 @@ def _commit_wake(board, seat, mid, lease, fence, label, ok):
             return "stale (rebound before delivery)"
         ep.pop("last_inflight_id", None)
         ep.pop("last_inflight_epoch", None)
+        delivered = label in ("woken", "queued-offline", "delivered-unconfirmed")
+        if mid and delivered:
+            ep["last_delivery_id"] = mid
+            ep["last_delivery_status"] = label
         if ok:
-            if mid:
-                ep["last_delivery_id"] = mid
-                ep["last_delivery_status"] = label
             ep["heartbeat_epoch"] = time.time()
             ep["heartbeat_at"] = ep.get("at") or ""
             write_endpoint(board, seat, ep)
             return label
-        ep["last_attempt_id"] = mid
-        ep["last_attempt_status"] = label
+        if not delivered:
+            ep["last_attempt_id"] = mid
+            ep["last_attempt_status"] = label
         write_endpoint(board, seat, ep)
         if label == "refused":
             try:
@@ -952,14 +1219,14 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         return "no live endpoint"
     lease, fence = _endpoint_lease_fence(ep)
     if provider == "claude":
-        ok = _poke_until(_poke_claude, ep, text)
-        label = "woken" if ok else "refused"
+        label = _poke_claude_until(ep, text)
+        ok = label == "woken"
     elif provider == "cursor":
         label = _cursor_pause_resume(ep, text)
         ok = label == "woken"
     else:
         label = _poke_codex_wake(ep, text)
-        ok = label in ("woken", "queued-offline")
+        ok = label == "woken"
     return _commit_wake(board, seat, mid, lease, fence, label, ok)
 
 
@@ -975,15 +1242,14 @@ def has_live_native_session(board, seat):
         return False
     provider = ep.get("provider") or ""
     if provider == "codex":
-        # Live wake requires managed app-server control sock (queue/start) or
-        # a still-alive session pid that owns the endpoint.
-        if os.path.exists(_codex_control_sock()):
-            return True
-        return _endpoint_pid_ok(ep.get("pid")) is True
+        return _codex_thread_is_loaded((ep.get("thread") or "").strip())
     if provider == "cursor":
         persist = (ep.get("persist_session") or "").strip()
         acp = (ep.get("socket") or "").strip()
         return bool(persist) or bool(acp and os.path.exists(acp))
+    if provider == "claude":
+        sock = (ep.get("socket") or "").strip()
+        return bool(sock and os.path.exists(sock))
     return True
 
 
@@ -992,7 +1258,7 @@ def public_adapter_state(board, seat, harness, adapter_online, wake_pending):
     provider = provider_for_harness(harness) or "custom"
     mode = adapter_mode_for(board, seat, harness)
     ep, _ = live_endpoint(board, seat)
-    native_online = bool(ep) and ep.get("mode") == "native"
+    native_online = native_wake_online(board, seat)
     if mode == "remote":
         online = bool(adapter_online)
     else:
