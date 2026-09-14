@@ -190,3 +190,70 @@ def test_concurrent_double_assign_yields_at_most_one_active(tool, board):
     to = show(tool, board, other)
     assert to["status"] == "open"
     assert to.get("reserved_for") == "alice"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_concurrent_transfer_and_target_claim_at_most_one_active(tool, board):
+    """Transfer of A to alice vs alice claiming B: at most one claimed hold.
+
+    True concurrent processes, not a recursive lock injection inside
+    _held_claimed (that deadlocks on the repaired non-reentrant owner lock).
+    """
+    a, b = setup_two_ready(tool, board)
+    assert run(tool, board, "claim", a, agent="bob").returncode == 0
+    ready = threading.Barrier(2)
+    results = []
+
+    def go(args, agent):
+        ready.wait(timeout=5)
+        results.append(run(tool, board, *args, agent=agent))
+
+    t1 = threading.Thread(target=go, args=(("assign", a, "--owner", "alice"), "planner"))
+    t2 = threading.Thread(target=go, args=(("claim", b), "alice"))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    held = claimed_by(tool, board, "alice")
+    assert len(held) <= 1, held
+    ta, tb = show(tool, board, a), show(tool, board, b)
+    alice_claimed = [tid for tid, rec in ((a, ta), (b, tb))
+                     if rec["status"] == "claimed" and rec.get("owner") == "alice"]
+    assert alice_claimed == held
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_concurrent_busy_reserve_does_not_clobber_other_claim(tool, board):
+    """Busy-alice reserve of B vs bob claiming B: a successful bob claim survives.
+
+    Assign must not write a stale open/owner-empty image over bob's claim.
+    """
+    a, b = setup_two_ready(tool, board)
+    assert run(tool, board, "claim", a, agent="alice").returncode == 0
+    ready = threading.Barrier(2)
+    results = {}
+
+    def assign():
+        ready.wait(timeout=5)
+        results["assign"] = run(tool, board, "assign", b, "--owner", "alice",
+                                agent="planner")
+
+    def claim():
+        ready.wait(timeout=5)
+        results["claim"] = run(tool, board, "claim", b, agent="bob")
+
+    t1 = threading.Thread(target=assign)
+    t2 = threading.Thread(target=claim)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    tb = show(tool, board, b)
+    if results["claim"].returncode == 0:
+        assert (tb["status"], tb.get("owner")) == ("claimed", "bob"), tb
+    else:
+        assert tb["status"] == "open", tb
+        assert tb.get("owner") in ("", None)
+        assert tb.get("reserved_for") == "alice"
+        assert results["assign"].returncode == 0, results["assign"].stderr + results["assign"].stdout
+    assert claimed_by(tool, board, "alice") == [a]
