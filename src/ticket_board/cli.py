@@ -2754,8 +2754,9 @@ Do not dump a live-board plan. Do not invent a second planner.
 ## CEO ONBOARDING — living board (product flow)
 
 **You are onboarding as Atman CEO.** Connecting is joining Atman, not a
-provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
-staffs. CEO does not claim worker tickets on this path.
+provider. Identity is `atman-<seat>` (example `atman-ceo`). The CoS staffs,
+and who that is comes from the board (`tickets master cos` sets it) — never
+from your provider. CEO does not claim worker tickets on this path.
 
 Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
 

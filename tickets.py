@@ -5740,12 +5740,14 @@ Do not dump a live-board plan. Do not invent a second planner.
 ## CEO ONBOARDING — living board (product flow)
 
 **You are onboarding as Atman CEO.** Connecting is joining Atman, not a
-provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
-staffs. CEO does not claim worker tickets on this path.
+provider. Identity is `atman-<seat>` (example `atman-ceo`). The CoS staffs,
+and who that is comes from the board (`tickets master cos` sets it) — never
+from your provider. CEO does not claim worker tickets on this path.
 
 Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
 
-1. Catalog + usage (`tickets harness available` + recorded limits)
+1. Catalog + subscriptions (`tickets harness available` + recorded limits),
+   then ASK which providers the operator is actually subscribed to
 2. Attach the living board / objective — do not invent a new team
 3. `tickets join atman-<seat> --roles master ...`
 4. Announce the Atman role (`tickets msg --to everyone`)
@@ -8774,13 +8776,15 @@ def cmd_join(a, board):
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
     if _join_is_ceo_path(owner, roles.get(owner, [])):
-        _cos, _cos_note = resolve_cos(board)
+        # Deliberately does NOT resolve the CoS here. `join` runs mid-sequence
+        # while seats are still arriving, and reading board state on this path
+        # perturbed an order-sensitive identity test for a purely cosmetic gain.
+        # `tickets connect` is where the CoS is resolved and named; this line
+        # only has to point at it.
         print("Atman CEO loop:  tickets inbox  ->  tickets objective  ->  "
               "tickets graph / tickets map  ->  tickets drive  ->  "
-              "tickets msg --to %s (CoS staffs). CEO does not claim worker tickets."
-              % (_cos or "<no CoS set>"))
-        if not _cos:
-            print("CoS: %s" % _cos_note)
+              "tickets msg --to <the CoS on the board> (CoS staffs; `tickets connect` "
+              "names it). CEO does not claim worker tickets.")
         print("Full instructions: tickets connect")
     else:
         print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "

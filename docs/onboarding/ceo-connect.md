@@ -76,11 +76,15 @@ tickets master                 # atman-ceo already holds master; take only if va
 tickets inbox
 tickets objective              # attach; do not --set unless empty
 
-tickets msg --to everyone "atman-ceo is Atman CEO on this living board. CoS is cursor. Integrating: cursor. @everyone"
-tickets master log "ceo onboard: seat=atman-ceo integrations=cursor"
+# CoS and integrations are NOT fixed values — read the CoS off the board and
+# use only the providers the operator confirmed a subscription for.
+tickets msg --to everyone "atman-ceo is Atman CEO on this living board. CoS is <from the board, or say it is unset>. Integrating: <what they confirmed>. @everyone"
+tickets master log "ceo onboard: seat=atman-ceo integrations=<what they confirmed>"
 
 # Ask the operator: what should change about this connect path?
-tickets msg --to cursor "CEO atman-ceo onboarded. Operator feedback: <their answer>"
+# If no CoS is recorded there is nobody to mail — ask who staffs the board,
+# then `tickets master cos <seat>` before sending this.
+tickets msg --to <the recorded cos> "CEO atman-ceo onboarded. Operator feedback: <their answer>"
 
 tickets graph
 tickets map
