@@ -829,6 +829,44 @@ footer > a:last-child:hover { color: var(--fg); }
   margin-top: 1.5rem;
 }
 
+.status-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
+  margin: 1.5rem 0 0;
+  padding: 0;
+}
+.status-strip > div {
+  min-width: 0;
+  margin: 0;
+  padding: 1rem 1.05rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--card);
+}
+.status-strip dt {
+  margin: 0 0 0.55rem;
+  color: var(--mute);
+  font-size: 0.7rem;
+  font-weight: 720;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.status-strip dd {
+  margin: 0;
+  color: var(--mute);
+  font-size: 0.86rem;
+}
+.status-strip code { color: var(--fg); font-size: 0.8rem; }
+.status-strip .status-current { border-color: rgb(111 158 150 / 45%); }
+.status-strip .status-current dt { color: var(--live); }
+.status-strip .status-review { border-color: rgb(224 165 61 / 42%); }
+.status-strip .status-review dt { color: var(--warn); }
+.status-strip .status-planned { border-style: dashed; }
+
+.workflow-capture { margin-top: 1.5rem; }
+.workflow-capture img { border-top: 0; }
+
 @media (max-width: 940px) {
   .hero { grid-template-columns: 1fr; }
   .command-board { width: min(100%, 36rem); }
@@ -844,6 +882,7 @@ footer > a:last-child:hover { color: var(--fg); }
   .horizon,
   .roadmap-grid { grid-template-columns: 1fr; }
   .ia-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .status-strip { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {

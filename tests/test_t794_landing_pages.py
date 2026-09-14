@@ -21,18 +21,18 @@ def test_first_class_section_ids_and_order():
     assert LANDING.index('id="roadmap"') < LANDING.index('id="start"')
 
 
-def test_tickets_ui_capture_is_shareable():
+def test_atm_ui_capture_is_shareable():
     block = LANDING[LANDING.index('id="app"') : LANDING.index('id="philosophy"')]
     for surface in ("Objective", "Team", "Work", "Intervene"):
         assert surface in block, surface
-    assert "assets/t732-dashboard-1440.png" in block
+    assert "assets/t971-app-work-1440.png" in block
     assert "not a hosted demo" in block.lower()
     assert "not fabricated activity" in block.lower()
-    assert "tickets connect" in block
+    assert "atm connect" in block
     assert "atman-&lt;seat&gt;" in block
-    assert "tickets ui" in block
+    assert "atm ui" in block
     assert "og:image" in LANDING
-    assert PAGES + "assets/t732-dashboard-1440.png" in LANDING
+    assert PAGES + "assets/t971-app-work-1440.png" in LANDING
     assert "127.0.0.1" not in LANDING
     assert "localhost" not in LANDING.lower()
 
@@ -40,7 +40,7 @@ def test_tickets_ui_capture_is_shareable():
 def test_workflow_graph_is_first_class():
     block = LANDING[LANDING.index('id="workflow"') : LANDING.index('id="per-turn"')]
     assert "Work stays invisible until its dependencies are done" in block
-    assert "tickets ui" in block
+    assert "atm ui" in block
     assert "T-001" in block
     assert "T-002" in block
     assert "T-003" in block
@@ -48,13 +48,13 @@ def test_workflow_graph_is_first_class():
     assert "hosted board" in block
 
 
-def test_app_is_tickets_ui_first_session_not_cloud_demo():
+def test_app_is_atm_ui_first_session_not_cloud_demo():
     block = LANDING[LANDING.index('id="app"') : LANDING.index('id="philosophy"')]
-    assert "tickets ui" in block
-    assert "tickets connect" in block
+    assert "atm ui" in block
+    assert "atm connect" in block
     assert "atman-&lt;seat&gt;" in block
     assert "not a hosted demo" in block.lower()
-    assert "assets/t732-dashboard-1440.png" in block
+    assert "assets/t971-app-work-1440.png" in block
     assert "127.0.0.1" not in LANDING
     assert "localhost" not in LANDING.lower()
 
@@ -74,7 +74,7 @@ def test_engineering_roadmap_is_first_class():
     assert "V2" in block
     assert "V3" in block
     assert "V4" in block
-    assert "tickets route" in block
+    assert "atm route" in block
     assert "named prior" in block.lower() or "named prior" in block
     assert ">Now<" in block or ">Now</span>" in block
     assert ">Next<" in block or ">Next</span>" in block
@@ -82,13 +82,13 @@ def test_engineering_roadmap_is_first_class():
     assert "No invented ship dates" in block
     assert "claimable only after cause, change, and proof exist" in block
     assert "median turns and measured cost only from done tickets" in block
-    assert "tickets hooks" in block
+    assert "atm hooks" in block
     assert "atman-&lt;seat&gt;" in block
     assert "not a pasted model setup" in block
-    assert "tickets next" in block
+    assert "atm next" in block
     assert "--after" in block
     assert "HOLD" in block
-    assert "tickets review" in block
+    assert "atm review" in block
     assert "SHA on main" in block
     assert "Load guidance only when the ticket needs it (handoff)" in block
     assert "not always-on AGENTS.md" in block

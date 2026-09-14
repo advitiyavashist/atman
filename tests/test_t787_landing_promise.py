@@ -103,11 +103,11 @@ def test_landing_readme_records_the_lock():
     assert "Contact us" in README or "GitHub issues" in README
 
 
-def test_start_connects_as_atman_then_tickets_ui():
+def test_start_connects_as_atman_then_atm_ui():
     start = LANDING[LANDING.index('id="start"') :]
     assert "connect as Atman" in start
-    assert "tickets connect" in start
+    assert "atm connect" in start
     assert "atman-ceo" in start
-    assert "tickets ui" in start
-    assert "tickets next" not in start
+    assert "atm ui" in start
+    assert "atm next" not in start
     assert "alice" not in start

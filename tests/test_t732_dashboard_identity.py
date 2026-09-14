@@ -52,7 +52,7 @@ def test_react_parity_surface_uses_the_same_action_accent():
 
 def test_landing_and_readme_point_at_the_t732_product_capture():
     assert EVIDENCE in README
-    assert 'src="assets/t732-dashboard-1440.png"' in LANDING
+    assert 'src="assets/t971-app-work-1440.png"' in LANDING  # T-971: current atm ui capture
     assert "../docs/brand/evidence" not in LANDING
     assert "t606-atman-dark-desktop.png" not in README
     assert "t606-atman-dark-desktop.png" not in LANDING
@@ -62,4 +62,7 @@ def test_landing_assets_exist_for_the_deployed_directory():
     assets = ROOT / "landing" / "assets"
     for width in ("1440", "768", "390"):
         path = assets / ("t732-dashboard-%s.png" % width)
+        assert path.is_file() and path.stat().st_size > 10_000, path
+    for width in ("1440", "768"):
+        path = assets / ("t971-app-work-%s.png" % width)
         assert path.is_file() and path.stat().st_size > 10_000, path
