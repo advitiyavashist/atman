@@ -1867,12 +1867,12 @@ def cmd_plan(a, board):
     who = whoami()
     for it, t0 in zip(items, made):
         t = load(board, t0["id"])
+        fields = _plan_item_sound_fields(it, t)
+        qs = S._questions_list(fields.get("open_questions"))
         if it.get("capture"):
             t["lane"] = "capture"
             save(board, t)
         elif it.get("sounded"):
-            fields = S.merge_sound_fields(t.get("body") or it.get("body") or "", "")
-            qs = S._questions_list(fields.get("open_questions"))
             if (not S.sound_fields_complete(fields) or qs
                     or S.is_no_change(fields.get("change"))):
                 for x in made:
@@ -1880,20 +1880,41 @@ def cmd_plan(a, board):
                 sys.exit("plan: %r marked sounded but needs cause/change/proof/deps and empty open questions"
                          % (it.get("key") or t["id"]))
             _apply_sounded(board, t, fields, who)
-        else:
-            # README / first-run: planned JSON is already a graph. Capture is
-            # `tickets capture` (or plan item `"capture": true`). Otherwise B
-            # waits on A via deps, not because it is still unsounded (T-879).
-            dep_keys = it.get("deps") or []
-            fields = {
-                "cause": (it.get("cause") or "planned in tickets plan").strip(),
-                "change": (it.get("change") or it.get("title") or t["title"]).strip(),
-                "proof": (it.get("proof") or "finish the ticket; tickets done with notes").strip(),
-                "deps": ", ".join(dep_keys) if dep_keys else "none",
-                "open_questions": (it.get("open_questions") or it.get("questions") or "").strip(),
-            }
+        elif (S.sound_fields_complete(fields) and not qs
+              and not S.is_no_change(fields.get("change"))):
+            # Real cause/change/proof only. Never synthesize placeholders (T-879).
             _apply_sounded(board, t, fields, who)
+        else:
+            t["lane"] = "capture"
+            save(board, t)
         print("created %s  %s  lane=%s" % (t["id"], t["title"], _ticket_lane(t)))
+
+
+def _plan_item_sound_fields(it, t):
+    """Collect cause/change/proof from the plan item. Never invent placeholders."""
+    S = _sounding()
+    fields = S.merge_sound_fields(t.get("body") or it.get("body") or "", "")
+    for key in ("cause", "change", "proof", "deps", "open_questions"):
+        raw = it.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, (list, tuple)):
+            text = ", ".join(str(x).strip() for x in raw if str(x).strip())
+        else:
+            text = str(raw).strip()
+        if text:
+            fields[key] = text
+    qs = it.get("questions")
+    if qs and not (fields.get("open_questions") or "").strip():
+        fields["open_questions"] = str(qs).strip()
+    if not (fields.get("deps") or "").strip():
+        real = t.get("deps") or []
+        fields["deps"] = ", ".join(real) if real else "none"
+    return fields
+
+
+def _capture_sound_hint(tid):
+    return "%s waits in capture: run tickets sound %s" % (tid, tid)
 
 
 def _apply_sounded(board, t, fields, who):
@@ -2537,11 +2558,13 @@ def cmd_graph(a, board):
         if t.get("owner"):
             bits.append("@" + t["owner"])
         lane = _ticket_lane(t)
-        if lane != "ready":
-            bits.append("lane=" + lane)
         waiting = [d for d in t.get("deps", []) if d not in done]
         if waiting and t["status"] == "open":
             bits.append("waiting on " + ",".join(waiting))
+        if lane != "ready":
+            bits.append("lane=" + lane)
+        if t["status"] == "open" and not waiting and lane == "capture":
+            bits.append(_capture_sound_hint(tid))
         if bits:
             s += "  (%s)" % "; ".join(bits)
         return s
@@ -2715,7 +2738,16 @@ def _start_successors(board, finished_id):
             started.append("%s -> %s" % (child["id"], who))
         else:
             started.append(child["id"])
-    return freed, started, held
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    capture_wait = []
+    for x in tickets:
+        if x["status"] != "open" or finished_id not in (x.get("deps") or []):
+            continue
+        if _ticket_lane(x) != "capture":
+            continue
+        if all(d in done for d in x.get("deps") or []):
+            capture_wait.append(x["id"])
+    return freed, started, held, capture_wait
 
 
 def _may_set_reservation(board, who):
@@ -2830,7 +2862,20 @@ def cmd_next(a, board):
         print("Fix with: tickets dep <id> --drop <missing-id>")
         sys.exit(2)
     holders = sorted(set(t.get("owner") or "?" for t in tickets if t["status"] == "claimed"))
-    msg = "no ticket ready: %d open, all waiting on unfinished work" % len(open_blocked)
+    done_ids = set(t["id"] for t in tickets if t["status"] == "done")
+    capture_ready, dep_waits = [], []
+    for t in open_blocked:
+        waiting = [d for d in t.get("deps", []) if d not in done_ids]
+        if waiting:
+            dep_waits.append("%s waits on %s" % (t["id"], ",".join(waiting)))
+        elif _ticket_lane(t) == "capture":
+            capture_ready.append(_capture_sound_hint(t["id"]))
+    if capture_ready:
+        msg = "no ticket ready: %s" % "; ".join(capture_ready)
+        if dep_waits:
+            msg += "; " + "; ".join(dep_waits)
+    else:
+        msg = "no ticket ready: %d open, all waiting on unfinished work" % len(open_blocked)
     if holders:
         msg += " (in progress with: %s)" % ", ".join(holders)
     print(msg)
@@ -4967,13 +5012,15 @@ def cmd_done(a, board):
         a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
     if g:
         print("recorded %s" % t["commit"])
-    freed, started, held = _start_successors(board, a.id)
+    freed, started, held, capture_wait = _start_successors(board, a.id)
     if freed:
         print("unblocked: %s" % ", ".join(freed))
     if started:
         print("started: %s" % ", ".join(started))
     if held:
         print("held (not started): %s" % ", ".join(held))
+    for tid in capture_wait:
+        print(_capture_sound_hint(tid))
     _finish_followup(board, a.id, "done")
 
 
@@ -16016,7 +16063,7 @@ def main():
     c.add_argument("--all", action="store_true", help="include done tickets and closed sprints")
     c.set_defaults(fn=cmd_map)
 
-    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin (ready; set capture:true to hold for sound)")
+    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin (ready only with cause/change/proof; else capture)")
     c.set_defaults(fn=cmd_plan)
 
     c = sub.add_parser("capture", help="capture a thought as lane=capture (not claimable until tickets sound)")

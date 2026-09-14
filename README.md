@@ -248,25 +248,27 @@ endless model turn open.
 
 ## Plan dependent work
 
-JSON `deps` become real `--after` edges. Planned tickets are **ready** (claimable
-when their deps are done). Use `"capture": true` on an item, or `tickets capture`,
-when the thought still needs `tickets sound`.
+JSON `deps` become real `--after` edges. A plan item is **ready** only when it
+carries real `cause`, `change`, and `proof` (or `"sounded": true` with those
+fields). Items without them stay in capture until `tickets sound T-00N`.
 
 ```sh
 tickets epic create "Auth" -b "..."
 tickets sprint create "Ship auth" --activate
 tickets plan <<'EOF'
 {"epic":"E-001","sprint":"S-01","tickets":[
- {"key":"db","title":"Schema","role":"backend","priority":1},
- {"key":"api","title":"Auth API","role":"backend","deps":["db"]},
- {"key":"ui","title":"Login UI","role":"console","deps":["api"]}
+ {"key":"A","title":"Task A: write hello.txt","role":"backend",
+  "cause":"B needs hello.txt on disk","change":"Write hello.txt","proof":"hello.txt exists"},
+ {"key":"B","title":"Task B: consume hello.txt","role":"backend","deps":["A"],
+  "cause":"A produced hello.txt","change":"Read and use hello.txt","proof":"consumer sees hello.txt"}
 ]}
 EOF
 ```
 
-After `tickets done` on Schema, Auth API is offered by `tickets next` — it does
-not stay in capture. Use `tickets map` for sprint and epic progress, `tickets graph`
-for dependency diagnosis, and `tickets who` for live ownership and worktrees.
+After `tickets done` on A, B is offered by `tickets next` — no extra sound step
+when the snippet carries fields. Use `tickets map` for sprint and epic progress,
+`tickets graph` for dependency diagnosis, and `tickets who` for live ownership
+and worktrees.
 
 ## Inspectable by design
 
