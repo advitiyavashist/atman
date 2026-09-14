@@ -1757,6 +1757,36 @@ def try_claim(board, tid, owner):
     return got
 
 
+def _held_claimed(board, owner, except_id=None):
+    """Claimed tickets currently held by owner (T-979 one-active-hold)."""
+    if not owner:
+        return []
+    return [t for t in load_all(board)
+            if t.get("status") == "claimed"
+            and t.get("owner") == owner
+            and t.get("id") != except_id]
+
+
+def _already_hold_msg(held):
+    ids = ", ".join(t["id"] for t in held)
+    return ("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
+            "more, or pass --another if you really want to work two in parallel." % ids)
+
+
+def try_claim_one_active(board, tid, owner, *, another=False):
+    """Claim tid unless owner already holds a different claimed ticket.
+
+    Serializes on the per-agent lock so concurrent assign/claim/next cannot
+    both create an active hold. Returns (ticket, None) on success, (None, held)
+    when refused for a second hold, or (None, None) when the ticket lock lost.
+    """
+    with _AgentLock(board, owner):
+        held = _held_claimed(board, owner, except_id=tid)
+        if held and not another:
+            return None, held
+        return try_claim(board, tid, owner), None
+
+
 def fmt_hours(h):
     if h is None:
         return "?"
@@ -3098,11 +3128,9 @@ def cmd_next(a, board):
         )
         sys.exit(1)
     tickets = load_all(board)
-    held = [t for t in tickets if t["status"] == "claimed" and t.get("owner") == owner]
+    held = _held_claimed(board, owner)
     if held and not a.another:
-        print("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
-              "more, or pass --another if you really want to work two in parallel."
-              % ", ".join(t["id"] for t in held))
+        print(_already_hold_msg(held))
         sys.exit(1)
     steal_id = (getattr(a, "steal", None) or "").strip()
     ready_all = unblocked(board, tickets)
@@ -3126,7 +3154,10 @@ def cmd_next(a, board):
 
     ready.sort(key=order)
     for t in ready:
-        got = try_claim(board, t["id"], owner)
+        got, held_now = try_claim_one_active(board, t["id"], owner, another=a.another)
+        if held_now:
+            print(_already_hold_msg(held_now))
+            sys.exit(1)
         if got:
             checkin(board, owner, got["id"])
             print(detail(board, got, load_all(board)))
@@ -3211,7 +3242,9 @@ def cmd_claim(a, board):
     if lane != "ready":
         sys.exit("%s is lane=%s; sound it before claiming (tickets sound %s)"
                  % (a.id, lane, a.id))
-    got = try_claim(board, a.id, owner)
+    got, held = try_claim_one_active(board, a.id, owner)
+    if held:
+        sys.exit(_already_hold_msg(held))
     if not got:
         sys.exit("%s is already taken" % a.id)
     checkin(board, owner, got["id"])
@@ -5614,13 +5647,25 @@ def cmd_assign(a, board):
         # hard assignment by the master: takes the lock on their behalf
         prev_owner = t.get("owner") or ""
         if t["status"] == "open" and a.owner:
-            got = try_claim(board, t["id"], a.owner)
-            if not got:
+            got, held = try_claim_one_active(board, t["id"], a.owner)
+            if held:
+                # Queued work stays queued: reserve, do not fabricate a
+                # second in-progress claim (T-979 / T-972).
+                t["reserved_for"] = a.owner
+                changed.append("reserved for %s (already holds %s)" % (
+                    a.owner, ", ".join(x["id"] for x in held)))
+            elif not got:
                 sys.exit("%s was claimed by someone else while assigning" % t["id"])
-            t = got
-            changed.append("claimed for %s" % a.owner)
-            _safe(lambda: _bind_agent_ticket(board, a.owner, t["id"]), None)
+            else:
+                t = got
+                changed.append("claimed for %s" % a.owner)
+                _safe(lambda: _bind_agent_ticket(board, a.owner, t["id"]), None)
         elif t["status"] in ("claimed", "review"):
+            if t["status"] == "claimed" and a.owner and a.owner != prev_owner:
+                held = _held_claimed(board, a.owner, except_id=t["id"])
+                if held:
+                    sys.exit("%s already holds %s -- finish that before taking an active assignment of %s"
+                             % (a.owner, ", ".join(x["id"] for x in held), t["id"]))
             t["owner"] = a.owner
             changed.append("owner=%s" % a.owner)
             if prev_owner and prev_owner != a.owner:
