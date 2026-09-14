@@ -9683,7 +9683,7 @@ def cmd_brief(a, board):
 _KNOWLEDGE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _KNOWLEDGE_NODE_TYPES = frozenset({
     "project", "component", "decision", "artifact", "model_pin", "experiment",
-    "failure", "runbook", "skill", "agent_capability",
+    "failure", "runbook", "skill", "agent_capability", "lesson",
 })
 _KNOWLEDGE_EDGE_TYPES = frozenset({
     "depends_on", "supersedes", "produced_by", "failed_because", "verified_by",
@@ -9958,6 +9958,22 @@ def _knowledge_dedup(nodes):
     return list(picked.values())
 
 
+def _lesson_in_scope(node, scopes, terms, text):
+    """Lessons inject only on explicit id, matching role/harness, or file tokens."""
+    if node.get("type") != "lesson":
+        return True
+    applies = {str(x).lower() for x in node.get("applies_to", [])}
+    if "all" in applies:
+        return True
+    scopes = {str(x).lower() for x in (scopes or []) if x}
+    if scopes & applies:
+        return True
+    data = node.get("data") or {}
+    files = [str(x).lower() for x in (data.get("files") or []) if x]
+    hay = " ".join([text or "", " ".join(sorted(terms or []))]).lower()
+    return any(token in hay for token in files)
+
+
 def _knowledge_query(root, text="", scopes=None, max_nodes=12):
     nodes, edges, errors = _knowledge_records(root)
     if errors:
@@ -9970,6 +9986,11 @@ def _knowledge_query(root, text="", scopes=None, max_nodes=12):
     explicit = {n["id"] for n in nodes if n["id"].lower() in referenced}
     scored = {}
     for node in nodes:
+        if node.get("type") == "lesson" and node["id"] not in explicit:
+            if node.get("verification") == "superseded":
+                continue
+            if not _lesson_in_scope(node, scopes, terms, text):
+                continue
         fields = " ".join(_knowledge_strings({
             "id": node.get("id"), "type": node.get("type"), "title": node.get("title"),
             "summary": node.get("summary"), "tags": node.get("tags"),
@@ -9984,6 +10005,8 @@ def _knowledge_query(root, text="", scopes=None, max_nodes=12):
         if "all" in applies:
             score += 2
         score += 9 * len(scopes & applies)
+        if node.get("type") == "lesson" and _lesson_in_scope(node, scopes, terms, text):
+            score += 8
         if score:
             scored[node["id"]] = score
     # Bring the evidence, failure or runbook connected to a direct match. This
@@ -9998,7 +10021,7 @@ def _knowledge_query(root, text="", scopes=None, max_nodes=12):
         if edge["to"] in direct and edge["from"] in by_id:
             scored[edge["from"]] = max(scored.get(edge["from"], 0),
                                        direct_scores[edge["to"]] - 1)
-    type_bias = {"failure": 5, "runbook": 4, "skill": 3, "decision": 2,
+    type_bias = {"lesson": 6, "failure": 5, "runbook": 4, "skill": 3, "decision": 2,
                  "artifact": 1, "experiment": 1}
     ranked = sorted((by_id[nid] for nid in scored), key=lambda n: (
         -(scored[n["id"]] + type_bias.get(n.get("type"), 0)),
@@ -10084,7 +10107,11 @@ def knowledge_context(board, owner, extra="", max_chars=None):
     nodes, edges, errors = _knowledge_query(root, " ".join(chunks), scopes=scopes)
     if errors:
         return "Knowledge graph invalid; run `tickets knowledge validate`."
-    return _knowledge_render(nodes, edges, _knowledge_budget(root, max_chars))
+    rendered = _knowledge_render(nodes, edges, _knowledge_budget(root, max_chars))
+    if not rendered:
+        return ""
+    ids = ",".join(n["id"] for n in nodes)
+    return rendered + "\n(knowledge selected: %s; %d chars)" % (ids, len(rendered))
 
 
 def _parse_knowledge_frontmatter(text):
@@ -14637,8 +14664,146 @@ def _quickstart_next_steps(board, agent):
     print("Learn it: tickets guide   |   docs/first-session.md   |   README.md")
 
 
+def _parse_guide_scope(raw):
+    """Parse --scope tokens into applies_to plus optional file list.
+
+    Accepts `harness:codex,role:backend,files:tickets.py` or bare tokens.
+    """
+    applies, files = [], []
+    for part in (raw or "").split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if ":" in token:
+            kind, value = token.split(":", 1)
+            kind, value = kind.strip().lower(), value.strip()
+            if not value:
+                continue
+            if kind in ("file", "files"):
+                files.append(value)
+                applies.append(value)
+            elif kind in ("role", "roles"):
+                applies.append(value)
+            elif kind in ("harness", "tool"):
+                applies.append(value)
+            else:
+                applies.append(value)
+        else:
+            applies.append(token)
+    # Preserve order, drop empties/dupes.
+    def uniq(items):
+        out, seen = [], set()
+        for item in items:
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+        return out
+    return uniq(applies), uniq(files)
+
+
+def _lesson_slug(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")[:42]
+    return "lesson." + (slug or "untitled")
+
+
+def _knowledge_put_node(root, record, replace=False, board=None):
+    """Write one graph node through the same validation as `knowledge add`."""
+    if _knowledge_inside_board(root, board):
+        sys.exit("knowledge graph must live outside the ticket board: %s" % root)
+    found = _knowledge_validate_record(record, "node")
+    if found:
+        sys.exit("NO CHANGE WAS MADE: " + "; ".join(found))
+    target = os.path.join(root, "nodes", record["id"] + ".json")
+    if not _knowledge_path_inside_root(root, os.path.dirname(target)):
+        sys.exit("NO CHANGE WAS MADE: knowledge destination escapes graph root")
+    current, _ = _knowledge_json(target)
+    if current is not None and not replace:
+        sys.exit("NO CHANGE WAS MADE: knowledge record %s already exists" % record["id"])
+    if current is None and replace:
+        sys.exit("NO CHANGE WAS MADE: knowledge record %s does not exist" % record["id"])
+    if replace and current is not None:
+        record["revision"] = int(current.get("revision") or 1) + 1
+        record.setdefault("recorded_at", current.get("recorded_at"))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = target + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, target)
+    _, _, after_errors = _knowledge_records(root)
+    if after_errors:
+        if current is None:
+            os.unlink(target)
+        else:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(current, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp, target)
+        sys.exit("NO CHANGE WAS MADE: " + "; ".join(after_errors[:4]))
+    return target
+
+
 def cmd_guide(a, board):
-    print(GUIDE)
+    action = (getattr(a, "action", "") or "").strip()
+    if not action:
+        print(GUIDE)
+        return
+    root = knowledge_root(board, whoami(getattr(a, "agent", "") or ""))
+    if action == "add":
+        lesson = (getattr(a, "text", "") or "").strip()
+        evidence = (getattr(a, "evidence", "") or "").strip()
+        if not lesson or not evidence:
+            sys.exit("usage: tickets guide add '<lesson>' --evidence <ticket/commit/log> --scope <files|roles|harness>")
+        applies, files = _parse_guide_scope(getattr(a, "scope", "") or "")
+        if not applies:
+            sys.exit("guide add needs --scope with at least one role, harness, or file")
+        nid = _lesson_slug(lesson)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        record = {
+            "kind": "node",
+            "id": nid,
+            "type": "lesson",
+            "title": lesson[:72],
+            "summary": lesson,
+            "tags": ["lesson", "field-guide"],
+            "applies_to": applies,
+            "source": {"kind": "ticket", "ref": evidence},
+            "recorded_at": stamp,
+            "owner": whoami(getattr(a, "agent", "") or ""),
+            "last_verified_at": stamp,
+            "verification": "observed",
+            "confidence": 0.8,
+            "stale_after_days": 90,
+            "revision": 1,
+            "data": {"files": files, "evidence": evidence},
+        }
+        path = _knowledge_put_node(root, record, replace=False, board=board)
+        print("guide add %s --evidence %s (%s)" % (nid, evidence, path))
+        return
+    if action == "retire":
+        nid = (getattr(a, "text", "") or "").strip()
+        reason = (getattr(a, "reason", "") or "").strip()
+        if not nid or not reason:
+            sys.exit("usage: tickets guide retire <id> --reason <why>")
+        if not nid.startswith("lesson."):
+            nid = "lesson." + nid if not _KNOWLEDGE_SLUG_RE.match(nid) else nid
+        target = os.path.join(root, "nodes", nid + ".json")
+        current, err = _knowledge_json(target)
+        if err or current is None:
+            sys.exit("NO CHANGE WAS MADE: no lesson %s" % nid)
+        if current.get("type") != "lesson":
+            sys.exit("NO CHANGE WAS MADE: %s is not a lesson" % nid)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        current["verification"] = "superseded"
+        current["last_verified_at"] = stamp
+        current.setdefault("data", {})
+        current["data"]["retired_reason"] = reason
+        path = _knowledge_put_node(root, current, replace=True, board=board)
+        print("guide retire %s --reason %s (%s)" % (nid, reason, path))
+        return
+    sys.exit("usage: tickets guide | tickets guide add '...' --evidence ... --scope ... | tickets guide retire <id> --reason ...")
 
 
 # ---- hooks: wire a tool so the board reaches the agent every turn ----------
@@ -15849,7 +16014,13 @@ def main():
     c.add_argument("--remove", action="store_true", help="delete the sample tickets this created")
     c.set_defaults(fn=cmd_quickstart)
 
-    c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
+    c = sub.add_parser("guide", help="startup guide, or Field Guide lesson add/retire")
+    c.add_argument("action", nargs="?", default="", help="omit to print the startup guide; add|retire for lessons")
+    c.add_argument("text", nargs="?", default="", help="lesson text (add) or lesson id (retire)")
+    c.add_argument("--evidence", default="", help="ticket, commit, or log that proves the lesson")
+    c.add_argument("--scope", default="", help="comma list: files:tickets.py,role:backend,harness:codex")
+    c.add_argument("--reason", default="", help="why a lesson is being retired")
+    c.add_argument("--agent", default="")
     c.set_defaults(fn=cmd_guide)
 
     c = sub.add_parser("brief", help="give an agent, role, or ticket context (shown on claim, in prompt, in boot)")
