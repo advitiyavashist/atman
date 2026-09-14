@@ -425,7 +425,7 @@ def test_hook_run_accepts_agy_events(board):
     assert "agy-stop" in help_text
 
 
-def test_inherit_settings_copies_agents_dir(tmp_path):
+def test_inherit_settings_does_not_copy_role_hooks(tmp_path):
     import importlib.util
     spec = importlib.util.spec_from_file_location("tickets", str(TOOL))
     mod = importlib.util.module_from_spec(spec)
@@ -435,11 +435,30 @@ def test_inherit_settings_copies_agents_dir(tmp_path):
     wt = tmp_path / "wt"
     (root / ".agents").mkdir(parents=True)
     (root / ".agents" / "hooks.json").write_text('{"test": true}')
+    (root / ".claude").mkdir(parents=True)
+    role_hook = "env TICKET_AGENT=cursor %s hook-run --agent cursor --event inbox" % TOOL
+    (root / ".claude" / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(pytest:*)"]},
+        "hooks": {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": role_hook},
+            {"type": "command", "command": "printf custom"},
+        ]}]},
+    }))
+    (root / ".claude" / "settings.local.json").write_text('{"allow": []}')
 
     copied = mod._inherit_settings(str(root), str(wt))
-    assert ".agents/hooks.json" in copied
-    assert (wt / ".agents" / "hooks.json").exists()
-    assert json.loads((wt / ".agents" / "hooks.json").read_text()) == {"test": True}
+    assert ".agents/hooks.json" not in copied
+    assert not (wt / ".agents" / "hooks.json").exists()
+    # Both .claude files come across so the worker keeps the project's
+    # permissions, but a canonical role hook never does (T-839).
+    assert sorted(copied) == ["settings.json", "settings.local.json"]
+    assert (wt / ".claude" / "settings.local.json").exists()
+    inherited = json.loads((wt / ".claude" / "settings.json").read_text())
+    assert inherited["permissions"]["allow"] == ["Bash(pytest:*)"]
+    kept = [h["command"] for e in inherited["hooks"]["UserPromptSubmit"] for h in e["hooks"]]
+    assert kept == ["printf custom"], kept
+    # The project file itself is left exactly as the operator wrote it.
+    assert role_hook in (root / ".claude" / "settings.json").read_text()
 
 
 def test_devin_builtin_harness_join_records_no_cmd(board):

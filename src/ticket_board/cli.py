@@ -19,7 +19,11 @@ Board location, in order of preference:
 `tickets board` does not scan children — SessionStart hooks stay silent in
 folders that are not the project. `tickets next` / `show` / `done` do.
 
-Agent identity comes from $TICKET_AGENT (set it per tool: claude, codex, cursor).
+Agent identity for a single command comes from $TICKET_AGENT (set it per tool:
+claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
+launched. Session-scoped surfaces (`board`'s "you:" line, `msg`/`inbox` with
+no --owner) resolve through session_seat(): explicit --owner, then
+$TICKET_SEAT, then this session's join record, then $TICKET_AGENT.
 Default roles for those names can be overridden by .tickets/roles.json.
 """
 
@@ -463,7 +467,106 @@ def _board_dir_uncached(discover_children=True):
 
 
 def whoami(explicit=None):
-    return explicit or os.environ.get("TICKET_AGENT") or "agent-%d" % os.getpid()
+    """Resolve who a SINGLE COMMAND acts as. Never reads the board."""
+    if explicit:
+        return explicit
+    return (os.environ.get("TICKET_SEAT")
+            or os.environ.get("TICKET_AGENT")
+            or "agent-%d" % os.getpid())
+
+
+IDENTITY_FILE = ".agent-identity"
+IDENTITY_DIR = ".identities"
+SESSION_ID_VARS = (
+    "TICKET_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "CURSOR_SESSION_ID",
+    "TERM_SESSION_ID",
+)
+
+
+def agent_session_key():
+    for var in SESSION_ID_VARS:
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return hashlib.sha256(val.encode("utf-8")).hexdigest()[:16]
+    return None
+
+
+def _identity_path(board, key=None):
+    if key:
+        return os.path.join(board, IDENTITY_DIR, key)
+    return os.path.join(board, IDENTITY_FILE)
+
+
+def _read_identity_file(path):
+    try:
+        with open(path) as f:
+            return (f.read() or "").strip() or None
+    except (OSError, IOError):
+        return None
+
+
+def read_identity(board):
+    key = agent_session_key()
+    if key:
+        return _read_identity_file(_identity_path(board, key))
+    return _read_identity_file(_identity_path(board))
+
+
+def write_identity(board, name):
+    key = agent_session_key()
+    path = _identity_path(board, key)
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write((name or "").strip() + "\n")
+    os.replace(tmp, path)
+
+
+def seat_confirmed(board):
+    try:
+        if os.environ.get("TICKET_SEAT"):
+            return True
+        if agent_session_key():
+            return bool(read_identity(board))
+        return bool(read_identity(board) or os.environ.get("TICKET_AGENT"))
+    except Exception:
+        return False
+
+
+def session_seat(board, explicit=None):
+    """Who THIS SESSION is.
+
+    explicit > TICKET_SEAT > a SESSION-KEYED recorded join > TICKET_AGENT >
+    the flat legacy recorded identity > pid. A recorded identity outranks the
+    ambient TICKET_AGENT only when it is keyed to THIS session; the flat
+    legacy file belongs to whichever agent joined last on this machine, so an
+    explicit TICKET_AGENT beats it. Must match tickets.py:session_seat().
+    """
+    if explicit:
+        return explicit
+    seat = (os.environ.get("TICKET_SEAT") or "").strip()
+    if seat:
+        return seat
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return recorded
+    env_agent = (os.environ.get("TICKET_AGENT") or "").strip()
+    if env_agent:
+        return env_agent
+    if recorded:
+        return recorded
+    return "agent-%d" % os.getpid()
 
 
 def now():
@@ -766,7 +869,10 @@ def agents_dir(board):
     return os.path.join(board, "agents")
 
 
-from ticket_board.agent_checkin import checkin  # canonical; no root tickets.py
+try:
+    from .agent_checkin import checkin  # canonical; no root tickets.py
+except ImportError:  # python src/ticket_board/cli.py
+    from agent_checkin import checkin
 
 
 def _clear_agent_ticket(board, agent, tid):
@@ -1345,7 +1451,15 @@ def cmd_board(a, board):
         d, n, _, _ = progress(mine)
         hdr.append("sprint %s %s" % (cur["id"], bar(d, n, 10)))
     hdr.append("master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    seat = session_seat(board)
+    recorded = seat_confirmed(board)
+    hdr.append("you: %s%s" % (seat, "" if recorded else " (UNCONFIRMED)"))
     print("  " + " | ".join(hdr))
+    if not recorded:
+        print("  ^ this session has NOT recorded a seat; %r is a guess from the "
+              "environment." % seat)
+        print("    Run `tickets join <your-name> --roles <role>` before acting on "
+              "anything addressed to a seat.")
     for t in tickets:
         if t["status"] != "done" or a.all:
             print("  " + line(t, tickets))
@@ -2351,9 +2465,9 @@ def cmd_block(a, board):
 
 def cmd_note(a, board):
     t = load(board, a.id)
-    t["notes"].append({"by": a.by or t.get("owner") or "agent", "at": now(), "text": a.text})
+    who = whoami(a.by)
+    t["notes"].append({"by": who, "at": now(), "text": a.text})
     save(board, t)
-    who = a.by or t.get("owner")
     # notes_len only -- the note body is the agent's own prose and never enters
     # the trajectory log.
     traj_event(board, "update", agent=who or whoami(), ticket=t,
@@ -3450,7 +3564,7 @@ def fmt_msg(m):
 
 
 def cmd_msg(a, board):
-    sender = whoami(a.owner)
+    sender = session_seat(board, a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
     m = post_message(board, sender, a.text, a.to or "", a.re or "")
@@ -3458,7 +3572,10 @@ def cmd_msg(a, board):
 
 
 def cmd_inbox(a, board):
-    owner = whoami(a.owner)
+    owner = session_seat(board, a.owner)
+    if getattr(a, "quiet_if_unidentified", False) and not a.owner:
+        if not seat_confirmed(board):
+            return
     scan = None
     if a.all:
         msgs = load_messages(board)[-a.limit:]
@@ -3961,6 +4078,12 @@ def cmd_join(a, board):
         board, owner, incoming,
         transfer=bool(getattr(a, "transfer", False)),
         alias=(getattr(a, "alias", "") or "").strip())
+    # AFTER the guard, never before it: a refused join must leave this session
+    # answering as whoever it already was. Stamping first made `join alpha` --
+    # refused for provider reuse or a bound alias -- still turn this session
+    # into alpha, so a bare `tickets inbox` read alpha's private mail and a
+    # bare `tickets msg` posted as alpha. Nothing below can sys.exit.
+    write_identity(board, owner)
     # Before checkin(), which creates the record: only a genuinely new agent is
     # stamped, so a re-join never moves the watermark over unread mail.
     first_join = not _agent_rec(board, owner)
@@ -4009,7 +4132,8 @@ def cmd_join(a, board):
         entry["role_alias"] = alias
     wf[owner] = entry
     save_workforce(board, wf)
-    rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""))
+    rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""),
+                  cwd=os.path.abspath(getattr(a, "worktree", "") or "") or None)
     if first_join:
         jrec = _agent_rec(board, owner)
         jrec.setdefault("joined_at", now())
@@ -4604,6 +4728,8 @@ def main():
     c.add_argument("--all", action="store_true", help="full history")
     c.add_argument("--limit", type=int, default=40)
     c.add_argument("--keep", action="store_true", help="do not mark as read")
+    c.add_argument("--quiet-if-unidentified", action="store_true",
+                   help="print nothing when this session has no recorded seat")
     c.add_argument("--owner", "-o")
     c.set_defaults(fn=cmd_inbox)
 
