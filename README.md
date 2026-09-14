@@ -31,6 +31,28 @@ stops — do not restart from chat history.
 The dashboard above is a checked-in product capture. Open it locally with
 `tickets ui`. It is not a public hosted demo.
 
+## Preview status
+
+This is an early developer preview. It has been tested on one macOS machine
+with Claude Code, Codex, and Cursor. Install via `git clone` + `./install.sh`;
+the Homebrew formula is not published yet.
+
+## Known issues
+
+- `done`/`review` may notify seats named `cursor` or `atman-ceo` on a fresh
+  board. Fix is in PR #147; until it merges, expect stray notifications to
+  those seat names on a new board.
+- `reserve` requires taking master first. Run `atm master take` before
+  `atm reserve`.
+- `atm done` refuses when run from `main`. Run it from the agent's own
+  worktree, not `main`.
+- Codex recipients may stop waking after one run. Workaround: restart the
+  watcher.
+- Cursor/Agy wake goes through a supervised watcher, not a native
+  integration.
+- Connect/reconnect, remote control, and metrics dashboards are not ready
+  yet.
+
 ## What Atman manages
 
 An agent is more than a model. Atman treats each working seat as the combination
