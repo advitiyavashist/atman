@@ -105,11 +105,11 @@ def test_living_connect_is_atman_ceo_product_flow(tmp_path):
     assert "atman-ceo" in out
     assert "ANNOUNCE THE ATMAN ROLE" in out
     assert "ASK FOR FEEDBACK" in out
-    assert "tickets graph" in out and "tickets map" in out
+    assert "atm graph" in out and "atm map" in out
     assert "CoS" in out and "cursor" in out
-    assert "tickets hooks cursor" in out
-    assert "tickets hooks codex" in out
-    assert "tickets hooks remote" in out
+    assert "atm hooks cursor" in out
+    assert "atm hooks codex" in out
+    assert "atm hooks remote" in out
     assert "tickets next" not in out
     assert "Paste this at the start of ANY agent session" not in out
 
@@ -139,7 +139,7 @@ def test_ceo_join_does_not_print_tickets_next(tmp_path):
     assert j.returncode == 0, j.stderr + j.stdout
     assert "joined as atman-ceo" in j.stdout
     assert "CEO does not claim worker tickets" in j.stdout
-    assert "tickets graph / tickets map" in j.stdout
+    assert "atm graph / atm map" in j.stdout
     assert "tickets next" not in j.stdout
 
 
