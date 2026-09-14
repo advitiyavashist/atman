@@ -29,6 +29,12 @@ def run(board, *args, agent="lead", env=None, cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    for var in (
+        "TICKET_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
+        "CURSOR_SESSION_ID", "TERM_SESSION_ID", "TICKET_SEAT",
+    ):
+        e.pop(var, None)
+    e["TICKET_SESSION_ID"] = "t808-%s" % (agent or "anon")
     if env:
         e.update(env)
     r = subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True,
@@ -203,14 +209,19 @@ def test_live_persist_watch_survives_queued_offline_poke(board, monkeypatch):
     })())
     seat = "persist-codex"
     assert run(board, "join", seat, "--roles", "docs", "--harness", "codex",
-               "--wake-mode", "continuous").returncode == 0
+               "--wake-mode", "continuous", agent=seat).returncode == 0
     wt = board.parent
+    watch_env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=seat,
+                     TICKET_SEAT=seat, TICKET_SESSION_ID="t808-watch-%s" % seat,
+                     HOME=str(board.parent.parent / "home"))
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID"):
+        watch_env.pop(var, None)
     proc = subprocess.Popen(
         [sys.executable, str(TOOL), "watch", "--agent", seat, "--every", "3600",
          "--persist", "--exec", "true", "--cwd", str(wt)],
         cwd=str(wt),
-        env=dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=seat,
-                 HOME=str(board.parent.parent / "home")),
+        env=watch_env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL, start_new_session=True)
     collect_watch_pids_from_board(board)
