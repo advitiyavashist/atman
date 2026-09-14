@@ -31,6 +31,28 @@ stops — do not restart from chat history.
 The dashboard above is a checked-in product capture. Open it locally with
 `tickets ui`. It is not a public hosted demo.
 
+## Preview status
+
+This is an early developer preview. It has been tested on one macOS machine
+with Claude Code, Codex, and Cursor. Install via `git clone` + `./install.sh`;
+the Homebrew formula is not published yet.
+
+## Known issues
+
+- `done`/`review` may notify seats named `cursor` or `atman-ceo` on a fresh
+  board. Fix is in PR #147; until it merges, expect stray notifications to
+  those seat names on a new board.
+- `reserve` requires taking master first. Run `atm master take` before
+  `atm reserve`.
+- `atm done` refuses when run from `main`. Run it from the agent's own
+  worktree, not `main`.
+- Codex recipients may stop waking after one run. Workaround: restart the
+  watcher.
+- Cursor/Agy wake goes through a supervised watcher, not a native
+  integration.
+- Connect/reconnect, remote control, and metrics dashboards are not ready
+  yet.
+
 ## What Atman manages
 
 An agent is more than a model. Atman treats each working seat as the combination
@@ -63,16 +85,16 @@ There is no hidden shared-memory claim.
 - A separate repo-backed graph for reviewed decisions, evidence, failures,
   model pins, runbooks, and reusable skills.
 
-The control plane is the `tickets` CLI: one Python file, standard library only,
-with plain files under `.tickets/`. It does not require a hosted service,
-database, or agent SDK.
+The control plane is the `atm` CLI (`tickets` is a compatibility alias): one
+Python file, standard library only, with plain files under `.tickets/`. It
+does not require a hosted service, database, or agent SDK.
 
 Runtime commands such as `watch`, `spawn`, `hooks`, `ui`, `--wake-mode`, and
 `remote` are provided by the root/live `tickets.py` installed with
 `./install.sh` or `./install.sh --live-release`. The `pyproject.toml` console
-script still points at the smaller core-board CLI in `src/ticket_board/cli.py`;
-it does not yet provide runtime wake or remote-adapter parity. Do not use the
-pip entry point for those features.
+scripts `atm` and `tickets` both point at the smaller core-board CLI in
+`src/ticket_board/cli.py`; they do not yet provide runtime wake or remote-adapter
+parity. Do not use the pip entry point for those features.
 
 ## Context without repetition
 
@@ -107,13 +129,14 @@ pinned release on a team machine.
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
 cd atman
-./install.sh                              # symlinks repo/tickets.py -> ~/.local/bin/tickets
+./install.sh                              # symlinks repo/tickets.py -> ~/.local/bin/atm
+                                          # and the same file -> ~/.local/bin/tickets
 export PATH="$HOME/.local/bin:$PATH"
 
 cd /path/to/your-project                # an existing git repo (git init if not)
-tickets quickstart --agent alice --roles backend
-tickets msg "alice is online"
-tickets next
+atm quickstart --agent alice --roles backend
+atm msg "alice is online"
+atm next
 git worktree add .worktrees/alice -b alice
 cd .worktrees/alice
 tickets update T-001 "working on the data model"
@@ -266,20 +289,27 @@ endless model turn open.
 
 ## Plan dependent work
 
+JSON `deps` become real `--after` edges. A plan item is **ready** only when it
+carries real `cause`, `change`, and `proof` (or `"sounded": true` with those
+fields). Items without them stay in capture until `tickets sound T-00N`.
+
 ```sh
 tickets epic create "Auth" -b "..."
 tickets sprint create "Ship auth" --activate
 tickets plan <<'EOF'
 {"epic":"E-001","sprint":"S-01","tickets":[
- {"key":"db","title":"Schema","role":"backend","priority":1},
- {"key":"api","title":"Auth API","role":"backend","deps":["db"]},
- {"key":"ui","title":"Login UI","role":"console","deps":["api"]}
+ {"key":"A","title":"Task A: write hello.txt","role":"backend",
+  "cause":"B needs hello.txt on disk","change":"Write hello.txt","proof":"hello.txt exists"},
+ {"key":"B","title":"Task B: consume hello.txt","role":"backend","deps":["A"],
+  "cause":"A produced hello.txt","change":"Read and use hello.txt","proof":"consumer sees hello.txt"}
 ]}
 EOF
 ```
 
-Use `tickets map` for sprint and epic progress, `tickets graph` for dependency
-diagnosis, and `tickets who` for live ownership and worktrees.
+After `tickets done` on A, B is offered by `tickets next` — no extra sound step
+when the snippet carries fields. Use `tickets map` for sprint and epic progress,
+`tickets graph` for dependency diagnosis, and `tickets who` for live ownership
+and worktrees.
 
 ## Inspectable by design
 

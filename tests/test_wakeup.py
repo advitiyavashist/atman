@@ -23,6 +23,48 @@ TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 def run(board, *args, agent="", stdin="", env=None, cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "", HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    # Strip every session-id var the harness running THIS test might itself
+    # be sitting in (e.g. CLAUDE_CODE_SESSION_ID from an outer coding-agent
+    # session) -- left in place, every subprocess this file launches would
+    # share one identical session key, and a session's RECORDED identity
+    # (from `join`) deliberately outranks an explicit per-invocation
+    # TICKET_AGENT for the surfaces that resolve through it (board/msg/inbox/
+    # stop-hook; see tests/test_identity_precedence.py) -- so every simulated
+    # actor in a test that exercises several of them would collapse onto
+    # whichever name last joined under that one shared session, instead of
+    # the TICKET_AGENT each call actually asked for.
+    #
+    # Stripping to nothing is not enough on its own: with NO session key at
+    # all, read_identity() falls back to the flat legacy per-board file
+    # (deliberately, for harnesses that genuinely give none -- see
+    # test_identity_session_scope's legacy-file test), and this file joins
+    # several differently-named agents on ONE board per test, so they would
+    # all collide on that single shared file -- the exact sideways bleed the
+    # session-scoped identity fix exists to prevent, just re-triggered by the
+    # test doing what no single real harness session would.
+    #
+    # A FRESH id per call does not work either: `join doc` and a later
+    # `agent="doc"` call are meant to model the SAME session across two
+    # subprocesses, and giving them unrelated ids breaks that continuity --
+    # session_seat()/seat_confirmed() then see a session key with no
+    # matching record and refuse to fall back to the (correctly set)
+    # TICKET_AGENT, because a session key present at all means "trust the
+    # record, not the ambient var".
+    #
+    # So: derive a STABLE id per simulated actor instead, anchored on
+    # whichever value names that actor for THIS call -- the positional name
+    # for `join` (which never passes `agent=`), otherwise `agent=` itself.
+    # Same actor name -> same id across every call in a test, matching what
+    # one continuous harness session would give for real; different actors,
+    # or no actor at all, get different (or no-record) ids and so cannot
+    # inherit each other's recorded identity.
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID", "TERM_SESSION_ID"):
+        e.pop(var, None)
+    if args and args[0] == "join" and len(args) > 1 and args[1]:
+        actor = args[1]
+    else:
+        actor = agent or "__anonymous__"
+    e["TICKET_SESSION_ID"] = "test-session-" + actor
     if env:
         e.update(env)
     where = cwd or (board.parent if board.parent.is_dir() else Path("/"))
@@ -438,12 +480,44 @@ def test_spawn_lifecycle_with_stub_command(board):
 
 
 def test_spawn_inherits_project_settings(board):
+    # The project file carries BOTH a permission allow-list the worker needs
+    # to work unattended and a board hook pinned to somebody else's seat.
+    # Exactly one of those may cross into the worktree (T-839).
     (board.parent / ".claude").mkdir()
-    (board.parent / ".claude" / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(pytest:*)"]}}))
+    parent_hook = ("env TICKET_AGENT=master TICKET_SEAT=master %s hook-run "
+                   "--agent master --event inbox" % TOOL)
+    (board.parent / ".claude" / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(pytest:*)"]},
+        "hooks": {
+            "UserPromptSubmit": [{"hooks": [
+                {"type": "command", "command": parent_hook},
+                {"type": "command", "command": "printf custom-check"},
+            ]}],
+        },
+    }))
     r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist", agent="master")
-    assert "inherited project settings" in r.stdout
+    assert "inherited project settings" in r.stdout, r.stderr
     inherited = json.loads((board.parent / ".worktrees" / "doc" / ".claude" / "settings.json").read_text())
-    assert inherited["permissions"]["allow"] == ["Bash(pytest:*)"]
+
+    # 1. The project allow-list survives, alongside the worker's own pinned
+    # board permissions -- without it a spawned worker stalls on a prompt.
+    allow = inherited["permissions"]["allow"]
+    assert "Bash(pytest:*)" in allow, allow
+    assert "Bash(tickets:*)" in allow, allow
+
+    # 2. No hook pinned to the parent seat comes across, while an unrelated
+    # command in that same entry is left alone.
+    commands = [h["command"] for entries in inherited.get("hooks", {}).values()
+                for e in entries for h in e.get("hooks", []) if "command" in h]
+    assert parent_hook not in commands, commands
+    assert not any("--agent master" in c for c in commands), commands
+    assert "printf custom-check" in commands, commands
+    # ...and the worker still got its OWN identity-pinned hooks.
+    assert any("--agent doc" in c for c in commands), commands
+
+    # 3. The project file itself is never rewritten by the spawn.
+    parent = json.loads((board.parent / ".claude" / "settings.json").read_text())
+    assert parent["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == parent_hook
     run(board, "spawn", "doc", "--stop", agent="master")
 
 
