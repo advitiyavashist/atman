@@ -8594,10 +8594,11 @@ A session cannot be woken by a hook once its turn has ended, so use both:
   when there is something to do:
 
       cd {root}/.worktrees/claude-opus
-      TICKET_AGENT=claude-opus tickets watch --every 60 --cwd "$PWD" \
-          --exec 'claude -p "$(tickets prompt)" --permission-mode acceptEdits'
+      TICKET_AGENT=claude-opus tickets watch --every 60 --cwd "$PWD"
 
-  Any tool works in `--exec` (codex, cursor-agent, a shell script). Logs go to
+  Default launch policy is unattended (same as `tickets spawn`; header prints
+  `launch=unattended`). `--safe` keeps acceptEdits prompts. Any tool works in
+  `--exec` (codex, cursor-agent, a shell script). Logs go to
   `.tickets/agents/<agent>.watch.log`. `tickets watch --once` is the cron-able
   form (exit 0 = work exists).
 - Interactive sessions you keep open: `/loop 10m` with the prompt
@@ -11530,19 +11531,23 @@ def cmd_watch(a, board):
     cwd = os.path.abspath(a.cwd or root)
     if not os.path.isdir(cwd):
         sys.exit("--cwd %s does not exist" % cwd)
+    mode, launch = resolve_launch_policy(
+        safe=bool(getattr(a, "safe", False)),
+        permission_mode=getattr(a, "permission_mode", "") or "",
+    )
     if a.exec:
         cmd = a.exec
     else:
         # No --exec: run whatever `tickets join` registered for this agent.
         # Defaulting to claude here would make `tickets watch --agent qwen`
         # (the cron-able form, used without spawn) launch the wrong harness.
+        # Same _worker_cmd as spawn so watch and spawn share one launch policy.
         harness, cmd_template = harness_of(board, owner)
-        if harness == "claude" and not cmd_template:
-            cmd = ('claude -p "$(tickets prompt)" --permission-mode %s%s'
-                   % (a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else ""))
-        else:
-            cmd = _worker_cmd(board, owner, "", a.permission_mode, harness,
-                              master=getattr(a, "prompt_kind", "") or "", cmd_template=cmd_template)
+        cmd = _worker_cmd(board, owner, "", mode, harness,
+                          master=getattr(a, "prompt_kind", "") or "", cmd_template=cmd_template)
+        allowed = getattr(a, "allowed_tools", "") or ""
+        if allowed and not cmd_template:
+            cmd = "%s --allowedTools %s" % (cmd, allowed)
     # BYOA: a custom harness command is a template, not a finished command line.
     # Expansion happens per run rather than once here because {prompt_file} must
     # be a FRESH prompt every time -- the whole point of the watcher is that the
@@ -11646,9 +11651,9 @@ def cmd_watch(a, board):
 
     runs = failures = 0
     try:
+        print("watching %s for %s every %ds; wake=%s; launch=%s; cwd=%s; cmd=%s" % (
+            board, owner, every, wake_mode, launch, cwd, cmd), flush=True)
         if not a.once:
-            print("watching %s for %s every %ds; wake=%s; cwd=%s; cmd=%s" % (
-                board, owner, every, wake_mode, cwd, cmd))
             _safe(lambda: checkin(board, owner, None, "watch loop online (%s, every %ds)" % (
                 wake_mode, every)), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
@@ -12032,7 +12037,8 @@ def cmd_boot(a, board):
         print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
     if a.watch:
         wn = argparse.Namespace(agent=owner, every=a.every, exec=a.exec, cwd=a.cwd or root,
-                                permission_mode="acceptEdits", allowed_tools="", max_runs=1,
+                                permission_mode="", safe=bool(getattr(a, "safe", False)),
+                                allowed_tools="", max_runs=1,
                                 once=False, dry_run=False, verbose=False, run_timeout=a.run_timeout,
                                 heartbeat=0, persist=False, force=False, prompt_kind="", beat_every=0)
         cmd_watch(wn, board)
@@ -12114,7 +12120,9 @@ Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
   Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
   a detached watcher that runs the tool with that model only when `tickets pending` says there is
   work. Workers persist until --stop, logout or reboot; new tickets created later are picked up on
-  the next poll. Spawned workers run unattended (no permission prompts); --safe keeps prompts.
+  the next poll. `tickets watch` and `tickets spawn` share one launch policy:
+  unattended (no permission prompts); --safe keeps prompts. The watcher header
+  prints launch=unattended or launch=safe.
   To survive reboot, add the watcher command from `spawn --list`'s log to a login item / launchd job.
 
 Stuck rule (in every worker prompt): if blocked -- permission, failing test, unclear scope, missing
@@ -12243,12 +12251,34 @@ def _render_prompt_file(board, owner, kind="", text=""):
     return path, cleanup
 
 
+def resolve_launch_policy(safe=False, permission_mode=""):
+    """One launch policy for `tickets watch` and `tickets spawn`.
+
+    Default is unattended (bypassPermissions / --dangerously-skip-permissions).
+    --safe keeps acceptEdits prompts. An explicit --permission-mode wins.
+    """
+    explicit = (permission_mode or "").strip()
+    if explicit:
+        mode = explicit
+    elif safe:
+        mode = "acceptEdits"
+    else:
+        mode = "bypassPermissions"
+    if mode == "bypassPermissions":
+        label = "unattended"
+    elif mode == "acceptEdits":
+        label = "safe"
+    else:
+        label = mode
+    return mode, label
+
+
 def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False,
                 cmd_template="", prompt_expr=""):
     """The headless command a spawned worker runs. Model comes from --model or
-    the workforce record (`tickets join --model`). Spawned workers run without
-    permission prompts by default: nobody is there to answer them, and the
-    blast radius is the agent's own worktree and branch (--safe for acceptEdits).
+    the workforce record (`tickets join --model`). Watch and spawn share one
+    launch policy: unattended by default (nobody is there to answer prompts);
+    the blast radius is the agent's own worktree and branch (--safe for acceptEdits).
 
     `cmd_template` (from `join --cmd` / `spawn --cmd`) overrides the built-in
     line for ANY harness, so bringing your own agent is not a second code path:
@@ -12568,13 +12598,15 @@ def cmd_spawn(a, board):
         os.unlink(_stop_file(board, owner))
     except OSError:
         pass
-    mode = "acceptEdits" if a.safe else "bypassPermissions"
+    mode, launch = resolve_launch_policy(safe=bool(getattr(a, "safe", False)))
     kind = "cos" if a.cos else ("master" if a.master else "")
     cmd = a.exec or _worker_cmd(board, owner, a.model, mode, harness, master=kind, cmd_template=cmd_template)
     argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
-            "--prompt-kind", kind,
+            "--prompt-kind", kind, "--permission-mode", mode,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
+    if getattr(a, "safe", False):
+        argv.append("--safe")
     effective_wake_mode = wake_mode_of(board, owner)
     max_runs = spawn_watch_max_runs(
         wake_mode=effective_wake_mode, persist=bool(getattr(a, "persist", False)),
@@ -12596,6 +12628,7 @@ def cmd_spawn(a, board):
     # its own yet -- otherwise a worker would be hidden from the very
     # mail it was launched to handle.
     env = _supervisor_launch_env(board, owner)
+    env["PYTHONUNBUFFERED"] = "1"
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     with open(log_path, "a") as lf:
         subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
@@ -12604,9 +12637,9 @@ def cmd_spawn(a, board):
     _time.sleep(1.0)
     pid = _watcher_pid(board, owner)
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; harness=%s; model=%s; wake=%s; persist=%s; max-runs=%s; log %s" % (
+    print("watcher for %s started%s; harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; log %s" % (
         owner, (" (pid %d)" % pid) if pid else "", harness, model,
-        effective_wake_mode, "yes" if max_runs == 0 else "no", max_runs, log_path))
+        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, log_path))
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
@@ -16488,7 +16521,10 @@ def main():
     c.add_argument("--prompt-kind", dest="prompt_kind", default="", choices=("", "master", "cos"),
                    help="which prompt to write to {prompt_file} (default: the worker prompt)")
     c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
-    c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
+    c.add_argument("--permission-mode", default="",
+                   help="override launch policy (default: unattended / bypassPermissions; --safe = acceptEdits)")
+    c.add_argument("--safe", action="store_true",
+                   help="worker confirms edits instead of running unattended (same as spawn --safe)")
     c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
     c.add_argument("--max-runs", type=int, default=1,
                    help="model runs this session then stop (default 1; 0 = loop until --stop)")
@@ -16533,6 +16569,8 @@ def main():
     c.add_argument("--exec", default="")
     c.add_argument("--cwd", default="")
     c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--safe", action="store_true",
+                   help="watch confirms edits instead of running unattended (same as spawn --safe)")
     c.set_defaults(fn=cmd_boot)
 
     c = sub.add_parser("spawn", help="start a persistent worker: register, worktree, detached watcher (model per agent)")
