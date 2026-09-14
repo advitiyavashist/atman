@@ -339,7 +339,7 @@ def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
     n = by["T-001"]
     assert n["phase"] != "posted" and n["dispatch"] is None
     assert n["unknown_posts"] == 1 and n["stale_posts"] == 0
-    assert "unknown order" in n["evidence"]
+    assert "unknown (same second as reopen)" in n["evidence"]
     assert "no task posted" not in n["evidence"]
     # reassigned by reservation: a post to another seat does not name the current recipient
     _, by = _pure([_t("T-001", reserved_for="bob")], [old])
@@ -348,30 +348,83 @@ def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
     assert n["evidence"].startswith("Reserved for @bob · no task posted")
 
 
-def test_same_second_task_post_as_reopen_is_pre_reopen_history():
-    """T-955: now() is whole seconds, so m.at == reopened_at is never current
-    dispatch. With the ``reopened_seen`` cutoff (T-810 Sol FIX) the post is the
-    previous life; without a cutoff it is unknown order, not silently stale."""
-    epoch = "2026-09-14T12:00:00Z"
-    same = {"id": "m-same", "kind": "task", "re": "T-001", "to": "carol",
-            "from": "planner", "at": epoch, "text": "take T-001"}
+# --- reopen / same-second boundary (CEO decision, T-810 vs T-955) -----------
+# (1) a shared event order (the reopened_seen cutoff) decides, never the
+#     second-resolution stamp; (2) equal stamps with no shared order are UNKNOWN:
+#     labelled 'unknown (same second as reopen)', never current intent and never
+#     silently stale; (3) automation does not act on an unknown-ordered post.
+
+SAME_EPOCH = "2026-09-14T12:00:00Z"
+SAME_POST = {"id": "m-same", "kind": "task", "re": "T-001", "to": "carol",
+             "from": "planner", "at": SAME_EPOCH, "text": "take T-001"}
+
+
+def test_same_second_task_post_as_reopen_is_never_current_dispatch():
+    """T-955 negative control, the original bug: a task post stamped in the
+    reopen second must never be read as current dispatch intent. No cutoff,
+    no widening: the assertion is the one T-955 opened with."""
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH)], [SAME_POST])
+    n = by["T-001"]
+    assert n["dispatch"] is None
+    assert n["phase"] != "posted"
+    # a strictly later post is current, so the boundary is exact, not a blanket ignore
     later = {"id": "m-new", "kind": "task", "re": "T-001", "to": "bob",
              "from": "planner", "at": "2026-09-14T12:00:01Z", "text": "take T-001 now"}
-    _, by = _pure([_t("T-001", reopened_at=epoch, reopened_seen=["m-same"])], [same])
-    n = by["T-001"]
-    assert n["dispatch"] is None and n["stale_posts"] == 1
-    _, by = _pure([_t("T-001", reopened_at=epoch)], [same])
-    n = by["T-001"]
-    assert n["dispatch"] is None and n["stale_posts"] == 0 and n["unknown_posts"] == 1
-    _, by = _pure([_t("T-001", reopened_at=epoch, reserved_for="bob")], [same, later])
-    n = by["T-001"]
-    assert n["dispatch"]["to"] == "bob"
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH, reserved_for="bob")], [SAME_POST, later])
+    assert by["T-001"]["dispatch"]["to"] == "bob"
 
 
-def test_same_second_trigger_as_reopen_is_ignored_but_same_second_as_done_counts():
-    """T-955: a trigger in the reopen second is never current (previous life
-    with a cutoff, unknown without one); parent done_at keeps < so a success
-    trigger posted in the completion second still counts."""
+def test_same_second_post_with_sequence_cutoff_is_previous_life():
+    """Sequence path: the reopened_seen cutoff recorded by tickets reopen is
+    the event order, so an equal-second post inside it is stale history."""
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH, reopened_seen=["m-same"])], [SAME_POST])
+    n = by["T-001"]
+    assert n["dispatch"] is None
+    assert n["stale_posts"] == 1 and n["unknown_posts"] == 0
+    assert "1 earlier task post ignored" in n["evidence"]
+    assert "unknown" not in n["evidence"]
+
+
+def test_same_second_post_without_cutoff_is_labelled_unknown():
+    """Unknown label path: equal stamps and no shared order are UNKNOWN. The
+    evidence says so; it is neither 'no task posted' nor silently stale."""
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH)], [SAME_POST])
+    n = by["T-001"]
+    assert n["unknown_posts"] == 1 and n["stale_posts"] == 0
+    assert "unknown (same second as reopen)" in n["evidence"]
+    assert "no task posted" not in n["evidence"]
+    assert "ignored" not in n["evidence"]
+    # reserved seat: the reservation stands, the unknown post is still named
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH, reserved_for="carol")], [SAME_POST])
+    n = by["T-001"]
+    assert n["phase"] == "reserved" and n["dispatch"] is None
+    assert n["evidence"].startswith("Reserved for @carol")
+    assert "1 task post unknown (same second as reopen)" in n["evidence"]
+
+
+def test_unknown_ordered_post_does_not_drive_automation():
+    """Automation no-act path: an unknown-ordered post is not a dispatch (the
+    ticket stays ready, nobody is named) and is not a success trigger."""
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH)], [SAME_POST])
+    n = by["T-001"]
+    assert n["phase"] == "ready" and n["who"] == "" and n["dispatch"] is None
+    assert "a new explicit task is required" in n["evidence"]
+    done = "2026-09-13T01:00:00Z"
+    a = _t("T-001", status="done", owner="x", done_at=done)
+    epoch = "2026-09-13T02:00:00Z"
+    child = _t("T-002", deps=["T-001"], reserved_for="bob", reopened_at=epoch)
+    trig = {"id": "m-ep", "kind": "task", "re": "T-002", "to": "bob", "from": "x",
+            "at": epoch, "text": "unblocked T-002 after T-001 -- start (success trigger)"}
+    _, by = _pure([a, child], [trig])
+    p = by["T-002"]["progress"]
+    assert p["trigger"] is None and p["trigger_unknown"] == 1
+    assert "Success trigger unknown (same second as reopen)" in work_view.WORK_JS
+
+
+def test_same_second_trigger_as_reopen_is_not_current_but_same_second_as_done_counts():
+    """T-955 negative control for the trigger scan: a trigger stamped in the
+    reopen second is never a current trigger; parent done_at keeps < so a
+    success trigger posted in the completion second still counts."""
     done = "2026-09-13T01:00:00Z"
     a = _t("T-001", status="done", owner="x", done_at=done)
     same_done = {"id": "m-eq", "kind": "task", "re": "T-002", "to": "bob", "from": "x",

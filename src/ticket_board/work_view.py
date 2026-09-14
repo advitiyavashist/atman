@@ -458,8 +458,14 @@ def evidence_of(t, phase, dispatch, progress, now):
     owner = (t.get("owner") or "").strip()
     reserved = (t.get("reserved_for") or "").strip()
     ignored = (dispatch or {}).get("ignored") or 0
-    hist = " · %d earlier task post%s ignored (before reopen or to another seat)" % (
+    unknown = (dispatch or {}).get("unknown") or 0
+    ignored_hist = " · %d earlier task post%s ignored (before reopen or to another seat)" % (
         ignored, "" if ignored == 1 else "s") if ignored else ""
+    # CEO decision (T-810 vs T-955): an equal-second post with no event-order
+    # cutoff is UNKNOWN, never current intent and never silently stale.
+    unknown_hist = " · %d task post%s unknown (same second as reopen)" % (
+        unknown, "" if unknown == 1 else "s") if unknown else ""
+    hist = ignored_hist + unknown_hist
     if phase == "working":
         claimed = _hours_since(t.get("claimed_at") or "", now)
         stamps = [n.get("at") for n in (t.get("notes") or []) if n.get("at")]
@@ -489,13 +495,15 @@ def evidence_of(t, phase, dispatch, progress, now):
             text += " · reserved for @%s" % reserved
         return text + hist
     if phase == "reserved":
+        if unknown:
+            return "Reserved for @%s · %d task post%s unknown (same second as reopen), not current · not claimed" % (
+                reserved, unknown, "" if unknown == 1 else "s") + ignored_hist
         return "Reserved for @%s · no task posted · not claimed" % reserved + hist
     if phase == "ready":
-        unknown = (dispatch or {}).get("unknown") or 0
         if unknown:
-            text = ("Task post at the reopen second has unknown order · "
-                    "not treated as current dispatch")
-            return text + hist
+            text = ("Task post unknown (same second as reopen) · not current "
+                    "dispatch · a new explicit task is required")
+            return text + ignored_hist
         text = "Unblocked · no reservation, no task posted · tickets next claims it"
         if progress and progress.get("became_ready"):
             text = "Became ready when %s finished %s · no reservation, no task posted · tickets next claims it" % (
@@ -1042,6 +1050,7 @@ window.AtmanWork=(function(){
     else if(p.became_ready)s='Became ready when '+parent+' finished '+when+' (all '+p.done_deps.length+' '+(p.done_deps.length===1?'dependency':'dependencies')+' done).';
     else s='Dependencies finished ('+parent+' last, '+when+'); readiness not evidenced.';
     if(p.trigger)s+=' Success trigger posted to @'+esc(p.trigger.to||'?')+' '+esc(ago(p.trigger.age_h))+' · '+esc(delivery(p.trigger))+'.';
+    else if(p.trigger_unknown)s+=' Success trigger unknown (same second as reopen); not acted on, a new explicit task is required.';
     else if(p.all_done&&!p.gate)s+=' No trigger message posted.';
     const c=p.claim;
     if(c){
