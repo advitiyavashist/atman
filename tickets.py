@@ -859,9 +859,36 @@ def load(board, tid):
         sys.exit("no such ticket: %s" % tid)
 
 
-def save(board, t):
+def _recovery():
+    """Optional coordination extension: structured handoff + ownership lease."""
+    try:
+        import ticket_coordination as tc
+        return tc
+    except ImportError:
+        try:
+            from ticket_board import ticket_coordination as tc
+            return tc
+        except ImportError:
+            return None
+
+
+def save(board, t, expected_generation=None):
     t["updated"] = now()
     path = ticket_path(board, t["id"])
+    tc = _recovery()
+    if tc is not None and os.path.isfile(path):
+        try:
+            with open(path) as f:
+                current = json.load(f)
+        except (ValueError, IOError):
+            current = None
+        if current:
+            err = tc.stale_write_error(current, t)
+            if err:
+                sys.exit(err)
+            if expected_generation is not None and tc.owner_generation(current) != int(expected_generation):
+                sys.exit("%s stale ownership generation %s (board is %s); reread before writing"
+                         % (t["id"], expected_generation, tc.owner_generation(current)))
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(t, f, indent=2)
@@ -1745,6 +1772,15 @@ def try_claim(board, tid, owner):
     t["owner"] = owner
     t["claimed_at"] = now()
     t["done_at"] = ""
+    tc = _recovery()
+    if tc is not None:
+        harness = ""
+        try:
+            harness = _agent_harness(board, owner)[0]
+        except Exception:
+            harness = ""
+        tc.issue_owner_lease(t, owner, harness=harness, reason="claim",
+                             previous_owner=prev_owner)
     got = save(board, t)
     # Written here, not in cmd_next/cmd_claim: this is the single point where a
     # claim actually succeeds, so no future caller can add a claim path that
@@ -3308,6 +3344,12 @@ def cmd_review(a, board):
     # (T-238; this was the same by=owner bug as cmd_note, one level up).
     owner = t.get("owner") or whoami(a.owner)
     author = whoami(a.owner)
+    tc = _recovery()
+    if tc is not None:
+        err = tc.stale_accept_error(t, author, kind="review")
+        if err:
+            sys.exit(err)
+    expected_generation = t.get("owner_generation")
     t["status"] = "review"
     t["owner"] = owner
     t["review_at"] = now()
@@ -3322,7 +3364,7 @@ def cmd_review(a, board):
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
     t["notes"].append({"by": author, "at": now(), "text": "REVIEW: " + text})
-    save(board, t)
+    save(board, t, expected_generation=expected_generation)
     checkin(board, author, t["id"], "submitted %s for review" % t["id"])
     if owner != author:
         # T-428: the owner still holds the ticket in review; do not copy the
@@ -5488,6 +5530,13 @@ def cmd_repin(a, board):
 
 def cmd_done(a, board):
     t = load(board, a.id)
+    closer = whoami()
+    tc = _recovery()
+    if tc is not None:
+        err = tc.stale_accept_error(t, closer, kind="done")
+        if err:
+            sys.exit(err)
+    expected_generation = t.get("owner_generation")
     if not a.notes and not a.no_notes:
         sys.exit(
             'done needs --notes "paths, names, decisions the next agent must match" '
@@ -5545,7 +5594,7 @@ def cmd_done(a, board):
         # by=whoami(), not t["owner"]: the note records who wrote it, which is
         # not always who the ticket is filed under (T-238 -- see cmd_note).
         t["notes"].append({"by": whoami(), "at": now(), "text": text})
-    save(board, t)
+    save(board, t, expected_generation=expected_generation)
     tm = timing(t)
     _safe(lambda: traj_event(board, "done", agent=whoami(), ticket=t,
                              state_before="review" if t.get("review_at") else "claimed",
@@ -5670,6 +5719,7 @@ def cmd_assign(a, board):
     clear_prev = None
     transfer_owner = None
     reserve_lock = None
+    expected_generation = None
     try:
         if a.owner is not None:
             # hard assignment by the master: takes the lock on their behalf
@@ -5702,6 +5752,18 @@ def cmd_assign(a, board):
                 t["owner"] = a.owner
                 changed.append("owner=%s" % a.owner)
                 if prev_owner and prev_owner != a.owner:
+                    tc = _recovery()
+                    if tc is not None:
+                        harness = ""
+                        try:
+                            harness = _agent_harness(board, a.owner)[0]
+                        except Exception:
+                            harness = ""
+                        expected_generation = tc.owner_generation(t)
+                        tc.issue_owner_lease(
+                            t, a.owner, harness=harness, reason="reassign",
+                            previous_owner=prev_owner)
+                        tc.rewrite_claim_lock(board, t["id"], a.owner)
                     clear_prev = prev_owner
                 if a.owner:
                     bind_owner = a.owner
@@ -5717,9 +5779,9 @@ def cmd_assign(a, board):
                 if held:
                     sys.exit("%s already holds %s -- finish that before taking an active assignment of %s"
                              % (transfer_owner, ", ".join(x["id"] for x in held), t["id"]))
-                save(board, t)
+                save(board, t, expected_generation=expected_generation)
         else:
-            save(board, t)
+            save(board, t, expected_generation=expected_generation)
     finally:
         _release_ticket_excl(reserve_lock)
     if clear_prev:
