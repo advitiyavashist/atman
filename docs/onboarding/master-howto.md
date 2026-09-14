@@ -1,11 +1,11 @@
 # Master how-to
 
+**You are onboarding.** Say that first. This is not a ticket claim and not a
+merge pass.
+
 Use [coordination and success](coordination-and-success.md) for accepted-merge
 endpoints, batch message handling, master/CoS ownership, and honest efficiency
 measurement. It governs ongoing coordination after onboarding.
-
-**You are onboarding.** Say that first. This is not a ticket claim and not a
-merge pass.
 
 On this Mac, copy-paste [ceo-mac-runbook.md](ceo-mac-runbook.md) (`python3`
 on a real `tickets.py`; PATH `tickets` is a stale shim).
