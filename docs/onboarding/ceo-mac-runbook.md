@@ -1,5 +1,17 @@
 # Any-CEO onboarding on this Mac
 
+> **Not a first read.** If you just installed `atm`, start at
+> [first-run.md](first-run.md). This page pins one operator's absolute
+> folders on one machine and one living board.
+>
+> **Verified 2026-09-14, and partly stale.** The `TICKETS_PY` below points at
+> `.worktrees/cursor-community-t790`, which **no longer exists** — that
+> command fails today. On this machine PATH now resolves correctly:
+> `~/.local/bin/atm` and `~/.local/bin/tickets` both point at a real
+> checkout, not the `sol-agy-harness` shim this page was written to route
+> around. Confirm with `atm self` and use PATH `atm` directly; keep the
+> `t()` wrapper below only if `atm self` shows something you did not expect.
+
 Copy-paste. Do not guess folders. This is the T-790 path: Cursor harness
 only, `python3` on a real `tickets.py`, never the PATH shim.
 

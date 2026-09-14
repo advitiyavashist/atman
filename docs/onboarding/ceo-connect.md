@@ -1,5 +1,13 @@
 # Any-CEO connect (product flow)
 
+> **Not a first read.** New to `atm`? Start at
+> [first-run.md](first-run.md). This page is the CEO connect flow against a
+> specific living board, and it assumes you already run the board.
+>
+> `atm connect` prints roughly ninety lines of instructions addressed to an
+> *agent*, and it creates nothing. It is a prompt, not a setup command. A
+> human setting up their own board wants `atm quickstart`.
+
 Connecting is joining **Atman**, not Claude, Cursor, Codex, or another
 provider. Board identity is `atman-<seat>` (example `atman-ceo`). CoS is
 `cursor` and staffs. Cursor-only spawns unless the operator says otherwise.

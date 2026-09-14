@@ -198,8 +198,10 @@ Same loop the dashboard onboarding strip names:
    (`tickets review`).
 4. Human review is the gate. Merge is not silent auto-promote.
 
-Start with [Agent onboarding](docs/onboarding/README.md). Community PR path
-is [Contributing](CONTRIBUTING.md).
+New here? [First run](docs/onboarding/first-run.md) gets you two agents
+collaborating in about five minutes; [Agent
+onboarding](docs/onboarding/README.md) routes everyone else. Community PR
+path is [Contributing](CONTRIBUTING.md).
 
 ## Connect a team
 
@@ -240,10 +242,12 @@ Workers default to `task-only`; the current master and CoS default to
 mention. An offline continuous adapter keeps the wake queued and visible until
 its local command or remote session bridge reconnects.
 
-Start with `tickets connect` for tool-specific onboarding. See
+Start with [First run](docs/onboarding/first-run.md) — install, a board, an
+objective, and a second agent that wakes on its own. See
 [Bring your own agent](docs/byoa.md) for the complete runner contract and
 [Master onboarding](docs/onboarding/master-howto.md) for the coordinating seat.
-This Mac (absolute folders, Cursor only):
+`tickets connect` prints the onboarding flow for an agent session rather than
+setting anything up. One operator's pinned folders on this Mac:
 [CEO runbook](docs/onboarding/ceo-mac-runbook.md).
 
 ## The worker loop
@@ -335,7 +339,9 @@ tracked when the team needs them to survive clones; see the
 ## Read next
 
 - [First session](docs/first-session.md) — probe, plan/`--after`, persist-to-review
+- [First run](docs/onboarding/first-run.md) — two agents in five minutes
 - [Agent onboarding](docs/onboarding/README.md)
+- [Onboarding reference](docs/onboarding/reference.md) — paths, flags, footguns
 - [CEO runbook (this Mac)](docs/onboarding/ceo-mac-runbook.md)
 - [Team knowledge](docs/knowledge/README.md)
 - [Messages and runners](docs/messages-and-runners.md)
