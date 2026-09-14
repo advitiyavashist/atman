@@ -391,6 +391,22 @@ the dashboard until the real bridge reconnects.
 `--harness` overrides **and** re-registers; a harness switch without a new
 `--cmd` **drops** the old command template on purpose.
 
+When the board and the deliverable are different repositories (Steer
+`.tickets` driving Atman work), pass an explicit target:
+
+```sh
+tickets spawn atman-worker --repo /path/to/atman --base origin/main --harness cursor --persist
+```
+
+`--repo` is a checkout path or `owner/repo`. The new worktree is
+`<repo>/.worktrees/<name>` unless `--worktree` says otherwise. Spawn
+installs identity-pinned hooks for that unique seat in the new tree —
+do not reuse the target repo's CoS `cursor` hooks. Ambiguous
+`--worktree` under a different origin, without `--repo`, fails closed.
+Same-repo spawn (board lives in the deliverable checkout) stays the
+old default. Misbound workers: see
+[t824-spawn-target-repo.md](../t824-spawn-target-repo.md).
+
 `tickets watch --once` is the cron/launchd form (exit 0 = there was work).
 A session cannot be woken by a hook after its turn ends — that is why waking
 is a poll plus `--exec`, not a callback.
@@ -469,8 +485,9 @@ That is the other extreme. Prefer the split above.
 **`$TICKETS_DIR` wins everything.** An old export from another project
 sends every command to the wrong board. Unset it or set it on purpose.
 
-**Two agents, one worktree.** `spawn` gives `.worktrees/<name>`. Do not
-point two live seats at the same tree.
+**Two agents, one worktree.** `spawn` gives `<repo>/.worktrees/<name>`.
+Do not point two live seats at the same tree. Do not spawn into the
+target repo's main checkout: its hooks often pin CoS `cursor`.
 
 **Paid smoke.** `harness check` and `watch` run the **real** command.
 A Claude/Codex check burns a real call. Use the dry harness in Step 5.
