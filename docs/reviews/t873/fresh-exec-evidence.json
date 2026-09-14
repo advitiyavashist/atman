@@ -1,0 +1,14 @@
+{
+  "global_planner_hook_commands_removed": 4,
+  "fresh_exec_passed": true,
+  "assigned_worker_identity_matched": true,
+  "planner_identity_not_injected": true,
+  "identity_command_count": 1,
+  "identity_command_exit": 0,
+  "guard_matching_session_worktree_passed": true,
+  "guard_foreign_worktree_silent": true,
+  "guard_foreign_session_silent": true,
+  "guard_missing_session_silent": true,
+  "prior_insufficient_probes": 3,
+  "native_zero_keystroke_ack_verified": false
+}

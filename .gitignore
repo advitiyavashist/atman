@@ -25,3 +25,7 @@ credentials.json
 secrets/
 operator-session.json
 enrollment.json
+
+/.codex/hooks.json
+/.codex/session-identity.local.json
+/.codex/session-hook.local.py

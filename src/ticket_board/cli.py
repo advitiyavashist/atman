@@ -64,6 +64,23 @@ DEFAULT_ROLES = {
     "grok": [],
 }
 
+# T-809: one implementation, two PATH names. atm is the public CLI; tickets
+# is the compatibility alias. Behavior, board, and exit codes must not fork.
+PRIMARY_CLI_NAME = "atm"
+COMPAT_CLI_NAME = "tickets"
+
+
+def cli_prog(argv=None):
+    """argparse/help/error name from how this process was invoked."""
+    raw = (argv if argv is not None else sys.argv) or [""]
+    base = os.path.basename(str(raw[0]).replace("\\", "/"))
+    stem = os.path.splitext(base)[0].lower()
+    if stem == COMPAT_CLI_NAME:
+        return COMPAT_CLI_NAME
+    if stem == PRIMARY_CLI_NAME:
+        return PRIMARY_CLI_NAME
+    return PRIMARY_CLI_NAME
+
 
 # --------------------------------------------------------------------------
 # board location + io
@@ -2701,7 +2718,7 @@ This board is being set up. I will ask you four things, in order:
 
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
-It auto-checks usage; missing remaining/reset is a FAIL row.
+It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
 When they name tasks, use `tickets plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
@@ -4160,7 +4177,7 @@ def cmd_retire(a, board):
     """Remove a seat from the board (inverse of join). Refused while it holds a ticket."""
     owner = (a.name or whoami()).strip()
     if not owner:
-        sys.exit("usage: tickets retire <name>")
+        sys.exit("usage: %s retire <name>" % cli_prog())
     if owner.startswith("agent-"):
         sys.exit("give a real agent name")
     agent_path = os.path.join(agents_dir(board), owner + ".json")
@@ -4213,7 +4230,7 @@ def cmd_connect(a, board):
         return
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
-    print("It auto-checks usage; missing remaining/reset is a FAIL row.")
+    print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
     print("Announce the board/team name with `tickets msg --to everyone`, then ask")
     print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
@@ -4327,8 +4344,10 @@ PROTOCOL = """## Shared ticket board
 
 Work here is coordinated through a ticket board that Claude Code, Codex and
 Cursor all share. It lives in `.tickets/` and is driven only through the
-`tickets` CLI -- never edit files in `.tickets/` by hand, or atomic claiming
-breaks and two agents will do the same work.
+Atman CLI -- never edit files in `.tickets/` by hand, or atomic claiming
+breaks and two agents will do the same work. The primary public name is `atm`;
+`tickets` is a compatibility alias for the same implementation, arguments,
+exit codes, and board.
 
 Run `tickets board` for the current state, or `tickets graph` to see the whole
 dependency tree with each node's status and owner.
@@ -4562,7 +4581,7 @@ watch_idle_reexec._warned = set()
 
 
 def main():
-    p = argparse.ArgumentParser(prog="tickets", description=__doc__.split("\n")[0])
+    p = argparse.ArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
