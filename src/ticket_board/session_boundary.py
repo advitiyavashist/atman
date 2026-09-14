@@ -58,7 +58,13 @@ def is_board_hook(command):
 
 
 def without_board_hooks(settings):
-    """Copy Claude settings, filtering individual Atman commands in entries."""
+    """Copy Claude settings, stripping Atman board hooks on EVERY hook event.
+
+    T-956: this is intentionally a wide scrub, not limited to the events the
+    boundary rewrites. A board hook a user put under PostToolUse (or any
+    other event) is still an identity-pinned Atman command and must not be
+    inherited by a child session. Non-board user hooks are kept (`is_board_hook`).
+    """
     result = copy.deepcopy(settings)
     hooks = result.get("hooks") if isinstance(result, dict) else None
     if not isinstance(hooks, dict):
