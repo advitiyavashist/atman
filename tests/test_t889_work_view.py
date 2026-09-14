@@ -320,6 +320,39 @@ def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
     assert n["evidence"].startswith("Reserved for @bob · no task posted")
 
 
+def test_same_second_task_post_as_reopen_is_pre_reopen_history():
+    """T-955: now() is whole seconds. m.at == reopened_at is the previous life."""
+    epoch = "2026-09-14T12:00:00Z"
+    same = {"id": "m-same", "kind": "task", "re": "T-001", "to": "carol",
+            "from": "planner", "at": epoch, "text": "take T-001"}
+    later = {"id": "m-new", "kind": "task", "re": "T-001", "to": "bob",
+             "from": "planner", "at": "2026-09-14T12:00:01Z", "text": "take T-001 now"}
+    _, by = _pure([_t("T-001", reopened_at=epoch)], [same])
+    n = by["T-001"]
+    assert n["dispatch"] is None and n["stale_posts"] == 1
+    _, by = _pure([_t("T-001", reopened_at=epoch, reserved_for="bob")], [same, later])
+    n = by["T-001"]
+    assert n["dispatch"]["to"] == "bob"
+
+
+def test_same_second_trigger_as_reopen_is_ignored_but_same_second_as_done_counts():
+    """T-955: reopen epoch uses <=; parent done_at keeps < so a success
+    trigger posted in the completion second still counts."""
+    done = "2026-09-13T01:00:00Z"
+    a = _t("T-001", status="done", owner="x", done_at=done)
+    same_done = {"id": "m-eq", "kind": "task", "re": "T-002", "to": "bob", "from": "x",
+                 "at": done, "text": "unblocked T-002 after T-001 -- start (success trigger)"}
+    c = _t("T-002", status="claimed", owner="bob", deps=["T-001"],
+           claimed_at="2026-09-13T01:05:00Z")
+    _, by = _pure([a, c], [same_done])
+    assert by["T-002"]["progress"]["trigger"]["to"] == "bob"
+    epoch = "2026-09-13T02:00:00Z"
+    child = _t("T-002", deps=["T-001"], reserved_for="bob", reopened_at=epoch)
+    same_epoch = dict(same_done, id="m-ep", at=epoch)
+    _, by = _pure([a, child], [same_epoch])
+    assert by["T-002"]["progress"]["trigger"] is None
+
+
 def test_reopen_stamps_reopened_at_so_old_posts_drop_out(board):
     _team(board)
     assert run(board, "msg", "take T-001", "--to", "bob", "--re", "T-001", "--task", agent="planner").returncode == 0
