@@ -16798,12 +16798,11 @@ def main():
                    help="spawn the chief of staff (review, unblock, merge) under the current master; "
                         "persistent watcher by default (override with --max-runs 1)")
     c.add_argument("--exec", default="", help="override the worker command entirely")
-    c.add_argument("--stop", action="store_true",
-                   help="ask this board's watcher for the seat to exit at its next poll")
+    c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
+    c.add_argument("--list", action="store_true")
     c.add_argument("--all-boards", action="store_true",
                    help="with --stop: also stop loops for this seat name running against "
                         "another board (explicit fleet intent; off by default)")
-    c.add_argument("--list", action="store_true")
     c.add_argument("--alias", default="",
                    help="stable role alias (ceo or cos) pointing at this unique runtime identity")
     c.add_argument("--transfer", action="store_true",
