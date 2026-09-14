@@ -1093,6 +1093,7 @@ def _git_state_raw(cwd=None):
         return None, True
     branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=here) or "?"
     sha = git("rev-parse", "--short", "HEAD", cwd=here) or "?"
+    sha_full = git("rev-parse", "HEAD", cwd=here) or ""
     dirty = git("status", "--porcelain", cwd=here)
     common = git("rev-parse", "--git-common-dir", cwd=here) or ""
     gitdir = git("rev-parse", "--git-dir", cwd=here) or ""
@@ -1101,6 +1102,7 @@ def _git_state_raw(cwd=None):
         "top": top,
         "branch": branch,
         "sha": sha,
+        "sha_full": sha_full,
         "dirty": len(dirty.splitlines()) if dirty else 0,
         "main_tree": is_main_tree,
         "repo": repo_identity(top),
@@ -2970,6 +2972,15 @@ def cmd_review(a, board):
         trunk = _trunk(cwd=art)
         if git("merge-base", "--is-ancestor", trunk, "HEAD", cwd=art) is None:
             sys.exit(_behind_trunk_refusal(g, art, trunk))
+    if (a.pr or "").strip():
+        if not g:
+            sys.exit("review --pr: not in a git working tree; cannot verify a submitted SHA")
+        pin_err = _review_verdict().verify_submit(
+            git, sha_full=g.get("sha_full") or "", branch=g.get("branch") or "",
+            origin_url=g.get("repo") or "", pr=a.pr, dirty=g.get("dirty") or 0,
+            cwd=art)
+        if pin_err:
+            sys.exit(pin_err)
     # `owner` decides who the ticket is filed under (unchanged: claim it via
     # review if nobody holds it yet, otherwise keep the existing owner).
     # `author` is who actually ran this command -- always whoami(), never
@@ -2988,6 +2999,8 @@ def cmd_review(a, board):
         # the artifact's, not the caller's cwd.
         stamp = _record_pin(t, g, art)
         text = "%s -- %s" % (stamp, text)
+        if (a.pr or "").strip() and g.get("sha_full"):
+            _review_verdict().record_verified_head(t, g["sha_full"], pr=a.pr)
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr

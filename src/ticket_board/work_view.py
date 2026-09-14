@@ -87,6 +87,9 @@ def _epoch_of(t):
 # --- review evidence --------------------------------------------------------
 
 def artifact_sha(t):
+    head = (t.get("review_head") or "").strip().lower()
+    if SHA_RE.fullmatch(head):
+        return head
     commit = (t.get("commit") or "").strip()
     if "@" in commit:
         commit = commit.rsplit("@", 1)[1]

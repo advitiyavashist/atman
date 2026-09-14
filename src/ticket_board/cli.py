@@ -754,6 +754,7 @@ def git_state():
         return None
     branch = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
     sha = git("rev-parse", "--short", "HEAD") or "?"
+    sha_full = git("rev-parse", "HEAD") or ""
     dirty = git("status", "--porcelain")
     common = git("rev-parse", "--git-common-dir") or ""
     gitdir = git("rev-parse", "--git-dir") or ""
@@ -762,6 +763,7 @@ def git_state():
         "top": top,
         "branch": branch,
         "sha": sha,
+        "sha_full": sha_full,
         "dirty": len(dirty.splitlines()) if dirty else 0,
         "main_tree": is_main_tree,
     }
@@ -1714,6 +1716,16 @@ def cmd_review(a, board):
         if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
             sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
+    if (a.pr or "").strip():
+        if not g:
+            sys.exit("review --pr: not in a git working tree; cannot verify a submitted SHA")
+        origin = git("config", "--get", "remote.origin.url") or ""
+        pin_err = _rv.verify_submit(
+            lambda *args, cwd=None: git(*args),
+            sha_full=g.get("sha_full") or "", branch=g.get("branch") or "",
+            origin_url=origin, pr=a.pr, dirty=g.get("dirty") or 0)
+        if pin_err:
+            sys.exit(pin_err)
     owner = t.get("owner") or whoami(a.owner)
     author = whoami(a.owner)
     t["status"] = "review"
@@ -1725,6 +1737,8 @@ def cmd_review(a, board):
         text = "%s -- %s" % (stamp, text)
         t["commit"] = stamp
         t["branch"] = g["branch"]
+        if (a.pr or "").strip() and g.get("sha_full"):
+            _rv.record_verified_head(t, g["sha_full"], pr=a.pr)
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr

@@ -24,15 +24,62 @@ TOOL_IDS = ["tickets.py", "cli.py"]
 OTHER_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
-def run(tool, board, *args, agent=""):
+def run(tool, board, *args, agent="", env=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
     # cli.py imported as a script needs src/ on PYTHONPATH (same as T-557).
     e["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + e.get("PYTHONPATH", "")
+    if env:
+        e.update(env)
     return subprocess.run(
         [sys.executable, str(tool), *args], capture_output=True, text=True,
         env=e, cwd=str(board.parent))
+
+
+def git(repo, *args):
+    return subprocess.run(
+        ["git", "-c", "user.email=t944@test", "-c", "user.name=t944", *args],
+        cwd=str(repo), capture_output=True, text=True, check=True)
+
+
+def attach_origin(repo):
+    origin = repo.parent / (repo.name + ".origin.git")
+    subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+    git(repo, "remote", "add", "origin", str(origin))
+    return origin
+
+
+def origin_url(repo):
+    return git(repo, "config", "--get", "remote.origin.url").stdout.strip()
+
+
+def pr_view(pr, sha, repo_url, branch="t944-pr"):
+    return {"TICKETS_PR_VIEW": json.dumps({
+        str(pr): {
+            "headRefOid": sha,
+            "headRefName": branch,
+            "headRepository": {"nameWithOwner": repo_url},
+            "repo": repo_url,
+        }
+    })}
+
+
+def claim_on_branch(tool, board, agent="alice", branch="t944-pr"):
+    repo = board.parent
+    ignore = repo / ".gitignore"
+    if ".tickets" not in ignore.read_text() if ignore.exists() else True:
+        ignore.write_text((ignore.read_text() if ignore.exists() else "") + ".tickets\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-qm", "ignore board")
+    assert run(tool, board, "join", agent, "--roles", "docs",
+               agent=agent).returncode == 0
+    claimed = run(tool, board, "claim", "T-001", agent=agent)
+    if claimed.returncode != 0:
+        claimed = run(tool, board, "next", agent=agent)
+    assert claimed.returncode == 0, claimed.stderr + claimed.stdout
+    git(repo, "checkout", "-q", "-B", branch)
+    return repo
 
 
 def load_ticket(board, tid):
@@ -195,3 +242,102 @@ def test_done_semantics_unchanged_without_structured_accept(tool, board):
     assert parent["status"] == "done"
     assert not parent.get("review_events")
     assert "unblocked" in r.stdout or "started" in r.stdout
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_review_pr_refuses_unpushed_sha(tool, board):
+    repo = claim_on_branch(tool, board)
+    attach_origin(repo)
+    git(repo, "push", "-q", "-u", "origin", "HEAD")
+    old = git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "unpushed.txt").write_text("local only\n")
+    git(repo, "add", "unpushed.txt")
+    git(repo, "commit", "-qm", "unpushed fix")
+    full = git(repo, "rev-parse", "HEAD").stdout.strip()
+    r = run(tool, board, "review", "T-001", "--notes", "paths", "--pr", "173",
+            agent="alice", env=pr_view("173", full, origin_url(repo)))
+    assert r.returncode != 0
+    err = r.stderr + r.stdout
+    assert "not on origin" in err
+    assert full in err
+    assert old in err
+    assert load_ticket(board, "T-001")["status"] != "review"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_review_pr_refuses_pr_head_mismatch(tool, board):
+    repo = claim_on_branch(tool, board)
+    attach_origin(repo)
+    (repo / "fix.txt").write_text("fix\n")
+    git(repo, "add", "fix.txt")
+    git(repo, "commit", "-qm", "the real fix")
+    full = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "push", "-q", "-u", "origin", "HEAD")
+    r = run(tool, board, "review", "T-001", "--notes", "paths", "--pr", "173",
+            agent="alice", env=pr_view("173", OTHER_SHA, origin_url(repo),
+                                       branch="agy-aira2-tty-work"))
+    assert r.returncode != 0
+    err = r.stderr + r.stdout
+    assert "does not equal or contain submitted SHA" in err
+    assert full in err
+    assert OTHER_SHA in err
+    assert load_ticket(board, "T-001")["status"] != "review"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_review_pr_refuses_wrong_repository(tool, board):
+    repo = claim_on_branch(tool, board)
+    attach_origin(repo)
+    (repo / "fix.txt").write_text("fix\n")
+    git(repo, "add", "fix.txt")
+    git(repo, "commit", "-qm", "the real fix")
+    full = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "push", "-q", "-u", "origin", "HEAD")
+    r = run(tool, board, "review", "T-001", "--notes", "paths", "--pr", "173",
+            agent="alice", env=pr_view("173", full, "advitiyavashist/steer"))
+    assert r.returncode != 0
+    err = r.stderr + r.stdout
+    assert "wrong repository" in err
+    assert full in err
+    assert load_ticket(board, "T-001")["status"] != "review"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_review_pr_refuses_dirty_worktree(tool, board):
+    repo = claim_on_branch(tool, board)
+    attach_origin(repo)
+    (repo / "fix.txt").write_text("fix\n")
+    git(repo, "add", "fix.txt")
+    git(repo, "commit", "-qm", "the real fix")
+    full = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "push", "-q", "-u", "origin", "HEAD")
+    (repo / "fix.txt").write_text("dirty\n")
+    r = run(tool, board, "review", "T-001", "--notes", "paths", "--pr", "173",
+            agent="alice", env=pr_view("173", full, origin_url(repo)))
+    assert r.returncode != 0
+    err = r.stderr + r.stdout
+    assert "dirty" in err.lower() or "uncommitted" in err.lower()
+    assert load_ticket(board, "T-001")["status"] != "review"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_review_pr_binds_verified_head_for_accept(tool, board):
+    repo = claim_on_branch(tool, board)
+    attach_origin(repo)
+    (repo / "fix.txt").write_text("fix\n")
+    git(repo, "add", "fix.txt")
+    git(repo, "commit", "-qm", "the real fix")
+    full = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "push", "-q", "-u", "origin", "HEAD")
+    r = run(tool, board, "review", "T-001", "--notes", "paths, tests", "--pr", "173",
+            agent="alice", env=pr_view("173", full, origin_url(repo)))
+    assert r.returncode == 0, r.stderr + r.stdout
+    t = load_ticket(board, "T-001")
+    assert t["status"] == "review"
+    assert t.get("review_head") == full
+    assert t.get("pr") in ("173", 173, "173")
+    ok = run(tool, board, "accept", "T-001", "--sha", full,
+             "--notes", "verified head", agent="reviewer")
+    assert ok.returncode == 0, ok.stderr + ok.stdout
+    evs = load_ticket(board, "T-001")["review_events"]
+    assert evs[0]["kind"] == "accept" and evs[0]["sha"] == full
