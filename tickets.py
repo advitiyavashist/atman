@@ -8882,14 +8882,6 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
-    # Record the seat for THIS session so later commands in it -- board's
-    # "you:" line, msg/inbox with no --owner, the stop-hook -- resolve to it
-    # without depending on an env var that can be inherited by a shell that
-    # was never told to be this agent. Joining IS the declaration of who you
-    # are, so this is the honest place to persist it. Silently a no-op when
-    # there is no session key at all (write_identity then falls back to the
-    # flat legacy file, honoured only in that same no-key case elsewhere).
-    write_identity(board, owner)
     knowledge_dir = (getattr(a, "knowledge_dir", "") or "").strip()
     if knowledge_dir:
         knowledge_dir = os.path.abspath(os.path.expanduser(knowledge_dir))
@@ -8975,6 +8967,22 @@ def cmd_join(a, board):
         if lifecycle not in LIFECYCLES:
             sys.exit("--lifecycle must be one of: %s" % ", ".join(LIFECYCLES))
         entry["lifecycle"] = lifecycle
+    # Record the seat for THIS session so later commands in it -- board's
+    # "you:" line, msg/inbox with no --owner, the stop-hook -- resolve to it
+    # without depending on an env var that can be inherited by a shell that
+    # was never told to be this agent. Joining IS the declaration of who you
+    # are, so this is the honest place to persist it. Silently a no-op when
+    # there is no session key at all (write_identity then falls back to the
+    # flat legacy file, honoured only in that same no-key case elsewhere).
+    #
+    # It happens HERE, after every guard and every validation above, and not
+    # at the top of the join: a REFUSED join must leave the session answering
+    # as whoever it already was. Stamping first meant that `join alpha` --
+    # refused for provider reuse, a bound alias, a bad --knowledge-dir or a
+    # malformed flag -- still made this session alpha, so a bare `tickets
+    # inbox` read (and marked read) alpha's private mail and a bare `tickets
+    # msg` posted as alpha. Nothing below this line can sys.exit.
+    write_identity(board, owner)
     entry["agent_id"] = owner
     if harness:
         entry["provider"] = harness

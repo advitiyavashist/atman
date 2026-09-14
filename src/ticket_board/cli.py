@@ -4073,12 +4073,17 @@ def cmd_join(a, board):
     owner = a.name or whoami()
     if owner.startswith("agent-"):
         sys.exit("give yourself a real name: tickets join <name> --roles ...")
-    write_identity(board, owner)
     incoming = (getattr(a, "harness", "") or a.tool or "").strip()
     _guard_seat_identity(
         board, owner, incoming,
         transfer=bool(getattr(a, "transfer", False)),
         alias=(getattr(a, "alias", "") or "").strip())
+    # AFTER the guard, never before it: a refused join must leave this session
+    # answering as whoever it already was. Stamping first made `join alpha` --
+    # refused for provider reuse or a bound alias -- still turn this session
+    # into alpha, so a bare `tickets inbox` read alpha's private mail and a
+    # bare `tickets msg` posted as alpha. Nothing below can sys.exit.
+    write_identity(board, owner)
     # Before checkin(), which creates the record: only a genuinely new agent is
     # stamped, so a re-join never moves the watermark over unread mail.
     first_join = not _agent_rec(board, owner)
