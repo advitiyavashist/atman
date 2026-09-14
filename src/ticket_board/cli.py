@@ -2754,8 +2754,8 @@ Do not dump a live-board plan. Do not invent a second planner.
 ## CEO ONBOARDING — living board (product flow)
 
 **You are onboarding as Atman CEO.** Connecting is joining Atman, not a
-provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
-staffs. CEO does not claim worker tickets on this path.
+provider. Identity is `atman-<seat>` (example `atman-ceo`). The current
+CoS holder staffs (or no CoS yet). CEO does not claim worker tickets.
 
 Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
 
@@ -2767,8 +2767,8 @@ Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
 6. `tickets graph` / `tickets map` — tasks they can actually run
 
 Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
-title — `tickets plan` with real deps if they add work. Cursor-only
-spawns unless they say otherwise. Mail hooks are not Claude-only:
+title — `tickets plan` with real deps if they add work. Spawn only the
+harnesses they confirm. Mail hooks are not Claude-only:
 `tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
 
 HANDOVER dated 2026-09-08 is historical, not live authority. Live:
@@ -4104,7 +4104,7 @@ def cmd_connect(a, board):
             sys.stdout.write("\n")
         print("")
         print("Product flow: catalog + usage → living board → %s → announce → feedback → graph/map" % name)
-        print("Do not invent a new team. CEO does not claim worker tickets. CoS (cursor) staffs.")
+        print("Do not invent a new team. CEO does not claim worker tickets. The current CoS holder staffs (or no CoS yet).")
         print("Then probe: `tickets harness available`")
         print("Join: tickets join %s --roles master --persistent --wake-mode continuous" % name)
         print("Announce Atman role, ask for feedback, then tickets graph / tickets map.")

@@ -1510,6 +1510,38 @@ def timing(t):
     return out
 
 
+def _onboard_roles():
+    try:
+        from ticket_board import onboard_roles as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import onboard_roles as m
+        return m
+
+
+def _cos_label(board):
+    return _onboard_roles().format_holder(
+        _onboard_roles().cos_holder(current_master(board) or {}),
+        _onboard_roles().ROLE_COS)
+
+
+def _master_label(board):
+    return _onboard_roles().format_holder(
+        _onboard_roles().master_holder(current_master(board) or {}),
+        _onboard_roles().ROLE_MASTER)
+
+
+def _print_role_discovery(rows):
+    roles = _onboard_roles()
+    print(roles.format_discovery_table(roles.discovery_rows(rows)))
+    print(roles.format_suggestion(roles.suggest_assignment(rows)))
+    print("Ask: which agents should be master, CoS, workers, verifiers?")
+    print("Do not treat the table as an assignment.")
+
+
 def _work_view():
     """T-889 Work view module (payload + CSS/HTML/JS); packaged with sounding."""
     try:
@@ -5409,8 +5441,8 @@ Connecting here is joining **Atman**, not Claude, Cursor, Codex, or any
 other provider. Board identity is `atman-<seat>` (example: `atman-ceo`).
 
 This is a living board. Do not invent a new team. Do not `tickets init`
-or `tickets clear`. CoS (`cursor`) staffs; you do not spawn, and you do
-not claim worker tickets.
+or `tickets clear`. The current CoS holder staffs (or no CoS yet); you do
+not spawn, and you do not claim worker tickets.
 
 Product flow (this order):
 1. Catalog + usage
@@ -5503,8 +5535,11 @@ def print_ceo_connect(board, seat="ceo"):
     attach_catalog_usage(rows)
     print("1. CATALOG + USAGE")
     print_integration_catalog(rows, note)
-    print("Codex stays in the catalog with zero usage. Do not spawn Gemini. No new Claude fable.")
-    print("Cursor-only spawns unless the operator says otherwise. CoS (`cursor`) staffs.")
+    print("Codex stays in the catalog with unknown usage listed as unknown. Do not spawn Gemini. No new Claude fable.")
+    print("Spawn only the harnesses the operator chooses. Never auto-assign CoS or master.")
+    print("")
+    _print_role_discovery(rows)
+    print("Current holders: master=%s  CoS=%s" % (_master_label(board), _cos_label(board)))
     print("")
     print_recorded_usage(board)
     print("")
@@ -5533,12 +5568,14 @@ def print_ceo_connect(board, seat="ceo"):
     print("   tickets objective")
     print("")
     print("4. ANNOUNCE THE ATMAN ROLE")
-    print('   tickets msg --to everyone "%s is Atman CEO on this living board. CoS is cursor. Integrating: <list from step 1>. @everyone"' % name)
+    print('   tickets msg --to everyone "%s is Atman CEO on this living board. CoS is %s. Integrating: <list from step 1>. @everyone"'
+          % (name, _cos_label(board)))
     print('   tickets master log "ceo onboard: seat=%s integrations=<list>"' % name)
     print("")
     print("5. ASK FOR FEEDBACK")
     print("   Ask the operator: what should change about this connect path?")
-    print('   tickets msg --to cursor "CEO %s onboarded. Operator feedback: <their answer>"' % name)
+    print("   %s" % _onboard_roles().mail_to_cos(current_master(board) or {}))
+    print('   # CEO %s onboarded. Operator feedback: <their answer>' % name)
     print("")
     print("6. TASKS YOU CAN RUN (graph / map)")
     print("   tickets graph")
@@ -5546,9 +5583,10 @@ def print_ceo_connect(board, seat="ceo"):
     print("   tickets drive")
     print("   tickets update / tickets here")
     print("   Mid-run: tickets plan (JSON keys+deps), tickets dep, tickets create --blocks")
-    print("   CoS (cursor) staffs workers. CEO does not claim worker tickets.")
+    print("   CoS (%s) staffs workers. CEO does not claim worker tickets." % _cos_label(board))
     print("")
-    print("CoS is cursor. Mail: tickets msg --to cursor. Never Grok DMs.")
+    print("CoS is %s. Mail: %s. Never Grok DMs." % (
+        _cos_label(board), _onboard_roles().mail_to_cos(current_master(board) or {})))
     print("HOLD T-773 T-774. No tickets clear.")
     print("If `tickets self` still points at sol-agy-harness, recut ~/.local/bin/tickets")
     print("onto this checkout before trusting PATH `tickets connect`.")
@@ -5584,7 +5622,11 @@ Unsupported or missing remaining/reset is unknown, not exhausted. If `~/.local/b
 it retargets to the newest `openai.chatgpt-*` extension binary.
 
 Ask: **Which of these do you want to use?** Do not spawn until they answer.
-Codex stays in the catalog even with **no usage**. Gemini dispatch records
+Show the discover table (harness, installed, logged in, remaining/reset or
+unknown — never invent 0 or FAIL). Then ask which seat is master, CoS,
+workers, verifiers. Offer a ranked suggestion; never auto-assign. Non-interactive
+`tickets connect` requires explicit `--master` / `--cos` to apply.
+Codex stays in the catalog even with **unknown usage**. Gemini dispatch records
 harness=gemini; persist/hooks is the wake (no Gemini product job).
 No new Claude fable.
 
@@ -5663,8 +5705,8 @@ Do not dump a live-board plan. Do not invent a second planner.
 ## CEO ONBOARDING — living board (product flow)
 
 **You are onboarding as Atman CEO.** Connecting is joining Atman, not a
-provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
-staffs. CEO does not claim worker tickets on this path.
+provider. Identity is `atman-<seat>` (example `atman-ceo`). The current
+CoS holder staffs (or no CoS yet). CEO does not claim worker tickets.
 
 Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
 
@@ -5676,8 +5718,8 @@ Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
 6. `tickets graph` / `tickets map` — tasks they can actually run
 
 Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
-title — `tickets plan` with real deps if they add work. Cursor-only
-spawns unless they say otherwise. Mail hooks are not Claude-only:
+title — `tickets plan` with real deps if they add work. Spawn only the
+harnesses they confirm. Mail hooks are not Claude-only:
 `tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
 
 HANDOVER dated 2026-09-08 is historical, not live authority. Live:
@@ -8699,7 +8741,8 @@ def cmd_join(a, board):
     if _join_is_ceo_path(owner, roles.get(owner, [])):
         print("Atman CEO loop:  tickets inbox  ->  tickets objective  ->  "
               "tickets graph / tickets map  ->  tickets drive  ->  "
-              "tickets msg --to cursor (CoS staffs). CEO does not claim worker tickets.")
+              "%s (CoS staffs). CEO does not claim worker tickets."
+              % _onboard_roles().mail_to_cos(current_master(board) or {}))
         print("Full instructions: tickets connect")
     else:
         print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
@@ -8759,6 +8802,29 @@ def cmd_retire(a, board):
     print("retired %s" % owner)
 
 
+def _apply_connect_roles(board, a):
+    """Apply --master/--cos only when the operator named them. Never infer."""
+    master = (getattr(a, "connect_master", "") or "").strip()
+    cos = (getattr(a, "connect_cos", "") or "").strip()
+    if not master and not cos:
+        print("CoS unset until chosen (`tickets master cos <seat>`).")
+        return
+    prev = current_master(board) or {}
+    os.makedirs(board, exist_ok=True)
+    if master:
+        rec = {"owner": master, "since": now(), "cos": cos or (prev.get("cos") or "")}
+        with open(master_state_path(board), "w") as f:
+            json.dump(rec, f)
+        print("applied master=%s CoS=%s" % (master, rec["cos"] or "no CoS yet"))
+        return
+    if not prev.get("owner"):
+        sys.exit("connect --cos requires --master or an existing master (never auto-assign)")
+    prev["cos"] = cos
+    with open(master_state_path(board), "w") as f:
+        json.dump(prev, f)
+    print("applied CoS=%s (master %s unchanged)" % (cos, prev["owner"]))
+
+
 def cmd_connect(a, board):
     worker = bool(getattr(a, "worker", False))
     ceo = bool(getattr(a, "ceo", False))
@@ -8766,8 +8832,12 @@ def cmd_connect(a, board):
     living = board_is_living(board)
     if ceo or (living and not worker):
         print_ceo_connect(board, seat=seat)
+        _apply_connect_roles(board, a)
         return
     print_onboarding_startup()
+    rows, _note = probe_integration_catalog()
+    attach_catalog_usage(rows)
+    _print_role_discovery(rows)
     print("Then probe integrations: `tickets harness available`")
     print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
@@ -8778,6 +8848,7 @@ def cmd_connect(a, board):
     print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
+    _apply_connect_roles(board, a)
 
 
 # ---- wake-up: is there work for this agent, and how to start it ----------
@@ -12976,7 +13047,7 @@ def cmd_harness_usage(a, board):
     print("")
     print("Unsupported or missing remaining/reset is unknown, not exhausted. Codex stays cataloged.")
     print("Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job).")
-    print("No new Claude fable. Cursor is the only spawn this desk uses.")
+    print("No new Claude fable. Spawn only harnesses the operator chooses.")
 
 
 def cmd_harness_available(a, board):
@@ -12989,12 +13060,13 @@ def cmd_harness_available(a, board):
     print_recorded_usage(board)
     print("")
     print("USAGE: unsupported or missing remaining/reset is unknown, not exhausted. Do not spawn a FAIL or exhausted seat.")
+    print("Ask: Which of these do you want to use?")
+    _print_role_discovery(rows)
     if board_is_living(board):
         print("This is a living board. Do not invent a new team.")
-        print("Announce the Atman role as atman-<seat>. CoS (cursor) staffs.")
+        print("Announce the Atman role as atman-<seat>. CoS (%s) staffs." % _cos_label(board))
         print("CEO does not claim worker tickets.")
     else:
-        print("Ask: Which of these do you want to use?")
         print("Then ask the board/team name, then:")
         print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
         print("Then ask for the objective and tasks. Do not spawn until they answer.")
@@ -15935,6 +16007,10 @@ def main():
                    help="worker claim loop (prints tickets next)")
     c.add_argument("--seat", default="ceo",
                    help="board identity suffix; join as atman-<seat> (default: ceo)")
+    c.add_argument("--master", dest="connect_master", default="",
+                   help="apply this seat as master (required to assign in non-interactive connect)")
+    c.add_argument("--cos", dest="connect_cos", default="",
+                   help="apply this seat as CoS (required to assign in non-interactive connect)")
     c.set_defaults(fn=cmd_connect)
 
     c = sub.add_parser("self", help="print which tickets.py is live (script path and install kind)")
