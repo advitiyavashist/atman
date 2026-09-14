@@ -1,0 +1,31 @@
+{
+  "applies_to": [
+    "backend"
+  ],
+  "confidence": 1.0,
+  "data": {
+    "evidence": "T-824",
+    "files": [
+      "tickets.py"
+    ]
+  },
+  "id": "lesson.spawn-defaults-caller-repo",
+  "kind": "node",
+  "last_verified_at": "2026-09-14T03:00:00Z",
+  "owner": "cursor-onboard",
+  "recorded_at": "2026-09-14T03:00:00Z",
+  "revision": 1,
+  "source": {
+    "kind": "ticket",
+    "ref": "T-824"
+  },
+  "stale_after_days": 90,
+  "summary": "spawn from a Steer-board caller defaulted to the Steer repo for Atman tickets (T-824).",
+  "tags": [
+    "lesson",
+    "field-guide"
+  ],
+  "title": "spawn from a Steer-board caller defaulted to Steer",
+  "type": "lesson",
+  "verification": "verified"
+}
