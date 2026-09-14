@@ -616,6 +616,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--src", help="live tree instead of git archive (single origin)")
     parser.add_argument("--workdir", default="", help="scratch dir for venvs and private receipts")
     parser.add_argument("--manifest-out", default="", help="public-safe JSON manifest path")
+    parser.add_argument("--ticket", default="T-909", help="ticket recorded in the manifest")
+    parser.add_argument(
+        "--purpose",
+        default="hermetic dependency and child-process preflight",
+        help="bounded purpose recorded in the manifest",
+    )
     parser.add_argument("--self-test", action="store_true")
     return parser
 
@@ -684,8 +690,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     manifest = {
-        "ticket": "T-909",
-        "purpose": "hermetic dependency and child-process preflight",
+        "ticket": args.ticket,
+        "purpose": args.purpose,
         "full_suite": False,
         "python": {
             "requested": python,
