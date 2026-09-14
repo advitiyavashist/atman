@@ -16777,7 +16777,7 @@ def cmd_self(a, board):
             print("persistent: no -- seat %s had a native endpoint but it went stale "
                   "(re-register with `tickets join %s --persistent`)" % (seat, seat))
         else:
-            probe = sa.probe_provider(sa.provider_for_harness(harness))
+            probe = sa.probe_provider(sa.provider_for_harness(harness) or harness)
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
                 seat, probe.get("reason", "ok") if not probe.get("ok") else "transport available"))
     print("cli:    primary=%s alias=%s (one implementation)" % (PRIMARY_CLI_NAME, COMPAT_CLI_NAME))
