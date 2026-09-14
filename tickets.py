@@ -1674,14 +1674,80 @@ def collect_handoffs(t, tickets):
     return direct, earlier
 
 
-def detail(board, t, tickets):
+WORKER_RULES_COMPACT = (
+    "Rules (compact): one ticket; own worktree never main; tickets sync then "
+    "review; never edit .tickets/ by hand; never tickets clear; stuck: "
+    "`tickets msg --to <master> --re <id>` then update/block."
+)
+
+
+def _leadership_viewer(board, owner=None):
+    owner = owner or whoami()
+    m = _safe(lambda: current_master(board), {}) or {}
+    if owner and owner in ((m.get("owner") or ""), (m.get("cos") or "")):
+        return True
+    roles = _safe(lambda: roles_for(board, owner), []) or []
+    return any(r in ("master", "planning") for r in roles)
+
+
+def _ticket_path_hints(t):
+    text = " ".join([t.get("title") or "", t.get("body") or ""])
+    found = re.findall(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md|ts|js|go|rs|json)\b|tests/[\w./-]+", text)
+    out, seen = [], set()
+    for item in found:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out[:12]
+
+
+def _ticket_scope_notes(t):
+    notes = []
+    for nt in t.get("notes") or []:
+        if nt.get("kind") == "context":
+            notes.append(nt.get("text") or "")
+            continue
+        by = (nt.get("by") or "").lower()
+        if by.startswith("atman-ceo") or by.endswith("-ceo") or by == "master":
+            notes.append(nt.get("text") or "")
+    return [n for n in notes if n][:4]
+
+
+def _log_prompt_diet(board, owner, text, view, ticket=None):
+    sections = []
+    if "Rules" in (text or "") or "one ticket" in (text or ""):
+        sections.append("rules")
+    if "Inherited knowledge" in (text or "") or "knowledge:" in (text or ""):
+        sections.append("lessons")
+    if "standing brief" in (text or "").lower() or "Standing brief:" in (text or ""):
+        sections.append("brief")
+    if "Files/tests:" in (text or "") or "Scope:" in (text or ""):
+        sections.append("scope")
+    if (ticket or {}).get("body") and (ticket.get("body") in (text or "")):
+        sections.append("ticket")
+    traj_event(board, "prompt", agent=owner, ticket=ticket,
+               prompt_chars=len(text or ""),
+               prompt_sections=",".join(sections) or "body",
+               prompt_view=view)
+
+
+def detail(board, t, tickets, viewer=None):
+    viewer = viewer or whoami()
+    compact = not _leadership_viewer(board, viewer)
     out = [line(t, tickets)]
-    packs = context_paths(board, t.get("owner") or whoami())
-    if packs:
+    if compact:
+        out.append(WORKER_RULES_COMPACT)
+    packs = context_paths(board, t.get("owner") or viewer)
+    if packs and not compact:
         out.append("")
         out.append("Read this briefing before editing:")
         for p in packs:
             out.append("  " + p)
+    elif packs and compact:
+        brief = os.path.join(board, "briefs", (t.get("owner") or viewer) + ".md")
+        if os.path.isfile(brief):
+            out.append("Standing brief: " + brief)
     discovered = os.path.dirname(board)
     if os.path.abspath(discovered) != os.path.abspath(os.getcwd()):
         out.append("")
@@ -1690,17 +1756,20 @@ def detail(board, t, tickets):
     if t.get("sprint"):
         for s in load_sprints(board):
             if s["id"] == t["sprint"]:
-                out.append("Sprint %s: %s" % (s["id"], s.get("goal", "")))
+                if compact:
+                    out.append("Sprint %s" % s["id"])
+                else:
+                    out.append("Sprint %s: %s" % (s["id"], s.get("goal", "")))
     if t.get("epic"):
         for e in load_epics(board):
             if e["id"] == t["epic"]:
                 sib = [x for x in tickets if x.get("epic") == e["id"]]
                 d, n, c, b = progress(sib)
                 out.append("Epic %s: %s  %s" % (e["id"], e["title"], bar(d, n, 12)))
-                if e.get("body"):
+                if e.get("body") and not compact:
                     out.append("  " + e["body"].strip().replace("\n", "\n  "))
                 others = [x for x in sib if x["id"] != t["id"] and x["status"] != "done"]
-                if others:
+                if others and not compact:
                     out.append("  also in this epic: " + "; ".join(
                         "%s %s%s" % (x["id"], MARK[x["status"]], (" @" + x["owner"]) if x.get("owner") else "")
                         for x in others[:8]))
@@ -1732,6 +1801,12 @@ def detail(board, t, tickets):
         out.append("PR: %s" % t["pr"])
     if t.get("discarded_reason"):
         out.append("discarded: %s" % t["discarded_reason"])
+    scope = _ticket_scope_notes(t)
+    if compact and scope:
+        out.append("Scope: " + " | ".join(scope))
+    hints = _ticket_path_hints(t)
+    if compact and hints:
+        out.append("Files/tests: " + ", ".join(hints))
     if t.get("body"):
         out.append("")
         out.append(t["body"])
@@ -1751,7 +1826,9 @@ def detail(board, t, tickets):
         out.append("Notes:")
         for nt in t["notes"]:
             out.append("  - [%s] %s" % (nt.get("by", "?"), nt["text"]))
-    return "\n".join(out)
+    text = "\n".join(out)
+    _log_prompt_diet(board, viewer, text, "compact" if compact else "wide", ticket=t)
+    return text
 
 
 # --------------------------------------------------------------------------
@@ -6178,7 +6255,7 @@ def cmd_who(a, board):
 TRAJ_VERSION = 1
 TRAJ_MAX_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_MAX_BYTES", 50 * 1024 * 1024))
 TRAJ_KINDS = ("run_start", "run_end", "claim", "update", "review", "done",
-              "reopen", "block", "msg", "merge", "shadow_decision")
+              "reopen", "block", "msg", "merge", "shadow_decision", "prompt")
 
 
 def trajectories_path(board):
@@ -9512,7 +9589,12 @@ def _task_dominant_extra(board, owner):
 
 
 def cmd_prompt(a, board):
-    print(prompt_text(a, board))
+    text = prompt_text(a, board)
+    owner = whoami(a.agent)
+    view = "wide" if (getattr(a, "master", False) or getattr(a, "cos", False)
+                      or _leadership_viewer(board, owner)) else "compact"
+    _log_prompt_diet(board, owner, text, view)
+    print(text)
 
 
 def prompt_text(a, board):
