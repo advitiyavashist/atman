@@ -290,3 +290,31 @@ The relevant Atman primitives already exist. A customer should see one coherent 
 **3. Retro needs an outcome check — T-831/T-827.** Treat four-gram output as candidate discovery only. A reviewer names the repeated failure, relevant prior/discarded units and a narrow guidance change; another frozen case checks whether the failure is prevented without hurting task completion. Paragraph presence alone isn't effectiveness. Reuse the existing offline taxonomy and cost accounting; no paid always-on retro session and no unbounded three-month reread on every event.
 
 Other capture/sound/UI/context ideas reinforce already approved scope and are not new implementation lanes. Original source attribution is now clear for this requested workflow: Fatih's article is explicitly supplied. That still does not retroactively identify which publication the operator previously called the Graph Engineer post. No ticket dependencies, assignments, runtime hooks or code changed in this review.
+
+## OpenInspect launch supplement — 2026-09-14
+
+OpenInspect is added to the [competitor category matrix](../research/atman-competitor-category-matrix.md)
+using its first-party repository and architecture/managed-skills documentation.
+The original Cole Murray X article was not accessible; no article-exclusive
+assertion or vendor number is treated as evidence here.
+
+**Recommendation: retain the September 18 scope.** A sandbox factory is not a
+reason to build a hosted fleet, new harness or broad integration suite this week.
+The first win remains one reviewed A→B handoff between existing agents, with
+honest receipt states, a coherent app and a reproducible install. Strengthen
+proof of that outcome and its accounting rather than compete on infrastructure.
+
+| Decision | Existing ticket and minimum behavior | Named measure / limit |
+| --- | --- | --- |
+| **Now: sharpen the promise** | **T-819:** say which existing agents the user connects, what Atman persists and what actually triggers B. Explain context inheritance without promising KV transfer or automatic learning. Open-source or multi-provider support alone is not differentiation. | First-win completion and manual handoff interventions; no unmeasured speed claim. |
+| **Now: attribute accepted work** | **T-831:** link each attempt, coordination/review activity and accepted artifact to its objective/epic. Charge failed and discarded attempts to the same objective; do not exclude them because the denominator is accepted tickets. Separate model spend from infrastructure and user-paid subscription availability. | Cost per accepted unit with coverage; unknown observations remain unknown. Zero accepted units means the ratio is undefined. No dollars inferred from context characters. |
+| **Now: make inheritance inspectable** | **T-931/T-932:** reuse reviewed repo-backed context, scoped selection, exact revision/source and rendered-context receipts. Say what is a candidate lesson, approved guidance or retired fact; inspect changes through existing review. Do not auto-enable every contributor's instruction. | Received-context coverage, irrelevant/retired inheritance, repeat-failure rate and first-review verdict; do not claim governance merely because a graph exists. |
+| **After launch: external intake** | Keep the CEO's existing P3 adapter lane. A source event must map to an objective/ticket, authenticate its source and deduplicate replay; preserve accepted dependency gates before dispatch. Start with the first customer's actual source, not several integrations at once. | Signal-to-reviewed-outcome latency, duplicate attempts and operator interventions. No new September 18 dependency. |
+| **Experiment only: model allocation** | **T-894/T-948:** keep matched tasks, outcome labels, total coordination cost and stop rules. Routing defaults should reduce first-run choices; allocation changes require evidence, not a vendor's organizational example. | Accepted quality, severe failures, total observed cost and turns under the same success gate. |
+| **Reject for launch: hosted factory parity** | Do not add sandbox provisioning, a provider harness fork, pre-warming or broad shared-tenant access. Existing local/remote runner contracts remain the extension boundary. | Avoid setup burden and date risk; no claim that Atman is a ready multi-tenant service. |
+
+The CEO's mapping already covers these changes. Extend those tickets' acceptance
+notes if needed; no duplicate Field Guide, collector, router or integration
+project is proposed. The original article remains a source limitation, not a
+reason to hold delivery. This is strategic advice, not implementation or a
+waiver of Atman's launch gates.

@@ -1,0 +1,426 @@
+{
+  "child_env": {
+    "HOME": "temporary under $WORKDIR",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONPATH": "unset",
+    "TMPDIR": "temporary under $WORKDIR",
+    "host_names_present_not_values": [
+      "CODEX_CI",
+      "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+      "CODEX_PERMISSION_PROFILE",
+      "CODEX_SANDBOX_NETWORK_DISABLED",
+      "CODEX_VERSION",
+      "CURSOR_AGENT",
+      "CURSOR_CONVERSATION_ID",
+      "CURSOR_INVOKED_AS",
+      "CURSOR_REQUEST_ID",
+      "CURSOR_RIPGREP_PATH",
+      "SSH_AUTH_SOCK",
+      "TICKETS_DIR",
+      "TICKETS_PY",
+      "TICKETS_RUN_ID",
+      "TICKETS_RUN_NO",
+      "TICKET_AGENT",
+      "TICKET_SEAT",
+      "VSCODE_CODE_CACHE_PATH",
+      "VSCODE_CRASH_REPORTER_PROCESS_TYPE",
+      "VSCODE_CWD",
+      "VSCODE_ESM_ENTRYPOINT",
+      "VSCODE_HANDLES_UNCAUGHT_ERRORS",
+      "VSCODE_IPC_HOOK",
+      "VSCODE_NLS_CONFIG",
+      "VSCODE_PID"
+    ],
+    "stripped_exact": [
+      "PYTHONHOME",
+      "PYTHONPATH",
+      "PYTHONSTARTUP",
+      "SSH_AGENT_PID",
+      "SSH_AUTH_SOCK",
+      "STEER_API_KEY"
+    ],
+    "stripped_prefixes": [
+      "TICKET_",
+      "TICKETS_",
+      "CURSOR_",
+      "CODEX_",
+      "CLAUDE_",
+      "ANTHROPIC_",
+      "OPENAI_",
+      "VSCODE_",
+      "TERM_PROGRAM"
+    ]
+  },
+  "full_suite": false,
+  "origins": [
+    {
+      "fixture_note": "tests/test_t544_conftest_shadow.py sets PYTHONPATH=src:. on purpose so a combined runners+server collect uses the checkout, not a wheel. That is a fixture contract, not a packaging defect. Wheel provenance in this preflight overrides pytest.ini pythonpath so child collection cannot shadow the wheel.",
+      "label": "baseline-t891-raw",
+      "ok": true,
+      "pins": [
+        "PyYAML==6.0.3",
+        "Pygments==2.21.0",
+        "attrs==26.1.0",
+        "exceptiongroup==1.3.1",
+        "iniconfig==2.1.0",
+        "jsonschema-specifications==2025.9.1",
+        "jsonschema==4.25.1",
+        "packaging==26.3",
+        "pluggy==1.6.0",
+        "pytest==8.4.2",
+        "referencing==0.36.2",
+        "rpds-py==0.27.1",
+        "tomli==2.4.1",
+        "typing_extensions==4.16.0"
+      ],
+      "sha": "f19bdab093f14930e990141eaf5c8eed4858de93",
+      "source": {
+        "child_import_exit": 0,
+        "cli": {
+          "cli_py": {
+            "argv0": "$WORKDIR/origins/baseline-t891-raw/source-venv/bin/python",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          },
+          "console_tickets": {
+            "argv0": "$WORKDIR/origins/baseline-t891-raw/source-venv/bin/tickets",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          },
+          "tickets_py": {
+            "argv0": "$WORKDIR/origins/baseline-t891-raw/source-venv/bin/python",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          }
+        },
+        "collect": {
+          "collected": 19,
+          "exit": 0,
+          "missing_files": [],
+          "ok": true,
+          "override_pythonpath": false
+        },
+        "probe": {
+          "enable_usersite": false,
+          "executable": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+          "prefix": "$WORKDIR/origins/baseline-t891-raw/source-venv",
+          "pytest_file": "$WORKDIR/origins/baseline-t891-raw/source-venv/lib/python3.9/site-packages/pytest/__init__.py",
+          "pytest_version": "8.4.2",
+          "sys_path": [
+            "",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload",
+            "$WORKDIR/origins/baseline-t891-raw/source-venv/lib/python3.9/site-packages",
+            "$WORKDIR/origins/baseline-t891-raw/src/src"
+          ],
+          "ticket_board_file": "$WORKDIR/origins/baseline-t891-raw/src/src/ticket_board/__init__.py",
+          "usersite": "$WORKDIR/origins/baseline-t891-raw/home/source/Library/Python/3.9/lib/python/site-packages"
+        },
+        "pytest_class": "venv",
+        "pytest_version": "8.4.2",
+        "ticket_board_class": "selected_src"
+      },
+      "source_tree": "$WORKDIR/origins/baseline-t891-raw/src",
+      "wheel": {
+        "atm_present": false,
+        "bytes": 300493,
+        "cli": {
+          "console_tickets": {
+            "argv0": "$WORKDIR/origins/baseline-t891-raw/wheel-venv/bin/tickets",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          }
+        },
+        "collect": {
+          "collected": 19,
+          "exit": 0,
+          "missing_files": [],
+          "ok": true,
+          "override_pythonpath": true
+        },
+        "filename": "ticket_board-0.2.0-py3-none-any.whl",
+        "probe": {
+          "enable_usersite": false,
+          "executable": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+          "prefix": "$WORKDIR/origins/baseline-t891-raw/wheel-venv",
+          "pytest_file": "$WORKDIR/origins/baseline-t891-raw/wheel-venv/lib/python3.9/site-packages/pytest/__init__.py",
+          "pytest_version": "8.4.2",
+          "sys_path": [
+            "",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload",
+            "$WORKDIR/origins/baseline-t891-raw/wheel-venv/lib/python3.9/site-packages"
+          ],
+          "ticket_board_file": "$WORKDIR/origins/baseline-t891-raw/wheel-venv/lib/python3.9/site-packages/ticket_board/__init__.py",
+          "usersite": "$WORKDIR/origins/baseline-t891-raw/home/wheel/Library/Python/3.9/lib/python/site-packages"
+        },
+        "pytest_class": "venv",
+        "sha256": "3a696abf643e70c4a3dd42f3b20c7a3a0103dfa17a3dcc9add29aaa58c0f87d8",
+        "ticket_board_class": "venv"
+      }
+    },
+    {
+      "fixture_note": "tests/test_t544_conftest_shadow.py sets PYTHONPATH=src:. on purpose so a combined runners+server collect uses the checkout, not a wheel. That is a fixture contract, not a packaging defect. Wheel provenance in this preflight overrides pytest.ini pythonpath so child collection cannot shadow the wheel.",
+      "label": "candidate-app-t896",
+      "ok": true,
+      "pins": [
+        "PyYAML==6.0.3",
+        "Pygments==2.21.0",
+        "attrs==26.1.0",
+        "exceptiongroup==1.3.1",
+        "iniconfig==2.1.0",
+        "jsonschema-specifications==2025.9.1",
+        "jsonschema==4.25.1",
+        "packaging==26.3",
+        "pluggy==1.6.0",
+        "pytest==8.4.2",
+        "referencing==0.36.2",
+        "rpds-py==0.27.1",
+        "tomli==2.4.1",
+        "typing_extensions==4.16.0"
+      ],
+      "sha": "c2f7dd59009451da5d7667c2c1930a10af12d884",
+      "source": {
+        "child_import_exit": 0,
+        "cli": {
+          "cli_py": {
+            "argv0": "$WORKDIR/origins/candidate-app-t896/source-venv/bin/python",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          },
+          "console_tickets": {
+            "argv0": "$WORKDIR/origins/candidate-app-t896/source-venv/bin/tickets",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          },
+          "tickets_py": {
+            "argv0": "$WORKDIR/origins/candidate-app-t896/source-venv/bin/python",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          }
+        },
+        "collect": {
+          "collected": 19,
+          "exit": 0,
+          "missing_files": [],
+          "ok": true,
+          "override_pythonpath": false
+        },
+        "probe": {
+          "enable_usersite": false,
+          "executable": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+          "prefix": "$WORKDIR/origins/candidate-app-t896/source-venv",
+          "pytest_file": "$WORKDIR/origins/candidate-app-t896/source-venv/lib/python3.9/site-packages/pytest/__init__.py",
+          "pytest_version": "8.4.2",
+          "sys_path": [
+            "",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload",
+            "$WORKDIR/origins/candidate-app-t896/source-venv/lib/python3.9/site-packages",
+            "$WORKDIR/origins/candidate-app-t896/src/src"
+          ],
+          "ticket_board_file": "$WORKDIR/origins/candidate-app-t896/src/src/ticket_board/__init__.py",
+          "usersite": "$WORKDIR/origins/candidate-app-t896/home/source/Library/Python/3.9/lib/python/site-packages"
+        },
+        "pytest_class": "venv",
+        "pytest_version": "8.4.2",
+        "ticket_board_class": "selected_src"
+      },
+      "source_tree": "$WORKDIR/origins/candidate-app-t896/src",
+      "wheel": {
+        "atm_present": false,
+        "bytes": 318902,
+        "cli": {
+          "console_tickets": {
+            "argv0": "$WORKDIR/origins/candidate-app-t896/wheel-venv/bin/tickets",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          }
+        },
+        "collect": {
+          "collected": 19,
+          "exit": 0,
+          "missing_files": [],
+          "ok": true,
+          "override_pythonpath": true
+        },
+        "filename": "ticket_board-0.2.0-py3-none-any.whl",
+        "probe": {
+          "enable_usersite": false,
+          "executable": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+          "prefix": "$WORKDIR/origins/candidate-app-t896/wheel-venv",
+          "pytest_file": "$WORKDIR/origins/candidate-app-t896/wheel-venv/lib/python3.9/site-packages/pytest/__init__.py",
+          "pytest_version": "8.4.2",
+          "sys_path": [
+            "",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload",
+            "$WORKDIR/origins/candidate-app-t896/wheel-venv/lib/python3.9/site-packages"
+          ],
+          "ticket_board_file": "$WORKDIR/origins/candidate-app-t896/wheel-venv/lib/python3.9/site-packages/ticket_board/__init__.py",
+          "usersite": "$WORKDIR/origins/candidate-app-t896/home/wheel/Library/Python/3.9/lib/python/site-packages"
+        },
+        "pytest_class": "venv",
+        "sha256": "3935e26eb2c7446be86d7e734485b6885e2eea249073360c3d38d33cc482eb41",
+        "ticket_board_class": "venv"
+      }
+    },
+    {
+      "fixture_note": "tests/test_t544_conftest_shadow.py sets PYTHONPATH=src:. on purpose so a combined runners+server collect uses the checkout, not a wheel. That is a fixture contract, not a packaging defect. Wheel provenance in this preflight overrides pytest.ini pythonpath so child collection cannot shadow the wheel.",
+      "label": "candidate-cli-t877",
+      "ok": true,
+      "pins": [
+        "PyYAML==6.0.3",
+        "Pygments==2.21.0",
+        "attrs==26.1.0",
+        "exceptiongroup==1.3.1",
+        "iniconfig==2.1.0",
+        "jsonschema-specifications==2025.9.1",
+        "jsonschema==4.25.1",
+        "packaging==26.3",
+        "pluggy==1.6.0",
+        "pytest==8.4.2",
+        "referencing==0.36.2",
+        "rpds-py==0.27.1",
+        "tomli==2.4.1",
+        "typing_extensions==4.16.0"
+      ],
+      "sha": "26ff79f1612bf3e756a91d30bfad46f0f9d29d16",
+      "source": {
+        "child_import_exit": 0,
+        "cli": {
+          "cli_py": {
+            "argv0": "$WORKDIR/origins/candidate-cli-t877/source-venv/bin/python",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          },
+          "console_tickets": {
+            "argv0": "$WORKDIR/origins/candidate-cli-t877/source-venv/bin/tickets",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          },
+          "tickets_py": {
+            "argv0": "$WORKDIR/origins/candidate-cli-t877/source-venv/bin/python",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          }
+        },
+        "collect": {
+          "collected": 19,
+          "exit": 0,
+          "missing_files": [],
+          "ok": true,
+          "override_pythonpath": false
+        },
+        "probe": {
+          "enable_usersite": false,
+          "executable": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+          "prefix": "$WORKDIR/origins/candidate-cli-t877/source-venv",
+          "pytest_file": "$WORKDIR/origins/candidate-cli-t877/source-venv/lib/python3.9/site-packages/pytest/__init__.py",
+          "pytest_version": "8.4.2",
+          "sys_path": [
+            "",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload",
+            "$WORKDIR/origins/candidate-cli-t877/source-venv/lib/python3.9/site-packages",
+            "$WORKDIR/origins/candidate-cli-t877/src/src"
+          ],
+          "ticket_board_file": "$WORKDIR/origins/candidate-cli-t877/src/src/ticket_board/__init__.py",
+          "usersite": "$WORKDIR/origins/candidate-cli-t877/home/source/Library/Python/3.9/lib/python/site-packages"
+        },
+        "pytest_class": "venv",
+        "pytest_version": "8.4.2",
+        "ticket_board_class": "selected_src"
+      },
+      "source_tree": "$WORKDIR/origins/candidate-cli-t877/src",
+      "wheel": {
+        "atm_present": true,
+        "bytes": 300857,
+        "cli": {
+          "atm_same_entry": true,
+          "console_atm": {
+            "argv0": "$WORKDIR/origins/candidate-cli-t877/wheel-venv/bin/atm",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          },
+          "console_tickets": {
+            "argv0": "$WORKDIR/origins/candidate-cli-t877/wheel-venv/bin/tickets",
+            "exit": 0,
+            "has_join": true,
+            "ok": true
+          }
+        },
+        "collect": {
+          "collected": 19,
+          "exit": 0,
+          "missing_files": [],
+          "ok": true,
+          "override_pythonpath": true
+        },
+        "filename": "ticket_board-0.2.0-py3-none-any.whl",
+        "probe": {
+          "enable_usersite": false,
+          "executable": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+          "prefix": "$WORKDIR/origins/candidate-cli-t877/wheel-venv",
+          "pytest_file": "$WORKDIR/origins/candidate-cli-t877/wheel-venv/lib/python3.9/site-packages/pytest/__init__.py",
+          "pytest_version": "8.4.2",
+          "sys_path": [
+            "",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload",
+            "$WORKDIR/origins/candidate-cli-t877/wheel-venv/lib/python3.9/site-packages"
+          ],
+          "ticket_board_file": "$WORKDIR/origins/candidate-cli-t877/wheel-venv/lib/python3.9/site-packages/ticket_board/__init__.py",
+          "usersite": "$WORKDIR/origins/candidate-cli-t877/home/wheel/Library/Python/3.9/lib/python/site-packages"
+        },
+        "pytest_class": "venv",
+        "sha256": "b16b1448b1f75f4c18bdc893dde8fbca91bc2fc7b5c42f601f7123c20026368f",
+        "ticket_board_class": "venv"
+      }
+    }
+  ],
+  "pins_requested": [
+    "pip>=24,<26",
+    "setuptools>=68,<76",
+    "wheel>=0.41,<0.46",
+    "pytest==8.4.2",
+    "jsonschema>=4.18,<5",
+    "pyyaml>=6,<7"
+  ],
+  "purpose": "hermetic dependency and child-process preflight",
+  "python": {
+    "requested": "/usr/bin/python3",
+    "version": "3.9.6"
+  },
+  "representative_tests": [
+    "tests/test_t263_init_isolation.py",
+    "tests/test_t836_clean_wheel.py"
+  ],
+  "t891_distinction": {
+    "post_run_pin": "bac7cb8b00c14237db2fb23d41961f7f285c881c",
+    "post_run_pin_is_fullsuite_evidence": false,
+    "raw_receipt_digest": "55b014fde225dcbc4af1c8e9bf12c25492f18aeb631cb6d1066a1d29e4b767ce",
+    "raw_receipt_sha": "f19bdab093f14930e990141eaf5c8eed4858de93",
+    "t891_used_operator_user_site_pytest": true
+  },
+  "ticket": "T-909",
+  "verdict": "PASS"
+}
