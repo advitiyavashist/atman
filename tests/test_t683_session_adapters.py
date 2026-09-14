@@ -171,10 +171,11 @@ def test_codex_app_server_start_is_woken(board, cache_dir, monkeypatch, tmp_path
     with mock.patch("subprocess.run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
         with mock.patch.object(sa, "_codex_thread_is_loaded", return_value=True):
-            with mock.patch.object(sa, "_codex_turn_start", return_value=True):
-                label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
-                assert label == "woken"
-                assert sa.has_live_native_session(str(board), "codex-seat") is True
+            with mock.patch.object(sa, "_codex_thread_is_busy", return_value=False):
+                with mock.patch.object(sa, "_codex_turn_start", return_value=True):
+                    label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
+                    assert label == "woken"
+                    assert sa.has_live_native_session(str(board), "codex-seat") is True
 
 
 def test_codex_retained_without_control_sock_does_not_block_watch(board, cache_dir, monkeypatch):
