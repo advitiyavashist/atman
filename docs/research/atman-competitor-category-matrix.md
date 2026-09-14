@@ -2,6 +2,8 @@
 
 **Snapshot:** 2026-09-11 (Asia/Singapore)
 
+**Supplement:** OpenInspect reviewed 2026-09-14; other rows retain their original snapshot.
+
 **Question:** Where does Atman sit among coding-agent suites, local multi-agent coordinators, workflow frameworks, and agent control planes?
 
 **Source policy:** Product capabilities come from current first-party documentation, repositories, or pricing pages. Community posts appear only in the pain-evidence section and carry retrieval grades. A missing documented capability is marked **N/E** (no first-party evidence found), rather than asserted to be impossible.
@@ -19,6 +21,7 @@ The closest current competitors are:
 5. **GitHub coding agents**, whose distribution, heterogeneous hosted agents, issue-to-PR lifecycle, security checks, and audit surface make it the strongest platform threat even though its public docs do not show a cross-agent delivery DAG or agent-to-agent wake contract.
 6. **Pentagon Studio**, which provides persistent local Claude/Codex agent teams, identity, direct/group communication, knowledge, delegation and status reporting, though no dependency DAG or autonomous task router is documented.
 7. **Cursor**, which has polished parallel cloud execution, durable run events, artifacts, triggers, worktrees, and self-hosted execution pools, but no documented shared task graph or cross-agent coordination protocol.
+8. **OpenInspect**, an open-source background coding factory that orchestrates hosted sandbox sessions. It is a meaningful control-plane competitor; multi-provider support and reusable context are overlap, not exclusive Atman features.
 
 Spine Canvas is a cloud DAG/model-routing product, while HarnessRouter, dari, Conifer and Not Diamond operate primarily at the harness/model routing layer. OpenHands, CrewAI, LangGraph, and Microsoft Agent Framework are adjacent runtimes or workflow substrates. Sondera is an adjacent reference monitor. They can run underneath or beside Atman; none of their reviewed first-party material establishes ownership of the repo-delivery lifecycle across arbitrary pre-existing coding harnesses.
 
@@ -47,6 +50,7 @@ Two distinctions prevent false parity:
 | Product | Category | Objective / task graph | Atomic ownership | Messages / wakes | Persistent sessions | BYOA harnesses | Recovery | Verification / merge gate |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | **Atman** | Repo-delivery control plane | **Y** durable objective, tickets, deps | **Y** exclusive claim; one active ticket default | **Y** durable DM/mention, dependency notes, queued offline wake | **P** lifecycle and native adapters exist; live proof gaps remain | **Y** prompt file + cwd + identity; built-ins and arbitrary command/remote | **Y** leases, stale/blocked states, explicit recovery | **Y** review queue; branch/SHA-pinned merge and tests |
+| **OpenInspect** | Hosted sandbox coding factory | **P** child tasks; acceptance-dependent external ticket DAG **N/E** | **N/E** external ticket claim contract | **P** durable prompts and child follow-ups; not proof of existing-CLI wake | **Y** session persistence | **P** multiple providers in factory harnesses | **Y** sandbox resume | **P** PR artifacts; external pinned ticket acceptance **N/E** |
 | **Claude Code agent teams** | Native coding-agent suite | **Y** shared dependent task list | **Y** claim protected by file locking | **Y** direct mailbox, automatic delivery, idle notification | **P** tasks are local; in-process teammate resumption unsupported | **N/E** Claude instances only | **P** state is visible; replacement is manual after teammate errors | **P** completion hooks can gate tasks; worktrees and code review exist on separate surfaces |
 | **Codex** | Native coding-agent suite and cloud service | **P** parent/child delegated task tree, not a documented durable delivery DAG | **N/E** | **P** parent/child send, wait, interrupt, follow-up | **Y** local sessions; cloud/app tasks are durable | **P** OSS CLI, MCP and tools; no arbitrary coding-harness team contract | **P** resume/retry at session or task level | **P** isolated worktrees, diffs, test logs and PR review; no documented team merge gate |
 | **Cursor** | IDE and hosted coding-agent suite | **N/E** shared delivery DAG | **N/E** | **P** queue/follow-up to an active agent; external triggers | **Y** agents and per-prompt runs are durable | **P** model selection and MCP; agent loop stays Cursor-owned | **P** checkpoints and durable run state | **P** worktrees, commits/PRs, artifacts and diagnostics; no shared merge gate documented |
@@ -64,6 +68,7 @@ Two distinctions prevent false parity:
 | Product | Trajectory data | Routing | Turns / cost measurement | Local / self-hosted | Setup | Price and source status |
 |---|---:|---:|---:|---:|---|---|
 | **Atman** | **P** run events tie objective/ticket/seat/harness/model/outcome; payloads intentionally bounded | **P** live eligibility rules; learned/prior comparison is shadow only | **P** turns exist; token/cost coverage is currently too sparse for claims | **Y** local file board; local/custom/HTTP models supported | Python 3.9+, Git; live CLI is one stdlib file | MIT; free source, user pays harness/model; no hosted plan published |
+| **OpenInspect** | **Y** durable session events | **P** provider selection; outcome-trained router **N/E** | **P** accepted-ticket cost contract **N/E** | **Y** self-deployable control plane; hosted sandbox execution | Deployment and provider setup | MIT; infrastructure and model costs remain |
 | **Claude Code** | **Y** local JSONL transcripts, histories, analytics | **P** lead delegates; `/batch` and subagent/agent-team choices; no learned team router evidenced | **Y** token/cost reporting; agent teams scale cost with active teammates | **P** local CLI, model service hosted by Anthropic | Installer/package plus account or API key; experimental flag for teams | Proprietary service; consumer plans and API usage pricing published |
 | **Codex** | **Y** transcripts, diffs, commands, logs and task artifacts | **P** parent delegates; app supports parallel tasks; no outcome-learned team router evidenced | **Y** usage is metered; no task-turn objective score evidenced | **Y** Apache-2.0 local CLI; hosted app/cloud optional | Script, npm or Homebrew; ChatGPT/API auth | CLI Apache-2.0; service proprietary and plan/credit metered |
 | **Cursor** | **Y** transcripts, run events, environment/setup logs and artifacts | **P** user selects model; pool routes to hardware class; `/best-of-n` | **Y** usage/model API-price accounting; no team-turn optimizer evidenced | **P** self-hosted runners execute tools, while Cursor retains the loop and inference control | Desktop/CLI or managed cloud; runners require pool setup | Proprietary; Individual Pro $20, Pro+ $60, Ultra $200; Teams from $40/user at retrieval |
@@ -77,6 +82,37 @@ Two distinctions prevent false parity:
 | **Sondera Coding Agent Hooks** | **Y** adjudicated trajectory events; every action/decision/reason is a product claim | **—** policy routes allow/deny/escalate/steer, not task-to-agent | **N/E** delivery turns/cost | **Y** deterministic signatures/Cedar run locally without provider key; platform optional | Release binary or Rust build, start `serve`, install harness adapter | MIT coding-agent hooks; open 110+ Cedar policies; managed console price not published in reviewed sources |
 
 ## Evidence notes by competitor
+
+### OpenInspect supplement — 2026-09-14
+
+The [repository README](https://github.com/ColeMurray/background-agents) documents
+background coding, external integrations, child sessions and multiple providers.
+It explicitly describes a trusted, single-tenant deployment. Open source and
+self-deployment are therefore not Atman-only differentiators.
+
+Its [architecture guide](https://github.com/ColeMurray/background-agents/blob/main/docs/HOW_IT_WORKS.md)
+separates a Cloudflare control plane from sandbox execution. Child follow-ups
+enter durable queues; queued instructions are not an interruption or turn-start
+receipt. Parent-child authorization is checked, rather than transferring the
+parent's credential into the child. These are substantial operational primitives,
+not evidence of an acceptance-dependent delivery DAG across pre-existing CLIs.
+
+Its [managed-skills guide](https://github.com/ColeMurray/background-agents/blob/main/docs/MANAGED_SKILLS.md)
+documents revision pinning, source provenance and session-visible skill selection.
+Instructions are trusted content, not permission enforcement. Atman should match
+that inspectability before describing its own Field Guide as governed inheritance.
+
+**Differentiation line:** OpenInspect runs coding sessions in hosted sandboxes;
+Atman coordinates the agent processes you already use around a local delivery
+graph, dependency handoffs and review. Both overlap in provider choice and context
+distribution. Atman's specific acceptance, wake and recovery claims still require
+release evidence; this comparison does not certify them.
+
+**Source limit:** The supplied [Cole Murray article](https://x.com/colemurray/status/2098528266638463035)
+returned 403 on direct retrieval. Its title and date are operator-provided metadata,
+not independently verified here. An indexed mirror was found but was not used to
+establish technical claims or change scope. No vendor usage, cost or adoption
+numbers are imported.
 
 ### Atman baseline
 
