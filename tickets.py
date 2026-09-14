@@ -11647,10 +11647,14 @@ def cmd_watch(a, board):
     runs = failures = 0
     try:
         if not a.once:
-            print("watching %s for %s every %ds; wake=%s; cwd=%s; cmd=%s" % (
-                board, owner, every, wake_mode, cwd, cmd))
+            print("watching %s for %s every %ds; wake=%s; cwd=%s; workspace=%s; cmd=%s" % (
+                board, owner, every, wake_mode, cwd, cwd, cmd), flush=True)
             _safe(lambda: checkin(board, owner, None, "watch loop online (%s, every %ds)" % (
-                wake_mode, every)), None)
+                wake_mode, every), cwd=cwd), None)
+            rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+            if rec.get("no_worktree"):
+                ws = rec.get("workspace") or cwd
+                _safe(lambda: _agent_set(board, owner, worktree=ws, cwd=cwd, workspace=ws), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
         while not stop["now"]:
             # Consume every queued edge at the start of one scan. A signal that
@@ -12243,8 +12247,15 @@ def _render_prompt_file(board, owner, kind="", text=""):
     return path, cleanup
 
 
+def _cursor_workspace_flags(workspace):
+    """Cursor `agent --workspace` only. Never `-w/--worktree` (creates ~/.cursor/worktrees)."""
+    if not workspace:
+        return ""
+    return " --workspace %s --trust" % shlex.quote(os.path.abspath(workspace))
+
+
 def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False,
-                cmd_template="", prompt_expr=""):
+                cmd_template="", prompt_expr="", workspace=""):
     """The headless command a spawned worker runs. Model comes from --model or
     the workforce record (`tickets join --model`). Spawned workers run without
     permission prompts by default: nobody is there to answer them, and the
@@ -12287,8 +12298,11 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         return 'codex exec --skip-git-repo-check %s%s %s' % (mode, (" -m %s" % model) if model else "", prompt)
     if tool == "cursor" or tool in ("grok", "grokbots"):
         # Cursor CLI (`agent`): Cursor Grok seats and grokbots use the same persist path.
+        # Isolated seats pass --workspace PATH --trust; never -w/--worktree.
         force = "--force" if permission_mode == "bypassPermissions" else ""
-        return 'agent -p --output-format text %s%s %s' % (force, (" --model %s" % model) if model else "", prompt)
+        return 'agent -p --output-format text %s%s%s %s' % (
+            force, _cursor_workspace_flags(workspace),
+            (" --model %s" % model) if model else "", prompt)
     if tool in ("agy", "antigravity"):
         flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
                 else "--mode accept-edits")
@@ -12303,8 +12317,9 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         # Fable through Cursor first; if that run errors, the same prompt through the
         # Claude CLI (opus). One identity, two engines -- the master never goes dark.
         first = _worker_cmd(board, owner, model or "claude-fable-5-1-thinking-high", permission_mode, "cursor",
-                            master, prompt_expr=prompt_expr)
-        second = _worker_cmd(board, owner, "opus", permission_mode, "claude", master, prompt_expr=prompt_expr)
+                            master, prompt_expr=prompt_expr, workspace=workspace)
+        second = _worker_cmd(board, owner, "opus", permission_mode, "claude", master, prompt_expr=prompt_expr,
+                            workspace=workspace)
         return "%s || %s" % (first, second)
     # Any other executable, named directly: it is the command, and it reads the
     # prompt itself. Kept for the pre-BYOA `spawn --tool ./my-runner` form.
@@ -12484,10 +12499,24 @@ def cmd_spawn(a, board):
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
-    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
-    git_root, origin_err = _spawn_git_root(board, owner, wt)
-    if origin_err:
-        sys.exit(origin_err)
+    no_worktree = bool(getattr(a, "no_worktree", False))
+    default_wt = os.path.join(root, ".worktrees", owner)
+    board_trees = os.path.abspath(os.path.join(root, ".worktrees"))
+    if no_worktree:
+        if getattr(a, "base", ""):
+            sys.exit("spawn --no-worktree refuses --base (would create a git worktree)")
+        if not a.worktree:
+            sys.exit("spawn --no-worktree needs --worktree PATH (existing isolated workspace)")
+        wt = os.path.abspath(a.worktree)
+        if not os.path.isdir(wt):
+            sys.exit("spawn --no-worktree: workspace %s does not exist" % wt)
+        if wt == board_trees or wt.startswith(board_trees + os.sep):
+            sys.exit("spawn --no-worktree refuses a path under %s; pass an isolated directory" % board_trees)
+    else:
+        wt = os.path.abspath(a.worktree) if a.worktree else default_wt
+        git_root, origin_err = _spawn_git_root(board, owner, wt)
+        if origin_err:
+            sys.exit(origin_err)
     resolved_harness, _ = harness_of(board, owner, requested_harness,
                                      getattr(a, "cmd_template", ""))
     sa = _session_adapters()
@@ -12506,7 +12535,9 @@ def cmd_spawn(a, board):
         if auth.get("state") != "ready":
             _print_auth_result(owner, auth)
             sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
-    if not os.path.isdir(wt):
+    if no_worktree:
+        print("workspace %s (no-worktree)" % wt)
+    elif not os.path.isdir(wt):
         base = a.base or _trunk()
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
                            capture_output=True, text=True)
@@ -12533,11 +12564,14 @@ def cmd_spawn(a, board):
         bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
                                 role="", by=whoami())
         _silent(lambda: cmd_brief(bn, board))
-    inherited = _inherit_settings(root, wt)
-    if inherited:
-        print("inherited project settings into the worktree: %s" % ", ".join(inherited))
-    if _pin_spawned_worker_hooks(board, owner, wt, harness):
-        print("pinned %s hooks to unique worker %s (canonical role hooks not inherited)" % (harness, owner))
+    if no_worktree:
+        _agent_set(board, owner, no_worktree=True, workspace=wt, worktree=wt, cwd=wt)
+    else:
+        inherited = _inherit_settings(root, wt)
+        if inherited:
+            print("inherited project settings into the worktree: %s" % ", ".join(inherited))
+        if _pin_spawned_worker_hooks(board, owner, wt, harness):
+            print("pinned %s hooks to unique worker %s (canonical role hooks not inherited)" % (harness, owner))
     if a.master:
         prev = current_master(board) or {}
         with open(master_state_path(board), "w") as f:
@@ -12570,7 +12604,8 @@ def cmd_spawn(a, board):
         pass
     mode = "acceptEdits" if a.safe else "bypassPermissions"
     kind = "cos" if a.cos else ("master" if a.master else "")
-    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, harness, master=kind, cmd_template=cmd_template)
+    cmd = a.exec or _worker_cmd(board, owner, a.model, mode, harness, master=kind,
+                                cmd_template=cmd_template, workspace=wt if no_worktree else "")
     argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
             "--prompt-kind", kind,
@@ -12596,6 +12631,7 @@ def cmd_spawn(a, board):
     # its own yet -- otherwise a worker would be hidden from the very
     # mail it was launched to handle.
     env = _supervisor_launch_env(board, owner)
+    env["PYTHONUNBUFFERED"] = "1"
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     with open(log_path, "a") as lf:
         subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
@@ -12607,6 +12643,7 @@ def cmd_spawn(a, board):
     print("watcher for %s started%s; harness=%s; model=%s; wake=%s; persist=%s; max-runs=%s; log %s" % (
         owner, (" (pid %d)" % pid) if pid else "", harness, model,
         effective_wake_mode, "yes" if max_runs == 0 else "no", max_runs, log_path))
+    print("workspace: %s" % wt)
     print("cmd: %s" % cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
@@ -16551,7 +16588,10 @@ def main():
     c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
                    help="persist the seat's wake policy (master/CoS default continuous; workers task-only)")
     c.add_argument("--brief", default="", help="standing context for this worker")
-    c.add_argument("--worktree", default="", help="default .worktrees/<name>")
+    c.add_argument("--worktree", default="", help="default .worktrees/<name>; with --no-worktree: isolated workspace")
+    c.add_argument("--no-worktree", action="store_true",
+                   help="do not create a git worktree; --worktree PATH is the isolated workspace "
+                        "(Cursor agent --workspace); refuse board .worktrees/")
     c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
     c.add_argument("--every", type=int, default=60)
     c.add_argument("--run-timeout", type=int, default=90)
