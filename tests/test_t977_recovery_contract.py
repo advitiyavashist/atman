@@ -333,6 +333,95 @@ def test_packaged_save_cannot_publish_old_generation_after_transfer(tmp_path, mo
     assert injected
 
 
+def test_handoff_publication_cannot_restore_a_revoked_owner(tmp_path, monkeypatch):
+    """Handoff tempfile publication must not overwrite a transfer at mkstemp."""
+    import importlib.util
+    import json as json_mod
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("handoff_save_tickets", root / "tickets.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    tc_spec = importlib.util.spec_from_file_location(
+        "handoff_tc_tickets", root / "ticket_coordination.py"
+    )
+    tc = importlib.util.module_from_spec(tc_spec)
+    tc_spec.loader.exec_module(tc)
+    monkeypatch.setattr(mod, "_recovery", lambda: tc)
+    board = tmp_path / "disposable-handoff-board"
+    board.mkdir()
+    path = board / "T-001.json"
+    initial = {"id": "T-001", "status": "claimed", "owner": "alice", "owner_generation": 1}
+    path.write_text(json_mod.dumps(initial))
+    mkstemp = tc.tempfile.mkstemp
+    injected = False
+
+    def interleaved_temp(*args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            moved = dict(initial, owner="bob", owner_generation=2)
+            mod.save(str(board), moved, expected_generation=1)
+        return mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(tc.tempfile, "mkstemp", interleaved_temp)
+    try:
+        tc.write_ticket_handoff(
+            str(board), "T-001", {"id": "synthetic-handoff", "agent": "alice"}, actor="alice"
+        )
+    except (ValueError, SystemExit):
+        pass
+    actual = json_mod.loads(path.read_text())
+    assert (actual["owner"], actual["owner_generation"]) == ("bob", 2), actual
+    assert injected
+    assert "handoff" not in actual
+
+
+def test_packaged_handoff_publication_cannot_restore_a_revoked_owner(tmp_path, monkeypatch):
+    import importlib.util
+    import json as json_mod
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "handoff_save_cli", root / "src" / "ticket_board" / "cli.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    tc_spec = importlib.util.spec_from_file_location(
+        "handoff_tc_cli", root / "src" / "ticket_board" / "ticket_coordination.py"
+    )
+    tc = importlib.util.module_from_spec(tc_spec)
+    tc_spec.loader.exec_module(tc)
+    monkeypatch.setattr(mod, "_recovery", lambda: tc)
+    board = tmp_path / "disposable-handoff-board"
+    board.mkdir()
+    path = board / "T-001.json"
+    initial = {"id": "T-001", "status": "claimed", "owner": "alice", "owner_generation": 1}
+    path.write_text(json_mod.dumps(initial))
+    mkstemp = tc.tempfile.mkstemp
+    injected = False
+
+    def interleaved_temp(*args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            moved = dict(initial, owner="bob", owner_generation=2)
+            mod.save(str(board), moved, expected_generation=1)
+        return mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(tc.tempfile, "mkstemp", interleaved_temp)
+    try:
+        tc.write_ticket_handoff(
+            str(board), "T-001", {"id": "synthetic-handoff", "agent": "alice"}, actor="alice"
+        )
+    except (ValueError, SystemExit):
+        pass
+    actual = json_mod.loads(path.read_text())
+    assert (actual["owner"], actual["owner_generation"]) == ("bob", 2), actual
+    assert injected
+    assert "handoff" not in actual
+
+
 def test_assign_a_b_c_keeps_original_owner_fenced(board):
     repo = board.parent
     for name, harness in (("alice", "cursor"), ("bob", "codex"), ("carol", "claude")):

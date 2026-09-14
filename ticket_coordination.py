@@ -249,24 +249,39 @@ def compact_handoff(record):
 
 
 def write_ticket_handoff(board, ticket_id, record, actor=None):
+    """Publish compact handoff onto the ticket without bypassing generation CAS.
+
+    Same contract as save(): hold <id>.json.lock, write a tempfile, then
+    recheck owner+generation immediately before os.replace. A transfer that
+    lands at mkstemp wins; this writer must not restore a revoked owner.
+    Does not take AgentLock.
+    """
     path = Path(board) / (ticket_id + ".json")
-    ticket = json.loads(path.read_text())
-    if actor is not None and ticket.get("owner") != actor:
-        raise ValueError("ownership changed before handover could be saved")
-    ticket["handoff"] = compact_handoff(record)
-    ticket["updated"] = stamp()
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=ticket_id + "-")
-    try:
-        with os.fdopen(fd, "w") as output:
-            json.dump(ticket, output, indent=2)
-            output.write("\n")
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-    return ticket
+    with ticket_mutation_lock(board, ticket_id):
+        ticket = json.loads(path.read_text())
+        if actor is not None and ticket.get("owner") != actor:
+            raise ValueError("ownership changed before handover could be saved")
+        expected = owner_generation(ticket)
+        ticket["handoff"] = compact_handoff(record)
+        ticket["updated"] = stamp()
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=ticket_id + "-")
+        try:
+            with os.fdopen(fd, "w") as output:
+                json.dump(ticket, output, indent=2)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            current = json.loads(path.read_text())
+            if actor is not None and current.get("owner") != actor:
+                raise ValueError("ownership changed before handover could be saved")
+            err = generation_publish_error(current, ticket, expected)
+            if err:
+                raise ValueError(err)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return ticket
 
 
 def owner_generation(ticket):

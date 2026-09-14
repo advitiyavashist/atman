@@ -54,7 +54,8 @@ A process that still holds the old generation cannot accept results:
 - `done` of IN REVIEW work stays legal for the closer (master merge)
 - `TICKET_OWNER_GENERATION` that does not match the board is rejected
 - `save` holds `<id>.json.lock`, compares generation, writes `<id>.json.tmp`, then re-checks generation immediately before `os.replace`. A transfer published in that window wins; the stale write is discarded
-- lock order with assign/claim: `AgentLock` (`agents/<owner>.json.lock`; two owners → sorted names) then the ticket mutation lock. `save` never takes `AgentLock`
+- `write_ticket_handoff` uses the same lock and owner+generation recheck immediately before `os.replace` (it still writes via `mkstemp`). A Bob generation-2 transfer between Alice's read and tempfile publication wins; the handoff must not restore Alice generation 1. Coordination history of the attempted handoff stays as written
+- lock order with assign/claim: `AgentLock` (`agents/<owner>.json.lock`; two owners → sorted names) then the ticket mutation lock. `save` and `write_ticket_handoff` never take `AgentLock`
 
 Notes from a non-owner stay allowed (T-238: make a second lane visible).
 
