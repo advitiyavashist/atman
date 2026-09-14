@@ -96,8 +96,8 @@ def test_living_connect_is_atman_ceo_product_flow(tmp_path):
     out = c.stdout
     assert first_nonempty(out).startswith("**You are onboarding as Atman CEO.**")
     assert "not Claude" in out or "not a provider" in out.lower() or "not Claude, Cursor, Codex" in out
-    assert "1. CATALOG + USAGE" in out
-    assert "cursor" in out and "gemini" in out
+    assert "1. CATALOG + SUBSCRIPTIONS" in out
+    assert "cursor" in out and "gemini" in out      # catalog rows, not a staffing claim
     assert "USAGE" in out
     assert "2. LIVING BOARD" in out
     assert "do not invent a new team" in out.lower() or "Do not invent a new team" in out
@@ -106,12 +106,63 @@ def test_living_connect_is_atman_ceo_product_flow(tmp_path):
     assert "ANNOUNCE THE ATMAN ROLE" in out
     assert "ASK FOR FEEDBACK" in out
     assert "tickets graph" in out and "tickets map" in out
-    assert "CoS" in out and "cursor" in out
-    assert "tickets hooks cursor" in out
+    assert "CoS" in out
+    # This board records no CoS, so connect must SAY so rather than name a
+    # provider. Asserting the literal "cursor" here is what let the hardcode
+    # survive: the test passed on the catalog row while the staffing line was
+    # telling every CEO to mail a seat that had never joined.
+    assert "(unset)" in out or "NO CoS RECORDED" in out
+    assert "tickets hooks <your-harness>" in out
     assert "tickets hooks codex" in out
     assert "tickets hooks remote" in out
     assert "tickets next" not in out
     assert "Paste this at the start of ANY agent session" not in out
+
+
+def test_connect_never_names_a_provider_as_the_cos(tmp_path):
+    """A harness is not a seat. No provider may be asserted as the CoS."""
+    repo, env = living_board(tmp_path)
+    out = run(repo, "connect", env=env, tmp_path=tmp_path).stdout
+    for provider in ("cursor", "claude", "codex", "gemini", "grok", "agy", "devin"):
+        assert "CoS is %s" % provider not in out
+        assert "CoS (`%s`)" % provider not in out
+        assert "CoS (%s) staffs" % provider not in out
+        assert "--to %s " % provider not in out
+
+
+def test_connect_resolves_the_recorded_cos_from_the_board(tmp_path):
+    """Once a CoS is recorded, connect must address THAT seat."""
+    repo, env = living_board(tmp_path)
+    # Deliberately NOT "atman-ceo": run()'s session id is derived from the actor
+    # name and is not board-scoped, so reusing a seat name another test in this
+    # file also joins leaks that session's binding across boards. Own seat name,
+    # own session. (The underlying scoping gap is T-020's, not this test's.)
+    env = dict(env, TICKET_AGENT="costest-lead")
+    assert run(repo, "join", "costest-lead", "--roles", "master",
+               env=env, tmp_path=tmp_path).returncode == 0
+    assert run(repo, "master", "take", env=env, tmp_path=tmp_path).returncode == 0
+    assert run(repo, "master", "cos", "real-cos-seat",
+               env=env, tmp_path=tmp_path).returncode == 0
+    out = run(repo, "connect", env=env, tmp_path=tmp_path).stdout
+    assert "CoS is real-cos-seat" in out
+    assert "--to real-cos-seat" in out
+    assert "CoS is cursor" not in out
+
+
+def test_living_board_is_still_asked_the_subscription_question(tmp_path):
+    """The ask was gated to blank boards only; that gate is the root cause.
+
+    A living board used to get a hardcoded staffing claim INSTEAD of the
+    question, which is how operators without Cursor installed were told Cursor
+    staffs their board. Which providers are subscribed is operator knowledge on
+    every board.
+    """
+    repo, env = living_board(tmp_path)
+    for argv in (("connect",), ("harness", "available")):
+        out = run(repo, *argv, env=env, tmp_path=tmp_path).stdout
+        assert "SUBSCRIPTIONS -- ASK THE OPERATOR" in out, argv
+        assert "Installed is NOT subscribed" in out, argv
+        assert "on this machine:" in out, argv
 
 
 def test_connect_ceo_flag_on_blank_board(tmp_path):

@@ -389,7 +389,7 @@
       <div class="start-copy">
         <p class="eyebrow">first run</p>
         <h2 id="start-title">Clone, connect as Atman, open tickets ui.</h2>
-        <p>Connecting is joining Atman, not the provider. Identity is <code>atman-&lt;seat&gt;</code> (example <code>atman-ceo</code>). Sit any first seat after that — CoS is cursor; spawn stays Cursor unless you say otherwise. Then open the local command board. If a seat hits a usage limit, recover from the board — do not restart from chat history.</p>
+        <p>Connecting is joining Atman, not the provider. Identity is <code>atman-&lt;seat&gt;</code> (example <code>atman-ceo</code>). Sit any first seat after that — connect asks which providers you are subscribed to, and never picks one for you. Whoever staffs the board is read from the board itself, not assumed from your provider. Then open the local command board. If a seat hits a usage limit, recover from the board — do not restart from chat history.</p>
         <p class="start-links">
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/first-session.md">Read the first session <span aria-hidden="true">↗</span></a>
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/byoa.md">Bring your own agent <span aria-hidden="true">↗</span></a>
@@ -419,7 +419,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 <span class="comment"># connect as Atman, not Claude — any first seat</span>
 tickets connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
+<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). It asks which providers you have.</span>
 
 <span class="comment"># ship UI</span>
 tickets ui</code></pre>
@@ -430,7 +430,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 <span class="comment"># connect as Atman, not Codex — any first seat</span>
 tickets connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
+<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). It asks which providers you have.</span>
 
 <span class="comment"># ship UI</span>
 tickets ui</code></pre>
@@ -439,9 +439,9 @@ git clone https://github.com/advitiyavashist/atman.git
 cd atman &amp;&amp; ./install.sh
 export PATH="$HOME/.local/bin:$PATH"
 
-<span class="comment"># connect as Atman, not Cursor — spawn stays Cursor</span>
+<span class="comment"># connect as Atman, not Cursor — any first seat</span>
 tickets connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
+<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). It asks which providers you have.</span>
 
 <span class="comment"># ship UI</span>
 tickets ui</code></pre>
@@ -452,7 +452,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 <span class="comment"># connect as Atman, not Grok — any first seat</span>
 tickets connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
+<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). It asks which providers you have.</span>
 
 <span class="comment"># ship UI</span>
 tickets ui</code></pre>
@@ -463,7 +463,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 <span class="comment"># connect as Atman — custom is a catalog row, not the board name</span>
 tickets connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
+<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). It asks which providers you have.</span>
 
 <span class="comment"># ship UI</span>
 tickets ui</code></pre>

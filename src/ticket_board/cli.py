@@ -2868,8 +2868,9 @@ Do not dump a live-board plan. Do not invent a second planner.
 ## CEO ONBOARDING — living board (product flow)
 
 **You are onboarding as Atman CEO.** Connecting is joining Atman, not a
-provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
-staffs. CEO does not claim worker tickets on this path.
+provider. Identity is `atman-<seat>` (example `atman-ceo`). The CoS staffs,
+and who that is comes from the board (`tickets master cos` sets it) — never
+from your provider. CEO does not claim worker tickets on this path.
 
 Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
 
@@ -4227,8 +4228,12 @@ def cmd_connect(a, board):
         if not CEO_ONBOARDING_STARTUP.endswith("\n"):
             sys.stdout.write("\n")
         print("")
-        print("Product flow: catalog + usage → living board → %s → announce → feedback → graph/map" % name)
-        print("Do not invent a new team. CEO does not claim worker tickets. CoS (cursor) staffs.")
+        print("Product flow: catalog + subscriptions (ASK) → living board → %s → announce → feedback → graph/map" % name)
+        print("Do not invent a new team. CEO does not claim worker tickets.")
+        # No provider is named here on purpose. A harness is not a seat: read the
+        # CoS off the board (`tickets master cos` sets it) and ask the operator
+        # when it is unset. See resolve_cos() in tickets.py.
+        print("CoS: read it from the board; if unset, ask the operator. Never assume a provider.")
         print("Then probe: `tickets harness available`")
         print("Join: tickets join %s --roles master --persistent --wake-mode continuous" % name)
         print("Announce Atman role, ask for feedback, then tickets graph / tickets map.")
