@@ -25,7 +25,7 @@ SEATS = (
     "Codex",
     "Cursor",
     "Grok Bot",
-    "custom",
+    "Custom",
 )
 
 
@@ -59,21 +59,21 @@ def test_turns_and_cost_are_secondary_honesty_not_fake_metrics():
 
 
 def test_first_seat_examples_appear_in_order():
-    lowered = LANDING
+    lowered = LANDING[LANDING.index('class="roster"') : LANDING.index('class="lanes"')]
     positions = [lowered.index(name) for name in SEATS]
     assert positions == sorted(positions)
 
 
-def test_start_is_clone_any_seat_then_tickets_ui():
+def test_start_is_source_install_then_sample_project_then_atm_ui():
     start = _start_block()
     term = _start_terminal()
     assert "git clone https://github.com/advitiyavashist/atman.git" in start
-    assert "any first seat" in start.lower() or "any first seat" in LANDING.lower()
-    assert "tickets connect" in term
-    assert "atman-ceo" in term
-    assert "tickets ui" in term
-    assert term.index("tickets connect") < term.index("tickets ui")
-    assert "tickets next" not in term
+    assert "your choice of agents" in LANDING.lower()
+    assert "./install.sh --prefix" in term
+    assert "unset TICKETS_DIR" in term
+    assert "atm ui" in term
+    assert term.index("atm where") < term.index("atm quickstart") < term.index("atm ui")
+    assert "atm next" not in term
     assert "alice" not in term
     for name in SEATS:
         assert name in start or name in LANDING
