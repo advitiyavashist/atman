@@ -4359,7 +4359,8 @@ def _watch_pid_uses_this_cli(pid):
 
 
 PERSIST_POKE_ATTEMPTS = 3
-_AUTONOMOUS_WAKE_LABELS = ("woken", "deduped", "watch-poked", "queued-busy")
+_AUTONOMOUS_WAKE_LABELS = (
+    "woken", "deduped", "watch-poked", "queued-busy", "delivery-unknown")
 
 
 def _poke_persist_watch(board, owner, attempts=None):
@@ -7659,7 +7660,7 @@ def _should_poke_persist(label):
     """
     s = str(label or "")
     if not s or s in ("woken", "deduped", "remote bridge required",
-                      "delivered-unconfirmed", "queued-busy"):
+                      "delivered-unconfirmed", "queued-busy", "delivery-unknown"):
         return False
     if s.startswith("stale (rebound"):
         return False

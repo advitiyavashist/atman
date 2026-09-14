@@ -98,8 +98,108 @@ def test_unloaded_queues_offline_no_turn_start():
     assert turns == []
 
 
+def test_thread_read_error_queues_and_does_not_turn_start():
+    ep = {"thread": "t-unk"}
+    turns = []
+    queues = []
+
+    def rpc(method, params, timeout=5):
+        if method == "thread/loaded/list":
+            return {"result": {"data": ["t-unk"]}}
+        if method == "thread/read":
+            return {"error": {"message": "read failed"}}
+        if method == "turn/start":
+            turns.append(params)
+            return {"result": {"ok": True}}
+        raise AssertionError(method)
+
+    with mock.patch.object(sa, "_codex_app_server_rpc", side_effect=rpc):
+        with mock.patch.object(sa, "_codex_queue_cli", side_effect=lambda *a: queues.append(a) or True):
+            label = sa._poke_codex_wake(ep, "maybe")
+    assert label == "queued-busy"
+    assert queues == [("t-unk", "maybe")]
+    assert turns == []
+
+
+def test_turn_start_timeout_is_delivery_unknown_no_queue():
+    ep = {"thread": "t-idle"}
+    queues = []
+    turns = []
+
+    def rpc(method, params, timeout=5):
+        if method == "thread/loaded/list":
+            return {"result": {"data": ["t-idle"]}}
+        if method == "thread/read":
+            return {"result": {"status": "idle"}}
+        if method == "turn/start":
+            turns.append(params)
+            return None
+        raise AssertionError(method)
+
+    with mock.patch.object(sa, "_codex_app_server_rpc", side_effect=rpc):
+        with mock.patch.object(sa, "_codex_queue_cli", side_effect=lambda *a: queues.append(a) or True):
+            label = sa._poke_codex_wake(ep, "hello", message_id="m-to")
+    assert label == "delivery-unknown"
+    assert queues == []
+    assert len(turns) == 1
+    assert turns[0]["clientUserMessageId"] == "m-to"
+
+
+def test_turn_start_explicit_error_falls_back_to_queue():
+    ep = {"thread": "t-idle"}
+    queues = []
+    turns = []
+
+    def rpc(method, params, timeout=5):
+        if method == "thread/loaded/list":
+            return {"result": {"data": ["t-idle"]}}
+        if method == "thread/read":
+            return {"result": {"status": "idle"}}
+        if method == "turn/start":
+            turns.append(params)
+            return {"error": {"message": "invalid thread"}}
+        raise AssertionError(method)
+
+    with mock.patch.object(sa, "_codex_app_server_rpc", side_effect=rpc):
+        with mock.patch.object(sa, "_codex_queue_cli", side_effect=lambda *a: queues.append(a) or True):
+            label = sa._poke_codex_wake(ep, "hello")
+    assert label == "queued-offline"
+    assert queues == [("t-idle", "hello")]
+    assert len(turns) == 1
+
+
+def test_turn_start_conn_refused_retries_then_woken():
+    ep = {"thread": "t-idle"}
+    queues = []
+    turns = []
+
+    def rpc(method, params, timeout=5):
+        if method == "thread/loaded/list":
+            return {"result": {"data": ["t-idle"]}}
+        if method == "thread/read":
+            return {"result": {"status": "idle"}}
+        if method == "turn/start":
+            turns.append(params)
+            if len(turns) < 2:
+                return {"error": {
+                    "code": sa.RPC_REFUSED_BEFORE_SEND,
+                    "message": "connection refused before send",
+                }}
+            return {"result": {"ok": True}}
+        raise AssertionError(method)
+
+    with mock.patch.object(sa, "_codex_app_server_rpc", side_effect=rpc):
+        with mock.patch.object(sa, "_codex_queue_cli", side_effect=lambda *a: queues.append(a) or True):
+            label = sa._poke_codex_wake(ep, "hello", message_id="m-retry")
+    assert label == "woken"
+    assert queues == []
+    assert len(turns) == 2
+    assert turns[0]["clientUserMessageId"] == "m-retry"
+
+
 def test_should_not_persist_poke_queued_busy():
     import tickets as tk
     assert tk._should_poke_persist("queued-busy") is False
     assert tk._should_poke_persist("woken") is False
+    assert tk._should_poke_persist("delivery-unknown") is False
     assert tk._should_poke_persist("queued-offline") is True
