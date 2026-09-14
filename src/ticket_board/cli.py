@@ -609,24 +609,43 @@ def save(board, t, expected_generation=None):
     t["updated"] = now()
     path = ticket_path(board, t["id"])
     tc = _recovery()
-    if tc is not None and os.path.isfile(path):
-        try:
-            with open(path) as f:
-                current = json.load(f)
-        except (ValueError, IOError):
-            current = None
-        if current:
-            err = tc.stale_write_error(current, t)
-            if err:
-                sys.exit(err)
-            if expected_generation is not None and tc.owner_generation(current) != int(expected_generation):
-                sys.exit("%s stale ownership generation %s (board is %s); reread before writing"
-                         % (t["id"], expected_generation, tc.owner_generation(current)))
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(t, f, indent=2)
-    os.replace(tmp, path)  # atomic
-    return t
+    lock = tc.ticket_mutation_lock(board, t["id"]) if tc is not None else None
+
+    def _publish():
+        if tc is not None and os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    current = json.load(f)
+            except (ValueError, IOError):
+                current = None
+            if current:
+                err = tc.generation_publish_error(current, t, expected_generation)
+                if err:
+                    sys.exit(err)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(t, f, indent=2)
+        if tc is not None and os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    current = json.load(f)
+            except (ValueError, IOError):
+                current = None
+            if current:
+                err = tc.generation_publish_error(current, t, expected_generation)
+                if err:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    sys.exit(err)
+        os.replace(tmp, path)  # atomic
+        return t
+
+    if lock is None:
+        return _publish()
+    with lock:
+        return _publish()
 
 
 def load_all(board):

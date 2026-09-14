@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,11 +276,108 @@ def owner_generation(ticket):
         return 0
 
 
+def revoked_owners(ticket):
+    """Owners fenced after one or more transfers. Survives A->B->C (not only last previous)."""
+    names = []
+    lease = (ticket or {}).get("owner_lease") if isinstance((ticket or {}).get("owner_lease"), dict) else {}
+    for raw in (
+        list((ticket or {}).get("revoked_owners") or []),
+        list((lease or {}).get("revoked_owners") or []),
+        [((lease or {}).get("previous_owner") or "")],
+    ):
+        for name in raw:
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def _accumulate_revoked(ticket, owner, previous_owner=""):
+    names = revoked_owners(ticket)
+    prev = previous_owner or ""
+    if prev and prev != (owner or "") and prev not in names:
+        names.append(prev)
+    return names
+
+
+_TICKET_LOCKS = threading.local()
+
+
+class TicketMutationLock:
+    """Serialize compare-and-publish of one ticket JSON.
+
+    Lock order with assign/claim: AgentLock (agents/<owner>.json.lock;
+    two owners → sorted names) then this lock (<id>.json.lock). save()
+    never takes AgentLock. Same-process reentry is allowed so a holder
+    that already serialized the ticket can call save() without deadlocking.
+    """
+
+    def __init__(self, board, ticket_id):
+        self.path = os.path.join(board, ticket_id + ".json.lock")
+        self.key = (os.path.abspath(board), ticket_id)
+        self.fd = None
+        self.reentered = False
+
+    def __enter__(self):
+        held = getattr(_TICKET_LOCKS, "keys", None)
+        if held is None:
+            held = {}
+            _TICKET_LOCKS.keys = held
+        if self.key in held:
+            held[self.key] += 1
+            self.reentered = True
+            return self
+        try:
+            import fcntl as flock_mod
+        except ImportError:
+            held[self.key] = 1
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        flock_mod.flock(self.fd, flock_mod.LOCK_EX)
+        held[self.key] = 1
+        return self
+
+    def __exit__(self, *exc):
+        held = getattr(_TICKET_LOCKS, "keys", None) or {}
+        if self.reentered:
+            if self.key in held:
+                held[self.key] -= 1
+                if held[self.key] <= 0:
+                    held.pop(self.key, None)
+            return
+        if self.fd is not None:
+            try:
+                import fcntl as flock_mod
+                flock_mod.flock(self.fd, flock_mod.LOCK_UN)
+            finally:
+                os.close(self.fd)
+                self.fd = None
+        held.pop(self.key, None)
+
+
+def ticket_mutation_lock(board, ticket_id):
+    return TicketMutationLock(board, ticket_id)
+
+
+def generation_publish_error(current, incoming, expected_generation=None):
+    """Refuse publishing a write that lost a concurrent generation bump."""
+    err = stale_write_error(current, incoming)
+    if err:
+        return err
+    if expected_generation is not None and owner_generation(current) != int(expected_generation):
+        return (
+            "%s stale ownership generation %s (board is %s); reread before writing"
+            % (incoming.get("id") or current.get("id"), expected_generation, owner_generation(current))
+        )
+    return None
+
+
 def issue_owner_lease(ticket, owner, *, harness="", reason="claim", previous_owner=""):
     """Advance the ticket's ownership generation. Reuses the ticket JSON; no database."""
     previous_generation = owner_generation(ticket)
     generation = previous_generation + 1
+    revoked = _accumulate_revoked(ticket, owner, previous_owner=previous_owner)
     ticket["owner_generation"] = generation
+    ticket["revoked_owners"] = revoked
     ticket["owner_lease"] = {
         "generation": generation,
         "owner": owner or "",
@@ -288,6 +386,7 @@ def issue_owner_lease(ticket, owner, *, harness="", reason="claim", previous_own
         "reason": reason,
         "previous_owner": previous_owner or "",
         "previous_generation": previous_generation,
+        "revoked_owners": revoked,
     }
     return generation
 
@@ -323,6 +422,7 @@ def stale_accept_error(ticket, actor, *, kind):
     generation = owner_generation(ticket)
     lease = (ticket or {}).get("owner_lease") or {}
     previous = lease.get("previous_owner") or ""
+    revoked = revoked_owners(ticket)
     presented = os.environ.get("TICKET_OWNER_GENERATION", "").strip()
     if presented:
         try:
@@ -343,7 +443,9 @@ def stale_accept_error(ticket, actor, *, kind):
             "(stale ownership after restart or reassignment)"
             % (ticket.get("id"), owner, generation, actor, kind)
         )
-    if kind == "review" and previous and actor == previous and owner != actor:
+    if kind == "review" and actor and owner != actor and (
+        actor == previous or actor in revoked
+    ):
         return (
             "%s is owned by %s under generation %s; %s cannot %s "
             "(stale ownership after restart or reassignment)"

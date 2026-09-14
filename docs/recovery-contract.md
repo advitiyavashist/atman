@@ -49,11 +49,12 @@ ticket JSON. There is no extra database.
 Before reassignment the lease is advanced and the claim lock is rewritten.
 A process that still holds the old generation cannot accept results:
 
-- `review` fences the previous owner after a lease bump; a helper submitter is still allowed (T-238)
+- `review` fences every revoked previous owner after one or more transfers (A stays fenced after A→B→C); a helper who never owned the ticket may still submit (T-238)
 - `done` of claimed work requires the current owner
 - `done` of IN REVIEW work stays legal for the closer (master merge)
 - `TICKET_OWNER_GENERATION` that does not match the board is rejected
-- a write loaded before the bump fails compare-and-swap
+- `save` holds `<id>.json.lock`, compares generation, writes `<id>.json.tmp`, then re-checks generation immediately before `os.replace`. A transfer published in that window wins; the stale write is discarded
+- lock order with assign/claim: `AgentLock` (`agents/<owner>.json.lock`; two owners → sorted names) then the ticket mutation lock. `save` never takes `AgentLock`
 
 Notes from a non-owner stay allowed (T-238: make a second lane visible).
 

@@ -223,3 +223,158 @@ def test_packaged_cli_bumps_lease_on_reassign(board):
     r = cli_run("review", "T-001", "--notes", "stale", "--force", agent="alice")
     assert r.returncode != 0
     assert "stale ownership" in (r.stderr + r.stdout)
+
+
+def test_twice_transferred_original_worker_is_still_fenced(monkeypatch):
+    """A->B->C must keep Alice fenced; only the last previous_owner is not enough."""
+    import ticket_coordination as tc
+
+    monkeypatch.delenv("TICKET_OWNER_GENERATION", raising=False)
+    ticket = {"id": "T-001", "status": "claimed", "owner": "alice"}
+    tc.issue_owner_lease(ticket, "alice", reason="claim")
+    ticket["owner"] = "bob"
+    tc.issue_owner_lease(ticket, "bob", previous_owner="alice", reason="reassign")
+    ticket["owner"] = "carol"
+    tc.issue_owner_lease(ticket, "carol", previous_owner="bob", reason="reassign")
+    assert tc.stale_accept_error(ticket, "alice", kind="review")
+    assert tc.stale_accept_error(ticket, "bob", kind="review")
+    assert not tc.stale_accept_error(ticket, "carol", kind="review")
+    assert not tc.stale_accept_error(ticket, "helper", kind="review")
+
+
+def test_packaged_twice_transferred_original_worker_is_still_fenced(monkeypatch):
+    import importlib.util
+    from pathlib import Path as P
+
+    path = P(__file__).resolve().parents[1] / "src" / "ticket_board" / "ticket_coordination.py"
+    spec = importlib.util.spec_from_file_location("pkg_lease_probe", path)
+    tc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tc)
+    monkeypatch.delenv("TICKET_OWNER_GENERATION", raising=False)
+    ticket = {"id": "T-001", "status": "claimed", "owner": "alice"}
+    tc.issue_owner_lease(ticket, "alice", reason="claim")
+    ticket["owner"] = "bob"
+    tc.issue_owner_lease(ticket, "bob", previous_owner="alice", reason="reassign")
+    ticket["owner"] = "carol"
+    tc.issue_owner_lease(ticket, "carol", previous_owner="bob", reason="reassign")
+    assert tc.stale_accept_error(ticket, "alice", kind="review")
+
+
+def test_save_cannot_publish_old_generation_after_transfer(tmp_path, monkeypatch):
+    """Generation compare must not publish after a transfer sneaks in at tmp-open."""
+    import builtins
+    import importlib.util
+    import json as json_mod
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("save_probe_tickets", root / "tickets.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    board = tmp_path / "disposable-board"
+    board.mkdir()
+    path = board / "T-001.json"
+    initial = {"id": "T-001", "status": "claimed", "owner": "alice", "owner_generation": 1}
+    path.write_text(json_mod.dumps(initial))
+    incoming = dict(initial, status="review")
+    injected = False
+
+    def interleaved_open(name, mode="r", *args, **kwargs):
+        nonlocal injected
+        if str(name) == str(path) + ".tmp" and mode == "w" and not injected:
+            injected = True
+            moved = dict(initial, owner="bob", owner_generation=2)
+            mod.save(str(board), moved, expected_generation=1)
+        return builtins.open(name, mode, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "open", interleaved_open, raising=False)
+    try:
+        mod.save(str(board), incoming, expected_generation=1)
+    except SystemExit:
+        pass
+    actual = json_mod.loads(path.read_text())
+    assert (actual["owner"], actual["owner_generation"]) == ("bob", 2), actual
+    assert injected
+
+
+def test_packaged_save_cannot_publish_old_generation_after_transfer(tmp_path, monkeypatch):
+    import builtins
+    import importlib.util
+    import json as json_mod
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "save_probe_cli", root / "src" / "ticket_board" / "cli.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    board = tmp_path / "disposable-board"
+    board.mkdir()
+    path = board / "T-001.json"
+    initial = {"id": "T-001", "status": "claimed", "owner": "alice", "owner_generation": 1}
+    path.write_text(json_mod.dumps(initial))
+    incoming = dict(initial, status="review")
+    injected = False
+
+    def interleaved_open(name, mode="r", *args, **kwargs):
+        nonlocal injected
+        if str(name) == str(path) + ".tmp" and mode == "w" and not injected:
+            injected = True
+            moved = dict(initial, owner="bob", owner_generation=2)
+            mod.save(str(board), moved, expected_generation=1)
+        return builtins.open(name, mode, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "open", interleaved_open, raising=False)
+    try:
+        mod.save(str(board), incoming, expected_generation=1)
+    except SystemExit:
+        pass
+    actual = json_mod.loads(path.read_text())
+    assert (actual["owner"], actual["owner_generation"]) == ("bob", 2), actual
+    assert injected
+
+
+def test_assign_a_b_c_keeps_original_owner_fenced(board):
+    repo = board.parent
+    for name, harness in (("alice", "cursor"), ("bob", "codex"), ("carol", "claude")):
+        assert _run(board, "join", name, "--roles", "docs", "--harness", harness,
+                   agent=name, cwd=repo).returncode == 0
+    assert _run(board, "objective", "recover mid.txt", "--exit", "mid.txt reviewed",
+               agent="master", cwd=repo).returncode == 0
+    assert _run(board, "next", "--role", "docs", agent="alice", cwd=repo).returncode == 0
+    assert _run(board, "assign", "T-001", "--owner", "bob", agent="master", cwd=repo).returncode == 0
+    assert _run(board, "assign", "T-001", "--owner", "carol", agent="master", cwd=repo).returncode == 0
+    after = _ticket(board)
+    assert after["owner"] == "carol"
+    assert "alice" in after.get("revoked_owners", [])
+    assert "bob" in after.get("revoked_owners", [])
+    r = _run(board, "review", "T-001", "--notes", "stale alice after two transfers",
+             "--force", agent="alice", cwd=repo)
+    assert r.returncode != 0
+    assert "stale ownership" in (r.stderr + r.stdout)
+    still = _ticket(board)
+    assert still["status"] == "claimed"
+    assert still["owner"] == "carol"
+
+
+def test_t238_helper_who_never_owned_can_still_review(board):
+    """Revocation is for previous owners, not a blanket owner-only review rule."""
+    repo = board.parent
+    assert _run(board, "join", "alice", "--roles", "docs", "--harness", "cursor",
+               agent="alice", cwd=repo).returncode == 0
+    assert _run(board, "join", "bob", "--roles", "docs", "--harness", "codex",
+               agent="bob", cwd=repo).returncode == 0
+    assert _run(board, "join", "helper", "--roles", "docs", "--harness", "cursor",
+               agent="helper", cwd=repo).returncode == 0
+    assert _run(board, "objective", "recover mid.txt", "--exit", "mid.txt reviewed",
+               agent="master", cwd=repo).returncode == 0
+    assert _run(board, "next", "--role", "docs", agent="alice", cwd=repo).returncode == 0
+    assert _run(board, "assign", "T-001", "--owner", "bob", agent="master", cwd=repo).returncode == 0
+    r = _run(board, "review", "T-001", "--notes", "helper submit of mid.txt",
+             "--force", agent="helper", cwd=repo)
+    assert r.returncode == 0, r.stderr + r.stdout
+    final = _ticket(board)
+    assert final["status"] == "review"
+    assert final["owner"] == "bob"
+    notes = " ".join(n["text"] for n in final["notes"])
+    assert "helper" in json.dumps(final["notes"])
+    assert "REVIEW:" in notes
