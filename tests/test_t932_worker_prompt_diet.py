@@ -70,7 +70,10 @@ def test_five_ticket_before_after_context_size(board):
         assert len(worker.stdout) < len(boss.stdout)
     # All five worker views are smaller than the leadership dump.
     assert all(w < b for _, w, b in rows)
-    # Trajectory recorded prompt_chars + sections.
+    # Prompt-size belongs on `tickets prompt`, not show/next (T-351 parity).
+    worker_p = run(board, "prompt", "--agent", "worker")
+    boss_p = run(board, "prompt", "--agent", "boss")
+    assert worker_p.returncode == 0 and boss_p.returncode == 0, worker_p.stderr
     log = (board / "trajectories.jsonl").read_text()
     events = [json.loads(line) for line in log.splitlines() if line.strip()]
     prompts = [e for e in events if e.get("kind") == "prompt"]

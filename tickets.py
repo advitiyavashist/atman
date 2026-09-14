@@ -1876,19 +1876,12 @@ def detail(board, t, tickets, viewer=None):
         out.append("Notes:")
         for nt in t["notes"]:
             out.append("  - [%s] %s" % (nt.get("by", "?"), nt["text"]))
-    text = "\n".join(out)
-    section_chars = {}
-    if compact:
-        section_chars["rules"] = len(WORKER_RULES_COMPACT)
-    if t.get("body"):
-        section_chars["ticket"] = len(t["body"])
-    if compact and scope:
-        section_chars["scope"] = sum(len(s) for s in scope)
-    if compact and hints:
-        section_chars["files"] = sum(len(h) for h in hints)
-    _log_prompt_diet(board, viewer, text, "compact" if compact else "wide",
-                     ticket=t, section_chars=section_chars)
-    return text
+    # Prompt-size logging stays on prompt_text / `tickets prompt`, not here.
+    # detail() is shared by show/next; the installed console's detail() does
+    # not emit traj events, and T-351 requires those two entry points to
+    # write identical trajectories. A prompt event from only tickets.py
+    # also made backfill see extra kinds on a live next+update (T-958).
+    return "\n".join(out)
 
 
 # --------------------------------------------------------------------------
