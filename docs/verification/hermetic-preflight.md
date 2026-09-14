@@ -73,3 +73,16 @@ T-911 and candidate verifiers must:
 - use the venv absolute interpreter for parent and children
 - keep sanitized `HOME`/`TMPDIR` and no operator `PYTHONPATH`
 - compare failure IDs only across receipts that share this manifest
+
+## Cold rebuild freeze receipt (T-913)
+
+`docs/verification/t913-cold-rebuild.manifest.json` records one fresh isolated
+rebuild of `862cbd041622c06bd3f1ec5f2e901493b317afc6`. Both source and wheel
+environments consumed the exact requirements freeze and reported
+`pip==25.3`, `setuptools==75.9.1`, and `wheel==0.45.1`; source import, wheel
+import, CLI help, scrubbed child import, and the 19-test representative
+collection passed.
+
+This receipt proves exact-freeze consumption and representative provenance for
+that cold rebuild only. It does not classify all 61 T-891 failures, certify
+packaging beyond the named probes, or constitute full-suite acceptance.
