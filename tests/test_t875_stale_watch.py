@@ -48,20 +48,20 @@ def _stop_spawn(board, owner):
 
 def test_watch_cmd_agent_recognises_path_tickets_shim():
     tk = _tickets()
-    cmd = ("/usr/bin/python3 /Users/op/.local/bin/tickets watch "
+    cmd = ("/usr/bin/python3 /opt/local/bin/tickets watch "
            "--agent cos --every 60 --cwd /repo")
     assert tk._watch_cmd_agent(cmd) == "cos"
 
 
 def test_watch_cmd_agent_recognises_atm_shim():
     tk = _tickets()
-    cmd = "/usr/bin/python3 /Users/op/.local/bin/atm watch --agent verifier --cwd /repo"
+    cmd = "/usr/bin/python3 /opt/local/bin/atm watch --agent verifier --cwd /repo"
     assert tk._watch_cmd_agent(cmd) == "verifier"
 
 
 def test_watch_cmd_agent_recognises_absolute_tickets_without_python():
     tk = _tickets()
-    cmd = "/Users/op/.local/bin/tickets watch --agent cos --persist"
+    cmd = "/opt/local/bin/tickets watch --agent cos --persist"
     assert tk._watch_cmd_agent(cmd) == "cos"
 
 
@@ -69,7 +69,7 @@ def test_watch_cmd_agent_rejects_grep_tickets_needle():
     tk = _tickets()
     assert tk._watch_cmd_agent("grep -n tickets watch --agent optimizer") == ""
     assert tk._watch_cmd_agent(
-        "/usr/bin/python3 /Users/op/.local/bin/tickets spawn cos --stop") == ""
+        "/usr/bin/python3 /opt/local/bin/tickets spawn cos --stop") == ""
 
 
 # ---- pidfile classification via full ps cmdline -------------------------
