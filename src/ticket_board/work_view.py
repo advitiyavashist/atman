@@ -76,7 +76,12 @@ def _msg_id(m):
 
 
 def _epoch_of(t):
-    """Messages older than this belong to the ticket's previous life (reopen)."""
+    """Messages at or before this stamp belong to the ticket's previous life.
+
+    T-955: now() is second-granularity, so a message posted in the same
+    wall-clock second as the reopen must count as pre-reopen. Callers
+    compare with ``<=``, not ``<``.
+    """
     return (t.get("reopened_at") or "").strip()
 
 
@@ -288,7 +293,7 @@ def _dispatch_of(t, task_msgs, acked, agents, now):
         to = (m.get("to") or "").strip()
         if not to or to.lower() in ("all", "everyone"):
             continue
-        if epoch and (m.get("at") or "") < epoch:
+        if epoch and (m.get("at") or "") <= epoch:
             ignored += 1
             continue
         if reserved and to != reserved:
@@ -458,9 +463,10 @@ def progress_of(t, by_id, done_ids, task_msgs, acked, agents, now):
             continue
         m_at = m.get("at") or ""
         if at and m_at < at:
-            continue          # a trigger from an earlier completion of the same parent
-        if epoch and m_at < epoch:
-            continue          # posted before the ticket was reopened
+            continue          # earlier completion of the same parent; same-second
+                              # as done_at still counts (success trigger is written then)
+        if epoch and m_at <= epoch:
+            continue          # T-955: same-second as reopen is the previous life
         to = (m.get("to") or "").strip()
         trigger = {"to": to, "from": m.get("from") or "", "at": m_at,
                    "age_h": _hours_since(m_at, now), "msg_id": _msg_id(m)}
