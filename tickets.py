@@ -2065,7 +2065,7 @@ def cmd_sound(a, board):
               % t["id"])
     else:
         print("%s -> lane=ready (sounded by %s)" % (t["id"], who))
-        print("  CoS: tickets dispatch %s --to <seat> --harness cursor" % t["id"])
+        print("  CoS: tickets dispatch %s --to <seat> --harness <subscribed-harness>" % t["id"])
         print("  cause: %s" % t.get("cause"))
         print("  change: %s" % t.get("change"))
         print("  proof: %s" % t.get("proof"))
@@ -5409,16 +5409,21 @@ Connecting here is joining **Atman**, not Claude, Cursor, Codex, or any
 other provider. Board identity is `atman-<seat>` (example: `atman-ceo`).
 
 This is a living board. Do not invent a new team. Do not `tickets init`
-or `tickets clear`. CoS (`cursor`) staffs; you do not spawn, and you do
-not claim worker tickets.
+or `tickets clear`. The CoS staffs; you do not spawn, and you do not
+claim worker tickets. Who the CoS is comes from the board, and may be
+nobody -- if so, ask the operator before assuming.
 
 Product flow (this order):
-1. Catalog + usage
+1. Catalog + subscriptions -- then ASK the operator which to use
 2. Attach the living board / objective
 3. Join as `atman-<seat>`
 4. Announce the Atman role
 5. Ask the operator for feedback
 6. Show tasks you can actually run (`tickets graph` / `tickets map`)
+
+Installed is not subscribed and not usable. Step 1 lists what is on this
+machine; only the operator knows which ones have a live subscription with
+quota left. Never pick for them, and never name a provider as the CoS.
 """
 
 
@@ -5431,6 +5436,61 @@ def board_is_living(board):
         return True
     tickets = _safe(lambda: load_all(board), []) or []
     return bool(tickets)
+
+
+def resolve_cos(board):
+    """The seat that staffs this board, read from the board. Returns (name, note).
+
+    `name` is "" when no CoS is recorded, and the caller must then ASK the
+    operator. It must never fall back to a provider name. `cursor` used to be
+    hardcoded through the CEO connect path because the flow was first written
+    against a Cursor demo scenario; a scenario's provider then shipped as if it
+    were policy. The cost was concrete: every CEO was told `tickets msg --to
+    cursor`, and on boards where no seat named `cursor` had ever joined that
+    mail went to a seat that does not exist. A provider is a harness, not a
+    seat. Set the real one with `tickets master cos <seat>`.
+
+    The note deliberately does NOT assert liveness. A seat's `seen` stamp is
+    refreshed by any command that runs with that name in TICKET_AGENT -- shell
+    env bleeds downward, so a dead seat looks fresh the moment anything runs
+    under its name. Liveness is read from the session's own transcript; see
+    `tickets who`, which is the honest answer.
+    """
+    m = _safe(lambda: current_master(board), {}) or {}
+    name = str((m or {}).get("cos") or "").strip()
+    if not name:
+        return "", "NO CoS RECORDED -- ask the operator, then `tickets master cos <seat>`"
+    wf = _safe(lambda: load_workforce(board), {}) or {}
+    if name not in wf:
+        return name, ("recorded but never joined this board -- confirm with the operator "
+                      "before mailing it")
+    return name, "recorded on the board; confirm it is live with `tickets who` before relying on it"
+
+
+def usable_integrations(rows):
+    """Split probed catalog rows into on-disk and missing.
+
+    On-disk is the strongest claim this tool can make on its own. Whether a row
+    has a paid subscription with quota left is not knowable from `command -v`,
+    so the caller must ask the operator rather than infer it.
+    """
+    on_disk = [r for r in rows if r.get("on_disk")]
+    missing = [r for r in rows if not r.get("on_disk")]
+    return on_disk, missing
+
+
+def print_subscription_question(rows):
+    """Step 1's ASK. Print what is on the machine, then put the question."""
+    on_disk, missing = usable_integrations(rows)
+    print("")
+    print("SUBSCRIPTIONS -- ASK THE OPERATOR, DO NOT INFER")
+    print("  on this machine: %s" % (", ".join(r["id"] for r in on_disk) or "(none)"))
+    print("  not on disk:     %s" % (", ".join(r["id"] for r in missing) or "(none)"))
+    print("  Installed is NOT subscribed. A missing quota reading is unknown, not exhausted.")
+    print("  ASK: which of these do you have a working subscription for right now,")
+    print("       and which should staff this board?")
+    print("  Record the answer with `tickets limit`/`tickets join --harness <id>`.")
+    print("  Do not spawn, and do not pick a harness for them, until they answer.")
 
 
 def atman_seat_name(seat="ceo"):
@@ -5501,10 +5561,13 @@ def print_ceo_connect(board, seat="ceo"):
     root = os.path.dirname(os.path.abspath(board)) if board else os.getcwd()
     rows, note = probe_integration_catalog()
     attach_catalog_usage(rows)
-    print("1. CATALOG + USAGE")
+    cos, cos_note = resolve_cos(board)
+    print("1. CATALOG + SUBSCRIPTIONS")
     print_integration_catalog(rows, note)
     print("Codex stays in the catalog with zero usage. Do not spawn Gemini. No new Claude fable.")
-    print("Cursor-only spawns unless the operator says otherwise. CoS (`cursor`) staffs.")
+    print_subscription_question(rows)
+    print("")
+    print("CoS (staffs workers): %s -- %s" % (cos or "(unset)", cos_note))
     print("")
     print_recorded_usage(board)
     print("")
@@ -5523,8 +5586,11 @@ def print_ceo_connect(board, seat="ceo"):
     print("   export TICKET_AGENT=%s" % name)
     print("   export TICKETS_DIR=%s" % (board or "$PWD/.tickets"))
     print("   cd %s" % root)
-    print("   tickets join %s --roles master --can own-machine,browser --cost high --persistent --wake-mode continuous --harness cursor" % name)
-    print("   tickets hooks cursor --agent %s" % name)
+    print("   # --harness is the harness YOU are actually running under, from step 1's answer.")
+    print("   # Labelling the seat with a harness you are not running makes it unreachable")
+    print("   # for wake/spawn, so do not copy a provider name you did not pick.")
+    print("   tickets join %s --roles master --can own-machine,browser --cost high --persistent --wake-mode continuous --harness <your-harness>" % name)
+    print("   tickets hooks <your-harness> --agent %s" % name)
     print("   tickets hooks codex --agent %s     # mail follow-up is not Claude-only" % name)
     print("   tickets hooks remote --agent %s" % name)
     print("   tickets master take")
@@ -5533,12 +5599,17 @@ def print_ceo_connect(board, seat="ceo"):
     print("   tickets objective")
     print("")
     print("4. ANNOUNCE THE ATMAN ROLE")
-    print('   tickets msg --to everyone "%s is Atman CEO on this living board. CoS is cursor. Integrating: <list from step 1>. @everyone"' % name)
+    print('   tickets msg --to everyone "%s is Atman CEO on this living board. CoS is %s. '
+          'Integrating: <the ones they confirmed in step 1>. @everyone"' % (name, cos or "<ask the operator>"))
     print('   tickets master log "ceo onboard: seat=%s integrations=<list>"' % name)
     print("")
     print("5. ASK FOR FEEDBACK")
     print("   Ask the operator: what should change about this connect path?")
-    print('   tickets msg --to cursor "CEO %s onboarded. Operator feedback: <their answer>"' % name)
+    if cos:
+        print('   tickets msg --to %s "CEO %s onboarded. Operator feedback: <their answer>"' % (cos, name))
+    else:
+        print("   No CoS is recorded, so there is nobody to mail this to. Ask the operator who")
+        print("   staffs this board, then `tickets master cos <seat>` before mailing.")
     print("")
     print("6. TASKS YOU CAN RUN (graph / map)")
     print("   tickets graph")
@@ -5546,9 +5617,13 @@ def print_ceo_connect(board, seat="ceo"):
     print("   tickets drive")
     print("   tickets update / tickets here")
     print("   Mid-run: tickets plan (JSON keys+deps), tickets dep, tickets create --blocks")
-    print("   CoS (cursor) staffs workers. CEO does not claim worker tickets.")
+    print("   The CoS staffs workers. CEO does not claim worker tickets.")
     print("")
-    print("CoS is cursor. Mail: tickets msg --to cursor. Never Grok DMs.")
+    if cos:
+        print("CoS is %s. Mail: tickets msg --to %s. Never Grok DMs." % (cos, cos))
+    else:
+        print("CoS is UNSET -- %s. Do not mail a provider name; it is a harness, not a seat." % cos_note)
+    print("Never Grok DMs.")
     print("HOLD T-773 T-774. No tickets clear.")
     print("If `tickets self` still points at sol-agy-harness, recut ~/.local/bin/tickets")
     print("onto this checkout before trusting PATH `tickets connect`.")
@@ -5583,7 +5658,9 @@ entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
 Unsupported or missing remaining/reset is unknown, not exhausted. If `~/.local/bin/codex` is stale,
 it retargets to the newest `openai.chatgpt-*` extension binary.
 
-Ask: **Which of these do you want to use?** Do not spawn until they answer.
+Ask: **Which of these do you have a working subscription for, and which should
+staff this board?** Installed is not subscribed, so the probe cannot answer
+this and must not guess. Do not spawn until they answer.
 Codex stays in the catalog even with **no usage**. Gemini dispatch records
 harness=gemini; persist/hooks is the wake (no Gemini product job).
 No new Claude fable.
@@ -8697,9 +8774,13 @@ def cmd_join(a, board):
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
     if _join_is_ceo_path(owner, roles.get(owner, [])):
+        _cos, _cos_note = resolve_cos(board)
         print("Atman CEO loop:  tickets inbox  ->  tickets objective  ->  "
               "tickets graph / tickets map  ->  tickets drive  ->  "
-              "tickets msg --to cursor (CoS staffs). CEO does not claim worker tickets.")
+              "tickets msg --to %s (CoS staffs). CEO does not claim worker tickets."
+              % (_cos or "<no CoS set>"))
+        if not _cos:
+            print("CoS: %s" % _cos_note)
         print("Full instructions: tickets connect")
     else:
         print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
@@ -12976,7 +13057,7 @@ def cmd_harness_usage(a, board):
     print("")
     print("Unsupported or missing remaining/reset is unknown, not exhausted. Codex stays cataloged.")
     print("Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job).")
-    print("No new Claude fable. Cursor is the only spawn this desk uses.")
+    print("No new Claude fable. Spawn only what the operator confirmed a subscription for.")
 
 
 def cmd_harness_available(a, board):
@@ -12989,12 +13070,20 @@ def cmd_harness_available(a, board):
     print_recorded_usage(board)
     print("")
     print("USAGE: unsupported or missing remaining/reset is unknown, not exhausted. Do not spawn a FAIL or exhausted seat.")
+    # The subscription question is asked on EVERY board. It used to be gated to
+    # blank boards only, so a living board printed a hardcoded staffing claim
+    # INSTEAD of asking -- which is how "CoS (cursor)" reached operators who had
+    # never installed Cursor. Which providers are subscribed is operator
+    # knowledge on a living board exactly as much as on a new one.
+    print_subscription_question(rows)
     if board_is_living(board):
+        cos, cos_note = resolve_cos(board)
+        print("")
         print("This is a living board. Do not invent a new team.")
-        print("Announce the Atman role as atman-<seat>. CoS (cursor) staffs.")
-        print("CEO does not claim worker tickets.")
+        print("Announce the Atman role as atman-<seat>. CEO does not claim worker tickets.")
+        print("CoS (staffs workers): %s -- %s" % (cos or "(unset)", cos_note))
     else:
-        print("Ask: Which of these do you want to use?")
+        print("")
         print("Then ask the board/team name, then:")
         print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
         print("Then ask for the objective and tasks. Do not spawn until they answer.")

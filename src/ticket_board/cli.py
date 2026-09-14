@@ -4103,8 +4103,12 @@ def cmd_connect(a, board):
         if not CEO_ONBOARDING_STARTUP.endswith("\n"):
             sys.stdout.write("\n")
         print("")
-        print("Product flow: catalog + usage → living board → %s → announce → feedback → graph/map" % name)
-        print("Do not invent a new team. CEO does not claim worker tickets. CoS (cursor) staffs.")
+        print("Product flow: catalog + subscriptions (ASK) → living board → %s → announce → feedback → graph/map" % name)
+        print("Do not invent a new team. CEO does not claim worker tickets.")
+        # No provider is named here on purpose. A harness is not a seat: read the
+        # CoS off the board (`tickets master cos` sets it) and ask the operator
+        # when it is unset. See resolve_cos() in tickets.py.
+        print("CoS: read it from the board; if unset, ask the operator. Never assume a provider.")
         print("Then probe: `tickets harness available`")
         print("Join: tickets join %s --roles master --persistent --wake-mode continuous" % name)
         print("Announce Atman role, ask for feedback, then tickets graph / tickets map.")

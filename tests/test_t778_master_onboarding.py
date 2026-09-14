@@ -128,7 +128,10 @@ def test_harness_available_prints_every_catalog_row_including_missing(tmp_path):
         assert cid in r.stdout, cid
     assert r.stdout.count("\n         ") >= 12  # policy + if-yes per row
     assert "do not spawn" in r.stdout.lower()
-    assert "Which of these do you want to use?" in r.stdout
+    # The ask is now about SUBSCRIPTIONS, not mere availability: this very test
+    # empties PATH so nothing is on disk, and "installed" was never the question
+    # worth asking anyway. Phrase moved into print_subscription_question().
+    assert "ASK: which of these do you have a working subscription for right now" in r.stdout
     assert "list only" not in r.stdout
     assert "gemini" in r.stdout
     lines = r.stdout.splitlines()
