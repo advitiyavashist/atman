@@ -1,0 +1,30 @@
+{
+  "applies_to": [
+    "ops",
+    "backend"
+  ],
+  "confidence": 1.0,
+  "data": {
+    "evidence": "T-931 swarm-week 2026-09-13",
+    "files": []
+  },
+  "id": "lesson.8gb-ram-caps-nine-seats",
+  "kind": "node",
+  "last_verified_at": "2026-09-14T03:00:00Z",
+  "owner": "cursor-onboard",
+  "recorded_at": "2026-09-14T03:00:00Z",
+  "revision": 1,
+  "source": {
+    "kind": "ticket",
+    "ref": "T-931 swarm-week 2026-09-13"
+  },
+  "stale_after_days": 90,
+  "summary": "8GB RAM caps about 9 active seats; more eats swap and disk.",
+  "tags": [
+    "lesson",
+    "field-guide"
+  ],
+  "title": "8GB RAM caps about 9 active seats",
+  "type": "lesson",
+  "verification": "verified"
+}

@@ -1,0 +1,32 @@
+{
+  "applies_to": [
+    "codex",
+    "backend"
+  ],
+  "confidence": 1.0,
+  "data": {
+    "evidence": "T-875 #9",
+    "files": [
+      "tickets.py"
+    ]
+  },
+  "id": "lesson.codex-task-only-goes-deaf",
+  "kind": "node",
+  "last_verified_at": "2026-09-14T03:00:00Z",
+  "owner": "cursor-onboard",
+  "recorded_at": "2026-09-14T03:00:00Z",
+  "revision": 1,
+  "source": {
+    "kind": "ticket",
+    "ref": "T-875 #9"
+  },
+  "stale_after_days": 90,
+  "summary": "Codex task-only watchers go deaf after their first run (T-875 #9); later --task messages watch-poke with no work.",
+  "tags": [
+    "lesson",
+    "field-guide"
+  ],
+  "title": "Codex task-only watchers go deaf after one run",
+  "type": "lesson",
+  "verification": "verified"
+}

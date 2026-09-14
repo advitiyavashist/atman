@@ -16,6 +16,15 @@ git add knowledge/
 git commit -m "Record verified runtime fact"
 ```
 
+Field Guide lessons (T-931) are knowledge nodes of type `lesson`. They are not stored on the ticket board. `atm` is the same CLI as `tickets`:
+
+```sh
+tickets guide add 'zsh does not word-split $VAR' --evidence T-931 --scope harness:zsh,role:ops
+tickets guide retire lesson.zsh-no-word-split --reason "superseded by runbook.x"
+```
+
+Bare `tickets guide` still prints the startup connect guide. The prompt selector injects a lesson only when the worker's role, harness, or ticket file tokens match `--scope`. Unrelated tickets do not inherit it. Retired lessons stay in git as `verification=superseded` and are not auto-injected.
+
 To correct an existing record, keep its stable `id`, update the source and `last_verified_at`, then run:
 
 ```sh
