@@ -2,6 +2,13 @@
 
 Decision adopted 15 September 2026. Target: 18 September preview.
 
+The operator subsequently appointed Sol interim CEO and froze new feature
+work. Consolidation includes the existing Fable app and landing changes.
+T-894 orchestration experiments, T-933 automatic train tooling, T-898 Homebrew
+publication and T-771 expanded knowledge work are on hold; Homebrew is removed
+from the preview acceptance dependency. Preserve their branches and evidence.
+Leadership return after Claude becomes available requires an explicit handoff.
+
 Atman lets you run the coding agents you already use as one team. Give a
 coordinator an objective, inspect the work, review the result, and continue
 interrupted work from saved artifacts and a handoff. Coordination state is
