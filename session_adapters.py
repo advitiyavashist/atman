@@ -5,6 +5,13 @@ interactive session when the harness supports it. Endpoints and credentials
 live outside the git-tracked board (~/.cache/atman/sessions/<board-hash>/,
 dirs 0700, files 0600). Falls back to supervised watch or the T-640 remote
 bridge when native injection is unavailable.
+
+T-927: board-hash is the realpath of the board, so symlink aliases
+(including macOS /tmp vs /private/tmp) share one endpoint cache and one
+seat/fingerprint lock namespace. Pre-T-927 abspath hashes are leftover
+only: reads, wake, and locks never adopt them as a live transport.
+Re-register persistent seats after upgrade, or call
+invalidate_legacy_board_caches to drop the orphan dirs.
 """
 
 import base64
@@ -12,6 +19,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -32,12 +40,77 @@ def cache_root():
         os.path.expanduser("~"), ".cache", "atman")
 
 
+def board_identity(board):
+    """Canonical physical board path for cache, seat lock, and fingerprint lock."""
+    return os.path.realpath(os.path.abspath(board))
+
+
 def board_hash(board):
+    return hashlib.sha256(board_identity(board).encode("utf-8")).hexdigest()[:16]
+
+
+def legacy_abspath_board_hash(board):
+    """Pre-T-927 cache namespace: hashed abspath, not canonical identity."""
     return hashlib.sha256(os.path.abspath(board).encode("utf-8")).hexdigest()[:16]
+
+
+def board_path_aliases(board):
+    """Known presentations of one physical board that used to hash apart.
+
+    Includes the given path, its realpath, and /tmp vs /private/tmp when
+    those prefixes are the same volume. Arbitrary historical symlink names
+    cannot be rediscovered if the caller no longer has them.
+    """
+    given = os.path.abspath(board)
+    ident = board_identity(board)
+    out = [given, ident]
+    tmp, private = "/tmp", "/private/tmp"
+    if ident == private or ident.startswith(private + os.sep):
+        out.append(tmp + ident[len(private):])
+    elif ident == tmp or ident.startswith(tmp + os.sep):
+        alt = private + ident[len(tmp):]
+        if os.path.realpath(alt) == ident:
+            out.append(alt)
+    return list(dict.fromkeys(out))
 
 
 def endpoint_dir(board):
     return os.path.join(cache_root(), "sessions", board_hash(board))
+
+
+def legacy_endpoint_dir(board):
+    return os.path.join(cache_root(), "sessions", legacy_abspath_board_hash(board))
+
+
+def legacy_endpoint_dirs(board):
+    """Abspath-hash session dirs that are not the canonical namespace."""
+    canonical = os.path.realpath(endpoint_dir(board))
+    out = []
+    seen = set()
+    for presentation in board_path_aliases(board):
+        path = os.path.join(
+            cache_root(), "sessions", legacy_abspath_board_hash(presentation))
+        real = os.path.realpath(path)
+        if real == canonical or real in seen:
+            continue
+        seen.add(real)
+        out.append(path)
+    return out
+
+
+def invalidate_legacy_board_caches(board):
+    """Delete leftover abspath-hash dirs. Never copies transports into canonical.
+
+    Live seats must re-register. Returns the number of directories removed.
+    """
+    removed = 0
+    for path in legacy_endpoint_dirs(board):
+        if not os.path.isdir(path):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.isdir(path):
+            removed += 1
+    return removed
 
 
 def endpoint_path(board, seat):

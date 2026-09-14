@@ -31,6 +31,11 @@ tickets join <seat> --persistent
 
 Reads harness env vars only (never typed tokens). Endpoint files live under
 `~/.cache/atman/sessions/<board-hash>/<seat>.json` (dirs `0700`, files `0600`).
+Board-hash is the realpath of the board (T-927), so `/tmp` vs `/private/tmp`
+and other symlink aliases share one cache and one seat/fingerprint lock.
+Pre-T-927 abspath-hash directories are not read as live transports and are
+not copied forward; re-register persistent seats after upgrade, or call
+`invalidate_legacy_board_caches` to drop the orphans.
 
 Capability probe fails closed with an actionable reason when transport is
 missing. `tickets self` reports probe/registration status.
