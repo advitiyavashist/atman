@@ -19,8 +19,11 @@ Evidence states (``phase``) are distinct and never overstate (T-892 review):
 * ``blocked`` / ``review`` / ``done`` / ``discarded`` follow the ticket status
 
 Review evidence is separate from ticket status: ``review_of`` reports the
-latest recorded verdict with reviewer and artifact SHA, marks verdicts on an
-older SHA as superseded, and never turns a done flag into "accepted".
+latest *structured* verdict (``review_events`` from ``atm accept`` /
+``atm reject``) with reviewer and artifact SHA, marks verdicts on an older
+SHA as superseded, and never turns a done flag or a prose note into
+"accepted". Legacy text that looks like accept/approved is an unstructured
+note.
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ import re
 from datetime import datetime, timezone
 
 from .sounding import ticket_lane, ticket_on_hold
+from .review_verdict import iter_structured, sha_match as _event_sha_match
 
 PHASES = ("working", "review", "blocked", "posted", "reserved", "ready", "waiting",
           "capture", "hold", "done", "discarded")
@@ -83,6 +87,9 @@ def _epoch_of(t):
 # --- review evidence --------------------------------------------------------
 
 def artifact_sha(t):
+    head = (t.get("review_head") or "").strip().lower()
+    if SHA_RE.fullmatch(head):
+        return head
     commit = (t.get("commit") or "").strip()
     if "@" in commit:
         commit = commit.rsplit("@", 1)[1]
@@ -106,23 +113,53 @@ def _verdict_kind(text):
         return ""          # the author's own submission, not a verdict
     if FIX_RE.search(text):
         return "FIX"
+    # T-944: accept/approved/reject prose is not a verdict. Only review_events
+    # written by atm accept / atm reject count as ACCEPT/REJECT.
     if REJECT_RE.search(text) and ("verdict" in low or low.startswith("reject")):
-        return "REJECT"
+        return "UNSTRUCTURED"
     if ACCEPT_RE.search(text) and not NEG_ACCEPT_RE.search(text):
         if "verdict" in low or low.startswith(("accept", "approved", "lgtm")):
-            return "ACCEPT"
+            return "UNSTRUCTURED"
     return ""
 
 
+def _applies(sha, art):
+    if not art:
+        return "unknown"
+    if not sha:
+        return "unknown"
+    if _sha_match(sha, art) or _event_sha_match(sha, art):
+        return "exact"
+    return "superseded"
+
+
 def _verdict_entries(t, msgs_re):
-    """Every recorded verdict about this ticket, oldest first."""
+    """Every recorded verdict about this ticket, oldest first.
+
+    ACCEPT/REJECT come only from structured ``review_events``. Notes and
+    messages may still contribute FIX/MERGED, or UNSTRUCTURED lookalikes.
+    """
     art = artifact_sha(t)
     seen = set()
     entries = []
-    rows = [("note", n) for n in (t.get("notes") or [])]
+    rows = [("event", ev) for ev in iter_structured(t)]
+    rows += [("note", n) for n in (t.get("notes") or [])]
     rows += [("msg", m) for m in (msgs_re or [])]
     rows.sort(key=lambda r: r[1].get("at") or "")
     for src, r in rows:
+        if src == "event":
+            kind = (r.get("kind") or "").strip().upper()
+            sha = (r.get("sha") or "").strip()
+            by = r.get("by") or ""
+            key = ("event", kind, by, sha)
+            if key in seen:
+                continue
+            seen.add(key)
+            extra = r.get("notes") or r.get("reason") or ""
+            entries.append({"kind": kind, "by": by, "at": r.get("at") or "",
+                            "sha": sha, "applies": _applies(sha, art),
+                            "source": "event", "text": extra[:200]})
+            continue
         text = (r.get("text") or "").strip()
         if not text:
             continue
@@ -138,21 +175,13 @@ def _verdict_entries(t, msgs_re):
             for cand in SHA_RE.findall(text):
                 sha = cand
                 break
-        if not art:
-            applies = "unknown"
-        elif not sha:
-            applies = "unknown"
-        elif _sha_match(sha, art):
-            applies = "exact"
-        else:
-            applies = "superseded"
         by = r.get("by") or r.get("from") or ""
         key = (kind, by, sha) if sha else (kind, by, text[:120])
         if key in seen:
             continue          # the same verdict recorded as a note and echoed as a message
         seen.add(key)
-        entries.append({"kind": kind, "by": r.get("by") or r.get("from") or "",
-                        "at": r.get("at") or "", "sha": sha, "applies": applies,
+        entries.append({"kind": kind, "by": by, "at": r.get("at") or "",
+                        "sha": sha, "applies": _applies(sha, art),
                         "source": src, "text": text[:200]})
     return entries
 
@@ -167,9 +196,11 @@ def review_of(t, msgs_re=None):
     st = t.get("status")
     art = artifact_sha(t)
     entries = _verdict_entries(t, msgs_re)
-    exact = [e for e in entries if e["applies"] == "exact"]
-    unknown = [e for e in entries if e["applies"] == "unknown"]
-    merged = [e for e in entries if e["kind"] == "MERGED"]
+    unstruct = [e for e in entries if e["kind"] == "UNSTRUCTURED"]
+    verdicts = [e for e in entries if e["kind"] != "UNSTRUCTURED"]
+    exact = [e for e in verdicts if e["applies"] == "exact"]
+    unknown = [e for e in verdicts if e["applies"] == "unknown"]
+    merged = [e for e in verdicts if e["kind"] == "MERGED"]
     latest = (exact or unknown or [None])[-1]
     history = [e for e in reversed(entries) if e is not latest]
     short = (art[:7] if art else "")
@@ -193,7 +224,9 @@ def review_of(t, msgs_re=None):
         label = "Marked done; verification not recorded"
     elif st == "review":
         label = "Awaiting review of %s · no verdict recorded" % (short or "unrecorded artifact")
-        sup = [e for e in history if e["applies"] == "superseded" and e["kind"] != "MERGED"]
+        if unstruct:
+            label += " · unstructured note"
+        sup = [e for e in history if e["applies"] == "superseded" and e["kind"] not in ("MERGED", "UNSTRUCTURED")]
         if sup:
             label += " · earlier %s by @%s on %s superseded" % (sup[0]["kind"], sup[0]["by"] or "?", sup[0]["sha"][:7])
     else:
@@ -968,7 +1001,7 @@ window.AtmanWork=(function(){
     const r=n.review||{};
     let s=r.label?esc(r.label):'<span class="mute">no verdict recorded</span>';
     const hist=(r.history||[]).filter(h=>h.kind!=='MERGED'||h.applies!=='exact');
-    if(hist.length)s+='<div class="hist">earlier: '+hist.slice(0,3).map(h=>esc(h.kind)+' by @'+esc(h.by||'?')+(h.sha?' on '+esc(h.sha.slice(0,7)):'')+(h.applies==='superseded'?' (superseded)':h.applies==='unknown'?' (artifact unknown)':'')).join('; ')+'</div>';
+    if(hist.length)s+='<div class="hist">earlier: '+hist.slice(0,3).map(h=>esc(h.kind==='UNSTRUCTURED'?'unstructured note':h.kind)+' by @'+esc(h.by||'?')+(h.sha?' on '+esc(h.sha.slice(0,7)):'')+(h.applies==='superseded'?' (superseded)':h.applies==='unknown'?' (artifact unknown)':'')).join('; ')+'</div>';
     return s;
   }
   function detailHtml(n){
