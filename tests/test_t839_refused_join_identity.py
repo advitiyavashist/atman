@@ -165,6 +165,29 @@ def test_refused_knowledge_dir_leaves_a_never_joined_session_nameless(tmp_path):
     assert not (board / "agents/gamma.json").exists()
 
 
+LATE_REFUSALS = {
+    # The validations that sit LATE in the root join, after roles.json has
+    # already been written -- the easiest ones to leave on the wrong side of
+    # the identity write, and root-only because the packaged CLI has no such
+    # flags. Only these two are reachable from the command line: bad
+    # --wake-mode and --lifecycle VALUES are caught by argparse `choices`
+    # before cmd_join runs at all, so they would prove nothing here.
+    "harness-custom-without-cmd": ["--harness", "custom"],
+    "persistent-plus-ephemeral": ["--persistent", "--lifecycle", "ephemeral"],
+}
+
+
+@pytest.mark.parametrize("refusal", sorted(LATE_REFUSALS))
+def test_late_flag_validation_refusals_leave_the_session_nameless(tmp_path, refusal):
+    repo, board, env, run = case(tmp_path, SOURCE)
+
+    refused = run(["join", "gamma", "--roles", "backend"] + LATE_REFUSALS[refusal],
+                  "gamma-sid", "stale-ambient", check=False)
+
+    assert refused.returncode != 0
+    assert identity_of(board, "gamma-sid") is None
+
+
 def test_knowledge_dir_inside_the_board_is_refused_without_renaming_the_session(tmp_path):
     """The other --knowledge-dir exit, from a session that already has a name."""
     repo, board, env, run = case(tmp_path, SOURCE)
