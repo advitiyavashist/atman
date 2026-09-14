@@ -1,8 +1,7 @@
 # Atman public landing
 
-Static page. No build step, no JavaScript, no framework. First-seat examples
-use CSS radio tabs so the ordered providers (Claude Code, Codex, Cursor, Grok
-Bot, custom) can be inspected without a script.
+Static page. No build step, no JavaScript, no framework. One source-install example creates a sample project before opening the app.
+Provider connections are explained in the first-session guide.
 
 **Live URL (renders as HTML, including mobile Safari):**
 https://advitiyavashist.github.io/atman/
@@ -14,9 +13,8 @@ root (`text/html`).
 Copy lock (T-787, renamed for `atm` in T-971):
 
 - **Promise:** Atman coordinates the agents you already run.
-- **Philosophy:** Not a multi-agent framework, not shared memory, not a model
-  router. Mail is the ticket board. Connecting an agent should feel like using
-  Atman, not the provider.
+- **Philosophy:** Tasks, decisions and handoffs stay with the project.
+  Agents retain separate identities and worktrees; results require review.
 - **Integration / product flow / efficiency / workflow dependency graph:** one
   sentence each, immediately after philosophy — not buried.
 - **Contact us:** GitHub issues (`CONTRIBUTING.md`). Do not invent an email.
@@ -30,8 +28,9 @@ capture — not a hosted live board.
 First-class sections (T-794), not buried in the four-sentence grid:
 
 1. **The app** — `atm ui` capture first: Objective, Team, Work, Intervene.
-   First session is `atm connect` as `atman-<seat>`. Local BYOA, not a
-   hosted cloud demo. Directly under the capture, a three-column status strip
+   First session uses an isolated source prefix, clears ambient
+   `TICKETS_DIR`, checks `atm where` and creates a sample with `atm quickstart`.
+   The sample does not launch a provider agent. Directly under the capture, a three-column status strip
    says what is **on main**, **in review** and **planned**; every row must be
    checkable against `main` and open PRs on the day it is edited.
 2. **Workflow dependency graph** — Work stays invisible until its dependencies

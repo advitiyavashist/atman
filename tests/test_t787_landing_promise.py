@@ -59,21 +59,20 @@ def test_hero_is_one_clear_promise_sentence():
     assert "local control plane" not in hero.lower()
 
 
-def test_philosophy_states_the_not_line():
+def test_philosophy_explains_saved_work_and_separate_agents():
     philosophy = _between("philosophy", "how")
     lowered = philosophy.lower()
-    assert "not a multi-agent framework" in lowered
-    assert "not shared memory" in lowered
-    assert "not a model router" in lowered
-    assert "mail is the ticket board" in lowered
-    assert "feel like using atman, not the provider" in lowered
+    assert "tasks, decisions and handoffs" in lowered
+    assert "saved context and artifacts" in lowered
+    assert "own identity and worktree" in lowered
+    assert "review" in lowered and "accepting" in lowered
 
 
 def test_four_unburied_sentences():
     how = _between("how", "surfaces")
     assert "Connect Claude Code, Codex, Cursor, or your own harness" in how
-    assert "the seat should feel like using Atman, not the provider" in how
-    assert "Claim work from the board, inherit the last handoff, finish or recover" in how
+    assert "existing provider login" in how
+    assert "read the saved handoff" in how and "submit a result for review" in how
     assert "Fewest turns and measured cost stay blank" in how
     assert "Work stays invisible until its dependencies are done" in how
     assert "Workflow dependency graph" in how
@@ -103,11 +102,12 @@ def test_landing_readme_records_the_lock():
     assert "Contact us" in README or "GitHub issues" in README
 
 
-def test_start_connects_as_atman_then_atm_ui():
+def test_start_creates_a_project_before_opening_atm_ui():
     start = LANDING[LANDING.index('id="start"') :]
-    assert "connect as Atman" in start
-    assert "atm connect" in start
-    assert "atman-ceo" in start
+    assert "./install.sh --prefix" in start
+    assert "unset TICKETS_DIR" in start
+    assert start.index("atm where") < start.index("atm quickstart") < start.index("atm ui")
+    assert "CoS is cursor" not in start
     assert "atm ui" in start
     assert "atm next" not in start
     assert "alice" not in start

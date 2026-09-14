@@ -67,13 +67,15 @@ def test_tickets_is_only_the_compatibility_alias():
     assert not re.search(r"\btickets (connect|ui|route|next|review|hooks|plan|msg|quickstart|show)\b", LANDING)
 
 
-def test_every_first_seat_panel_connects_then_opens_atm_ui():
+def test_one_source_install_creates_sample_then_opens_atm_ui():
     start = LANDING[LANDING.index('id="start"') :]
     panels = re.findall(r"<pre[^>]*>(.*?)</pre>", start, flags=re.S)
-    assert len(panels) == 5
+    assert len(panels) == 1
     for panel in panels:
         assert "./install.sh" in panel
-        assert panel.index("atm connect") < panel.index("atm ui")
+        assert "./install.sh --prefix" in panel
+        assert "unset TICKETS_DIR" in panel
+        assert panel.index("atm where") < panel.index("atm quickstart") < panel.index("atm ui")
         assert "tickets connect" not in panel and "tickets ui" not in panel
         assert "atm next" not in panel and "alice" not in panel
 
@@ -89,8 +91,9 @@ def test_app_capture_is_current_checked_in_and_is_the_og_image():
         path = LANDING_DIR / "assets" / name
         assert path.is_file() and path.stat().st_size > 10_000, path
     assert "atm quickstart" in block
-    assert "not a hosted demo" in block.lower()
-    assert "not fabricated activity" in block.lower()
+    assert "sample project" in block.lower()
+    assert "this site shows a product capture" in block.lower()
+    assert "your live team appears in the local app" in block.lower()
 
 
 def test_status_strip_separates_on_main_from_in_review_and_planned():

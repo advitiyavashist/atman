@@ -570,43 +570,7 @@ figcaption { margin-top: 0.75rem; color: var(--mute); font-size: 0.76rem; }
 .start-links a { color: var(--fg); font-size: 0.82rem; text-decoration-color: var(--line); }
 .terminal { min-width: 0; }
 
-.seat-tabs { position: relative; }
-.seat-tabs > input { position: absolute; opacity: 0; pointer-events: none; }
-
-.tab-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  padding: 0.65rem 0.75rem 0;
-  border-left: 1px solid var(--line);
-  border-right: 1px solid var(--line);
-  background: var(--card);
-}
-
-.tab-row label {
-  display: inline-flex;
-  min-height: 2rem;
-  align-items: center;
-  padding: 0.25rem 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 0.35rem;
-  color: var(--mute);
-  font-size: 0.72rem;
-  cursor: pointer;
-}
-
-#seat-claude:checked ~ .tab-row label[for="seat-claude"],
-#seat-codex:checked ~ .tab-row label[for="seat-codex"],
-#seat-cursor:checked ~ .tab-row label[for="seat-cursor"],
-#seat-grok:checked ~ .tab-row label[for="seat-grok"],
-#seat-custom:checked ~ .tab-row label[for="seat-custom"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
-}
-
-.panel {
-  display: none;
+.terminal pre {
   margin: 0;
   padding: 1.2rem;
   overflow-x: auto;
@@ -616,12 +580,6 @@ figcaption { margin-top: 0.75rem; color: var(--mute); font-size: 0.76rem; }
   color: #ece8e1;
   font: 0.76rem/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-
-#seat-claude:checked ~ .panel-claude,
-#seat-codex:checked ~ .panel-codex,
-#seat-cursor:checked ~ .panel-cursor,
-#seat-grok:checked ~ .panel-grok,
-#seat-custom:checked ~ .panel-custom { display: block; }
 
 .terminal .comment { color: #8a8478; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }

@@ -26,10 +26,8 @@ def test_atm_ui_capture_is_shareable():
     for surface in ("Objective", "Team", "Work", "Intervene"):
         assert surface in block, surface
     assert "assets/t971-app-work-1440.png" in block
-    assert "not a hosted demo" in block.lower()
-    assert "not fabricated activity" in block.lower()
-    assert "atm connect" in block
-    assert "atman-&lt;seat&gt;" in block
+    assert "this site shows a product capture" in block.lower()
+    assert "your live team appears in the local app" in block.lower()
     assert "atm ui" in block
     assert "og:image" in LANDING
     assert PAGES + "assets/t971-app-work-1440.png" in LANDING
@@ -51,9 +49,8 @@ def test_workflow_graph_is_first_class():
 def test_app_is_atm_ui_first_session_not_cloud_demo():
     block = LANDING[LANDING.index('id="app"') : LANDING.index('id="philosophy"')]
     assert "atm ui" in block
-    assert "atm connect" in block
-    assert "atman-&lt;seat&gt;" in block
-    assert "not a hosted demo" in block.lower()
+    assert "sample project" in block.lower()
+    assert "this site shows a product capture" in block.lower()
     assert "assets/t971-app-work-1440.png" in block
     assert "127.0.0.1" not in LANDING
     assert "localhost" not in LANDING.lower()

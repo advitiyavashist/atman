@@ -44,14 +44,14 @@
       <div class="hero-copy">
         <p class="kicker">local · atm · the agents you already run</p>
         <h1>Atman coordinates the agents you already run.</h1>
-        <p class="lede">Bring Claude Code, Codex, Cursor, or your own harness. <code>atm</code> is the control plane. Mail is the ticket board. No cloud signup.</p>
+        <p class="lede">Give a coordinator an objective. Claude Code, Codex, Cursor, or your own harness can share tasks, messages and handoffs while you review the work. Start with <code>atm</code>. Coordination stays on your machine; models use their usual providers.</p>
         <p class="ctas">
           <a class="btn" href="#app">See the app <span aria-hidden="true">→</span></a>
-          <a class="ghost" href="#start">Connect as Atman</a>
+          <a class="ghost" href="#start">Get started</a>
         </p>
         <ul class="trust" aria-label="Product properties">
-          <li>Plain local state</li>
-          <li>Any first seat</li>
+          <li>Local workspace</li>
+          <li>Your choice of agents</li>
           <li>Human review</li>
           <li>No hosted service</li>
           <li>MIT licensed</li>
@@ -68,25 +68,25 @@
     <section id="app" class="capture" aria-labelledby="app-title">
       <div class="section-heading">
         <p class="eyebrow">atm ui · product capture</p>
-        <h2 id="app-title">Objective, Team, Work, Intervene.</h2>
-        <p>The local app. Clone, <code>atm connect</code> as <code>atman-&lt;seat&gt;</code>, then <code>atm ui</code> on your machine. This is a checked-in capture of the app on <code>main</code> against a sample board, not a hosted demo and not fabricated activity. <code>tickets</code> still runs the same file as a compatibility alias.</p>
+        <h2 id="app-title">See the work and what needs you.</h2>
+        <p>Open the local app with <code>atm ui</code>. Follow the objective, see who owns each task, and inspect blockers, handoffs and review evidence. The capture below uses a sample project.</p>
       </div>
       <ol class="ia-strip" aria-label="atm ui surfaces">
         <li>
           <h3>Objective</h3>
-          <p>Standing mission with a done-when. Met / not met from the board.</p>
+          <p>What the team is finishing and how you will judge success.</p>
         </li>
         <li>
           <h3>Team</h3>
-          <p>Who’s present. What’s uncovered.</p>
+          <p>Your agents, their availability and assigned work.</p>
         </li>
         <li>
           <h3>Work</h3>
-          <p>Objective above a real dependency graph. Graph or columns.</p>
+          <p>Tasks, dependencies, blockers and results ready for review.</p>
         </li>
         <li>
           <h3>Intervene</h3>
-          <p>Route, unblock, reassign, nudge, msg. No silent auto-promote.</p>
+          <p>Send a message, resolve a blocker or choose the next worker.</p>
         </li>
       </ol>
       <figure class="product-frame ui-capture">
@@ -101,7 +101,7 @@
           <span>Intervene</span>
         </p>
         <img src="assets/t971-app-work-1440.png" srcset="assets/t971-app-work-768.png 768w, assets/t971-app-work-1440.png 1440w" sizes="(max-width: 940px) 100vw, min(74rem, 92vw)" alt="atm ui capture on Work: objective with its done-when above a dependency graph of five sample tickets, one working and four waiting on real --after edges, with Objective, Team, Work and Intervene tabs" width="1440" height="1000">
-        <figcaption>Checked-in capture of <code>atm ui</code> on <code>main</code>, Work tab, against the sample board <code>atm quickstart</code> creates. Median turns and cost show <code>—</code> because no done ticket has reported. No fabricated activity or cloud telemetry. The live board is not on this site.</figcaption>
+        <figcaption>Sample project built with <code>atm quickstart</code>, captured from <code>main</code>. Median turns and cost show <code>—</code> until work reports them. Your live team appears in the local app; this site shows a product capture.</figcaption>
       </figure>
 
       <dl class="status-strip" aria-label="What is shipped, in review, and planned">
@@ -115,7 +115,7 @@
         </div>
         <div class="status-planned">
           <dt>Planned · not built or not published</dt>
-          <dd>Homebrew tap: formula in the repo, not published. Install is clone plus <code>./install.sh</code>. Connect and reconnect flows, remote control, and a metrics dashboard are still in progress. Learned routing waits for the trajectory log.</dd>
+          <dd>Homebrew is not published; use the source install below. Connect/reconnect, remote control and a metrics dashboard are not ready for the preview.</dd>
         </div>
       </dl>
 
@@ -187,23 +187,23 @@
 
     <section id="philosophy" class="philosophy" aria-labelledby="philosophy-title">
       <p class="eyebrow">philosophy</p>
-      <h2 id="philosophy-title">Not a multi-agent framework, not shared memory, not a model router.</h2>
-      <p>Mail is the ticket board. Connecting an agent should feel like using Atman, not the provider.</p>
+      <h2 id="philosophy-title">The work outlasts the chat.</h2>
+      <p>Tasks, decisions and handoffs stay with the project. A replacement agent can start from saved context and artifacts, with its own identity and worktree. You review what comes back before accepting it.</p>
     </section>
 
     <section id="how" class="pillars" aria-labelledby="how-title">
       <div class="section-heading">
         <p class="eyebrow">how it works</p>
-        <h2 id="how-title">Integration, product flow, efficiency, and the workflow dependency graph.</h2>
+        <h2 id="how-title">One objective. Work the team can follow.</h2>
       </div>
       <ul class="pillar-grid">
         <li id="integration">
           <h3>Integration</h3>
-          <p>Connect Claude Code, Codex, Cursor, or your own harness — the seat should feel like using Atman, not the provider.</p>
+          <p>Connect Claude Code, Codex, Cursor, or your own harness to the same project. Keep using your existing provider login.</p>
         </li>
         <li id="flow">
           <h3>Product flow</h3>
-          <p>Claim work from the board, inherit the last handoff, finish or recover — if a seat hits a usage limit, another seat continues from the same ticket.</p>
+          <p>Claim work from the board, read the saved handoff and submit a result for review. If work stops, use the saved artifacts and recovery steps to continue.</p>
         </li>
         <li id="efficiency">
           <h3>Efficiency</h3>
@@ -412,8 +412,8 @@
     <section id="start" class="start" aria-labelledby="start-title">
       <div class="start-copy">
         <p class="eyebrow">first run</p>
-        <h2 id="start-title">Clone, connect as Atman, open atm ui.</h2>
-        <p>Connecting is joining Atman, not the provider. Identity is <code>atman-&lt;seat&gt;</code> (example <code>atman-ceo</code>). Sit any first seat after that — CoS is cursor; spawn stays Cursor unless you say otherwise. Then open the local app. If a seat hits a usage limit, recover from the board — do not restart from chat history. Python 3.9+ and Git are the only requirements; <code>tickets</code> is the same command, kept as a compatibility alias.</p>
+        <h2 id="start-title">Start with a local project.</h2>
+        <p>You need Python 3.9+ and Git. Install Atman in an isolated prefix, create a sample board in your project and open the app. Then follow the first-session guide to connect the agents you use. <code>tickets</code> remains a compatibility alias for <code>atm</code>.</p>
         <p class="start-links">
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/first-session.md">Read the first session <span aria-hidden="true">↗</span></a>
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/byoa.md">Bring your own agent <span aria-hidden="true">↗</span></a>
@@ -422,76 +422,21 @@
       </div>
 
       <div class="terminal">
-        <div class="terminal-bar"><span></span><span></span><span></span><p>first seat</p></div>
-        <div class="seat-tabs">
-          <input type="radio" name="first-seat" id="seat-claude" checked>
-          <input type="radio" name="first-seat" id="seat-codex">
-          <input type="radio" name="first-seat" id="seat-cursor">
-          <input type="radio" name="first-seat" id="seat-grok">
-          <input type="radio" name="first-seat" id="seat-custom">
-          <div class="tab-row" role="tablist" aria-label="First seat">
-            <label for="seat-claude">Claude Code</label>
-            <label for="seat-codex">Codex</label>
-            <label for="seat-cursor">Cursor</label>
-            <label for="seat-grok">Grok Bot</label>
-            <label for="seat-custom">Custom</label>
-          </div>
-          <pre class="panel panel-claude"><code><span class="comment"># clone the runtime; install.sh links atm (and tickets, the same file)</span>
+        <div class="terminal-bar"><span></span><span></span><span></span><p>source install · sample project</p></div>
+        <pre><code><span class="comment"># install from a source checkout</span>
 git clone https://github.com/advitiyavashist/atman.git
-cd atman &amp;&amp; ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
+cd atman
+./install.sh --prefix "$PWD/.atman-bin"
+export PATH="$PWD/.atman-bin:$PATH"
 
-<span class="comment"># connect as Atman, not Claude — any first seat</span>
-atm connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
+<span class="comment"># choose an existing Git project</span>
+cd /path/to/your-project
+unset TICKETS_DIR
+atm where
+atm quickstart --agent atman-demo --roles backend
 
-<span class="comment"># open the local app</span>
+<span class="comment"># inspect the sample project in the local app</span>
 atm ui</code></pre>
-          <pre class="panel panel-codex"><code><span class="comment"># clone the runtime; install.sh links atm (and tickets, the same file)</span>
-git clone https://github.com/advitiyavashist/atman.git
-cd atman &amp;&amp; ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
-
-<span class="comment"># connect as Atman, not Codex — any first seat</span>
-atm connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
-
-<span class="comment"># open the local app</span>
-atm ui</code></pre>
-          <pre class="panel panel-cursor"><code><span class="comment"># clone the runtime; install.sh links atm (and tickets, the same file)</span>
-git clone https://github.com/advitiyavashist/atman.git
-cd atman &amp;&amp; ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
-
-<span class="comment"># connect as Atman, not Cursor — spawn stays Cursor</span>
-atm connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
-
-<span class="comment"># open the local app</span>
-atm ui</code></pre>
-          <pre class="panel panel-grok"><code><span class="comment"># clone the runtime; install.sh links atm (and tickets, the same file)</span>
-git clone https://github.com/advitiyavashist/atman.git
-cd atman &amp;&amp; ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
-
-<span class="comment"># connect as Atman, not Grok — any first seat</span>
-atm connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
-
-<span class="comment"># open the local app</span>
-atm ui</code></pre>
-          <pre class="panel panel-custom"><code><span class="comment"># clone the runtime; install.sh links atm (and tickets, the same file)</span>
-git clone https://github.com/advitiyavashist/atman.git
-cd atman &amp;&amp; ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
-
-<span class="comment"># connect as Atman — custom is a catalog row, not the board name</span>
-atm connect
-<span class="comment"># join as atman-ceo (atman-&lt;seat&gt;). CoS is cursor.</span>
-
-<span class="comment"># open the local app</span>
-atm ui</code></pre>
-        </div>
       </div>
     </section>
   </main>
