@@ -2144,7 +2144,7 @@ def cmd_dispatch(a, board):
         roles=None, can=None, cost=None, model="", best_for="", wake_mode=None,
         brief="", exec=getattr(a, "exec", "") or "", master=False, cos=False,
         safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
-        max_runs=getattr(a, "max_runs", None),
+        max_runs=getattr(a, "max_runs", None), replace=False,
     )
     try:
         cmd_spawn(ns, board)
@@ -3998,14 +3998,22 @@ def _is_python_interpreter(tok):
     return base == "python" or base.startswith("python")
 
 
+_WATCH_SCRIPT_NAMES = ("tickets.py", "tickets", "atm")
+
+
 def _is_legitimate_watch_script(tok):
-    """True when `tok` points at a real tickets.py, not a grep/search needle."""
+    """True when `tok` points at a real tickets CLI, not a grep/search needle.
+
+    Installed shims are often `~/.local/bin/tickets` or `atm` (symlinks to
+    tickets.py). T-875 (12): a stale manual `tickets watch` must still count.
+    """
     path = os.path.expanduser(tok or "")
     if _RELEASE_TICKETS_RE.search(path + " "):
         return True
     if path.endswith("/.claude/tools/tickets.py"):
         return True
-    return os.path.isabs(path) and os.path.basename(path) == "tickets.py"
+    base = os.path.basename(path)
+    return os.path.isabs(path) and base in _WATCH_SCRIPT_NAMES
 
 
 def _watch_cmd_agent(cmd):
@@ -4026,10 +4034,13 @@ def _watch_cmd_agent(cmd):
     `grep -n tickets.py watch --agent optimizer`) must not count -- require
     a python interpreter immediately before the script token, or a path under
     tickets-releases/<sha>/, the ~/.claude/tools shim, or an absolute checkout.
+
+    T-875 (12): the installed PATH shims `tickets` and `atm` (no .py suffix)
+    are the same CLI. A stale manual `tickets watch` must match here.
     """
     argv = _split_cmdline(cmd)
     for i, tok in enumerate(argv):
-        if os.path.basename(tok) != "tickets.py":
+        if os.path.basename(tok) not in _WATCH_SCRIPT_NAMES:
             continue
         rest = argv[i + 1:]
         if not rest or rest[0] != "watch":
@@ -4223,7 +4234,8 @@ def _parse_watch_table():
         except ValueError:
             continue
         cmd = parts[1]
-        if pid == me or "tickets.py" not in cmd:
+        # T-875 (12): installed `tickets`/`atm` shims do not contain tickets.py.
+        if pid == me or " watch" not in cmd:
             continue
         agent = _watch_cmd_agent(cmd)
         if not agent:
@@ -4334,14 +4346,177 @@ def _watch_poke_file(board, owner):
 
 
 def _process_command(pid):
+    """Full, untruncated command line for pid, or '' if gone/unreadable.
+
+    T-875 (12): mere PID existence is not evidence of a watcher -- PIDs get
+    recycled. Callers must read this string. Linux /proc is preferred; macOS
+    `ps -ww` avoids the default ARG_MAX truncation.
+    """
     import subprocess
 
     try:
-        r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "command="],
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    proc_path = "/proc/%d/cmdline" % pid
+    try:
+        with open(proc_path, "rb") as f:
+            raw = f.read()
+        if raw:
+            return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    except (OSError, IOError):
+        pass
+    try:
+        r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
                            capture_output=True, text=True)
     except (OSError, ValueError):
         return ""
     return (r.stdout or "").strip()
+
+
+def _read_watch_pidfile(board, owner):
+    path = os.path.join(agents_dir(board), owner + ".watch.pid")
+    try:
+        with open(path) as f:
+            return int((f.read() or "0").strip() or 0), path
+    except (IOError, OSError, ValueError):
+        return 0, path
+
+
+def _pidfile_watch_state(board, owner):
+    """Classify the pidfile holder by full ps cmdline, not mere PID existence.
+
+    Returns (pid, cmdline, kind):
+      absent    -- no pidfile
+      dead      -- pid gone or empty cmdline
+      unrelated -- pid alive but cmdline is not a watch loop for this seat
+      live      -- full cmdline is a tickets/atm watch loop for this seat
+    """
+    pid, path = _read_watch_pidfile(board, owner)
+    if not pid:
+        return 0, "", "absent" if not os.path.lexists(path) else "dead"
+    cmd = _process_command(pid)
+    if not cmd:
+        return pid, "", "dead"
+    if _watch_cmd_agent(cmd) == owner:
+        return pid, cmd, "live"
+    return pid, cmd, "unrelated"
+
+
+def _reclaim_unrelated_watch_pidfile(board, owner):
+    """Drop a pidfile whose PID is dead or an unrelated recycled process."""
+    pid, cmd, kind = _pidfile_watch_state(board, owner)
+    if kind in ("dead", "unrelated"):
+        path = os.path.join(agents_dir(board), owner + ".watch.pid")
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return kind, pid, cmd
+
+
+def _seat_live_watchers(board, owner):
+    """Live watch loops for this seat: pidfile full cmdline AND process table."""
+    found = []
+    seen = set()
+    pid, cmd, kind = _pidfile_watch_state(board, owner)
+    if kind == "live":
+        found.append((pid, cmd, "pidfile"))
+        seen.add(pid)
+    for p in _live_watch_pids(owner, board=board):
+        if p in seen:
+            continue
+        c = _process_command(p)
+        found.append((p, c, "ps"))
+        seen.add(p)
+    return found
+
+
+def _format_live_watchers(rows):
+    lines = []
+    for pid, cmd, src in rows:
+        lines.append("  pid %d [%s]: %s" % (pid, src, cmd or "(empty cmdline)"))
+    return "\n".join(lines)
+
+
+def _replace_seat_watchers(board, owner, existing, wait_s=10.0):
+    """SIGTERM live loops for this seat and wait until they are gone."""
+    import signal
+    import time as _time
+
+    _mark_run_interrupted(board, owner)
+    try:
+        with open(_stop_file(board, owner), "w") as f:
+            f.write(now())
+    except OSError:
+        pass
+    stopped = []
+    for pid, _cmd, _src in existing:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped.append(pid)
+        except ProcessLookupError:
+            pass
+    deadline = _time.time() + max(0.2, float(wait_s))
+    while _time.time() < deadline:
+        if not _seat_live_watchers(board, owner):
+            _reclaim_unrelated_watch_pidfile(board, owner)
+            return stopped, ""
+        _time.sleep(0.1)
+    left = _seat_live_watchers(board, owner)
+    return stopped, "failure: --replace did not stop live watcher(s) for %s:\n%s" % (
+        owner, _format_live_watchers(left))
+
+
+def _spawn_verify_started_watcher(board, owner, started_pid, timeout=5.0):
+    """Prove the new pidfile belongs to the watcher we just started.
+
+    T-875 (12): spawn's own 'started (pid N)' is untrustworthy. The pidfile
+    PID must equal started_pid and its full ps command line must be a watch
+    loop for this seat. Mere PID existence (recycled PIDs) is a failure.
+    Returns (ok, detail, pid, cmdline).
+    """
+    import time as _time
+
+    path = os.path.join(agents_dir(board), owner + ".watch.pid")
+    deadline = _time.time() + max(0.2, float(timeout))
+    last = "pidfile %s not written" % path
+    while _time.time() < deadline:
+        if not _pid_alive(started_pid):
+            last = "started pid %d exited before taking the watch lock" % started_pid
+            try:
+                with open(path) as f:
+                    file_pid = int((f.read() or "0").strip() or 0)
+            except (IOError, OSError, ValueError):
+                file_pid = 0
+            cmd = _process_command(file_pid) if file_pid else ""
+            if file_pid and file_pid != int(started_pid):
+                last = ("started pid %d exited; pidfile still holds pid %d; cmdline: %s"
+                        % (started_pid, file_pid, cmd or "(empty)"))
+            return False, last, file_pid, cmd
+        try:
+            with open(path) as f:
+                file_pid = int((f.read() or "0").strip() or 0)
+        except (IOError, OSError, ValueError):
+            file_pid = 0
+        if file_pid:
+            cmd = _process_command(file_pid)
+            agent = _watch_cmd_agent(cmd) if cmd else ""
+            if file_pid == int(started_pid) and agent == owner:
+                return True, "ok", file_pid, cmd
+            if file_pid != int(started_pid):
+                last = ("pidfile holds pid %d, not started pid %d; cmdline: %s"
+                        % (file_pid, started_pid, cmd or "(empty)"))
+                if cmd:
+                    return False, last, file_pid, cmd
+            elif not cmd:
+                last = "started pid %d has empty ps cmdline" % started_pid
+            else:
+                last = ("started pid %d cmdline is not a watch for %s: %s"
+                        % (started_pid, owner, cmd))
+                return False, last, file_pid, cmd
+        _time.sleep(0.05)
+    return False, last, 0, ""
 
 
 def _watch_pid_uses_this_cli(pid):
@@ -12141,11 +12316,21 @@ def cmd_spawn(a, board):
               "spawn would double up on the interactive seat"
               % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
         return
-    live = _live_watch_pids(owner, board=board)
-    if live:
-        print("watcher for %s already running (%d process(es), pids %s); --stop first" % (
-            owner, len(live), ", ".join(str(p) for p in live)))
-        return
+    existing = _seat_live_watchers(board, owner)
+    if existing:
+        detail = _format_live_watchers(existing)
+        if not getattr(a, "replace", False):
+            print("watcher for %s already running (%d process(es)); --stop or --replace first" % (
+                owner, len(existing)))
+            print(detail)
+            sys.exit("refuse: live watcher for %s still holds the seat" % owner)
+        stopped, stop_err = _replace_seat_watchers(board, owner, existing)
+        if stop_err:
+            sys.exit(stop_err)
+        print("replaced %d watcher(s) for %s (pids %s)" % (
+            len(stopped), owner, ", ".join(str(p) for p, _c, _s in existing)))
+    else:
+        _reclaim_unrelated_watch_pidfile(board, owner)
     _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     try:
         os.unlink(_stop_file(board, owner))
@@ -12180,16 +12365,25 @@ def cmd_spawn(a, board):
                PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ.get("PATH", ""))
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     with open(log_path, "a") as lf:
-        subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, start_new_session=True)
-    import time as _time
-    _time.sleep(1.0)
-    pid = _watcher_pid(board, owner)
+        started = subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
+                                   stdin=subprocess.DEVNULL, start_new_session=True)
+    started_pid = started.pid
+    ok, verify_detail, pid, started_cmd = _spawn_verify_started_watcher(
+        board, owner, started_pid)
+    if not ok:
+        import signal
+        try:
+            os.kill(started_pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        sys.exit("failure: spawn did not install a live watcher for %s "
+                 "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; log %s" % (
-        owner, (" (pid %d)" % pid) if pid else "", harness, model,
+    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; log %s" % (
+        owner, pid, harness, model,
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, log_path))
     print("cmd: %s" % cmd)
+    print("watch-cmdline: %s" % started_cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
 
@@ -16152,6 +16346,9 @@ def main():
                         "persistent watcher by default (override with --max-runs 1)")
     c.add_argument("--exec", default="", help="override the worker command entirely")
     c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
+    c.add_argument("--replace", action="store_true",
+                   help="if a live watcher already holds this seat (pidfile + full ps cmdline), "
+                        "stop it and start a new one; verify the new pidfile is the process just started")
     c.add_argument("--list", action="store_true")
     c.add_argument("--alias", default="",
                    help="stable role alias (ceo or cos) pointing at this unique runtime identity")
