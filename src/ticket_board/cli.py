@@ -2600,12 +2600,13 @@ This board is being set up. I will ask you four things, in order:
 3. I will **announce that name** on the board with the integrations you
    picked.
 4. Then I will ask for **tasks and the objective**, and turn tasks into a
-   `tickets plan` graph (real `--after` edges), not a flat list.
+   `atm plan` graph (real `--after` edges), not a flat list.
 
 I will not spawn workers or create tickets until you answer.
-Run `tickets harness available` to probe every catalog row (missing is a row).
+CLI: `atm` (the `tickets` command is an alias).
+Run `atm harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
-When they name tasks, use `tickets plan` so deps are real `--after` edges.
+When they name tasks, use `atm plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
@@ -2741,13 +2742,13 @@ Spawn seats only from the integrations they confirmed, one ticket each.
 
 **You are onboarding as chief of staff.** Master plans and scopes. CoS
 reviews, unblocks, merges, and staffs. Same integration catalog as master.
-After the board has an objective and a `tickets plan` graph:
+After the board has an objective and a `atm plan` graph:
 
-1. `tickets graph` / `tickets map` — statuses and `--after` edges, not prose.
-2. Follow-up: `tickets update` / `here`; `tickets reopen` silent >90m claims;
-   `tickets drive` toward the objective; review queue.
-3. Mid-run graph edits: `tickets dep` / `tickets create --blocks`.
-4. Announce with `tickets master cos <name>` and `tickets msg --to everyone`.
+1. `atm graph` / `atm map` — statuses and `--after` edges, not prose.
+2. Follow-up: `atm update` / `here`; `atm reopen` silent >90m claims;
+   `atm drive` toward the objective; review queue.
+3. Mid-run graph edits: `atm dep` / `atm create --blocks`.
+4. Announce with `atm master cos <name>` and `atm msg --to everyone`.
 
 Do not dump a live-board plan. Do not invent a second planner.
 
@@ -2757,14 +2758,14 @@ Do not dump a live-board plan. Do not invent a second planner.
 provider. Identity is `atman-<seat>` (example `atman-ceo`). The current
 CoS holder staffs (or no CoS yet). CEO does not claim worker tickets.
 
-Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
+Run `atm connect` (or `atm connect --ceo`). It executes, in order:
 
-1. Catalog + usage (`tickets harness available` + recorded limits)
+1. Catalog + usage (`atm harness available` + recorded limits)
 2. Attach the living board / objective — do not invent a new team
-3. `tickets join atman-<seat> --roles master ...`
-4. Announce the Atman role (`tickets msg --to everyone`)
+3. `atm join atman-<seat> --roles master ...`
+4. Announce the Atman role (`atm msg --to everyone`)
 5. Ask the operator for feedback
-6. `tickets graph` / `tickets map` — tasks they can actually run
+6. `atm graph` / `atm map` — tasks they can actually run
 
 Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
 title — `tickets plan` with real deps if they add work. Spawn only the
@@ -4105,19 +4106,19 @@ def cmd_connect(a, board):
         print("")
         print("Product flow: catalog + usage → living board → %s → announce → feedback → graph/map" % name)
         print("Do not invent a new team. CEO does not claim worker tickets. The current CoS holder staffs (or no CoS yet).")
-        print("Then probe: `tickets harness available`")
-        print("Join: tickets join %s --roles master --persistent --wake-mode continuous" % name)
-        print("Announce Atman role, ask for feedback, then tickets graph / tickets map.")
+        print("Then probe: `atm harness available`")
+        print("Join: atm join %s --roles master --persistent --wake-mode continuous" % name)
+        print("Announce Atman role, ask for feedback, then atm graph / atm map.")
         return
     print_onboarding_startup()
-    print("Then probe integrations: `tickets harness available`")
+    print("Then probe integrations: `atm harness available`")
     print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
-    print("Announce the board/team name with `tickets msg --to everyone`, then ask")
-    print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
-    print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
-    print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
-    print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
+    print("Announce the board/team name with `atm msg --to everyone`, then ask")
+    print("for the objective and tasks. Turn tasks into a graph with `atm plan`")
+    print("(JSON keys + deps), then `atm graph` / `atm map`. Follow up with")
+    print("`atm update` / `here`, reopen silent >90m claims, `atm drive`.")
+    print("Unattended persist ends at a reviewable SHA; human `atm review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 

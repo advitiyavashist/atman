@@ -77,6 +77,7 @@ def test_suggestion_not_applied_without_flags(tmp_path):
     assert "SUGGESTED ASSIGNMENT" in out
     assert "unknown" in out
     assert "CoS unset until chosen" in out
+    assert "CLI: atm" in out or "tickets is an alias" in out
     master = repo / ".tickets" / "master.json"
     if master.is_file():
         rec = json.loads(master.read_text())
@@ -94,8 +95,9 @@ def test_connect_requires_explicit_flags_to_set_roles(tmp_path):
     assert rec["cos"] == "bev"
     r2 = run(repo, "connect", "--ceo", env=env, tmp_path=tmp_path)
     assert "CoS is bev" in r2.stdout
-    assert "tickets msg --to bev" in r2.stdout
+    assert "atm msg --to bev" in r2.stdout
     assert "tickets msg --to cursor" not in r2.stdout
+    assert "atm msg --to cursor" not in r2.stdout
 
 
 def test_join_ceo_mail_uses_resolved_holder(tmp_path):
@@ -105,8 +107,46 @@ def test_join_ceo_mail_uses_resolved_holder(tmp_path):
     run(repo, "connect", "--master", "ada", "--cos", "bev", env=env, tmp_path=tmp_path)
     r = run(repo, "join", "atman-ceo", "--roles", "master", env=env, tmp_path=tmp_path)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "tickets msg --to bev" in r.stdout
+    assert "atm msg --to bev" in r.stdout
     assert "tickets msg --to cursor" not in r.stdout
+    assert "atm msg --to cursor" not in r.stdout
+
+
+def test_login_probe_yes_no_unknown():
+    assert roles.classify_login_output(0, "Logged in as fixture@example.test") == "yes"
+    assert roles.classify_login_output(1, "Error: login required") == "no"
+    assert roles.classify_login_output(1, "connection refused") == "unknown"
+    assert roles.classify_login_output(124, "") == "unknown"
+
+    def runner_ok(argv, timeout):
+        return 0, "Logged in as fixture@example.test"
+
+    yes = roles.probe_login(
+        {"id": "cursor", "on_disk": True, "path": "/bin/agent"},
+        runner=runner_ok)
+    assert yes == "yes"
+    assert roles.probe_login({"id": "cursor", "on_disk": False, "path": ""}) == "no"
+    assert roles.probe_login(
+        {"id": "cursor", "on_disk": True, "path": "/bin/agent"},
+        runner=lambda argv, timeout: (1, "status failed")) == "unknown"
+
+
+def test_suggestion_skips_codex_for_leadership_and_gives_reasons():
+    rows = [
+        {"id": "codex", "on_disk": True, "logged_in": "yes", "remaining": None},
+        {"id": "cursor", "on_disk": True, "logged_in": "unknown", "remaining": None},
+        {"id": "claude", "on_disk": True, "logged_in": "yes", "remaining": None},
+    ]
+    sug = roles.suggest_assignment(rows)
+    assert sug["master"] == "claude"
+    assert sug["cos"] == "cursor"
+    assert "codex" in sug["workers"]
+    assert "T-875" in sug["reasons"]["workers"]
+    assert "reliable interactive" in sug["reasons"]["master"]
+    text = roles.format_suggestion(sug)
+    assert "atm master take" in text
+    assert "CLI: atm" in text
+    assert "tickets master take" not in text
 
 
 def test_master_template_has_no_cursor_cos_role():

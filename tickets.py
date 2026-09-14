@@ -1536,6 +1536,7 @@ def _master_label(board):
 
 def _print_role_discovery(rows):
     roles = _onboard_roles()
+    roles.attach_login_probes(rows)
     print(roles.format_discovery_table(roles.discovery_rows(rows)))
     print(roles.format_suggestion(roles.suggest_assignment(rows)))
     print("Ask: which agents should be master, CoS, workers, verifiers?")
@@ -5377,9 +5378,10 @@ This board is being set up. I will ask you four things, in order:
    `tickets plan` graph (real `--after` edges), not a flat list.
 
 I will not spawn workers or create tickets until you answer.
-Run `tickets harness available` to probe every catalog row (missing is a row).
+CLI: `atm` (the `tickets` command is an alias).
+Run `atm harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
-When they name tasks, use `tickets plan` so deps are real `--after` edges.
+When they name tasks, use `atm plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
@@ -5440,8 +5442,8 @@ CEO_ONBOARDING_STARTUP = """**You are onboarding as Atman CEO.**
 Connecting here is joining **Atman**, not Claude, Cursor, Codex, or any
 other provider. Board identity is `atman-<seat>` (example: `atman-ceo`).
 
-This is a living board. Do not invent a new team. Do not `tickets init`
-or `tickets clear`. The current CoS holder staffs (or no CoS yet); you do
+This is a living board. Do not invent a new team. Do not `atm init`
+or `atm clear`. The current CoS holder staffs (or no CoS yet); you do
 not spawn, and you do not claim worker tickets.
 
 Product flow (this order):
@@ -5450,7 +5452,7 @@ Product flow (this order):
 3. Join as `atman-<seat>`
 4. Announce the Atman role
 5. Ask the operator for feedback
-6. Show tasks you can actually run (`tickets graph` / `tickets map`)
+6. Show tasks you can actually run (`atm graph` / `atm map`)
 """
 
 
@@ -5549,28 +5551,28 @@ def print_ceo_connect(board, seat="ceo"):
     text = str(obj.get("text") or "").strip()
     if text:
         print("objective: %s" % text[:400])
-        print("Attach this objective. Do not `tickets objective --set` unless it is empty.")
+        print("Attach this objective. Do not `atm objective --set` unless it is empty.")
     else:
-        print("objective: (none yet — ask one sentence, then `tickets objective --set`)")
-    print("Do not tickets init. Do not tickets clear. Do not name a new team.")
+        print("objective: (none yet — ask one sentence, then `atm objective --set`)")
+    print("Do not atm init. Do not atm clear. Do not name a new team.")
     print("")
     print("3. JOIN AS `%s`" % name)
     print("   export TICKET_AGENT=%s" % name)
     print("   export TICKETS_DIR=%s" % (board or "$PWD/.tickets"))
     print("   cd %s" % root)
-    print("   tickets join %s --roles master --can own-machine,browser --cost high --persistent --wake-mode continuous --harness cursor" % name)
-    print("   tickets hooks cursor --agent %s" % name)
-    print("   tickets hooks codex --agent %s     # mail follow-up is not Claude-only" % name)
-    print("   tickets hooks remote --agent %s" % name)
-    print("   tickets master take")
-    print("   tickets master")
-    print("   tickets inbox")
-    print("   tickets objective")
+    print("   atm join %s --roles master --can own-machine,browser --cost high --persistent --wake-mode continuous --harness cursor" % name)
+    print("   atm hooks cursor --agent %s" % name)
+    print("   atm hooks codex --agent %s     # mail follow-up is not Claude-only" % name)
+    print("   atm hooks remote --agent %s" % name)
+    print("   atm master take")
+    print("   atm master")
+    print("   atm inbox")
+    print("   atm objective")
     print("")
     print("4. ANNOUNCE THE ATMAN ROLE")
-    print('   tickets msg --to everyone "%s is Atman CEO on this living board. CoS is %s. Integrating: <list from step 1>. @everyone"'
+    print('   atm msg --to everyone "%s is Atman CEO on this living board. CoS is %s. Integrating: <list from step 1>. @everyone"'
           % (name, _cos_label(board)))
-    print('   tickets master log "ceo onboard: seat=%s integrations=<list>"' % name)
+    print('   atm master log "ceo onboard: seat=%s integrations=<list>"' % name)
     print("")
     print("5. ASK FOR FEEDBACK")
     print("   Ask the operator: what should change about this connect path?")
@@ -5578,18 +5580,18 @@ def print_ceo_connect(board, seat="ceo"):
     print('   # CEO %s onboarded. Operator feedback: <their answer>' % name)
     print("")
     print("6. TASKS YOU CAN RUN (graph / map)")
-    print("   tickets graph")
-    print("   tickets map")
-    print("   tickets drive")
-    print("   tickets update / tickets here")
-    print("   Mid-run: tickets plan (JSON keys+deps), tickets dep, tickets create --blocks")
+    print("   atm graph")
+    print("   atm map")
+    print("   atm drive")
+    print("   atm update / atm here")
+    print("   Mid-run: atm plan (JSON keys+deps), atm dep, atm create --blocks")
     print("   CoS (%s) staffs workers. CEO does not claim worker tickets." % _cos_label(board))
     print("")
     print("CoS is %s. Mail: %s. Never Grok DMs." % (
         _cos_label(board), _onboard_roles().mail_to_cos(current_master(board) or {})))
-    print("HOLD T-773 T-774. No tickets clear.")
-    print("If `tickets self` still points at sol-agy-harness, recut ~/.local/bin/tickets")
-    print("onto this checkout before trusting PATH `tickets connect`.")
+    print("HOLD T-773 T-774. No atm clear.")
+    print("If `atm self` still points at sol-agy-harness, recut ~/.local/bin/atm")
+    print("onto this checkout before trusting PATH `atm connect`.")
 
 
 MASTER_TEMPLATE = """**You are onboarding.**
@@ -5692,13 +5694,13 @@ Spawn seats only from the integrations they confirmed, one ticket each.
 
 **You are onboarding as chief of staff.** Master plans and scopes. CoS
 reviews, unblocks, merges, and staffs. Same integration catalog as master.
-After the board has an objective and a `tickets plan` graph:
+After the board has an objective and a `atm plan` graph:
 
-1. `tickets graph` / `tickets map` — statuses and `--after` edges, not prose.
-2. Follow-up: `tickets update` / `here`; `tickets reopen` silent >90m claims;
-   `tickets drive` toward the objective; review queue.
-3. Mid-run graph edits: `tickets dep` / `tickets create --blocks`.
-4. Announce with `tickets master cos <name>` and `tickets msg --to everyone`.
+1. `atm graph` / `atm map` — statuses and `--after` edges, not prose.
+2. Follow-up: `atm update` / `here`; `atm reopen` silent >90m claims;
+   `atm drive` toward the objective; review queue.
+3. Mid-run graph edits: `atm dep` / `atm create --blocks`.
+4. Announce with `atm master cos <name>` and `atm msg --to everyone`.
 
 Do not dump a live-board plan. Do not invent a second planner.
 
@@ -5708,12 +5710,12 @@ Do not dump a live-board plan. Do not invent a second planner.
 provider. Identity is `atman-<seat>` (example `atman-ceo`). The current
 CoS holder staffs (or no CoS yet). CEO does not claim worker tickets.
 
-Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
+Run `atm connect` (or `atm connect --ceo`). It executes, in order:
 
-1. Catalog + usage (`tickets harness available` + recorded limits)
+1. Catalog + usage (`atm harness available` + recorded limits)
 2. Attach the living board / objective — do not invent a new team
-3. `tickets join atman-<seat> --roles master ...`
-4. Announce the Atman role (`tickets msg --to everyone`)
+3. `atm join atman-<seat> --roles master ...`
+4. Announce the Atman role (`atm msg --to everyone`)
 5. Ask the operator for feedback
 6. `tickets graph` / `tickets map` — tasks they can actually run
 
@@ -8739,16 +8741,16 @@ def cmd_join(a, board):
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
     if _join_is_ceo_path(owner, roles.get(owner, [])):
-        print("Atman CEO loop:  tickets inbox  ->  tickets objective  ->  "
-              "tickets graph / tickets map  ->  tickets drive  ->  "
+        print("Atman CEO loop:  atm inbox  ->  atm objective  ->  "
+              "atm graph / atm map  ->  atm drive  ->  "
               "%s (CoS staffs). CEO does not claim worker tickets."
               % _onboard_roles().mail_to_cos(current_master(board) or {}))
-        print("Full instructions: tickets connect")
+        print("Full instructions: atm connect")
     else:
-        print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
-              "tickets update <id> \"...\" (every %d min)  ->  tickets done <id> --notes \"...\"  "
-              "->  merge  ->  tickets next" % UPDATE_EVERY_MIN)
-        print("Full instructions: tickets connect --worker")
+        print("Loop:  atm master  ->  atm next  ->  work + commit  ->  "
+              "atm update <id> \"...\" (every %d min)  ->  atm done <id> --notes \"...\"  "
+              "->  merge  ->  atm next" % UPDATE_EVERY_MIN)
+        print("Full instructions: atm connect --worker")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
     _safe(lambda: _enroll_runner_context(board, owner), None)
@@ -8807,7 +8809,7 @@ def _apply_connect_roles(board, a):
     master = (getattr(a, "connect_master", "") or "").strip()
     cos = (getattr(a, "connect_cos", "") or "").strip()
     if not master and not cos:
-        print("CoS unset until chosen (`tickets master cos <seat>`).")
+        print("CoS unset until chosen (`atm master cos <seat>`).")
         return
     prev = current_master(board) or {}
     os.makedirs(board, exist_ok=True)
@@ -8838,14 +8840,14 @@ def cmd_connect(a, board):
     rows, _note = probe_integration_catalog()
     attach_catalog_usage(rows)
     _print_role_discovery(rows)
-    print("Then probe integrations: `tickets harness available`")
+    print("Then probe integrations: `atm harness available`")
     print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
-    print("Announce the board/team name with `tickets msg --to everyone`, then ask")
-    print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
-    print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
-    print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
-    print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
+    print("Announce the board/team name with `atm msg --to everyone`, then ask")
+    print("for the objective and tasks. Turn tasks into a graph with `atm plan`")
+    print("(JSON keys + deps), then `atm graph` / `atm map`. Follow up with")
+    print("`atm update` / `here`, reopen silent >90m claims, `atm drive`.")
+    print("Unattended persist ends at a reviewable SHA; human `atm review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
     _apply_connect_roles(board, a)
