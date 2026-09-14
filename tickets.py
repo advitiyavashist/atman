@@ -21,13 +21,15 @@ folders that are not the project. `tickets next` / `show` / `done` do.
 
 Agent identity for a single command comes from $TICKET_AGENT (set it per tool:
 claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
-launched. Session-scoped surfaces (`board`'s "you:" line, the stop-hook,
-`msg`/`inbox` with no --owner) resolve through session_seat(): an explicit
---owner, then a supervisor TICKET_SEAT (authoritative for launched workers),
-then this session's OWN `tickets join` record, then ambient TICKET_AGENT. A
-join is only "this session's own" when the harness gave us a session id to key
-it by; without one the record is a machine-wide legacy file that any agent may
-have written last, so an explicit TICKET_AGENT beats it. Default roles for
+launched. `note` is a whoami() surface: a join/spawn must not rebind note
+attribution (T-956/T-958 identity-precedence). Session-scoped surfaces
+(`board`'s "you:" line, the stop-hook, `msg`/`inbox` with no --owner)
+resolve through session_seat(): an explicit --owner, then a supervisor
+TICKET_SEAT (authoritative for launched workers), then this session's OWN
+`tickets join` record, then ambient TICKET_AGENT. A join is only "this
+session's own" when the harness gave us a session id to key it by; without
+one the record is a machine-wide legacy file that any agent may have
+written last, so an explicit TICKET_AGENT beats it. Default roles for
 those names can be overridden by .tickets/roles.json.
 """
 
@@ -779,8 +781,9 @@ def whoami(explicit=None):
     command act as" -- board's own status line, a hook deciding whether to
     stay quiet, the stop-hook holding a turn open for a seat, `msg`'s sender
     or `inbox`'s owner when no --owner is given -- wants session_seat(), not
-    this. Collapsing the two into one function is the failure this split
-    guards against: it makes a recorded identity outrank an explicit
+    this. `note` stays on whoami() so a join cannot rebind note attribution
+    (T-956/T-958). Collapsing the two into one function is the failure this
+    split guards against: it makes a recorded identity outrank an explicit
     per-command override, breaking the `TICKET_AGENT=X tickets <cmd>`
     pattern this docstring describes.
     """
@@ -797,7 +800,8 @@ def session_seat(board, explicit=None):
     `inbox --quiet-if-unidentified` hook, the stop-hook, and `msg`'s sender /
     `inbox`'s owner when no --owner is given. These need the session-recorded
     identity (from `tickets join`) precisely because nobody is passing an
-    explicit name on that particular call.
+    explicit name on that particular call. `note` is not in this list -- it
+    uses whoami() so a join cannot rebind note attribution (T-956/T-958).
 
     Precedence: explicit > TICKET_SEAT > a SESSION-KEYED recorded identity >
     TICKET_AGENT > the flat legacy recorded identity > pid.
@@ -5362,13 +5366,13 @@ def cmd_block(a, board):
 def cmd_note(a, board):
     """Add a note (`tickets note` / `tickets update`).
 
-    `by` is always the caller's own identity (`--by`, else $TICKET_AGENT),
-    never the ticket's `owner` field. T-238: a fallback to `t.get("owner")`
-    here meant a second agent working the same ticket in parallel -- exactly
-    the case a duplicate lane needs to be visible -- had its notes silently
-    relabeled as the owner's, so nothing in the note history could ever
-    reveal the second lane. This was a write-path bug: the on-disk `by` was
-    wrong, not just its rendering in `tickets show`.
+    `by` is the caller's posting identity (`whoami`), never the ticket's
+    `owner` field and never a join-written session binding. `--by` still
+    wins as an explicit override. T-238: a fallback to `t.get("owner")`
+    relabeled a parallel agent's notes as the owner's. T-956/T-958:
+    session_seat() here broke identity-precedence -- a join must not rebind
+    note attribution. msg stays on session_seat(); collapsing the two
+    surfaces fails the rest of test_identity_precedence.py.
     """
     t = load(board, a.id)
     who = whoami(a.by)
@@ -7885,7 +7889,8 @@ def cmd_msg(a, board):
     # a recorded `join` is the deliberate, authoritative fact, and it must
     # outrank a stray ambient TICKET_AGENT the way it outranks one everywhere
     # else identity is resolved. whoami() intentionally does not make that
-    # promise; see its docstring.
+    # promise; see its docstring. T-956/T-958: note stays on whoami() so a
+    # join cannot rebind note attribution; do not collapse the two surfaces.
     sender = session_seat(board, a.owner)
     is_task = bool(getattr(a, "task", False))
     if a.to and a.to == sender:
@@ -12348,7 +12353,7 @@ def _inherit_settings(root, wt):
     """
     import shutil
     copied = []
-    for dname, fnames, prefixed in ((".claude", ("settings.json", "settings.local.json"), False),):
+    for dname, fnames in ((".claude", ("settings.json", "settings.local.json")),):
         src = os.path.join(root, dname)
         dst = os.path.join(wt, dname)
         if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
@@ -12367,7 +12372,7 @@ def _inherit_settings(root, wt):
                     _atomic_hook_write(d, json.dumps(clean, indent=2) + "\n", 0o600)
                 else:
                     shutil.copy2(s, d)
-                copied.append(os.path.join(dname, name) if prefixed else name)
+                copied.append(name)
     return copied
 
 
