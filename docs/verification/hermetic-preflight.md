@@ -77,7 +77,7 @@ T-911 and candidate verifiers must:
 ## Cold rebuild freeze receipt (T-913)
 
 `docs/verification/t913-cold-rebuild.manifest.json` records one fresh isolated
-rebuild of `862cbd041622c06bd3f1ec5f2e901493b317afc6`. Both source and wheel
+rebuild of `68cb22c9849519c7fff3908fade0a151f1fcf701`. Both source and wheel
 environments consumed the exact requirements freeze and reported
 `pip==25.3`, `setuptools==75.9.1`, and `wheel==0.45.1`; source import, wheel
 import, CLI help, scrubbed child import, and the 19-test representative

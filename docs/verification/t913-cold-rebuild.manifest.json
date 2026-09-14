@@ -70,7 +70,7 @@
         }
       },
       "fixture_note": "tests/test_t544_conftest_shadow.py sets PYTHONPATH=src:. on purpose so a combined runners+server collect uses the checkout, not a wheel. That is a fixture contract, not a packaging defect. Wheel provenance in this preflight overrides pytest.ini pythonpath so child collection cannot shadow the wheel.",
-      "label": "sha-862cbd041622",
+      "label": "sha-68cb22c98495",
       "ok": true,
       "pins": [
         "PyYAML==6.0.3",
@@ -107,7 +107,7 @@
         "tomli==2.4.1",
         "typing_extensions==4.16.0"
       ],
-      "sha": "862cbd041622c06bd3f1ec5f2e901493b317afc6",
+      "sha": "68cb22c9849519c7fff3908fade0a151f1fcf701",
       "source": {
         "child_import_exit": 0,
         "cli": {
@@ -118,7 +118,7 @@
             "ok": true
           },
           "console_tickets": {
-            "argv0": "$WORKDIR/origins/sha-862cbd041622/source-venv/bin/tickets",
+            "argv0": "$WORKDIR/origins/sha-68cb22c98495/source-venv/bin/tickets",
             "exit": 0,
             "has_join": true,
             "ok": true
@@ -140,38 +140,38 @@
         "probe": {
           "enable_usersite": false,
           "executable": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-          "prefix": "$WORKDIR/origins/sha-862cbd041622/source-venv",
-          "pytest_file": "$WORKDIR/origins/sha-862cbd041622/source-venv/lib/python3.9/site-packages/pytest/__init__.py",
+          "prefix": "$WORKDIR/origins/sha-68cb22c98495/source-venv",
+          "pytest_file": "$WORKDIR/origins/sha-68cb22c98495/source-venv/lib/python3.9/site-packages/pytest/__init__.py",
           "pytest_version": "8.4.2",
           "sys_path": [
             "",
             "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip",
             "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9",
             "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload",
-            "$WORKDIR/origins/sha-862cbd041622/source-venv/lib/python3.9/site-packages",
-            "$WORKDIR/origins/sha-862cbd041622/src/src"
+            "$WORKDIR/origins/sha-68cb22c98495/source-venv/lib/python3.9/site-packages",
+            "$WORKDIR/origins/sha-68cb22c98495/src/src"
           ],
-          "ticket_board_file": "$WORKDIR/origins/sha-862cbd041622/src/src/ticket_board/__init__.py",
-          "usersite": "$WORKDIR/origins/sha-862cbd041622/home/source/Library/Python/3.9/lib/python/site-packages"
+          "ticket_board_file": "$WORKDIR/origins/sha-68cb22c98495/src/src/ticket_board/__init__.py",
+          "usersite": "$WORKDIR/origins/sha-68cb22c98495/home/source/Library/Python/3.9/lib/python/site-packages"
         },
         "pytest_class": "venv",
         "pytest_version": "8.4.2",
         "ticket_board_class": "selected_src"
       },
-      "source_tree": "$WORKDIR/origins/sha-862cbd041622/src",
+      "source_tree": "$WORKDIR/origins/sha-68cb22c98495/src",
       "wheel": {
         "atm_present": true,
-        "bytes": 321627,
+        "bytes": 324520,
         "cli": {
           "atm_same_entry": true,
           "console_atm": {
-            "argv0": "$WORKDIR/origins/sha-862cbd041622/wheel-venv/bin/atm",
+            "argv0": "$WORKDIR/origins/sha-68cb22c98495/wheel-venv/bin/atm",
             "exit": 0,
             "has_join": true,
             "ok": true
           },
           "console_tickets": {
-            "argv0": "$WORKDIR/origins/sha-862cbd041622/wheel-venv/bin/tickets",
+            "argv0": "$WORKDIR/origins/sha-68cb22c98495/wheel-venv/bin/tickets",
             "exit": 0,
             "has_join": true,
             "ok": true
@@ -188,21 +188,21 @@
         "probe": {
           "enable_usersite": false,
           "executable": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-          "prefix": "$WORKDIR/origins/sha-862cbd041622/wheel-venv",
-          "pytest_file": "$WORKDIR/origins/sha-862cbd041622/wheel-venv/lib/python3.9/site-packages/pytest/__init__.py",
+          "prefix": "$WORKDIR/origins/sha-68cb22c98495/wheel-venv",
+          "pytest_file": "$WORKDIR/origins/sha-68cb22c98495/wheel-venv/lib/python3.9/site-packages/pytest/__init__.py",
           "pytest_version": "8.4.2",
           "sys_path": [
             "",
             "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip",
             "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9",
             "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload",
-            "$WORKDIR/origins/sha-862cbd041622/wheel-venv/lib/python3.9/site-packages"
+            "$WORKDIR/origins/sha-68cb22c98495/wheel-venv/lib/python3.9/site-packages"
           ],
-          "ticket_board_file": "$WORKDIR/origins/sha-862cbd041622/wheel-venv/lib/python3.9/site-packages/ticket_board/__init__.py",
-          "usersite": "$WORKDIR/origins/sha-862cbd041622/home/wheel/Library/Python/3.9/lib/python/site-packages"
+          "ticket_board_file": "$WORKDIR/origins/sha-68cb22c98495/wheel-venv/lib/python3.9/site-packages/ticket_board/__init__.py",
+          "usersite": "$WORKDIR/origins/sha-68cb22c98495/home/wheel/Library/Python/3.9/lib/python/site-packages"
         },
         "pytest_class": "venv",
-        "sha256": "10945b9467c9ee280a42252281497b82517f694c88894a98fb811893c3d732e4",
+        "sha256": "fdb6eef82cca0fe97faadfa88220085dad45e136b1548a7d408e23f8ef626051",
         "ticket_board_class": "venv"
       }
     }
