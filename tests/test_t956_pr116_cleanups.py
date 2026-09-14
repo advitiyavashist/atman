@@ -33,7 +33,15 @@ def run(board, args, session=None, agent=None):
     )
 
 
-def test_note_uses_session_seat_not_ambient_ticket_agent(tmp_path):
+def test_note_uses_whoami_not_join_written_session_seat(tmp_path):
+    """T-956/T-958: note attribution is whoami(), not session_seat().
+
+    A join-written session binding must not rebind the caller. TICKET_AGENT
+    on this invocation wins, matching
+    test_whoami_surfaces_ignore_a_join_this_same_session_made. msg stays on
+    session_seat() -- collapsing the two broke five identity-precedence
+    tests in that same file.
+    """
     repo = tmp_path / "proj"
     repo.mkdir()
     run(str(repo), ["init"], session="setup", agent="setup")
@@ -44,7 +52,7 @@ def test_note_uses_session_seat_not_ambient_ticket_agent(tmp_path):
             session="alice-sid", agent="stale-ambient")
     assert r.returncode == 0, r.stderr
     t = json.loads((repo / ".tickets" / "T-001.json").read_text())
-    assert t["notes"][-1]["by"] == "alice"
+    assert t["notes"][-1]["by"] == "stale-ambient"
 
 
 def test_without_board_hooks_scrubs_non_rewritten_events():
