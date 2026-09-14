@@ -1,0 +1,38 @@
+[
+  {
+    "key": "quota",
+    "title": "Atman: supported subscription quota adapters and honest availability states",
+    "role": "backend",
+    "priority": 2,
+    "deps": [
+      "T-860"
+    ],
+    "body": "Extend existing T-793 catalog, no second registry. Contract: docs/product/agent-onboarding-and-subscription-usage.md on sol-agent-onboarding-quota-t860. Native Codex account/rateLimits/read+updated; optional Claude/Agy status-line collectors preserving custom scripts; optional Cursor team/org read-only admin APIs. Personal Cursor/Grok/Devin/Gemini unsupported quota stays unknown, not FAIL/exhausted. Separate installation/auth/quota/wake, account-shared windows, null/reset/freshness, reserve admission vs guarantee. No paid probe, credential dumps, browser-cookie scraping or automatic overages. Root+installed package parity, deterministic fixture gates. CoS staffs one unique worker; preserve current operator harness restrictions until CEO edits."
+  },
+  {
+    "key": "onboarding",
+    "title": "Atman: discover agents, optional install/login, usage preferences and teammate-wake setup",
+    "role": "frontend",
+    "priority": 2,
+    "deps": [
+      "T-860"
+    ],
+    "body": "Integrate with existing T-810 local app and T-687 auth/reconnect; coordinate path ownership, do not rebuild either. Contract: docs/product/agent-onboarding-and-subscription-usage.md. Detect catalog PATH/user paths with aliases deduped; ask about more providers; selected official installer preview/manual/skip/recheck; native login and cancel/retry. Choose enabled accounts/models/concurrency/reserve, paid-overage OFF, unknown allowance asks user. Provider-specific persistent/on-demand wake consent. Inspect effective Claude crossSessionInbound and overrides; preview scoped/global authorized change or alert exact file/value with Open settings, I changed it-test again, manual mode. Preserve custom settings/hooks/statusline and unique worker identity. Other agents get capability-specific instructions, no invented universal setting. Show nonce-tested ACK/work states; design can proceed before native transport acceptance. Reuse graph first-win and existing metric schema. CoS staffs unique UI worker after coordinating T-810 owner."
+  },
+  {
+    "key": "acceptance",
+    "title": "Atman: independently verify agent onboarding, quota states and unattended teammate wake",
+    "role": "verification",
+    "priority": 2,
+    "needs": [
+      "own-machine"
+    ],
+    "deps": [
+      "quota",
+      "onboarding",
+      "T-818",
+      "T-857"
+    ],
+    "body": "Independent verification only after accepted integrated provider+wizard candidates and existing native-message gates. Use docs/product/agent-onboarding-and-subscription-usage.md. Source+installed package; aliases/missing/custom executable trust; selected install only; retry/cancel/offline auth; null/stale/real-zero/shared-account multiwindow quota; existing user hooks/statusline preserved; user alerts and Claude effective override/accept/hold/refuse. Approved idle and active native nonce ACKs without operator keystrokes; no socket-write-only woken claim, no new paid run labeled resume. Two unique seats and accepted predecessor triggering actual dependent work. Report setup funnel, first claim/accepted task, wake latency and intervention, quota coverage with denominators. Synthetic parser fixtures; bounded deliberate live probes only. CEO reviews/merges; no Sol approval dependency."
+  }
+]

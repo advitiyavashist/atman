@@ -121,6 +121,11 @@ tickets review T-001 --notes "paths changed, tests run, decisions"
 tickets ui
 ```
 
+`install.sh` refuses to overwrite an existing `~/.local/bin/tickets` that
+isn't already a symlink to this checkout (a pinned live release, or an
+unrelated tool) — pass `--prefix DIR` (or `PREFIX=DIR`) to install somewhere
+isolated instead, or `--force` to replace it anyway.
+
 `quickstart` creates a local board, registers the first agent, and adds three
 sample tasks in a real dependency chain. It is safe to run twice. Run it inside
 an existing git repo — `git init` first if `your-project` is not one yet — so
@@ -139,6 +144,19 @@ cd ~/tickets
 
 Check what is actually running: `tickets self` (script path, PATH entry, release
 status). `tickets --version` prints the pinned commit or flags drift.
+
+**macOS (Homebrew)** — same pinned-release mechanism, packaged as a formula
+(T-865; not yet published — see `packaging/homebrew/README.md`):
+
+```sh
+brew install advitiyavashist/homebrew-tap/atman
+atm --version   # verified release, same check as tickets self
+atm join <name> --roles backend
+atm ui
+```
+
+`brew uninstall atman` removes the CLI only; it does not touch any
+`~/.claude` or `~/.codex` hook configuration you installed separately.
 
 Any first seat: hook Claude Code, Codex, Cursor, Grok Bot, or a custom
 harness (see `install.sh` and [Bring your own agent](docs/byoa.md)).

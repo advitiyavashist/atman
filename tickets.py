@@ -2074,6 +2074,7 @@ def cmd_dispatch(a, board):
     if pending:
         sys.exit("dispatch: %s still waits on %s" % (t["id"], ", ".join(pending)))
     rows, _note = probe_integration_catalog()
+    attach_catalog_usage(rows)
     row = None
     for r in rows:
         if r["id"] == harness:
@@ -5315,7 +5316,7 @@ This board is being set up. I will ask you four things, in order:
 
 I will not spawn workers or create tickets until you answer.
 Run `tickets harness available` to probe every catalog row (missing is a row).
-It auto-checks usage; missing remaining/reset is a FAIL row.
+It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
 When they name tasks, use `tickets plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
@@ -5323,36 +5324,44 @@ Unattended persist ends at a reviewable SHA; human review is the gate.
 # Probe-only catalog for a new board. Codex stays listed with zero usage.
 # Gemini dispatches like the others; persist/hooks is the wake. No new Claude fable.
 # usage_args: non-spawning status/about only. Never -p/--print/exec/prompt.
+# quota: supported | unsupported | optional-admin (T-862; not a second registry).
 INTEGRATION_CATALOG = (
     {"id": "cursor", "name": "Cursor", "binaries": ("agent", "cursor-agent"),
      "if_yes": "tickets spawn <seat> --harness cursor --persist",
      "policy": "ok to spawn if chosen",
-     "usage_args": ("about", "--format", "json")},
+     "usage_args": ("about", "--format", "json"),
+     "quota": "optional-admin"},
     {"id": "agy", "name": "Antigravity", "binaries": ("agy",),
      "if_yes": "tickets spawn <seat> --harness agy --persist",
      "policy": "ok to spawn if chosen",
-     "usage_args": ("help",)},
+     "usage_args": ("help",),
+     "quota": "supported"},
     {"id": "claude", "name": "Claude Code", "binaries": ("claude",),
      "if_yes": "tickets spawn <seat> --harness claude",
      "policy": "ok to spawn if chosen; no new Claude fable",
-     "usage_args": ("auth", "status", "--json")},
+     "usage_args": ("auth", "status", "--json"),
+     "quota": "supported"},
     {"id": "codex", "name": "Codex", "binaries": ("codex",),
      "if_yes": "tickets spawn <seat> --harness codex",
      "policy": "catalog even with zero usage; do not spawn unless they say usage is back",
-     "usage_args": ("login", "status")},
+     "usage_args": ("login", "status"),
+     "quota": "supported"},
     {"id": "devin", "name": "Devin", "binaries": ("devin",),
      "if_yes": "tickets spawn <seat> --harness devin",
      "policy": "list; spawn only if the operator confirms the harness exists",
-     "usage_args": ("auth", "status")},
+     "usage_args": ("auth", "status"),
+     "quota": "unsupported"},
     {"id": "gemini", "name": "Gemini CLI", "binaries": ("gemini",),
      "if_yes": "tickets dispatch T-id --to <seat> --harness gemini  # persist/hooks wake",
      "policy": "ok to dispatch; persist/hooks wake; do not spawn a Gemini product job",
-     "usage_args": ("--version",)},
+     "usage_args": ("--version",),
+     "quota": "unsupported"},
     {"id": "grok", "name": "Grok (Cursor persist / grokbots)",
      "binaries": ("agent", "cursor-agent"),
      "if_yes": "tickets spawn <seat> --harness grok --persist",
      "policy": "Cursor Grok seats and grok-worker; same persist wake as cursor",
-     "usage_args": ("about", "--format", "json")},
+     "usage_args": ("about", "--format", "json"),
+     "quota": "unsupported"},
 )
 
 
@@ -5461,6 +5470,7 @@ def print_ceo_connect(board, seat="ceo"):
     name = atman_seat_name(seat)
     root = os.path.dirname(os.path.abspath(board)) if board else os.getcwd()
     rows, note = probe_integration_catalog()
+    attach_catalog_usage(rows)
     print("1. CATALOG + USAGE")
     print_integration_catalog(rows, note)
     print("Codex stays in the catalog with zero usage. Do not spawn Gemini. No new Claude fable.")
@@ -5540,7 +5550,7 @@ Record it here: `Onboarding name:` _(none yet — ask)_
 Run `tickets harness available`. It probes `command -v` for every catalog
 entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
 `gemini`) and auto-checks usage. Missing binary is a row, not a skip.
-Missing remaining or reset is a FAIL row. If `~/.local/bin/codex` is stale,
+Unsupported or missing remaining/reset is unknown, not exhausted. If `~/.local/bin/codex` is stale,
 it retargets to the newest `openai.chatgpt-*` extension binary.
 
 Ask: **Which of these do you want to use?** Do not spawn until they answer.
@@ -8565,7 +8575,7 @@ def cmd_connect(a, board):
         return
     print_onboarding_startup()
     print("Then probe integrations: `tickets harness available`")
-    print("It auto-checks usage; missing remaining/reset is a FAIL row.")
+    print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
     print("Announce the board/team name with `tickets msg --to everyone`, then ask")
     print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
@@ -12655,38 +12665,50 @@ def _run_usage_probe(argv, env, timeout=HARNESS_USAGE_TIMEOUT):
 
 
 def probe_catalog_usage(row, env=None, timeout=HARNESS_USAGE_TIMEOUT):
-    """Usage check for one catalog row. Missing remaining or reset is FAIL."""
+    """Usage check for one catalog row. Missing remaining/reset is unknown, not FAIL."""
+    try:
+        from quota_adapters import (
+            SUPPORTED_QUOTA, classify_catalog_usage, detect_auth_error,
+            parse_cursor_admin, parse_provider_quota)
+    except ImportError:
+        from ticket_board.quota_adapters import (
+            SUPPORTED_QUOTA, classify_catalog_usage, detect_auth_error,
+            parse_cursor_admin, parse_provider_quota)
     spec = next((s for s in INTEGRATION_CATALOG if s["id"] == row.get("id")), {})
     args = catalog_usage_argv(spec)
     reason = ""
     output = ""
+    remaining, reset = None, None
+    probe_env = dict(env if env is not None else os.environ)
+    cursor_admin = bool(probe_env.get("ATMAN_CURSOR_ADMIN_USAGE"))
     if not row.get("on_disk") or not row.get("path"):
-        remaining, reset = None, None
         reason = "missing binary"
     elif not args:
-        remaining, reset = None, None
         reason = "no usage probe"
     else:
-        probe_env = dict(env if env is not None else os.environ)
         argv = [row["path"]] + list(args)
         output, err = _run_usage_probe(argv, probe_env, timeout=timeout)
-        remaining, reset = parse_usage_remaining_reset(output)
-        reason = err
-        if remaining is None or reset is None:
-            if not reason:
-                missing = []
-                if remaining is None:
-                    missing.append("remaining")
-                if reset is None:
-                    missing.append("reset")
-                reason = "missing " + " and ".join(missing)
-    ok = remaining is not None and reset is not None
+        reason = err or detect_auth_error(output)
+        hid = row.get("id")
+        if hid == "cursor" and cursor_admin:
+            remaining, reset = parse_cursor_admin(output)
+        else:
+            remaining, reset = parse_provider_quota(hid, output)
+        if remaining is None and reset is None and hid in SUPPORTED_QUOTA:
+            remaining, reset = parse_usage_remaining_reset(output)
+        if remaining is None and reset is None and not reason:
+            reason = "missing remaining and reset"
+    usage, reason = classify_catalog_usage(
+        row.get("id"), remaining, reset, reason=reason,
+        on_disk=bool(row.get("on_disk") and row.get("path")),
+        cursor_admin=cursor_admin)
     return {
-        "usage": "ok" if ok else "FAIL",
+        "usage": usage,
         "remaining": remaining,
         "reset": reset,
         "usage_reason": reason,
-        "usage_ok": ok,
+        "usage_ok": usage == "ok",
+        "usage_status": usage,
     }
 
 
@@ -12732,7 +12754,7 @@ def probe_integration_catalog(home=None, search_path=None):
 
 def _print_catalog_usage_line(row):
     print("         usage %-4s remaining=%s  reset=%s%s" % (
-        row.get("usage") or "FAIL",
+        row.get("usage") or "unknown",
         _fmt_usage_field(row.get("remaining")),
         _fmt_usage_field(row.get("reset")),
         ("  (%s)" % row["usage_reason"]) if row.get("usage_reason") and row.get("usage") != "ok" else ""))
@@ -12749,7 +12771,7 @@ def cmd_harness_usage(a, board):
     print("%-8s %-6s %-18s %s" % ("id", "usage", "remaining", "reset"))
     for r in rows:
         print("%-8s %-6s %-18s %s" % (
-            r["id"], r.get("usage") or "FAIL",
+            r["id"], r.get("usage") or "unknown",
             (_fmt_usage_field(r.get("remaining")))[:18],
             _fmt_usage_field(r.get("reset"))))
         if r.get("usage") != "ok" and r.get("usage_reason"):
@@ -12758,7 +12780,7 @@ def cmd_harness_usage(a, board):
         if fail:
             print("         FAIL %s" % r["policy"])
     print("")
-    print("Missing remaining/reset is a FAIL row. Codex stays cataloged with zero usage.")
+    print("Unsupported or missing remaining/reset is unknown, not exhausted. Codex stays cataloged.")
     print("Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job).")
     print("No new Claude fable. Cursor is the only spawn this desk uses.")
 
@@ -12772,7 +12794,7 @@ def cmd_harness_available(a, board):
     print("")
     print_recorded_usage(board)
     print("")
-    print("USAGE: missing remaining/reset is a FAIL row. Do not spawn a FAIL seat.")
+    print("USAGE: unsupported or missing remaining/reset is unknown, not exhausted. Do not spawn a FAIL or exhausted seat.")
     if board_is_living(board):
         print("This is a living board. Do not invent a new team.")
         print("Announce the Atman role as atman-<seat>. CoS (cursor) staffs.")
@@ -12792,7 +12814,7 @@ def cmd_harness(a, board):
     poll interval discovering it does not. The result is written to the agent
     record so `spawn --list` and the master can see who is really reachable.
     available: probe command -v for every catalog integration (missing is a row)
-    and auto-check usage (missing remaining/reset is FAIL). Does not spawn.
+    and auto-check usage (unsupported remaining/reset is unknown). Does not spawn.
     usage: the usage table alone (same probes as available).
     """
     if a.harness_cmd == "available":
@@ -15647,9 +15669,9 @@ def main():
     x.add_argument("--timeout", type=int, default=15)
     hs.add_parser("list", help="every registered agent, its harness and its last check")
     hs.add_parser("available",
-                  help="probe command -v and usage remaining/reset for every catalog row (missing remaining/reset is FAIL; do not spawn)")
+                  help="probe command -v and usage remaining/reset for every catalog row (unsupported remaining/reset is unknown; do not spawn FAIL/exhausted)")
     hs.add_parser("usage",
-                  help="auto-check remaining/reset for every catalog row (missing is FAIL; do not spawn)")
+                  help="auto-check remaining/reset for every catalog row (unsupported remaining/reset is unknown; do not spawn FAIL/exhausted)")
     c.set_defaults(fn=cmd_harness, harness_cmd="list", name="", harness="", cmd_template="", model="", cwd="",
                    timeout=HARNESS_CHECK_TIMEOUT, login=False, recover_stale=False)
 

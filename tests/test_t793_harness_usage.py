@@ -1,8 +1,8 @@
 """T-793: harness available auto-checks usage remaining/reset (throwaway board).
 
 Every catalog row (cursor, agy, claude, codex, devin, gemini) must be
-usage-checked. Missing remaining or reset is FAIL. Probes are status/about
-only — never -p/--print/exec or a model prompt.
+usage-checked. Missing remaining or reset is unknown (T-862), not FAIL.
+Probes are status/about only — never -p/--print/exec or a model prompt.
 """
 import importlib.util
 import os
@@ -111,7 +111,7 @@ def test_parse_usage_remaining_reset_does_not_invent():
     assert remaining == "0" and reset == "never"
 
 
-def test_harness_available_fail_when_remaining_reset_missing(tmp_path):
+def test_harness_available_unknown_when_remaining_reset_missing(tmp_path):
     repo = make_repo(tmp_path / "repo")
     env = clean_env(tmp_path)
     r = run(repo, "init", env=env, tmp_path=tmp_path)
@@ -122,16 +122,16 @@ def test_harness_available_fail_when_remaining_reset_missing(tmp_path):
     assert r.returncode == 0, r.stderr
     for cid in CATALOG_IDS:
         assert cid in r.stdout, cid
-        assert "usage FAIL" in r.stdout
+        assert "usage unknown" in r.stdout
     assert "remaining=(missing)" in r.stdout
     assert "reset=(missing)" in r.stdout
-    assert "missing remaining/reset is a fail row" in r.stdout.lower()
+    assert "unknown, not exhausted" in r.stdout.lower()
     assert "do not spawn" in r.stdout.lower()
     agents = list((repo / ".tickets" / "agents").glob("*")) if (repo / ".tickets" / "agents").exists() else []
     assert agents == []
 
 
-def test_harness_usage_fail_table_for_every_catalog_row(tmp_path):
+def test_harness_usage_unknown_table_for_every_catalog_row(tmp_path):
     repo = make_repo(tmp_path / "repo")
     env = clean_env(tmp_path)
     assert run(repo, "init", env=env, tmp_path=tmp_path).returncode == 0
@@ -141,7 +141,7 @@ def test_harness_usage_fail_table_for_every_catalog_row(tmp_path):
     assert r.returncode == 0, r.stderr
     for cid in CATALOG_IDS:
         assert cid in r.stdout, cid
-    assert r.stdout.count("FAIL") >= 6
+    assert r.stdout.lower().count("unknown") >= 6
     assert "(missing)" in r.stdout
     assert "do not spawn" in r.stdout.lower()
 
@@ -160,34 +160,35 @@ def test_harness_available_ok_when_remaining_and_reset_present(tmp_path):
     assert "remaining=80%" in r.stdout
     assert "reset=2026-09-13T08:00" in r.stdout
     assert "usage FAIL" not in r.stdout
+    assert "usage unknown" in r.stdout  # personal cursor/devin/gemini stay unknown
     agents = list((repo / ".tickets" / "agents").glob("*")) if (repo / ".tickets" / "agents").exists() else []
     assert agents == []
 
 
-def test_harness_available_fail_when_only_remaining(tmp_path):
+def test_harness_available_unknown_when_only_remaining(tmp_path):
     repo = make_repo(tmp_path / "repo")
     env = clean_env(tmp_path)
     install_catalog_bins(tmp_path / "bin", USAGE_REMAINING_ONLY_SH)
     assert run(repo, "init", env=env, tmp_path=tmp_path).returncode == 0
     r = run(repo, "harness", "available", env=env, tmp_path=tmp_path)
     assert r.returncode == 0, r.stderr
-    assert "usage FAIL" in r.stdout
+    assert "usage unknown" in r.stdout
     assert "remaining=80%" in r.stdout
     assert "reset=(missing)" in r.stdout
-    assert "usage ok" not in r.stdout
+    assert "usage FAIL" not in r.stdout
 
 
-def test_harness_available_fail_when_only_reset(tmp_path):
+def test_harness_available_unknown_when_only_reset(tmp_path):
     repo = make_repo(tmp_path / "repo")
     env = clean_env(tmp_path)
     install_catalog_bins(tmp_path / "bin", USAGE_RESET_ONLY_SH)
     assert run(repo, "init", env=env, tmp_path=tmp_path).returncode == 0
     r = run(repo, "harness", "available", env=env, tmp_path=tmp_path)
     assert r.returncode == 0, r.stderr
-    assert "usage FAIL" in r.stdout
+    assert "usage unknown" in r.stdout
     assert "remaining=(missing)" in r.stdout
     assert "reset=2026-09-13T08:00" in r.stdout
-    assert "usage ok" not in r.stdout
+    assert "usage FAIL" not in r.stdout
 
 
 def test_harness_usage_ok_table(tmp_path):
@@ -199,5 +200,6 @@ def test_harness_usage_ok_table(tmp_path):
     assert r.returncode == 0, r.stderr
     for cid in CATALOG_IDS:
         assert cid in r.stdout, cid
-    assert r.stdout.count("ok") >= 6
-    assert "FAIL" not in r.stdout.split("USAGE", 1)[-1].split("Missing", 1)[0]
+    assert r.stdout.count("ok") >= 3  # supported: agy, claude, codex
+    table = r.stdout.split("USAGE", 1)[-1]
+    assert "FAIL" not in table.split("Unsupported", 1)[0]
