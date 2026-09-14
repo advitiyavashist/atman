@@ -1,4 +1,7 @@
 # T-909 pinned isolated test/runtime extras. Install into a fresh venv.
+pip==25.3
+setuptools==75.9.1
+wheel==0.45.1
 PyYAML==6.0.3
 Pygments==2.21.0
 attrs==26.1.0

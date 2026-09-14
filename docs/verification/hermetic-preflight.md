@@ -6,9 +6,9 @@ receipt as an equivalent environment.
 
 T-891 ran `/usr/bin/python3 -m pytest` with pytest 8.4.2 loaded from operator
 user-site via `PYTHONPATH`. Hermetic `HOME`/`TMPDIR` then dropped that user-site
-for children, so many subprocesses raised `ModuleNotFoundError: ticket_board` or
-`No module named pytest`. Those failures are an environment fault, not a
-production defect and not a waiver.
+for children. This preflight reproduces that environment mechanism only for its
+representative import and collection probes. It does **not** classify all 61
+T-891 failures, certify packaging behavior generally, or prove the full suite.
 
 ## Distinctions that stay true
 
@@ -38,8 +38,9 @@ under the workdir; commit only the public manifest beside this page.
 The script:
 
 1. Creates a fresh venv from the requested interpreter (prefer Python 3.9.6).
-2. Installs pinned `pytest==8.4.2` plus declared contracts extras into that
-   venv (`scripts/requirements-preflight.txt` records the freeze).
+2. Installs the exact `name==version` freeze from
+   `scripts/requirements-preflight.txt`; ranges, markers, URLs, duplicate names,
+   or missing bootstrap pins fail closed.
 3. Installs the selected tree (`pip install -e --no-deps`) and a no-deps wheel
    into a second venv.
 4. Runs `--help` on root `tickets.py`, `src/ticket_board/cli.py`, and the
@@ -49,6 +50,9 @@ The script:
 6. Collects only `tests/test_t263_init_isolation.py` and
    `tests/test_t836_clean_wheel.py`. Wheel collection overrides
    `pytest.ini` `pythonpath` so `ticket_board` cannot come from `src/`.
+7. Records the requirements-file SHA-256 and verifies the installed
+   `pip==25.3`, `setuptools==75.9.1`, and `wheel==0.45.1` versions in both the
+   source and wheel environments.
 
 Pass means every origin resolved `ticket_board` and `pytest` from the selected
 tree or its venv, never operator user-site or another SHA. It does not mean the

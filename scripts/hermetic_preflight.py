@@ -26,14 +26,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 PINNED_PYTEST = "8.4.2"
-PINNED_INSTALL = (
-    "pip>=24,<26",
-    "setuptools>=68,<76",
-    "wheel>=0.41,<0.46",
-    "pytest==%s" % PINNED_PYTEST,
-    "jsonschema>=4.18,<5",
-    "pyyaml>=6,<7",
-)
+REQUIREMENTS_FILE = Path(__file__).with_name("requirements-preflight.txt")
+BOOTSTRAP_PACKAGES = ("pip", "setuptools", "wheel")
+EXACT_REQUIREMENT = re.compile(r"^([A-Za-z0-9_.-]+)==([^;\s]+)$")
 
 STRIP_PREFIXES = (
     "TICKET_",
@@ -71,6 +66,37 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def normalized_package_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def load_frozen_requirements(path: Path = REQUIREMENTS_FILE) -> Tuple[List[str], Dict[str, str]]:
+    """Load a complete exact freeze; reject ranges, markers, URLs, and duplicates."""
+    if not path.is_file():
+        fail("missing frozen requirements file %s" % path)
+    lines: List[str] = []
+    versions: Dict[str, str] = {}
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = EXACT_REQUIREMENT.fullmatch(line)
+        if not match:
+            fail("requirements line %d is not an exact name==version pin: %s" % (number, line))
+        name, version = match.groups()
+        key = normalized_package_name(name)
+        if key in versions:
+            fail("duplicate frozen requirement %s" % name)
+        versions[key] = version
+        lines.append(line)
+    missing = [name for name in (*BOOTSTRAP_PACKAGES, "pytest") if name not in versions]
+    if missing:
+        fail("frozen requirements missing %s" % ", ".join(missing))
+    if versions["pytest"] != PINNED_PYTEST:
+        fail("frozen pytest %s != %s" % (versions["pytest"], PINNED_PYTEST))
+    return lines, versions
 
 
 def run(
@@ -232,6 +258,31 @@ def pip_install(venv_python: Path, args: Sequence[str], env: Dict[str, str]) -> 
         fail("pip install %s" % " ".join(args), proc)
 
 
+def installed_versions(
+    venv_python: Path, names: Sequence[str], env: Dict[str, str]
+) -> Dict[str, str]:
+    script = (
+        "import importlib.metadata, json, sys\n"
+        "print(json.dumps({name: importlib.metadata.version(name) for name in sys.argv[1:]}, sort_keys=True))\n"
+    )
+    proc = run([str(venv_python), "-c", script, *names], env=env)
+    if proc.returncode != 0:
+        fail("bootstrap version probe", proc)
+    return json.loads(proc.stdout)
+
+
+def require_expected_versions(
+    actual: Dict[str, str], expected: Dict[str, str], label: str
+) -> None:
+    mismatches = {
+        name: {"expected": expected[name], "actual": actual.get(name)}
+        for name in BOOTSTRAP_PACKAGES
+        if actual.get(name) != expected[name]
+    }
+    if mismatches:
+        fail("%s bootstrap versions drifted: %s" % (label, json.dumps(mismatches, sort_keys=True)))
+
+
 def probe_imports(venv_python: Path, env: Dict[str, str], cwd: Path) -> Dict[str, str]:
     script = (
         "import json, pytest, sys, ticket_board\n"
@@ -321,6 +372,9 @@ def preflight_origin(
     src_override: Optional[Path],
     operator_user_site: Path,
     host_presence: List[str],
+    requirements_file: Path,
+    frozen_requirements: List[str],
+    expected_versions: Dict[str, str],
 ) -> Dict[str, Any]:
     if sha:
         sha = git_rev_parse(repo, sha)
@@ -348,8 +402,9 @@ def preflight_origin(
 
     source_python = make_venv(python, source_venv)
     source_env = sanitized_env(home / "source", tmp / "source", source_venv)
-    pip_install(source_python, ["-U", "pip", "setuptools", "wheel"], source_env)
-    pip_install(source_python, PINNED_INSTALL, source_env)
+    pip_install(source_python, ["--requirement", str(requirements_file)], source_env)
+    source_bootstrap = installed_versions(source_python, BOOTSTRAP_PACKAGES, source_env)
+    require_expected_versions(source_bootstrap, expected_versions, "source")
     pip_install(source_python, ["-e", str(src), "--no-deps"], source_env)
 
     source_probe = probe_imports(source_python, source_env, src)
@@ -425,8 +480,9 @@ def preflight_origin(
 
     wheel_python = make_venv(python, wheel_venv)
     wheel_env = sanitized_env(home / "wheel", tmp / "wheel", wheel_venv)
-    pip_install(wheel_python, ["-U", "pip", "setuptools", "wheel"], wheel_env)
-    pip_install(wheel_python, PINNED_INSTALL, wheel_env)
+    pip_install(wheel_python, ["--requirement", str(requirements_file)], wheel_env)
+    wheel_bootstrap = installed_versions(wheel_python, BOOTSTRAP_PACKAGES, wheel_env)
+    require_expected_versions(wheel_bootstrap, expected_versions, "wheel")
     pip_install(wheel_python, [str(wheel), "--no-deps", "--no-cache-dir"], wheel_env)
 
     wheel_probe = probe_imports(wheel_python, wheel_env, tmp / "wheel")
@@ -516,6 +572,12 @@ def preflight_origin(
             "atm_present": atm.is_file(),
         },
         "pins": pinned,
+        "requirements": list(frozen_requirements),
+        "bootstrap": {
+            "requested": {name: expected_versions[name] for name in BOOTSTRAP_PACKAGES},
+            "source": source_bootstrap,
+            "wheel": wheel_bootstrap,
+        },
         "fixture_note": fixture_note,
         "ok": True,
     }
@@ -583,6 +645,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     operator_user_site = Path(site.getusersitepackages())
     host_presence = parent_env_presence(list(STRIP_EXACT) + list(STRIP_PREFIXES))
+    frozen_requirements, expected_versions = load_frozen_requirements()
 
     shas = list(args.shas)
     if not shas and not args.src:
@@ -599,6 +662,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 src_override=Path(args.src),
                 operator_user_site=operator_user_site,
                 host_presence=host_presence,
+                requirements_file=REQUIREMENTS_FILE,
+                frozen_requirements=frozen_requirements,
+                expected_versions=expected_versions,
             )
         )
     for sha in shas:
@@ -611,6 +677,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 src_override=None,
                 operator_user_site=operator_user_site,
                 host_presence=host_presence,
+                requirements_file=REQUIREMENTS_FILE,
+                frozen_requirements=frozen_requirements,
+                expected_versions=expected_versions,
             )
         )
 
@@ -622,7 +691,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "requested": python,
             "version": version.replace("Python ", ""),
         },
-        "pins_requested": list(PINNED_INSTALL),
+        "pins_requested": list(frozen_requirements),
+        "requirements_freeze": {
+            "path": "scripts/requirements-preflight.txt",
+            "sha256": sha256_file(REQUIREMENTS_FILE),
+            "exact": True,
+        },
         "child_env": {
             "PYTHONNOUSERSITE": "1",
             "PYTHONPATH": "unset",
