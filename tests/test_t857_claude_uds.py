@@ -1,10 +1,11 @@
-"""T-857: Claude UDS inbox is JSON user envelope + ack-gated woken."""
+"""T-857: Claude UDS inbox takes a JSON user envelope; woken needs a receipt."""
 
 import json
 import os
 import socket
 import threading
 import time
+import uuid
 
 import session_adapters as sa
 
@@ -68,8 +69,11 @@ class AckInbox:
             pass
 
 
-def test_user_envelope_plus_ack_is_woken(board, cache_dir, sock_dir, monkeypatch):
+def test_verified_frame_shape_and_receipt_gated_woken(board, cache_dir, sock_dir, monkeypatch):
     monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    # Production never waits for a receipt; raise the budget so the branch
+    # that would honour one is exercised deterministically.
+    monkeypatch.setattr(sa, "CLAUDE_ACK_WAIT_SECS", 2.0)
     sock_path = str(__import__("pathlib").Path(sock_dir) / "claude-ack.sock")
     inbox = AckInbox(sock_path)
     sa.write_endpoint(str(board), "cos", {
@@ -84,6 +88,9 @@ def test_user_envelope_plus_ack_is_woken(board, cache_dir, sock_dir, monkeypatch
     assert inbox.frames[0] == {"type": "auth", "token": "tok"}
     user = inbox.frames[1]
     assert user["type"] == "user"
+    assert user["msgV"] == 1
+    assert user["priority"] == "next"
+    assert uuid.UUID(user["msg_id"]).version == 4
     assert user["message"]["role"] == "user"
     assert "nonce-idle please reply" in user["message"]["content"]
     ep = sa.read_endpoint(str(board), "cos")
@@ -91,17 +98,32 @@ def test_user_envelope_plus_ack_is_woken(board, cache_dir, sock_dir, monkeypatch
     assert ep.get("last_delivery_status") == "woken"
 
 
+def test_raw_text_payload_is_not_a_wake():
+    """A bare line after auth is dropped by the JSONL inbox, so it never woke."""
+    frame = sa._claude_user_envelope("please act\nsecond line")
+    line = json.dumps(frame)
+    assert "\n" not in line
+    assert json.loads(line)["message"]["content"] == "please act\nsecond line"
+    assert sa._claude_ack_ok(None) is False
+    assert sa._claude_ack_ok("ok") is False
+
+
 def test_no_ack_is_delivered_unconfirmed_without_heartbeat(board, cache_dir, sock_dir, monkeypatch):
+    """Live Claude Code never acks, so the wake must not stall waiting."""
     monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    assert sa.CLAUDE_ACK_WAIT_SECS == 0.0
     sock_path = str(__import__("pathlib").Path(sock_dir) / "claude-silent.sock")
     inbox = AckInbox(sock_path, ack=False)
     sa.write_endpoint(str(board), "cos", {
         "seat": "cos", "provider": "claude", "mode": "native",
         "socket": sock_path, "token": "tok", "pid": os.getpid(), "at": "now",
         "lease_id": "lease-c", "fence": 1, "heartbeat_epoch": 11})
+    t0 = time.time()
     label = sa.wake_seat(str(board), "cos", "hello", harness="claude",
                           message_id="claude-silent-1")
+    elapsed = time.time() - t0
     inbox.close()
+    assert elapsed < 1.0, elapsed
     assert label == "delivered-unconfirmed", label
     ep = sa.read_endpoint(str(board), "cos")
     assert ep["heartbeat_epoch"] == 11
@@ -111,7 +133,7 @@ def test_no_ack_is_delivered_unconfirmed_without_heartbeat(board, cache_dir, soc
     assert inbox.frames[1]["type"] == "user"
 
 
-def test_msg_task_prints_woken_only_when_inbox_acks(board, cache_dir, sock_dir):
+def test_msg_task_receipt_is_delivered_unconfirmed_without_an_ack(board, cache_dir, sock_dir):
     sock_path = str(__import__("pathlib").Path(sock_dir) / "claude-msg.sock")
     inbox = FakeInbox(sock_path)
     r = _run(board, "join", "cos-seat", "--roles", "ops", "--persistent",
@@ -123,7 +145,9 @@ def test_msg_task_prints_woken_only_when_inbox_acks(board, cache_dir, sock_dir):
     sent = _run(board, "msg", "please act", "--to", "cos-seat", "--task",
                 agent="sender", env={"TICKETS_CACHE_DIR": cache_dir})
     assert sent.returncode == 0, sent.stderr
-    assert "wake: cos-seat -> woken" in sent.stdout
+    # FakeInbox does ack, but production does not wait for one, so the CLI
+    # must report what it actually knows.
+    assert "wake: cos-seat -> delivered-unconfirmed" in sent.stdout
     payload = inbox.wait_for_message()
     inbox.close()
     assert '"type": "user"' in payload or '"type":"user"' in payload

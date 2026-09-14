@@ -600,14 +600,21 @@ def wake_payload(fmt_msg, message):
     return "tickets board message -- %s\n(see `tickets inbox` for the rest)" % fmt_msg(message)
 
 
-def _claude_user_envelope(text):
+def _claude_user_envelope(text, msg_id=""):
     """Claude Code UDS inbox is JSONL, not a raw text line.
 
-    Documented inject (claude 2.1.263): auth frame, then
-    {"type":"user","message":{"role":"user","content":...}}.
-    A raw second line is ignored after auth, so write-success is not a wake.
+    Verified frame (claude 2.1.263/2.1.266): auth frame, then one JSON object
+    carrying msgV/msg_id/type/message/priority. A raw second line is ignored
+    after auth, so write-success is not a wake. The receiver dedupes by
+    msg_id, which is why a retry must reuse the id it already sent.
     """
-    return {"type": "user", "message": {"role": "user", "content": text}}
+    return {
+        "msgV": 1,
+        "msg_id": str(msg_id or uuid.uuid4()),
+        "type": "user",
+        "message": {"role": "user", "content": text},
+        "priority": "next",
+    }
 
 
 def _claude_ack_ok(obj):
@@ -625,17 +632,23 @@ def _claude_ack_ok(obj):
 
 
 def _recv_json_line(sock, deadline):
+    """One JSON line, waiting no longer than `deadline`.
+
+    Always makes one attempt, non-blocking when the deadline has already
+    passed, so a receipt that is already sitting in the buffer still counts.
+    """
     buf = b""
-    while time.time() < deadline:
-        sock.settimeout(max(0.05, deadline - time.time()))
+    while True:
+        remaining = deadline - time.time()
+        sock.settimeout(max(0.0, remaining))
         try:
             chunk = sock.recv(4096)
-        except socket.timeout:
-            break
+        except (socket.timeout, BlockingIOError):
+            return None
         except OSError:
             return None
         if not chunk:
-            break
+            return None
         buf += chunk
         if b"\n" in buf:
             line = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
@@ -645,14 +658,24 @@ def _recv_json_line(sock, deadline):
                 return json.loads(line)
             except ValueError:
                 return None
-    return None
+        if remaining <= 0:
+            return None
 
 
-def _poke_claude_wake(ep, text):
-    """Inject a Claude UDS user envelope. woken only on a same-connection ack.
+# Claude Code sends no receipt on the injector socket, so blocking for one
+# only stalls every wake. Read whatever already arrived and return. Tests
+# raise this to exercise the receipt branch.
+CLAUDE_ACK_WAIT_SECS = 0.0
 
-    Live Claude Code does not write an ack on the injector socket; that is
-    delivered-unconfirmed, not woken. Raw text after auth is never a wake.
+
+def _poke_claude_wake(ep, text, msg_id=""):
+    """Inject a Claude UDS user envelope. woken only on a real receipt.
+
+    Live Claude Code does not write an ack on the injector socket, so the
+    honest receipt is delivered-unconfirmed: the bytes left here, nobody
+    confirmed a turn. Raw text after auth is never a wake. Only a failure to
+    connect or to finish the write is a connection error worth retrying --
+    a completed write must never be sent twice under a fresh id.
     """
     sock_path = ep.get("socket") or ""
     if not sock_path or not os.path.exists(sock_path):
@@ -665,9 +688,13 @@ def _poke_claude_wake(ep, text):
         token = ep.get("token") or ""
         if token:
             s.sendall((json.dumps({"type": "auth", "token": token}) + "\n").encode("utf-8"))
-        s.sendall((json.dumps(_claude_user_envelope(text)) + "\n").encode("utf-8"))
+        s.sendall((json.dumps(_claude_user_envelope(text, msg_id)) + "\n").encode("utf-8"))
         wrote = True
-        ack = _recv_json_line(s, time.time() + 2)
+        try:
+            s.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        ack = _recv_json_line(s, time.time() + CLAUDE_ACK_WAIT_SECS)
         if _claude_ack_ok(ack):
             return "woken"
         return "delivered-unconfirmed"
@@ -680,8 +707,34 @@ def _poke_claude_wake(ep, text):
             pass
 
 
-def _poke_claude(ep, text):
-    return _poke_claude_wake(ep, text)
+def _poke_claude(ep, text, msg_id=""):
+    return _poke_claude_wake(ep, text, msg_id)
+
+
+# Only these mean "the bytes never left"; anything else is a delivery outcome.
+CLAUDE_RETRYABLE = ("queued-offline",)
+
+
+def _poke_claude_until(ep, text, attempts=None):
+    """Retry one inject on connection errors only, reusing the same msg_id.
+
+    The receiver dedupes by msg_id, so resending the id it may already hold is
+    safe; minting a new one per attempt is what would double-post a turn.
+    """
+    attempts = NATIVE_POKE_ATTEMPTS if attempts is None else attempts
+    msg_id = str(uuid.uuid4())
+    label = "queued-offline"
+    for _ in range(max(1, int(attempts))):
+        poked = _poke_claude(ep, text, msg_id)
+        # Older mocks answer True/False rather than a label.
+        if poked is True:
+            return "woken"
+        if poked is False:
+            return "refused"
+        label = str(poked or "queued-offline")
+        if label not in CLAUDE_RETRYABLE:
+            return label
+    return label
 
 
 _WS_GUID = "258EAFA5-E914-47DA-95AA-C5AB0DC85B11"
@@ -1166,14 +1219,7 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         return "no live endpoint"
     lease, fence = _endpoint_lease_fence(ep)
     if provider == "claude":
-        # One inject. Mocked _poke_claude may still return True/False.
-        poked = _poke_claude(ep, text)
-        if poked is True:
-            label = "woken"
-        elif poked is False:
-            label = "refused"
-        else:
-            label = str(poked or "queued-offline")
+        label = _poke_claude_until(ep, text)
         ok = label == "woken"
     elif provider == "cursor":
         label = _cursor_pause_resume(ep, text)
