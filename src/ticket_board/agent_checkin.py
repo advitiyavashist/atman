@@ -141,14 +141,18 @@ def _agent_update(board, owner, mutate):
     return rec
 
 
-def checkin(board, owner, ticket=None, note=""):
-    """Record where this agent is working: cwd, worktree root, branch, sha."""
-    _state, _mismatch = _git_state_raw()
+def checkin(board, owner, ticket=None, note="", cwd=None):
+    """Record where this agent is working: cwd, worktree root, branch, sha.
+
+    `cwd` is the seat's worktree (T-875). Default remains this process's cwd.
+    """
+    here = os.path.abspath(cwd) if cwd else os.getcwd()
+    _state, _mismatch = _git_state_raw(here)
     g = _state or {}
     fields = {
         "owner": owner,
-        "cwd": os.getcwd(),
-        "worktree": g.get("top", ""),
+        "cwd": here,
+        "worktree": g.get("top", "") or here,
         "branch": g.get("branch", ""),
         "sha": g.get("sha", ""),
         "dirty": g.get("dirty", 0),
