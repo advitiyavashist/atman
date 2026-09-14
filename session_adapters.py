@@ -860,9 +860,37 @@ def _codex_app_server_rpc(method, params, timeout=5):
     return _codex_ws_rpc(method, params, timeout=timeout)
 
 
-def _thread_ids_from_loaded_result(resp):
-    ids = []
+def _collect_loaded_thread_ids(items, ids):
+    for item in items or []:
+        if isinstance(item, str) and item.strip():
+            ids.append(item.strip())
+        elif isinstance(item, dict):
+            for key in ("id", "threadId", "thread_id"):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    ids.append(val.strip())
+                    break
 
+
+def _thread_ids_from_loaded_result(resp):
+    """Thread ids from thread/loaded/list.
+
+    Production (codex-cli 0.154+): ``result: {data: ["<id>", ...], nextCursor}``.
+    Walking only ``id``/``threadId`` keys misses that shape, so loaded checks
+    were always false and wake never called turn/start.
+    """
+    ids = []
+    result = (resp or {}).get("result")
+    if isinstance(result, list):
+        _collect_loaded_thread_ids(result, ids)
+        return ids
+    if not isinstance(result, dict):
+        return ids
+    data = result.get("data")
+    if isinstance(data, list):
+        _collect_loaded_thread_ids(data, ids)
+        return ids
+    # compat: older fixtures nested {id: ...} anywhere under result
     def walk(obj):
         if isinstance(obj, dict):
             for key, val in obj.items():
@@ -871,10 +899,38 @@ def _thread_ids_from_loaded_result(resp):
                 else:
                     walk(val)
         elif isinstance(obj, list):
+            _collect_loaded_thread_ids(obj, ids)
             for item in obj:
-                walk(item)
+                if isinstance(item, (dict, list)):
+                    walk(item)
 
-    walk((resp or {}).get("result"))
+    walk(result)
+    return ids
+
+
+def _loaded_next_cursor(resp):
+    result = (resp or {}).get("result")
+    if not isinstance(result, dict):
+        return ""
+    return (result.get("nextCursor") or result.get("next_cursor") or "").strip()
+
+
+def _codex_loaded_thread_ids():
+    """All loaded thread ids, following nextCursor."""
+    ids = []
+    cursor = ""
+    seen = set()
+    while True:
+        params = {"cursor": cursor} if cursor else {}
+        resp = _codex_app_server_rpc("thread/loaded/list", params)
+        if not resp or resp.get("error"):
+            break
+        ids.extend(_thread_ids_from_loaded_result(resp))
+        nxt = _loaded_next_cursor(resp)
+        if not nxt or nxt in seen:
+            break
+        seen.add(nxt)
+        cursor = nxt
     return ids
 
 
@@ -882,10 +938,33 @@ def _codex_thread_is_loaded(thread):
     thread = (thread or "").strip()
     if not thread:
         return False
-    resp = _codex_app_server_rpc("thread/loaded/list", {})
+    return thread in _codex_loaded_thread_ids()
+
+
+_ACTIVE_TURN = ("inprogress", "in_progress", "active", "running", "busy")
+
+
+def _result_shows_active_turn(result):
+    if not isinstance(result, dict):
+        return False
+    for key in ("status", "state"):
+        if str(result.get(key) or "").lower().replace("-", "_") in _ACTIVE_TURN:
+            return True
+    turn = result.get("turn") or result.get("activeTurn") or result.get("active_turn")
+    if isinstance(turn, dict):
+        return _result_shows_active_turn(turn)
+    return False
+
+
+def _codex_thread_is_busy(thread):
+    """True when the loaded thread has an active turn. Do not turn/start then."""
+    thread = (thread or "").strip()
+    if not thread:
+        return False
+    resp = _codex_app_server_rpc("thread/read", {"threadId": thread})
     if not resp or resp.get("error"):
         return False
-    return thread in _thread_ids_from_loaded_result(resp)
+    return _result_shows_active_turn(resp.get("result") or {})
 
 
 def _codex_queue_start(thread):
@@ -896,43 +975,58 @@ def _codex_queue_start(thread):
     return True
 
 
-def _codex_turn_start(thread, text):
-    """Direct turn inject via app-server when the thread is loaded."""
+def _codex_turn_start(thread, text, message_id=""):
+    """Direct turn inject via app-server when the thread is loaded and idle."""
     params = {
         "threadId": thread,
         "input": [{"type": "text", "text": text}],
     }
+    if message_id:
+        params["clientUserMessageId"] = str(message_id)
     resp = _codex_app_server_rpc("turn/start", params)
     if not resp or resp.get("error"):
         return False
     return True
 
 
-def _poke_codex_wake(ep, text):
-    """Enqueue then start. Returns woken | queued-offline | refused.
+def _codex_queue_cli(thread, text):
+    cmd = ["codex", "queue", "--thread", thread, "--message", text]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
-    `codex queue` alone writes ~/.codex/queue_1.sqlite and does not resume a
-    paused session. Managed app-server `thread/queue/start` or `turn/start` is
-    required for Claude-parity pause→resume. Sqlite-only success is
-    queued-offline (durable, not a native wake).
+
+CODEX_OFFLINE_HINT = "run the thread in terminal Codex to enable native wake"
+
+
+def _poke_codex_wake(ep, text, message_id=""):
+    """Wake a Codex thread. Returns woken | queued-busy | queued-offline | refused.
+
+    Idle + loaded in the reachable daemon: turn/start only (do not also queue;
+    the daemon would drain the queue and double-deliver). Busy: queue and
+    return queued-busy (auto-submits at turn end; never turn/start — that
+    steers). Not loaded (VS Code private app-server, etc.): queue and return
+    queued-offline with a recovery hint. Sqlite-only success is not a native
+    wake.
     """
     thread = (ep.get("thread") or "").strip()
     if not thread:
         return "refused"
-    cmd = ["codex", "queue", "--thread", thread, "--message", text]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        queued = r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        queued = False
-    if not queued:
+    loaded = _codex_thread_is_loaded(thread)
+    busy = loaded and _codex_thread_is_busy(thread)
+    if loaded and not busy:
+        for _ in range(max(1, int(NATIVE_POKE_ATTEMPTS))):
+            if _codex_turn_start(thread, text, message_id=message_id):
+                return "woken"
+        if _codex_queue_cli(thread, text):
+            return "queued-offline"
         return "refused"
-    # Do not thread/resume a VS Code-owned session. turn/start only when hosted.
-    if not _codex_thread_is_loaded(thread):
-        return "queued-offline"
-    for _ in range(max(1, int(NATIVE_POKE_ATTEMPTS))):
-        if _codex_turn_start(thread, text):
-            return "woken"
+    if not _codex_queue_cli(thread, text):
+        return "refused"
+    if busy:
+        return "queued-busy"
     return "queued-offline"
 
 
@@ -1163,7 +1257,9 @@ def _commit_wake(board, seat, mid, lease, fence, label, ok):
             return "stale (rebound before delivery)"
         ep.pop("last_inflight_id", None)
         ep.pop("last_inflight_epoch", None)
-        delivered = label in ("woken", "queued-offline", "delivered-unconfirmed")
+        delivered = label in ("woken", "queued-offline", "queued-busy",
+                              "delivered-unconfirmed") or str(label).startswith(
+            "queued-offline")
         if mid and delivered:
             ep["last_delivery_id"] = mid
             ep["last_delivery_status"] = label
@@ -1225,7 +1321,7 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
         label = _cursor_pause_resume(ep, text)
         ok = label == "woken"
     else:
-        label = _poke_codex_wake(ep, text)
+        label = _poke_codex_wake(ep, text, message_id=mid)
         ok = label == "woken"
     return _commit_wake(board, seat, mid, lease, fence, label, ok)
 

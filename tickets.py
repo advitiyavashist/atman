@@ -4359,7 +4359,7 @@ def _watch_pid_uses_this_cli(pid):
 
 
 PERSIST_POKE_ATTEMPTS = 3
-_AUTONOMOUS_WAKE_LABELS = ("woken", "deduped", "watch-poked")
+_AUTONOMOUS_WAKE_LABELS = ("woken", "deduped", "watch-poked", "queued-busy")
 
 
 def _poke_persist_watch(board, owner, attempts=None):
@@ -7633,7 +7633,11 @@ def cmd_msg(a, board):
             poked = _poke_persist_watch(board, to)
             if poked:
                 label = "watch-poked"
-        print("wake: %s -> %s" % (to, label))
+        if label == "queued-offline":
+            print("wake: %s -> %s (%s)" % (
+                to, label, "run the thread in terminal Codex to enable native wake"))
+        else:
+            print("wake: %s -> %s" % (to, label))
         _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
@@ -7655,7 +7659,7 @@ def _should_poke_persist(label):
     """
     s = str(label or "")
     if not s or s in ("woken", "deduped", "remote bridge required",
-                      "delivered-unconfirmed"):
+                      "delivered-unconfirmed", "queued-busy"):
         return False
     if s.startswith("stale (rebound"):
         return False
