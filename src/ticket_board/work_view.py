@@ -297,7 +297,11 @@ def _dispatch_of(t, task_msgs, acked, agents, now):
         d = _receipts(to, m, acked, agents, now)
         d.update({"to": to, "from": m.get("from") or "", "at": m.get("at") or "",
                   "age_h": _hours_since(m.get("at") or "", now), "msg_id": _msg_id(m),
-                  "text": (m.get("text") or "").strip()[:160], "ignored": ignored})
+                  "text": (m.get("text") or "").strip()[:160], "ignored": ignored,
+                  "unverified": bool(m.get("unverified")),
+                  "via": m.get("via") or "",
+                  "provenance": "absent" if "via" not in m else (
+                      "unverified" if m.get("unverified") else "verified")})
         return d
     return None if not ignored else {"ignored": ignored, "to": "", "msg_id": "", "seen": None, "wake": None}
 
