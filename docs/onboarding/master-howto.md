@@ -596,7 +596,8 @@ tickets route [--claim]     # suggest / assign owners
 tickets limits              # who is out (AUTH vs wait)
 tickets merge               # integration worktree → tests → ff main
 tickets spawn --list        # watchers
-tickets spawn <name> --stop
+tickets spawn <name> --stop              # this board only
+tickets spawn <name> --stop --all-boards # also loops on other boards
 tickets brief --role docs --show
 tickets knowledge
 tickets knowledge show kb-lock

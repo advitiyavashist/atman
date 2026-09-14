@@ -4493,14 +4493,22 @@ _WATCH_TABLE = threading.local()
 
 
 def _parse_watch_table():
-    """All live `tickets watch` rows from one process-table snapshot."""
+    """All live `tickets watch` rows from one process-table snapshot.
+
+    Returns `(rows, available)`. `available` is False when `ps` could not be
+    run at all; an empty `rows` then means "unknown", not "no watchers", and
+    callers that are about to signal or to report absence must say so rather
+    than claim the fleet is idle (T-926).
+    """
     import subprocess
 
     out = []
     try:
         r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
     except OSError:
-        return out
+        return out, False
+    if r.returncode != 0:
+        return out, False
     me = os.getpid()
     for line in (r.stdout or "").splitlines():
         line = line.strip()
@@ -4521,7 +4529,7 @@ def _parse_watch_table():
             continue
         argv = _split_cmdline(cmd)
         out.append({"pid": pid, "agent": agent, "cwd": _argv_flag_value(argv, "--cwd")})
-    return out
+    return out, True
 
 
 class _shared_watch_table:
@@ -4536,9 +4544,12 @@ class _shared_watch_table:
     def __enter__(self):
         self._prev_bound = getattr(_WATCH_TABLE, "bound", False)
         self._prev_rows = getattr(_WATCH_TABLE, "rows", None)
+        self._prev_ok = getattr(_WATCH_TABLE, "available", True)
         self._mine = not self._prev_bound
+        self._prev_cwds = getattr(_WATCH_TABLE, "cwds", None)
         if self._mine:
-            _WATCH_TABLE.rows = _parse_watch_table()
+            _WATCH_TABLE.rows, _WATCH_TABLE.available = _parse_watch_table()
+            _WATCH_TABLE.cwds = {}
             _WATCH_TABLE.bound = True
         return _WATCH_TABLE.rows
 
@@ -4547,12 +4558,25 @@ class _shared_watch_table:
             return
         _WATCH_TABLE.bound = self._prev_bound
         _WATCH_TABLE.rows = self._prev_rows
+        _WATCH_TABLE.available = self._prev_ok
+        _WATCH_TABLE.cwds = self._prev_cwds
 
 
 def _watch_table_rows():
     if getattr(_WATCH_TABLE, "bound", False):
         return _WATCH_TABLE.rows or []
-    return _parse_watch_table()
+    rows, ok = _parse_watch_table()
+    _WATCH_TABLE.available = ok
+    return rows
+
+
+def _watch_table_available():
+    """Whether the last process-table read in this thread actually ran `ps`.
+
+    Read it right after the `_live_watch_pids` call it describes, or inside a
+    `_shared_watch_table` block, which pins one answer for the whole snapshot.
+    """
+    return bool(getattr(_WATCH_TABLE, "available", True))
 
 
 def _live_watch_pids(owner=None, board=None):
@@ -4560,11 +4584,15 @@ def _live_watch_pids(owner=None, board=None):
 
     The pid file only tracks one loop per board; duplicates (interrupted pytest
     runs, races before lock) show up here. `owner` filters to one agent name.
-    When `board` is set, loops whose --cwd lies under that repo count, AND
-    loops whose agents/<name>.watch.pid on THIS board matches the live pid
-    even when --cwd is another repo (Steer board + Atman worktree). Foreign
-    cwd without this board's pid file is still excluded (T-554).
-    Omit `board` for fleet-wide stop of every loop for the name.
+    When `board` is set, a loop counts on three kinds of own-board evidence:
+    its --cwd lies under that repo; it carries no --cwd (older releases, and
+    `tickets watch` by hand) but the OS reports a working directory under the
+    repo; or agents/<name>.watch.pid on THIS board names the live pid even
+    though --cwd is another repo (Steer board + Atman worktree). Foreign cwd
+    without this board's pid file is still excluded (T-554), and no evidence
+    at all excludes too -- a stop must never reach a board nobody named.
+    Omit `board` for the fleet-wide view; `spawn --stop` passes the board and
+    needs --all-boards to widen (T-926).
     Inside `_shared_watch_table`, every caller shares one `ps` snapshot.
     """
     repo = os.path.realpath(os.path.dirname(board)) if board else None
@@ -4576,20 +4604,75 @@ def _live_watch_pids(owner=None, board=None):
         if owner is not None and agent != owner:
             continue
         if repo:
-            watch_cwd = row.get("cwd") or ""
-            under_repo = False
-            if watch_cwd:
-                try:
-                    real = os.path.realpath(watch_cwd)
-                    under_repo = real == repo or real.startswith(repo + os.sep)
-                except OSError:
-                    under_repo = False
-            claimed = _watch_pid_claimed_on_board(board, agent, pid)
-            if not under_repo and not claimed:
+            # The pid-file claim is the fallback, and it costs an extra `ps`
+            # for the reuse fence -- do not pay it for the ordinary shape.
+            if not _path_under(_watch_row_cwd(pid, row), repo) \
+                    and not _watch_pid_claimed_on_board(board, agent, pid):
                 continue
         if agent and (bound or _pid_alive(pid)):
             out.append(pid)
     return sorted(set(out))
+
+
+# A pid file is written moments after the watcher it names starts, so a
+# process that started LATER than the file cannot be the one that wrote it.
+# The slack absorbs clock/rounding noise between `ps` and the filesystem.
+WATCH_PID_REUSE_SLACK_SECS = 90
+
+
+def _process_elapsed_secs(pid):
+    """Seconds since `pid` started, or None when `ps` cannot say.
+
+    `etime` is POSIX and locale-independent ([[dd-]hh:]mm:ss), unlike lstart.
+    """
+    import subprocess
+
+    try:
+        r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "etime="],
+                           capture_output=True, text=True)
+    except (OSError, ValueError):
+        return None
+    text = (r.stdout or "").strip()
+    if r.returncode != 0 or not text:
+        return None
+    days = 0
+    if "-" in text:
+        head, text = text.split("-", 1)
+        try:
+            days = int(head)
+        except ValueError:
+            return None
+    parts = text.split(":")
+    if len(parts) > 3:
+        return None
+    try:
+        nums = [int(x) for x in parts]
+    except ValueError:
+        return None
+    while len(nums) < 3:
+        nums.insert(0, 0)
+    return days * 86400 + nums[0] * 3600 + nums[1] * 60 + nums[2]
+
+
+def _pid_predates_file(pid, path):
+    """True unless `pid` demonstrably started after `path` was written.
+
+    Answers "could this process have written that pid file?". Unknown (no
+    `ps` etime, no stat) keeps the pid: the row already came from the process
+    table as a `watch --agent <seat>` loop, so the claim is only refused on
+    positive evidence of pid reuse, never on missing evidence.
+    """
+    import time
+
+    elapsed = _process_elapsed_secs(pid)
+    if elapsed is None:
+        return True
+    try:
+        written = os.stat(path).st_mtime
+    except OSError:
+        return True
+    started = time.time() - elapsed
+    return started <= written + WATCH_PID_REUSE_SLACK_SECS
 
 
 def _watch_pid_claimed_on_board(board, agent, pid):
@@ -4597,14 +4680,22 @@ def _watch_pid_claimed_on_board(board, agent, pid):
 
     Steer-board + Atman-worktree is the normal persist shape: --cwd is not
     under the board repo, but the pid file still lives on this board.
+
+    A bare pid is not identity: a stale pid file from a watcher that died can
+    name a number the OS has since handed to a DIFFERENT board's loop for the
+    same seat name, and acting on that claim stops the wrong board (T-926).
+    The claim therefore also requires that the process is old enough to have
+    written the file.
     """
     if not board or not agent or not pid:
         return False
+    path = os.path.join(agents_dir(board), agent + ".watch.pid")
     try:
-        with open(os.path.join(agents_dir(board), agent + ".watch.pid")) as f:
-            return int((f.read() or "0").strip() or 0) == int(pid)
+        with open(path) as f:
+            claimed = int((f.read() or "0").strip() or 0) == int(pid)
     except (IOError, OSError, ValueError):
         return False
+    return claimed and _pid_predates_file(pid, path)
 
 
 def _watcher_pid(board, owner):
@@ -4624,6 +4715,68 @@ def _watch_poke_file(board, owner):
     return os.path.join(agents_dir(board), owner + ".watch.poke")
 
 
+def _process_cwd(pid):
+    """The process's actual working directory, or "" when it cannot be read.
+
+    Only consulted for a `watch` row whose command line carries no `--cwd`:
+    releases before that flag, and `tickets watch` started by hand. Without
+    it those loops have no board evidence at all, so a board-scoped stop
+    would miss a duplicate running right here (T-554 intent) (T-926).
+    """
+    import subprocess
+
+    try:
+        return os.readlink("/proc/%d/cwd" % int(pid))
+    except (OSError, ValueError):
+        pass
+    try:
+        r = subprocess.run(["lsof", "-a", "-p", str(int(pid)), "-d", "cwd", "-Fn"],
+                           capture_output=True, text=True)
+    except (OSError, ValueError):
+        return ""
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("n"):
+            return line[1:].strip()
+    return ""
+
+
+def _watch_row_cwd(pid, row):
+    """Working directory for one `watch` row, cached inside a shared snapshot."""
+    recorded = row.get("cwd") or ""
+    if recorded:
+        return recorded
+    cache = getattr(_WATCH_TABLE, "cwds", None)
+    if cache is None:
+        return _process_cwd(pid)
+    if pid not in cache:
+        cache[pid] = _process_cwd(pid)
+    return cache[pid]
+
+
+def _path_under(path, repo):
+    if not path or not repo:
+        return False
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return False
+    return real == repo or real.startswith(repo + os.sep)
+
+
+def _proc_cmdline(pid):
+    """Command line from /proc, for boxes where `ps` is missing (Linux only).
+
+    Returns "" on any platform or process where it cannot be read; callers
+    must treat that as "unknown", never as "not a watcher".
+    """
+    try:
+        with open("/proc/%d/cmdline" % int(pid), "rb") as f:
+            raw = f.read()
+    except (OSError, ValueError):
+        return ""
+    return " ".join(p.decode("utf-8", "replace") for p in raw.split(b"\0") if p)
+
+
 def _process_command(pid):
     import subprocess
 
@@ -4631,8 +4784,35 @@ def _process_command(pid):
         r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "command="],
                            capture_output=True, text=True)
     except (OSError, ValueError):
-        return ""
-    return (r.stdout or "").strip()
+        return _proc_cmdline(pid)
+    if r.returncode != 0:
+        return _proc_cmdline(pid)
+    return (r.stdout or "").strip() or _proc_cmdline(pid)
+
+
+def _validated_owned_watch_pid(board, owner):
+    """This board's recorded watcher pid, confirmed to still BE that watcher.
+
+    The fallback for a box where the process table cannot be read at all: the
+    recorded pid on its own is not proof, because pids are recycled, so the
+    command line has to name `watch --agent <owner>` before anyone signals
+    it. Returns `(pid, state)`:
+
+      "owned"   -- live and identified; safe to stop
+      "unknown" -- a live pid this board recorded, identity unverifiable
+      "none"    -- no pid file, or the pid is gone, or it is another program
+    """
+    try:
+        with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
+            pid = int((f.read() or "0").strip() or 0)
+    except (IOError, OSError, ValueError):
+        return 0, "none"
+    if not pid or not _pid_alive(pid):
+        return 0, "none"
+    cmd = _process_command(pid)
+    if not cmd:
+        return pid, "unknown"
+    return (pid, "owned") if _watch_cmd_agent(cmd) == owner else (0, "none")
 
 
 def _watch_pid_uses_this_cli(pid):
@@ -12406,6 +12586,89 @@ def _stop_file(board, owner):
     return os.path.join(agents_dir(board), owner + ".watch.stop")
 
 
+def _spawn_stop(board, owner, all_boards=False):
+    """`tickets spawn <owner> --stop`: stop that seat's watcher ON THIS BOARD.
+
+    Scope is the invariant here. The seat name is not globally unique: the
+    same person runs one board per repo and gives the seat the same name on
+    each, so a stop that matched on the name alone reached across boards and
+    killed a loop the operator never named (T-926). Discovery is the board's
+    own: a loop whose --cwd is under this repo, or one this board's pid file
+    claims (the Steer-board + Atman-worktree shape), on any release path --
+    the release-agnostic own-board discovery T-554 added is unchanged.
+
+    `all_boards` is the separate, explicit fleet intent; it is never implied.
+    """
+    import signal
+
+    with _shared_watch_table():
+        pids = _live_watch_pids(owner) if all_boards else _live_watch_pids(owner, board=board)
+        table_ok = _watch_table_available()
+    _mark_run_interrupted(board, owner)
+    scope = "any board" if all_boards else board
+    if not pids and not table_ok:
+        # `ps` did not run. An empty table is "unknown", and reporting it as
+        # "no running watcher" is the answer that gets a duplicate loop
+        # spawned beside a live one. Fall back to the pid file this board
+        # wrote, but only signal a pid whose identity is confirmed.
+        pid, state = _validated_owned_watch_pid(board, owner)
+        if state == "owned":
+            pids, table_ok = [pid], True
+            print("process table unavailable; using this board's verified pid file (pid %d)" % pid)
+        else:
+            _stop_requested(board, owner)
+            if state == "unknown":
+                print("unverified: cannot read the process table, and pid %d from this board's "
+                      "pid file could not be identified -- stop requested, liveness unknown. "
+                      "Check the seat before `tickets spawn %s`." % (pid, owner))
+            else:
+                print("unverified: cannot read the process table and this board has no watcher "
+                      "pid file for %s -- stop requested, liveness unknown." % owner)
+            return
+    if not pids:
+        # Watcher is already gone; a late heartbeat from the dead run
+        # must not reopen the receipt. Re-apply the stop fence after the
+        # liveness check so a beat that raced the first mark stays closed.
+        _mark_run_interrupted(board, owner)
+        print("no running watcher for %s on %s" % (owner, scope))
+        if not all_boards:
+            elsewhere = _live_watch_pids(owner)
+            if elsewhere:
+                print("note: %d loop(s) for %s are running against another board "
+                      "(pids %s) -- `tickets spawn %s --stop --all-boards` stops those too"
+                      % (len(elsewhere), owner, ", ".join(str(p) for p in elsewhere), owner))
+        return
+    busy = [p for p in pids if _watcher_run_active(board, owner, p)]
+    _stop_requested(board, owner)
+    stopped = 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped += 1
+        except ProcessLookupError:
+            pass
+    print("stopped %d watcher(s) for %s on %s (pids %s)" % (
+        stopped, owner, scope, ", ".join(str(p) for p in pids)))
+    if busy:
+        # SIGTERM + stop-file are observed within WATCH_STOP_SLICE, including
+        # mid-run. The duplicate guard in the start path below only sees a
+        # pid that has actually gone, so say so rather than let the operator
+        # spawn into a still-live loop (T-554).
+        print("mid-run: %s -- wait for the pid(s) to exit before `tickets spawn %s`" % (
+            ", ".join(str(p) for p in busy), owner))
+    post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
+    return
+
+
+def _stop_requested(board, owner):
+    """Raise this board's stop fence; the watcher exits at its next poll."""
+    try:
+        with open(_stop_file(board, owner), "w") as f:
+            f.write(now())
+    except OSError:
+        pass
+
+
 def cmd_spawn(a, board):
     """Bring up a persistent worker: register it, give it a worktree, and start a
     detached watcher that launches the tool (with the chosen model) whenever the
@@ -12440,41 +12703,7 @@ def cmd_spawn(a, board):
         sys.exit("spawn needs a name (or --list)")
     owner = a.name
     if a.stop:
-        import signal
-
-        pids = _live_watch_pids(owner)
-        _mark_run_interrupted(board, owner)
-        if not pids:
-            # Watcher is already gone; a late heartbeat from the dead run
-            # must not reopen the receipt. Re-apply the stop fence after the
-            # liveness check so a beat that raced the first mark stays closed.
-            _mark_run_interrupted(board, owner)
-            print("no running watcher for %s" % owner)
-            return
-        busy = [p for p in pids if _watcher_run_active(board, owner, p)]
-        try:
-            with open(_stop_file(board, owner), "w") as f:
-                f.write(now())
-        except OSError:
-            pass
-        stopped = 0
-        for pid in pids:
-            try:
-                os.kill(pid, signal.SIGTERM)
-                stopped += 1
-            except ProcessLookupError:
-                pass
-        print("stopped %d watcher(s) for %s (pids %s)" % (
-            stopped, owner, ", ".join(str(p) for p in pids)))
-        if busy:
-            # SIGTERM + stop-file are observed within WATCH_STOP_SLICE, including
-            # mid-run. The duplicate guard in the start path below only sees a
-            # pid that has actually gone, so say so rather than let the operator
-            # spawn into a still-live loop (T-554).
-            print("mid-run: %s -- wait for the pid(s) to exit before `tickets spawn %s`" % (
-                ", ".join(str(p) for p in busy), owner))
-        post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
-        return
+        return _spawn_stop(board, owner, all_boards=bool(getattr(a, "all_boards", False)))
     requested_harness = getattr(a, "harness", "") or a.tool
     incoming_harness, _ = _split_harness(requested_harness)
     conflict = _identity_reuse_conflict(board, owner, incoming_harness)
@@ -16569,7 +16798,11 @@ def main():
                    help="spawn the chief of staff (review, unblock, merge) under the current master; "
                         "persistent watcher by default (override with --max-runs 1)")
     c.add_argument("--exec", default="", help="override the worker command entirely")
-    c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
+    c.add_argument("--stop", action="store_true",
+                   help="ask this board's watcher for the seat to exit at its next poll")
+    c.add_argument("--all-boards", action="store_true",
+                   help="with --stop: also stop loops for this seat name running against "
+                        "another board (explicit fleet intent; off by default)")
     c.add_argument("--list", action="store_true")
     c.add_argument("--alias", default="",
                    help="stable role alias (ceo or cos) pointing at this unique runtime identity")

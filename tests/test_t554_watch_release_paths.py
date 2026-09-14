@@ -166,7 +166,12 @@ def test_cwd_board_filter_still_excludes_another_repo(tk, loops, repo, tmp_path)
     got = _settle(lambda: tk._live_watch_pids(SEAT, board=board), [mine.pid])
     assert got == [mine.pid]
     assert theirs.pid not in got
-    # fleet-wide (no board) still sees both -- that is what --stop uses
+    # Fleet-wide (no board) still sees both, and that view is still what
+    # `spawn --stop --all-boards` acts on. `spawn --stop` itself no longer
+    # uses it: a seat name is reused across one board per repo, so an
+    # unscoped stop reached into a board the operator never named (T-926).
+    # Fleet-wide is now explicit intent, not the default -- see
+    # tests/test_t926_stop_scope.py for that contract.
     allpids = _settle(lambda: tk._live_watch_pids(SEAT), sorted([mine.pid, theirs.pid]))
     assert allpids == sorted([mine.pid, theirs.pid])
 
