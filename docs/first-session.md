@@ -9,6 +9,22 @@ Total elapsed: under a minute. Four commands.
 
 ---
 
+## Before starting
+
+In the project you want to manage, clear a board override from any previous
+session and confirm where commands will go:
+
+```sh
+cd /path/to/your-project
+unset TICKETS_DIR
+atm where
+```
+
+`TICKETS_DIR` takes precedence over the current directory. Clearing it leaves
+the old board intact; linked worktrees still use their main checkout's board.
+The captured run below used a fresh environment without that override. See
+[Board resolution](board-resolution.md) for deliberately sharing another board.
+
 ## 1. `tickets quickstart`
 
 One command takes you from a repo with no board to a board with work on it and

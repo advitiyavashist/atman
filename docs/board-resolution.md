@@ -13,6 +13,14 @@ when they disagree; if both came from `_repo_root()` the comparison would be
 `x == x` and the refusal would be unreachable. That was the first fix's defect
 (T-282), and it was unreachable in the common linked-worktree configuration.
 
+## Starting in a different project
+
+An exported `TICKETS_DIR` follows your shell into other projects. For a new
+project, run `unset TICKETS_DIR`, then `atm where` before `atm quickstart`.
+The previous board is unchanged. Within linked worktrees, the normal resolver
+continues to select the main checkout's board. Keep an explicit override when
+that is the board you intend to use.
+
 ## Ambient precedence (`_board_dir_uncached`)
 
 First match wins. **The order is the bug** T-263 was filed against: the top

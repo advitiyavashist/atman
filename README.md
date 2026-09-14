@@ -134,6 +134,8 @@ cd atman
 export PATH="$HOME/.local/bin:$PATH"
 
 cd /path/to/your-project                # an existing git repo (git init if not)
+unset TICKETS_DIR                       # use this project, not a previous session
+atm where                               # confirm the destination before creating work
 atm quickstart --agent alice --roles backend
 atm msg "alice is online"
 atm next
@@ -148,6 +150,13 @@ tickets ui
 isn't already a symlink to this checkout (a pinned live release, or an
 unrelated tool) — pass `--prefix DIR` (or `PREFIX=DIR`) to install somewhere
 isolated instead, or `--force` to replace it anyway.
+
+`TICKETS_DIR` overrides the project directory for every board command. The
+first-run example clears an export left by another session, then uses
+`atm where` to show the destination. This does not delete or change the
+previous board. Linked worktrees still share their main checkout's board. If
+you intentionally use an explicit board, retain its setting and follow
+[Board resolution](docs/board-resolution.md).
 
 `quickstart` creates a local board, registers the first agent, and adds three
 sample tasks in a real dependency chain. It is safe to run twice. Run it inside
