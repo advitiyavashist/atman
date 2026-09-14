@@ -1,28 +1,23 @@
-cand summary: 11 failed, 2196 passed, 26 skipped, 11 xfailed, 3 errors in 1599.19s (0:26:39)
-base summary: 10 failed, 2170 passed, 25 skipped, 11 xfailed in 1555.37s (0:25:55)
+# FULL clean-env suite comparison -- candidate d70b55e vs base 9b2057d (merge-base)
 
-== FAILED: candidate-only (NEW) ==
-  NEW   tests/test_t683_session_adapters.py::test_wake_delivery_is_deduped_by_message_id
-== FAILED: base-only (fixed or base-side flake) ==
-   (none)
-== FAILED: shared / pre-existing ==
-  BOTH  tests/test_t257_board_guard.py::test_refuses_a_board_outside_tmp_while_under_pytest
-  BOTH  tests/test_t278_agent_record_race.py::test_clearing_a_limit_survives_a_straddling_heartbeat
-  BOTH  tests/test_t278_agent_record_race.py::test_inbox_seen_survives_a_straddling_heartbeat
-  BOTH  tests/test_t278_agent_record_race.py::test_limit_survives_a_heartbeat_that_straddles_it
-  BOTH  tests/test_t278_agent_record_race.py::test_stop_blocks_survive_a_straddling_heartbeat
-  BOTH  tests/test_t611_objective_bounds.py::test_review_tasks_cos_once_then_inbox_clears_repeat_wake
-  BOTH  tests/test_t707_docker_packaging.py::test_wheel_installs_tickets_console_script
-  BOTH  tests/test_t778_master_onboarding.py::test_master_template_and_howto_start_with_onboarding
-  BOTH  tests/test_t784_team_intro.py::test_howto_still_starts_with_onboarding
-  BOTH  tests/test_trajectories.py::test_claim_update_review_done_are_all_recorded
+cand: 9 failed, 2215 passed, 24 skipped, 11 xfailed in 1756.68s (0:29:16)
+base: 9 failed, 2172 passed, 24 skipped, 11 xfailed in 1631.13s (0:27:11)
 
-== ERROR: candidate-only (NEW) ==
-  NEW   tests/test_t839_boundary_adapters.py::test_installed_sanitizer_preserves_nonboard_commands_in_mixed_entries
-  NEW   tests/test_t839_boundary_adapters.py::test_supported_remote_wrapper_replaces_inherited_mailbox_sender_and_session[root]
-  NEW   tests/test_t839_boundary_adapters.py::test_supported_remote_wrapper_replaces_inherited_mailbox_sender_and_session[wheel]
-== ERROR: base-only (fixed or base-side flake) ==
-   (none)
-== ERROR: shared / pre-existing ==
+## NEW on candidate:
+  (none)
 
-NEW FAILURES = 4
+## GONE vs base:
+  (none)
+
+## shared / pre-existing on main:
+tests/test_t257_board_guard.py::test_refuses_a_board_outside_tmp_while_under_pytest
+tests/test_t278_agent_record_race.py::test_clearing_a_limit_survives_a_straddling_heartbeat
+tests/test_t278_agent_record_race.py::test_inbox_seen_survives_a_straddling_heartbeat
+tests/test_t278_agent_record_race.py::test_limit_survives_a_heartbeat_that_straddles_it
+tests/test_t278_agent_record_race.py::test_stop_blocks_survive_a_straddling_heartbeat
+tests/test_t611_objective_bounds.py::test_review_tasks_cos_once_then_inbox_clears_repeat_wake
+tests/test_t778_master_onboarding.py::test_master_template_and_howto_start_with_onboarding
+tests/test_t784_team_intro.py::test_howto_still_starts_with_onboarding
+tests/test_trajectories.py::test_claim_update_review_done_are_all_recorded
+
+NEW FAILURES = 0
