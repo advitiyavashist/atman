@@ -5683,16 +5683,16 @@ def cmd_block(a, board):
 def cmd_note(a, board):
     """Add a note (`tickets note` / `tickets update`).
 
-    `by` is always the caller's own identity (`--by`, else $TICKET_AGENT),
-    never the ticket's `owner` field. T-238: a fallback to `t.get("owner")`
-    here meant a second agent working the same ticket in parallel -- exactly
-    the case a duplicate lane needs to be visible -- had its notes silently
-    relabeled as the owner's, so nothing in the note history could ever
-    reveal the second lane. This was a write-path bug: the on-disk `by` was
-    wrong, not just its rendering in `tickets show`.
+    `by` is who THIS SESSION is (`session_seat`, same as msg/inbox), never
+    the ticket's `owner` field. `--by` still wins as an explicit override.
+    T-238: a fallback to `t.get("owner")` relabeled a parallel agent's notes
+    as the owner's. T-956: whoami() here drifted from the module rule that
+    'who is acting' is session_seat(), so a note and a message from the same
+    session could disagree -- a provenance hole now that T-944 binds verdicts
+    to identity.
     """
     t = load(board, a.id)
-    who = whoami(a.by)
+    who = session_seat(board, a.by)
     t["notes"].append({"by": who, "at": now(), "text": a.text})
     save(board, t)
     # notes_len only -- the note body is the agent's own prose and never enters
@@ -12899,7 +12899,7 @@ def _inherit_settings(root, wt):
     """
     import shutil
     copied = []
-    for dname, fnames, prefixed in ((".claude", ("settings.json", "settings.local.json"), False),):
+    for dname, fnames in ((".claude", ("settings.json", "settings.local.json")),):
         src = os.path.join(root, dname)
         dst = os.path.join(wt, dname)
         if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
@@ -12918,7 +12918,7 @@ def _inherit_settings(root, wt):
                     _atomic_hook_write(d, json.dumps(clean, indent=2) + "\n", 0o600)
                 else:
                     shutil.copy2(s, d)
-                copied.append(os.path.join(dname, name) if prefixed else name)
+                copied.append(name)
     return copied
 
 
