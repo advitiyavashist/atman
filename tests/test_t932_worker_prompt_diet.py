@@ -75,6 +75,74 @@ def test_five_ticket_before_after_context_size(board):
     assert any(e.get("prompt_view") == "wide" for e in prompts)
 
 
+def _prompt_manifests(board):
+    events = [json.loads(line) for line in
+              (board / "trajectories.jsonl").read_text().splitlines() if line.strip()]
+    out = []
+    for e in events:
+        if e.get("kind") != "prompt" or not e.get("prompt_manifest"):
+            continue
+        out.append(json.loads(e["prompt_manifest"]))
+    return out
+
+
+def test_prompt_manifest_has_revisions_sections_and_null_tokens(board, tmp_path):
+    from test_t620_knowledge_graph import graph_env, write_graph
+    from test_t931_field_guide import lesson
+
+    stale = lesson("lesson.old-advice", "stale scoped advice for tickets.py",
+                   ["backend"], ["tickets.py"])
+    stale["last_verified_at"] = "2020-01-01T00:00:00Z"
+    stale["stale_after_days"] = 1
+    stale["revision"] = 4
+    fresh = lesson("lesson.codex-deaf", "Codex watchers go deaf after one run",
+                   ["backend"], ["tickets.py"])
+    fresh["revision"] = 2
+    graph = write_graph(tmp_path / "graph", [fresh, stale], budget=4000)
+    env = graph_env(graph)
+    assert run(board, "join", "backend-seat", "--roles", "backend",
+               "--harness", "codex", env=env).returncode == 0
+    r = run(board, "prompt", "--agent", "backend-seat",
+            "--extra", "repair tickets.py knowledge:does.not.exist", env=env)
+    assert r.returncode == 0, r.stderr
+    assert "never run `tickets clear`" in r.stdout
+    manifests = _prompt_manifests(board)
+    assert manifests
+    man = manifests[-1]
+    ids = {row["id"]: row["revision"] for row in man["knowledge"]}
+    assert ids.get("lesson.codex-deaf") == 2
+    assert ids.get("lesson.old-advice") == 4
+    assert "policy" in man["section_chars"]
+    assert man["section_chars"]["policy"] > 0
+    assert man["budget_chars"] == 4000
+    assert "does.not.exist" in man["missing"]
+    assert "lesson.old-advice" in man["stale"]
+    assert man["tokens"] is None or isinstance(man["tokens"], int)
+    assert man["view"] in ("compact", "wide")
+    assert man["chars"] == len(r.stdout.rstrip("\n")) or man["chars"] == len(r.stdout)
+
+
+def test_prompt_manifest_marks_truncated_knowledge(board, tmp_path):
+    from test_t620_knowledge_graph import graph_env, write_graph
+    from test_t931_field_guide import lesson
+
+    nodes = [
+        lesson("lesson.long-a", "A" * 300, ["backend"], ["tickets.py"]),
+        lesson("lesson.long-b", "B" * 300, ["backend"], ["tickets.py"]),
+        lesson("lesson.long-c", "C" * 300, ["backend"], ["tickets.py"]),
+    ]
+    graph = write_graph(tmp_path / "graph", nodes, budget=500)
+    env = graph_env(graph)
+    assert run(board, "join", "backend-seat", "--roles", "backend",
+               "--harness", "codex", env=env).returncode == 0
+    r = run(board, "prompt", "--agent", "backend-seat",
+            "--extra", "repair tickets.py", env=env)
+    assert r.returncode == 0, r.stderr
+    man = _prompt_manifests(board)[-1]
+    assert man["truncated"] is True
+    assert man["budget_chars"] == 500
+
+
 def test_worker_prompt_still_has_required_instructions(board):
     assert run(board, "join", "doc", "--roles", "docs").returncode == 0
     r = run(board, "prompt", "--agent", "doc", "--extra", "EXTRA LINE")

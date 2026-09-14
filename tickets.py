@@ -1714,7 +1714,20 @@ def _ticket_scope_notes(t):
     return [n for n in notes if n][:4]
 
 
-def _log_prompt_diet(board, owner, text, view, ticket=None):
+def _prompt_token_count(text):
+    """Count tokens only when a known tokenizer is already importable."""
+    try:
+        import tiktoken
+    except ImportError:
+        return None
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text or ""))
+    except Exception:
+        return None
+
+
+def _infer_prompt_sections(text, ticket=None):
     sections = []
     if "Rules" in (text or "") or "one ticket" in (text or ""):
         sections.append("rules")
@@ -1726,10 +1739,33 @@ def _log_prompt_diet(board, owner, text, view, ticket=None):
         sections.append("scope")
     if (ticket or {}).get("body") and (ticket.get("body") in (text or "")):
         sections.append("ticket")
+    return sections
+
+
+def _log_prompt_diet(board, owner, text, view, ticket=None, sections=None,
+                     section_chars=None, knowledge=None):
+    sections = list(sections or _infer_prompt_sections(text, ticket))
+    knowledge = knowledge or {}
+    selected = list(knowledge.get("knowledge") or [])
+    manifest = {
+        "knowledge": selected,
+        "section_chars": {k: int(v) for k, v in (section_chars or {}).items()},
+        "budget_chars": int(knowledge.get("budget_chars") or 0),
+        "truncated": bool(knowledge.get("truncated")),
+        "missing": list(knowledge.get("missing") or []),
+        "stale": list(knowledge.get("stale") or []),
+        "tokens": _prompt_token_count(text),
+        "view": view,
+        "chars": len(text or ""),
+    }
+    if knowledge.get("error"):
+        manifest["error"] = knowledge["error"]
     traj_event(board, "prompt", agent=owner, ticket=ticket,
-               prompt_chars=len(text or ""),
+               prompt_chars=manifest["chars"],
                prompt_sections=",".join(sections) or "body",
-               prompt_view=view)
+               prompt_view=view,
+               prompt_manifest=json.dumps(manifest, sort_keys=True),
+               prompt_tokens=manifest["tokens"])
 
 
 def detail(board, t, tickets, viewer=None):
@@ -1827,7 +1863,17 @@ def detail(board, t, tickets, viewer=None):
         for nt in t["notes"]:
             out.append("  - [%s] %s" % (nt.get("by", "?"), nt["text"]))
     text = "\n".join(out)
-    _log_prompt_diet(board, viewer, text, "compact" if compact else "wide", ticket=t)
+    section_chars = {}
+    if compact:
+        section_chars["rules"] = len(WORKER_RULES_COMPACT)
+    if t.get("body"):
+        section_chars["ticket"] = len(t["body"])
+    if compact and scope:
+        section_chars["scope"] = sum(len(s) for s in scope)
+    if compact and hints:
+        section_chars["files"] = sum(len(h) for h in hints)
+    _log_prompt_diet(board, viewer, text, "compact" if compact else "wide",
+                     ticket=t, section_chars=section_chars)
     return text
 
 
@@ -9048,7 +9094,8 @@ def _remote_claim_once(board, owner, lease_id, fence, prompt_kind=""):
         kind = prompt_kind or ("cos" if owner == (current_master(board) or {}).get("cos")
                                else ("master" if owner == (current_master(board) or {}).get("owner") else ""))
         result["prompt"] = prompt_text(argparse.Namespace(
-            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board,
+            log=True)
     return result
 
 
@@ -9589,15 +9636,10 @@ def _task_dominant_extra(board, owner):
 
 
 def cmd_prompt(a, board):
-    text = prompt_text(a, board)
-    owner = whoami(a.agent)
-    view = "wide" if (getattr(a, "master", False) or getattr(a, "cos", False)
-                      or _leadership_viewer(board, owner)) else "compact"
-    _log_prompt_diet(board, owner, text, view)
-    print(text)
+    print(prompt_text(a, board, log=True))
 
 
-def prompt_text(a, board):
+def prompt_text(a, board, log=False):
     """The worker/master/cos prompt as a string.
 
     Split out of cmd_prompt so the watcher can write it to a {prompt_file} for
@@ -9609,13 +9651,23 @@ def prompt_text(a, board):
     master = (m["owner"] if m else "the master")
     cos = (m or {}).get("cos") or ""
     role_ctx = role_context(board, owner)
-    knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "")
+    know_meta = {}
+    knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "",
+                                      meta=know_meta)
     held_first = _task_dominant_extra(board, owner)
+    section_chars = {}
+    if held_first:
+        section_chars["held"] = len(held_first)
+    if role_ctx:
+        section_chars["role"] = len(role_ctx)
+    if knowledge_ctx:
+        section_chars["lessons"] = len(knowledge_ctx)
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
         extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
         body = cos_prompt_text(owner, board, os.path.dirname(board), extra)
-        return (held_first + "\n\n" + body) if held_first else body
-    if getattr(a, "master", False):
+        text = (held_first + "\n\n" + body) if held_first else body
+        view = "wide"
+    elif getattr(a, "master", False):
         rest = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
         extra = rest
         obj = _safe(lambda: load_objective(board), {})
@@ -9627,34 +9679,50 @@ def prompt_text(a, board):
                 exit_criterion=(obj.get("exit_criterion") or "(none — FLAG: add --exit)"),
                 status=_safe(lambda: drive_status(board), ""))
             extra = drive + ("\n" + extra if extra else "")
+            section_chars["drive"] = len(drive)
         if cos and owner != cos:
             body = PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
                                          extra=extra)
         else:
             body = MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
-        return (held_first + "\n\n" + body) if held_first else body
-    parts = []
-    if held_first:
-        parts.append(held_first)
-    if role_ctx:
-        parts.append(role_ctx)
-    if knowledge_ctx:
-        parts.append(knowledge_ctx)
-    brief = agent_brief(board, owner)
-    if brief:
-        parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
-    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
-    obj = _safe(lambda: load_objective(board), {})
-    if int(rec.get("drive_every") or 0) > 0 and obj and objective_state(obj) == "active" and objective_exit_ok(obj):
-        _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
-        parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
-    tctx = ticket_context(board, owner)
-    if tctx:
-        parts.append("Context attached to your ticket(s):\n" + tctx)
-    if a.extra:
-        parts.append(a.extra)
-    return WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                                extra="\n\n".join(parts))
+        text = (held_first + "\n\n" + body) if held_first else body
+        view = "wide"
+        section_chars["policy"] = len(body) - len(extra)
+    else:
+        parts = []
+        if held_first:
+            parts.append(held_first)
+        if role_ctx:
+            parts.append(role_ctx)
+        if knowledge_ctx:
+            parts.append(knowledge_ctx)
+        brief = agent_brief(board, owner)
+        if brief:
+            section_chars["brief"] = len(brief)
+            parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
+        rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+        obj = _safe(lambda: load_objective(board), {})
+        if int(rec.get("drive_every") or 0) > 0 and obj and objective_state(obj) == "active" and objective_exit_ok(obj):
+            _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
+            parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
+        tctx = ticket_context(board, owner)
+        if tctx:
+            section_chars["ticket"] = len(tctx)
+            parts.append("Context attached to your ticket(s):\n" + tctx)
+        if a.extra:
+            section_chars["extra"] = len(a.extra)
+            parts.append(a.extra)
+        extra = "\n\n".join(parts)
+        text = WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
+                                    extra=extra)
+        view = "wide" if _leadership_viewer(board, owner) else "compact"
+        section_chars["policy"] = len(text) - len(extra)
+        if "truncated" in (role_ctx or "") or "truncated" in (brief or ""):
+            know_meta["truncated"] = True
+    if log:
+        _log_prompt_diet(board, owner, text, view, section_chars=section_chars,
+                         knowledge=know_meta)
+    return text
 
 
 def cmd_brief(a, board):
@@ -10165,13 +10233,28 @@ def _knowledge_render(nodes, edges, max_chars):
     return "\n".join(kept) + marker
 
 
-def knowledge_context(board, owner, extra="", max_chars=None):
+def knowledge_context(board, owner, extra="", max_chars=None, meta=None):
     """Compact task/seat inheritance shared by every prompt-file harness."""
+    state = {
+        "knowledge": [],
+        "budget_chars": 0,
+        "truncated": False,
+        "missing": [],
+        "stale": [],
+        "error": "",
+    }
+
+    def _finish(text):
+        if meta is not None:
+            meta.update(state)
+        return text
+
     root = knowledge_root(board, owner)
     if _knowledge_inside_board(root, board):
-        return "Knowledge graph configuration invalid: graph must live outside the ticket board."
+        state["error"] = "graph-inside-board"
+        return _finish("Knowledge graph configuration invalid: graph must live outside the ticket board.")
     if not _knowledge_graph(root):
-        return ""
+        return _finish("")
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     wf = _safe(lambda: load_workforce(board), {}).get(owner, {}) or {}
     roles = roles_for(board, owner) or []
@@ -10186,14 +10269,25 @@ def knowledge_context(board, owner, extra="", max_chars=None):
         for note in ticket.get("notes", []):
             if note.get("kind") == "context":
                 chunks.append(note.get("text", ""))
-    nodes, edges, errors = _knowledge_query(root, " ".join(chunks), scopes=scopes)
+    query = " ".join(chunks)
+    nodes, edges, errors = _knowledge_query(root, query, scopes=scopes)
+    refs = _knowledge_refs(query)
     if errors:
-        return "Knowledge graph invalid; run `tickets knowledge validate`."
-    rendered = _knowledge_render(nodes, edges, _knowledge_budget(root, max_chars))
+        state["error"] = "invalid-graph"
+        state["missing"] = sorted(refs)
+        return _finish("Knowledge graph invalid; run `tickets knowledge validate`.")
+    budget = _knowledge_budget(root, max_chars)
+    state["budget_chars"] = budget
+    rendered = _knowledge_render(nodes, edges, budget)
+    selected_l = {n["id"].lower() for n in nodes}
+    state["knowledge"] = [{"id": n["id"], "revision": int(n.get("revision") or 0)} for n in nodes]
+    state["missing"] = sorted(r for r in refs if r not in selected_l)
+    state["stale"] = [n["id"] for n in nodes if _knowledge_stale(n)]
+    state["truncated"] = "knowledge budget reached" in (rendered or "")
     if not rendered:
-        return ""
-    ids = ",".join(n["id"] for n in nodes)
-    return rendered + "\n(knowledge selected: %s; %d chars)" % (ids, len(rendered))
+        return _finish("")
+    ids = ",".join("%s@%s" % (n["id"], n.get("revision") or 0) for n in nodes)
+    return _finish(rendered + "\n(knowledge selected: %s; %d chars)" % (ids, len(rendered)))
 
 
 def _parse_knowledge_frontmatter(text):
@@ -11706,7 +11800,7 @@ def _render_prompt_file(board, owner, kind="", text=""):
 
     if not text:
         ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="")
-        text = _safe(lambda: prompt_text(ns, board), "") or ""
+        text = _safe(lambda: prompt_text(ns, board, log=True), "") or ""
     fd, path = tempfile.mkstemp(prefix="tickets-prompt-%s-" % re.sub(r"[^A-Za-z0-9_.-]", "_", owner)[:32],
                                 suffix=".txt")
     try:
