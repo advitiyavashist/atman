@@ -3127,15 +3127,20 @@ def cmd_train(a, board):
             sys.exit("train verify: pass --main-failures and --train-failures "
                      "(hermetic suite logs). Do not land without an ACCEPT verdict.")
         with open(main_path) as f:
-            main_ids = tr.failure_ids(f.read())
+            main_text = f.read()
         with open(train_path) as f:
-            train_ids = tr.failure_ids(f.read())
-        diff = tr.verdict_from_failures(main_ids, train_ids)
+            train_text = f.read()
+        ran = tr.suite_evidence(main_text) and tr.suite_evidence(train_text)
+        main_ids = tr.failure_ids(main_text)
+        train_ids = tr.failure_ids(train_text)
+        diff = tr.verdict_from_failures(main_ids, train_ids, suite_ran=ran)
         rec.update(diff)
         tr.save_train(board, rec)
         print("train verify %s  new=%s  train=%s  main=%s" % (
             rec["verdict"], rec["train_sha"][:12], rec["main_sha"][:12],
             ",".join(rec["new_failures"]) or "-"))
+        if rec["verdict"] == "UNKNOWN":
+            sys.exit("train verify UNKNOWN: logs must include suite-ran evidence")
         if rec["verdict"] != "ACCEPT":
             sys.exit("train verify REJECT: new failures: %s" % (
                 ", ".join(rec["new_failures"])))
@@ -3144,8 +3149,16 @@ def cmd_train(a, board):
         rec = tr.load_train(board)
         owner = whoami(getattr(a, "owner", "") or "")
         require_integrator(board, owner, force_master=getattr(a, "force_master", False))
+        root = artifact_tree(a)
+        if not root:
+            sys.exit("train land: pass --artifact at the repo recorded in train.json")
+        for member in rec.get("members") or []:
+            if member.get("repo") and not tr.same_repo(member["repo"], tr.repo_bind(root)):
+                sys.exit("train land refused: member %s is bound to another repo" % (
+                    member.get("pr") or member.get("ref") or member.get("sha")))
         gh = os.environ.get("TICKETS_GH") or "gh"
-        landed = tr.land_train(rec, executor_ok=True, gh_bin=gh)
+        landed = tr.land_train(rec, executor_ok=True, gh_bin=gh, root=root,
+                              trunk=_trunk(cwd=root))
         rec["landed"] = landed
         tr.save_train(board, rec)
         print("train land %s  %s" % (
