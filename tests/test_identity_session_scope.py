@@ -109,20 +109,29 @@ def test_explicit_owner_still_wins_over_a_recorded_identity(board):
 
 
 def test_legacy_flat_file_is_honoured_only_when_there_is_no_session_key(board):
-    """Backwards compatibility, but deliberately narrow.
+    """Backwards compatibility, but deliberately narrow -- last resort only.
 
-    A flat file beside the board predates session keying. Honour it when the
-    harness gives us nothing better -- and ignore it when it does, because
-    adopting a file some other agent wrote is the sideways leak.
+    A flat file beside the board predates session keying and belongs to
+    whichever agent on this machine joined last. So it ranks BELOW anything
+    that actually names the caller: session-keyed record > explicit
+    TICKET_AGENT/TICKET_SEAT > flat legacy file. It only answers when nothing
+    else does; the alternative is the regression where `TICKET_AGENT=master
+    tickets msg --to worker`, run after the worker joined, resolves the master
+    as the worker and refuses the message as self-addressed.
     """
     tickets_dir = os.path.join(board, ".tickets")
     with open(os.path.join(tickets_dir, ".agent-identity"), "w") as f:
         f.write("legacy-name\n")
 
-    # No session key anywhere: the flat file is the best available answer.
-    assert seat_of(board, agent="ambient") == "legacy-name"
+    # Nothing names the caller: the flat file is the best available answer.
+    assert seat_of(board) == "legacy-name"
 
-    # A keyed session must not adopt it.
+    # An explicit name in the caller's OWN environment beats a file some
+    # other agent wrote, with or without a session key.
+    assert seat_of(board, agent="ambient") == "ambient"
+    assert seat_of(board, env={"TICKET_SEAT": "assigned"}) == "assigned"
+
+    # A keyed session must not adopt it either.
     assert seat_of(board, session="session-A", agent="ambient") == "ambient"
 
 
