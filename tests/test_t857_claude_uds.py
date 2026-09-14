@@ -1,4 +1,4 @@
-"""T-857: Claude UDS inbox takes a JSON user envelope; woken needs a receipt."""
+"""T-857: Claude UDS inbox takes a JSON user envelope; write-ack is not woken."""
 
 import json
 import os
@@ -69,7 +69,8 @@ class AckInbox:
             pass
 
 
-def test_verified_frame_shape_and_receipt_gated_woken(board, cache_dir, sock_dir, monkeypatch):
+def test_verified_frame_shape_and_write_ack_is_delivery_confirmed(
+        board, cache_dir, sock_dir, monkeypatch):
     monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
     # Production never waits for a receipt; raise the budget so the branch
     # that would honour one is exercised deterministically.
@@ -84,7 +85,8 @@ def test_verified_frame_shape_and_receipt_gated_woken(board, cache_dir, sock_dir
     label = sa.wake_seat(str(board), "cos", "nonce-idle please reply", harness="claude",
                           message_id="claude-ack-1")
     inbox.close()
-    assert label == "woken", label
+    assert label == "delivered-confirmed", label
+    assert label != "woken"
     assert inbox.frames[0] == {"type": "auth", "token": "tok"}
     user = inbox.frames[1]
     assert user["type"] == "user"
@@ -94,8 +96,8 @@ def test_verified_frame_shape_and_receipt_gated_woken(board, cache_dir, sock_dir
     assert user["message"]["role"] == "user"
     assert "nonce-idle please reply" in user["message"]["content"]
     ep = sa.read_endpoint(str(board), "cos")
-    assert ep["heartbeat_epoch"] >= before
-    assert ep.get("last_delivery_status") == "woken"
+    assert ep["heartbeat_epoch"] == before
+    assert ep.get("last_delivery_status") == "delivered-confirmed"
 
 
 def test_raw_text_payload_is_not_a_wake():

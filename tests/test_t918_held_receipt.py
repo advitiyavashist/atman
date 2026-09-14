@@ -62,6 +62,7 @@ def test_held_peer_status_is_not_ack_ok():
     assert sa._claude_ack_ok(held) is False
     assert sa._claude_receipt_label(held) == "held"
     assert sa._claude_ack_ok({"type": "ack", "ok": True}) is True
+    assert sa._claude_receipt_label({"type": "ack", "ok": True}) == "delivered-confirmed"
 
 
 @pytest.mark.parametrize("status,label", [
@@ -118,3 +119,37 @@ def test_held_receipt_prints_named_recovery_action():
     src = Path(__file__).resolve().parents[1].joinpath("tickets.py").read_text()
     assert "CLAUDE_HELD_RECOVERY" in src
     assert 'label == "held"' in src
+
+
+@pytest.mark.parametrize("frame", [
+    {"type": "ack", "ok": True},
+    {"ok": True},
+    {"status": "accepted"},
+])
+def test_generic_write_ack_is_delivery_confirmed_not_woken(frame):
+    assert sa._claude_ack_ok(frame) is True
+    assert sa._claude_receipt_label(frame) == "delivered-confirmed"
+    assert sa._claude_receipt_label(frame) != "woken"
+
+
+def test_write_only_ack_does_not_refresh_wake_heartbeat(
+        board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    monkeypatch.setattr(sa, "CLAUDE_ACK_WAIT_SECS", 2.0)
+    path = str(Path(sock_dir) / "write-only.sock")
+    inbox = AckInbox(path)
+    try:
+        sa.write_endpoint(str(board), "worker", {
+            "seat": "worker", "provider": "claude", "mode": "native",
+            "socket": path, "token": "tok", "pid": os.getpid(), "at": "now",
+            "lease_id": "lease-write", "fence": 1, "heartbeat_epoch": 7})
+        label = sa.wake_seat(str(board), "worker", "delivery only", harness="claude",
+                             message_id="write-only-message")
+        endpoint = sa.read_endpoint(str(board), "worker")
+        assert label == "delivered-confirmed", label
+        assert label != "woken"
+        assert endpoint["heartbeat_epoch"] == 7
+        assert endpoint.get("last_delivery_status") == "delivered-confirmed"
+        assert endpoint.get("last_delivery_id") == "write-only-message"
+    finally:
+        inbox.close()

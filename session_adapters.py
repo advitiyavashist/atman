@@ -881,7 +881,7 @@ CLAUDE_PEER_STATUS_LABELS = {
 
 
 def _claude_ack_ok(obj):
-    """True only for a generic write-ack. peer_message_status is not a wake."""
+    """True only for a generic write-ack. That is delivery, not a wake."""
     if not isinstance(obj, dict):
         return False
     if obj.get("type") == "control" and obj.get("action") == "peer_message_status":
@@ -896,14 +896,19 @@ def _claude_ack_ok(obj):
 
 
 def _claude_receipt_label(obj):
-    """Map a Claude inbox object to a wake receipt. Never woken for held."""
+    """Map a Claude inbox object to a wake receipt.
+
+    Write-acks and peer_message_status are delivery outcomes. woken requires
+    verified evidence that the intended message started a recipient turn;
+    no Claude inbox frame currently carries that proof, so do not invent one.
+    """
     if not isinstance(obj, dict):
         return None
     if obj.get("type") == "control" and obj.get("action") == "peer_message_status":
         status = str(obj.get("status") or "").strip().lower()
         return CLAUDE_PEER_STATUS_LABELS.get(status)
     if _claude_ack_ok(obj):
-        return "woken"
+        return "delivered-confirmed"
     return None
 
 
@@ -945,13 +950,15 @@ CLAUDE_ACK_WAIT_SECS = 0.0
 
 
 def _poke_claude_wake(ep, text, msg_id=""):
-    """Inject a Claude UDS user envelope. woken only on a real receipt.
+    """Inject a Claude UDS user envelope. Write-ack is not a wake.
 
     Live Claude Code does not write an ack on the injector socket, so the
     honest receipt is delivered-unconfirmed: the bytes left here, nobody
-    confirmed a turn. Raw text after auth is never a wake. Only a failure to
-    connect or to finish the write is a connection error worth retrying --
-    a completed write must never be sent twice under a fresh id.
+    confirmed a turn. A generic write-ack, if one ever arrives, is
+    delivered-confirmed and must not refresh the heartbeat. Raw text after
+    auth is never a wake. Only a failure to connect or to finish the write
+    is a connection error worth retrying -- a completed write must never be
+    sent twice under a fresh id.
     """
     sock_path = ep.get("socket") or ""
     if not sock_path or not os.path.exists(sock_path):
