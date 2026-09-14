@@ -11,7 +11,8 @@ import subprocess
 import sys
 import tempfile
 
-FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py", "session_adapters.py")
+FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py", "session_adapters.py",
+         "train_stack.py")
 PACKAGE_PREFIX = "src/ticket_board"
 
 
