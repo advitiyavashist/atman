@@ -64,6 +64,23 @@ DEFAULT_ROLES = {
     "grok": [],
 }
 
+# T-809: one implementation, two PATH names. atm is the public CLI; tickets
+# is the compatibility alias. Behavior, board, and exit codes must not fork.
+PRIMARY_CLI_NAME = "atm"
+COMPAT_CLI_NAME = "tickets"
+
+
+def cli_prog(argv=None):
+    """argparse/help/error name from how this process was invoked."""
+    raw = (argv if argv is not None else sys.argv) or [""]
+    base = os.path.basename(str(raw[0]).replace("\\", "/"))
+    stem = os.path.splitext(base)[0].lower()
+    if stem == COMPAT_CLI_NAME:
+        return COMPAT_CLI_NAME
+    if stem == PRIMARY_CLI_NAME:
+        return PRIMARY_CLI_NAME
+    return PRIMARY_CLI_NAME
+
 
 # --------------------------------------------------------------------------
 # board location + io
@@ -1493,6 +1510,19 @@ def timing(t):
     return out
 
 
+def _work_view():
+    """T-889 Work view module (payload + CSS/HTML/JS); packaged with sounding."""
+    try:
+        from ticket_board import work_view as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import work_view as m
+        return m
+
+
 def _sounding():
     try:
         from ticket_board import sounding as m
@@ -1867,9 +1897,12 @@ def cmd_plan(a, board):
     who = whoami()
     for it, t0 in zip(items, made):
         t = load(board, t0["id"])
-        if it.get("sounded"):
-            fields = S.merge_sound_fields(t.get("body") or it.get("body") or "", "")
-            qs = S._questions_list(fields.get("open_questions"))
+        fields = _plan_item_sound_fields(it, t)
+        qs = S._questions_list(fields.get("open_questions"))
+        if it.get("capture"):
+            t["lane"] = "capture"
+            save(board, t)
+        elif it.get("sounded"):
             if (not S.sound_fields_complete(fields) or qs
                     or S.is_no_change(fields.get("change"))):
                 for x in made:
@@ -1877,10 +1910,41 @@ def cmd_plan(a, board):
                 sys.exit("plan: %r marked sounded but needs cause/change/proof/deps and empty open questions"
                          % (it.get("key") or t["id"]))
             _apply_sounded(board, t, fields, who)
+        elif (S.sound_fields_complete(fields) and not qs
+              and not S.is_no_change(fields.get("change"))):
+            # Real cause/change/proof only. Never synthesize placeholders (T-879).
+            _apply_sounded(board, t, fields, who)
         else:
             t["lane"] = "capture"
             save(board, t)
         print("created %s  %s  lane=%s" % (t["id"], t["title"], _ticket_lane(t)))
+
+
+def _plan_item_sound_fields(it, t):
+    """Collect cause/change/proof from the plan item. Never invent placeholders."""
+    S = _sounding()
+    fields = S.merge_sound_fields(t.get("body") or it.get("body") or "", "")
+    for key in ("cause", "change", "proof", "deps", "open_questions"):
+        raw = it.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, (list, tuple)):
+            text = ", ".join(str(x).strip() for x in raw if str(x).strip())
+        else:
+            text = str(raw).strip()
+        if text:
+            fields[key] = text
+    qs = it.get("questions")
+    if qs and not (fields.get("open_questions") or "").strip():
+        fields["open_questions"] = str(qs).strip()
+    if not (fields.get("deps") or "").strip():
+        real = t.get("deps") or []
+        fields["deps"] = ", ".join(real) if real else "none"
+    return fields
+
+
+def _capture_sound_hint(tid):
+    return "%s waits in capture: run tickets sound %s" % (tid, tid)
 
 
 def _apply_sounded(board, t, fields, who):
@@ -2525,11 +2589,13 @@ def cmd_graph(a, board):
         if t.get("owner"):
             bits.append("@" + t["owner"])
         lane = _ticket_lane(t)
-        if lane != "ready":
-            bits.append("lane=" + lane)
         waiting = [d for d in t.get("deps", []) if d not in done]
         if waiting and t["status"] == "open":
             bits.append("waiting on " + ",".join(waiting))
+        if lane != "ready":
+            bits.append("lane=" + lane)
+        if t["status"] == "open" and not waiting and lane == "capture":
+            bits.append(_capture_sound_hint(tid))
         if bits:
             s += "  (%s)" % "; ".join(bits)
         return s
@@ -2703,7 +2769,16 @@ def _start_successors(board, finished_id):
             started.append("%s -> %s" % (child["id"], who))
         else:
             started.append(child["id"])
-    return freed, started, held
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    capture_wait = []
+    for x in tickets:
+        if x["status"] != "open" or finished_id not in (x.get("deps") or []):
+            continue
+        if _ticket_lane(x) != "capture":
+            continue
+        if all(d in done for d in x.get("deps") or []):
+            capture_wait.append(x["id"])
+    return freed, started, held, capture_wait
 
 
 def _may_set_reservation(board, who):
@@ -2818,7 +2893,20 @@ def cmd_next(a, board):
         print("Fix with: tickets dep <id> --drop <missing-id>")
         sys.exit(2)
     holders = sorted(set(t.get("owner") or "?" for t in tickets if t["status"] == "claimed"))
-    msg = "no ticket ready: %d open, all waiting on unfinished work" % len(open_blocked)
+    done_ids = set(t["id"] for t in tickets if t["status"] == "done")
+    capture_ready, dep_waits = [], []
+    for t in open_blocked:
+        waiting = [d for d in t.get("deps", []) if d not in done_ids]
+        if waiting:
+            dep_waits.append("%s waits on %s" % (t["id"], ",".join(waiting)))
+        elif _ticket_lane(t) == "capture":
+            capture_ready.append(_capture_sound_hint(t["id"]))
+    if capture_ready:
+        msg = "no ticket ready: %s" % "; ".join(capture_ready)
+        if dep_waits:
+            msg += "; " + "; ".join(dep_waits)
+    else:
+        msg = "no ticket ready: %d open, all waiting on unfinished work" % len(open_blocked)
     if holders:
         msg += " (in progress with: %s)" % ", ".join(holders)
     print(msg)
@@ -4955,13 +5043,15 @@ def cmd_done(a, board):
         a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
     if g:
         print("recorded %s" % t["commit"])
-    freed, started, held = _start_successors(board, a.id)
+    freed, started, held, capture_wait = _start_successors(board, a.id)
     if freed:
         print("unblocked: %s" % ", ".join(freed))
     if started:
         print("started: %s" % ", ".join(started))
     if held:
         print("held (not started): %s" % ", ".join(held))
+    for tid in capture_wait:
+        print(_capture_sound_hint(tid))
     _finish_followup(board, a.id, "done")
 
 
@@ -5969,6 +6059,9 @@ def cmd_reopen(a, board):
     prev_owner = t.get("owner", "")
     t["status"] = "open"
     t["owner"] = ""
+    # T-889 hook: the Work view treats task posts and triggers older than this
+    # as the ticket's previous life, never as current dispatch evidence.
+    t["reopened_at"] = now()
     save(board, t)
     _safe(lambda: traj_event(board, "reopen", agent=whoami(getattr(a, "by", "")),
                              ticket=t, state_before=before, state_after="open",
@@ -8629,7 +8722,7 @@ def cmd_retire(a, board):
     """Remove a seat from the board (inverse of join). Refused while it holds a ticket."""
     owner = (a.name or whoami()).strip()
     if not owner:
-        sys.exit("usage: tickets retire <name>")
+        sys.exit("usage: %s retire <name>" % cli_prog())
     if owner.startswith("agent-"):
         sys.exit("give a real agent name")
     agent_path = os.path.join(agents_dir(board), owner + ".json")
@@ -9336,7 +9429,7 @@ def _watch_note_limit_from_log(board, owner, log_slice):
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
-TICKET_AGENT is already set in your environment; run `tickets ...` commands plainly (no env prefix).
+TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
 Rules: one ticket at a time; own git worktree, never main; `tickets sync` before `tickets review`;
 `tickets update <id> "..."` every 45 minutes; finish with `tickets review <id> --notes "paths, tests, decisions"`;
 never edit .tickets/ by hand; never run `tickets clear`. Board-only comms: `tickets msg`.
@@ -9354,7 +9447,7 @@ Do now, in order:
 {extra}"""
 
 MASTER_PROMPT = """You are {agent}, the MASTER of the shared ticket board at {board} (repo {root}).
-TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
+TICKET_AGENT is set; run `atm ...` plainly (`tickets` is the same CLI). You do not take feature tickets.
 This run: pick ONE concrete outcome (one unblock, one merge batch, or one routing act) and stop.
 Ordinary messages and ACKs are notification-only and must not extend the run.
 If there is no standing objective with a measurable --exit criterion, ask for one
@@ -13207,6 +13300,7 @@ body[data-work-view=columns] #graphLede{display:none}
   .portfolio-menu{position:fixed;left:12px;right:12px;top:auto;width:auto}
 }
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+<!--WORK_VIEW:css-->
 </style></head><body data-tab="board" data-work-view="graph">
 <header class="cmd">
   <div class="brand">
@@ -13284,7 +13378,7 @@ body[data-work-view=columns] #graphLede{display:none}
     <button type="button" id="view-columns" data-work-view="columns" aria-selected="false">Columns</button>
   </div>
   <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">tickets graph</span> / <span class="mono">tickets map</span> — not a list of titles. Follow-up: <span class="mono">tickets update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">tickets reopen</span>. Review: <span class="mono">tickets review</span> then <span class="mono">tickets merge</span>.</p>
-  <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"></div>
+  <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"><!--WORK_VIEW:html--></div>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
@@ -13509,9 +13603,12 @@ function setWorkView(name, persistHash){
     try{history.replaceState(null,'','#'+name)}catch(e){}
   }
 }
-function renderGraph(g){
+<!--WORK_VIEW:js-->
+function renderGraph(g,d){
   const host=document.getElementById('workflowGraph');
   if(!host)return;
+  // T-889 hook: the Work view module owns this pane when its payload is present.
+  if(window.AtmanWork&&d&&d.work){window.AtmanWork.render(d,host);return}
   const by={};(g&&g.nodes||[]).forEach(n=>{by[n.id]=n});
   const edges=(g&&g.edges)||[];
   if(!g||!(g.nodes||[]).length){
@@ -13763,7 +13860,7 @@ async function load(manual){
   fillCol('ready',ready,ready.map(t=>card(t)).join(''));
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
   fillCol('review',d.review||[],(d.review||[]).map(t=>card(t,t.commit?'<div class="mono mute">'+esc(t.commit)+(t.pr?' · PR '+esc(t.pr):'')+'</div>':'')).join(''));
-  renderGraph(d.graph);
+  renderGraph(d.graph,d);
   renderEmptyBoard(d);
   renderAttention(d.attention);
   renderEpics(d.epics);
@@ -14419,8 +14516,9 @@ def _board_snapshot_body(board, messages=40):
                   "waiting": [d for d in t.get("deps", []) if d not in done]}
                  for t in tickets if t["status"] in ("open", "blocked")]
     turns, usage, promise = _cached_turns_usage_promise(board, tickets)
+    all_msgs = load_messages(board)
     raw_msgs = []
-    for x in load_messages(board)[-messages:]:
+    for x in all_msgs[-messages:]:
         row = {"id": _msg_id(x), "at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
                "kind": x.get("kind") or "message",
@@ -14441,6 +14539,13 @@ def _board_snapshot_body(board, messages=40):
     health_items = [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12]
     coverage = _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
                                 open_rows, in_flight, review, out_agents)
+    graph = workflow_graph(tickets)
+    objective_view = {
+        "text": (obj or {}).get("text", ""),
+        "state": objective_state(obj) if obj else "",
+        "exit_criterion": (obj or {}).get("exit_criterion") or "",
+        "exit_missing": bool(obj) and objective_exit_missing(obj),
+    }
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -14466,15 +14571,17 @@ def _board_snapshot_body(board, messages=40):
         "usage": usage,
         "promise": promise,
         "objective": {
-            "text": (obj or {}).get("text", ""),
-            "state": objective_state(obj) if obj else "",
-            "exit_criterion": (obj or {}).get("exit_criterion") or "",
-            "exit_missing": bool(obj) and objective_exit_missing(obj),
+            **objective_view,
             "wake_gates": "continuous seats: directed DM/@mention; task-only/scheduled seats: explicit tasks; all: stuck/blocked, held, assigned work",
             "stop_condition": STOP_CONDITION,
         },
         "coverage": coverage,
-        "graph": workflow_graph(tickets),
+        "graph": graph,
+        # T-889 hook: the Work view payload (objective, phases, node detail).
+        "work": _safe(lambda: _work_view().work_payload(
+            tickets, graph, all_msgs, objective=objective_view,
+            acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who)),
+            agents=agents), None),
     }
 
 
@@ -14507,6 +14614,18 @@ def _ui_msg_origin_ok(headers):
     return parsed.netloc.lower() == host.lower()
 
 
+def _ui_page():
+    """T-889 hook: UI_HTML with the Work view module spliced in at its three
+    named placeholders. Missing module -> the shell's own fallback graph."""
+    mod = _safe(_work_view, None)
+    css = getattr(mod, "WORK_CSS", "") if mod else ""
+    html = getattr(mod, "WORK_HTML", "") if mod else ""
+    js = getattr(mod, "WORK_JS", "") if mod else ""
+    return (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
+            .replace("<!--WORK_VIEW:html-->", html)
+            .replace("<!--WORK_VIEW:js-->", js))
+
+
 def cmd_ui(a, board):
     """Local status UI: serves an auto-refreshing page, /board.json, and a
     composer POST at /msg that posts through post_message() -- same board,
@@ -14532,7 +14651,7 @@ def cmd_ui(a, board):
                 })).encode()
                 ctype = "application/json"
             else:
-                body = UI_HTML.encode()
+                body = _ui_page().encode()
                 ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
@@ -15397,8 +15516,10 @@ PROTOCOL = """## Shared ticket board
 
 Work here is coordinated through a ticket board that Claude Code, Codex and
 Cursor all share. It lives in `.tickets/` and is driven only through the
-`tickets` CLI -- never edit files in `.tickets/` by hand, or atomic claiming
-breaks and two agents will do the same work.
+Atman CLI -- never edit files in `.tickets/` by hand, or atomic claiming
+breaks and two agents will do the same work. The primary public name is `atm`;
+`tickets` is a compatibility alias for the same implementation, arguments,
+exit codes, and board.
 
 Run `tickets board` for the current state, or `tickets graph` to see the whole
 dependency tree with each node's status and owner.
@@ -15619,14 +15740,20 @@ def cmd_self(a, board):
             probe = sa.probe_provider(sa.provider_for_harness(harness))
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
                 seat, probe.get("reason", "ok") if not probe.get("ok") else "transport available"))
-    on_path = shutil.which("tickets")
-    if on_path:
-        resolved = os.path.realpath(on_path)
-        print("PATH:   %s" % on_path)
-        if resolved != on_path:
+    print("cli:    primary=%s alias=%s (one implementation)" % (PRIMARY_CLI_NAME, COMPAT_CLI_NAME))
+    on_path = None
+    for path_name in (PRIMARY_CLI_NAME, COMPAT_CLI_NAME):
+        found = shutil.which(path_name)
+        if not found:
+            continue
+        resolved = os.path.realpath(found)
+        print("PATH:   %s (%s)" % (found, path_name))
+        if resolved != found:
             print("        -> %s" % resolved)
         if resolved != script:
             print("        running %s" % script)
+        if path_name == COMPAT_CLI_NAME:
+            on_path = found
         try:
             with open(resolved) as source:
                 launcher = source.read(512)
@@ -15641,7 +15768,7 @@ def cmd_self(a, board):
 
 def main():
     status = release_status()
-    p = _LoudArgumentParser(prog="tickets", description=__doc__.split("\n")[0],
+    p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
                            epilog=status)
     p.add_argument("--version", action="version", version=status)
     sub = p.add_subparsers(dest="cmd")
@@ -16186,7 +16313,7 @@ def main():
     c.add_argument("--all", action="store_true", help="include done tickets and closed sprints")
     c.set_defaults(fn=cmd_map)
 
-    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin (default lane=capture until sounded)")
+    c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin (ready only with cause/change/proof; else capture)")
     c.set_defaults(fn=cmd_plan)
 
     c = sub.add_parser("capture", help="capture a thought as lane=capture (not claimable until tickets sound)")
