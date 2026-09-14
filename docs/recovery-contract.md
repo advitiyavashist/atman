@@ -46,7 +46,11 @@ ticket JSON. There is no extra database.
 | Same-provider restart | unchanged | unchanged | the same agent, new process |
 | Cross-provider handoff | `assign --owner` | incremented | only the new owner |
 
-Before reassignment the lease is advanced and the claim lock is rewritten.
+Reassignment validates the target hold (and generation) first. The lease is
+advanced in memory, then a successful `save` plus claim-lock rewrite run
+inside the same ticket-json mutation critical section. A refused busy
+transfer or lost-generation save leaves the claim lock untouched. Agent
+bind/clear stay outside the owner lock.
 A process that still holds the old generation cannot accept results:
 
 - `review` fences every revoked previous owner after one or more transfers (A stays fenced after A→B→C); a helper who never owned the ticket may still submit (T-238)

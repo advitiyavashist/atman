@@ -2673,6 +2673,7 @@ def cmd_assign(a, board):
     transfer_owner = None
     reserve_lock = None
     expected_generation = None
+    rewrite_lock_to = None
     try:
         if a.owner is not None:
             # hard assignment by the master: takes the lock on their behalf
@@ -2711,22 +2712,35 @@ def cmd_assign(a, board):
                         tc.issue_owner_lease(
                             t, a.owner, harness=_lease_harness(board, a.owner),
                             reason="reassign", previous_owner=prev_owner)
-                        tc.rewrite_claim_lock(board, t["id"], a.owner)
+                        rewrite_lock_to = a.owner
                     clear_prev = prev_owner
                 if a.owner:
                     bind_owner = a.owner
         if not changed:
             sys.exit("nothing to change; see tickets assign --help")
         t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
+
+        def _save_and_rewrite_lock():
+            # Hold/generation already validated. Publish JSON and relabel the
+            # claim lock in the same ticket-json critical section so a refused
+            # transfer or lost-generation save cannot leave Alice on T002.lock.
+            tc_pub = _recovery() if rewrite_lock_to else None
+            if tc_pub is not None:
+                with tc_pub.ticket_mutation_lock(board, t["id"]):
+                    save(board, t, expected_generation=expected_generation)
+                    tc_pub.rewrite_claim_lock(board, t["id"], rewrite_lock_to)
+            else:
+                save(board, t, expected_generation=expected_generation)
+
         if transfer_owner:
             with _OwnerHoldLock(board, transfer_owner):
                 held = _held_claimed(board, transfer_owner, except_id=t["id"])
                 if held:
                     sys.exit("%s already holds %s -- finish that before taking an active assignment of %s"
                              % (transfer_owner, ", ".join(x["id"] for x in held), t["id"]))
-                save(board, t, expected_generation=expected_generation)
+                _save_and_rewrite_lock()
         else:
-            save(board, t, expected_generation=expected_generation)
+            _save_and_rewrite_lock()
     finally:
         _release_ticket_excl(reserve_lock)
     if clear_prev:
