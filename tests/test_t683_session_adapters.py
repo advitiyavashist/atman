@@ -65,28 +65,44 @@ class FakeInbox:
         self.received = []
         self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._srv.bind(self.path)
-        self._srv.listen(1)
+        self._srv.listen(8)
         self._srv.settimeout(10)
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
 
-    def _accept_loop(self):
+    def _handle(self, conn):
+        conn.settimeout(5)
+        chunks = []
+        buf = b""
+        acked = False
         try:
-            conn, _ = self._srv.accept()
+            while True:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+                buf += data
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        obj = json.loads(line.decode("utf-8", "replace"))
+                    except ValueError:
+                        continue
+                    if obj.get("type") == "user" and not acked:
+                        conn.sendall(b'{"type":"ack","ok":true}\n')
+                        acked = True
         except OSError:
-            return
-        with conn:
-            conn.settimeout(5)
-            chunks = []
-            try:
-                while True:
-                    data = conn.recv(4096)
-                    if not data:
-                        break
-                    chunks.append(data)
-            except OSError:
-                pass
+            pass
         self.received.append(b"".join(chunks).decode("utf-8", "replace"))
+
+    def _accept_loop(self):
+        while True:
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            with conn:
+                self._handle(conn)
 
     def wait_for_message(self, timeout=5):
         deadline = time.time() + timeout
@@ -133,7 +149,8 @@ def test_claude_register_and_wake(board, cache_dir, sock_dir):
     sent = _run(board, "msg", "please act", "--to", "bob", "--task", agent="sender",
                 env={"TICKETS_CACHE_DIR": cache_dir})
     assert sent.returncode == 0, sent.stderr
-    assert "wake: bob -> woken" in sent.stdout
+    # Claude Code writes no receipt on the injector socket.
+    assert "wake: bob -> delivered-unconfirmed" in sent.stdout
     payload = inbox.wait_for_message()
     inbox.close()
     assert payload and "please act" in payload
@@ -153,10 +170,11 @@ def test_codex_app_server_start_is_woken(board, cache_dir, monkeypatch, tmp_path
         "heartbeat_epoch": time.time()})
     with mock.patch("subprocess.run") as run_mock:
         run_mock.return_value = subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch.object(sa, "_codex_queue_start", return_value=True):
-            label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
-    assert label == "woken"
-    assert sa.has_live_native_session(str(board), "codex-seat") is True
+        with mock.patch.object(sa, "_codex_thread_is_loaded", return_value=True):
+            with mock.patch.object(sa, "_codex_turn_start", return_value=True):
+                label = sa.wake_seat(str(board), "codex-seat", "hello", harness="codex")
+                assert label == "woken"
+                assert sa.has_live_native_session(str(board), "codex-seat") is True
 
 
 def test_codex_retained_without_control_sock_does_not_block_watch(board, cache_dir, monkeypatch):
@@ -281,17 +299,24 @@ def test_continuous_dm_wakes_native_endpoint(board, cache_dir, sock_dir):
     sent = _run(board, "msg", "continuous ping", "--to", "seat", agent="sender",
                 env={"TICKETS_CACHE_DIR": cache_dir})
     assert sent.returncode == 0, sent.stderr
-    assert "wake: seat -> woken" in sent.stdout
+    assert "wake: seat -> delivered-unconfirmed" in sent.stdout
     inbox.close()
 
 
 def test_probe_fail_closed_without_transport(board, cache_dir):
+    """No transport in the environment means no endpoint, ever.
+
+    The register call has to stay inside the cleared environment too: the
+    suite itself usually runs inside a harness that exports the real socket,
+    and reading it here both passed the test for the wrong reason and wrote
+    an endpoint into the operator's live cache.
+    """
     sa = _adapters()
-    with mock.patch.dict(os.environ, {}, clear=True):
+    with mock.patch.dict(os.environ, {"TICKETS_CACHE_DIR": cache_dir}, clear=True):
         probe = sa.probe_provider("claude")
-    assert not probe.get("ok")
-    reg = sa.register_persistent(str(board), "alice", "claude", "now")
-    assert not reg.get("ok")
+        assert not probe.get("ok")
+        reg = sa.register_persistent(str(board), "alice", "claude", "now")
+    assert not reg.get("ok"), reg
 
 
 def test_public_state_redacts_token(board, cache_dir, monkeypatch):
@@ -409,7 +434,7 @@ def test_persistent_task_only_does_not_poke_ordinary_dm(board, cache_dir, sock_d
     tasked = _run(board, "msg", "spend this turn", "--to", "seat", "--task", agent="sender",
                   env={"TICKETS_CACHE_DIR": cache_dir})
     assert tasked.returncode == 0, tasked.stderr
-    assert "wake: seat -> woken" in tasked.stdout
+    assert "wake: seat -> delivered-unconfirmed" in tasked.stdout
     payload = inbox.wait_for_message()
     inbox.close()
     assert payload and "spend this turn" in payload
@@ -526,7 +551,7 @@ def test_wake_delivery_is_deduped_by_message_id(board, cache_dir, sock_dir, monk
         "seat": "bob", "provider": "claude", "mode": "native",
         "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
         "heartbeat_epoch": time.time()})
-    assert sa.wake_seat(str(board), "bob", "hello", message_id="m1") == "woken"
+    assert sa.wake_seat(str(board), "bob", "hello", message_id="m1") == "delivered-unconfirmed"
     assert sa.wake_seat(str(board), "bob", "hello", message_id="m1") == "deduped"
     inbox.close()
 
@@ -834,7 +859,7 @@ def test_stale_delivery_after_rebind_does_not_mark_new_lease(board, cache_dir, s
     old_lease = first_reg["lease_id"]
     old_fence = int(first_reg["record"]["fence"])
 
-    def poke_and_rebind(ep, text):
+    def poke_and_rebind(ep, text, msg_id=""):
         monkeypatch.setenv("TICKETS_SESSION_LEASE", old_lease)
         monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", second)
         assert sa.register_persistent(str(board), "alice", "claude", "t2").get("ok")
@@ -889,11 +914,38 @@ def test_wake_retries_same_message_then_succeeds(board, cache_dir, sock_dir, mon
         "seat": "bob", "provider": "claude", "mode": "native",
         "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
         "lease_id": "lease-1", "fence": 1, "heartbeat_epoch": time.time()})
-    with mock.patch.object(sa, "_poke_claude", side_effect=[False, True]) as poke:
+    seen = []
+
+    def flaky(ep, text, msg_id=""):
+        seen.append(msg_id)
+        # Attempt 1 never got the bytes out; attempt 2 wrote them.
+        return "queued-offline" if len(seen) == 1 else "delivered-unconfirmed"
+
+    with mock.patch.object(sa, "_poke_claude_wake", side_effect=flaky) as poke:
         label = sa.wake_seat(str(board), "bob", "hello", harness="claude", message_id="durable-1")
-    assert label == "woken"
+    # Claude Code sends no receipt, so a written frame is delivered-unconfirmed.
+    assert label == "delivered-unconfirmed"
     assert poke.call_count == 2
+    # The receiver dedupes by msg_id; a retry that minted a new one would
+    # post the turn twice.
+    assert seen[0] and seen[0] == seen[1]
     assert sa.read_endpoint(str(board), "bob")["last_delivery_id"] == "durable-1"
+
+
+def test_wake_does_not_retry_after_the_write_landed(board, cache_dir, sock_dir, monkeypatch):
+    monkeypatch.setenv("TICKETS_CACHE_DIR", cache_dir)
+    sock_path = str(Path(sock_dir) / "once.sock")
+    Path(sock_path).touch()
+    sa = _adapters()
+    sa.write_endpoint(str(board), "bob", {
+        "seat": "bob", "provider": "claude", "mode": "native",
+        "socket": sock_path, "token": "", "pid": os.getpid(), "at": "now",
+        "lease_id": "lease-1", "fence": 1, "heartbeat_epoch": time.time()})
+    with mock.patch.object(sa, "_poke_claude_wake",
+                           return_value="delivered-unconfirmed") as poke:
+        label = sa.wake_seat(str(board), "bob", "hello", harness="claude", message_id="durable-2")
+    assert label == "delivered-unconfirmed"
+    assert poke.call_count == 1
 
 
 def test_wake_exhausts_same_message_without_claiming_retrying(board, cache_dir, sock_dir, monkeypatch):
@@ -909,7 +961,7 @@ def test_wake_exhausts_same_message_without_claiming_retrying(board, cache_dir, 
     with mock.patch.object(sa, "_poke_claude", return_value=False) as poke:
         label = sa.wake_seat(str(board), "bob", "hello", harness="claude", message_id="durable-1")
     assert label == "refused"
-    assert poke.call_count == 3
+    assert poke.call_count == 1
     tk = _tickets()
     tk._note_native_wake_result(str(board), "bob", label, "durable-1")
     rec = tk._agent_rec(str(board), "bob") or {}
@@ -989,7 +1041,7 @@ def test_concurrent_same_message_id_pokes_once(board, cache_dir, sock_dir, monke
     proceed = threading.Event()
     pokes = []
 
-    def slow_poke(ep, text):
+    def slow_poke(ep, text, msg_id=""):
         pokes.append(1)
         in_poke.set()
         proceed.wait(timeout=5)

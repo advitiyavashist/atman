@@ -115,6 +115,10 @@ def run(command, args, board, api):
                 )
 
             result = transact(board, roles)
+            if args.operation == "take":
+                warn = api.get("warn_leadership_offline") if isinstance(api, dict) else None
+                if callable(warn):
+                    warn(board, actor, args.role_id)
         elif command == "handover":
             if not re.fullmatch(r"T-\d+", args.ticket):
                 raise ValueError("Expected ticket ID T-123")
