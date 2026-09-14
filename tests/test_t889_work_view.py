@@ -451,9 +451,18 @@ def test_review_verdicts_fix_accept_none_superseded_and_marked_done():
     assert r["latest"] is None
     assert r["history"][0]["kind"] == "FIX" and r["history"][0]["applies"] == "superseded"
     assert r["label"] == "Awaiting review of def5678 · no verdict recorded · earlier FIX by @cos on abc1234 superseded"
-    # ACCEPT on the exact artifact
+    # T-944: prose ACCEPT is an unstructured note, never a verdict
     acc = ("cos", "2026-09-13T02:10:00Z", "verdict: ACCEPT def5678 -- good")
     _, by = _pure([_rev("review", "br@def5678", [sub, fix, sub2, acc])])
+    r = by["T-001"]["review"]
+    assert r["verified"] is False
+    assert "Accepted" not in r["label"]
+    assert "unstructured note" in r["label"]
+    # structured accept on the exact artifact
+    t_acc = _rev("review", "br@def5678", [sub, fix, sub2])
+    t_acc["review_events"] = [{"kind": "accept", "by": "cos", "at": "2026-09-13T02:10:00Z",
+                               "sha": "def5678", "notes": "good"}]
+    _, by = _pure([t_acc])
     r = by["T-001"]["review"]
     assert r["label"] == "Accepted by @cos on def5678" and r["verified"] is True
     # a verdict that names no SHA is recorded evidence of unknown applicability
