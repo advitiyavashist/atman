@@ -701,6 +701,58 @@ def write_identity(board, name):
     return name
 
 
+def identity_resolution(board, explicit=None):
+    """(seat, why) matching session_seat() -- for `tickets self` / identity."""
+    if explicit:
+        return explicit, "explicit --owner"
+    seat = (os.environ.get("TICKET_SEAT") or "").strip()
+    if seat:
+        return seat, "TICKET_SEAT (supervisor assignment)"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return recorded, "session-keyed join record"
+    env_agent = (os.environ.get("TICKET_AGENT") or "").strip()
+    if env_agent:
+        return env_agent, "TICKET_AGENT"
+    if recorded:
+        return recorded, "legacy flat identity file"
+    return "agent-%d" % os.getpid(), "pid fallback"
+
+
+def _join_binds_this_session(board, owner, on_behalf=False):
+    """True when this join may write the caller's session-keyed identity.
+
+    T-954: spawn/join on behalf of another seat must not rebind the caller.
+    T-839: a first join still decides the session even if TICKET_AGENT is a
+    stale ambient name -- unless that ambient name is already a real seat
+    on this board (a leader operating a worker).
+    """
+    if on_behalf:
+        return False
+    owner = (owner or "").strip()
+    caller = whoami()
+    if owner and owner == caller:
+        return True
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board and keyed:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if recorded:
+        return False
+    if caller and not caller.startswith("agent-") and _agent_rec(board, caller):
+        return False
+    return True
+
+
 def seat_confirmed(board):
     """True when this session DELIBERATELY confirmed the seat it answers as.
 
@@ -8876,6 +8928,42 @@ def _strip_identity_bound_state(board, owner):
     _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
 
 
+def _leadership_seat_names(board):
+    """Unique seats that currently hold, or retired holding, ceo/cos/master."""
+    names = set()
+    m = current_master(board) or {}
+    for key in ("owner", "cos"):
+        n = (m.get(key) or "").strip()
+        if n:
+            names.add(n)
+    for alias, holder in (load_aliases(board) or {}).items():
+        if (alias or "").strip().lower() in STABLE_ROLE_ALIASES and holder:
+            names.add(holder)
+    for name, info in load_retired(board).items():
+        alias = ((info or {}).get("alias") or "").strip().lower()
+        if alias in STABLE_ROLE_ALIASES or alias in ("master", "ceo", "cos"):
+            names.add(name)
+    return names
+
+
+def _refuse_protected_seat_takeover(board, owner, transfer=False, on_behalf=False):
+    """Refuse join/spawn of retired or leadership names without --transfer.
+
+    Self-join (owner == whoami()) is allowed so a leader can recover their
+    own session. T-954 CEO add: worker seat 'sol-ceo-cto' on T-913.
+    """
+    if transfer or not owner:
+        return
+    caller = whoami()
+    if owner == caller:
+        return
+    if owner in load_retired(board):
+        sys.exit("refusing: %s is retired; pass --transfer for an audited handover" % owner)
+    if owner in _leadership_seat_names(board):
+        sys.exit("refusing: %s holds or held a leadership role; pass --transfer "
+                 "for an audited handover" % owner)
+
+
 def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias=""):
     """Refuse provider reuse, or audited-transfer that drops identity-bound state."""
     alias = (alias or "").strip().lower()
@@ -8931,6 +9019,7 @@ def _join_namespace(a, owner):
         transfer=bool(getattr(a, "transfer", False)),
         alias=getattr(a, "alias", "") or "",
         worktree=getattr(a, "worktree", "") or "",
+        on_behalf=True,
     )
 
 
@@ -8955,6 +9044,10 @@ def cmd_join(a, board):
         board, owner, harness,
         transfer=bool(getattr(a, "transfer", False)),
         alias=(getattr(a, "alias", "") or "").strip())
+    _refuse_protected_seat_takeover(
+        board, owner,
+        transfer=bool(getattr(a, "transfer", False)),
+        on_behalf=bool(getattr(a, "on_behalf", False)))
     # Read this BEFORE checkin(), which creates the record. Only a genuinely new
     # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
     # calls straight through here) must leave delivery completely alone.
@@ -9039,7 +9132,16 @@ def cmd_join(a, board):
     # malformed flag -- still made this session alpha, so a bare `tickets
     # inbox` read (and marked read) alpha's private mail and a bare `tickets
     # msg` posted as alpha. Nothing below this line can sys.exit.
-    write_identity(board, owner)
+    #
+    # T-954: spawn/join on behalf of another seat must not write THIS
+    # session's identity. Only an explicit self-join rebinds the caller.
+    on_behalf = bool(getattr(a, "on_behalf", False))
+    if _join_binds_this_session(board, owner, on_behalf=on_behalf):
+        write_identity(board, owner)
+    else:
+        seat, why = identity_resolution(board)
+        print("session identity unchanged (%s via %s); joined %s on behalf" % (
+            seat, why, owner))
     entry["agent_id"] = owner
     if harness:
         entry["provider"] = harness
@@ -16263,7 +16365,17 @@ def cmd_self(a, board):
     script = os.path.realpath(__file__)
     print("script: %s" % script)
     print("status: %s" % release_status())
-    seat = whoami()
+    if board is None:
+        try:
+            found = board_dir(discover_children=False)
+            if found and os.path.isdir(found):
+                board = found
+        except Exception:
+            board = None
+    seat, why = identity_resolution(board)
+    print("seat:   %s" % seat)
+    print("why:    %s" % why)
+    print("whoami: %s" % whoami())
     if board and seat and not seat.startswith("agent-"):
         harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
         sa = _session_adapters()
@@ -17085,7 +17197,11 @@ def main():
         p.print_help()
         return
     if a.cmd == "self":
-        cmd_self(a, None)
+        try:
+            found = board_dir(discover_children=False)
+        except Exception:
+            found = None
+        cmd_self(a, found if found and os.path.isdir(found) else None)
         return
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
