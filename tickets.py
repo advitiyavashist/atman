@@ -1891,6 +1891,26 @@ def timing(t):
     return out
 
 
+def _intake():
+    try:
+        from ticket_board import intake as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import intake as m
+        return m
+
+
+class _IntakeHooks:
+    load_all = staticmethod(load_all)
+    create = staticmethod(create)
+    save = staticmethod(save)
+    now = staticmethod(now)
+    who = staticmethod(whoami)
+
+
 def _work_view():
     """T-889 Work view module (payload + CSS/HTML/JS); packaged with sounding."""
     try:
@@ -2404,6 +2424,37 @@ def cmd_capture(a, board):
     save(board, t)
     print("captured %s  %s  lane=capture" % (t["id"], t["title"]))
     print("  not visible to tickets next until `tickets sound %s`" % t["id"])
+
+
+def cmd_intake(a, board):
+    """Turn a signal into a capture-lane ticket. Never sounds or dispatches."""
+    kind = (getattr(a, "source", "") or "").strip()
+    payload = {}
+    raw = (getattr(a, "json", "") or "").strip()
+    if raw:
+        if raw == "-":
+            payload = json.loads(sys.stdin.read() or "{}")
+        else:
+            with open(raw) as f:
+                payload = json.load(f)
+        kind = kind or (payload.get("source") or payload.get("kind") or "")
+    payload = dict(payload)
+    for key in ("repo", "number", "title", "url", "run_id", "sha", "name",
+                "schedule", "prompt", "workflow", "conclusion", "role",
+                "priority"):
+        val = getattr(a, key, None)
+        if val not in (None, ""):
+            payload[key] = val
+    if not kind:
+        sys.exit("intake: github-issue | ci-failure | cron  (or --json)")
+    try:
+        t, status = _intake().ingest(board, kind, payload, _IntakeHooks())
+    except (ValueError, TypeError) as e:
+        sys.exit("intake: %s" % e)
+    print("%s %s  %s  lane=%s  source_id=%s" % (
+        status, t["id"], t["title"], t.get("lane"), (t.get("intake") or {}).get("source_id")))
+    if status == "created":
+        print("  not visible to tickets next until `tickets sound %s`" % t["id"])
 
 
 def cmd_sound(a, board):
@@ -17201,6 +17252,28 @@ def main():
     c.add_argument("--role", "-r", default="")
     c.add_argument("--priority", "-p", type=int, default=2)
     c.set_defaults(fn=cmd_capture)
+
+    c = sub.add_parser(
+        "intake",
+        help="signal → capture-lane ticket (github-issue | ci-failure | cron); never dispatch",
+        description="Turn a signal into a capture-lane ticket. Never sounds or dispatches.")
+    c.add_argument("source", nargs="?", default="",
+                   help="github-issue | ci-failure | cron (aliases: issue, ci)")
+    c.add_argument("--json", default="", help="payload file, or - for stdin")
+    c.add_argument("--repo", default="")
+    c.add_argument("--number", type=int, default=None)
+    c.add_argument("--title", default="")
+    c.add_argument("--url", default="")
+    c.add_argument("--run-id", dest="run_id", default="")
+    c.add_argument("--sha", default="")
+    c.add_argument("--name", default="")
+    c.add_argument("--schedule", default="")
+    c.add_argument("--prompt", default="")
+    c.add_argument("--workflow", default="")
+    c.add_argument("--conclusion", default="")
+    c.add_argument("--role", "-r", default="")
+    c.add_argument("--priority", "-p", type=int, default=2)
+    c.set_defaults(fn=cmd_intake)
 
     c = sub.add_parser("sound", help="turn a capture into an implementable ticket (cause/change/proof/deps)")
     c.add_argument("id")
