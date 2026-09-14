@@ -527,6 +527,55 @@ def write_identity(board, name):
     os.replace(tmp, path)
 
 
+def identity_resolution(board, explicit=None):
+    """(seat, why) matching session_seat(). Must match tickets.py."""
+    if explicit:
+        return explicit, "explicit --owner"
+    seat = (os.environ.get("TICKET_SEAT") or "").strip()
+    if seat:
+        return seat, "TICKET_SEAT (supervisor assignment)"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return recorded, "session-keyed join record"
+    env_agent = (os.environ.get("TICKET_AGENT") or "").strip()
+    if env_agent:
+        return env_agent, "TICKET_AGENT"
+    if recorded:
+        return recorded, "legacy flat identity file"
+    return "agent-%d" % os.getpid(), "pid fallback"
+
+
+def _join_binds_this_session(board, owner, on_behalf=False):
+    """True when this join may write the caller's session-keyed identity.
+
+    Must match tickets.py:_join_binds_this_session (T-954 / T-839).
+    """
+    if on_behalf:
+        return False
+    owner = (owner or "").strip()
+    caller = whoami()
+    if owner and owner == caller:
+        return True
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board and keyed:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if recorded:
+        return False
+    if caller and not caller.startswith("agent-") and _agent_rec(board, caller):
+        return False
+    return True
+
+
 def seat_confirmed(board):
     try:
         if os.environ.get("TICKET_SEAT"):
@@ -4078,12 +4127,29 @@ def cmd_join(a, board):
         board, owner, incoming,
         transfer=bool(getattr(a, "transfer", False)),
         alias=(getattr(a, "alias", "") or "").strip())
+    if not getattr(a, "transfer", False) and owner != whoami():
+        m = current_master(board) or {}
+        leaders = set(n for n in (m.get("owner"), m.get("cos")) if n)
+        for alias, holder in (load_aliases(board) or {}).items():
+            if (alias or "").strip().lower() in ("ceo", "cos") and holder:
+                leaders.add(holder)
+        if owner in leaders:
+            sys.exit("refusing: %s holds or held a leadership role; pass --transfer "
+                     "for an audited handover" % owner)
     # AFTER the guard, never before it: a refused join must leave this session
     # answering as whoever it already was. Stamping first made `join alpha` --
     # refused for provider reuse or a bound alias -- still turn this session
     # into alpha, so a bare `tickets inbox` read alpha's private mail and a
     # bare `tickets msg` posted as alpha. Nothing below can sys.exit.
-    write_identity(board, owner)
+    #
+    # T-954: join on behalf of another seat must not write THIS session.
+    on_behalf = bool(getattr(a, "on_behalf", False))
+    if _join_binds_this_session(board, owner, on_behalf=on_behalf):
+        write_identity(board, owner)
+    else:
+        seat, why = identity_resolution(board)
+        print("session identity unchanged (%s via %s); joined %s on behalf" % (
+            seat, why, owner))
     # Before checkin(), which creates the record: only a genuinely new agent is
     # stamped, so a re-join never moves the watermark over unread mail.
     first_join = not _agent_rec(board, owner)
