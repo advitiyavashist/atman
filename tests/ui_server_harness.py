@@ -93,9 +93,12 @@ def _unregister_ui_pid(pid: int) -> None:
 
 def _kill_pid_tree(pid: int) -> None:
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
-        return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
     for _ in range(20):
         try:
             os.kill(pid, 0)
@@ -103,9 +106,49 @@ def _kill_pid_tree(pid: int) -> None:
             return
         time.sleep(0.1)
     try:
-        os.kill(pid, signal.SIGKILL)
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
-        pass
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def live_registered_ui_pids() -> list[int]:
+    live = []
+    for pid, _port in _read_pid_entries():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        live.append(pid)
+    return live
+
+
+def leftover_suite_ui_children(pytest_pid: int | None = None) -> list[tuple[int, int, str]]:
+    """ui --port processes still parented by this suite or already reparented to 1."""
+    me = int(pytest_pid or os.getpid())
+    leftover: list[tuple[int, int, str]] = []
+    try:
+        out = subprocess.check_output(["ps", "-x", "-o", "pid=,ppid=,command="], text=True)
+    except OSError:
+        return leftover
+    for line in out.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        cmd = parts[2]
+        if pid == me:
+            continue
+        if " ui " not in cmd or "--port" not in cmd:
+            continue
+        if ppid == me:
+            leftover.append((pid, ppid, cmd))
+    return leftover
 
 
 def reap_stale_ui_servers() -> None:
@@ -126,13 +169,15 @@ class UiServer:
         self.marker = _board_marker(board, probe_prefix)
         self.port = _free_port()
         env = dict(os.environ, TICKETS_DIR=str(board))
-        ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port), "--host", "127.0.0.1"]
+        ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
+                  "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]
         self.proc = subprocess.Popen(
             [sys.executable, str(_SUPERVISOR), str(os.getpid())] + ui_cmd,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
         _ACTIVE_SERVERS.append(self)
         _register_ui_pid(self.proc.pid, self.port)
@@ -167,17 +212,11 @@ class UiServer:
         self._stopped = True
         proc = getattr(self, "proc", None)
         if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
+            _kill_pid_tree(proc.pid)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                _kill_pid_tree(proc.pid)
                 proc.wait(timeout=2)
         if proc is not None:
             _unregister_ui_pid(proc.pid)

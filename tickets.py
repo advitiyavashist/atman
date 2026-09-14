@@ -15164,10 +15164,28 @@ def cmd_ui(a, board):
     if a.open:
         import subprocess
         subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
+    parent_pid = int(getattr(a, "parent_pid", 0) or 0)
+    board_dir = os.path.abspath(board) if board else ""
+    import threading
+    worker = threading.Thread(target=srv.serve_forever, daemon=True)
+    worker.start()
     try:
-        srv.serve_forever()
+        while worker.is_alive():
+            if board_dir and not os.path.isdir(board_dir):
+                print("board UI: board directory gone (%s); exiting" % board_dir)
+                break
+            if parent_pid:
+                try:
+                    os.kill(parent_pid, 0)
+                except ProcessLookupError:
+                    print("board UI: parent pid %d gone; exiting" % parent_pid)
+                    break
+            worker.join(0.25)
     except KeyboardInterrupt:
         pass
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 QUICKSTART_MARKER = "quickstart.json"
@@ -16583,6 +16601,8 @@ def main():
     c.add_argument("--host", default="127.0.0.1")
     c.add_argument("--open", action="store_true", help="open it in the browser")
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
+    c.add_argument("--parent-pid", type=int, default=0,
+                   help="exit when this pid disappears (test/supervisor watchdog)")
     c.set_defaults(fn=cmd_ui)
 
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")

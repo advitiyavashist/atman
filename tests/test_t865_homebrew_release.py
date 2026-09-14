@@ -8,7 +8,9 @@ so CI can run it anywhere.
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import tarfile
@@ -126,8 +128,11 @@ def test_extracted_tarball_ui_answers_board_json(source, tmp_path):
                             cwd=str(cwd), env=env)
 
     port = _free_port()
-    proc = subprocess.Popen([str(tickets_py), "ui", "--port", str(port), "--host", "127.0.0.1"],
-                            cwd=str(cwd), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(
+        [str(tickets_py), "ui", "--port", str(port), "--host", "127.0.0.1",
+         "--parent-pid", str(os.getpid())],
+        cwd=str(cwd), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
     try:
         body = None
         deadline = time.time() + 10
@@ -142,8 +147,18 @@ def test_extracted_tarball_ui_answers_board_json(source, tmp_path):
         assert body is not None, "atm ui never answered /board.json"
         assert "counts" in body
     finally:
-        proc.terminate()
-        proc.wait(timeout=5)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+            proc.wait(timeout=2)
 
 
 def test_formula_points_at_a_github_release_tarball_and_pins_a_sha256():
