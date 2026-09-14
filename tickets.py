@@ -3105,10 +3105,11 @@ def cmd_train(a, board):
             if raw:
                 refs.append({"ref": raw, "sha": "", "pr": None})
         gh = os.environ.get("TICKETS_GH") or "gh"
+        gh_repo = tr.github_repo((tr.repo_bind(root).get("origin") if root else "") or "")
         for raw in (getattr(a, "prs", "") or "").split(","):
             raw = raw.strip()
             if raw:
-                refs.append(tr.gh_pr_ref(raw, gh_bin=gh))
+                refs.append(tr.gh_pr_ref(raw, gh_bin=gh, root=root, repo=gh_repo or None))
         trunk = (getattr(a, "trunk", "") or "").strip() or _trunk(cwd=root)
         rec = tr.build_train(root, refs, branch=getattr(a, "branch", "") or "train/stack",
                              trunk=trunk)
@@ -3135,6 +3136,14 @@ def cmd_train(a, board):
         train_ids = tr.failure_ids(train_text)
         diff = tr.verdict_from_failures(main_ids, train_ids, suite_ran=ran)
         rec.update(diff)
+        rec["evidence"] = {
+            "main": tr.completed_run_receipt(
+                main_text, source=os.path.realpath(main_path),
+                repo=rec.get("repo"), sha=rec.get("main_sha"), kind="main"),
+            "train": tr.completed_run_receipt(
+                train_text, source=os.path.realpath(train_path),
+                repo=rec.get("repo"), sha=rec.get("train_sha"), kind="train"),
+        }
         tr.save_train(board, rec)
         print("train verify %s  new=%s  train=%s  main=%s" % (
             rec["verdict"], rec["train_sha"][:12], rec["main_sha"][:12],

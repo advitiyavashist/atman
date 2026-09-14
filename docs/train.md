@@ -22,16 +22,22 @@ tickets train land --artifact /path/to/repo
 - `build` uses `git merge --no-ff` in the given order. The first conflict
   stops the train and names the pair (`conflict: A then B`). It never
   deletes an existing branch; a preexisting train branch is refused.
-- `verify` ACCEPTS only when both logs include `suite-ran` evidence and the
-  train introduces no failure ids that main does not already have. Empty or
-  missing lists without that mark stay `UNKNOWN`.
-- `land` calls `gh pr merge <n> --match-head-commit <sha>` per member. It
-  refuses unless `train.json` says `verdict=ACCEPT` (or `GO-WITH-DEBT` with
-  an explicit `policy=go-with-debt` receipt), the caller is the named merge
-  executor, `--artifact` is the receipt repo, and the recorded train SHA /
-  trunk SHA / no-ff strategy still match the tree.
+- `verify` ACCEPTS only when both logs include a completed-run marker
+  (`# suite-ran` or `# suite-ran=true`) and the train introduces no failure
+  ids that main does not already have. `# suite-ran=false`,
+  `# not-suite-ran`, aborted/timed-out tokens, and empty logs stay
+  `UNKNOWN`. ACCEPT writes a source/env/digest evidence receipt.
+- `land` calls `gh pr merge <n> --match-head-commit <sha>` bound to the
+  artifact (`--repo owner/name` when origin is GitHub, always `cwd` of
+  `--artifact`). It refuses unless `train.json` has the full schema
+  (`repo`, `main_sha`, `train_sha`, `strategy=no-ff`), verdict is `ACCEPT`
+  (or `GO-WITH-DEBT` with `policy=go-with-debt` plus named
+  `debt_authority` and `debt_baseline`), the caller is the named merge
+  executor, `--artifact` is the receipt repo, the recorded train SHA still
+  matches, and both local trunk and `origin/<trunk>` still match the
+  verified base. Incomplete or legacy receipts must be rebuilt.
 - Recorded fields: train SHA, main SHA, member SHAs, repo bind, strategy,
-  verdict.
+  verdict, evidence.
 
 This does not replace `tickets merge` for a single pinned review SHA. It is
 the batch path used when several PRs should share one hermetic suite run

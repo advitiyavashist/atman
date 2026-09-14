@@ -80,6 +80,28 @@ def test_verify_accept_and_reject(board, tmp_path):
     assert "REJECT" in reject.stderr + reject.stdout
     rec = json.loads((board / "train.json").read_text())
     assert rec["new_failures"] == ["tests/test_new.py::test_y"]
+    assert rec["evidence"]["main"]["completed"] is True
+    assert rec["evidence"]["train"]["digest"]
+
+
+def test_verify_false_suite_marker_stays_unknown(board, tmp_path):
+    repo = _repo(tmp_path)
+    _branch(repo, "pr-a", "a.txt", "A\n")
+    assert run(board, "train", "build", "--refs", "pr-a",
+               "--artifact", str(repo), "--trunk", "main").returncode == 0
+    main_f = tmp_path / "main.txt"
+    train_f = tmp_path / "train.txt"
+    main_f.write_text("# suite-ran=false\n")
+    train_f.write_text("# suite-ran-aborted\n")
+    unknown = run(board, "train", "verify",
+                  "--main-failures", str(main_f),
+                  "--train-failures", str(train_f))
+    assert unknown.returncode != 0
+    assert "UNKNOWN" in unknown.stderr + unknown.stdout
+    rec = json.loads((board / "train.json").read_text())
+    assert rec["verdict"] == "UNKNOWN"
+    assert rec["evidence"]["main"] is None
+    assert rec["evidence"]["train"] is None
 
 
 def test_land_refuses_without_accept_and_merges_at_exact_sha(board, tmp_path):
