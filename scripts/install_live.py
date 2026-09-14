@@ -46,6 +46,19 @@ def seed_fixture_repo(repo_dir, source_repo):
     shutil.copytree(source_repo / PACKAGE_PREFIX, repo_dir / PACKAGE_PREFIX)
 
 
+def path_cli_aliases(live):
+    """Same launcher under atm and tickets names (T-809). No second implementation."""
+    live = Path(live)
+    name = live.name
+    if name in ("tickets.py", "atm.py"):
+        names = ("tickets.py", "atm.py")
+    elif name in ("tickets", "atm"):
+        names = ("tickets", "atm")
+    else:
+        return [live, live.parent / "atm"]
+    return [live.with_name(n) for n in names]
+
+
 def _write_release_file(stage, rel_path, data):
     dest = stage / rel_path
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +185,7 @@ def install(repo, ref, live, activate=False, expected=None):
                 shutil.copy2(live, backup, follow_symlinks=False)
         fd, temporary = tempfile.mkstemp(prefix=".tickets-launcher-", dir=live.parent)
         temporary = Path(temporary)
+        extra_aliases = []
         try:
             with os.fdopen(fd, "w") as out:
                 out.write(launcher)
@@ -182,6 +196,19 @@ def install(repo, ref, live, activate=False, expected=None):
             if exists and live.read_bytes() != previous:
                 raise RuntimeError("live tool changed during installation; retry after coordination")
             os.replace(temporary, live)
+            for alias in path_cli_aliases(live):
+                if alias == live:
+                    continue
+                alias.parent.mkdir(parents=True, exist_ok=True)
+                afd, atmp = tempfile.mkstemp(prefix=".atm-launcher-", dir=alias.parent)
+                atmp = Path(atmp)
+                extra_aliases.append(atmp)
+                with os.fdopen(afd, "w") as out:
+                    out.write(launcher)
+                    out.flush()
+                    os.fsync(out.fileno())
+                atmp.chmod(mode)
+                os.replace(atmp, alias)
             try:
                 smoke(live, sha)
             except Exception:
@@ -194,6 +221,9 @@ def install(repo, ref, live, activate=False, expected=None):
         finally:
             if temporary.exists() or temporary.is_symlink():
                 temporary.unlink()
+            for leftover in extra_aliases:
+                if leftover.exists() or leftover.is_symlink():
+                    leftover.unlink()
         print("activated %s via %s; previous launcher: %s" % (sha, live, backup))
         return release
 
