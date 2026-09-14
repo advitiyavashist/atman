@@ -141,14 +141,20 @@ def _agent_update(board, owner, mutate):
     return rec
 
 
-def checkin(board, owner, ticket=None, note=""):
-    """Record where this agent is working: cwd, worktree root, branch, sha."""
-    _state, _mismatch = _git_state_raw()
+def checkin(board, owner, ticket=None, note="", cwd=None):
+    """Record where this agent is working: cwd, worktree root, branch, sha.
+
+    `cwd` is the tree to stamp. Spawn must pass the target --worktree here:
+    the launcher process cwd is a different checkout (T-839 live restart).
+    """
+    here = os.path.abspath(cwd) if cwd else os.getcwd()
+    _state, _mismatch = _git_state_raw(here)
     g = _state or {}
+    top = g.get("top", "")
     fields = {
         "owner": owner,
-        "cwd": os.getcwd(),
-        "worktree": g.get("top", ""),
+        "cwd": here,
+        "worktree": top or (here if cwd else ""),
         "branch": g.get("branch", ""),
         "sha": g.get("sha", ""),
         "dirty": g.get("dirty", 0),
