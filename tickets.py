@@ -171,9 +171,12 @@ def _supervisor_launch_env(board, owner):
     env = _clean_git_env()
     for var in PROVIDER_SESSION_ID_VARS:
         env.pop(var, None)
+    env.pop("TICKET_SEAT", None)
+    env.pop("TICKET_AGENT", None)
     sid = "launch:%s:%s" % (owner, hashlib.sha256(os.urandom(16)).hexdigest()[:16])
     env["TICKET_AGENT"] = owner
     env["TICKET_SEAT"] = owner
+    env["TICKETS_WATCH_PINNED"] = owner
     env["TICKETS_DIR"] = os.path.abspath(board)
     env["TICKETS_PY"] = os.path.realpath(__file__)
     env["TICKET_SESSION_ID"] = sid
@@ -12308,6 +12311,21 @@ watch_idle_reexec._warned = set()
 # --- end T-427 ---
 
 
+def _reexec_watch_if_unpinned(board, owner):
+    """Replace this watch process when inherited identity is still present.
+
+    Spawn already Popen's with `_supervisor_launch_env`. Direct `tickets watch`
+    from a leadership shell does not: the process keeps TICKET_SEAT of the
+    caller (CEO impersonation 2026-09-14). One execve pins the seat.
+    """
+    if (os.environ.get("TICKETS_WATCH_PINNED") or "").strip() == owner:
+        return
+    if os.environ.get("TICKETS_NO_WATCH_REEXEC"):
+        return
+    env = _supervisor_launch_env(board, owner)
+    os.execve(sys.executable, [sys.executable] + sys.argv, env)
+
+
 def cmd_watch(a, board):
     """Poll the board; when there is work for the agent, launch a worker command.
 
@@ -12323,6 +12341,9 @@ def cmd_watch(a, board):
     owner = whoami(a.agent)
     if owner.startswith("agent-"):
         sys.exit("set --agent or TICKET_AGENT to a real name")
+    _reexec_watch_if_unpinned(board, owner)
+    print("seat=%s (TICKET_SEAT pinned; inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped)"
+          % owner)
     _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     root = os.path.dirname(board)
     cwd = os.path.abspath(a.cwd or root)
@@ -13452,9 +13473,9 @@ def cmd_spawn(a, board):
         sys.exit("failure: spawn did not install a live watcher for %s "
                  "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; log %s" % (
+    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; seat=%s pinned; log %s" % (
         owner, pid, harness, model,
-        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, log_path))
+        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, owner, log_path))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
