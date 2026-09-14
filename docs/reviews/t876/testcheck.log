@@ -1,0 +1,74 @@
+===== unpatched candidate f3289b2 (expect FAIL) =====
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_a_refused_join_does_not_claim_the_seat __________________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-tc/pytest-of-kavana/pytest-0/test_a_refused_join_does_not_c0/proj'
+
+    def test_a_refused_join_does_not_claim_the_seat(board):
+        """A join the board REJECTS is not a declaration of identity.
+    
+        cmd_join recorded the seat before the guards that can refuse it, so every
+        refusal path left the session answering as the name it had just been denied.
+        """
+        run(board, ["join", "alpha", "--tool", "claude", "--roles", "lead"],
+            session="session-A")
+        # A second harness may not reuse alpha; the seat guard refuses.
+        r = run(board, ["join", "alpha", "--tool", "codex", "--roles", "lead"],
+                session="session-B", agent="bravo")
+        assert r.returncode != 0, "expected the seat guard to refuse this join"
+>       assert seat_of(board, session="session-B", agent="bravo") == "bravo"
+E       AssertionError: assert 'alpha' == 'bravo'
+E         
+E         - bravo
+E         + alpha
+
+tests/test_t876_refused_join.py:19: AssertionError
+_________ test_a_refused_join_does_not_consume_the_refused_seats_mail __________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-tc/pytest-of-kavana/pytest-0/test_a_refused_join_does_not_c1/proj'
+
+    def test_a_refused_join_does_not_consume_the_refused_seats_mail(board):
+        """The refusal must not hand the caller another seat's unread DMs.
+    
+        Worse than impersonation: `inbox` marks what it prints as read, so the
+        private message is lost to the agent it was addressed to.
+        """
+        run(board, ["join", "alpha", "--tool", "claude", "--roles", "lead"],
+            session="session-A")
+        run(board, ["join", "carol", "--tool", "cursor", "--roles", "ds"],
+            session="session-C")
+        run(board, ["msg", "private handover details", "--to", "alpha"],
+            session="session-C")
+    
+        r = run(board, ["join", "alpha", "--tool", "codex", "--roles", "lead"],
+                session="session-B", agent="bravo")
+        assert r.returncode != 0, "expected the seat guard to refuse this join"
+    
+        out = run(board, ["inbox"], session="session-B", agent="bravo").stdout
+>       assert "for alpha" not in out, out
+E       AssertionError: 2 unread for alpha:
+E           09-14 14:54 +08  carol: joined the board via cursor; roles=['ds']; at /private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-tc/pytest-of-kavana/pytest-0/test_a_refused_join_does_not_c1/proj [?]
+E           09-14 14:54 +08  carol -> alpha: private handover details
+E         
+E       assert 'for alpha' not in '2 unread fo...er details\n'
+E         
+E         'for alpha' is contained here:
+E           2 unread for alpha:
+E             09-14 14:54 +08  carol: joined the board via cursor; roles=['ds']; at /private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-tc/pytest-of-kavana/pytest-0/test_a_refused_join_does_not_c1/proj [?]
+E             09-14 14:54 +08  carol -> alpha: private handover details
+
+tests/test_t876_refused_join.py:40: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_t876_refused_join.py::test_a_refused_join_does_not_claim_the_seat
+FAILED tests/test_t876_refused_join.py::test_a_refused_join_does_not_consume_the_refused_seats_mail
+2 failed in 2.13s
+exit=1
+===== candidate + proposed fix (expect PASS) =====
+..                                                                       [100%]
+2 passed in 2.12s
+exit=0
+........................................................................ [ 97%]
+..                                                                       [100%]
+74 passed in 99.50s (0:01:39)
+patched-identity-modules exit=0

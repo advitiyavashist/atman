@@ -1,0 +1,669 @@
+################ 5. clean-venv wheel smoke (build backend now present)
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools>=68
+* Getting build dependencies for wheel...
+/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/build-env-di0075x6/lib/python3.11/site-packages/setuptools/config/_apply_pyprojecttoml.py:82: SetuptoolsDeprecationWarning: `project.license` as a TOML table is deprecated
+!!
+
+        ********************************************************************************
+        Please use a simple string containing a SPDX expression for `project.license`. You can also use `project.license-files`. (Both options available on setuptools>=77.0.0).
+
+        By 2027-Feb-18, you need to update your project and remove deprecated calls
+        or your builds will no longer be supported.
+
+        See https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#license for details.
+        ********************************************************************************
+
+!!
+  corresp(dist, value, root_dir)
+running egg_info
+writing src/ticket_board.egg-info/PKG-INFO
+writing dependency_links to src/ticket_board.egg-info/dependency_links.txt
+writing entry points to src/ticket_board.egg-info/entry_points.txt
+writing requirements to src/ticket_board.egg-info/requires.txt
+writing top-level names to src/ticket_board.egg-info/top_level.txt
+reading manifest file 'src/ticket_board.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file 'src/ticket_board.egg-info/SOURCES.txt'
+* Installed build dependency versions:
+  - setuptools==84.0.0
+* Building wheel...
+/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/build-env-di0075x6/lib/python3.11/site-packages/setuptools/config/_apply_pyprojecttoml.py:82: SetuptoolsDeprecationWarning: `project.license` as a TOML table is deprecated
+!!
+
+        ********************************************************************************
+        Please use a simple string containing a SPDX expression for `project.license`. You can also use `project.license-files`. (Both options available on setuptools>=77.0.0).
+
+        By 2027-Feb-18, you need to update your project and remove deprecated calls
+        or your builds will no longer be supported.
+
+        See https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#license for details.
+        ********************************************************************************
+
+!!
+  corresp(dist, value, root_dir)
+running bdist_wheel
+running build
+running build_py
+running egg_info
+writing src/ticket_board.egg-info/PKG-INFO
+writing dependency_links to src/ticket_board.egg-info/dependency_links.txt
+writing entry points to src/ticket_board.egg-info/entry_points.txt
+writing requirements to src/ticket_board.egg-info/requires.txt
+writing top-level names to src/ticket_board.egg-info/top_level.txt
+reading manifest file 'src/ticket_board.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file 'src/ticket_board.egg-info/SOURCES.txt'
+installing to build/bdist.macosx-11.0-arm64/wheel
+running install
+running install_lib
+creating build/bdist.macosx-11.0-arm64/wheel
+creating build/bdist.macosx-11.0-arm64/wheel/ticket_board
+copying build/lib/ticket_board/sounding.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/presets.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/agent_checkin.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/quota_adapters.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+creating build/bdist.macosx-11.0-arm64/wheel/ticket_board/server
+copying build/lib/ticket_board/server/auth.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/hooks.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/events.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/httpd.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/wire.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/validate.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/master.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/app.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/errors.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/views.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/schema.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/server/messaging.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/server
+copying build/lib/ticket_board/work_view.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+creating build/bdist.macosx-11.0-arm64/wheel/ticket_board/storage
+copying build/lib/ticket_board/storage/db.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/backup.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/board.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/legacy.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/migrations.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/errors.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/ids.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/schema.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+copying build/lib/ticket_board/storage/messaging.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/storage
+creating build/bdist.macosx-11.0-arm64/wheel/ticket_board/adapters
+creating build/bdist.macosx-11.0-arm64/wheel/ticket_board/adapters/claude
+copying build/lib/ticket_board/adapters/claude/connect.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/adapters/claude
+copying build/lib/ticket_board/adapters/claude/adapter.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/adapters/claude
+copying build/lib/ticket_board/adapters/claude/hook.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/adapters/claude
+copying build/lib/ticket_board/adapters/claude/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/adapters/claude
+copying build/lib/ticket_board/git_env.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/cli.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/turns.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/session_boundary.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+creating build/bdist.macosx-11.0-arm64/wheel/ticket_board/runners
+copying build/lib/ticket_board/runners/supervisor.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/runners
+copying build/lib/ticket_board/runners/client.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/runners
+copying build/lib/ticket_board/runners/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/runners
+copying build/lib/ticket_board/runners/launcher.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/runners
+copying build/lib/ticket_board/runners/__main__.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/runners
+copying build/lib/ticket_board/runners/state.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/runners
+copying build/lib/ticket_board/scheduler.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/prices.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/board_backup.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/ticket_coordination.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/trajectories.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/__main__.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+creating build/bdist.macosx-11.0-arm64/wheel/ticket_board/orchestrator
+copying build/lib/ticket_board/orchestrator/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/orchestrator
+copying build/lib/ticket_board/orchestrator/recommend.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/orchestrator
+copying build/lib/ticket_board/orchestrator/sweep.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/orchestrator
+copying build/lib/ticket_board/orchestrator/eligibility.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board/orchestrator
+copying build/lib/ticket_board/seat_schedule.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+copying build/lib/ticket_board/worktrees.py -> build/bdist.macosx-11.0-arm64/wheel/./ticket_board
+running install_egg_info
+Copying src/ticket_board.egg-info to build/bdist.macosx-11.0-arm64/wheel/./ticket_board-0.2.0-py3.11.egg-info
+running install_scripts
+creating build/bdist.macosx-11.0-arm64/wheel/ticket_board-0.2.0.dist-info/WHEEL
+creating '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/wheel/.tmp-5_henoht/ticket_board-0.2.0-py3-none-any.whl' and adding 'build/bdist.macosx-11.0-arm64/wheel' to it
+adding 'ticket_board/__init__.py'
+adding 'ticket_board/__main__.py'
+adding 'ticket_board/agent_checkin.py'
+adding 'ticket_board/board_backup.py'
+adding 'ticket_board/cli.py'
+adding 'ticket_board/git_env.py'
+adding 'ticket_board/presets.py'
+adding 'ticket_board/prices.py'
+adding 'ticket_board/quota_adapters.py'
+adding 'ticket_board/scheduler.py'
+adding 'ticket_board/seat_schedule.py'
+adding 'ticket_board/session_boundary.py'
+adding 'ticket_board/sounding.py'
+adding 'ticket_board/ticket_coordination.py'
+adding 'ticket_board/trajectories.py'
+adding 'ticket_board/turns.py'
+adding 'ticket_board/work_view.py'
+adding 'ticket_board/worktrees.py'
+adding 'ticket_board/adapters/claude/__init__.py'
+adding 'ticket_board/adapters/claude/adapter.py'
+adding 'ticket_board/adapters/claude/connect.py'
+adding 'ticket_board/adapters/claude/hook.py'
+adding 'ticket_board/orchestrator/__init__.py'
+adding 'ticket_board/orchestrator/eligibility.py'
+adding 'ticket_board/orchestrator/recommend.py'
+adding 'ticket_board/orchestrator/sweep.py'
+adding 'ticket_board/runners/__init__.py'
+adding 'ticket_board/runners/__main__.py'
+adding 'ticket_board/runners/client.py'
+adding 'ticket_board/runners/launcher.py'
+adding 'ticket_board/runners/state.py'
+adding 'ticket_board/runners/supervisor.py'
+adding 'ticket_board/server/__init__.py'
+adding 'ticket_board/server/app.py'
+adding 'ticket_board/server/auth.py'
+adding 'ticket_board/server/errors.py'
+adding 'ticket_board/server/events.py'
+adding 'ticket_board/server/hooks.py'
+adding 'ticket_board/server/httpd.py'
+adding 'ticket_board/server/master.py'
+adding 'ticket_board/server/messaging.py'
+adding 'ticket_board/server/schema.py'
+adding 'ticket_board/server/validate.py'
+adding 'ticket_board/server/views.py'
+adding 'ticket_board/server/wire.py'
+adding 'ticket_board/storage/__init__.py'
+adding 'ticket_board/storage/backup.py'
+adding 'ticket_board/storage/board.py'
+adding 'ticket_board/storage/db.py'
+adding 'ticket_board/storage/errors.py'
+adding 'ticket_board/storage/ids.py'
+adding 'ticket_board/storage/legacy.py'
+adding 'ticket_board/storage/messaging.py'
+adding 'ticket_board/storage/migrations.py'
+adding 'ticket_board/storage/schema.py'
+adding 'ticket_board-0.2.0.dist-info/licenses/LICENSE'
+adding 'ticket_board-0.2.0.dist-info/METADATA'
+adding 'ticket_board-0.2.0.dist-info/WHEEL'
+adding 'ticket_board-0.2.0.dist-info/entry_points.txt'
+adding 'ticket_board-0.2.0.dist-info/top_level.txt'
+adding 'ticket_board-0.2.0.dist-info/RECORD'
+removing build/bdist.macosx-11.0-arm64/wheel
+Successfully built ticket_board-0.2.0-py3-none-any.whl
+build exit=0
+total 640
+drwxr-xr-x@  3 kavana  wheel      96 Sep 14 14:58 .
+drwxr-xr-x@ 71 kavana  wheel    2272 Sep 14 14:58 ..
+-rw-r--r--@  1 kavana  wheel  324375 Sep 14 14:58 ticket_board-0.2.0-py3-none-any.whl
+WHEEL=/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/wheel/ticket_board-0.2.0-py3-none-any.whl
+Looking in links: /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/tmp8y9y7v8h
+Processing /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/tmp8y9y7v8h/setuptools-79.0.1-py3-none-any.whl
+Processing /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/tmp8y9y7v8h/pip-24.0-py3-none-any.whl
+Installing collected packages: setuptools, pip
+Successfully installed pip-24.0 setuptools-79.0.1
+
+[notice] A new release of pip is available: 24.0 -> 26.2.1
+[notice] To update, run: /private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/wheel/venv/bin/python -m pip install --upgrade pip
+install exit=0
+usage: tickets [-h]
+               {create,assign,reserve,hold,epic,sprint,master,join,retire,route,connect,here,who,msg,inbox,trajectories,traj,turns,review,sync,merge,limit,limits,status,update,dep,graph,map,plan,list,board,show,next,claim,done,block,note,reopen,clear,board-backup,board-restore,where,context,mine,init,identity,role,handover,pulse}
+               ...
+tickets: error: unrecognized arguments: --version
+tickets --version exit=2
+ticket_board from /private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/wheel/venv/lib/python3.11/site-packages/ticket_board/__init__.py
+################ 6. T-844 root/wheel/spawn probe against the installed wheel
+ARTIFACT_ROOT /private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/reprotmp/atman-t844-probes-0t7zqy44
+root EXPLICIT_SEAT_OVERRIDES_FORGED_SID=PASS
+root FORGED_SID_WITHOUT_ASSIGNED_SEAT_LEAK= True
+root GENUINE_RECORDED_SESSION_PRECEDENCE=PASS
+wheel EXPLICIT_SEAT_OVERRIDES_FORGED_SID=PASS
+wheel FORGED_SID_WITHOUT_ASSIGNED_SEAT_LEAK= True
+wheel GENUINE_RECORDED_SESSION_PRECEDENCE=PASS
+ROOT_GENERATED_WORKER_HOOK_IDENTITY=PASS output= {"user_message": "2 new ticket-board message(s) for worker-seat", "additional_context": "Ticket board: 2 new message(s) for worker-seat. Reply with `tickets msg`.\n- 09-14T06:58 parent-seat -> everyone: joined the board; roles=['verification']; at /p
+ROOT_REAL_SPAWN_WORKTREE_REGISTRATION=PASS /private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/reprotmp/atman-t844-probes-0t7zqy44/worker-tree
+DISPOSABLE_WATCHER_STOP 0 no running watcher for spawn-worker
+NO_CURSOR_MODEL_OR_LIVE_WAKE_EXECUTED
+baseline REMOTE_WRAPPER_INHERITED_SID 0 PARENT_SECRET_LEAK= False WORKER_MAIL_VISIBLE= True
+baseline REMOTE_WRAPPER_INHERITED_ASSIGNED_SEAT_SENDER= worker-seat
+root REMOTE_WRAPPER_INHERITED_SID 0 PARENT_SECRET_LEAK= False WORKER_MAIL_VISIBLE= True
+root REMOTE_WRAPPER_INHERITED_ASSIGNED_SEAT_SENDER= worker-seat
+CLAUDE_SETTINGS_LOCAL_CANONICAL_HOOK_SURVIVES_WORKER_PIN=False PASS copied= ['settings.local.json']
+t844_probe exit=0
+################ 7. negative control: PR tests vs main production code
+reverted to main:
+M  src/ticket_board/agent_checkin.py
+M  src/ticket_board/cli.py
+M  tickets.py
+F...FFF.FFFFF.FFFF..FFFFF.                                               [100%]
+=================================== FAILURES ===================================
+____________ test_join_records_identity_and_it_outranks_the_env_var ____________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_join_records_identity_and0/proj'
+
+    def test_join_records_identity_and_it_outranks_the_env_var(board):
+        """The session's own record beats a foreign TICKET_AGENT for THIS session."""
+        run(board, ["join", "planner", "--roles", "review"], session="s1")
+        r = run(board, ["msg", "hello"], session="s1", agent="some-other-worker")
+        assert r.returncode == 0, r.stderr
+>       assert _senders(board)[-1] == "planner"
+E       AssertionError: assert 'some-other-worker' == 'planner'
+E         
+E         - planner
+E         + some-other-worker
+
+tests/test_identity_precedence.py:92: AssertionError
+___________ test_plain_self_addressed_message_warns_but_still_posts ____________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_plain_self_addressed_mess0/proj'
+
+    def test_plain_self_addressed_message_warns_but_still_posts(board):
+        """A plain DM to yourself does not wake anyone (only --task, or landing
+        on a `continuous`-mode seat, does), so it reads as a harmless note to
+        self far more often than as the coordinator mistake this guard exists
+        for. Warn, but do not block a command that may have been intentional.
+        """
+        run(board, ["join", "planner", "--roles", "review"], session="s1")
+        before = len(_senders(board))
+        r = run(board, ["msg", "--to", "planner", "do the thing"], session="s1")
+        assert r.returncode == 0, r.stdout
+>       assert "your OWN identity" in (r.stderr + r.stdout)
+E       AssertionError: assert 'your OWN identity' in ('' + 'posted: 09-14 14:58 +08  agent-50388 -> planner: do the thing\n')
+E        +  where '' = CompletedProcess(args=['/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5...r', 'do the thing'], returncode=0, stdout='posted: 09-14 14:58 +08  agent-50388 -> planner: do the thing\n', stderr='').stderr
+E        +  and   'posted: 09-14 14:58 +08  agent-50388 -> planner: do the thing\n' = CompletedProcess(args=['/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5...r', 'do the thing'], returncode=0, stdout='posted: 09-14 14:58 +08  agent-50388 -> planner: do the thing\n', stderr='').stdout
+
+tests/test_identity_precedence.py:135: AssertionError
+______ test_task_self_addressed_message_is_refused_and_names_the_identity ______
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_task_self_addressed_messa0/proj'
+
+    def test_task_self_addressed_message_is_refused_and_names_the_identity(board):
+        """A --task send to yourself WOULD wake you, which is the destructive
+        case: it is almost always a misdirected assignment meant for someone
+        else, and it fails SILENTLY otherwise -- the message posts, the
+        sender's own unread count rises, and their own inbox hook reports their
+        own assignment back, which reads exactly like a peer receiving mail and
+        not replying.
+        """
+        run(board, ["join", "planner", "--roles", "review"], session="s1")
+        before = len(_senders(board))
+        r = run(board, ["msg", "--to", "planner", "--task", "do the thing"], session="s1")
+>       assert r.returncode != 0, r.stdout
+E       AssertionError: posted: 09-14 14:58 +08  agent-50410 -> planner: do the thing
+E         wake: planner -> no live endpoint
+E         
+E       assert 0 != 0
+E        +  where 0 = CompletedProcess(args=['/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5...stdout='posted: 09-14 14:58 +08  agent-50410 -> planner: do the thing\nwake: planner -> no live endpoint\n', stderr='').returncode
+
+tests/test_identity_precedence.py:150: AssertionError
+__________________ test_addressing_someone_else_is_unaffected __________________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_addressing_someone_else_i0/proj'
+
+    def test_addressing_someone_else_is_unaffected(board):
+        run(board, ["join", "planner", "--roles", "review"], session="s1")
+        r = run(board, ["msg", "--to", "worker-1", "do the thing"], session="s1")
+        assert r.returncode == 0, r.stderr
+>       assert _senders(board)[-1] == "planner"
+E       AssertionError: assert 'agent-50442' == 'planner'
+E         
+E         - planner
+E         + agent-50442
+
+tests/test_identity_precedence.py:161: AssertionError
+______ test_no_session_key_and_no_env_var_still_falls_back_to_the_record _______
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_no_session_key_and_no_env0/proj'
+
+    def test_no_session_key_and_no_env_var_still_falls_back_to_the_record(board):
+        """The flat file is still better than a pid when nothing else names us."""
+        assert run(board, ["join", "worker-seat", "--roles", "backend"]).returncode == 0
+        r = run(board, ["msg", "hello"])
+        assert r.returncode == 0, r.stderr
+>       assert _senders(board)[-1] == "worker-seat"
+E       AssertionError: assert 'agent-50498' == 'worker-seat'
+E         
+E         - worker-seat
+E         + agent-50498
+
+tests/test_identity_precedence.py:189: AssertionError
+__________ test_ticket_seat_still_outranks_everything_below_explicit ___________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_ticket_seat_still_outrank0/proj'
+
+    def test_ticket_seat_still_outranks_everything_below_explicit(board):
+        """The launch gate: a supervisor-assigned seat beats record and env var."""
+        assert run(board, ["join", "worker-seat", "--roles", "backend"]).returncode == 0
+        r = run(board, ["msg", "hello"], env={"TICKET_SEAT": "spawned-worker"},
+                agent="master-seat")
+        assert r.returncode == 0, r.stderr
+>       assert _senders(board)[-1] == "spawned-worker"
+E       AssertionError: assert 'master-seat' == 'spawned-worker'
+E         
+E         - spawned-worker
+E         + master-seat
+
+tests/test_identity_precedence.py:198: AssertionError
+___________ test_recorded_identity_does_not_bleed_to_another_session ___________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_recorded_identity_does_no0/proj'
+
+    def test_recorded_identity_does_not_bleed_to_another_session(board):
+        """The sideways leak. Session A joining must not rename session B."""
+        run(board, ["join", "alpha", "--roles", "lead"], session="session-A")
+>       assert seat_of(board, session="session-A") == "alpha"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_identity_session_scope.py:79: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_recorded_identity_does_no0/proj'
+kw = {'session': 'session-A'}
+
+    def seat_of(board, **kw):
+        out = run(board, ["board", "-q"], **kw).stdout
+        for line in out.splitlines():
+            if "you: " in line:
+                seat = line.split("you: ", 1)[1].split(" |")[0].strip()
+                return seat.replace("(UNCONFIRMED)", "").strip()
+>       raise AssertionError("board printed no seat:\n" + out)
+E       AssertionError: board printed no seat:
+E       Ticket board (/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_recorded_identity_does_no0/proj/.tickets): 1 open
+E         master: nobody (tickets master take)
+E         [ ] TO DO       T-001  seat probe  (role=lead)
+E         -> ready to claim: T-001
+
+tests/test_identity_session_scope.py:73: AssertionError
+__________ test_recorded_identity_outranks_a_stale_inherited_env_var ___________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_recorded_identity_outrank0/proj'
+
+    def test_recorded_identity_outranks_a_stale_inherited_env_var(board):
+        """The downward leak -- the one that put another seat's mail in my window."""
+        run(board, ["join", "alpha", "--roles", "lead"], session="session-A")
+>       seat = seat_of(board, session="session-A", agent="somebody-elses-stale-name")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_identity_session_scope.py:89: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_recorded_identity_outrank0/proj'
+kw = {'session': 'session-A', 'agent': 'somebody-elses-stale-name'}
+
+    def seat_of(board, **kw):
+        out = run(board, ["board", "-q"], **kw).stdout
+        for line in out.splitlines():
+            if "you: " in line:
+                seat = line.split("you: ", 1)[1].split(" |")[0].strip()
+                return seat.replace("(UNCONFIRMED)", "").strip()
+>       raise AssertionError("board printed no seat:\n" + out)
+E       AssertionError: board printed no seat:
+E       Ticket board (/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_recorded_identity_outrank0/proj/.tickets): 1 open
+E         master: nobody (tickets master take)
+E         [ ] TO DO       T-001  seat probe  (role=lead)
+E         -> ready to claim: T-001
+
+tests/test_identity_session_scope.py:73: AssertionError
+______________ test_each_session_keeps_its_own_recorded_identity _______________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_each_session_keeps_its_ow0/proj'
+
+    def test_each_session_keeps_its_own_recorded_identity(board):
+        run(board, ["join", "alpha", "--roles", "lead"], session="session-A")
+        run(board, ["join", "beta", "--roles", "ds"], session="session-B")
+>       assert seat_of(board, session="session-A") == "alpha"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_identity_session_scope.py:96: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_each_session_keeps_its_ow0/proj'
+kw = {'session': 'session-A'}
+
+    def seat_of(board, **kw):
+        out = run(board, ["board", "-q"], **kw).stdout
+        for line in out.splitlines():
+            if "you: " in line:
+                seat = line.split("you: ", 1)[1].split(" |")[0].strip()
+                return seat.replace("(UNCONFIRMED)", "").strip()
+>       raise AssertionError("board printed no seat:\n" + out)
+E       AssertionError: board printed no seat:
+E       Ticket board (/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_each_session_keeps_its_ow0/proj/.tickets): 1 open
+E         master: nobody (tickets master take)
+E         [ ] TO DO       T-001  seat probe  (role=lead)
+E         -> ready to claim: T-001
+
+tests/test_identity_session_scope.py:73: AssertionError
+_____ test_legacy_flat_file_is_honoured_only_when_there_is_no_session_key ______
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_legacy_flat_file_is_honou0/proj'
+
+    def test_legacy_flat_file_is_honoured_only_when_there_is_no_session_key(board):
+        """Backwards compatibility, but deliberately narrow -- last resort only.
+    
+        A flat file beside the board predates session keying and belongs to
+        whichever agent on this machine joined last. So it ranks BELOW anything
+        that actually names the caller: session-keyed record > explicit
+        TICKET_AGENT/TICKET_SEAT > flat legacy file. It only answers when nothing
+        else does; the alternative is the regression where `TICKET_AGENT=master
+        tickets msg --to worker`, run after the worker joined, resolves the master
+        as the worker and refuses the message as self-addressed.
+        """
+        tickets_dir = os.path.join(board, ".tickets")
+        with open(os.path.join(tickets_dir, ".agent-identity"), "w") as f:
+            f.write("legacy-name\n")
+    
+        # Nothing names the caller: the flat file is the best available answer.
+>       assert seat_of(board) == "legacy-name"
+               ^^^^^^^^^^^^^^
+
+tests/test_identity_session_scope.py:127: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_legacy_flat_file_is_honou0/proj'
+kw = {}
+
+    def seat_of(board, **kw):
+        out = run(board, ["board", "-q"], **kw).stdout
+        for line in out.splitlines():
+            if "you: " in line:
+                seat = line.split("you: ", 1)[1].split(" |")[0].strip()
+                return seat.replace("(UNCONFIRMED)", "").strip()
+>       raise AssertionError("board printed no seat:\n" + out)
+E       AssertionError: board printed no seat:
+E       Ticket board (/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_legacy_flat_file_is_honou0/proj/.tickets): 1 open
+E         master: nobody (tickets master take)
+E         [ ] TO DO       T-001  seat probe  (role=lead)
+E         -> ready to claim: T-001
+
+tests/test_identity_session_scope.py:73: AssertionError
+______ test_unconfirmed_seat_is_flagged_and_the_agent_is_told_what_to_do _______
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_unconfirmed_seat_is_flagg0/proj'
+
+    def test_unconfirmed_seat_is_flagged_and_the_agent_is_told_what_to_do(board):
+        """An agent that does not know its seat cannot decline another seat's mail.
+    
+        So the ambiguity must be stated, not implied -- and stated with the remedy,
+        because the reader here is usually an agent deciding whether a message is
+        addressed to it.
+        """
+        out = run(board, ["board", "-q"], session="fresh", agent="ambient").stdout
+>       assert "(UNCONFIRMED)" in out
+E       AssertionError: assert '(UNCONFIRMED)' in 'Ticket board (/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-2...  master: nobody (tickets master take)\n  [ ] TO DO       T-001  seat probe  (role=lead)\n  -> ready to claim: T-001\n'
+
+tests/test_identity_session_scope.py:146: AssertionError
+___________ test_inbox_is_silent_for_a_session_with_no_recorded_seat ___________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_inbox_is_silent_for_a_ses0/proj'
+
+    def test_inbox_is_silent_for_a_session_with_no_recorded_seat(board):
+        """For hooks: silence beats handing a session another seat's backlog.
+    
+        The original failure was a hook printing one agent's unread mail into
+        another agent's window, where it was read and acted on. If identity cannot
+        be pinned, printing nothing is the only safe output.
+        """
+        run(board, ["join", "alpha", "--roles", "lead"], session="session-A")
+        run(board, ["join", "beta", "--roles", "ds"], session="session-B")
+        run(board, ["msg", "for alpha only", "--to", "alpha"], session="session-B")
+    
+        quiet = run(
+            board,
+            ["inbox", "--keep", "--limit", "5", "--quiet-if-unidentified"],
+            session="unrecorded-window",
+            agent="alpha",  # the inherited-name trap: env says alpha, session did not
+        )
+        assert quiet.stdout.strip() == "", quiet.stdout
+        assert "for alpha only" not in quiet.stdout
+    
+        # The seat that actually recorded itself still sees its own mail.
+        mine = run(
+            board,
+            ["inbox", "--keep", "--limit", "5", "--quiet-if-unidentified"],
+            session="session-A",
+        )
+>       assert "for alpha only" in mine.stdout
+E       AssertionError: assert 'for alpha only' in ''
+E        +  where '' = CompletedProcess(args=['/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5...}\n               ...\ntickets: error: unrecognized arguments: --quiet-if-unidentified\ntickets: NO CHANGE WAS MADE\n').stdout
+
+tests/test_identity_session_scope.py:182: AssertionError
+______ test_supervisor_assigned_seat_confirms_a_launched_run_with_no_join ______
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_supervisor_assigned_seat_0/proj'
+
+    def test_supervisor_assigned_seat_confirms_a_launched_run_with_no_join(board):
+        """TICKET_SEAT is a supervisor's deliberate assignment for a run it is
+        launching (watch/spawn), not ambient inheritance -- so it must confirm
+        the seat even though the launched process has a brand-new session id
+        and never called `join` itself. Otherwise a launched worker would be
+        hidden from the very mail it was launched to handle.
+        """
+        run(board, ["join", "boss", "--roles", "lead"], session="session-boss")
+        run(board, ["msg", "for worker-1 only", "--to", "worker-1"], session="session-boss")
+    
+        seen = run(
+            board,
+            ["inbox", "--keep", "--limit", "5", "--quiet-if-unidentified"],
+            session="fresh-launched-worker",
+            env={"TICKET_SEAT": "worker-1", "TICKET_AGENT": "worker-1"},
+        )
+>       assert "for worker-1 only" in seen.stdout
+E       AssertionError: assert 'for worker-1 only' in ''
+E        +  where '' = CompletedProcess(args=['/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5...}\n               ...\ntickets: error: unrecognized arguments: --quiet-if-unidentified\ntickets: NO CHANGE WAS MADE\n').stdout
+
+tests/test_identity_session_scope.py:201: AssertionError
+_____________ test_packaged_and_root_record_session_identity[root] _____________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_packaged_and_root_record_0/proj'
+entry = 'root'
+
+    @pytest.mark.parametrize("entry", ["root", "pkg"])
+    def test_packaged_and_root_record_session_identity(board, entry):
+        _run(board, ["join", "planner", "--roles", "lead"], session="s1", entry=entry)
+        out = _run(board, ["board", "-q"], session="s1", agent="stale-name", entry=entry).stdout
+>       assert "you: planner" in out
+E       AssertionError: assert 'you: planner' in 'Ticket board (/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-2...  master: nobody (tickets master take)\n  [ ] TO DO       T-001  seat probe  (role=lead)\n  -> ready to claim: T-001\n'
+
+tests/test_t839_launch_identity.py:88: AssertionError
+_____________ test_packaged_and_root_record_session_identity[pkg] ______________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_packaged_and_root_record_1/proj'
+entry = 'pkg'
+
+    @pytest.mark.parametrize("entry", ["root", "pkg"])
+    def test_packaged_and_root_record_session_identity(board, entry):
+        _run(board, ["join", "planner", "--roles", "lead"], session="s1", entry=entry)
+        out = _run(board, ["board", "-q"], session="s1", agent="stale-name", entry=entry).stdout
+>       assert "you: planner" in out
+E       AssertionError: assert 'you: planner' in 'Ticket board (/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-2...  master: nobody (tickets master take)\n  [ ] TO DO       T-001  seat probe  (role=lead)\n  -> ready to claim: T-001\n'
+
+tests/test_t839_launch_identity.py:88: AssertionError
+_________ test_supervisor_launch_env_strips_inherited_provider_session _________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_supervisor_launch_env_str0/proj'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107b479d0>
+
+    def test_supervisor_launch_env_strips_inherited_provider_session(board, monkeypatch):
+        mod = _load_tickets()
+        monkeypatch.setenv("CURSOR_SESSION_ID", "parent-cos-session")
+        monkeypatch.setenv("TICKET_SESSION_ID", "parent-cos-session")
+        monkeypatch.setenv("TICKET_AGENT", "cursor")
+>       env = mod._supervisor_launch_env(os.path.join(board, ".tickets"), "unique-worker")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'tickets_t839' has no attribute '_supervisor_launch_env'
+
+tests/test_t839_launch_identity.py:97: AttributeError
+____________ test_spawned_cursor_hooks_replace_canonical_role_hook _____________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_spawned_cursor_hooks_repl0/proj'
+tmp_path = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_spawned_cursor_hooks_repl0')
+
+    def test_spawned_cursor_hooks_replace_canonical_role_hook(board, tmp_path):
+        mod = _load_tickets()
+        tickets_dir = os.path.join(board, ".tickets")
+        _run(board, ["join", "cursor", "--roles", "verification"], session="cos")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        canonical = _run(board, ["hooks", "cursor", "--agent", "cursor", "--worktree", str(repo)])
+        assert canonical.returncode == 0, canonical.stderr
+        hook_src = (repo / ".cursor" / "hooks" / "tickets-board.py").read_text()
+        assert "AGENT = 'cursor'" in hook_src
+    
+        worker_a = tmp_path / "worker-a"
+        worker_b = tmp_path / "worker-b"
+        worker_a.mkdir()
+        worker_b.mkdir()
+        (worker_a / ".cursor").mkdir(parents=True)
+        (worker_b / ".cursor").mkdir(parents=True)
+        import shutil
+        shutil.copytree(repo / ".cursor", worker_a / ".cursor", dirs_exist_ok=True)
+        shutil.copytree(repo / ".cursor", worker_b / ".cursor", dirs_exist_ok=True)
+        assert "AGENT = 'cursor'" in (worker_a / ".cursor" / "hooks" / "tickets-board.py").read_text()
+    
+        roles_before = json.loads((Path(tickets_dir) / "roles.json").read_text())
+        assert roles_before.get("cursor") == ["verification"]
+    
+>       assert mod._pin_spawned_worker_hooks(tickets_dir, "codex-to-cursor-a", str(worker_a), "cursor")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'tickets_t839' has no attribute '_pin_spawned_worker_hooks'
+
+tests/test_t839_launch_identity.py:130: AttributeError
+____________ test_checkin_stamps_explicit_worktree_not_process_cwd _____________
+
+board = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_checkin_stamps_explicit_w0/proj'
+tmp_path = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-neg2/pytest-of-kavana/pytest-0/test_checkin_stamps_explicit_w0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107c139d0>
+
+    def test_checkin_stamps_explicit_worktree_not_process_cwd(board, tmp_path, monkeypatch):
+        mod = _load_tickets()
+        launcher = tmp_path / "atman-runtime-current"
+        target = tmp_path / "cursor-cos-runtime-0912"
+        launcher.mkdir()
+        target.mkdir()
+        tickets_dir = os.path.join(board, ".tickets")
+        monkeypatch.chdir(launcher)
+>       rec = mod.checkin(tickets_dir, "cursor", None, "spawned", cwd=str(target))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: checkin() got an unexpected keyword argument 'cwd'
+
+/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/neg2/tests/test_t839_launch_identity.py:149: TypeError
+=========================== short test summary info ============================
+FAILED tests/test_identity_precedence.py::test_join_records_identity_and_it_outranks_the_env_var
+FAILED tests/test_identity_precedence.py::test_plain_self_addressed_message_warns_but_still_posts
+FAILED tests/test_identity_precedence.py::test_task_self_addressed_message_is_refused_and_names_the_identity
+FAILED tests/test_identity_precedence.py::test_addressing_someone_else_is_unaffected
+FAILED tests/test_identity_precedence.py::test_no_session_key_and_no_env_var_still_falls_back_to_the_record
+FAILED tests/test_identity_precedence.py::test_ticket_seat_still_outranks_everything_below_explicit
+FAILED tests/test_identity_session_scope.py::test_recorded_identity_does_not_bleed_to_another_session
+FAILED tests/test_identity_session_scope.py::test_recorded_identity_outranks_a_stale_inherited_env_var
+FAILED tests/test_identity_session_scope.py::test_each_session_keeps_its_own_recorded_identity
+FAILED tests/test_identity_session_scope.py::test_legacy_flat_file_is_honoured_only_when_there_is_no_session_key
+FAILED tests/test_identity_session_scope.py::test_unconfirmed_seat_is_flagged_and_the_agent_is_told_what_to_do
+FAILED tests/test_identity_session_scope.py::test_inbox_is_silent_for_a_session_with_no_recorded_seat
+FAILED tests/test_identity_session_scope.py::test_supervisor_assigned_seat_confirms_a_launched_run_with_no_join
+FAILED tests/test_t839_launch_identity.py::test_packaged_and_root_record_session_identity[root]
+FAILED tests/test_t839_launch_identity.py::test_packaged_and_root_record_session_identity[pkg]
+FAILED tests/test_t839_launch_identity.py::test_supervisor_launch_env_strips_inherited_provider_session
+FAILED tests/test_t839_launch_identity.py::test_spawned_cursor_hooks_replace_canonical_role_hook
+FAILED tests/test_t839_launch_identity.py::test_checkin_stamps_explicit_worktree_not_process_cwd
+18 failed, 8 passed in 17.97s
+neg-control exit=1 (NONZERO is the expected, correct result)

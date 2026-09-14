@@ -1,0 +1,73 @@
+################ 1. t683 dedupe: is the candidate-only failure real or flake?
+# session_adapters.py is byte-identical base vs cand; the test loads it by file path.
+--- cand run 1 ---
+.                                                                        [100%]
+1 passed in 0.31s
+exit=0
+--- cand run 2 ---
+.                                                                        [100%]
+1 passed in 0.25s
+exit=0
+--- cand run 3 ---
+.                                                                        [100%]
+1 passed in 0.26s
+exit=0
+--- cand run 4 ---
+.                                                                        [100%]
+1 passed in 0.26s
+exit=0
+--- cand run 5 ---
+.                                                                        [100%]
+1 passed in 0.25s
+exit=0
+--- base run 1 ---
+.                                                                        [100%]
+1 passed in 0.25s
+exit=0
+--- base run 2 ---
+.                                                                        [100%]
+1 passed in 0.26s
+exit=0
+--- base run 3 ---
+.                                                                        [100%]
+1 passed in 0.25s
+exit=0
+--- base run 4 ---
+.                                                                        [100%]
+1 passed in 0.24s
+exit=0
+--- base run 5 ---
+.                                                                        [100%]
+1 passed in 0.24s
+exit=0
+################ 2. seed the build backend into BOTH venvs (identically)
+--- cand ---
+usage: python -m ensurepip [-h] [--version] [-v] [-U] [--user] [--root ROOT]
+                           [--altinstall] [--default-pip]
+python -m ensurepip: error: unrecognized arguments: -q
+pip-seed exit=0
+build                     1.6.1
+setuptools                84.0.0
+wheel                     0.48.0
+--- base ---
+usage: python -m ensurepip [-h] [--version] [-v] [-U] [--user] [--root ROOT]
+                           [--altinstall] [--default-pip]
+python -m ensurepip: error: unrecognized arguments: -q
+pip-seed exit=0
+build                     1.6.1
+setuptools                84.0.0
+wheel                     0.48.0
+################ 3. the PR's own t839_boundary_adapters, now that the backend exists
+.....                                                                    [100%]
+5 passed in 9.77s
+cand t839_boundary_adapters exit=0
+# (base has no such file: it is added by the PR)
+################ 4. t707 wheel/console-script on BOTH trees with the backend seeded
+--- cand ---
+.........                                                                [100%]
+9 passed in 6.40s
+cand t707 exit=0
+--- base ---
+.........                                                                [100%]
+9 passed in 4.79s
+base t707 exit=0

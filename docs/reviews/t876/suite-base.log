@@ -1,0 +1,480 @@
+....x.x..x..x......x.xx.....xxxs..........x............................. [  3%]
+........................................................................ [  6%]
+........................................................................ [  9%]
+........................................................................ [ 12%]
+....s................................................................... [ 16%]
+........................................................................ [ 19%]
+........................................................................ [ 22%]
+........................................................................ [ 25%]
+........................................................................ [ 29%]
+.................sss.................................................... [ 32%]
+........................................................................ [ 35%]
+........................................................................ [ 38%]
+............................s........................................... [ 42%]
+........................................................................ [ 45%]
+........................................................................ [ 48%]
+........................................................................ [ 51%]
+........................................................................ [ 55%]
+..........................................................F............. [ 58%]
+.......ssssssssssss..ss.........FFFF.................................... [ 61%]
+........................................................................ [ 64%]
+........................................................................ [ 68%]
+........................................................................ [ 71%]
+........................................................................ [ 74%]
+...................s...........................F........................ [ 77%]
+................................................................ss...... [ 81%]
+........................................................................ [ 84%]
+..............F...........................F...................F......... [ 87%]
+........................................................................ [ 90%]
+..........s..s.......................................................... [ 94%]
+.........F.............................................................. [ 97%]
+........................................................                 [100%]
+=================================== FAILURES ===================================
+_____________ test_refuses_a_board_outside_tmp_while_under_pytest ______________
+
+tmp_path = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_refuses_a_board_outside_t0')
+
+    def test_refuses_a_board_outside_tmp_while_under_pytest(tmp_path):
+        # A "real" board that is NOT under the system temp dir -- standing in for
+        # a live board an ambient TICKETS_DIR would otherwise point at.
+        # (tmp_path itself, and anything under it, IS inside the system temp
+        # dir -- that's the whole point of the guard -- so this must live
+        # somewhere else entirely, e.g. next to the repo checkout.)
+        fake_live_root = Path(__file__).resolve().parent / ("t257-not-under-tmp-%d" % os.getpid())
+        fake_live_board = fake_live_root / ".tickets"
+        fake_live_board.mkdir(parents=True, exist_ok=True)
+        try:
+            before = set(fake_live_board.glob("T-*.json"))
+            r = run({"TICKETS_DIR": str(fake_live_board), "TICKET_AGENT": "probe"},
+                    tmp_path, "create", "probe ticket", "--role", "backend")
+>           assert r.returncode != 0, r.stdout
+E           AssertionError: created T-001  probe ticket
+E             
+E           assert 0 != 0
+E            +  where 0 = CompletedProcess(args=['/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5...s.py', 'create', 'probe ticket', '--role', 'backend'], returncode=0, stdout='created T-001  probe ticket\n', stderr='').returncode
+
+tests/test_t257_board_guard.py:42: AssertionError
+______________ test_limit_survives_a_heartbeat_that_straddles_it _______________
+
+board = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_limit_survives_a_heartbea0/repo/.tickets')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bded490>
+
+    def test_limit_survives_a_heartbeat_that_straddles_it(board, monkeypatch):
+        """The 03:36Z incident: `tickets limit` printed success and the record was
+        gone three minutes later, because a watch-loop check-in had read the record
+        before the limit landed and wrote it back afterwards."""
+        monkeypatch.setenv("TICKET_AGENT", "gpt-codex")
+        mod = load_tool()
+        b = str(board)
+        mod.checkin(b, "gpt-codex")
+    
+>       interleave(mod, b, "gpt-codex", lambda: mod.cmd_limit(
+            Args(agent="gpt-codex", clear=False, until="2026-09-12 19:41", note="credits out"), b))
+
+tests/test_t278_agent_record_race.py:95: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+mod = <module 'tickets_tool_t278' from '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/base/tickets.py'>
+board_dir = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_limit_survives_a_heartbea0/repo/.tickets'
+owner = 'gpt-codex'
+writer = <function test_limit_survives_a_heartbeat_that_straddles_it.<locals>.<lambda> at 0x10bb582c0>
+
+    def interleave(mod, board_dir, owner, writer):
+        """Run `writer()` while a real checkin() is paused between its read and its write.
+    
+        Returns after both have finished. The heartbeat thread holds whatever the
+        implementation holds at read time -- nothing today, the agent lock once
+        fixed -- so against the fixed code `writer` simply blocks until the
+        heartbeat commits, which is the point.
+        """
+        b_read = threading.Event()
+        writer_done = threading.Event()
+        real_rec = mod._agent_rec
+    
+        def gated_rec(bd, own):
+            rec = real_rec(bd, own)
+            if threading.current_thread().name == "heartbeat" and not b_read.is_set():
+                b_read.set()
+                # Bounded: against the FIXED code the writer is blocked on the lock
+                # we are holding and can never set this, so we must time out and
+                # commit rather than deadlock the suite.
+                writer_done.wait(1.5)
+            return rec
+    
+        mod._agent_rec = gated_rec
+        try:
+            t = threading.Thread(target=lambda: mod.checkin(board_dir, owner), name="heartbeat")
+            t.start()
+>           assert b_read.wait(5), "heartbeat never reached its read"
+E           AssertionError: heartbeat never reached its read
+E           assert False
+E            +  where False = wait(5)
+E            +    where wait = <threading.Event at 0x10bde9090: unset>.wait
+
+tests/test_t278_agent_record_race.py:71: AssertionError
+____________ test_clearing_a_limit_survives_a_straddling_heartbeat _____________
+
+board = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_clearing_a_limit_survives0/repo/.tickets')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10a2c2450>
+
+    def test_clearing_a_limit_survives_a_straddling_heartbeat(board, monkeypatch):
+        """The inverse: `tickets limit --clear` must not be undone either, or a
+        recovered agent stays marked dead and nothing routes to it."""
+        monkeypatch.setenv("TICKET_AGENT", "gpt-codex")
+        mod = load_tool()
+        b = str(board)
+        mod.checkin(b, "gpt-codex")
+        mod.cmd_limit(Args(agent="gpt-codex", clear=False, until="2026-10-05", note="x"), b)
+        assert "limit" in _rec(b, "gpt-codex")
+    
+>       interleave(mod, b, "gpt-codex", lambda: mod.cmd_limit(
+            Args(agent="gpt-codex", clear=True, until="", note=""), b))
+
+tests/test_t278_agent_record_race.py:114: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+mod = <module 'tickets_tool_t278' from '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/base/tickets.py'>
+board_dir = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_clearing_a_limit_survives0/repo/.tickets'
+owner = 'gpt-codex'
+writer = <function test_clearing_a_limit_survives_a_straddling_heartbeat.<locals>.<lambda> at 0x10b985e40>
+
+    def interleave(mod, board_dir, owner, writer):
+        """Run `writer()` while a real checkin() is paused between its read and its write.
+    
+        Returns after both have finished. The heartbeat thread holds whatever the
+        implementation holds at read time -- nothing today, the agent lock once
+        fixed -- so against the fixed code `writer` simply blocks until the
+        heartbeat commits, which is the point.
+        """
+        b_read = threading.Event()
+        writer_done = threading.Event()
+        real_rec = mod._agent_rec
+    
+        def gated_rec(bd, own):
+            rec = real_rec(bd, own)
+            if threading.current_thread().name == "heartbeat" and not b_read.is_set():
+                b_read.set()
+                # Bounded: against the FIXED code the writer is blocked on the lock
+                # we are holding and can never set this, so we must time out and
+                # commit rather than deadlock the suite.
+                writer_done.wait(1.5)
+            return rec
+    
+        mod._agent_rec = gated_rec
+        try:
+            t = threading.Thread(target=lambda: mod.checkin(board_dir, owner), name="heartbeat")
+            t.start()
+>           assert b_read.wait(5), "heartbeat never reached its read"
+E           AssertionError: heartbeat never reached its read
+E           assert False
+E            +  where False = wait(5)
+E            +    where wait = <threading.Event at 0x10ad74f50: unset>.wait
+
+tests/test_t278_agent_record_race.py:71: AssertionError
+----------------------------- Captured stdout call -----------------------------
+gpt-codex hit a usage limit until 2026-10-05: x
+_______________ test_inbox_seen_survives_a_straddling_heartbeat ________________
+
+board = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_inbox_seen_survives_a_str0/repo/.tickets')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c1ee590>
+
+    def test_inbox_seen_survives_a_straddling_heartbeat(board, monkeypatch):
+        """inbox_seen lives in the same record behind the same read-modify-write.
+        Losing it re-delivers already-read mail on every poll."""
+        monkeypatch.setenv("TICKET_AGENT", "bob")
+        mod = load_tool()
+        b = str(board)
+        mod.checkin(b, "bob")
+    
+>       interleave(mod, b, "bob", lambda: mod._mark_inbox_read(b, "bob"))
+
+tests/test_t278_agent_record_race.py:130: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+mod = <module 'tickets_tool_t278' from '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/base/tickets.py'>
+board_dir = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_inbox_seen_survives_a_str0/repo/.tickets'
+owner = 'bob'
+writer = <function test_inbox_seen_survives_a_straddling_heartbeat.<locals>.<lambda> at 0x10b281940>
+
+    def interleave(mod, board_dir, owner, writer):
+        """Run `writer()` while a real checkin() is paused between its read and its write.
+    
+        Returns after both have finished. The heartbeat thread holds whatever the
+        implementation holds at read time -- nothing today, the agent lock once
+        fixed -- so against the fixed code `writer` simply blocks until the
+        heartbeat commits, which is the point.
+        """
+        b_read = threading.Event()
+        writer_done = threading.Event()
+        real_rec = mod._agent_rec
+    
+        def gated_rec(bd, own):
+            rec = real_rec(bd, own)
+            if threading.current_thread().name == "heartbeat" and not b_read.is_set():
+                b_read.set()
+                # Bounded: against the FIXED code the writer is blocked on the lock
+                # we are holding and can never set this, so we must time out and
+                # commit rather than deadlock the suite.
+                writer_done.wait(1.5)
+            return rec
+    
+        mod._agent_rec = gated_rec
+        try:
+            t = threading.Thread(target=lambda: mod.checkin(board_dir, owner), name="heartbeat")
+            t.start()
+>           assert b_read.wait(5), "heartbeat never reached its read"
+E           AssertionError: heartbeat never reached its read
+E           assert False
+E            +  where False = wait(5)
+E            +    where wait = <threading.Event at 0x10bade190: unset>.wait
+
+tests/test_t278_agent_record_race.py:71: AssertionError
+_______________ test_stop_blocks_survive_a_straddling_heartbeat ________________
+
+board = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_stop_blocks_survive_a_str0/repo/.tickets')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10a5eec90>
+
+    def test_stop_blocks_survive_a_straddling_heartbeat(board, monkeypatch):
+        """stop_blocks is the continuation rate limit. Losing an append hands the
+        agent more continuations than the cap allows."""
+        monkeypatch.setenv("TICKET_AGENT", "bob")
+        mod = load_tool()
+        b = str(board)
+        mod.checkin(b, "bob")
+    
+>       interleave(mod, b, "bob", lambda: mod._record_stop_block(b, "bob"))
+
+tests/test_t278_agent_record_race.py:143: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+mod = <module 'tickets_tool_t278' from '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/base/tickets.py'>
+board_dir = '/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_stop_blocks_survive_a_str0/repo/.tickets'
+owner = 'bob'
+writer = <function test_stop_blocks_survive_a_straddling_heartbeat.<locals>.<lambda> at 0x10b7b45e0>
+
+    def interleave(mod, board_dir, owner, writer):
+        """Run `writer()` while a real checkin() is paused between its read and its write.
+    
+        Returns after both have finished. The heartbeat thread holds whatever the
+        implementation holds at read time -- nothing today, the agent lock once
+        fixed -- so against the fixed code `writer` simply blocks until the
+        heartbeat commits, which is the point.
+        """
+        b_read = threading.Event()
+        writer_done = threading.Event()
+        real_rec = mod._agent_rec
+    
+        def gated_rec(bd, own):
+            rec = real_rec(bd, own)
+            if threading.current_thread().name == "heartbeat" and not b_read.is_set():
+                b_read.set()
+                # Bounded: against the FIXED code the writer is blocked on the lock
+                # we are holding and can never set this, so we must time out and
+                # commit rather than deadlock the suite.
+                writer_done.wait(1.5)
+            return rec
+    
+        mod._agent_rec = gated_rec
+        try:
+            t = threading.Thread(target=lambda: mod.checkin(board_dir, owner), name="heartbeat")
+            t.start()
+>           assert b_read.wait(5), "heartbeat never reached its read"
+E           AssertionError: heartbeat never reached its read
+E           assert False
+E            +  where False = wait(5)
+E            +    where wait = <threading.Event at 0x10c20a950: unset>.wait
+
+tests/test_t278_agent_record_race.py:71: AssertionError
+___________ test_review_tasks_cos_once_then_inbox_clears_repeat_wake ___________
+
+board = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_review_tasks_cos_once_the0/repo/.tickets')
+
+    def test_review_tasks_cos_once_then_inbox_clears_repeat_wake(board):
+        run(board, "master", "take", agent="planner")
+        run(board, "master", "cos", "cos-x", agent="planner")
+        run(board, "join", "cos-x", "--roles", "review")
+        _submit_docs_review(board)
+        time.sleep(1.1)
+        rc, p = pending(board, "cos-x")
+        assert rc == 0 and p.get("pending") is True, p
+        assert p.get("wake_reason") == "task_messages"
+        assert p.get("task_messages")
+        assert "review_queue" in p
+        recs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+        cos_mail = next(m for m in recs if m.get("to") == "cos-x" and "ready for review" in m.get("text", ""))
+        assert cos_mail.get("kind") == "task"
+        assert cos_mail.get("source") == "review"
+        master_mail = next(m for m in recs if m.get("to") == "planner" and "ready for review" in m.get("text", ""))
+        assert master_mail.get("kind") != "task"
+        rc, p = pending(board, "planner")
+>       assert p.get("pending") is False and rc == 1, p
+E       AssertionError: {'agent': 'planner', 'pending': True, 'messages_to_me': ['09-14 14:41 +08  doc -> planner [T-001]: T-001 ready for rev... [T-001]: T-001 review. Coordinator follow-up: inbox poke + persist wake (pr-sync after SHA is on origin/main).'], ...}
+E       assert (True is False)
+E        +  where True = <built-in method get of dict object at 0x10ad5a500>('pending')
+E        +    where <built-in method get of dict object at 0x10ad5a500> = {'agent': 'planner', 'pending': True, 'messages_to_me': ['09-14 14:41 +08  doc -> planner [T-001]: T-001 ready for rev... [T-001]: T-001 review. Coordinator follow-up: inbox poke + persist wake (pr-sync after SHA is on origin/main).'], ...}.get
+
+tests/test_t611_objective_bounds.py:187: AssertionError
+__________________ test_wheel_installs_tickets_console_script __________________
+
+tmp_path = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_wheel_installs_tickets_co0')
+
+    def test_wheel_installs_tickets_console_script(tmp_path):
+        if shutil.which("python3") is None:
+            raise AssertionError("python3 is required to prove the installable artifact")
+        dist = tmp_path / "dist"
+        dist.mkdir()
+>       subprocess.run(
+            ["python3", "-m", "pip", "install", "--quiet", "build"],
+            check=True,
+            cwd=ROOT,
+        )
+
+tests/test_t707_docker_packaging.py:52: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+input = None, capture_output = False, timeout = None, check = True
+popenargs = (['python3', '-m', 'pip', 'install', '--quiet', 'build'],)
+kwargs = {'cwd': PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/base')}
+
+    def run(*popenargs,
+            input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        """Run command with arguments and return a CompletedProcess instance.
+    
+        The returned instance will have attributes args, returncode, stdout and
+        stderr. By default, stdout and stderr are not captured, and those attributes
+        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,
+        or pass capture_output=True to capture both.
+    
+        If check is True and the exit code was non-zero, it raises a
+        CalledProcessError. The CalledProcessError object will have the return code
+        in the returncode attribute, and output & stderr attributes if those streams
+        were captured.
+    
+        If timeout is given, and the process takes too long, a TimeoutExpired
+        exception will be raised.
+    
+        There is an optional argument "input", allowing you to
+        pass bytes or a string to the subprocess's stdin.  If you use this argument
+        you may not also use the Popen constructor's "stdin" argument, as
+        it will be used internally.
+    
+        By default, all communication is in bytes, and therefore any "input" should
+        be bytes, and the stdout and stderr will be bytes. If in text mode, any
+        "input" should be a string, and stdout and stderr will be strings decoded
+        according to locale encoding, or by "encoding" if set. Text mode is
+        triggered by setting any of text, encoding, errors or universal_newlines.
+    
+        The other arguments are the same as for the Popen constructor.
+        """
+        if input is not None:
+            if kwargs.get('stdin') is not None:
+                raise ValueError('stdin and input arguments may not both be used.')
+            kwargs['stdin'] = PIPE
+    
+        if capture_output:
+            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+                raise ValueError('stdout and stderr arguments may not be used '
+                                 'with capture_output.')
+            kwargs['stdout'] = PIPE
+            kwargs['stderr'] = PIPE
+    
+        with Popen(*popenargs, **kwargs) as process:
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except TimeoutExpired as exc:
+                process.kill()
+                if _mswindows:
+                    # Windows accumulates the output in a single blocking
+                    # read() call run on child threads, with the timeout
+                    # being done in a join() on those threads.  communicate()
+                    # _after_ kill() is required to collect that and add it
+                    # to the exception.
+                    exc.stdout, exc.stderr = process.communicate()
+                else:
+                    # POSIX _communicate already populated the output so
+                    # far into the TimeoutExpired exception.
+                    process.wait()
+                raise
+            except:  # Including KeyboardInterrupt, communicate handled that.
+                process.kill()
+                # We don't call process.wait() as .__exit__ does that for us.
+                raise
+            retcode = process.poll()
+            if check and retcode:
+>               raise CalledProcessError(retcode, process.args,
+                                         output=stdout, stderr=stderr)
+E               subprocess.CalledProcessError: Command '['python3', '-m', 'pip', 'install', '--quiet', 'build']' returned non-zero exit status 1.
+
+/Users/kavana/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/subprocess.py:571: CalledProcessError
+----------------------------- Captured stderr call -----------------------------
+/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/base/.venv/bin/python3: No module named pip
+_____________ test_master_template_and_howto_start_with_onboarding _____________
+
+    def test_master_template_and_howto_start_with_onboarding():
+        src = (ROOT / "tickets.py").read_text()
+        marker = "MASTER_TEMPLATE = "
+        i = src.find(marker)
+        assert i != -1
+        # The assigned template begins with the onboarding sentence (possibly via
+        # concatenation after a short prefix string).
+        chunk = src[i:i + 400]
+        assert "You are onboarding" in chunk
+        howto = HOWTO.read_text()
+        # First markdown body line after the title.
+        lines = [ln.strip() for ln in howto.splitlines() if ln.strip()]
+        assert lines[0] == "# Master how-to"
+>       assert "You are onboarding" in lines[1]
+E       AssertionError: assert 'You are onboarding' in 'Use [coordination and success](coordination-and-success.md) for accepted-merge'
+
+tests/test_t778_master_onboarding.py:76: AssertionError
+___________________ test_howto_still_starts_with_onboarding ____________________
+
+    def test_howto_still_starts_with_onboarding():
+        lines = [ln.strip() for ln in HOWTO.read_text().splitlines() if ln.strip()]
+        assert lines[0] == "# Master how-to"
+>       assert "You are onboarding" in lines[1]
+E       AssertionError: assert 'You are onboarding' in 'Use [coordination and success](coordination-and-success.md) for accepted-merge'
+
+tests/test_t784_team_intro.py:64: AssertionError
+________________ test_claim_update_review_done_are_all_recorded ________________
+
+worked = PosixPath('/private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-atman-verify-t876-opus-0914/5b5d252c-25d6-4f12-aa89-09c3c0279e44/scratchpad/t876/tmp-base/pytest-of-kavana/pytest-1/test_claim_update_review_done_0/repo/.tickets')
+
+    def test_claim_update_review_done_are_all_recorded(worked):
+        b = worked
+        repo = b.parent
+        r = run(b, "next", "--role", "backend", agent="alice", cwd=repo)
+        assert r.returncode == 0, r.stdout + r.stderr
+        tid = "T-002"  # T-001 is the fixture's docs ticket
+        run(b, "update", tid, "halfway there", agent="alice", cwd=repo)
+        commit(repo)
+        r = run(b, "review", tid, "--notes", "paths and tests", agent="alice", cwd=repo)
+        assert r.returncode == 0, r.stdout + r.stderr
+        r = run(b, "done", tid, "--notes", "landed", agent="alice", cwd=repo)
+        assert r.returncode == 0, r.stdout + r.stderr
+    
+        got = [e["kind"] for e in events(b, ticket=tid)]
+        # the `msg` is cmd_review notifying the master: a real event on this
+        # ticket, and it carries the notification's LENGTH, never its text.
+>       assert got == ["claim", "update", "review", "msg", "done"], got
+E       AssertionError: ['claim', 'update', 'review', 'msg', 'msg', 'msg', ...]
+E       assert ['claim', 'up...', 'msg', ...] == ['claim', 'up...'msg', 'done']
+E         
+E         At index 4 diff: 'msg' != 'done'
+E         Left contains 4 more items, first extra item: 'msg'
+E         Use -v to get more diff
+
+tests/test_trajectories.py:85: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_t257_board_guard.py::test_refuses_a_board_outside_tmp_while_under_pytest
+FAILED tests/test_t278_agent_record_race.py::test_limit_survives_a_heartbeat_that_straddles_it
+FAILED tests/test_t278_agent_record_race.py::test_clearing_a_limit_survives_a_straddling_heartbeat
+FAILED tests/test_t278_agent_record_race.py::test_inbox_seen_survives_a_straddling_heartbeat
+FAILED tests/test_t278_agent_record_race.py::test_stop_blocks_survive_a_straddling_heartbeat
+FAILED tests/test_t611_objective_bounds.py::test_review_tasks_cos_once_then_inbox_clears_repeat_wake
+FAILED tests/test_t707_docker_packaging.py::test_wheel_installs_tickets_console_script
+FAILED tests/test_t778_master_onboarding.py::test_master_template_and_howto_start_with_onboarding
+FAILED tests/test_t784_team_intro.py::test_howto_still_starts_with_onboarding
+FAILED tests/test_trajectories.py::test_claim_update_review_done_are_all_recorded
+10 failed, 2170 passed, 25 skipped, 11 xfailed in 1555.37s (0:25:55)
+exit=1
