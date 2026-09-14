@@ -421,9 +421,36 @@ def _refuse_unbound_live_board(path):
     )
 
 
+def _refuse_board_outside_declared_tickets_dir(path):
+    """Refuse a board that is not the test's declared TICKETS_DIR.
+
+    T-938 / T-257: PYTEST_CURRENT_TEST plus a declared TICKETS_DIR means the
+    process is a test or verification sandbox. It may only touch that board.
+    T-257 already blocks boards outside trusted tmp; this catches a second
+    tmp board (or any other path) that is not the one the test declared.
+    """
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    declared = os.environ.get("TICKETS_DIR")
+    if not declared:
+        return
+    real = os.path.realpath(path)
+    want = os.path.realpath(os.path.expanduser(declared))
+    if real == want:
+        return
+    sys.exit(
+        "REFUSING TO USE BOARD %r: running under pytest "
+        "(PYTEST_CURRENT_TEST is set) but this board is not the test's "
+        "declared TICKETS_DIR %r (resolved %r). Test/verification contexts "
+        "may only mutate the board they declared -- see T-257 and T-938."
+        % (real, declared, want)
+    )
+
+
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
     _refuse_board_outside_pytest_tmp(result)
+    _refuse_board_outside_declared_tickets_dir(result)
     _refuse_unbound_live_board(result)
     return result
 
