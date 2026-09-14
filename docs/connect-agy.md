@@ -21,6 +21,11 @@ tickets spawn NAME --harness agy --persist --roles backend
 # --safe uses `agy --mode accept-edits` instead of --dangerously-skip-permissions
 ```
 
+An Agy seat is **supervised**: `agy` has no live-session injection, so board
+mail is delivered by the hooks below (or a persist watcher), and a wake receipt
+says `supervised (...)` rather than `woken`. `tickets join --persistent` will
+tell you the same. Evidence: docs/wake-recipients.md.
+
 ## 2. Hooks
 
 ```sh

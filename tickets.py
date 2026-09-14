@@ -701,6 +701,58 @@ def write_identity(board, name):
     return name
 
 
+def identity_resolution(board, explicit=None):
+    """(seat, why) matching session_seat() -- for `tickets self` / identity."""
+    if explicit:
+        return explicit, "explicit --owner"
+    seat = (os.environ.get("TICKET_SEAT") or "").strip()
+    if seat:
+        return seat, "TICKET_SEAT (supervisor assignment)"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return recorded, "session-keyed join record"
+    env_agent = (os.environ.get("TICKET_AGENT") or "").strip()
+    if env_agent:
+        return env_agent, "TICKET_AGENT"
+    if recorded:
+        return recorded, "legacy flat identity file"
+    return "agent-%d" % os.getpid(), "pid fallback"
+
+
+def _join_binds_this_session(board, owner, on_behalf=False):
+    """True when this join may write the caller's session-keyed identity.
+
+    T-954: spawn/join on behalf of another seat must not rebind the caller.
+    T-839: a first join still decides the session even if TICKET_AGENT is a
+    stale ambient name -- unless that ambient name is already a real seat
+    on this board (a leader operating a worker).
+    """
+    if on_behalf:
+        return False
+    owner = (owner or "").strip()
+    caller = whoami()
+    if owner and owner == caller:
+        return True
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board and keyed:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if recorded:
+        return False
+    if caller and not caller.startswith("agent-") and _agent_rec(board, caller):
+        return False
+    return True
+
+
 def seat_confirmed(board):
     """True when this session DELIBERATELY confirmed the seat it answers as.
 
@@ -1366,6 +1418,7 @@ def _git_state_raw(cwd=None):
         return None, True
     branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=here) or "?"
     sha = git("rev-parse", "--short", "HEAD", cwd=here) or "?"
+    sha_full = git("rev-parse", "HEAD", cwd=here) or ""
     dirty = git("status", "--porcelain", cwd=here)
     common = git("rev-parse", "--git-common-dir", cwd=here) or ""
     gitdir = git("rev-parse", "--git-dir", cwd=here) or ""
@@ -1374,6 +1427,7 @@ def _git_state_raw(cwd=None):
         "top": top,
         "branch": branch,
         "sha": sha,
+        "sha_full": sha_full,
         "dirty": len(dirty.splitlines()) if dirty else 0,
         "main_tree": is_main_tree,
         "repo": repo_identity(top),
@@ -1783,6 +1837,39 @@ def timing(t):
     return out
 
 
+def _onboard_roles():
+    try:
+        from ticket_board import onboard_roles as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import onboard_roles as m
+        return m
+
+
+def _cos_label(board):
+    return _onboard_roles().format_holder(
+        _onboard_roles().cos_holder(current_master(board) or {}),
+        _onboard_roles().ROLE_COS)
+
+
+def _master_label(board):
+    return _onboard_roles().format_holder(
+        _onboard_roles().master_holder(current_master(board) or {}),
+        _onboard_roles().ROLE_MASTER)
+
+
+def _print_role_discovery(rows):
+    roles = _onboard_roles()
+    roles.attach_login_probes(rows)
+    print(roles.format_discovery_table(roles.discovery_rows(rows)))
+    print(roles.format_suggestion(roles.suggest_assignment(rows)))
+    print("Ask: which agents should be master, CoS, workers, verifiers?")
+    print("Do not treat the table as an assignment.")
+
+
 def _work_view():
     """T-889 Work view module (payload + CSS/HTML/JS); packaged with sounding."""
     try:
@@ -1817,6 +1904,18 @@ def _seat_schedule():
         if src not in sys.path:
             sys.path.insert(0, src)
         from ticket_board import seat_schedule as m
+        return m
+
+
+def _review_verdict():
+    try:
+        from ticket_board import review_verdict as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import review_verdict as m
         return m
 
 
@@ -2038,14 +2137,130 @@ def collect_handoffs(t, tickets):
     return direct, earlier
 
 
-def detail(board, t, tickets):
+WORKER_RULES_COMPACT = (
+    "Rules (compact): one ticket; own worktree never main; tickets sync then "
+    "review; never edit .tickets/ by hand; never tickets clear; stuck: "
+    "`tickets msg --to <master> --re <id>` then update/block."
+)
+
+
+def _leadership_viewer(board, owner=None):
+    owner = owner or whoami()
+    m = _safe(lambda: current_master(board), {}) or {}
+    if owner and owner in ((m.get("owner") or ""), (m.get("cos") or "")):
+        return True
+    roles = _safe(lambda: roles_for(board, owner), []) or []
+    return any(r in ("master", "planning") for r in roles)
+
+
+def _ticket_path_hints(t):
+    text = " ".join([t.get("title") or "", t.get("body") or ""])
+    found = re.findall(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md|ts|js|go|rs|json)\b|tests/[\w./-]+", text)
+    out, seen = [], set()
+    for item in found:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out[:12]
+
+
+def _ticket_scope_notes(t):
+    notes = []
+    for nt in t.get("notes") or []:
+        if nt.get("kind") == "context":
+            notes.append(nt.get("text") or "")
+            continue
+        by = (nt.get("by") or "").lower()
+        if by.startswith("atman-ceo") or by.endswith("-ceo") or by == "master":
+            notes.append(nt.get("text") or "")
+    return [n for n in notes if n][:4]
+
+
+def _prompt_token_count(text):
+    """Proxy token count via tiktoken cl100k_base when that package is importable.
+
+    This is not a model-matched or provider-usage figure. Callers must label
+    the encoding and kind; model token usage stays null unless a known model
+    tokenizer is available.
+    """
+    try:
+        import tiktoken
+    except ImportError:
+        return None
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text or ""))
+    except Exception:
+        return None
+
+
+def _infer_prompt_sections(text, ticket=None):
+    sections = []
+    if "Rules" in (text or "") or "one ticket" in (text or ""):
+        sections.append("rules")
+    if "Inherited knowledge" in (text or "") or "knowledge:" in (text or ""):
+        sections.append("lessons")
+    if "standing brief" in (text or "").lower() or "Standing brief:" in (text or ""):
+        sections.append("brief")
+    if "Files/tests:" in (text or "") or "Scope:" in (text or ""):
+        sections.append("scope")
+    if (ticket or {}).get("body") and (ticket.get("body") in (text or "")):
+        sections.append("ticket")
+    return sections
+
+
+def _log_prompt_diet(board, owner, text, view, ticket=None, sections=None,
+                     section_chars=None, knowledge=None):
+    sections = list(sections or _infer_prompt_sections(text, ticket))
+    knowledge = knowledge or {}
+    selected = list(knowledge.get("knowledge") or [])
+    rendered = list(knowledge.get("rendered_knowledge") or [])
+    proxy = _prompt_token_count(text)
+    manifest = {
+        "knowledge": selected,
+        "rendered_knowledge": rendered,
+        "section_chars": {k: int(v) for k, v in (section_chars or {}).items()},
+        "budget_chars": int(knowledge.get("budget_chars") or 0),
+        "truncated": bool(knowledge.get("truncated")),
+        "missing": list(knowledge.get("missing") or []),
+        "stale": list(knowledge.get("stale") or []),
+        # Model-matched usage stays null; cl100k_base is a labeled proxy only.
+        "tokens": None,
+        "view": view,
+        "chars": len(text or ""),
+    }
+    if proxy is not None:
+        manifest["proxy_tokens"] = int(proxy)
+        manifest["token_encoding"] = "cl100k_base"
+        manifest["tokenizer"] = "tiktoken"
+        manifest["token_kind"] = "proxy"
+    if knowledge.get("error"):
+        manifest["error"] = knowledge["error"]
+    traj_event(board, "prompt", agent=owner, ticket=ticket,
+               prompt_chars=manifest["chars"],
+               prompt_sections=",".join(sections) or "body",
+               prompt_view=view,
+               prompt_manifest=json.dumps(manifest, sort_keys=True),
+               prompt_tokens=manifest["tokens"])
+
+
+def detail(board, t, tickets, viewer=None):
+    viewer = viewer or whoami()
+    compact = not _leadership_viewer(board, viewer)
     out = [line(t, tickets)]
-    packs = context_paths(board, t.get("owner") or whoami())
-    if packs:
+    if compact:
+        out.append(WORKER_RULES_COMPACT)
+    packs = context_paths(board, t.get("owner") or viewer)
+    if packs and not compact:
         out.append("")
         out.append("Read this briefing before editing:")
         for p in packs:
             out.append("  " + p)
+    elif packs and compact:
+        brief = os.path.join(board, "briefs", (t.get("owner") or viewer) + ".md")
+        if os.path.isfile(brief):
+            out.append("Standing brief: " + brief)
     discovered = os.path.dirname(board)
     if os.path.abspath(discovered) != os.path.abspath(os.getcwd()):
         out.append("")
@@ -2054,17 +2269,20 @@ def detail(board, t, tickets):
     if t.get("sprint"):
         for s in load_sprints(board):
             if s["id"] == t["sprint"]:
-                out.append("Sprint %s: %s" % (s["id"], s.get("goal", "")))
+                if compact:
+                    out.append("Sprint %s" % s["id"])
+                else:
+                    out.append("Sprint %s: %s" % (s["id"], s.get("goal", "")))
     if t.get("epic"):
         for e in load_epics(board):
             if e["id"] == t["epic"]:
                 sib = [x for x in tickets if x.get("epic") == e["id"]]
                 d, n, c, b = progress(sib)
                 out.append("Epic %s: %s  %s" % (e["id"], e["title"], bar(d, n, 12)))
-                if e.get("body"):
+                if e.get("body") and not compact:
                     out.append("  " + e["body"].strip().replace("\n", "\n  "))
                 others = [x for x in sib if x["id"] != t["id"] and x["status"] != "done"]
-                if others:
+                if others and not compact:
                     out.append("  also in this epic: " + "; ".join(
                         "%s %s%s" % (x["id"], MARK[x["status"]], (" @" + x["owner"]) if x.get("owner") else "")
                         for x in others[:8]))
@@ -2096,6 +2314,12 @@ def detail(board, t, tickets):
         out.append("PR: %s" % t["pr"])
     if t.get("discarded_reason"):
         out.append("discarded: %s" % t["discarded_reason"])
+    scope = _ticket_scope_notes(t)
+    if compact and scope:
+        out.append("Scope: " + " | ".join(scope))
+    hints = _ticket_path_hints(t)
+    if compact and hints:
+        out.append("Files/tests: " + ", ".join(hints))
     if t.get("body"):
         out.append("")
         out.append(t["body"])
@@ -2110,12 +2334,29 @@ def detail(board, t, tickets):
         out.append("Handoff from earlier ancestors (latest note each):")
         for tid, title, text in earlier:
             out.append("  %s (%s): %s" % (tid, title, text))
+    evs = _review_verdict().format_detail(t)
+    if evs:
+        out.append("")
+        out.append("Review events:")
+        out.extend(evs)
     if t.get("notes"):
         out.append("")
         out.append("Notes:")
         for nt in t["notes"]:
             out.append("  - [%s] %s" % (nt.get("by", "?"), nt["text"]))
-    return "\n".join(out)
+    text = "\n".join(out)
+    section_chars = {}
+    if compact:
+        section_chars["rules"] = len(WORKER_RULES_COMPACT)
+    if t.get("body"):
+        section_chars["ticket"] = len(t["body"])
+    if compact and scope:
+        section_chars["scope"] = sum(len(s) for s in scope)
+    if compact and hints:
+        section_chars["files"] = sum(len(h) for h in hints)
+    _log_prompt_diet(board, viewer, text, "compact" if compact else "wide",
+                     ticket=t, section_chars=section_chars)
+    return text
 
 
 # --------------------------------------------------------------------------
@@ -2478,7 +2719,7 @@ def cmd_dispatch(a, board):
         roles=None, can=None, cost=None, model="", best_for="", wake_mode=None,
         brief="", exec=getattr(a, "exec", "") or "", master=False, cos=False,
         safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
-        max_runs=getattr(a, "max_runs", None),
+        max_runs=getattr(a, "max_runs", None), replace=False,
     )
     try:
         cmd_spawn(ns, board)
@@ -3323,6 +3564,15 @@ def cmd_review(a, board):
         trunk = _trunk(cwd=art)
         if git("merge-base", "--is-ancestor", trunk, "HEAD", cwd=art) is None:
             sys.exit(_behind_trunk_refusal(g, art, trunk))
+    if (a.pr or "").strip():
+        if not g:
+            sys.exit("review --pr: not in a git working tree; cannot verify a submitted SHA")
+        pin_err = _review_verdict().verify_submit(
+            git, sha_full=g.get("sha_full") or "", branch=g.get("branch") or "",
+            origin_url=g.get("repo") or "", pr=a.pr, dirty=g.get("dirty") or 0,
+            cwd=art)
+        if pin_err:
+            sys.exit(pin_err)
     # `owner` decides who the ticket is filed under (unchanged: claim it via
     # review if nobody holds it yet, otherwise keep the existing owner).
     # `author` is who actually ran this command -- always whoami(), never
@@ -3341,6 +3591,8 @@ def cmd_review(a, board):
         # the artifact's, not the caller's cwd.
         stamp = _record_pin(t, g, art)
         text = "%s -- %s" % (stamp, text)
+        if (a.pr or "").strip() and g.get("sha_full"):
+            _review_verdict().record_verified_head(t, g["sha_full"], pr=a.pr)
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
@@ -3376,6 +3628,28 @@ def cmd_review(a, board):
     print("%s -> IN REVIEW after %s of work; %s. Claim your next ticket." % (
         t["id"], fmt_hours(tm["active"]), who))
     _finish_followup(board, t["id"], "review")
+
+
+def cmd_accept(a, board):
+    """Record a structured accept bound to the submitted review head (T-944)."""
+    t = load(board, a.id)
+    ev, err = _review_verdict().apply(
+        t, whoami(), a.sha, "accept", notes=a.notes, require_full=True)
+    if err:
+        sys.exit(err)
+    save(board, t)
+    print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
+
+
+def cmd_reject(a, board):
+    """Record a structured reject bound to the submitted review head (T-944)."""
+    t = load(board, a.id)
+    ev, err = _review_verdict().apply(
+        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+    if err:
+        sys.exit(err)
+    save(board, t)
+    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
 
 
 def _trunk(cwd=None):
@@ -4368,14 +4642,22 @@ def _is_python_interpreter(tok):
     return base == "python" or base.startswith("python")
 
 
+_WATCH_SCRIPT_NAMES = ("tickets.py", "tickets", "atm")
+
+
 def _is_legitimate_watch_script(tok):
-    """True when `tok` points at a real tickets.py, not a grep/search needle."""
+    """True when `tok` points at a real tickets CLI, not a grep/search needle.
+
+    Installed shims are often `~/.local/bin/tickets` or `atm` (symlinks to
+    tickets.py). T-875 (12): a stale manual `tickets watch` must still count.
+    """
     path = os.path.expanduser(tok or "")
     if _RELEASE_TICKETS_RE.search(path + " "):
         return True
     if path.endswith("/.claude/tools/tickets.py"):
         return True
-    return os.path.isabs(path) and os.path.basename(path) == "tickets.py"
+    base = os.path.basename(path)
+    return os.path.isabs(path) and base in _WATCH_SCRIPT_NAMES
 
 
 def _watch_cmd_agent(cmd):
@@ -4396,10 +4678,13 @@ def _watch_cmd_agent(cmd):
     `grep -n tickets.py watch --agent optimizer`) must not count -- require
     a python interpreter immediately before the script token, or a path under
     tickets-releases/<sha>/, the ~/.claude/tools shim, or an absolute checkout.
+
+    T-875 (12): the installed PATH shims `tickets` and `atm` (no .py suffix)
+    are the same CLI. A stale manual `tickets watch` must match here.
     """
     argv = _split_cmdline(cmd)
     for i, tok in enumerate(argv):
-        if os.path.basename(tok) != "tickets.py":
+        if os.path.basename(tok) not in _WATCH_SCRIPT_NAMES:
             continue
         rest = argv[i + 1:]
         if not rest or rest[0] != "watch":
@@ -4593,7 +4878,8 @@ def _parse_watch_table():
         except ValueError:
             continue
         cmd = parts[1]
-        if pid == me or "tickets.py" not in cmd:
+        # T-875 (12): installed `tickets`/`atm` shims do not contain tickets.py.
+        if pid == me or " watch" not in cmd:
             continue
         agent = _watch_cmd_agent(cmd)
         if not agent:
@@ -4704,14 +4990,177 @@ def _watch_poke_file(board, owner):
 
 
 def _process_command(pid):
+    """Full, untruncated command line for pid, or '' if gone/unreadable.
+
+    T-875 (12): mere PID existence is not evidence of a watcher -- PIDs get
+    recycled. Callers must read this string. Linux /proc is preferred; macOS
+    `ps -ww` avoids the default ARG_MAX truncation.
+    """
     import subprocess
 
     try:
-        r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "command="],
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    proc_path = "/proc/%d/cmdline" % pid
+    try:
+        with open(proc_path, "rb") as f:
+            raw = f.read()
+        if raw:
+            return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    except (OSError, IOError):
+        pass
+    try:
+        r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
                            capture_output=True, text=True)
     except (OSError, ValueError):
         return ""
     return (r.stdout or "").strip()
+
+
+def _read_watch_pidfile(board, owner):
+    path = os.path.join(agents_dir(board), owner + ".watch.pid")
+    try:
+        with open(path) as f:
+            return int((f.read() or "0").strip() or 0), path
+    except (IOError, OSError, ValueError):
+        return 0, path
+
+
+def _pidfile_watch_state(board, owner):
+    """Classify the pidfile holder by full ps cmdline, not mere PID existence.
+
+    Returns (pid, cmdline, kind):
+      absent    -- no pidfile
+      dead      -- pid gone or empty cmdline
+      unrelated -- pid alive but cmdline is not a watch loop for this seat
+      live      -- full cmdline is a tickets/atm watch loop for this seat
+    """
+    pid, path = _read_watch_pidfile(board, owner)
+    if not pid:
+        return 0, "", "absent" if not os.path.lexists(path) else "dead"
+    cmd = _process_command(pid)
+    if not cmd:
+        return pid, "", "dead"
+    if _watch_cmd_agent(cmd) == owner:
+        return pid, cmd, "live"
+    return pid, cmd, "unrelated"
+
+
+def _reclaim_unrelated_watch_pidfile(board, owner):
+    """Drop a pidfile whose PID is dead or an unrelated recycled process."""
+    pid, cmd, kind = _pidfile_watch_state(board, owner)
+    if kind in ("dead", "unrelated"):
+        path = os.path.join(agents_dir(board), owner + ".watch.pid")
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return kind, pid, cmd
+
+
+def _seat_live_watchers(board, owner):
+    """Live watch loops for this seat: pidfile full cmdline AND process table."""
+    found = []
+    seen = set()
+    pid, cmd, kind = _pidfile_watch_state(board, owner)
+    if kind == "live":
+        found.append((pid, cmd, "pidfile"))
+        seen.add(pid)
+    for p in _live_watch_pids(owner, board=board):
+        if p in seen:
+            continue
+        c = _process_command(p)
+        found.append((p, c, "ps"))
+        seen.add(p)
+    return found
+
+
+def _format_live_watchers(rows):
+    lines = []
+    for pid, cmd, src in rows:
+        lines.append("  pid %d [%s]: %s" % (pid, src, cmd or "(empty cmdline)"))
+    return "\n".join(lines)
+
+
+def _replace_seat_watchers(board, owner, existing, wait_s=10.0):
+    """SIGTERM live loops for this seat and wait until they are gone."""
+    import signal
+    import time as _time
+
+    _mark_run_interrupted(board, owner)
+    try:
+        with open(_stop_file(board, owner), "w") as f:
+            f.write(now())
+    except OSError:
+        pass
+    stopped = []
+    for pid, _cmd, _src in existing:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped.append(pid)
+        except ProcessLookupError:
+            pass
+    deadline = _time.time() + max(0.2, float(wait_s))
+    while _time.time() < deadline:
+        if not _seat_live_watchers(board, owner):
+            _reclaim_unrelated_watch_pidfile(board, owner)
+            return stopped, ""
+        _time.sleep(0.1)
+    left = _seat_live_watchers(board, owner)
+    return stopped, "failure: --replace did not stop live watcher(s) for %s:\n%s" % (
+        owner, _format_live_watchers(left))
+
+
+def _spawn_verify_started_watcher(board, owner, started_pid, timeout=5.0):
+    """Prove the new pidfile belongs to the watcher we just started.
+
+    T-875 (12): spawn's own 'started (pid N)' is untrustworthy. The pidfile
+    PID must equal started_pid and its full ps command line must be a watch
+    loop for this seat. Mere PID existence (recycled PIDs) is a failure.
+    Returns (ok, detail, pid, cmdline).
+    """
+    import time as _time
+
+    path = os.path.join(agents_dir(board), owner + ".watch.pid")
+    deadline = _time.time() + max(0.2, float(timeout))
+    last = "pidfile %s not written" % path
+    while _time.time() < deadline:
+        if not _pid_alive(started_pid):
+            last = "started pid %d exited before taking the watch lock" % started_pid
+            try:
+                with open(path) as f:
+                    file_pid = int((f.read() or "0").strip() or 0)
+            except (IOError, OSError, ValueError):
+                file_pid = 0
+            cmd = _process_command(file_pid) if file_pid else ""
+            if file_pid and file_pid != int(started_pid):
+                last = ("started pid %d exited; pidfile still holds pid %d; cmdline: %s"
+                        % (started_pid, file_pid, cmd or "(empty)"))
+            return False, last, file_pid, cmd
+        try:
+            with open(path) as f:
+                file_pid = int((f.read() or "0").strip() or 0)
+        except (IOError, OSError, ValueError):
+            file_pid = 0
+        if file_pid:
+            cmd = _process_command(file_pid)
+            agent = _watch_cmd_agent(cmd) if cmd else ""
+            if file_pid == int(started_pid) and agent == owner:
+                return True, "ok", file_pid, cmd
+            if file_pid != int(started_pid):
+                last = ("pidfile holds pid %d, not started pid %d; cmdline: %s"
+                        % (file_pid, started_pid, cmd or "(empty)"))
+                if cmd:
+                    return False, last, file_pid, cmd
+            elif not cmd:
+                last = "started pid %d has empty ps cmdline" % started_pid
+            else:
+                last = ("started pid %d cmdline is not a watch for %s: %s"
+                        % (started_pid, owner, cmd))
+                return False, last, file_pid, cmd
+        _time.sleep(0.05)
+    return False, last, 0, ""
 
 
 def _watch_pid_uses_this_cli(pid):
@@ -4729,7 +5178,8 @@ def _watch_pid_uses_this_cli(pid):
 
 
 PERSIST_POKE_ATTEMPTS = 3
-_AUTONOMOUS_WAKE_LABELS = ("woken", "deduped", "watch-poked")
+_AUTONOMOUS_WAKE_LABELS = (
+    "woken", "deduped", "watch-poked", "queued-busy", "delivery-unknown")
 
 
 def _poke_persist_watch(board, owner, attempts=None):
@@ -4771,10 +5221,18 @@ def _finish_followup(board, tid, event):
     persist watcher on this CLI gets SIGUSR1; others still get the board msg.
     """
     m = current_master(board) or {}
+    on_board = set(load_workforce(board) or {})
+    on_board.update(r.get("owner") or "" for r in load_agents(board))
+    on_board.discard("")
     seats = []
-    for name in ((m or {}).get("cos"), (m or {}).get("owner"), "cursor", "atman-ceo"):
+    candidates = [((m or {}).get("cos") or ""), ((m or {}).get("owner") or "")]
+    # Live fleet aliases only if this board actually enrolled them (T-883).
+    for name in ("cursor", "atman-ceo"):
+        if name in on_board:
+            candidates.append(name)
+    for name in candidates:
         n = (name or "").strip()
-        if n and n not in seats:
+        if n and n in on_board and n not in seats:
             seats.append(n)
     author = whoami()
     body = ("%s %s. Coordinator follow-up: inbox poke + persist wake "
@@ -5441,16 +5899,16 @@ def cmd_block(a, board):
 def cmd_note(a, board):
     """Add a note (`tickets note` / `tickets update`).
 
-    `by` is always the caller's own identity (`--by`, else $TICKET_AGENT),
-    never the ticket's `owner` field. T-238: a fallback to `t.get("owner")`
-    here meant a second agent working the same ticket in parallel -- exactly
-    the case a duplicate lane needs to be visible -- had its notes silently
-    relabeled as the owner's, so nothing in the note history could ever
-    reveal the second lane. This was a write-path bug: the on-disk `by` was
-    wrong, not just its rendering in `tickets show`.
+    `by` is who THIS SESSION is (`session_seat`, same as msg/inbox), never
+    the ticket's `owner` field. `--by` still wins as an explicit override.
+    T-238: a fallback to `t.get("owner")` relabeled a parallel agent's notes
+    as the owner's. T-956: whoami() here drifted from the module rule that
+    'who is acting' is session_seat(), so a note and a message from the same
+    session could disagree -- a provenance hole now that T-944 binds verdicts
+    to identity.
     """
     t = load(board, a.id)
-    who = whoami(a.by)
+    who = session_seat(board, a.by)
     t["notes"].append({"by": who, "at": now(), "text": a.text})
     save(board, t)
     # notes_len only -- the note body is the agent's own prose and never enters
@@ -5715,9 +6173,10 @@ This board is being set up. I will ask you four things, in order:
    `tickets plan` graph (real `--after` edges), not a flat list.
 
 I will not spawn workers or create tickets until you answer.
-Run `tickets harness available` to probe every catalog row (missing is a row).
+CLI: `atm` (the `tickets` command is an alias).
+Run `atm harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
-When they name tasks, use `tickets plan` so deps are real `--after` edges.
+When they name tasks, use `atm plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
@@ -5778,9 +6237,9 @@ CEO_ONBOARDING_STARTUP = """**You are onboarding as Atman CEO.**
 Connecting here is joining **Atman**, not Claude, Cursor, Codex, or any
 other provider. Board identity is `atman-<seat>` (example: `atman-ceo`).
 
-This is a living board. Do not invent a new team. Do not `tickets init`
-or `tickets clear`. CoS (`cursor`) staffs; you do not spawn, and you do
-not claim worker tickets.
+This is a living board. Do not invent a new team. Do not `atm init`
+or `atm clear`. The current CoS holder staffs (or no CoS yet); you do
+not spawn, and you do not claim worker tickets.
 
 Product flow (this order):
 1. Catalog + usage
@@ -5788,7 +6247,7 @@ Product flow (this order):
 3. Join as `atman-<seat>`
 4. Announce the Atman role
 5. Ask the operator for feedback
-6. Show tasks you can actually run (`tickets graph` / `tickets map`)
+6. Show tasks you can actually run (`atm graph` / `atm map`)
 """
 
 
@@ -5873,8 +6332,11 @@ def print_ceo_connect(board, seat="ceo"):
     attach_catalog_usage(rows)
     print("1. CATALOG + USAGE")
     print_integration_catalog(rows, note)
-    print("Codex stays in the catalog with zero usage. Do not spawn Gemini. No new Claude fable.")
-    print("Cursor-only spawns unless the operator says otherwise. CoS (`cursor`) staffs.")
+    print("Codex stays in the catalog with unknown usage listed as unknown. Do not spawn Gemini. No new Claude fable.")
+    print("Spawn only the harnesses the operator chooses. Never auto-assign CoS or master.")
+    print("")
+    _print_role_discovery(rows)
+    print("Current holders: master=%s  CoS=%s" % (_master_label(board), _cos_label(board)))
     print("")
     print_recorded_usage(board)
     print("")
@@ -5884,44 +6346,47 @@ def print_ceo_connect(board, seat="ceo"):
     text = str(obj.get("text") or "").strip()
     if text:
         print("objective: %s" % text[:400])
-        print("Attach this objective. Do not `tickets objective --set` unless it is empty.")
+        print("Attach this objective. Do not `atm objective --set` unless it is empty.")
     else:
-        print("objective: (none yet — ask one sentence, then `tickets objective --set`)")
-    print("Do not tickets init. Do not tickets clear. Do not name a new team.")
+        print("objective: (none yet — ask one sentence, then `atm objective --set`)")
+    print("Do not atm init. Do not atm clear. Do not name a new team.")
     print("")
     print("3. JOIN AS `%s`" % name)
     print("   export TICKET_AGENT=%s" % name)
     print("   export TICKETS_DIR=%s" % (board or "$PWD/.tickets"))
     print("   cd %s" % root)
-    print("   tickets join %s --roles master --can own-machine,browser --cost high --persistent --wake-mode continuous --harness cursor" % name)
-    print("   tickets hooks cursor --agent %s" % name)
-    print("   tickets hooks codex --agent %s     # mail follow-up is not Claude-only" % name)
-    print("   tickets hooks remote --agent %s" % name)
-    print("   tickets master take")
-    print("   tickets master")
-    print("   tickets inbox")
-    print("   tickets objective")
+    print("   atm join %s --roles master --can own-machine,browser --cost high --persistent --wake-mode continuous --harness cursor" % name)
+    print("   atm hooks cursor --agent %s" % name)
+    print("   atm hooks codex --agent %s     # mail follow-up is not Claude-only" % name)
+    print("   atm hooks remote --agent %s" % name)
+    print("   atm master take")
+    print("   atm master")
+    print("   atm inbox")
+    print("   atm objective")
     print("")
     print("4. ANNOUNCE THE ATMAN ROLE")
-    print('   tickets msg --to everyone "%s is Atman CEO on this living board. CoS is cursor. Integrating: <list from step 1>. @everyone"' % name)
-    print('   tickets master log "ceo onboard: seat=%s integrations=<list>"' % name)
+    print('   atm msg --to everyone "%s is Atman CEO on this living board. CoS is %s. Integrating: <list from step 1>. @everyone"'
+          % (name, _cos_label(board)))
+    print('   atm master log "ceo onboard: seat=%s integrations=<list>"' % name)
     print("")
     print("5. ASK FOR FEEDBACK")
     print("   Ask the operator: what should change about this connect path?")
-    print('   tickets msg --to cursor "CEO %s onboarded. Operator feedback: <their answer>"' % name)
+    print("   %s" % _onboard_roles().mail_to_cos(current_master(board) or {}))
+    print('   # CEO %s onboarded. Operator feedback: <their answer>' % name)
     print("")
     print("6. TASKS YOU CAN RUN (graph / map)")
-    print("   tickets graph")
-    print("   tickets map")
-    print("   tickets drive")
-    print("   tickets update / tickets here")
-    print("   Mid-run: tickets plan (JSON keys+deps), tickets dep, tickets create --blocks")
-    print("   CoS (cursor) staffs workers. CEO does not claim worker tickets.")
+    print("   atm graph")
+    print("   atm map")
+    print("   atm drive")
+    print("   atm update / atm here")
+    print("   Mid-run: atm plan (JSON keys+deps), atm dep, atm create --blocks")
+    print("   CoS (%s) staffs workers. CEO does not claim worker tickets." % _cos_label(board))
     print("")
-    print("CoS is cursor. Mail: tickets msg --to cursor. Never Grok DMs.")
-    print("HOLD T-773 T-774. No tickets clear.")
-    print("If `tickets self` still points at sol-agy-harness, recut ~/.local/bin/tickets")
-    print("onto this checkout before trusting PATH `tickets connect`.")
+    print("CoS is %s. Mail: %s. Never Grok DMs." % (
+        _cos_label(board), _onboard_roles().mail_to_cos(current_master(board) or {})))
+    print("HOLD T-773 T-774. No atm clear.")
+    print("If `atm self` still points at sol-agy-harness, recut ~/.local/bin/atm")
+    print("onto this checkout before trusting PATH `atm connect`.")
 
 
 MASTER_TEMPLATE = """**You are onboarding.**
@@ -5954,7 +6419,11 @@ Unsupported or missing remaining/reset is unknown, not exhausted. If `~/.local/b
 it retargets to the newest `openai.chatgpt-*` extension binary.
 
 Ask: **Which of these do you want to use?** Do not spawn until they answer.
-Codex stays in the catalog even with **no usage**. Gemini dispatch records
+Show the discover table (harness, installed, logged in, remaining/reset or
+unknown — never invent 0 or FAIL). Then ask which seat is master, CoS,
+workers, verifiers. Offer a ranked suggestion; never auto-assign. Non-interactive
+`tickets connect` requires explicit `--master` / `--cos` to apply.
+Codex stays in the catalog even with **unknown usage**. Gemini dispatch records
 harness=gemini; persist/hooks is the wake (no Gemini product job).
 No new Claude fable.
 
@@ -6020,34 +6489,34 @@ Spawn seats only from the integrations they confirmed, one ticket each.
 
 **You are onboarding as chief of staff.** Master plans and scopes. CoS
 reviews, unblocks, merges, and staffs. Same integration catalog as master.
-After the board has an objective and a `tickets plan` graph:
+After the board has an objective and a `atm plan` graph:
 
-1. `tickets graph` / `tickets map` — statuses and `--after` edges, not prose.
-2. Follow-up: `tickets update` / `here`; `tickets reopen` silent >90m claims;
-   `tickets drive` toward the objective; review queue.
-3. Mid-run graph edits: `tickets dep` / `tickets create --blocks`.
-4. Announce with `tickets master cos <name>` and `tickets msg --to everyone`.
+1. `atm graph` / `atm map` — statuses and `--after` edges, not prose.
+2. Follow-up: `atm update` / `here`; `atm reopen` silent >90m claims;
+   `atm drive` toward the objective; review queue.
+3. Mid-run graph edits: `atm dep` / `atm create --blocks`.
+4. Announce with `atm master cos <name>` and `atm msg --to everyone`.
 
 Do not dump a live-board plan. Do not invent a second planner.
 
 ## CEO ONBOARDING — living board (product flow)
 
 **You are onboarding as Atman CEO.** Connecting is joining Atman, not a
-provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
-staffs. CEO does not claim worker tickets on this path.
+provider. Identity is `atman-<seat>` (example `atman-ceo`). The current
+CoS holder staffs (or no CoS yet). CEO does not claim worker tickets.
 
-Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
+Run `atm connect` (or `atm connect --ceo`). It executes, in order:
 
-1. Catalog + usage (`tickets harness available` + recorded limits)
+1. Catalog + usage (`atm harness available` + recorded limits)
 2. Attach the living board / objective — do not invent a new team
-3. `tickets join atman-<seat> --roles master ...`
-4. Announce the Atman role (`tickets msg --to everyone`)
+3. `atm join atman-<seat> --roles master ...`
+4. Announce the Atman role (`atm msg --to everyone`)
 5. Ask the operator for feedback
 6. `tickets graph` / `tickets map` — tasks they can actually run
 
 Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
-title — `tickets plan` with real deps if they add work. Cursor-only
-spawns unless they say otherwise. Mail hooks are not Claude-only:
+title — `tickets plan` with real deps if they add work. Spawn only the
+harnesses they confirm. Mail hooks are not Claude-only:
 `tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
 
 HANDOVER dated 2026-09-08 is historical, not live authority. Live:
@@ -6648,7 +7117,7 @@ def cmd_who(a, board):
 TRAJ_VERSION = 1
 TRAJ_MAX_BYTES = int(os.environ.get("TICKETS_TRAJECTORIES_MAX_BYTES", 50 * 1024 * 1024))
 TRAJ_KINDS = ("run_start", "run_end", "claim", "update", "review", "done",
-              "reopen", "block", "msg", "merge", "shadow_decision")
+              "reopen", "block", "msg", "merge", "shadow_decision", "prompt")
 
 
 def trajectories_path(board):
@@ -7327,9 +7796,100 @@ def _iso_span_secs(a, b):
 
 
 # ---- message board ------------------------------------------------------
+#
+# T-957 provenance: new records carry `session`, `via`, `endpoint_pid`,
+# `unverified`, and optionally `leadership_flag`. Records written before
+# this change have none of those keys. Absence is NOT evidence of forgery
+# -- it means the schema predates provenance. Do not fail closed on it.
+
+WEAK_SENDER_VIA = ("TICKET_AGENT", "flat", "pid")
+
 
 def messages_path(board):
     return os.path.join(board, "messages.jsonl")
+
+
+def _sender_via(board, explicit=None):
+    """Which session_seat() precedence rule named the sender."""
+    if explicit:
+        return "explicit"
+    if (os.environ.get("TICKET_SEAT") or "").strip():
+        return "TICKET_SEAT"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return "session-keyed"
+    if (os.environ.get("TICKET_AGENT") or "").strip():
+        return "TICKET_AGENT"
+    if recorded:
+        return "flat"
+    return "pid"
+
+
+def _board_leadership_names(board):
+    names = set()
+    m = current_master(board) or {}
+    for key in ("owner", "cos"):
+        n = (m.get(key) or "").strip()
+        if n:
+            names.add(n)
+    try:
+        aliases = load_aliases(board)
+    except Exception:
+        aliases = {}
+    for alias, holder in (aliases or {}).items():
+        if (alias or "").strip().lower() in ("ceo", "cos") and holder:
+            names.add(holder)
+    return names
+
+
+def _message_provenance(board, sender, explicit=None):
+    """Provenance recorded on every new message. Never used to reject a post."""
+    via = _sender_via(board, explicit)
+    session = agent_session_key() or ""
+    endpoint_pid = ""
+    endpoint_session = ""
+    try:
+        sa = _session_adapters()
+        ep = sa.read_endpoint(board, sender) or {}
+        if ep:
+            endpoint_pid = str(ep.get("pid") or "")
+            endpoint_session = str(ep.get("session_id") or ep.get("session") or "")
+    except Exception:
+        pass
+    unverified = via in WEAK_SENDER_VIA
+    leadership_flag = ""
+    if sender and sender in _board_leadership_names(board):
+        raw_sid = ""
+        for var in SESSION_ID_VARS:
+            raw_sid = (os.environ.get(var) or "").strip()
+            if raw_sid:
+                break
+        if endpoint_session and raw_sid and endpoint_session != raw_sid:
+            leadership_flag = "session-mismatch"
+        elif not endpoint_session and via in WEAK_SENDER_VIA:
+            leadership_flag = "no-registered-endpoint"
+    return {
+        "session": session,
+        "via": via,
+        "endpoint_pid": endpoint_pid,
+        "unverified": unverified,
+        "leadership_flag": leadership_flag,
+    }
+
+
+def message_provenance_state(m):
+    """absent | unverified | verified -- absence is not a finding."""
+    if not m or "via" not in m:
+        return "absent"
+    if m.get("unverified"):
+        return "unverified"
+    return "verified"
 
 
 def _rotate_messages_if_big(board):
@@ -7480,7 +8040,8 @@ def resolve_to_and_mentions(text, to="", registered=None, master_owner=""):
     return to, mentions, "", empty, empty
 
 
-def post_message(board, sender, text, to="", re="", kind="", task=False, source=""):
+def post_message(board, sender, text, to="", re="", kind="", task=False, source="",
+                 explicit=None):
     _rotate_messages_if_big(board)
     holder = ((current_master(board) or {}) or {}).get("owner") or ""
     to, mentions, unknown, explicit_unknown, dropped = resolve_to_and_mentions(
@@ -7497,6 +8058,13 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
                                 if t.lower() != retired_name.lower()]
     rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
            "to": to, "re": re, "text": text}
+    prov = _message_provenance(board, sender, explicit=explicit)
+    rec["session"] = prov["session"]
+    rec["via"] = prov["via"]
+    rec["endpoint_pid"] = prov["endpoint_pid"]
+    rec["unverified"] = prov["unverified"]
+    if prov["leadership_flag"]:
+        rec["leadership_flag"] = prov["leadership_flag"]
     if forwarded:
         rec["forwarded_from"] = forwarded["from"]
         rec["forward_role"] = forwarded["role"]
@@ -7944,7 +8512,14 @@ def fmt_local(iso):
 def fmt_msg(m):
     to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
     re_ = (" [%s]" % m["re"]) if m.get("re") else ""
-    return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
+    mark = ""
+    state = message_provenance_state(m)
+    if state == "unverified":
+        mark = " [unverified:%s]" % (m.get("via") or "?")
+    if m.get("leadership_flag"):
+        mark += " [leadership-flag:%s]" % m["leadership_flag"]
+    return "%s  %s%s%s%s: %s" % (
+        fmt_local(m.get("at")), m.get("from", "?"), mark, to, re_, m.get("text", ""))
 
 
 def _message_wakes_seat(board, seat, message):
@@ -8008,7 +8583,7 @@ def cmd_msg(a, board):
         load(board, a.re)  # validate the ticket exists
     # Board first, native wake second: the board is the source of truth.
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
-                     task=is_task)
+                     task=is_task, explicit=a.owner or None)
     unknown = m.pop("_unregistered_implicit", None)
     explicit_unknown = m.pop("_unregistered_explicit", None) or []
     dropped = m.pop("_unregistered_dropped", None) or []
@@ -8047,7 +8622,11 @@ def cmd_msg(a, board):
             poked = _poke_persist_watch(board, to)
             if poked:
                 label = "watch-poked"
-        print("wake: %s -> %s" % (to, label))
+        if label == "queued-offline":
+            print("wake: %s -> %s (%s)" % (
+                to, label, "run the thread in terminal Codex to enable native wake"))
+        else:
+            print("wake: %s -> %s" % (to, label))
         _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
@@ -8069,7 +8648,7 @@ def _should_poke_persist(label):
     """
     s = str(label or "")
     if not s or s in ("woken", "deduped", "remote bridge required",
-                      "delivered-unconfirmed"):
+                      "delivered-unconfirmed", "queued-busy", "delivery-unknown"):
         return False
     if s.startswith("stale (rebound"):
         return False
@@ -8677,10 +9256,11 @@ A session cannot be woken by a hook once its turn has ended, so use both:
   when there is something to do:
 
       cd {root}/.worktrees/claude-opus
-      TICKET_AGENT=claude-opus tickets watch --every 60 --cwd "$PWD" \
-          --exec 'claude -p "$(tickets prompt)" --permission-mode acceptEdits'
+      TICKET_AGENT=claude-opus tickets watch --every 60 --cwd "$PWD"
 
-  Any tool works in `--exec` (codex, cursor-agent, a shell script). Logs go to
+  Default launch policy is unattended (same as `tickets spawn`; header prints
+  `launch=unattended`). `--safe` keeps acceptEdits prompts. Any tool works in
+  `--exec` (codex, cursor-agent, a shell script). Logs go to
   `.tickets/agents/<agent>.watch.log`. `tickets watch --once` is the cron-able
   form (exit 0 = work exists).
 - Interactive sessions you keep open: `/loop 10m` with the prompt
@@ -8902,6 +9482,42 @@ def _strip_identity_bound_state(board, owner):
     _safe(lambda: _session_adapters().remove_endpoint(board, owner), None)
 
 
+def _leadership_seat_names(board):
+    """Unique seats that currently hold, or retired holding, ceo/cos/master."""
+    names = set()
+    m = current_master(board) or {}
+    for key in ("owner", "cos"):
+        n = (m.get(key) or "").strip()
+        if n:
+            names.add(n)
+    for alias, holder in (load_aliases(board) or {}).items():
+        if (alias or "").strip().lower() in STABLE_ROLE_ALIASES and holder:
+            names.add(holder)
+    for name, info in load_retired(board).items():
+        alias = ((info or {}).get("alias") or "").strip().lower()
+        if alias in STABLE_ROLE_ALIASES or alias in ("master", "ceo", "cos"):
+            names.add(name)
+    return names
+
+
+def _refuse_protected_seat_takeover(board, owner, transfer=False, on_behalf=False):
+    """Refuse join/spawn of retired or leadership names without --transfer.
+
+    Self-join (owner == whoami()) is allowed so a leader can recover their
+    own session. T-954 CEO add: worker seat 'sol-ceo-cto' on T-913.
+    """
+    if transfer or not owner:
+        return
+    caller = whoami()
+    if owner == caller:
+        return
+    if owner in load_retired(board):
+        sys.exit("refusing: %s is retired; pass --transfer for an audited handover" % owner)
+    if owner in _leadership_seat_names(board):
+        sys.exit("refusing: %s holds or held a leadership role; pass --transfer "
+                 "for an audited handover" % owner)
+
+
 def _guard_seat_identity(board, owner, incoming_harness, transfer=False, alias=""):
     """Refuse provider reuse, or audited-transfer that drops identity-bound state."""
     alias = (alias or "").strip().lower()
@@ -8957,6 +9573,7 @@ def _join_namespace(a, owner):
         transfer=bool(getattr(a, "transfer", False)),
         alias=getattr(a, "alias", "") or "",
         worktree=getattr(a, "worktree", "") or "",
+        on_behalf=True,
     )
 
 
@@ -8981,6 +9598,10 @@ def cmd_join(a, board):
         board, owner, harness,
         transfer=bool(getattr(a, "transfer", False)),
         alias=(getattr(a, "alias", "") or "").strip())
+    _refuse_protected_seat_takeover(
+        board, owner,
+        transfer=bool(getattr(a, "transfer", False)),
+        on_behalf=bool(getattr(a, "on_behalf", False)))
     # Read this BEFORE checkin(), which creates the record. Only a genuinely new
     # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
     # calls straight through here) must leave delivery completely alone.
@@ -9065,7 +9686,16 @@ def cmd_join(a, board):
     # malformed flag -- still made this session alpha, so a bare `tickets
     # inbox` read (and marked read) alpha's private mail and a bare `tickets
     # msg` posted as alpha. Nothing below this line can sys.exit.
-    write_identity(board, owner)
+    #
+    # T-954: spawn/join on behalf of another seat must not write THIS
+    # session's identity. Only an explicit self-join rebinds the caller.
+    on_behalf = bool(getattr(a, "on_behalf", False))
+    if _join_binds_this_session(board, owner, on_behalf=on_behalf):
+        write_identity(board, owner)
+    else:
+        seat, why = identity_resolution(board)
+        print("session identity unchanged (%s via %s); joined %s on behalf" % (
+            seat, why, owner))
     entry["agent_id"] = owner
     if harness:
         entry["provider"] = harness
@@ -9140,15 +9770,16 @@ def cmd_join(a, board):
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
     if _join_is_ceo_path(owner, roles.get(owner, [])):
-        print("Atman CEO loop:  tickets inbox  ->  tickets objective  ->  "
-              "tickets graph / tickets map  ->  tickets drive  ->  "
-              "tickets msg --to cursor (CoS staffs). CEO does not claim worker tickets.")
-        print("Full instructions: tickets connect")
+        print("Atman CEO loop:  atm inbox  ->  atm objective  ->  "
+              "atm graph / atm map  ->  atm drive  ->  "
+              "%s (CoS staffs). CEO does not claim worker tickets."
+              % _onboard_roles().mail_to_cos(current_master(board) or {}))
+        print("Full instructions: atm connect")
     else:
-        print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
-              "tickets update <id> \"...\" (every %d min)  ->  tickets done <id> --notes \"...\"  "
-              "->  merge  ->  tickets next" % UPDATE_EVERY_MIN)
-        print("Full instructions: tickets connect --worker")
+        print("Loop:  atm master  ->  atm next  ->  work + commit  ->  "
+              "atm update <id> \"...\" (every %d min)  ->  atm done <id> --notes \"...\"  "
+              "->  merge  ->  atm next" % UPDATE_EVERY_MIN)
+        print("Full instructions: atm connect --worker")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
     _safe(lambda: _enroll_runner_context(board, owner), None)
@@ -9202,6 +9833,29 @@ def cmd_retire(a, board):
     print("retired %s" % owner)
 
 
+def _apply_connect_roles(board, a):
+    """Apply --master/--cos only when the operator named them. Never infer."""
+    master = (getattr(a, "connect_master", "") or "").strip()
+    cos = (getattr(a, "connect_cos", "") or "").strip()
+    if not master and not cos:
+        print("CoS unset until chosen (`atm master cos <seat>`).")
+        return
+    prev = current_master(board) or {}
+    os.makedirs(board, exist_ok=True)
+    if master:
+        rec = {"owner": master, "since": now(), "cos": cos or (prev.get("cos") or "")}
+        with open(master_state_path(board), "w") as f:
+            json.dump(rec, f)
+        print("applied master=%s CoS=%s" % (master, rec["cos"] or "no CoS yet"))
+        return
+    if not prev.get("owner"):
+        sys.exit("connect --cos requires --master or an existing master (never auto-assign)")
+    prev["cos"] = cos
+    with open(master_state_path(board), "w") as f:
+        json.dump(prev, f)
+    print("applied CoS=%s (master %s unchanged)" % (cos, prev["owner"]))
+
+
 def cmd_connect(a, board):
     worker = bool(getattr(a, "worker", False))
     ceo = bool(getattr(a, "ceo", False))
@@ -9209,18 +9863,23 @@ def cmd_connect(a, board):
     living = board_is_living(board)
     if ceo or (living and not worker):
         print_ceo_connect(board, seat=seat)
+        _apply_connect_roles(board, a)
         return
     print_onboarding_startup()
-    print("Then probe integrations: `tickets harness available`")
+    rows, _note = probe_integration_catalog()
+    attach_catalog_usage(rows)
+    _print_role_discovery(rows)
+    print("Then probe integrations: `atm harness available`")
     print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
-    print("Announce the board/team name with `tickets msg --to everyone`, then ask")
-    print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
-    print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
-    print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
-    print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
+    print("Announce the board/team name with `atm msg --to everyone`, then ask")
+    print("for the objective and tasks. Turn tasks into a graph with `atm plan`")
+    print("(JSON keys + deps), then `atm graph` / `atm map`. Follow up with")
+    print("`atm update` / `here`, reopen silent >90m claims, `atm drive`.")
+    print("Unattended persist ends at a reviewable SHA; human `atm review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
+    _apply_connect_roles(board, a)
 
 
 # ---- wake-up: is there work for this agent, and how to start it ----------
@@ -9668,7 +10327,8 @@ def _remote_claim_once(board, owner, lease_id, fence, prompt_kind=""):
         kind = prompt_kind or ("cos" if owner == (current_master(board) or {}).get("cos")
                                else ("master" if owner == (current_master(board) or {}).get("owner") else ""))
         result["prompt"] = prompt_text(argparse.Namespace(
-            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board,
+            log=True)
     return result
 
 
@@ -10209,10 +10869,10 @@ def _task_dominant_extra(board, owner):
 
 
 def cmd_prompt(a, board):
-    print(prompt_text(a, board))
+    print(prompt_text(a, board, log=True))
 
 
-def prompt_text(a, board):
+def prompt_text(a, board, log=False):
     """The worker/master/cos prompt as a string.
 
     Split out of cmd_prompt so the watcher can write it to a {prompt_file} for
@@ -10224,13 +10884,23 @@ def prompt_text(a, board):
     master = (m["owner"] if m else "the master")
     cos = (m or {}).get("cos") or ""
     role_ctx = role_context(board, owner)
-    knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "")
+    know_meta = {}
+    knowledge_ctx = knowledge_context(board, owner, extra=getattr(a, "extra", "") or "",
+                                      meta=know_meta)
     held_first = _task_dominant_extra(board, owner)
+    section_chars = {}
+    if held_first:
+        section_chars["held"] = len(held_first)
+    if role_ctx:
+        section_chars["role"] = len(role_ctx)
+    if knowledge_ctx:
+        section_chars["lessons"] = len(knowledge_ctx)
     if getattr(a, "cos", False) or (cos and owner == cos and not getattr(a, "master", False)):
         extra = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
         body = cos_prompt_text(owner, board, os.path.dirname(board), extra)
-        return (held_first + "\n\n" + body) if held_first else body
-    if getattr(a, "master", False):
+        text = (held_first + "\n\n" + body) if held_first else body
+        view = "wide"
+    elif getattr(a, "master", False):
         rest = "\n\n".join(x for x in (role_ctx, knowledge_ctx, a.extra or "") if x)
         extra = rest
         obj = _safe(lambda: load_objective(board), {})
@@ -10242,34 +10912,50 @@ def prompt_text(a, board):
                 exit_criterion=(obj.get("exit_criterion") or "(none — FLAG: add --exit)"),
                 status=_safe(lambda: drive_status(board), ""))
             extra = drive + ("\n" + extra if extra else "")
+            section_chars["drive"] = len(drive)
         if cos and owner != cos:
             body = PLANNER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), cos=cos,
                                          extra=extra)
         else:
             body = MASTER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), extra=extra)
-        return (held_first + "\n\n" + body) if held_first else body
-    parts = []
-    if held_first:
-        parts.append(held_first)
-    if role_ctx:
-        parts.append(role_ctx)
-    if knowledge_ctx:
-        parts.append(knowledge_ctx)
-    brief = agent_brief(board, owner)
-    if brief:
-        parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
-    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
-    obj = _safe(lambda: load_objective(board), {})
-    if int(rec.get("drive_every") or 0) > 0 and obj and objective_state(obj) == "active" and objective_exit_ok(obj):
-        _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
-        parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
-    tctx = ticket_context(board, owner)
-    if tctx:
-        parts.append("Context attached to your ticket(s):\n" + tctx)
-    if a.extra:
-        parts.append(a.extra)
-    return WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                                extra="\n\n".join(parts))
+        text = (held_first + "\n\n" + body) if held_first else body
+        view = "wide"
+        section_chars["policy"] = len(body) - len(extra)
+    else:
+        parts = []
+        if held_first:
+            parts.append(held_first)
+        if role_ctx:
+            parts.append(role_ctx)
+        if knowledge_ctx:
+            parts.append(knowledge_ctx)
+        brief = agent_brief(board, owner)
+        if brief:
+            section_chars["brief"] = len(brief)
+            parts.append("Your standing brief (%s):\n%s" % (brief_path(board, owner), brief))
+        rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+        obj = _safe(lambda: load_objective(board), {})
+        if int(rec.get("drive_every") or 0) > 0 and obj and objective_state(obj) == "active" and objective_exit_ok(obj):
+            _safe(lambda: _agent_set(board, owner, drive_at=now()), None)
+            parts.append(STANDING_SEAT_PROMPT.format(every=int(rec.get("drive_every")), objective=obj.get("text", "")))
+        tctx = ticket_context(board, owner)
+        if tctx:
+            section_chars["ticket"] = len(tctx)
+            parts.append("Context attached to your ticket(s):\n" + tctx)
+        if a.extra:
+            section_chars["extra"] = len(a.extra)
+            parts.append(a.extra)
+        extra = "\n\n".join(parts)
+        text = WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
+                                    extra=extra)
+        view = "wide" if _leadership_viewer(board, owner) else "compact"
+        section_chars["policy"] = len(text) - len(extra)
+        if "truncated" in (role_ctx or "") or "truncated" in (brief or ""):
+            know_meta["truncated"] = True
+    if log:
+        _log_prompt_diet(board, owner, text, view, section_chars=section_chars,
+                         knowledge=know_meta)
+    return text
 
 
 def cmd_brief(a, board):
@@ -10380,7 +11066,7 @@ def cmd_brief(a, board):
 _KNOWLEDGE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _KNOWLEDGE_NODE_TYPES = frozenset({
     "project", "component", "decision", "artifact", "model_pin", "experiment",
-    "failure", "runbook", "skill", "agent_capability",
+    "failure", "runbook", "skill", "agent_capability", "lesson",
 })
 _KNOWLEDGE_EDGE_TYPES = frozenset({
     "depends_on", "supersedes", "produced_by", "failed_because", "verified_by",
@@ -10655,6 +11341,33 @@ def _knowledge_dedup(nodes):
     return list(picked.values())
 
 
+def _lesson_in_scope(node, scopes, terms, text):
+    """Lessons inject only on explicit id, matching role/harness, or file tokens."""
+    if node.get("type") != "lesson":
+        return True
+    applies = {str(x).lower() for x in node.get("applies_to", [])}
+    if "all" in applies:
+        return True
+    scopes = {str(x).lower() for x in (scopes or []) if x}
+    if scopes & applies:
+        return True
+    data = node.get("data") or {}
+    files = [str(x).lower() for x in (data.get("files") or []) if x]
+    hay = " ".join([text or "", " ".join(sorted(terms or []))]).lower()
+    return any(token in hay for token in files)
+
+
+def _lesson_auto_eligible(node, scopes, terms, text, explicit):
+    """Automatic inheritance: in-scope and not superseded, unless named."""
+    if node.get("type") != "lesson":
+        return True
+    if node["id"] in explicit:
+        return True
+    if node.get("verification") == "superseded":
+        return False
+    return _lesson_in_scope(node, scopes, terms, text)
+
+
 def _knowledge_query(root, text="", scopes=None, max_nodes=12):
     nodes, edges, errors = _knowledge_records(root)
     if errors:
@@ -10667,6 +11380,8 @@ def _knowledge_query(root, text="", scopes=None, max_nodes=12):
     explicit = {n["id"] for n in nodes if n["id"].lower() in referenced}
     scored = {}
     for node in nodes:
+        if not _lesson_auto_eligible(node, scopes, terms, text, explicit):
+            continue
         fields = " ".join(_knowledge_strings({
             "id": node.get("id"), "type": node.get("type"), "title": node.get("title"),
             "summary": node.get("summary"), "tags": node.get("tags"),
@@ -10681,21 +11396,30 @@ def _knowledge_query(root, text="", scopes=None, max_nodes=12):
         if "all" in applies:
             score += 2
         score += 9 * len(scopes & applies)
+        if node.get("type") == "lesson" and _lesson_in_scope(node, scopes, terms, text):
+            score += 8
         if score:
             scored[node["id"]] = score
     # Bring the evidence, failure or runbook connected to a direct match. This
     # is the useful part of a graph: a failure can carry its corrective command
-    # without copying the command into every ticket or brief.
+    # without copying the command into every ticket or brief. Lessons still
+    # need the same eligibility rule; a UI decision must not pull a
+    # backend-only or superseded lesson across the edge.
     direct = set(scored)
     direct_scores = dict(scored)
     for edge in edges:
+        neighbours = []
         if edge["from"] in direct and edge["to"] in by_id:
-            scored[edge["to"]] = max(scored.get(edge["to"], 0),
-                                     direct_scores[edge["from"]] - 1)
+            neighbours.append((edge["to"], edge["from"]))
         if edge["to"] in direct and edge["from"] in by_id:
-            scored[edge["from"]] = max(scored.get(edge["from"], 0),
-                                       direct_scores[edge["to"]] - 1)
-    type_bias = {"failure": 5, "runbook": 4, "skill": 3, "decision": 2,
+            neighbours.append((edge["from"], edge["to"]))
+        for neighbour_id, source_id in neighbours:
+            neighbour = by_id[neighbour_id]
+            if not _lesson_auto_eligible(neighbour, scopes, terms, text, explicit):
+                continue
+            scored[neighbour_id] = max(scored.get(neighbour_id, 0),
+                                       direct_scores[source_id] - 1)
+    type_bias = {"lesson": 6, "failure": 5, "runbook": 4, "skill": 3, "decision": 2,
                  "artifact": 1, "experiment": 1}
     ranked = sorted((by_id[nid] for nid in scored), key=lambda n: (
         -(scored[n["id"]] + type_bias.get(n.get("type"), 0)),
@@ -10717,53 +11441,110 @@ def _knowledge_budget(root, requested=None):
     return max(500, min(budget, _KNOWLEDGE_MAX_BUDGET))
 
 
-def _knowledge_render(nodes, edges, max_chars):
+_KNOWLEDGE_HEADER = "Inherited knowledge (repo-backed; open a source before changing a fact):"
+_KNOWLEDGE_MARKER = "...(knowledge budget reached; run `tickets knowledge query ...`)"
+
+
+def _knowledge_fact_line(node, relation):
+    age = "STALE" if _knowledge_stale(node) else node["verification"].upper()
+    summary = (" ".join(node["title"].split()) + ": " +
+               " ".join(node["summary"].split()))[:330]
+    source = node.get("source", {}).get("ref", "")[:170]
+    rels = ",".join(sorted(relation.get(node["id"], [])))[:170]
+    line = "- knowledge:%s [%s; confidence %.2f] %s" % (
+        node["id"], age, float(node["confidence"]), summary)
+    if rels:
+        line += " relations=" + rels
+    if source:
+        line += " source=" + source
+    return line[:620]
+
+
+def _knowledge_selection_footer(nodes, body_chars):
+    ids = ",".join("%s@%s" % (n["id"], n.get("revision") or 0) for n in nodes)
+    return "(knowledge selected: %s; %d chars)" % (ids, body_chars)
+
+
+def _knowledge_pack(nodes, edges, max_chars, with_footer=False):
+    """Pack header + fact lines [+ marker] [+ footer] into max_chars.
+
+    Returns (text, rendered_nodes). rendered_nodes are the facts that appear
+    as knowledge: lines. When with_footer is true the footer lists every
+    retrieved node (the caller-supplied set) so the receipt can distinguish
+    retrieval from rendered fact bodies.
+    """
     if not nodes:
-        return ""
+        return "", []
     relation = {}
     for edge in edges:
         relation.setdefault(edge["from"], []).append("%s→%s" % (edge["type"], edge["to"]))
-    lines = ["Inherited knowledge (repo-backed; open a source before changing a fact):"]
-    for node in nodes:
-        age = "STALE" if _knowledge_stale(node) else node["verification"].upper()
-        summary = (" ".join(node["title"].split()) + ": " +
-                   " ".join(node["summary"].split()))[:330]
-        source = node.get("source", {}).get("ref", "")[:170]
-        rels = ",".join(sorted(relation.get(node["id"], [])))[:170]
-        line = "- knowledge:%s [%s; confidence %.2f] %s" % (
-            node["id"], age, float(node["confidence"]), summary)
-        if rels:
-            line += " relations=" + rels
-        if source:
-            line += " source=" + source
-        lines.append(line[:620])
-    text = "\n".join(lines)
-    if len(text) <= max_chars:
-        return text
-    kept = [lines[0]]
-    marker = "\n...(knowledge budget reached; run `tickets knowledge query ...`)"
-    for line in lines[1:]:
-        candidate = "\n".join(kept + [line]) + marker
-        if len(candidate) > max_chars:
-            # A single verbose fact should still be useful under the minimum
-            # budget. Fit a visibly truncated line instead of returning only a
-            # budget notice.
-            if len(kept) == 1:
-                room = max_chars - len("\n".join(kept)) - len(marker) - 2
-                if room > 40:
-                    kept.append(line[:room - 3] + "...")
-            break
-        kept.append(line)
-    return "\n".join(kept) + marker
+    pairs = [(node, _knowledge_fact_line(node, relation)) for node in nodes]
+
+    def assemble(kept_pairs, truncated):
+        parts = [_KNOWLEDGE_HEADER] + [line for _, line in kept_pairs]
+        if truncated:
+            parts.append(_KNOWLEDGE_MARKER)
+        body = "\n".join(parts)
+        if with_footer:
+            return body + "\n" + _knowledge_selection_footer(nodes, len(body))
+        return body
+
+    full = assemble(pairs, truncated=False)
+    if len(full) <= max_chars:
+        return full, [node for node, _ in pairs]
+
+    kept = []
+    for item in pairs:
+        trial = kept + [item]
+        if len(assemble(trial, truncated=True)) <= max_chars:
+            kept = trial
+            continue
+        if not kept:
+            node, line = item
+            lo, hi, best = 40, len(line), None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                clipped = line if mid >= len(line) else (line[:mid - 3] + "...")
+                candidate = assemble([(node, clipped)], truncated=True)
+                if len(candidate) <= max_chars:
+                    best = [(node, clipped)]
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            if best:
+                kept = best
+        break
+    return assemble(kept, truncated=True), [node for node, _ in kept]
 
 
-def knowledge_context(board, owner, extra="", max_chars=None):
+def _knowledge_render(nodes, edges, max_chars):
+    text, _kept = _knowledge_pack(nodes, edges, max_chars, with_footer=False)
+    return text
+
+
+def knowledge_context(board, owner, extra="", max_chars=None, meta=None):
     """Compact task/seat inheritance shared by every prompt-file harness."""
+    state = {
+        "knowledge": [],
+        "rendered_knowledge": [],
+        "budget_chars": 0,
+        "truncated": False,
+        "missing": [],
+        "stale": [],
+        "error": "",
+    }
+
+    def _finish(text):
+        if meta is not None:
+            meta.update(state)
+        return text
+
     root = knowledge_root(board, owner)
     if _knowledge_inside_board(root, board):
-        return "Knowledge graph configuration invalid: graph must live outside the ticket board."
+        state["error"] = "graph-inside-board"
+        return _finish("Knowledge graph configuration invalid: graph must live outside the ticket board.")
     if not _knowledge_graph(root):
-        return ""
+        return _finish("")
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     wf = _safe(lambda: load_workforce(board), {}).get(owner, {}) or {}
     roles = roles_for(board, owner) or []
@@ -10778,10 +11559,27 @@ def knowledge_context(board, owner, extra="", max_chars=None):
         for note in ticket.get("notes", []):
             if note.get("kind") == "context":
                 chunks.append(note.get("text", ""))
-    nodes, edges, errors = _knowledge_query(root, " ".join(chunks), scopes=scopes)
+    query = " ".join(chunks)
+    nodes, edges, errors = _knowledge_query(root, query, scopes=scopes)
+    refs = _knowledge_refs(query)
     if errors:
-        return "Knowledge graph invalid; run `tickets knowledge validate`."
-    return _knowledge_render(nodes, edges, _knowledge_budget(root, max_chars))
+        state["error"] = "invalid-graph"
+        state["missing"] = sorted(refs)
+        return _finish("Knowledge graph invalid; run `tickets knowledge validate`.")
+    budget = _knowledge_budget(root, max_chars)
+    state["budget_chars"] = budget
+    rendered, kept = _knowledge_pack(nodes, edges, budget, with_footer=True)
+    selected_l = {n["id"].lower() for n in nodes}
+    state["knowledge"] = [{"id": n["id"], "revision": int(n.get("revision") or 0)} for n in nodes]
+    state["rendered_knowledge"] = [
+        {"id": n["id"], "revision": int(n.get("revision") or 0)} for n in kept
+    ]
+    state["missing"] = sorted(r for r in refs if r not in selected_l)
+    state["stale"] = [n["id"] for n in nodes if _knowledge_stale(n)]
+    state["truncated"] = "knowledge budget reached" in (rendered or "")
+    if not rendered:
+        return _finish("")
+    return _finish(rendered)
 
 
 def _parse_knowledge_frontmatter(text):
@@ -11613,19 +12411,23 @@ def cmd_watch(a, board):
     cwd = os.path.abspath(a.cwd or root)
     if not os.path.isdir(cwd):
         sys.exit("--cwd %s does not exist" % cwd)
+    mode, launch = resolve_launch_policy(
+        safe=bool(getattr(a, "safe", False)),
+        permission_mode=getattr(a, "permission_mode", "") or "",
+    )
     if a.exec:
         cmd = a.exec
     else:
         # No --exec: run whatever `tickets join` registered for this agent.
         # Defaulting to claude here would make `tickets watch --agent qwen`
         # (the cron-able form, used without spawn) launch the wrong harness.
+        # Same _worker_cmd as spawn so watch and spawn share one launch policy.
         harness, cmd_template = harness_of(board, owner)
-        if harness == "claude" and not cmd_template:
-            cmd = ('claude -p "$(tickets prompt)" --permission-mode %s%s'
-                   % (a.permission_mode, (" --allowedTools %s" % a.allowed_tools) if a.allowed_tools else ""))
-        else:
-            cmd = _worker_cmd(board, owner, "", a.permission_mode, harness,
-                              master=getattr(a, "prompt_kind", "") or "", cmd_template=cmd_template)
+        cmd = _worker_cmd(board, owner, "", mode, harness,
+                          master=getattr(a, "prompt_kind", "") or "", cmd_template=cmd_template)
+        allowed = getattr(a, "allowed_tools", "") or ""
+        if allowed and not cmd_template:
+            cmd = "%s --allowedTools %s" % (cmd, allowed)
     # BYOA: a custom harness command is a template, not a finished command line.
     # Expansion happens per run rather than once here because {prompt_file} must
     # be a FRESH prompt every time -- the whole point of the watcher is that the
@@ -11729,9 +12531,9 @@ def cmd_watch(a, board):
 
     runs = failures = 0
     try:
+        print("watching %s for %s every %ds; wake=%s; launch=%s; cwd=%s; cmd=%s" % (
+            board, owner, every, wake_mode, launch, cwd, cmd), flush=True)
         if not a.once:
-            print("watching %s for %s every %ds; wake=%s; cwd=%s; cmd=%s" % (
-                board, owner, every, wake_mode, cwd, cmd))
             _safe(lambda: checkin(board, owner, None, "watch loop online (%s, every %ds)" % (
                 wake_mode, every)), None)
         _safe(lambda: _agent_set(board, owner, drive_every=int(getattr(a, "heartbeat", 0) or 0)), None)
@@ -12115,7 +12917,8 @@ def cmd_boot(a, board):
         print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
     if a.watch:
         wn = argparse.Namespace(agent=owner, every=a.every, exec=a.exec, cwd=a.cwd or root,
-                                permission_mode="acceptEdits", allowed_tools="", max_runs=1,
+                                permission_mode="", safe=bool(getattr(a, "safe", False)),
+                                allowed_tools="", max_runs=1,
                                 once=False, dry_run=False, verbose=False, run_timeout=a.run_timeout,
                                 heartbeat=0, persist=False, force=False, prompt_kind="", beat_every=0)
         cmd_watch(wn, board)
@@ -12197,7 +13000,9 @@ Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
   Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
   a detached watcher that runs the tool with that model only when `tickets pending` says there is
   work. Workers persist until --stop, logout or reboot; new tickets created later are picked up on
-  the next poll. Spawned workers run unattended (no permission prompts); --safe keeps prompts.
+  the next poll. `tickets watch` and `tickets spawn` share one launch policy:
+  unattended (no permission prompts); --safe keeps prompts. The watcher header
+  prints launch=unattended or launch=safe.
   To survive reboot, add the watcher command from `spawn --list`'s log to a login item / launchd job.
 
 Stuck rule (in every worker prompt): if blocked -- permission, failing test, unclear scope, missing
@@ -12307,7 +13112,7 @@ def _render_prompt_file(board, owner, kind="", text=""):
 
     if not text:
         ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="")
-        text = _safe(lambda: prompt_text(ns, board), "") or ""
+        text = _safe(lambda: prompt_text(ns, board, log=True), "") or ""
     fd, path = tempfile.mkstemp(prefix="tickets-prompt-%s-" % re.sub(r"[^A-Za-z0-9_.-]", "_", owner)[:32],
                                 suffix=".txt")
     try:
@@ -12326,12 +13131,34 @@ def _render_prompt_file(board, owner, kind="", text=""):
     return path, cleanup
 
 
+def resolve_launch_policy(safe=False, permission_mode=""):
+    """One launch policy for `tickets watch` and `tickets spawn`.
+
+    Default is unattended (bypassPermissions / --dangerously-skip-permissions).
+    --safe keeps acceptEdits prompts. An explicit --permission-mode wins.
+    """
+    explicit = (permission_mode or "").strip()
+    if explicit:
+        mode = explicit
+    elif safe:
+        mode = "acceptEdits"
+    else:
+        mode = "bypassPermissions"
+    if mode == "bypassPermissions":
+        label = "unattended"
+    elif mode == "acceptEdits":
+        label = "safe"
+    else:
+        label = mode
+    return mode, label
+
+
 def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False,
                 cmd_template="", prompt_expr=""):
     """The headless command a spawned worker runs. Model comes from --model or
-    the workforce record (`tickets join --model`). Spawned workers run without
-    permission prompts by default: nobody is there to answer them, and the
-    blast radius is the agent's own worktree and branch (--safe for acceptEdits).
+    the workforce record (`tickets join --model`). Watch and spawn share one
+    launch policy: unattended by default (nobody is there to answer prompts);
+    the blast radius is the agent's own worktree and branch (--safe for acceptEdits).
 
     `cmd_template` (from `join --cmd` / `spawn --cmd`) overrides the built-in
     line for ANY harness, so bringing your own agent is not a second code path:
@@ -12431,7 +13258,7 @@ def _inherit_settings(root, wt):
     """
     import shutil
     copied = []
-    for dname, fnames, prefixed in ((".claude", ("settings.json", "settings.local.json"), False),):
+    for dname, fnames in ((".claude", ("settings.json", "settings.local.json")),):
         src = os.path.join(root, dname)
         dst = os.path.join(wt, dname)
         if not os.path.isdir(src) or os.path.abspath(src) == os.path.abspath(dst):
@@ -12450,7 +13277,7 @@ def _inherit_settings(root, wt):
                     _atomic_hook_write(d, json.dumps(clean, indent=2) + "\n", 0o600)
                 else:
                     shutil.copy2(s, d)
-                copied.append(os.path.join(dname, name) if prefixed else name)
+                copied.append(name)
     return copied
 
 
@@ -12641,23 +13468,35 @@ def cmd_spawn(a, board):
               "spawn would double up on the interactive seat"
               % (owner, (ep or {}).get("provider", "?"), (ep or {}).get("pid", "?")))
         return
-    live = _live_watch_pids(owner, board=board)
-    if live:
-        print("watcher for %s already running (%d process(es), pids %s); --stop first" % (
-            owner, len(live), ", ".join(str(p) for p in live)))
-        return
+    existing = _seat_live_watchers(board, owner)
+    if existing:
+        detail = _format_live_watchers(existing)
+        if not getattr(a, "replace", False):
+            print("watcher for %s already running (%d process(es)); --stop or --replace first" % (
+                owner, len(existing)))
+            print(detail)
+            sys.exit("refuse: live watcher for %s still holds the seat" % owner)
+        stopped, stop_err = _replace_seat_watchers(board, owner, existing)
+        if stop_err:
+            sys.exit(stop_err)
+        print("replaced %d watcher(s) for %s (pids %s)" % (
+            len(stopped), owner, ", ".join(str(p) for p, _c, _s in existing)))
+    else:
+        _reclaim_unrelated_watch_pidfile(board, owner)
     _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     try:
         os.unlink(_stop_file(board, owner))
     except OSError:
         pass
-    mode = "acceptEdits" if a.safe else "bypassPermissions"
+    mode, launch = resolve_launch_policy(safe=bool(getattr(a, "safe", False)))
     kind = "cos" if a.cos else ("master" if a.master else "")
     cmd = a.exec or _worker_cmd(board, owner, a.model, mode, harness, master=kind, cmd_template=cmd_template)
     argv = [sys.executable, os.path.realpath(__file__), "watch", "--agent", owner, "--every", str(a.every),
             "--cwd", wt, "--exec", cmd, "--run-timeout", str(a.run_timeout),
-            "--prompt-kind", kind,
+            "--prompt-kind", kind, "--permission-mode", mode,
             "--heartbeat", str(int(getattr(a, "heartbeat", 0) or 0))]
+    if getattr(a, "safe", False):
+        argv.append("--safe")
     effective_wake_mode = wake_mode_of(board, owner)
     max_runs = spawn_watch_max_runs(
         wake_mode=effective_wake_mode, persist=bool(getattr(a, "persist", False)),
@@ -12679,18 +13518,28 @@ def cmd_spawn(a, board):
     # its own yet -- otherwise a worker would be hidden from the very
     # mail it was launched to handle.
     env = _supervisor_launch_env(board, owner)
+    env["PYTHONUNBUFFERED"] = "1"
     log_path = os.path.join(agents_dir(board), owner + ".watch.log")
     with open(log_path, "a") as lf:
-        subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, start_new_session=True)
-    import time as _time
-    _time.sleep(1.0)
-    pid = _watcher_pid(board, owner)
+        started = subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
+                                   stdin=subprocess.DEVNULL, start_new_session=True)
+    started_pid = started.pid
+    ok, verify_detail, pid, started_cmd = _spawn_verify_started_watcher(
+        board, owner, started_pid)
+    if not ok:
+        import signal
+        try:
+            os.kill(started_pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        sys.exit("failure: spawn did not install a live watcher for %s "
+                 "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started%s; harness=%s; model=%s; wake=%s; persist=%s; max-runs=%s; log %s" % (
-        owner, (" (pid %d)" % pid) if pid else "", harness, model,
-        effective_wake_mode, "yes" if max_runs == 0 else "no", max_runs, log_path))
+    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; log %s" % (
+        owner, pid, harness, model,
+        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, log_path))
     print("cmd: %s" % cmd)
+    print("watch-cmdline: %s" % started_cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
 
@@ -13514,7 +14363,7 @@ def cmd_harness_usage(a, board):
     print("")
     print("Unsupported or missing remaining/reset is unknown, not exhausted. Codex stays cataloged.")
     print("Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job).")
-    print("No new Claude fable. Cursor is the only spawn this desk uses.")
+    print("No new Claude fable. Spawn only harnesses the operator chooses.")
 
 
 def cmd_harness_available(a, board):
@@ -13527,12 +14376,13 @@ def cmd_harness_available(a, board):
     print_recorded_usage(board)
     print("")
     print("USAGE: unsupported or missing remaining/reset is unknown, not exhausted. Do not spawn a FAIL or exhausted seat.")
+    print("Ask: Which of these do you want to use?")
+    _print_role_discovery(rows)
     if board_is_living(board):
         print("This is a living board. Do not invent a new team.")
-        print("Announce the Atman role as atman-<seat>. CoS (cursor) staffs.")
+        print("Announce the Atman role as atman-<seat>. CoS (%s) staffs." % _cos_label(board))
         print("CEO does not claim worker tickets.")
     else:
-        print("Ask: Which of these do you want to use?")
         print("Then ask the board/team name, then:")
         print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
         print("Then ask for the objective and tasks. Do not spawn until they answer.")
@@ -15883,8 +16733,146 @@ def _quickstart_next_steps(board, agent):
     print("Learn it: tickets guide   |   docs/first-session.md   |   README.md")
 
 
+def _parse_guide_scope(raw):
+    """Parse --scope tokens into applies_to plus optional file list.
+
+    Accepts `harness:codex,role:backend,files:tickets.py` or bare tokens.
+    """
+    applies, files = [], []
+    for part in (raw or "").split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if ":" in token:
+            kind, value = token.split(":", 1)
+            kind, value = kind.strip().lower(), value.strip()
+            if not value:
+                continue
+            if kind in ("file", "files"):
+                files.append(value)
+                applies.append(value)
+            elif kind in ("role", "roles"):
+                applies.append(value)
+            elif kind in ("harness", "tool"):
+                applies.append(value)
+            else:
+                applies.append(value)
+        else:
+            applies.append(token)
+    # Preserve order, drop empties/dupes.
+    def uniq(items):
+        out, seen = [], set()
+        for item in items:
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+        return out
+    return uniq(applies), uniq(files)
+
+
+def _lesson_slug(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")[:42]
+    return "lesson." + (slug or "untitled")
+
+
+def _knowledge_put_node(root, record, replace=False, board=None):
+    """Write one graph node through the same validation as `knowledge add`."""
+    if _knowledge_inside_board(root, board):
+        sys.exit("knowledge graph must live outside the ticket board: %s" % root)
+    found = _knowledge_validate_record(record, "node")
+    if found:
+        sys.exit("NO CHANGE WAS MADE: " + "; ".join(found))
+    target = os.path.join(root, "nodes", record["id"] + ".json")
+    if not _knowledge_path_inside_root(root, os.path.dirname(target)):
+        sys.exit("NO CHANGE WAS MADE: knowledge destination escapes graph root")
+    current, _ = _knowledge_json(target)
+    if current is not None and not replace:
+        sys.exit("NO CHANGE WAS MADE: knowledge record %s already exists" % record["id"])
+    if current is None and replace:
+        sys.exit("NO CHANGE WAS MADE: knowledge record %s does not exist" % record["id"])
+    if replace and current is not None:
+        record["revision"] = int(current.get("revision") or 1) + 1
+        record.setdefault("recorded_at", current.get("recorded_at"))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = target + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, target)
+    _, _, after_errors = _knowledge_records(root)
+    if after_errors:
+        if current is None:
+            os.unlink(target)
+        else:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(current, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp, target)
+        sys.exit("NO CHANGE WAS MADE: " + "; ".join(after_errors[:4]))
+    return target
+
+
 def cmd_guide(a, board):
-    print(GUIDE)
+    action = (getattr(a, "action", "") or "").strip()
+    if not action:
+        print(GUIDE)
+        return
+    root = knowledge_root(board, whoami(getattr(a, "agent", "") or ""))
+    if action == "add":
+        lesson = (getattr(a, "text", "") or "").strip()
+        evidence = (getattr(a, "evidence", "") or "").strip()
+        if not lesson or not evidence:
+            sys.exit("usage: tickets guide add '<lesson>' --evidence <ticket/commit/log> --scope <files|roles|harness>")
+        applies, files = _parse_guide_scope(getattr(a, "scope", "") or "")
+        if not applies:
+            sys.exit("guide add needs --scope with at least one role, harness, or file")
+        nid = _lesson_slug(lesson)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        record = {
+            "kind": "node",
+            "id": nid,
+            "type": "lesson",
+            "title": lesson[:72],
+            "summary": lesson,
+            "tags": ["lesson", "field-guide"],
+            "applies_to": applies,
+            "source": {"kind": "ticket", "ref": evidence},
+            "recorded_at": stamp,
+            "owner": whoami(getattr(a, "agent", "") or ""),
+            "last_verified_at": stamp,
+            "verification": "observed",
+            "confidence": 0.8,
+            "stale_after_days": 90,
+            "revision": 1,
+            "data": {"files": files, "evidence": evidence},
+        }
+        path = _knowledge_put_node(root, record, replace=False, board=board)
+        print("guide add %s --evidence %s (%s)" % (nid, evidence, path))
+        return
+    if action == "retire":
+        nid = (getattr(a, "text", "") or "").strip()
+        reason = (getattr(a, "reason", "") or "").strip()
+        if not nid or not reason:
+            sys.exit("usage: tickets guide retire <id> --reason <why>")
+        if not nid.startswith("lesson."):
+            nid = "lesson." + nid if not _KNOWLEDGE_SLUG_RE.match(nid) else nid
+        target = os.path.join(root, "nodes", nid + ".json")
+        current, err = _knowledge_json(target)
+        if err or current is None:
+            sys.exit("NO CHANGE WAS MADE: no lesson %s" % nid)
+        if current.get("type") != "lesson":
+            sys.exit("NO CHANGE WAS MADE: %s is not a lesson" % nid)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        current["verification"] = "superseded"
+        current["last_verified_at"] = stamp
+        current.setdefault("data", {})
+        current["data"]["retired_reason"] = reason
+        path = _knowledge_put_node(root, current, replace=True, board=board)
+        print("guide retire %s --reason %s (%s)" % (nid, reason, path))
+        return
+    sys.exit("usage: tickets guide | tickets guide add '...' --evidence ... --scope ... | tickets guide retire <id> --reason ...")
 
 
 # ---- hooks: wire a tool so the board reaches the agent every turn ----------
@@ -16687,7 +17675,17 @@ def cmd_self(a, board):
     script = os.path.realpath(__file__)
     print("script: %s" % script)
     print("status: %s" % release_status())
-    seat = whoami()
+    if board is None:
+        try:
+            found = board_dir(discover_children=False)
+            if found and os.path.isdir(found):
+                board = found
+        except Exception:
+            board = None
+    seat, why = identity_resolution(board)
+    print("seat:   %s" % seat)
+    print("why:    %s" % why)
+    print("whoami: %s" % whoami())
     if board and seat and not seat.startswith("agent-"):
         harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
         sa = _session_adapters()
@@ -16704,7 +17702,7 @@ def cmd_self(a, board):
             print("persistent: no -- seat %s had a native endpoint but it went stale "
                   "(re-register with `tickets join %s --persistent`)" % (seat, seat))
         else:
-            probe = sa.probe_provider(sa.provider_for_harness(harness))
+            probe = sa.probe_provider(sa.provider_for_harness(harness) or harness)
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
                 seat, probe.get("reason", "ok") if not probe.get("ok") else "transport available"))
     print("cli:    primary=%s alias=%s (one implementation)" % (PRIMARY_CLI_NAME, COMPAT_CLI_NAME))
@@ -16902,6 +17900,10 @@ def main():
                    help="worker claim loop (prints tickets next)")
     c.add_argument("--seat", default="ceo",
                    help="board identity suffix; join as atman-<seat> (default: ceo)")
+    c.add_argument("--master", dest="connect_master", default="",
+                   help="apply this seat as master (required to assign in non-interactive connect)")
+    c.add_argument("--cos", dest="connect_cos", default="",
+                   help="apply this seat as CoS (required to assign in non-interactive connect)")
     c.set_defaults(fn=cmd_connect)
 
     c = sub.add_parser("self", help="print which tickets.py is live (script path and install kind)")
@@ -16999,7 +18001,10 @@ def main():
     c.add_argument("--prompt-kind", dest="prompt_kind", default="", choices=("", "master", "cos"),
                    help="which prompt to write to {prompt_file} (default: the worker prompt)")
     c.add_argument("--cwd", default="", help="directory to run in (default: repo root; use the agent's worktree)")
-    c.add_argument("--permission-mode", default="acceptEdits", help="for the default claude command")
+    c.add_argument("--permission-mode", default="",
+                   help="override launch policy (default: unattended / bypassPermissions; --safe = acceptEdits)")
+    c.add_argument("--safe", action="store_true",
+                   help="worker confirms edits instead of running unattended (same as spawn --safe)")
     c.add_argument("--allowed-tools", default="", help='e.g. "Bash Edit Write Read"')
     c.add_argument("--max-runs", type=int, default=1,
                    help="model runs this session then stop (default 1; 0 = loop until --stop)")
@@ -17044,6 +18049,8 @@ def main():
     c.add_argument("--exec", default="")
     c.add_argument("--cwd", default="")
     c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--safe", action="store_true",
+                   help="watch confirms edits instead of running unattended (same as spawn --safe)")
     c.set_defaults(fn=cmd_boot)
 
     c = sub.add_parser("spawn", help="start a persistent worker: register, worktree, detached watcher (model per agent)")
@@ -17081,6 +18088,9 @@ def main():
                         "persistent watcher by default (override with --max-runs 1)")
     c.add_argument("--exec", default="", help="override the worker command entirely")
     c.add_argument("--stop", action="store_true", help="ask the watcher to exit at its next poll")
+    c.add_argument("--replace", action="store_true",
+                   help="if a live watcher already holds this seat (pidfile + full ps cmdline), "
+                        "stop it and start a new one; verify the new pidfile is the process just started")
     c.add_argument("--list", action="store_true")
     c.add_argument("--alias", default="",
                    help="stable role alias (ceo or cos) pointing at this unique runtime identity")
@@ -17104,7 +18114,13 @@ def main():
     c.add_argument("--remove", action="store_true", help="delete the sample tickets this created")
     c.set_defaults(fn=cmd_quickstart)
 
-    c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
+    c = sub.add_parser("guide", help="startup guide, or Field Guide lesson add/retire")
+    c.add_argument("action", nargs="?", default="", help="omit to print the startup guide; add|retire for lessons")
+    c.add_argument("text", nargs="?", default="", help="lesson text (add) or lesson id (retire)")
+    c.add_argument("--evidence", default="", help="ticket, commit, or log that proves the lesson")
+    c.add_argument("--scope", default="", help="comma list: files:tickets.py,role:backend,harness:codex")
+    c.add_argument("--reason", default="", help="why a lesson is being retired")
+    c.add_argument("--agent", default="")
     c.set_defaults(fn=cmd_guide)
 
     c = sub.add_parser("brief", help="give an agent, role, or ticket context (shown on claim, in prompt, in boot)")
@@ -17216,6 +18232,18 @@ def main():
     c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_review)
+
+    c = sub.add_parser("accept", help="record a structured accept of the exact submitted SHA")
+    c.add_argument("id")
+    c.add_argument("--sha", required=True, help="full 40-character git SHA of the submitted review head")
+    c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
+    c.set_defaults(fn=cmd_accept)
+
+    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c.add_argument("id")
+    c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
+    c.add_argument("--reason", required=True, help="why this artifact is rejected")
+    c.set_defaults(fn=cmd_reject)
 
     c = sub.add_parser("sync", help="agent: merge main into my branch now (do this before review)")
     c.add_argument("--artifact", default="", metavar="DIR",
@@ -17505,7 +18533,11 @@ def main():
         p.print_help()
         return
     if a.cmd == "self":
-        cmd_self(a, None)
+        try:
+            found = board_dir(discover_children=False)
+        except Exception:
+            found = None
+        cmd_self(a, found if found and os.path.isdir(found) else None)
         return
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)

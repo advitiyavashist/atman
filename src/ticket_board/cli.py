@@ -43,6 +43,11 @@ except ImportError:  # run as a plain script path, not as a package module
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import trajectories as _traj
 
+try:
+    from . import review_verdict as _rv
+except ImportError:
+    import review_verdict as _rv
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -527,6 +532,55 @@ def write_identity(board, name):
     os.replace(tmp, path)
 
 
+def identity_resolution(board, explicit=None):
+    """(seat, why) matching session_seat(). Must match tickets.py."""
+    if explicit:
+        return explicit, "explicit --owner"
+    seat = (os.environ.get("TICKET_SEAT") or "").strip()
+    if seat:
+        return seat, "TICKET_SEAT (supervisor assignment)"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return recorded, "session-keyed join record"
+    env_agent = (os.environ.get("TICKET_AGENT") or "").strip()
+    if env_agent:
+        return env_agent, "TICKET_AGENT"
+    if recorded:
+        return recorded, "legacy flat identity file"
+    return "agent-%d" % os.getpid(), "pid fallback"
+
+
+def _join_binds_this_session(board, owner, on_behalf=False):
+    """True when this join may write the caller's session-keyed identity.
+
+    Must match tickets.py:_join_binds_this_session (T-954 / T-839).
+    """
+    if on_behalf:
+        return False
+    owner = (owner or "").strip()
+    caller = whoami()
+    if owner and owner == caller:
+        return True
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board and keyed:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if recorded:
+        return False
+    if caller and not caller.startswith("agent-") and _agent_rec(board, caller):
+        return False
+    return True
+
+
 def seat_confirmed(board):
     try:
         if os.environ.get("TICKET_SEAT"):
@@ -852,6 +906,7 @@ def git_state():
         return None
     branch = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
     sha = git("rev-parse", "--short", "HEAD") or "?"
+    sha_full = git("rev-parse", "HEAD") or ""
     dirty = git("status", "--porcelain")
     common = git("rev-parse", "--git-common-dir") or ""
     gitdir = git("rev-parse", "--git-dir") or ""
@@ -860,6 +915,7 @@ def git_state():
         "top": top,
         "branch": branch,
         "sha": sha,
+        "sha_full": sha_full,
         "dirty": len(dirty.splitlines()) if dirty else 0,
         "main_tree": is_main_tree,
     }
@@ -1290,6 +1346,11 @@ def detail(board, t, tickets):
         out.append("Handoff from earlier ancestors (latest note each):")
         for tid, title, text in earlier:
             out.append("  %s (%s): %s" % (tid, title, text))
+    evs = _rv.format_detail(t)
+    if evs:
+        out.append("")
+        out.append("Review events:")
+        out.extend(evs)
     if t.get("notes"):
         out.append("")
         out.append("Notes:")
@@ -1818,6 +1879,16 @@ def cmd_review(a, board):
         if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
             sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
+    if (a.pr or "").strip():
+        if not g:
+            sys.exit("review --pr: not in a git working tree; cannot verify a submitted SHA")
+        origin = git("config", "--get", "remote.origin.url") or ""
+        pin_err = _rv.verify_submit(
+            lambda *args, cwd=None: git(*args),
+            sha_full=g.get("sha_full") or "", branch=g.get("branch") or "",
+            origin_url=origin, pr=a.pr, dirty=g.get("dirty") or 0)
+        if pin_err:
+            sys.exit(pin_err)
     owner = t.get("owner") or whoami(a.owner)
     author = whoami(a.owner)
     t["status"] = "review"
@@ -1829,6 +1900,8 @@ def cmd_review(a, board):
         text = "%s -- %s" % (stamp, text)
         t["commit"] = stamp
         t["branch"] = g["branch"]
+        if (a.pr or "").strip() and g.get("sha_full"):
+            _rv.record_verified_head(t, g["sha_full"], pr=a.pr)
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
@@ -1851,6 +1924,28 @@ def cmd_review(a, board):
     tm = timing(t)
     print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
         t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
+
+
+def cmd_accept(a, board):
+    """Record a structured accept bound to the submitted review head (T-944)."""
+    t = load(board, a.id)
+    ev, err = _rv.apply(
+        t, whoami(), a.sha, "accept", notes=a.notes, require_full=True)
+    if err:
+        sys.exit(err)
+    save(board, t)
+    print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
+
+
+def cmd_reject(a, board):
+    """Record a structured reject bound to the submitted review head (T-944)."""
+    t = load(board, a.id)
+    ev, err = _rv.apply(
+        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+    if err:
+        sys.exit(err)
+    save(board, t)
+    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
 
 
 def _trunk():
@@ -2714,12 +2809,13 @@ This board is being set up. I will ask you four things, in order:
 3. I will **announce that name** on the board with the integrations you
    picked.
 4. Then I will ask for **tasks and the objective**, and turn tasks into a
-   `tickets plan` graph (real `--after` edges), not a flat list.
+   `atm plan` graph (real `--after` edges), not a flat list.
 
 I will not spawn workers or create tickets until you answer.
-Run `tickets harness available` to probe every catalog row (missing is a row).
+CLI: `atm` (the `tickets` command is an alias).
+Run `atm harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
-When they name tasks, use `tickets plan` so deps are real `--after` edges.
+When they name tasks, use `atm plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
@@ -2855,34 +2951,34 @@ Spawn seats only from the integrations they confirmed, one ticket each.
 
 **You are onboarding as chief of staff.** Master plans and scopes. CoS
 reviews, unblocks, merges, and staffs. Same integration catalog as master.
-After the board has an objective and a `tickets plan` graph:
+After the board has an objective and a `atm plan` graph:
 
-1. `tickets graph` / `tickets map` — statuses and `--after` edges, not prose.
-2. Follow-up: `tickets update` / `here`; `tickets reopen` silent >90m claims;
-   `tickets drive` toward the objective; review queue.
-3. Mid-run graph edits: `tickets dep` / `tickets create --blocks`.
-4. Announce with `tickets master cos <name>` and `tickets msg --to everyone`.
+1. `atm graph` / `atm map` — statuses and `--after` edges, not prose.
+2. Follow-up: `atm update` / `here`; `atm reopen` silent >90m claims;
+   `atm drive` toward the objective; review queue.
+3. Mid-run graph edits: `atm dep` / `atm create --blocks`.
+4. Announce with `atm master cos <name>` and `atm msg --to everyone`.
 
 Do not dump a live-board plan. Do not invent a second planner.
 
 ## CEO ONBOARDING — living board (product flow)
 
 **You are onboarding as Atman CEO.** Connecting is joining Atman, not a
-provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
-staffs. CEO does not claim worker tickets on this path.
+provider. Identity is `atman-<seat>` (example `atman-ceo`). The current
+CoS holder staffs (or no CoS yet). CEO does not claim worker tickets.
 
-Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
+Run `atm connect` (or `atm connect --ceo`). It executes, in order:
 
-1. Catalog + usage (`tickets harness available` + recorded limits)
+1. Catalog + usage (`atm harness available` + recorded limits)
 2. Attach the living board / objective — do not invent a new team
-3. `tickets join atman-<seat> --roles master ...`
-4. Announce the Atman role (`tickets msg --to everyone`)
+3. `atm join atman-<seat> --roles master ...`
+4. Announce the Atman role (`atm msg --to everyone`)
 5. Ask the operator for feedback
-6. `tickets graph` / `tickets map` — tasks they can actually run
+6. `atm graph` / `atm map` — tasks they can actually run
 
 Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
-title — `tickets plan` with real deps if they add work. Cursor-only
-spawns unless they say otherwise. Mail hooks are not Claude-only:
+title — `tickets plan` with real deps if they add work. Spawn only the
+harnesses they confirm. Mail hooks are not Claude-only:
 `tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
 
 HANDOVER dated 2026-09-08 is historical, not live authority. Live:
@@ -3338,8 +3434,45 @@ def messages_path(board):
     return os.path.join(board, "messages.jsonl")
 
 
-def post_message(board, sender, text, to="", re="", kind="", task=False):
+WEAK_SENDER_VIA = ("TICKET_AGENT", "flat", "pid")
+
+
+def _sender_via(board, explicit=None):
+    if explicit:
+        return "explicit"
+    if (os.environ.get("TICKET_SEAT") or "").strip():
+        return "TICKET_SEAT"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return "session-keyed"
+    if (os.environ.get("TICKET_AGENT") or "").strip():
+        return "TICKET_AGENT"
+    if recorded:
+        return "flat"
+    return "pid"
+
+
+def message_provenance_state(m):
+    if not m or "via" not in m:
+        return "absent"
+    if m.get("unverified"):
+        return "unverified"
+    return "verified"
+
+
+def post_message(board, sender, text, to="", re="", kind="", task=False, explicit=None):
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    via = _sender_via(board, explicit)
+    rec["session"] = agent_session_key() or ""
+    rec["via"] = via
+    rec["endpoint_pid"] = ""
+    rec["unverified"] = via in WEAK_SENDER_VIA
     if task or kind == "task":
         rec["kind"] = "task"
     line_ = json.dumps(rec) + "\n"
@@ -3560,14 +3693,21 @@ def unread(board, owner):
 def fmt_msg(m):
     to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
     re_ = (" [%s]" % m["re"]) if m.get("re") else ""
-    return "%s  %s%s%s: %s" % (m["at"][5:16].replace("T", " "), m.get("from", "?"), to, re_, m.get("text", ""))
+    mark = ""
+    if message_provenance_state(m) == "unverified":
+        mark = " [unverified:%s]" % (m.get("via") or "?")
+    if m.get("leadership_flag"):
+        mark += " [leadership-flag:%s]" % m["leadership_flag"]
+    return "%s  %s%s%s%s: %s" % (
+        m["at"][5:16].replace("T", " "), m.get("from", "?"), mark, to, re_, m.get("text", ""))
 
 
 def cmd_msg(a, board):
     sender = session_seat(board, a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
-    m = post_message(board, sender, a.text, a.to or "", a.re or "")
+    m = post_message(board, sender, a.text, a.to or "", a.re or "",
+                     explicit=a.owner or None)
     print("posted: " + fmt_msg(m))
 
 
@@ -4078,12 +4218,29 @@ def cmd_join(a, board):
         board, owner, incoming,
         transfer=bool(getattr(a, "transfer", False)),
         alias=(getattr(a, "alias", "") or "").strip())
+    if not getattr(a, "transfer", False) and owner != whoami():
+        m = current_master(board) or {}
+        leaders = set(n for n in (m.get("owner"), m.get("cos")) if n)
+        for alias, holder in (load_aliases(board) or {}).items():
+            if (alias or "").strip().lower() in ("ceo", "cos") and holder:
+                leaders.add(holder)
+        if owner in leaders:
+            sys.exit("refusing: %s holds or held a leadership role; pass --transfer "
+                     "for an audited handover" % owner)
     # AFTER the guard, never before it: a refused join must leave this session
     # answering as whoever it already was. Stamping first made `join alpha` --
     # refused for provider reuse or a bound alias -- still turn this session
     # into alpha, so a bare `tickets inbox` read alpha's private mail and a
     # bare `tickets msg` posted as alpha. Nothing below can sys.exit.
-    write_identity(board, owner)
+    #
+    # T-954: join on behalf of another seat must not write THIS session.
+    on_behalf = bool(getattr(a, "on_behalf", False))
+    if _join_binds_this_session(board, owner, on_behalf=on_behalf):
+        write_identity(board, owner)
+    else:
+        seat, why = identity_resolution(board)
+        print("session identity unchanged (%s via %s); joined %s on behalf" % (
+            seat, why, owner))
     # Before checkin(), which creates the record: only a genuinely new agent is
     # stamped, so a re-join never moves the watermark over unread mail.
     first_join = not _agent_rec(board, owner)
@@ -4228,20 +4385,20 @@ def cmd_connect(a, board):
             sys.stdout.write("\n")
         print("")
         print("Product flow: catalog + usage → living board → %s → announce → feedback → graph/map" % name)
-        print("Do not invent a new team. CEO does not claim worker tickets. CoS (cursor) staffs.")
-        print("Then probe: `tickets harness available`")
-        print("Join: tickets join %s --roles master --persistent --wake-mode continuous" % name)
-        print("Announce Atman role, ask for feedback, then tickets graph / tickets map.")
+        print("Do not invent a new team. CEO does not claim worker tickets. The current CoS holder staffs (or no CoS yet).")
+        print("Then probe: `atm harness available`")
+        print("Join: atm join %s --roles master --persistent --wake-mode continuous" % name)
+        print("Announce Atman role, ask for feedback, then atm graph / atm map.")
         return
     print_onboarding_startup()
-    print("Then probe integrations: `tickets harness available`")
+    print("Then probe integrations: `atm harness available`")
     print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
-    print("Announce the board/team name with `tickets msg --to everyone`, then ask")
-    print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
-    print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
-    print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
-    print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
+    print("Announce the board/team name with `atm msg --to everyone`, then ask")
+    print("for the objective and tasks. Turn tasks into a graph with `atm plan`")
+    print("(JSON keys + deps), then `atm graph` / `atm map`. Follow up with")
+    print("`atm update` / `here`, reopen silent >90m claims, `atm drive`.")
+    print("Unattended persist ends at a reviewable SHA; human `atm review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
@@ -4772,6 +4929,18 @@ def main():
     c.add_argument("--owner", "-o")
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_review)
+
+    c = sub.add_parser("accept", help="record a structured accept of the exact submitted SHA")
+    c.add_argument("id")
+    c.add_argument("--sha", required=True, help="full 40-character git SHA of the submitted review head")
+    c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
+    c.set_defaults(fn=cmd_accept)
+
+    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c.add_argument("id")
+    c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
+    c.add_argument("--reason", required=True, help="why this artifact is rejected")
+    c.set_defaults(fn=cmd_reject)
 
     c = sub.add_parser("sync", help="agent: merge main into my branch now (do this before review)")
     c.add_argument("--force", action="store_true")
