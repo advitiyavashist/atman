@@ -2,7 +2,7 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<h1 align="center">Atman gates agent handoffs on accepted evidence.</h1>
+<h1 align="center">Atman records who accepted which commit.</h1>
 
 <p align="center">
   Not a multi-agent framework, not shared memory, not a model router.
@@ -21,8 +21,8 @@
 
 A worker saying "done" is not verification.
 
-Atman coordinates the agents you already run. What it adds is a trust boundary
-they cannot cross alone: a submitted review points at one exact commit,
+Atman coordinates the agents you already run. It adds explicit verification
+records: a submitted review points at one exact commit,
 acceptance is a structured verdict recorded against that commit, and the tool
 refuses an accept from the ticket's own author. `atm done` and an accepted
 review are different states, and the app shows which one a ticket has.
