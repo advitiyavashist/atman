@@ -2,12 +2,13 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<h1 align="center">Atman coordinates the agents you already run.</h1>
+<h1 align="center">Atman gates agent handoffs on accepted evidence.</h1>
 
 <p align="center">
   Not a multi-agent framework, not shared memory, not a model router.
-  One local board where your agents take tickets, hand work to each other,
-  and show you what needs review.
+  A board of plain files in your repository: a ticket is accepted on an exact
+  commit by a seat other than its author, and the ticket that depends on it
+  opens only when it is closed.
 </p>
 
 <p align="center">
@@ -18,30 +19,36 @@
   <a href="docs/first-session.md">First run</a>
 </p>
 
-You finish a task in one agent, then retype it all for the next one.
+A worker saying "done" is not verification.
 
-Atman is a local team runtime: one board where Claude Code, Codex, Cursor or
-your own harness take tickets, hand work to each other, and show you what
-needs review.
+Atman coordinates the agents you already run. What it adds is a trust boundary
+they cannot cross alone: a submitted review points at one exact commit,
+acceptance is a structured verdict recorded against that commit, and the tool
+refuses an accept from the ticket's own author. `atm done` and an accepted
+review are different states, and the app shows which one a ticket has.
 
-Give a coordinator an objective. Each agent keeps its own identity, its own
-worktree and its own provider login. Coordination is plain files on your
-machine, driven by `atm`. You review what comes back before it counts. Cursor
-seats start through a supervised watcher.
+Dependencies are gates. A ticket that depends on A is invisible to `atm next`
+until A is closed, and when it opens, A's handoff notes travel in its prompt
+with nothing retyped. Coordination is text under `.tickets/` in your own
+repository, driven by `atm`: greppable, diffable, no IDE, no service, no
+database. Each agent, whether Claude Code, Codex, Cursor or your own harness,
+keeps its own identity, worktree and provider login. Cursor seats start
+through a supervised watcher.
 
-**Your agents. One handoff. No retyping.** The executable walkthrough below
-shows the exact commands and handoff output.
+**Accepted, not just reported.** The executable walkthrough below shows the
+exact commands, the refused short SHA, and the handoff output.
 
-## Three things Atman does today
+## Four things Atman does today
 
-**1. One board, separate seats.** Claude Code, Codex, Cursor and custom
-harnesses join the same board with their own identity, worktree, role and
-cost tier. Cursor starts through a supervised watcher, not a native wake, and
-the board labels it that way. Antigravity is experimental: discovery is
-documented, but its current headless one-shot path is not supported in this
-preview. Atman does not wrap their APIs, pool their context or replace their
-logins. Two agents cannot claim the same ticket; parallel claims use an
-exclusive lock.
+Each claim below has a row in the [preview status table](#preview-status-and-limitations).
+
+**1. Acceptance is bound to an exact commit, and the author cannot give it.**
+`atm review` pins a branch and a full commit SHA. `atm accept --sha` records
+a verdict against that SHA and refuses a short SHA or the ticket's own author.
+A note that merely says "accept" is not a verdict; the Work view labels such a
+ticket `Marked done; verification not recorded`. This README went through the
+same gate: the review ledger in `docs/reviews/t819-readme-proof.md` records the
+lines it sent back.
 
 **2. The next task opens when its predecessor is done, with the handoff
 attached.** Dependencies are real `--after` edges, so a dependent ticket is
@@ -52,13 +59,26 @@ A's handoff notes in its prompt. You do not type the next instruction. Today a
 seat that receives B unattended starts through a supervised watcher; Atman
 labels that as a watcher, not a native wake.
 
-**3. The work outlasts the session.** When a model, session or machine stops,
-or a seat hits its usage limit, the claim, the blocker and the next step stay
-on the board. A replacement seat inherits the handoff instead of restarting
-from chat history. The local app reports productive watcher-run turns and
-harness-reported cost for completed tickets, leaving missing values blank.
-`atm turns` can also show clearly labelled list-price cost estimates. Unknown
-is not zero.
+**3. The board is plain files in your repository.** Tickets, claims, messages,
+handoff notes and verdicts live as text under `.tickets/`. You can grep them,
+diff them in a pull request and back them up with the code. There is no IDE to
+install, no hosted service and no database. Claude Code, Codex, Cursor and
+custom harnesses join the same board with their own identity, worktree, role
+and cost tier; Atman does not wrap their APIs, pool their context or replace
+their logins. Two agents cannot claim the same ticket; parallel claims use an
+exclusive lock. Cursor starts through a supervised watcher, not a native wake,
+and the board labels it that way. Antigravity is experimental: discovery is
+documented, but its current headless one-shot path is not supported in this
+preview.
+
+**4. Evidence over assertion, and the work outlasts the session.** A worker's
+completion message is not verification, and unknown is never zero. When a
+model, session or machine stops, or a seat hits its usage limit, the claim,
+the blocker and the next step stay on the board, and a replacement seat
+inherits the handoff instead of restarting from chat history. The local app
+reports productive watcher-run turns and harness-reported cost for completed
+tickets, leaving missing values blank. `atm turns` can also show clearly
+labelled list-price cost estimates.
 
 ## Install
 
