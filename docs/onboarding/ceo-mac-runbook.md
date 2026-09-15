@@ -1,8 +1,9 @@
-# Any-CEO onboarding (local `tickets.py`)
+# Any-CEO onboarding
 
-Copy-paste. Do not guess folders. This is the T-790 path: `python3` on a
-real `tickets.py`, never the PATH shim. Pick harnesses from
-`atm harness available`.
+For a first board, start with [first-run.md](first-run.md).
+
+Install `atm` from your checkout and confirm it with `atm self`. Pick harnesses
+from `atm harness available`.
 
 **You are onboarding.** This is not a ticket claim.
 
@@ -11,16 +12,13 @@ real `tickets.py`, never the PATH shim. Pick harnesses from
 Set these to the local checkout and living board. Do not paste a machine path.
 
 ```sh
-TICKETS_PY=<repo>/tickets.py
 LIVING_BOARD=<board>
 REPO=<repo>
 
-t() { python3 "$TICKETS_PY" "$@"; }
-
 # PATH `tickets` is a stale shim (~/.local/bin/tickets -> ~/.claude/tools/tickets.py).
 # Confirm before any spawn:
-ls -l ~/.local/bin/tickets
-python3 "$TICKETS_PY" --version
+atm self
+atm --version
 ```
 
 Do not run `atm init` or `atm clear` on a living board you did not create.
@@ -39,31 +37,34 @@ export TICKET_AGENT=atman-ceo
 export TICKETS_DIR="$LIVING_BOARD"
 cd "$REPO"   # or a dedicated CEO worktree; never main
 
-t harness available
+atm harness available
 # Probe every catalog row. Ask which to use. Missing is a row. Do not spawn yet.
 
-t join "$TICKET_AGENT" --roles master --persistent --wake-mode continuous --harness cursor
-t hooks cursor --agent "$TICKET_AGENT" --worktree "$PWD"
-t master take
+atm join "$TICKET_AGENT" --roles master --persistent --wake-mode continuous --harness cursor
+atm hooks cursor --agent "$TICKET_AGENT" --worktree "$PWD"
+atm master take
 
-t msg --to everyone "atman-ceo is onboarding. Integrating: cursor. Objective and tasks next. @everyone"
-t master log "onboarding: name=atman-ceo integrations=cursor"
+atm msg --to everyone "atman-ceo is onboarding. Integrating: cursor. Objective and tasks next. @everyone"
+atm master log "onboarding: name=atman-ceo integrations=cursor"
 
-t objective --set "Team intro: onboarding, plan/graph, persist-to-review" \
+atm objective --set "Team intro: onboarding, plan/graph, persist-to-review" \
   --exit "throwaway proof green; living board unchanged except this announce"
 
-t plan <<'EOF'
-[{"key":"probe","title":"Probe integrations","role":"docs","deps":[]},
- {"key":"plan","title":"Plan the graph with real deps","role":"docs","deps":["probe"]},
- {"key":"review","title":"Persist to a reviewable SHA","role":"docs","deps":["plan"]}]
+atm plan <<'EOF'
+[{"key":"probe","title":"Probe integrations","role":"docs","deps":[],
+  "cause":"we do not know what can be spent","change":"run harness available","proof":"every catalog row printed"},
+ {"key":"plan","title":"Plan the graph with real deps","role":"docs","deps":["probe"],
+  "cause":"probe answered","change":"write the plan JSON with deps","proof":"atm graph shows the edges"},
+ {"key":"review","title":"Persist to a reviewable SHA","role":"docs","deps":["plan"],
+  "cause":"graph is staffed","change":"work a ticket to a branch@sha","proof":"atm review records branch@sha"}]
 EOF
-t graph
-t map
+atm graph
+atm map
 
-t spawn cursor-worker --roles backend --harness cursor --persist --wake-mode task-only
+atm spawn cursor-worker --roles backend --harness cursor --persist --wake-mode task-only
 
-t master cos cos
-t msg --to cos "CoS: staff from the catalog the operator chose."
+atm master cos cos
+atm msg --to cos "CoS: staff from the catalog the operator chose."
 ```
 
 Do **not** run one `atm create` per title. Edges must be `atm plan`
@@ -77,32 +78,32 @@ Same verbs, disposable `.tickets`. Never point `TICKETS_DIR` at a shared
 living board.
 
 ```sh
-TICKETS_PY=/path/to/this/checkout/tickets.py
-t() { python3 "$TICKETS_PY" "$@"; }
 REPO=/tmp/t790-ceo-proof   # test uses pytest tmp_path instead
-cd "$REPO"                 # git repo; t init
+cd "$REPO"                 # existing Git repo
 unset TICKETS_DIR          # resolve the board from cwd
 
 export TICKET_AGENT=atman-ceo
-t init
-t join "$TICKET_AGENT" --roles master --persistent --wake-mode continuous --harness cursor
-t hooks cursor --agent "$TICKET_AGENT" --worktree "$PWD"
-t master take
-t msg --to everyone "atman-ceo is onboarding. Integrating: cursor. Objective and tasks next. @everyone"
-t objective --set "Dry CEO onboarding path" --exit "graph has real deps; CoS messaged"
-t plan <<'EOF'
-[{"key":"api","title":"Build REST API","role":"backend","deps":[]},
- {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
+atm init
+atm join "$TICKET_AGENT" --roles master --persistent --wake-mode continuous --harness cursor
+atm hooks cursor --agent "$TICKET_AGENT" --worktree "$PWD"
+atm master take
+atm msg --to everyone "atman-ceo is onboarding. Integrating: cursor. Objective and tasks next. @everyone"
+atm objective --set "Dry CEO onboarding path" --exit "graph has real deps; CoS messaged"
+atm plan <<'EOF'
+[{"key":"api","title":"Build REST API","role":"backend","deps":[],
+  "cause":"clients have nothing to call","change":"REST API for the model","proof":"pytest -q tests/api"},
+ {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"],
+  "cause":"API is live","change":"login screen on the API","proof":"login returns a session"}]
 EOF
-t graph
-t join cursor-worker --roles backend --harness cursor --wake-mode task-only
+atm graph
+atm join cursor-worker --roles backend --harness cursor --wake-mode task-only
 # Paid Cursor is not invoked: --exec is a dry runner (auth gate skipped).
-t spawn cursor-worker --harness cursor --max-runs 1 \
+atm spawn cursor-worker --harness cursor --max-runs 1 \
   --exec '/usr/bin/true {prompt_file} {cwd} {agent}'
-t spawn cursor-worker --stop
-t master cos cos-cursor
-t join cos-cursor --roles docs --harness cursor --wake-mode continuous
-t msg --to cos-cursor "CoS: staff from the catalog the operator chose."
+atm spawn cursor-worker --stop
+atm join cos-cursor --roles docs --harness cursor --wake-mode continuous
+atm master cos cos-cursor
+atm msg --to cos-cursor "CoS: staff from the catalog the operator chose."
 ```
 
 `atm graph` must show the UI ticket waiting on the API ticket.
@@ -117,3 +118,12 @@ replace either. It pins **portable folder placeholders** (`<repo>`, `<board>`)
 and an example sequence a CEO can execute without guessing.
 
 See [master-howto.md](master-howto.md) for the long form.
+
+## Run from the checkout, not a stale shim
+
+If `atm self` shows an unexpected file, run the checkout directly:
+
+```sh
+TICKETS_PY=<repo>/tickets.py
+python3 "$TICKETS_PY" self
+```
