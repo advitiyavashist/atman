@@ -35,7 +35,8 @@ def test_hero_leads_with_category_then_team_runtime_line():
     hero = LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
     lede = LANDING[LANDING.index('class="lede"') : LANDING.index('class="ctas"')]
     assert "coordinates the agents you already run" in hero.lower()
-    assert "Mail is the ticket board" in lede
+    assert "Give a coordinator an objective" in lede
+    assert "usual providers" in lede
     assert "fewest turns" not in hero.lower()
 
 
@@ -66,29 +67,18 @@ def test_provider_order_is_claude_codex_cursor_grok_custom():
         roster.index("<strong>Custom</strong>"),
     ]
     assert order == sorted(order)
-    tabs = [
-        LANDING.index('for="seat-claude"'),
-        LANDING.index('for="seat-codex"'),
-        LANDING.index('for="seat-cursor"'),
-        LANDING.index('for="seat-grok"'),
-        LANDING.index('for="seat-custom"'),
-    ]
-    assert tabs == sorted(tabs)
 
 
-def test_quickstart_tabs_cover_ordered_providers():
+def test_quickstart_has_one_project_setup_path():
     start = _start_block()
     assert "git clone https://github.com/advitiyavashist/atman.git" in start
-    assert "tickets connect" in start
-    assert "atman-ceo" in start
-    assert "connect as Atman, not Claude" in start
-    assert "connect as Atman, not Codex" in start
-    assert "connect as Atman, not Cursor" in start
-    assert "connect as Atman, not Grok" in start
-    assert "custom is a catalog row" in start
-    assert "tickets ui" in start
+    assert start.count("<pre") == 1
+    assert "./install.sh --prefix" in start
+    assert "unset TICKETS_DIR" in start
+    assert start.index("atm where") < start.index("atm quickstart") < start.index("atm ui")
+    assert "CoS is cursor" not in start
+    assert "atm ui" in start
     assert "alice" not in start
-    assert 'id="seat-claude" checked' in start
 
 
 def test_surfaces_explain_team_ia():
@@ -127,8 +117,9 @@ def test_visual_tokens_are_bone_brass_not_steer_lime():
 def test_no_fake_progress_or_cloud_claim():
     assert "3 / 5" not in LANDING
     assert "progress-track" not in LANDING
-    assert "hosted demo" in LANDING.lower() or "no cloud signup" in LANDING.lower()
-    assert "fabricated" in LANDING.lower()
+    assert "this site shows a product capture" in LANDING.lower()
+    assert "your live team appears in the local app" in LANDING.lower()
+    assert "sample project" in LANDING.lower()
 
 
 def test_no_swarm_hype_or_localhost_product_link():
