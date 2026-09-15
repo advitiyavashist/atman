@@ -639,14 +639,67 @@ def load(board, tid):
         sys.exit("no such ticket: %s" % tid)
 
 
-def save(board, t):
+def _recovery():
+    """Optional coordination extension: structured handoff + ownership lease."""
+    try:
+        from . import ticket_coordination as tc
+        return tc
+    except ImportError:
+        try:
+            import ticket_coordination as tc
+            return tc
+        except ImportError:
+            return None
+
+
+def _lease_harness(board, owner):
+    try:
+        return (load_workforce(board).get(owner) or {}).get("harness") or ""
+    except Exception:
+        return ""
+
+
+def save(board, t, expected_generation=None):
     t["updated"] = now()
     path = ticket_path(board, t["id"])
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(t, f, indent=2)
-    os.replace(tmp, path)  # atomic
-    return t
+    tc = _recovery()
+    lock = tc.ticket_mutation_lock(board, t["id"]) if tc is not None else None
+
+    def _publish():
+        if tc is not None and os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    current = json.load(f)
+            except (ValueError, IOError):
+                current = None
+            if current:
+                err = tc.generation_publish_error(current, t, expected_generation)
+                if err:
+                    sys.exit(err)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(t, f, indent=2)
+        if tc is not None and os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    current = json.load(f)
+            except (ValueError, IOError):
+                current = None
+            if current:
+                err = tc.generation_publish_error(current, t, expected_generation)
+                if err:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    sys.exit(err)
+        os.replace(tmp, path)  # atomic
+        return t
+
+    if lock is None:
+        return _publish()
+    with lock:
+        return _publish()
 
 
 def load_all(board):
@@ -1109,6 +1162,10 @@ def try_claim(board, tid, owner):
     t["owner"] = owner
     t["claimed_at"] = now()
     t["done_at"] = ""
+    tc = _recovery()
+    if tc is not None:
+        tc.issue_owner_lease(t, owner, harness=_lease_harness(board, owner),
+                             reason="claim", previous_owner=prev_owner)
     got = save(board, t)
     # Written here, not in cmd_next/cmd_claim: this is the single point where a
     # claim actually succeeds, so no future caller can add a claim path that
@@ -1118,6 +1175,87 @@ def try_claim(board, tid, owner):
     if prev_owner and prev_owner != owner:
         _clear_agent_ticket(board, prev_owner, tid)
     return got
+
+
+def _try_lock_ticket_excl(board, tid, owner):
+    """Acquire the O_EXCL claim lock. Returns lock path, or None if taken."""
+    lock = os.path.join(board, tid + ".lock")
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            return None
+        raise
+    os.write(fd, owner.encode())
+    os.close(fd)
+    return lock
+
+
+def _release_ticket_excl(lock):
+    if not lock:
+        return
+    try:
+        os.unlink(lock)
+    except OSError:
+        pass
+
+
+def _held_claimed(board, owner, except_id=None):
+    """Claimed tickets currently held by owner (T-979 one-active-hold)."""
+    if not owner:
+        return []
+    return [t for t in load_all(board)
+            if t.get("status") == "claimed"
+            and t.get("owner") == owner
+            and t.get("id") != except_id]
+
+
+def _already_hold_msg(held):
+    ids = ", ".join(t["id"] for t in held)
+    return ("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
+            "more, or pass --another if you really want to work two in parallel." % ids)
+
+
+class _OwnerHoldLock:
+    """Same path as agent_checkin._AgentLock so root and package serialize together."""
+
+    def __init__(self, board, owner):
+        os.makedirs(os.path.join(board, "agents"), exist_ok=True)
+        self.path = os.path.join(board, "agents", owner + ".json.lock")
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
+def try_claim_one_active(board, tid, owner, *, another=False):
+    """Claim tid unless owner already holds a different claimed ticket.
+
+    Serializes on the per-agent lock so concurrent assign/claim/next cannot
+    both create an active hold. Returns (ticket, None) on success, (None, held)
+    when refused for a second hold, or (None, None) when the ticket lock lost.
+    """
+    with _OwnerHoldLock(board, owner):
+        held = _held_claimed(board, owner, except_id=tid)
+        if held and not another:
+            return None, held
+        return try_claim(board, tid, owner), None
 
 
 def fmt_hours(h):
@@ -1760,11 +1898,9 @@ def cmd_next(a, board):
         )
         sys.exit(1)
     tickets = load_all(board)
-    held = [t for t in tickets if t["status"] == "claimed" and t.get("owner") == owner]
+    held = _held_claimed(board, owner)
     if held and not a.another:
-        print("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
-              "more, or pass --another if you really want to work two in parallel."
-              % ", ".join(t["id"] for t in held))
+        print(_already_hold_msg(held))
         sys.exit(1)
     steal_id = (getattr(a, "steal", None) or "").strip()
     ready_all = unblocked(board, tickets)
@@ -1788,7 +1924,10 @@ def cmd_next(a, board):
 
     ready.sort(key=order)
     for t in ready:
-        got = try_claim(board, t["id"], owner)
+        got, held_now = try_claim_one_active(board, t["id"], owner, another=a.another)
+        if held_now:
+            print(_already_hold_msg(held_now))
+            sys.exit(1)
         if got:
             checkin(board, owner, got["id"])
             print(detail(board, got, load_all(board)))
@@ -1851,7 +1990,9 @@ def cmd_next(a, board):
 
 def cmd_claim(a, board):
     owner = whoami(a.owner)
-    got = try_claim(board, a.id, owner)
+    got, held = try_claim_one_active(board, a.id, owner)
+    if held:
+        sys.exit(_already_hold_msg(held))
     if not got:
         sys.exit("%s is already taken" % a.id)
     checkin(board, owner, got["id"])
@@ -1891,6 +2032,12 @@ def cmd_review(a, board):
             sys.exit(pin_err)
     owner = t.get("owner") or whoami(a.owner)
     author = whoami(a.owner)
+    tc = _recovery()
+    if tc is not None:
+        err = tc.stale_accept_error(t, author, kind="review")
+        if err:
+            sys.exit(err)
+    expected_generation = t.get("owner_generation")
     t["status"] = "review"
     t["owner"] = owner
     t["review_at"] = now()
@@ -1906,7 +2053,7 @@ def cmd_review(a, board):
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
     t["notes"].append({"by": owner, "at": now(), "text": "REVIEW: " + text})
-    save(board, t)
+    save(board, t, expected_generation=expected_generation)
     checkin(board, author, t["id"], "submitted %s for review" % t["id"])
     if owner != author:
         # T-428: do not copy the submitter's cwd/branch/sha onto the owner.
@@ -2480,6 +2627,13 @@ def cmd_status(a, board):
 
 def cmd_done(a, board):
     t = load(board, a.id)
+    closer = whoami()
+    tc = _recovery()
+    if tc is not None:
+        err = tc.stale_accept_error(t, closer, kind="done")
+        if err:
+            sys.exit(err)
+    expected_generation = t.get("owner_generation")
     if not a.notes and not a.no_notes:
         sys.exit(
             'done needs --notes "paths, names, decisions the next agent must match" '
@@ -2513,7 +2667,7 @@ def cmd_done(a, board):
         t["commit"] = stamp
     if text:
         t["notes"].append({"by": t.get("owner") or "agent", "at": now(), "text": text})
-    save(board, t)
+    save(board, t, expected_generation=expected_generation)
     if t.get("owner"):
         # T-428: checkin() always writes THIS process's cwd/branch/sha. That is
         # the closer's location. Stamping it onto a different owner makes
@@ -2609,27 +2763,85 @@ def cmd_assign(a, board):
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
-    if a.owner is not None:
-        # hard assignment by the master: takes the lock on their behalf
-        prev_owner = t.get("owner") or ""
-        if t["status"] == "open" and a.owner:
-            got = try_claim(board, t["id"], a.owner)
-            if not got:
-                sys.exit("%s was claimed by someone else while assigning" % t["id"])
-            t = got
-            changed.append("claimed for %s" % a.owner)
-            _bind_agent_ticket(board, a.owner, t["id"])
-        elif t["status"] in ("claimed", "review"):
-            t["owner"] = a.owner
-            changed.append("owner=%s" % a.owner)
-            if prev_owner and prev_owner != a.owner:
-                _clear_agent_ticket(board, prev_owner, t["id"])
-            if a.owner:
-                _bind_agent_ticket(board, a.owner, t["id"])
-    if not changed:
-        sys.exit("nothing to change; see tickets assign --help")
-    t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
-    save(board, t)
+    bind_owner = None
+    clear_prev = None
+    transfer_owner = None
+    reserve_lock = None
+    expected_generation = None
+    rewrite_lock_to = None
+    try:
+        if a.owner is not None:
+            # hard assignment by the master: takes the lock on their behalf
+            prev_owner = t.get("owner") or ""
+            if t["status"] == "open" and a.owner:
+                got, held = try_claim_one_active(board, t["id"], a.owner)
+                if held:
+                    # Queued work stays queued: reserve, do not fabricate a
+                    # second in-progress claim (T-979 / T-972). Re-read under
+                    # the claim lock so a concurrent other-owner claim cannot
+                    # be overwritten by this stale open image.
+                    reserve_lock = _try_lock_ticket_excl(board, t["id"], a.owner)
+                    if reserve_lock is None:
+                        sys.exit("%s was claimed by someone else while assigning" % t["id"])
+                    t = load(board, t["id"])
+                    if t.get("status") != "open":
+                        sys.exit("%s was claimed by someone else while assigning" % t["id"])
+                    t["reserved_for"] = a.owner
+                    changed.append("reserved for %s (already holds %s)" % (
+                        a.owner, ", ".join(x["id"] for x in held)))
+                elif not got:
+                    sys.exit("%s was claimed by someone else while assigning" % t["id"])
+                else:
+                    t = got
+                    changed.append("claimed for %s" % a.owner)
+                    bind_owner = a.owner
+            elif t["status"] in ("claimed", "review"):
+                if t["status"] == "claimed" and a.owner and a.owner != prev_owner:
+                    transfer_owner = a.owner
+                t["owner"] = a.owner
+                changed.append("owner=%s" % a.owner)
+                if prev_owner and prev_owner != a.owner:
+                    tc = _recovery()
+                    if tc is not None:
+                        expected_generation = tc.owner_generation(t)
+                        tc.issue_owner_lease(
+                            t, a.owner, harness=_lease_harness(board, a.owner),
+                            reason="reassign", previous_owner=prev_owner)
+                        rewrite_lock_to = a.owner
+                    clear_prev = prev_owner
+                if a.owner:
+                    bind_owner = a.owner
+        if not changed:
+            sys.exit("nothing to change; see tickets assign --help")
+        t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
+
+        def _save_and_rewrite_lock():
+            # Hold/generation already validated. Publish JSON and relabel the
+            # claim lock in the same ticket-json critical section so a refused
+            # transfer or lost-generation save cannot leave Alice on T002.lock.
+            tc_pub = _recovery() if rewrite_lock_to else None
+            if tc_pub is not None:
+                with tc_pub.ticket_mutation_lock(board, t["id"]):
+                    save(board, t, expected_generation=expected_generation)
+                    tc_pub.rewrite_claim_lock(board, t["id"], rewrite_lock_to)
+            else:
+                save(board, t, expected_generation=expected_generation)
+
+        if transfer_owner:
+            with _OwnerHoldLock(board, transfer_owner):
+                held = _held_claimed(board, transfer_owner, except_id=t["id"])
+                if held:
+                    sys.exit("%s already holds %s -- finish that before taking an active assignment of %s"
+                             % (transfer_owner, ", ".join(x["id"] for x in held), t["id"]))
+                _save_and_rewrite_lock()
+        else:
+            _save_and_rewrite_lock()
+    finally:
+        _release_ticket_excl(reserve_lock)
+    if clear_prev:
+        _clear_agent_ticket(board, clear_prev, t["id"])
+    if bind_owner:
+        _bind_agent_ticket(board, bind_owner, t["id"])
     print("%s: %s" % (t["id"], ", ".join(changed)))
 
 

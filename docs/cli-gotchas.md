@@ -12,8 +12,12 @@ out to be a deliberate safety feature working correctly.
                 find claims held by agents that have died.
     reopen      release a claimed ticket back to open. This is how you fix a
                 stale claim -- `update` has no --status flag.
-    handover    save recovery context and publish a ticket update. Use this
-                before you stop, rather than a bare note.
+    handover    persist a structured recovery record (facts vs assumptions,
+                artifacts, checks, next action) and publish a ticket update.
+                Use this before you stop. Same-provider restart keeps the
+                owner_generation lease; cross-provider assign bumps it and
+                accumulates revoked_owners so the original worker stays
+                fenced after further transfers. See docs/recovery-contract.md.
     role        durable role: list / show / take (with an expected holder)
     mine        tickets claimed by this agent
     next        atomically claim the next available ticket
