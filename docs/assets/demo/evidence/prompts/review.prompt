@@ -1,0 +1,6 @@
+You are the reviewer on this board. T-001 is IN REVIEW.Do not implement A yourself.
+Then inspect the submitted PR, diff and full commit SHA, and independently run its tests in <RUN>/repo/.worktrees/codex-worker.
+Only if correct run atm accept T-001 --sha FULL40 --notes 'actual checks performed'.
+Run atm done T-001 --artifact <RUN>/repo/.worktrees/codex-worker --notes 'Accepted FULL40; integrate that exact commit before B. saleskit/summary.py: summarize(path) -> region -> units/revenue; north=15/600.00.'
+Use the actual SHA instead of FULL40. Do not run any command in Cursor's pane. Stop after done.
+Do not set an objective and do not run atm plan; the plan already exists.

@@ -1,0 +1,13 @@
+{
+  "checked_at": "2026-09-15T14:46:37Z",
+  "repository": "advitiyavashist/atman-demo-sales",
+  "pull_request": 5,
+  "url": "https://github.com/advitiyavashist/atman-demo-sales/pull/5",
+  "state": "closed",
+  "merged": false,
+  "base_ref": "main",
+  "base_sha": "2d3a2f2fe8ed1a21f2dd0533438e33a988b11dbb",
+  "head_ref": "codex-worker-t001-5b8cd8f",
+  "head_sha": "db0849bb7c3928e0123b6007ff6fb8b1a23d352d",
+  "source": "GitHub REST pull-request response; read-only snapshot"
+}
