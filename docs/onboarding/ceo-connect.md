@@ -1,5 +1,11 @@
 # Any-CEO connect (product flow)
 
+> **Not a first read.** This page is the CEO-seat wiring for a board that
+> already exists and already has a team on it. If you just installed `atm`,
+> start at [first-run.md](first-run.md) instead. This page will not make
+> sense before you have a board.
+
+
 Connecting is joining **Atman**, not Claude, Cursor, Codex, or another
 provider. Board identity is `atman-<seat>` (example `atman-ceo`). A CoS
 seat staffs workers. Choose harnesses from `atm harness available`; this

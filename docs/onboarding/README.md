@@ -1,22 +1,33 @@
 # Onboarding
 
-Start here. Pick one file.
+Pick one line. You do not need the others yet.
 
 | If you are… | Read |
 |---|---|
-| A CEO joining a living board (`python3` on `tickets.py`) | [ceo-mac-runbook.md](ceo-mac-runbook.md) |
-| Taking the **master** seat in a fresh Claude / Cursor / Codex session | [master-howto.md](master-howto.md) |
-| Running `tickets` for the first time as a worker | [../first-session.md](../first-session.md) |
-| Wiring Claude, Codex, or Cursor to a board that already exists | `atm guide` or `atm connect` |
-| Registering a custom / local harness | [../byoa.md](../byoa.md) |
-| Seeding role context (know → inject → update) | [role-context.md](role-context.md) |
-| Adding or updating evidence, runbooks, and skills | [../knowledge/README.md](../knowledge/README.md) |
+| **Installing `atm` for the first time and want a working board** | **[first-run.md](first-run.md)** |
+| Taking the **master** seat on a board that already exists | [master-howto.md](master-howto.md) |
+| A worker about to claim your first ticket | [../first-session.md](../first-session.md) |
+| Looking up a path, a flag, or something that just refused you | [reference.md](reference.md) |
+| Registering a custom or local harness | [../byoa.md](../byoa.md) |
+| Seeding standing context per role (know → inject → update) | [role-context.md](role-context.md) |
+| Coordinating an already-staffed team day to day | [coordination-and-success.md](coordination-and-success.md) |
+| Adding evidence, runbooks, or skills | [../knowledge/README.md](../knowledge/README.md) |
+| The operator on this specific Mac, with pinned folders | [ceo-mac-runbook.md](ceo-mac-runbook.md) |
+| Wiring the CEO seat to Cursor / Codex / a remote session | [ceo-connect.md](ceo-connect.md) |
+
+If you installed `atm` five minutes ago, the answer is the first row.
 
 Atman is a **team runtime**. You bring the harnesses. The board owns the
 objective, the shared state, the task graph, messaging, scheduling, and
 verification. The north star is **task completion in the fewest turns**.
 
-Team intro, in order: probe integrations (`atm harness available`),
-`atm plan` with real `--after` edges, unattended persist to a reviewable SHA,
-then human review (`atm review`) as the gate. See
-[master-howto.md](master-howto.md) and [first session](../first-session.md).
+The shape of a run, in order: probe what you can actually spend
+(`tickets harness available`), lay out work as a graph with real `--after`
+edges (`tickets plan`, or `tickets create --deps` on a first board), let
+seats persist unattended to a **reviewable SHA**, and gate it on
+**human review**. [first-run.md](first-run.md) does exactly that, end to end,
+with the output it printed.
+
+Install today is `git clone` + `./install.sh` on macOS. Homebrew, Linux
+packages, and pipx are planned and not published — see
+[reference.md](reference.md#install-modes).
