@@ -15,6 +15,14 @@ objective-to-accepted-result path; local, open source, your own
 subscriptions. No hosted site, no research path, no native-wake claim, no
 metric that has not been reported by a done ticket, no vendor numbers.
 
+Revision 2 (2026-09-15, CEO review of f20d7d4): acceptance is `atm accept`
+bound to the full review SHA, not a prose note; two official install paths
+with today's Homebrew status stated; Antigravity named with Cursor as a
+supervised seat and given an evidence row; privacy line split into what stays
+local and what your agents still send; the keystroke claim replaced by "no
+further instruction from you" with the watcher caveat. Section 9 lists the
+capability-checklist rows (T-975) this copy depends on.
+
 ---
 
 ## 1. Hero
@@ -39,6 +47,7 @@ Supporting line, directly under the sentence:
 > Give a coordinator an objective. Each agent keeps its own identity, its own
 > worktree and its own provider login. Coordination is plain files on your
 > machine, driven by `atm`. You review what comes back before it counts.
+> Cursor and Antigravity seats start through a supervised watcher.
 
 Placement note for T-819: the demo GIF goes directly under these four lines,
 with its own caption from the storyline (`Your agents. One handoff. No
@@ -48,14 +57,15 @@ retyping.`). Do not put a feature list above the GIF.
 
 **1. One board, separate seats.** Claude Code, Codex, Cursor, Antigravity and
 custom harnesses join the same board with their own identity, worktree, role
-and cost tier. Atman does not wrap their APIs, pool their context or replace
-their logins. Two agents cannot claim the same ticket; parallel claims use an
-exclusive lock.
+and cost tier. Cursor and Antigravity have no live-session wake: their seats
+start through a supervised watcher, and the board labels them that way. Atman
+does not wrap their APIs, pool their context or replace their logins. Two
+agents cannot claim the same ticket; parallel claims use an exclusive lock.
 
 **2. The next task starts on acceptance, with the handoff attached.**
 Dependencies are real `--after` edges, so a dependent ticket is invisible to
-`atm next` until its predecessor is finished. When you record a verdict on A's
-pinned commit and mark it done, B is posted to the next seat and that seat's
+`atm next` until its predecessor is finished. When you accept A on its exact
+review commit and mark it done, B is posted to the next seat and that seat's
 prompt carries A's handoff notes. You do not type the next instruction.
 Today the seat that receives B starts through a supervised watcher; Atman
 labels that as a watcher, not a native wake.
@@ -69,16 +79,29 @@ not zero.
 
 ## 3. How it feels on day one
 
-Three steps. Each command below is on `main` today.
+Three steps. Every `atm` command below is on `main` today.
 
-**Install** (Python 3.9+ and Git; tested on one macOS machine; Homebrew not
-published yet):
+**Install.** Two official paths: Homebrew on macOS, and `git clone` plus
+`./install.sh` anywhere with Python 3.9+ and Git. As of 2026-09-15 the
+Homebrew formula is in the repository but the tap is not yet published
+(T-898), so the command that works today is the clone. The clone path is
+tested on one macOS machine; the formula's test block is proven against the
+built release tarball, not yet through a live `brew install`. Linux and pipx
+are planned.
 
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
 cd atman
 ./install.sh                 # links atm and tickets into ~/.local/bin
 export PATH="$HOME/.local/bin:$PATH"
+```
+
+macOS, once the tap is published (T-819 checks T-898 on the day and keeps or
+removes the "not yet published" label):
+
+```sh
+brew install advitiyavashist/homebrew-tap/atman
+atm --version                # verified release, same check as atm self
 ```
 
 **Onboard** in an existing git repo. One command writes the board, registers
@@ -113,19 +136,31 @@ EOF
 
 1. A seat runs `atm next`, claims A in its own worktree, does the work, and
    hands it back with `atm review T-001 --notes "..."`. Review pins the exact
-   branch and commit.
-2. You check A and record the verdict against that commit:
-   `atm note T-001 "verdict: ACCEPT <branch>@<sha> -- test passes"`, then
-   `atm done T-001 --notes "summarize(path) in csv_summary.py"`.
+   branch and commit (`recorded <branch>@<sha7>`).
+2. You check A and accept it on that exact commit, from your own seat. Take
+   the full 40-character SHA from the reviewed worktree (`git rev-parse
+   <branch>`) or from the PR head:
+
+   ```sh
+   atm accept T-001 --sha <full 40-character SHA of that commit> --notes "test passes"
+   atm done T-001 --notes "summarize(path) in csv_summary.py"
+   ```
+
+   Acceptance is bound to that commit. `atm accept` refuses a short SHA, a SHA
+   that is not the submitted review head, and a reviewer who is the ticket's
+   author. A note that merely says "accept" is not a verdict: the Work view
+   shows such a ticket as `Marked done; verification not recorded`.
 3. Atman unblocks B and posts it to the next seat. That seat claims B, and its
    prompt prints `Handoff from dependencies` with your note from A. Nobody
    retypes what A did.
 4. B comes back through `atm review`. You accept it the same way. The Work
-   view shows A's verdict, B's handoff, and which commit each verdict is
-   bound to.
+   view shows `Accepted by @you on <sha7>` for A, B's handoff, and which
+   commit each verdict is bound to.
 
-Total operator keystrokes after accepting A: none, until B is ready for your
-review.
+No further instruction from you after accepting A: the next seat's supervised
+watcher polls the board, claims B and starts it with A's handoff attached.
+The watcher's own `atm next` call is the mechanism, and the board labels it a
+watcher, not a native wake.
 
 ## 4. Philosophy
 
@@ -162,9 +197,10 @@ turns and cost per ticket so that routing can improve over time. It reports
 only what finished tickets measured. A blank is unmeasured, never a win.
 
 **Local, open source, your own subscriptions.** Coordination is one Python
-file and plain files on your machine, MIT licensed. Models run through the
-providers and logins you already have. Atman holds no keys, needs no hosted
-service, database or agent SDK, and sends nothing anywhere.
+file and plain files on your machine, MIT licensed. Atman's coordination
+state stays on your machine, and Atman holds no keys, hosted service,
+database or agent SDK. Your agents still send their prompts to their own
+providers under your logins, exactly as they do without Atman.
 
 ## 5. Non-goals
 
@@ -178,16 +214,17 @@ Atman is not:
 - a compliance, audit or policy-enforcement layer.
 
 Not in the preview, labelled planned in the capability checklist rather than
-omitted: Linux and pipx install; Homebrew formula; native wake for every
-harness (Cursor and Antigravity start through a supervised watcher; Codex may
-stop waking after one run until the watcher restarts); remote control as a
-feature; a metrics dashboard; any efficiency comparison against another tool.
+omitted: Linux and pipx install; the published Homebrew tap (the formula is in
+the repository); native wake for every harness (Cursor and Antigravity start
+through a supervised watcher; Codex may stop waking after one run until the
+watcher restarts); remote control as a feature; a metrics dashboard; any
+efficiency comparison against another tool.
 
 ## 6. Five-line version for social
 
 > Atman coordinates the agents you already run.
 > Claude Code, Codex, Cursor and your own harness on one local board, each with its own identity and worktree.
-> Plan A then B. Accept A. B starts on the next seat with A's handoff, without your next command.
+> Plan A then B. Accept A on its exact commit. B starts on the next seat with A's handoff, with no further instruction from you.
 > Turns and cost per ticket, blank until a finished ticket reports them.
 > Open source, MIT, your own subscriptions: `git clone` and `./install.sh`.
 
@@ -199,7 +236,12 @@ feature; a metrics dashboard; any efficiency comparison against another tool.
   otherwise "task posted".
 - No "accepted" for a ticket that was only marked done.
 - No hosted site, no research program, no metrics dashboard, no remote
-  control, no Homebrew install command.
+  control. The Homebrew command appears only with its publication status
+  (T-898) stated next to it on launch day.
+- No "accepted" without an `atm accept` event bound to the full review SHA;
+  a prose note is `verification not recorded`.
+- No "no keystrokes" or "zero operator input" wording; the claim is "no
+  further instruction from you", with the watcher named.
 - No harness named as having done work unless its own turn is on screen.
 
 ## 8. Claims ledger
@@ -208,16 +250,18 @@ feature; a metrics dashboard; any efficiency comparison against another tool.
 | --- | --- |
 | H1 "Atman coordinates the agents you already run." | `README.md` H1; `landing/index.html` hero |
 | Pain line | T-940 storyline, beat 0 caption |
-| Harness list: Claude Code, Codex, Cursor, Antigravity, custom | `tickets.py` `BUILTIN_HARNESSES` includes `agy`; README "Connect a team" |
+| Harness list: Claude Code, Codex, Cursor, Antigravity, custom | `tickets.py` `BUILTIN_HARNESSES` includes `agy`; README "Connect a team"; `docs/connect-agy.md` |
+| Cursor and Antigravity start through a supervised watcher | README "Known issues"; `docs/wake-recipients.md` (Agy measured against `agy 1.2.2`: supervised, no live-session injection) |
 | Own identity, worktree, provider login | README "Integration" bullet; landing "Keep using your existing provider login" |
 | Exclusive lock on claims | README "The worker loop" |
 | Dependent ticket invisible until predecessor finished | README "Workflow dependency graph"; landing graph section |
 | Handoff notes in the successor prompt | storyline beat 4: `Handoff from dependencies (all notes):` from `tickets.py` `detail()` |
-| Verdict recorded with `atm note` against the pinned SHA | storyline section 2 "Acceptance path"; `work_view.py` verdict parsing |
+| Acceptance is `atm accept --sha <full 40> --notes`, bound to the submitted review head, author cannot accept own work | `tickets.py` `cmd_accept`; `src/ticket_board/review_verdict.py` `refuse()` (T-944); `work_view.py` label `Marked done; verification not recorded` for prose notes |
 | Supervised watcher, not native wake | README "Known issues"; storyline must-not-imply table |
 | Recovery on session end or usage limit | README "Product flow" bullet; landing "Durable handoffs" |
 | Turns and cost blank until reported; unknown is not zero | README "Efficiency" bullet; landing efficiency section |
-| Install commands, Python 3.9+, Git, one macOS machine, no Homebrew | README "First run", "Preview status" |
+| Two official install paths; Homebrew tap not yet published on 2026-09-15 | Operator decision 2026-09-15 (CEO message on T-969); README "Preview status" and "macOS (Homebrew)"; `packaging/homebrew/atman.rb` (T-865 done); T-898 open; `advitiyavashist/homebrew-tap` does not resolve on GitHub today |
+| Linux and pipx planned | Launch cut line 2026-09-15 (T-866) |
 | `atm quickstart` writes board plus three chained samples | README "First run"; `docs/first-session.md` |
 | `atm connect` tool-specific onboarding | README "Connect a team" |
 | Seat = intelligence + context + boundary + capability | README "What Atman manages" table |
@@ -229,3 +273,23 @@ feature; a metrics dashboard; any efficiency comparison against another tool.
 | One Python file, standard library, MIT, no hosted service | README "What works today"; landing "No hosted service, MIT licensed" |
 | Non-goals list | README subtitle; E-011 boundaries; storyline must-not-imply table |
 | Planned list | CEO launch cut line 2026-09-15; README "Known issues" |
+| Coordination state local, no keys; agents still call their providers | README "What works today"; landing "Keep using your existing provider login"; `docs/product/agent-onboarding-and-subscription-usage.md` (no credential printed, no private endpoint called) |
+| "No further instruction from you", watcher caveat | T-940 storyline beat 4 (`supervised watcher`, "nothing typed by the operator in any pane"); README "Known issues" |
+
+## 9. Capability-checklist rows this copy depends on (for T-975)
+
+Every path and harness named above needs a row in
+`docs/launch/capability-checklist.md`. Proposed rows, with the evidence that
+exists on 2026-09-15; T-975's owner decides the final status word.
+
+| Claim | Claimed in | Tested by | Status |
+| --- | --- | --- | --- |
+| Install: `git clone` + `./install.sh` | README, this draft | `tests/test_live_install.py`; T-972 proof run on throwaway boards from an isolated prefix (PR #171) | tested |
+| Install: Homebrew on macOS | README, this draft | `tests/test_t865_homebrew_release.py` (formula test-block operations proven against the built tarball, PR #120 @ffbaf46); live `brew install` not proven; tap not published (T-898) | partial: formula in repo, tap unpublished |
+| Install: Linux, pipx | this draft (planned list) | none | planned (T-866) |
+| Harness: Claude Code seat takes tickets | README, this draft | T-924 demo take (CEO pane); board history | tested |
+| Harness: Codex seat takes tickets | README, this draft | T-924 demo take (worker pane); README known issue: may stop waking after one run | partial: watcher restart caveat |
+| Harness: Cursor seat starts B through a supervised watcher | README, this draft, storyline beat 4 | T-924 demo take; `docs/wake-recipients.md` | partial: supervised, not native |
+| Harness: Antigravity seat takes tickets through a supervised watcher | this draft | `docs/connect-agy.md`; `docs/wake-recipients.md` (`agy 1.2.2`, `supervised (...)` receipt); done tickets owned by Agy seats on the board: T-754, T-775, T-797, T-801, T-806 | partial: supervised, not native |
+| Harness: custom via `atm join --harness custom --cmd` | README, this draft | `docs/byoa.md` | needs a test id from T-975 |
+| Acceptance bound to the full review SHA; author cannot accept own work | this draft | `tests/test_t944_accept_reject.py`, `tests/test_t889_work_view.py` | tested |
