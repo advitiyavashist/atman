@@ -99,11 +99,11 @@ tickets harness check qwen
 
 ```
 checking qwen: harness=custom cmd=/tmp/byoa2/echo-agent.sh {prompt_file} {cwd} {agent}
-  cmd:      /tmp/byoa2/echo-agent.sh /var/folders/.../tickets-prompt-qwen-ldpjocfa.txt /private/tmp/byoa2/repo qwen
+  cmd:      /tmp/byoa2/echo-agent.sh $TMPDIR/.../tickets-prompt-qwen-ldpjocfa.txt $TMPDIR/byoa2/repo qwen
   exit:     0
   latency:  0.8s
   replied:  no 'OK' in the first 400 chars
-  output:   prompt is        8 bytes; cwd /private/tmp/byoa2/repo; agent qwen
+  output:   prompt is        8 bytes; cwd $TMPDIR/byoa2/repo; agent qwen
 qwen: harness OK
 ```
 
@@ -122,7 +122,7 @@ show who is actually reachable:
 
 ```
 agent          watcher   harness   model    check        seen     worktree
-qwen           pid 64905 custom    -        ok 0.8s      0m ago   /private/tmp/byoa2/repo/.worktrees/qwen
+qwen           pid 64905 custom    -        ok 0.8s      0m ago   $TMPDIR/byoa2/repo/.worktrees/qwen
 ```
 
 Exit code is 0 on pass, 1 on fail, so `harness check` is usable in a script.

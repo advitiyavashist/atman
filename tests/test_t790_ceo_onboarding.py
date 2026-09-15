@@ -63,13 +63,9 @@ def make_repo(path):
 
 def test_runbook_pins_this_mac_and_forbids_shim():
     body = RUNBOOK.read_text(encoding="utf-8")
-    pinned = re.sub(
-        r"/(?:Users|home)/[A-Za-z0-9_.-]+",
-        r"/Users/<operator>",
-        body,
-    )
-    assert "/Users/<operator>/Downloads/atman/.worktrees/cursor-community-t790/tickets.py" in pinned
-    assert "/Users/<operator>/Downloads/steer/.tickets" in pinned
+    assert "TICKETS_PY=<repo>/tickets.py" in body
+    assert "LIVING_BOARD=<board>" in body
+    assert "<steer>" in body
     assert "python3" in body
     assert "stale shim" in body
     assert "~/.local/bin/tickets" in body

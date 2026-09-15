@@ -303,7 +303,7 @@ def _trusted_tmp_roots():
     board before any of this was written:
 
         cd <steer> && env -i PATH=... HOME=... \
-            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=/Users/<operator>/Downloads \
+            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=$HOME/Downloads \
             python3 tickets.py board --quiet
 
     printed the full live 200+-ticket board, exit 0, no refusal; the identical

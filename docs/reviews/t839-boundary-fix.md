@@ -36,7 +36,7 @@ no checkout `PYTHONPATH`.
 ```sh
 PYTHONPATH=src:. python3 -m pytest -q -p no:cacheprovider \
   tests/test_t839_boundary_adapters.py \
-  --basetemp=/private/tmp/atman-t839-boundary-tests
+  --basetemp=$TMPDIR/atman-t839-boundary-tests
 ```
 
 **5 passed.** Root-generated remote wrappers and the wheel's shared renderer
@@ -59,11 +59,11 @@ PYTHONPATH=src:. python3 -m pytest -q -p no:cacheprovider \
   tests/test_t839_boundary_adapters.py tests/test_t836_packaged_checkin.py \
   tests/test_t804_identity_isolation.py \
   -k 'boundary or cli_imports or tickets_help or cli.py' \
-  --basetemp=/private/tmp/atman-t839-boundary-final
+  --basetemp=$TMPDIR/atman-t839-boundary-final
 
 PYTHONPATH=src:. python3 -m pytest -q -p no:cacheprovider \
   tests/test_t808_persist_delivery.py::test_live_persist_watch_survives_queued_offline_poke \
-  --basetemp=/private/tmp/atman-t839-live-poke-host
+  --basetemp=$TMPDIR/atman-t839-live-poke-host
 ```
 
 This evidence covers generated adapters and installed-wheel normal commands.

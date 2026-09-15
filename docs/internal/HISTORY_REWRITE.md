@@ -84,7 +84,7 @@ per commit that still contains it).
 | Absolute `/Users/<handle>/…` | 3535 | 513 | handles: operator home **3080**, test placeholder `someone` **455** |
 | Deleted internal docs still in history | (file present) | see below | PR #16 removed them from the tip only |
 | Steer / live-board / pin-table ops | 5257 | 467 | includes deleted docs **and** leftover tip files since scrubbed here |
-| Seat / operator-path mentions | 3145 | 433 | mostly the same `/Users/<operator>` files |
+| Seat / operator-path mentions | 3145 | 433 | mostly the same `$HOME` files |
 | `.tickets` / `tickets.json` string | 8355 | 523 | **mostly product code and docs**, not a committed live board dump |
 
 Deleted-from-tip files that **remain in history** (commit-count where the
@@ -100,7 +100,7 @@ path still existed):
 | `docs/CROSS_REPO_PINS.md` | 69 |
 | `docs/brand/ACCEPT.md` | 20 |
 
-Historical files that contained a real `/Users/<operator>/` home path
+Historical files that contained a real `$HOME/` home path
 (not the `/Users/someone` test fixture):
 
 - `docs/HANDOFF.md`
@@ -125,11 +125,11 @@ left, a few internals on `origin/main` `d11236f`:
 | Path | Issue | Action in this change |
 |---|---|---|
 | `docs/handoffs/reports/e010-artifact-map.md` | live review-queue dump, operator `/Users/…` paths, steer pins | deleted (same class as `CROSS_REPO_PINS.md`) |
-| `docs/turns-scorecard-organic.md` | live board path `/Users/<operator>/Downloads/steer/.tickets` | path redacted |
+| `docs/turns-scorecard-organic.md` | live board path `$HOME/Downloads/steer/.tickets` | path redacted |
 | `tests/fixtures/t349_adversarial_trajectories.jsonl` | `pytest-of-<operator>` in captured tmp paths | renamed to `pytest-of-operator` |
 
 Remaining `/Users/` strings on the tip are **intentional placeholders**
-(` /Users/<operator> `, `/Users/someone` in an error-redaction test, and
+(` $HOME `, `/Users/someone` in an error-redaction test, and
 the T-210 guard in `tests/test_contracts.py`).
 
 ## 2. Replacement snapshot
