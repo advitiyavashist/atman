@@ -1901,7 +1901,7 @@ def _held_claimed(board, owner, except_id=None):
 
 def _already_hold_msg(held):
     ids = ", ".join(t["id"] for t in held)
-    return ("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
+    return ("you already hold %s -- finish it (atm review/block/reopen) before claiming "
             "more, or pass --another if you really want to work two in parallel." % ids)
 
 
@@ -3352,8 +3352,8 @@ def cmd_next(a, board):
                 print("")
                 print(warn)
             print("")
-            print("Post progress with `tickets update %s \"...\"` at least every %d min; "
-                  "finish with `tickets done %s --notes \"branch@sha, paths, decisions\"`."
+            print("Post progress with `atm update %s \"...\"` at least every %d min; "
+                  "finish with `atm review %s --notes \"exact SHA, paths, decisions\"`."
                   % (got["id"], UPDATE_EVERY_MIN, got["id"]))
             return
     open_blocked = [t for t in tickets if t["status"] == "open"]
@@ -6838,7 +6838,8 @@ def cmd_master(a, board):
     queue = [t for t in tickets if t["status"] == "review"]
     if queue:
         print("")
-        print("REVIEW QUEUE (%d) -- master: review, merge, then `tickets done <id> --notes \"merged as <sha>\"`:" % len(queue))
+        print("REVIEW QUEUE (%d) -- coordinator close is three distinct steps: "
+              "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
                 t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
@@ -9924,8 +9925,9 @@ def cmd_join(a, board):
         print("Full instructions: atm connect")
     else:
         print("Loop:  atm master  ->  atm next  ->  work + commit  ->  "
-              "atm update <id> \"...\" (every %d min)  ->  atm done <id> --notes \"...\"  "
-              "->  merge  ->  atm next" % UPDATE_EVERY_MIN)
+              "atm update <id> \"...\" (every %d min)  ->  atm review <id> --notes \"<exact artifact>\"  "
+              "->  atm next" % UPDATE_EVERY_MIN)
+        print("Workers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.")
         print("Full instructions: atm connect --worker")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
@@ -16165,19 +16167,19 @@ QUICKSTART_MARKER = "quickstart.json"
 QUICKSTART_TICKETS = [
     {"key": "schema", "title": "Sample: design the data model",
      "role": "backend", "priority": 1,
-     "body": "A sample ticket created by `tickets quickstart`.\n\n"
-             "It has no dependencies, so it is the one `tickets next` hands out first.\n"
+     "body": "A sample ticket created by `atm quickstart`.\n\n"
+             "It has no dependencies, so it is the one `atm next` hands out first.\n"
              "Work it like a real ticket: claim it, post an update, then send it to review.\n"
-             "Delete the samples whenever you like: tickets quickstart --remove"},
+             "Delete the samples whenever you like: atm quickstart --remove"},
     {"key": "api", "title": "Sample: build the API on top of the model",
      "role": "backend", "priority": 2, "deps": ["schema"],
      "body": "A sample ticket that DEPENDS on the first one.\n\n"
-             "`tickets next` will not offer it until the schema ticket is done -- that is\n"
+             "`atm next` will not offer it until the schema ticket is done -- that is\n"
              "the dependency graph doing its job, not the board being empty."},
     {"key": "ui", "title": "Sample: put a screen on the API",
      "role": "console", "priority": 2, "deps": ["api"],
      "body": "The third sample, two hops down the chain.\n\n"
-             "Run `tickets graph` to see all three and what is blocking what."},
+             "Run `atm graph` to see all three and what is blocking what."},
 ]
 
 
@@ -16279,8 +16281,8 @@ def cmd_quickstart(a, board):
     else:
         epic = _alloc(epics_dir(board), "E", 3, {
             "title": "Sample epic: a first slice end to end",
-            "body": "Created by `tickets quickstart` so the board is not empty on day one.\n"
-                    "Remove the samples with `tickets quickstart --remove`.",
+            "body": "Created by `atm quickstart` so the board is not empty on day one.\n"
+                    "Remove the samples with `atm quickstart --remove`.",
             "status": "open", "created": now(), "updated": now(),
         })
         epic_id = epic["id"]
@@ -16321,13 +16323,13 @@ def cmd_quickstart(a, board):
                 cmd_join(join_args, board)
         except SystemExit:
             print("agent: could not register %r automatically" % agent)
-            print("       run: tickets join <name> --roles backend")
+            print("       run: atm join <name> --roles backend")
         else:
             joined = [ln for ln in buf.getvalue().splitlines() if ln.startswith("joined as ")]
             print(joined[0] if joined else "agent: %s" % agent)
     else:
         agent = ""
-        print("agent: none registered (set TICKET_AGENT, or: tickets join <name> --roles backend)")
+        print("agent: none registered (set TICKET_AGENT, or: atm join <name> --roles backend)")
 
     # 4. optionally put a real worker on it
     if a.with_agent:
@@ -16341,25 +16343,26 @@ def _quickstart_spawn(a, board, name):
     if not harness:
         print("")
         print("--with-agent: no agent harness found on PATH (looked for claude, codex, cursor-agent).")
-        print("  Install one, or start a worker by hand:  TICKET_AGENT=%s tickets next" % name)
+        print("  Install one, or start a worker by hand:  TICKET_AGENT=%s atm next" % name)
         return
     print("")
     print("worker: %s will run as %s" % (harness, name))
-    print("  tickets spawn %s --tool %s" % (name, harness))
+    print("  atm spawn %s --tool %s" % (name, harness))
     print("  (not launched for you -- quickstart never starts a background process without asking;")
-    print("   run the line above, or: TICKET_AGENT=%s %s \"$(tickets prompt)\")" % (name, " ".join(argv)))
+    print("   run the line above, or: TICKET_AGENT=%s %s \"$(atm prompt)\")" % (name, " ".join(argv)))
 
 
 def _quickstart_next_steps(board, agent):
     ident = ("TICKET_AGENT=%s " % agent) if agent else ""
     print("")
     print("The three commands that matter:")
-    print("  %stickets next                      claim the next ready ticket" % ident)
-    print("  %stickets update <id> \"...\"         say where you are, at least every 45 min" % ident)
-    print("  %stickets review <id> --notes \"...\" hand it back with evidence" % ident)
+    print("  %satm next                      claim the next ready ticket" % ident)
+    print("  %satm update <id> \"...\"         say where you are, at least every 45 min" % ident)
+    print("  %satm review <id> --notes \"...\" hand it back with an exact artifact" % ident)
+    print("  (`tickets` is a compatibility alias for the same CLI.)")
     print("")
-    print("See it: tickets ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
-    print("Learn it: tickets guide   |   docs/first-session.md   |   README.md")
+    print("See it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
+    print("Learn it: atm guide   |   docs/first-session.md   |   README.md")
 
 
 def cmd_guide(a, board):
