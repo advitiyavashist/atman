@@ -118,6 +118,23 @@ missing / timeout without a transport error). Never classify auth as quota.
   enrolled context, never from an arbitrary caller. A sandbox caller cannot
   unpause a persistent host `network` seat or steal its alert.
 - Matching-context probes replace the stored blob.
+- Exception (T-991): an authoritative `unavailable` re-probe for the **same
+  fenced seat** may replace stored lineage when only the resolved `binary`
+  path and the `runner_id` derived from it have drifted (the enrolled CLI
+  disappeared; `_which_binary` falls back to argv0). Cross-seat, sandbox,
+  repo-root, different `argv0`, and Ready-with-new-binary probes still
+  cannot overwrite.
+
+## Supported install (T-991 / T-995)
+
+The macOS developer preview supports the **source-prefix installer only**
+(`./install.sh` or `./install.sh --prefix`). That path links both `atm`
+(primary) and `tickets` (compatibility alias) to the same checkout
+`tickets.py`. `harness auth` and this reconnect-after-death transition live
+on that script. Wheel, pipx, and Homebrew stay **planned**: the packaged
+`ticket_board.cli` has no harness/auth surface and is not a supported
+entry point for this path. Proof is that both installed aliases execute
+the same source script and both clear Ready → unavailable.
 - Matching authoritative `quota|login_required|expired|…` → `ready` must
   clear `pause.paused` and `alert_id` so a recovered persistent seat resumes
   once.

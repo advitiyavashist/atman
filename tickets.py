@@ -13661,6 +13661,34 @@ def _detect_runner_kind():
     return "host"
 
 
+def _local_host_ctx():
+    """Hostname/user/kind for Team reconnect gating. No git, no secrets."""
+    import getpass
+    host = os.uname().nodename if hasattr(os, "uname") else ""
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "operator"
+    return {
+        "hostname": host,
+        "username": user,
+        "runner_kind": _detect_runner_kind(),
+    }
+
+
+def _agent_auth_surface(board, rec, name, harness="", local_ctx=None):
+    from auth_v2_contract import auth_readiness_surface
+    rec = rec or {}
+    return auth_readiness_surface(
+        rec.get("auth_check") or {},
+        enrolled_ctx=rec.get("runner_context") or {},
+        local_ctx=local_ctx if local_ctx is not None else _local_host_ctx(),
+        resume_at=rec.get("auth_resume_at") or "",
+        harness=harness,
+        agent_id=name,
+    )
+
+
 def _env_fingerprint(env=None):
     env = env if env is not None else os.environ
     names = set(_AUTH_ENV_NAMES)
@@ -14621,6 +14649,11 @@ body[data-work-view=columns] #graphLede{display:none}
 .av{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--chip);color:var(--fg);border:1px solid var(--line);font-size:9px;font-weight:700;flex:none}
 .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
 .agent{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.auth-box{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--surface)}
+.auth-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:8px 0 0;font-size:12px}
+.auth-kv dt{color:var(--mute)}
+.auth-kv dd{margin:0}
+.auth-kv code.block,.auth-box code.block{display:block;margin-top:4px;font-size:11px;overflow-wrap:anywhere;background:var(--card);padding:6px 8px;border-radius:6px}
 .agent.head{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .agent .st{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px;color:var(--mute)}
@@ -14848,6 +14881,7 @@ body[data-work-view=columns] #graphLede{display:none}
     <div>
       <h2 class="seats-title">Team</h2>
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
+      <p class="seats-lede">Auth is the enrolled runner, not this tab. Recheck never asks for provider secrets. Reachable is not Ready.</p>
       <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">atm msg --to</span>.</p>
     </div>
   </div>
@@ -14900,6 +14934,53 @@ const fmtWhen=iso=>{const a=fmtLocal(iso);if(!iso||a==='-'||a===String(iso))retu
 function initials(name){const s=String(name||'?').split(/[-_ ]/).filter(Boolean);
   return ((s[0]||'?')[0]+(s.length>1?s[1][0]:(s[0]||'?')[1]||'')).toUpperCase()}
 function who(name){if(!name)return '';return '<span class="who"><span class="av">'+esc(initials(name))+'</span>'+esc(name)+'</span>'}
+function authReadiness(a){
+  const s=a.auth_surface||{};
+  const rec=s.recovery||{};
+  const q=s.queue||{};
+  const ready=!!s.ready;
+  const paused=!!s.paused;
+  const st=s.state||'';
+  const label=s.label||'Not checked';
+  const cls=ready?'ok':(paused?'pending':(st==='quota'?'limit':(st?'limit':'mute')));
+  const offline=a.state==='DOWN'||a.reachable===false;
+  const offlineTag=offline?'<span class="tag mute" title="reachability is not auth">offline</span>':'';
+  const pausedTag=paused?'<span class="tag pending" data-testid="auth-paused-'+esc(a.name)+'">paused-auth</span>':'';
+  const quotaTag=st==='quota'?'<span class="tag limit" title="quota is not login">Usage quota</span>':'';
+  const action=rec.execute_here
+    ?'<button type="button" class="intervene" data-auth-reconnect="'+esc(a.name)+'" data-testid="auth-reconnect-'+esc(a.name)+'">Recheck auth</button>'
+    :'';
+  const cmd=rec.cmd?'<code class="block" data-testid="auth-recovery-'+esc(a.name)+'">'+esc(rec.cmd)+'</code>':'';
+  const loginNote=rec.kind==='login'?'<p class="mute">Login stays on the provider CLI. This page has no secret fields.</p>':'';
+  const hostNote=rec.on_enrolled_host?'':'<p class="mute">This dashboard is not the enrolled runner. Copy the command onto that host.</p>';
+  return '<div class="auth-box" data-testid="auth-'+esc(a.name)+'" data-auth-ready="'+(ready?'true':'false')+'" data-auth-state="'+esc(st)+'">'+
+    '<div class="head"><span class="tag '+cls+'">'+esc(label)+'</span>'+pausedTag+quotaTag+offlineTag+'</div>'+
+    '<dl class="auth-kv">'+
+    '<dt>Provider</dt><dd data-testid="auth-provider-'+esc(a.name)+'">'+esc(s.provider||a.harness||'—')+(s.profile_kind?' · '+esc(s.profile_kind):'')+'</dd>'+
+    '<dt>Runner</dt><dd data-testid="auth-context-'+esc(a.name)+'">'+esc(s.context||'enrolled runner unknown')+'</dd>'+
+    '<dt>Identity</dt><dd data-testid="auth-identity-'+esc(a.name)+'">'+esc(s.identity_label||'—')+'</dd>'+
+    '<dt>Checked</dt><dd data-testid="auth-checked-'+esc(a.name)+'">'+(s.checked_at?fmtWhen(s.checked_at):'never')+'</dd>'+
+    '<dt>Recovery</dt><dd>'+esc(rec.copy||'')+cmd+loginNote+hostNote+action+'</dd>'+
+    (q.copy?'<dt>Queue</dt><dd data-testid="auth-queue-'+esc(a.name)+'">'+esc(q.copy)+'</dd>':'')+
+    '</dl></div>';
+}
+async function reconnectAuth(name){
+  try{
+    const r=await fetch('/auth-reconnect',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({agent:name})});
+    const out=await r.json();
+    const sel=(window.CSS&&CSS.escape)?CSS.escape(name):name;
+    const box=document.querySelector('[data-testid="auth-'+sel+'"]');
+    if(out&&out.ok===false){
+      const note=out.instructions||out.error||'reconnect refused';
+      if(box){
+        const rec=box.querySelector('[data-testid="auth-recovery-'+sel+'"]');
+        if(rec)rec.textContent=note;
+      }
+    }
+    load();
+  }catch(e){}
+}
 function mentionText(text){
   return esc(text).split(/(```[\s\S]*?```|`[^`]*`)/g).map((part,i)=>i%2
     ?part
@@ -15092,10 +15173,12 @@ try{const wv=localStorage.getItem('tickets-ui-work-view');if(wv)setWorkView(wv)}
 (function applyWorkHash(){
   const h=(location.hash||'').replace('#','');
   if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
+  if(h==='agents'||h==='team')setTab('agents');
 })();
 window.addEventListener('hashchange',()=>{
   const h=(location.hash||'').replace('#','');
   if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
+  if(h==='agents'||h==='team')setTab('agents');
 });
 let AGENTS=[];
 let THREAD_SEAT='';
@@ -15171,6 +15254,8 @@ function loadAgentPickers(){
   else{to.disabled=false;if(AGENTS.includes(prevTo))to.value=prevTo}
 }
 document.addEventListener('click',e=>{
+  const rec=e.target.closest('[data-auth-reconnect]');
+  if(rec){e.preventDefault();reconnectAuth(rec.dataset.authReconnect||'');return}
   const btn=e.target.closest('[data-seat-chat]');
   if(!btn||btn.closest('#composer'))return;
   e.preventDefault();
@@ -15322,20 +15407,14 @@ async function load(manual){
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
-    const auth=a.auth==='login_required'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Login required · '+esc(a.auth_login_cmd||'agent login')+'</span>':'';
-    const expired=a.auth==='expired'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Expired</span>':'';
-    const network=a.auth==='network'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Network</span>':'';
-    const unavail=a.auth==='unavailable'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Unavailable</span>':'';
-    const unsup=a.auth==='unsupported'?'<span class="tag mute" title="'+esc(a.auth_detail||'')+'">Unsupported</span>':'';
-    const pausedAuth=a.auth_paused?'<span class="tag pending" title="paused-auth">paused-auth</span>':'';
-    const quota=a.auth==='quota'?'<span class="tag limit" title="'+esc(a.auth_detail||'')+'">Usage quota</span>':'';
     const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
     const onlineDot=(a.reachable!==false && a.adapter_online)?' ●':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+auth+expired+network+unavail+unsup+pausedAuth+quota+lim+wake+'</div>'+
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+lim+wake+'</div>'+
       '<div class="mute mono">'+esc(a.agent_id||a.name)+' · '+esc(a.adapter_provider||a.harness||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.adapter_delivery||'offline')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
+      authReadiness(a)+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
@@ -15837,6 +15916,7 @@ def _board_snapshot_body(board, messages=40):
     wf = load_workforce(board)
     roles = load_roles(board)
     out_agents = []
+    local_host = _local_host_ctx()
     for r in rows:
         rec = agents.get(r["agent"], {})
         agent_wf = wf.get(r["agent"], {}) or {}
@@ -15926,6 +16006,8 @@ def _board_snapshot_body(board, messages=40):
                            "auth_profile_kind": (rec.get("auth_check") or {}).get("profile_kind", ""),
                            "auth_authoritative": (rec.get("auth_check") or {}).get("authoritative"),
                            "auth_paused": ((rec.get("auth_check") or {}).get("pause") or {}).get("paused"),
+                           "auth_surface": _agent_auth_surface(
+                               board, rec, r["agent"], harness_name, local_host),
                            "limit": lim,
                            "limit_until": (lim or {}).get("until", "") if lim else ""})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
@@ -16032,11 +16114,97 @@ def _board_snapshot_body(board, messages=40):
 
 _UI_MSG_MAX_BYTES = 65536
 _UI_MSG_KINDS = frozenset(("message", "task"))
+_UI_SECRET_KEY_MARKERS = (
+    "password", "passwd", "secret", "token", "api_key", "apikey",
+    "authorization", "cookie", "credential", "private_key",
+)
 
 
 def _ui_msg_is_json(headers):
     raw = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
     return raw == "application/json"
+
+
+def _ui_payload_has_secrets(payload):
+    if not isinstance(payload, dict):
+        return False
+    for key, value in payload.items():
+        kl = str(key).lower().replace("-", "_")
+        if any(marker in kl for marker in _UI_SECRET_KEY_MARKERS):
+            return True
+        if isinstance(value, dict) and _ui_payload_has_secrets(value):
+            return True
+    return False
+
+
+def _ui_read_json_body(handler):
+    try:
+        length = int(handler.headers.get("Content-Length") or 0)
+    except ValueError:
+        length = -1
+    if length < 0 or length > _UI_MSG_MAX_BYTES:
+        raise ValueError("body exceeds %d bytes" % _UI_MSG_MAX_BYTES)
+    raw = handler.rfile.read(length) if length else b"{}"
+    if not _ui_msg_is_json(handler.headers):
+        raise ValueError("Content-Type must be application/json")
+    if not _ui_msg_origin_ok(handler.headers):
+        raise ValueError("origin mismatch")
+    payload = json.loads(raw or b"{}")
+    if not isinstance(payload, dict):
+        raise ValueError("JSON object required")
+    if _ui_payload_has_secrets(payload):
+        raise ValueError("provider secrets are not accepted in the Atman UI")
+    return payload
+
+
+def _ui_auth_reconnect(board, payload):
+    """Zero-model recheck on the enrolled host, or copyable local instructions.
+
+    Never runs provider login. Never starts a model. T-830: login stays local/host.
+    """
+    name = str((payload or {}).get("agent") or (payload or {}).get("name") or "").strip()
+    if (payload or {}).get("login"):
+        return 400, {
+            "ok": False,
+            "executed": False,
+            "ran": False,
+            "error": "login is not a dashboard action; run the copyable provider CLI on the enrolled host",
+        }
+    extra = set((payload or {}).keys()) - {"agent", "name"}
+    if extra:
+        return 400, {
+            "ok": False,
+            "executed": False,
+            "ran": False,
+            "error": "auth-reconnect accepts only agent",
+        }
+    if not name or not _agent_rec(board, name):
+        return 400, {"ok": False, "executed": False, "ran": False, "error": "agent is required and must be registered"}
+    rec = _agent_rec(board, name) or {}
+    harness = (load_workforce(board).get(name) or {}).get("harness") or ""
+    surface = _agent_auth_surface(board, rec, name, harness)
+    recovery = surface.get("recovery") or {}
+    instructions = ("%s\n%s" % (recovery.get("copy") or "", recovery.get("cmd") or "")).strip()
+    if not recovery.get("execute_here"):
+        return 200, {
+            "ok": False,
+            "executed": False,
+            "ran": False,
+            "error": "not the enrolled runner host",
+            "instructions": instructions or recovery.get("copy") or "",
+            "auth_surface": surface,
+        }
+    stored = _refresh_auth_check(board, name, harness)
+    rec = _agent_rec(board, name) or {}
+    surface = _agent_auth_surface(board, rec, name, harness)
+    return 200, {
+        "ok": True,
+        "executed": True,
+        "ran": False,
+        "auth_surface": surface,
+        "state": (stored or {}).get("state") or surface.get("state"),
+        "instructions": (surface.get("recovery") or {}).get("cmd") or "",
+    }
 
 
 def _ui_msg_origin_ok(headers):
@@ -16106,23 +16274,25 @@ def cmd_ui(a, board):
             self.wfile.write(body)
 
         def do_POST(self):
+            if self.path.startswith("/auth-reconnect"):
+                try:
+                    payload = _ui_read_json_body(self)
+                    status, out = _ui_auth_reconnect(board, payload)
+                except Exception as e:  # noqa: BLE001 - always answer, never hang
+                    status, out = 400, {"ok": False, "executed": False, "ran": False, "error": str(e)}
+                body = json.dumps(out).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if not self.path.startswith("/msg"):
                 self.send_response(404)
                 self.end_headers()
                 return
             try:
-                try:
-                    length = int(self.headers.get("Content-Length") or 0)
-                except ValueError:
-                    length = -1
-                if length < 0 or length > _UI_MSG_MAX_BYTES:
-                    raise ValueError("body exceeds %d bytes" % _UI_MSG_MAX_BYTES)
-                raw = self.rfile.read(length) if length else b"{}"
-                if not _ui_msg_is_json(self.headers):
-                    raise ValueError("Content-Type must be application/json")
-                if not _ui_msg_origin_ok(self.headers):
-                    raise ValueError("origin mismatch")
-                payload = json.loads(raw or b"{}")
+                payload = _ui_read_json_body(self)
                 sender = str(payload.get("from") or "").strip()
                 text = str(payload.get("text") or "").strip()
                 to = str(payload.get("to") or "").strip()
