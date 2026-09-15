@@ -171,13 +171,20 @@ def _supervisor_launch_env(board, owner):
     env = _clean_git_env()
     for var in PROVIDER_SESSION_ID_VARS:
         env.pop(var, None)
+    env.pop("TICKET_SEAT", None)
+    env.pop("TICKET_AGENT", None)
     sid = "launch:%s:%s" % (owner, hashlib.sha256(os.urandom(16)).hexdigest()[:16])
     env["TICKET_AGENT"] = owner
     env["TICKET_SEAT"] = owner
+    env["TICKETS_WATCH_PINNED"] = owner
     env["TICKETS_DIR"] = os.path.abspath(board)
     env["TICKETS_PY"] = os.path.realpath(__file__)
     env["TICKET_SESSION_ID"] = sid
-    env["PATH"] = os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + env.get("PATH", "")
+    # Caller PATH stays first so a re-exec or child probe sees the same
+    # provider binaries the operator (or a test stub) selected. Fallback
+    # dirs are last-resort only (T-999 / T-985 #163).
+    extra = os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin"
+    env["PATH"] = (env.get("PATH") or "") + ":" + extra
     prev = {var: os.environ.get(var) for var in SESSION_ID_VARS}
     for var in SESSION_ID_VARS:
         os.environ.pop(var, None)
@@ -12399,6 +12406,25 @@ watch_idle_reexec._warned = set()
 # --- end T-427 ---
 
 
+def _reexec_watch_if_unpinned(board, owner, dry_run=False):
+    """Replace this watch process when inherited identity is still present.
+
+    Spawn already Popen's with `_supervisor_launch_env`. Direct `tickets watch`
+    from a leadership shell does not: the process keeps TICKET_SEAT of the
+    caller (CEO impersonation 2026-09-14). One execve pins the seat.
+
+    Dry-run starts no model turn, so skip the auth-bearing re-exec (T-999).
+    """
+    if dry_run:
+        return
+    if (os.environ.get("TICKETS_WATCH_PINNED") or "").strip() == owner:
+        return
+    if os.environ.get("TICKETS_NO_WATCH_REEXEC"):
+        return
+    env = _supervisor_launch_env(board, owner)
+    os.execve(sys.executable, [sys.executable] + sys.argv, env)
+
+
 def cmd_watch(a, board):
     """Poll the board; when there is work for the agent, launch a worker command.
 
@@ -12414,6 +12440,11 @@ def cmd_watch(a, board):
     owner = whoami(a.agent)
     if owner.startswith("agent-"):
         sys.exit("set --agent or TICKET_AGENT to a real name")
+    dry_run = bool(getattr(a, "dry_run", False))
+    _reexec_watch_if_unpinned(board, owner, dry_run=dry_run)
+    if not dry_run:
+        print("seat=%s (TICKET_SEAT pinned; inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped)"
+              % owner)
     _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     root = os.path.dirname(board)
     cwd = os.path.abspath(a.cwd or root)
@@ -12591,7 +12622,8 @@ def cmd_watch(a, board):
                     print("%s dispatch %s (attempts=%s; queued trigger unchanged)" % (
                         now(), retry_state.get("state"), retry_state.get("attempts")))
             elif actionable(p):
-                if _auth_gates_spawn(retry_harness) and not getattr(a, "exec", None):
+                if (_auth_gates_spawn(retry_harness) and not getattr(a, "exec", None)
+                        and not getattr(a, "dry_run", False)):
                     auth = _refresh_auth_check(board, owner)
                     if (auth.get("state") != "ready"
                             and ((auth.get("pause") or {}).get("retry_model") is False)):
@@ -13592,9 +13624,9 @@ def cmd_spawn(a, board):
         sys.exit("failure: spawn did not install a live watcher for %s "
                  "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; log %s" % (
+    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; seat=%s pinned; log %s" % (
         owner, pid, harness, model,
-        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, log_path))
+        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, owner, log_path))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
