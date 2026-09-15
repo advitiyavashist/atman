@@ -176,11 +176,11 @@ def _shadow_board_refusal(candidate, configured):
         "real data (messages, agent registrations) on a board nothing else "
         "reads, the T-959 shape. Pick one:\n"
         "  * use the shared board:      export TICKETS_DIR=%s\n"
-        "  * inspect what is here:      tickets doctor\n"
+        "  * inspect what is here:      atm doctor\n"
         "  * keep this repo's own board on purpose:\n"
-        "                                tickets board-mark-primary\n"
+        "                                atm board-mark-primary\n"
         "  * archive this board aside (never deletes):\n"
-        "                                tickets board-archive-shadow %s --yes\n"
+        "                                atm board-archive-shadow %s --yes\n"
         % (real_candidate, configured, configured, real_candidate)
     )
 
@@ -200,7 +200,7 @@ def _apply_shared_board_config(candidate):
         return candidate
     if not _board_has_content(candidate):
         sys.stderr.write(
-            "tickets: cwd .tickets is empty -- using this repo's configured "
+            "atm: cwd .tickets is empty -- using this repo's configured "
             "shared board %s\n" % configured
         )
         return configured
@@ -1992,6 +1992,62 @@ def _next_refusal_parts(ready_all, roles, owner, steal_id, board):
     return role_miss, reserved_miss
 
 
+def _work_view():
+    """T-889 Work view (packaged with sounding). Never import as a top-level
+    module: work_view.py uses relative ``.sounding``, which crashes
+    ``python src/ticket_board/cli.py next`` on every reopened ticket."""
+    try:
+        from ticket_board import work_view as m
+        return m
+    except ImportError:
+        src = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import work_view as m
+        return m
+
+
+def _task_life_actionable(board, message):
+    """False when a ticket-scoped task is previous-life or same-second unknown."""
+    tid = (message.get("re") or "").strip()
+    if not tid:
+        return True
+    kind = (message.get("kind") or "").strip()
+    text = str(message.get("text") or "").strip().lower()
+    is_task = kind == "task" or message.get("task") or text.startswith(
+        ("stuck", "blocked", "task:", "task "))
+    if not is_task:
+        return True
+    try:
+        t = load(board, tid)
+    except Exception:
+        return True
+    if not t:
+        return True
+    wv = _work_view()
+    return wv._life_of(t, message) == wv.LIFE_CURRENT
+
+
+def _reopen_blocks_automation(board, t, messages=None):
+    """True when the only ticket-scoped tasks after reopen are unknown-ordered."""
+    if not ((t.get("reopened_at") or "").strip() or t.get("reopened_seen")):
+        return False
+    wv = _work_view()
+    lives = []
+    for m in (messages if messages is not None else load_messages(board)):
+        if (m.get("re") or "").strip() != t["id"]:
+            continue
+        kind = (m.get("kind") or "").strip()
+        text = str(m.get("text") or "").strip().lower()
+        if kind != "task" and not m.get("task") and not text.startswith(
+                ("stuck", "blocked", "task:", "task ")):
+            continue
+        lives.append(wv._life_of(t, m))
+    if not lives:
+        return False
+    return wv.LIFE_CURRENT not in lives and wv.LIFE_UNKNOWN in lives
+
+
 def cmd_next(a, board):
     owner = whoami(a.owner)
     roles = roles_for(board, owner, a.role)
@@ -2011,6 +2067,7 @@ def cmd_next(a, board):
     ready = [t for t in _filter_ready(ready_all, roles) if can_do(board, owner, t)]
     ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
     ready = [t for t in ready if not _ticket_on_hold(t)]
+    ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -3791,7 +3848,7 @@ def cmd_doctor(a):
             shown = s["recipients"][:20]
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
-        print("    fix: tickets board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+        print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
 
 
 def cmd_board_mark_primary(a):
@@ -3805,19 +3862,30 @@ def cmd_board_mark_primary(a):
     print("marked %s primary -- it now wins over any configured shared board for this repo" % board)
 
 
+def _board_in_effect_for_archive():
+    """Live board for archive-shadow, without refusing an unmarked shadow.
+
+    Same order as board_dir: TICKETS_DIR, then a local .primary, then the
+    configured shared board, then cwd .tickets.
+    """
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    candidate = _board_dir_uncached()
+    if _is_marked_primary(candidate):
+        return candidate
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    if configured:
+        return configured
+    return candidate
+
+
 def cmd_board_archive_shadow(a):
     path = os.path.abspath(os.path.expanduser(a.path))
     if not os.path.isdir(path):
         sys.exit("no such directory: %s" % path)
-    env = os.environ.get("TICKETS_DIR")
-    root = _repo_root()
-    configured = _configured_shared_board(root) if root else None
-    if env:
-        effective = os.path.abspath(os.path.expanduser(env))
-    elif configured:
-        effective = configured
-    else:
-        effective = _board_dir_uncached()
+    effective = _board_in_effect_for_archive()
     if os.path.realpath(path) == os.path.realpath(effective):
         sys.exit(
             "REFUSING: %s IS the board currently in effect -- archiving it would "
@@ -3835,6 +3903,7 @@ def cmd_board_archive_shadow(a):
         )
     os.rename(path, dest)
     print("archived shadow board %s -> %s (nothing deleted)" % (path, dest))
+
 
 
 def cmd_context(a, board):

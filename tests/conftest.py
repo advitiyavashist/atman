@@ -14,7 +14,11 @@ if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
 from tmp_path_reaper import reap_green_basetemp  # noqa: E402
-from ui_server_harness import reap_stale_ui_servers, stop_all_ui_servers  # noqa: E402
+from ui_server_harness import (  # noqa: E402
+    leftover_suite_ui_children,
+    reap_stale_ui_servers,
+    stop_all_ui_servers,
+)
 from watch_reaper import SESSION_ROOTS, reap_watchers_under  # noqa: E402
 
 
@@ -25,6 +29,10 @@ def pytest_sessionstart(session):
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
     stop_all_ui_servers()
+    leftover = leftover_suite_ui_children()
+    if leftover:
+        session.exitstatus = 1
+        print("T-960: suite left ui children alive: %s" % leftover)
     reap_green_basetemp(session, exitstatus)
 
 

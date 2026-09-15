@@ -21,13 +21,15 @@ folders that are not the project. `atm next` / `show` / `done` do.
 
 Agent identity for a single command comes from $TICKET_AGENT (set it per tool:
 claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
-launched. Session-scoped surfaces (`board`'s "you:" line, the stop-hook,
-`msg`/`inbox` with no --owner) resolve through session_seat(): an explicit
---owner, then a supervisor TICKET_SEAT (authoritative for launched workers),
-then this session's OWN `atm join` record, then ambient TICKET_AGENT. A
-join is only "this session's own" when the harness gave us a session id to key
-it by; without one the record is a machine-wide legacy file that any agent may
-have written last, so an explicit TICKET_AGENT beats it. Default roles for
+launched. `note` is a whoami() surface: a join/spawn must not rebind note
+attribution (T-956/T-958 identity-precedence). Session-scoped surfaces
+(`board`'s "you:" line, the stop-hook, `msg`/`inbox` with no --owner)
+resolve through session_seat(): an explicit --owner, then a supervisor
+TICKET_SEAT (authoritative for launched workers), then this session's OWN
+`atm join` record, then ambient TICKET_AGENT. A join is only "this
+session's own" when the harness gave us a session id to key it by; without
+one the record is a machine-wide legacy file that any agent may have
+written last, so an explicit TICKET_AGENT beats it. Default roles for
 those names can be overridden by .tickets/roles.json.
 """
 
@@ -159,7 +161,7 @@ def _configured_shared_board(repo_root):
 def _is_marked_primary(path):
     """True when this board dir was explicitly opted in as this repo's board
     of record even though a *different* shared board is configured for this
-    repo (see `tickets board-mark-primary`)."""
+    repo (see `atm board-mark-primary`)."""
     return os.path.isfile(os.path.join(path, PRIMARY_BOARD_MARKER))
 
 
@@ -194,11 +196,11 @@ def _shadow_board_refusal(candidate, configured):
         "real data (messages, agent registrations) on a board nothing else "
         "reads, the T-959 shape. Pick one:\n"
         "  * use the shared board:      export TICKETS_DIR=%s\n"
-        "  * inspect what is here:      tickets doctor\n"
+        "  * inspect what is here:      atm doctor\n"
         "  * keep this repo's own board on purpose:\n"
-        "                                tickets board-mark-primary\n"
+        "                                atm board-mark-primary\n"
         "  * archive this board aside (never deletes):\n"
-        "                                tickets board-archive-shadow %s --yes\n"
+        "                                atm board-archive-shadow %s --yes\n"
         % (real_candidate, configured, configured, real_candidate)
     )
 
@@ -223,7 +225,7 @@ def _apply_shared_board_config(candidate):
         return candidate
     if not _board_has_content(candidate):
         sys.stderr.write(
-            "tickets: cwd .tickets is empty -- using this repo's configured "
+            "atm: cwd .tickets is empty -- using this repo's configured "
             "shared board %s\n" % configured
         )
         return configured
@@ -962,8 +964,9 @@ def whoami(explicit=None):
     command act as" -- board's own status line, a hook deciding whether to
     stay quiet, the stop-hook holding a turn open for a seat, `msg`'s sender
     or `inbox`'s owner when no --owner is given -- wants session_seat(), not
-    this. Collapsing the two into one function is the failure this split
-    guards against: it makes a recorded identity outrank an explicit
+    this. `note` stays on whoami() so a join cannot rebind note attribution
+    (T-956/T-958). Collapsing the two into one function is the failure this
+    split guards against: it makes a recorded identity outrank an explicit
     per-command override, breaking the `TICKET_AGENT=X tickets <cmd>`
     pattern this docstring describes.
     """
@@ -980,7 +983,8 @@ def session_seat(board, explicit=None):
     `inbox --quiet-if-unidentified` hook, the stop-hook, and `msg`'s sender /
     `inbox`'s owner when no --owner is given. These need the session-recorded
     identity (from `atm join`) precisely because nobody is passing an
-    explicit name on that particular call.
+    explicit name on that particular call. `note` is not in this list -- it
+    uses whoami() so a join cannot rebind note attribution (T-956/T-958).
 
     Precedence: explicit > TICKET_SEAT > a SESSION-KEYED recorded identity >
     TICKET_AGENT > the flat legacy recorded identity > pid.
@@ -2785,6 +2789,9 @@ def cmd_dispatch(a, board):
         sys.exit("dispatch: %s is on HOLD" % t["id"])
     if t.get("status") != "open":
         sys.exit("dispatch: %s is %s; only open ready tickets" % (t["id"], t.get("status")))
+    if _reopen_blocks_automation(board, t):
+        sys.exit("dispatch: %s has a same-second-as-reopen task with no event order; "
+                 "post a new explicit --task" % t["id"])
     done = set(x["id"] for x in load_all(board) if x["status"] == "done")
     pending = [d for d in (t.get("deps") or []) if d not in done]
     if pending:
@@ -2826,11 +2833,13 @@ def cmd_dispatch(a, board):
         return
     ns = argparse.Namespace(
         name=seat, list=False, stop=False, worktree=getattr(a, "worktree", "") or "",
+        repo=getattr(a, "repo", "") or "", base=getattr(a, "base", "") or "",
         harness=harness, tool="", cmd_template=getattr(a, "cmd_template", "") or "",
         roles=None, can=None, cost=None, model="", best_for="", wake_mode=None,
         brief="", exec=getattr(a, "exec", "") or "", master=False, cos=False,
         safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
         max_runs=getattr(a, "max_runs", None), replace=False,
+        transfer=False, alias="",
     )
     try:
         cmd_spawn(ns, board)
@@ -3541,6 +3550,7 @@ def cmd_next(a, board):
     ready = [t for t in _filter_ready(ready_all, roles) if can_do(board, owner, t)]
     ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
     ready = [t for t in ready if not _ticket_on_hold(t)]
+    ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -6209,13 +6219,13 @@ def cmd_block(a, board):
 def cmd_note(a, board):
     """Add a note (`atm note` / `atm update`).
 
-    `by` is always the caller's own identity (`--by`, else $TICKET_AGENT),
-    never the ticket's `owner` field. T-238: a fallback to `t.get("owner")`
-    here meant a second agent working the same ticket in parallel -- exactly
-    the case a duplicate lane needs to be visible -- had its notes silently
-    relabeled as the owner's, so nothing in the note history could ever
-    reveal the second lane. This was a write-path bug: the on-disk `by` was
-    wrong, not just its rendering in `atm show`.
+    `by` is the caller's posting identity (`whoami`), never the ticket's
+    `owner` field and never a join-written session binding. `--by` still
+    wins as an explicit override. T-238: a fallback to `t.get("owner")`
+    relabeled a parallel agent's notes as the owner's. T-956/T-958:
+    session_seat() here broke identity-precedence -- a join must not rebind
+    note attribution. msg stays on session_seat(); collapsing the two
+    surfaces fails the rest of test_identity_precedence.py.
     """
     t = load(board, a.id)
     who = whoami(a.by)
@@ -7476,7 +7486,7 @@ def cmd_doctor(a):
             shown = s["recipients"][:20]
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
-        print("    fix: tickets board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+        print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
 
 
 def cmd_board_mark_primary(a):
@@ -7492,6 +7502,26 @@ def cmd_board_mark_primary(a):
     print("marked %s primary -- it now wins over any configured shared board for this repo" % board)
 
 
+def _board_in_effect_for_archive():
+    """Live board for archive-shadow, without refusing an unmarked shadow.
+
+    Same order as board_dir: TICKETS_DIR, then a local .primary, then the
+    configured shared board, then cwd .tickets. A marked-primary local board
+    must not be treated as a shadow of a configured shared board.
+    """
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    candidate = _board_dir_uncached()
+    if _is_marked_primary(candidate):
+        return candidate
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    if configured:
+        return configured
+    return candidate
+
+
 def cmd_board_archive_shadow(a):
     """Move a shadow board aside after the operator confirms -- NEVER deletes
     (T-959). `--yes` is required; without it this only prints what would
@@ -7499,15 +7529,7 @@ def cmd_board_archive_shadow(a):
     path = os.path.abspath(os.path.expanduser(a.path))
     if not os.path.isdir(path):
         sys.exit("no such directory: %s" % path)
-    env = os.environ.get("TICKETS_DIR")
-    root = _repo_root()
-    configured = _configured_shared_board(root) if root else None
-    if env:
-        effective = os.path.abspath(os.path.expanduser(env))
-    elif configured:
-        effective = configured
-    else:
-        effective = _board_dir_uncached()
+    effective = _board_in_effect_for_archive()
     if os.path.realpath(path) == os.path.realpath(effective):
         sys.exit(
             "REFUSING: %s IS the board currently in effect -- archiving it would "
@@ -9065,8 +9087,55 @@ def fmt_msg(m):
         fmt_local(m.get("at")), m.get("from", "?"), mark, to, re_, m.get("text", ""))
 
 
+def _task_life_actionable(board, message):
+    """False when a ticket-scoped task is previous-life or same-second unknown.
+
+    CEO T-955/T-810: automation must not wake, dispatch, or next-claim from an
+    unknown-ordered pre-reopen post. A new explicit task is required.
+    """
+    tid = (message.get("re") or "").strip()
+    if not tid:
+        return True
+    kind = (message.get("kind") or "").strip()
+    text = str(message.get("text") or "").strip().lower()
+    is_task = kind == "task" or message.get("task") or text.startswith(
+        ("stuck", "blocked", "task:", "task "))
+    if not is_task:
+        return True
+    try:
+        t = load(board, tid)
+    except Exception:
+        return True
+    if not t:
+        return True
+    wv = _work_view()
+    return wv._life_of(t, message) == wv.LIFE_CURRENT
+
+
+def _reopen_blocks_automation(board, t, messages=None):
+    """True when the only ticket-scoped tasks after reopen are unknown-ordered."""
+    if not ((t.get("reopened_at") or "").strip() or t.get("reopened_seen")):
+        return False
+    wv = _work_view()
+    lives = []
+    for m in (messages if messages is not None else load_messages(board)):
+        if (m.get("re") or "").strip() != t["id"]:
+            continue
+        kind = (m.get("kind") or "").strip()
+        text = str(m.get("text") or "").strip().lower()
+        if kind != "task" and not m.get("task") and not text.startswith(
+                ("stuck", "blocked", "task:", "task ")):
+            continue
+        lives.append(wv._life_of(t, m))
+    if not lives:
+        return False
+    return wv.LIFE_CURRENT not in lives and wv.LIFE_UNKNOWN in lives
+
+
 def _message_wakes_seat(board, seat, message):
     """Whether a posted message should attempt a native session wake for seat."""
+    if not _task_life_actionable(board, message):
+        return False
     obj_state = objective_state(_safe(lambda: load_objective(board), {}))
     return (_message_wakes(message, obj_state)
             or _continuous_message_wakes(board, seat, message))
@@ -9086,7 +9155,8 @@ def cmd_msg(a, board):
     # a recorded `join` is the deliberate, authoritative fact, and it must
     # outrank a stray ambient TICKET_AGENT the way it outranks one everywhere
     # else identity is resolved. whoami() intentionally does not make that
-    # promise; see its docstring.
+    # promise; see its docstring. T-956/T-958: note stays on whoami() so a
+    # join cannot rebind note attribution; do not collapse the two surfaces.
     sender = session_seat(board, a.owner)
     is_task = bool(getattr(a, "task", False))
     if a.to and a.to == sender:
@@ -9170,6 +9240,10 @@ def cmd_msg(a, board):
                 to, label, "run the thread in terminal Codex to enable native wake"))
         else:
             print("wake: %s -> %s" % (to, label))
+        if label == "held":
+            print("  recovery: %s" % getattr(
+                sa, "CLAUDE_HELD_RECOVERY",
+                "approve in the recipient session or set crossSessionInbound accept"))
         _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
@@ -9188,10 +9262,15 @@ def _should_poke_persist(label):
     mail and wait for a keystroke. A live persist watcher is the autonomous
     path. Remote bridge stays its own transport. Rebound leases belong to
     another live session, so they are not stolen here.
+
+    A REFUSED native delivery is not success (T-1000). Exact `refused` and
+    `refused (...)` stay watcher-eligible; only delivered-confirmed, held,
+    dropped, and expired suppress persistent poke.
     """
     s = str(label or "")
     if not s or s in ("woken", "deduped", "remote bridge required",
-                      "delivered-unconfirmed", "queued-busy", "delivery-unknown"):
+                      "delivered-unconfirmed", "queued-busy", "delivery-unknown",
+                      "delivered-confirmed", "held", "dropped", "expired"):
         return False
     if s.startswith("stale (rebound"):
         return False
@@ -10502,8 +10581,7 @@ def pending_work(board, owner):
     if direct:
         out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
         tasks = [_wake_message_summary(m) for m in direct
-                 if (_message_wakes(m, obj_state)
-                     or _continuous_message_wakes(board, owner, m))]
+                 if _pending_message_triggers_wake(board, owner, m, obj_state)]
         if tasks:
             out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
     elif msgs:
@@ -10516,7 +10594,8 @@ def pending_work(board, owner):
     ready = _safe(lambda: [t for t in _filter_ready(unblocked(board, tickets), roles)
                            if can_do(board, owner, t)
                            and not _reservation_blocks(t, owner)
-                           and not _ticket_on_hold(t)], [])
+                           and not _ticket_on_hold(t)
+                           and not _reopen_blocks_automation(board, t)], [])
     mine_first = [t for t in ready if t.get("suggested") == owner or _reserved_agent(t) == owner]
     if mine_first:
         out["suggested_for_me"] = [t["id"] + " " + t.get("title", "")[:60] for t in mine_first[:3]]
@@ -10540,7 +10619,8 @@ def pending_work(board, owner):
                      _safe(lambda: load_messages(board), []), owner,
                      rec.get("joined_at", ""))
                  if x.get("from") != owner and _is_unread(x, since, _rem)
-                 and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
+                 and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))
+                 and _task_life_actionable(board, x)]
         if stuck:
             out["stuck_messages"] = stuck[-WAKE_MESSAGE_LIMIT:]
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
@@ -10570,6 +10650,14 @@ def _message_wakes(m, obj_state=""):
     if text.startswith(("stuck", "blocked", "task:", "task ")):
         return True
     return False
+
+
+def _pending_message_triggers_wake(board, owner, message, obj_state):
+    """True when pending/fingerprint may start a paid turn from this message."""
+    if not (_message_wakes(message, obj_state)
+            or _continuous_message_wakes(board, owner, message)):
+        return False
+    return _task_life_actionable(board, message)
 
 
 def _wake_message_summary(message):
@@ -10652,8 +10740,7 @@ def _watch_trigger_fingerprint(board, owner, pending):
         direct = [m for m in msgs if not is_board_broadcast(m)]
         obj_state = objective_state(_safe(lambda: load_objective(board), {}))
         waking = [m for m in direct
-                  if (_message_wakes(m, obj_state)
-                      or _continuous_message_wakes(board, owner, m))]
+                  if _pending_message_triggers_wake(board, owner, m, obj_state)]
         parts.extend("msg:" + _msg_id(m) for m in waking[-WAKE_MESSAGE_LIMIT:])
     for key in ("holding", "suggested_for_me", "ready_in_my_lane", "review_queue"):
         if key in pending:
@@ -13887,10 +13974,22 @@ def cmd_spawn(a, board):
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
-    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
-    git_root, origin_err = _spawn_git_root(board, owner, wt)
+    git_root, wt, expected_origin, base, origin_err = _resolve_spawn_target(
+        board, owner,
+        worktree_arg=getattr(a, "worktree", "") or "",
+        repo_arg=getattr(a, "repo", "") or "",
+        base_arg=getattr(a, "base", "") or "")
     if origin_err:
         sys.exit(origin_err)
+    dedicated = os.path.realpath(wt) == os.path.realpath(os.path.join(git_root, ".worktrees", owner))
+    if os.path.isdir(wt) and not dedicated:
+        pinned_hook = _cursor_hook_agent(wt)
+        if pinned_hook and pinned_hook != owner:
+            sys.exit(
+                "refusing to spawn %s into %s: hooks already pin %s. "
+                "Use a dedicated --worktree under the target --repo "
+                "(default <repo>/.worktrees/%s)."
+                % (owner, wt, pinned_hook, owner))
     resolved_harness, _ = harness_of(board, owner, requested_harness,
                                      getattr(a, "cmd_template", ""))
     sa = _session_adapters()
@@ -13910,7 +14009,6 @@ def cmd_spawn(a, board):
             _print_auth_result(owner, auth)
             sys.exit("watcher not started; fix the state above, then rerun `atm spawn %s`" % owner)
     if not os.path.isdir(wt):
-        base = a.base or _trunk()
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
                            capture_output=True, text=True)
         if r.returncode != 0:
@@ -13919,6 +14017,17 @@ def cmd_spawn(a, board):
         if r.returncode != 0:
             sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
         print("worktree %s (branch %s)" % (wt, owner))
+    print("target repo %s%s base %s" % (
+        git_root,
+        (" (%s)" % expected_origin) if expected_origin else "",
+        base))
+    if expected_origin:
+        wf = load_workforce(board)
+        entry = wf.get(owner, {})
+        entry["expected_origin"] = expected_origin
+        entry["spawn_repo"] = git_root
+        wf[owner] = entry
+        save_workforce(board, wf)
     ns = _join_namespace(a, owner)
     ns.worktree = wt
     _silent(lambda: cmd_join(ns, board))
@@ -13936,11 +14045,11 @@ def cmd_spawn(a, board):
         bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
                                 role="", by=whoami())
         _silent(lambda: cmd_brief(bn, board))
-    inherited = _inherit_settings(root, wt)
+    inherited = _inherit_settings(git_root, wt)
     if inherited:
         print("inherited project settings into the worktree: %s" % ", ".join(inherited))
     if _pin_spawned_worker_hooks(board, owner, wt, harness):
-        print("pinned %s hooks to unique worker %s (canonical role hooks not inherited)" % (harness, owner))
+        print("hooks pinned to %s (unique worker; canonical role hooks not inherited)" % owner)
     if a.master:
         prev = current_master(board) or {}
         with open(master_state_path(board), "w") as f:
@@ -14363,6 +14472,192 @@ def _auth_blocks_model(auth):
         if pause.get("paused") or rec.get("state") in NO_SPEND_STATES:
             return True
     return False
+
+
+def _existing_ancestor(path):
+    """First existing ancestor of path, including path itself when it exists."""
+    p = os.path.abspath(os.path.expanduser(path or ""))
+    if not p:
+        return ""
+    while p and not os.path.exists(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            return ""
+        p = parent
+    return p
+
+
+def _git_root_from(path):
+    """Git worktree root containing path, walking through not-yet-created children."""
+    start = _existing_ancestor(path) if path else ""
+    if not start:
+        return ""
+    return _init_cwd_worktree_root(start) or ""
+
+
+def _git_main_worktree(cwd):
+    """Main checkout for `git worktree add`. Linked worktrees share this object DB."""
+    if not cwd:
+        return ""
+    raw = git("rev-parse", "--git-common-dir", cwd=cwd)
+    if not raw:
+        return cwd
+    common = raw if os.path.isabs(raw) else os.path.normpath(os.path.join(cwd, raw))
+    common = os.path.realpath(common)
+    if os.path.basename(common) == ".git":
+        return os.path.dirname(common)
+    return os.path.realpath(cwd)
+
+
+def _origin_key(path):
+    from auth_v2_contract import normalize_git_origin
+    return normalize_git_origin(_git_remote_origin(path)) or ""
+
+
+def _repo_spec_is_path(spec):
+    """True for a filesystem checkout. `owner/repo` origin slugs stay slugs."""
+    spec = (spec or "").strip()
+    if not spec:
+        return False
+    if spec.startswith("~") or spec.startswith(".") or spec.startswith("/"):
+        return True
+    expanded = os.path.expanduser(spec)
+    return os.path.isdir(expanded)
+
+
+def _find_checkout_for_origin(wanted, hints):
+    """First local checkout whose origin matches wanted. Empty if none."""
+    from auth_v2_contract import repo_identity_matches
+    seen = []
+    for hint in hints:
+        if not hint:
+            continue
+        root = _git_root_from(hint)
+        if not root:
+            continue
+        root = os.path.realpath(root)
+        if root in seen:
+            continue
+        seen.append(root)
+        if repo_identity_matches(wanted, _git_remote_origin(root)):
+            return _git_main_worktree(root)
+    return ""
+
+
+def _spawn_base_ref(git_root, requested):
+    """Explicit --base, else origin/main when that ref exists, else local trunk."""
+    base = (requested or "").strip()
+    if base:
+        return base
+    if git("rev-parse", "--verify", "-q", "origin/main", cwd=git_root) is not None:
+        return "origin/main"
+    return _trunk(cwd=git_root)
+
+
+def _cursor_hook_agent(worktree):
+    """Agent baked into a worktree's Cursor board hook, or empty."""
+    script = os.path.join(worktree, ".cursor", "hooks", "tickets-board.py")
+    if not os.path.isfile(script):
+        return ""
+    try:
+        text = open(script, encoding="utf-8").read()
+    except OSError:
+        return ""
+    m = re.search(r"^AGENT = ['\"]([^'\"]+)['\"]", text, re.M)
+    return m.group(1) if m else ""
+
+
+def _resolve_spawn_target(board, owner, worktree_arg="", repo_arg="", base_arg=""):
+    """Choose the git root, worktree path, expected origin, and base ref.
+
+    dirname(board) is not identity. Cross-repo boards (Steer `.tickets` driving
+    Atman work) must pass --repo or fail closed when --worktree sits under a
+    different origin. Same-repo spawn keeps the historic default
+    `<board-parent>/.worktrees/<name>`.
+    """
+    from auth_v2_contract import normalize_git_origin, repo_identity_matches
+    board_root = os.path.dirname(os.path.abspath(board))
+    board_origin = _origin_key(board_root)
+    repo_arg = (repo_arg or "").strip()
+    worktree_arg = (worktree_arg or "").strip()
+    pinned = _expected_origin_for(board, owner, worktree_arg)
+    git_root = ""
+    expected = ""
+
+    if repo_arg:
+        if _repo_spec_is_path(repo_arg):
+            checkout = _git_root_from(os.path.abspath(os.path.expanduser(repo_arg)))
+            if not checkout:
+                return "", "", "", "", (
+                    "spawn --repo %s is not a git checkout" % repo_arg)
+            git_root = _git_main_worktree(checkout)
+            expected = _origin_key(git_root) or pinned
+        else:
+            expected = normalize_git_origin(repo_arg) or repo_arg
+            repo_name = expected.split("/")[-1] if "/" in expected else expected
+            hints = [
+                worktree_arg,
+                os.getcwd(),
+                board_root,
+                os.path.join(os.path.dirname(board_root), repo_name),
+            ]
+            git_root = _find_checkout_for_origin(expected, hints)
+            if not git_root:
+                return "", "", "", "", (
+                    "spawn --repo %s: no local checkout whose origin matches; "
+                    "pass --repo /path/to/checkout" % repo_arg)
+    else:
+        wt_probe = os.path.abspath(os.path.expanduser(worktree_arg)) if worktree_arg else ""
+        inferred_root = _git_main_worktree(_git_root_from(wt_probe)) if wt_probe else ""
+        inferred_origin = _origin_key(inferred_root) if inferred_root else ""
+        if pinned:
+            expected = pinned
+            repo_name = expected.split("/")[-1] if "/" in expected else expected
+            git_root = _find_checkout_for_origin(expected, [
+                wt_probe, os.getcwd(), board_root,
+                os.path.join(os.path.dirname(board_root), repo_name),
+            ])
+            if not git_root:
+                return "", "", "", "", (
+                    "repo_mismatch: spawn git root origin must be %s "
+                    "(dirname(board) is not identity); pass --repo /path/to/checkout"
+                    % expected)
+        elif inferred_root and inferred_origin and board_origin and inferred_origin != board_origin:
+            return "", "", "", "", (
+                "cross-repo spawn is ambiguous: --worktree is under %s but the "
+                "board lives in %s. Pass --repo %s (or the checkout path) to "
+                "derive the worktree from that repository."
+                % (inferred_origin, board_origin, inferred_root))
+        elif inferred_root:
+            git_root = inferred_root
+            expected = inferred_origin or board_origin or pinned
+        else:
+            git_root = board_root
+            expected = board_origin or pinned
+
+    if not git_root:
+        return "", "", "", "", "repo_mismatch: could not resolve a spawn git root"
+    git_root = os.path.realpath(git_root)
+    wt = (os.path.abspath(os.path.expanduser(worktree_arg)) if worktree_arg
+          else os.path.join(git_root, ".worktrees", owner))
+    exists = os.path.isdir(wt)
+    spawn_origin = _origin_key(git_root)
+    if expected and spawn_origin and not repo_identity_matches(expected, spawn_origin):
+        return "", "", "", "", (
+            "repo_mismatch: --repo origin %s does not match checkout %s"
+            % (expected, spawn_origin))
+    wt_origin = _origin_key(wt) if exists else ""
+    if exists and wt_origin and expected and not repo_identity_matches(expected, wt_origin):
+        return "", "", "", "", "repo_mismatch: worktree origin does not match %s" % expected
+    ancestor = _git_main_worktree(_git_root_from(wt)) if (exists or worktree_arg) else ""
+    if ancestor and os.path.realpath(ancestor) != git_root:
+        anc_origin = _origin_key(ancestor)
+        if anc_origin and spawn_origin and not repo_identity_matches(anc_origin, spawn_origin):
+            return "", "", "", "", (
+                "repo_mismatch: --worktree is under %s but --repo is %s"
+                % (anc_origin, spawn_origin or expected))
+    base = _spawn_base_ref(git_root, base_arg)
+    return git_root, wt, expected or spawn_origin, base, ""
 
 
 def _spawn_git_root(board, owner, worktree):
@@ -17232,10 +17527,28 @@ def cmd_ui(a, board):
     if a.open:
         import subprocess
         subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
+    parent_pid = int(getattr(a, "parent_pid", 0) or 0)
+    board_dir = os.path.abspath(board) if board else ""
+    import threading
+    worker = threading.Thread(target=srv.serve_forever, daemon=True)
+    worker.start()
     try:
-        srv.serve_forever()
+        while worker.is_alive():
+            if board_dir and not os.path.isdir(board_dir):
+                print("board UI: board directory gone (%s); exiting" % board_dir)
+                break
+            if parent_pid:
+                try:
+                    os.kill(parent_pid, 0)
+                except ProcessLookupError:
+                    print("board UI: parent pid %d gone; exiting" % parent_pid)
+                    break
+            worker.join(0.25)
     except KeyboardInterrupt:
         pass
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 QUICKSTART_MARKER = "quickstart.json"
@@ -18654,8 +18967,10 @@ def main():
     c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
                    help="persist the seat's wake policy (master/CoS default continuous; workers task-only)")
     c.add_argument("--brief", default="", help="standing context for this worker")
-    c.add_argument("--worktree", default="", help="default .worktrees/<name>")
-    c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
+    c.add_argument("--worktree", default="", help="default <repo>/.worktrees/<name>")
+    c.add_argument("--repo", default="",
+                   help="target checkout path or origin slug for cross-repo spawn")
+    c.add_argument("--base", default="", help="branch/ref to create the worktree from (default origin/main)")
     c.add_argument("--every", type=int, default=60)
     c.add_argument("--run-timeout", type=int, default=90)
     c.add_argument("--heartbeat", type=int, default=0,
@@ -18692,6 +19007,8 @@ def main():
     c.add_argument("--host", default="127.0.0.1")
     c.add_argument("--open", action="store_true", help="open it in the browser")
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
+    c.add_argument("--parent-pid", type=int, default=0,
+                   help="exit when this pid disappears (test/supervisor watchdog)")
     c.set_defaults(fn=cmd_ui)
 
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
@@ -19126,9 +19443,8 @@ def main():
         cmd_self(a, found if found and os.path.isdir(found) else None)
         return
     if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
-        # These diagnose/repair board resolution itself, so they must not go
-        # through board_dir() -- a shadow board is exactly the case they are
-        # for, and board_dir() would refuse before they ever ran (T-959).
+        # Diagnose/repair board resolution itself; must not go through
+        # board_dir() or a shadow board is refused before we can report it.
         a.fn(a)
         return
     discover = a.cmd != "board"

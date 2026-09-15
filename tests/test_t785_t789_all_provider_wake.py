@@ -71,10 +71,16 @@ def test_seat_harness_prefers_tool_over_claude_default():
         "supervised (no persist/tmux or ACP control sock; agent -p --resume "
         "is a new paid run, not pause-resume)")
     assert tk._should_poke_persist("refused")
+    assert tk._should_poke_persist(
+        "refused (harness claude != provider cursor; removed stale endpoint)")
     assert not tk._should_poke_persist("woken")
     assert not tk._should_poke_persist("deduped")
     assert not tk._should_poke_persist("remote bridge required")
     assert not tk._should_poke_persist("stale (rebound before delivery)")
+    assert not tk._should_poke_persist("delivered-confirmed")
+    assert not tk._should_poke_persist("held")
+    assert not tk._should_poke_persist("dropped")
+    assert not tk._should_poke_persist("expired")
 
 
 def test_msg_honors_tool_not_claude(board, monkeypatch):
