@@ -104,9 +104,14 @@ configure a heartbeat or an external cadence separately.
 `--harness` overrides **and** re-registers, and a harness switch without a
 new `--cmd` drops the old command template on purpose.
 
-For a model session hosted elsewhere, register `--harness remote` and install
-`atm hooks remote`. A bare remote `spawn` fails closed: queued work stays
-visible in the dashboard until the real bridge reconnects.
+**Remote sessions are not part of the supported preview.** `--harness remote`
+and `atm hooks remote` exist, but the bridge that would make them reconnect is
+unfinished, so a remote seat is not something to build a first board on. A
+bare remote `spawn` fails closed rather than quietly substituting a local
+model — it refuses with *"uses a remote adapter; connect the generated remote
+hook/bridge or register a custom command"* — and queued work stays visible in
+the dashboard. Treat that as the honest failure it is, not as a working path:
+nothing here should be read as a promise that reconnect works.
 
 ---
 

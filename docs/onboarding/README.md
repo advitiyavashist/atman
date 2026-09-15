@@ -13,7 +13,7 @@ Pick one line. You do not need the others yet.
 | Coordinating an already-staffed team day to day | [coordination-and-success.md](coordination-and-success.md) |
 | Adding evidence, runbooks, or skills | [../knowledge/README.md](../knowledge/README.md) |
 | The operator on this specific Mac, with pinned folders | [ceo-mac-runbook.md](ceo-mac-runbook.md) |
-| Wiring the CEO seat to Cursor / Codex / a remote session | [ceo-connect.md](ceo-connect.md) |
+| Wiring the CEO seat to Cursor / Codex | [ceo-connect.md](ceo-connect.md) |
 
 If you installed `atm` five minutes ago, the answer is the first row.
 
