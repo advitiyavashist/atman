@@ -3083,11 +3083,13 @@ def cmd_board(a, board):
             print(inherited)
 
 
-def workflow_graph(tickets, include_done=False):
+def workflow_graph(tickets, include_done=False, keep_done=None):
     """JSON twin of `tickets graph` for the command board.
 
     Active tickets plus the specific deps they wait on. Edges are real
     `--after` links, not a dump of titles and not prose blockers.
+    ``keep_done`` (T-992): done ticket ids that stay in the active view --
+    the app passes done-without-ACCEPT so unverified work never disappears.
     """
     by_id = dict((t["id"], t) for t in tickets)
     done = set(t["id"] for t in tickets if t["status"] == "done")
@@ -3099,6 +3101,7 @@ def workflow_graph(tickets, include_done=False):
         keep = set(by_id)
     else:
         keep = set(t["id"] for t in tickets if t["status"] in ("open", "claimed", "blocked", "review"))
+        keep.update(tid for tid in (keep_done or ()) if tid in by_id and by_id[tid]["status"] == "done")
         for tid in list(keep):
             for d in (by_id.get(tid) or {}).get("deps") or []:
                 if d in by_id:
@@ -14465,7 +14468,13 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .product-row b{color:var(--fg);font:600 11px/1.35 ui-monospace,Menlo,monospace}
 .product-row small{font-size:11px;line-height:1.35}
 .product-row.current{border-left-color:var(--acc);background:var(--surface)}
+.hdr-status{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;flex:1;min-width:0}
+.hdr-status>summary{display:none;list-style:none;cursor:pointer;align-items:center;gap:6px;padding:2px 4px;color:var(--mute);font:11px/1.3 ui-monospace,Menlo,monospace}
+.hdr-status>summary::-webkit-details-marker{display:none}
+.hdr-status>summary .caret{color:var(--acc);font-weight:800}
+.hdr-status-body{display:contents}
 .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.chip.unverified{border-color:color-mix(in srgb,var(--warn) 55%,var(--line));color:var(--warn)}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;background:var(--chip);border:1px solid var(--line);font-size:12px}
 .chip b{font-weight:650}
 .chip.master,.chip.cos{border-color:var(--line)}
@@ -14705,9 +14714,23 @@ body[data-work-view=columns] #workJump{display:none}
 #cTo:disabled{opacity:.7}
 @media(max-width:700px){.seat{min-width:108px}.chat-layout{flex-direction:column}.chat-rail{max-width:none;flex-direction:row;flex-wrap:wrap}}
 @media(max-width:600px){
-  header.cmd{flex-direction:column;align-items:stretch}
-  .conn{display:flex;justify-content:flex-start;margin-left:0}
-  .live-meta-pop{left:0;right:auto}
+  /* T-992: brand + transport on one row, then the folded status line; the objective
+     strip and next-step duplicate the Work pane's own objective/summary cards there */
+  header.cmd{gap:8px 10px;padding:8px 12px}
+  .brand{min-width:0}
+  .conn{margin-left:auto;flex-wrap:nowrap;gap:6px}
+  .live-meta-pop{left:auto;right:0}
+  .portfolio{order:2;flex:1 1 auto}
+  .hdr-status{order:3;flex:1 1 100%;display:block}
+  .hdr-status>summary{display:flex}
+  .hdr-status-body{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:8px 0 2px}
+  .sprint{flex-basis:100%}
+  body[data-tab=board] .promise-strip{display:none}
+  .attention,.onboard{margin:0 12px;padding:6px 0}
+  .onboard .ob-body{margin-top:6px}
+  nav.tabs{padding:6px 12px 0}
+  main{padding:10px 12px}
+  .work-objective{padding:10px 12px}
   .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
   .next-step .cmd{white-space:normal;overflow-wrap:anywhere}
   .promise-strip .msg{max-width:100%;overflow-wrap:anywhere}
@@ -14748,6 +14771,9 @@ body[data-work-view=columns] #workJump{display:none}
       <div class="product-row"><b>steer.md</b><small>Policy for output · separate product</small></div>
     </div>
   </details>
+  <details class="hdr-status" id="hdrStatus" open><!-- T-992: one fold on ≤600px; always open on desktop -->
+    <summary aria-label="Board status"><span class="caret" aria-hidden="true">^</span><span>Status</span><span class="mute" id="hdrStatusBrief"></span></summary>
+    <div class="hdr-status-body">
   <div class="chips" id="chips"></div>
   <div class="chips promise-chips" id="promiseChips">
     <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
@@ -14755,10 +14781,12 @@ body[data-work-view=columns] #workJump{display:none}
   </div>
   <div class="sprint" id="sprint"></div>
   <div class="health" id="pulse"><i></i><span>No alerts</span></div>
+    </div>
+  </details>
   <div class="conn" id="connBar">
     <details class="live-meta" id="liveMeta">
       <summary aria-label="Connection and last updated">
-        <span id="connStatus" class="conn-status live" aria-live="polite">live</span>
+        <span id="connStatus" class="conn-status reconnecting" aria-live="polite">syncing</span>
       </summary>
       <div class="live-meta-pop">
         <span id="clock"></span>
@@ -15477,7 +15505,11 @@ async function load(manual){
   document.getElementById('chips').innerHTML=
     '<span class="chip master"><b>master</b> '+esc(d.master||'nobody')+'</span>'+
     '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
-    '<span class="chip"><b>'+esc(counts.done)+'</b>/'+esc(counts.total)+' done</span>';
+    // T-992: the count is accepted work; a done flag without ACCEPT is named, not folded in
+    '<span class="chip"><b>'+esc(counts.accepted!=null?counts.accepted:counts.done)+'</b>/'+esc(counts.total)+' accepted</span>'+
+    (counts.done_unverified?'<span class="chip unverified" title="Marked done; verification not recorded"><b>'+esc(counts.done_unverified)+'</b> done, unverified</span>':'');
+  const brief=document.getElementById('hdrStatusBrief');
+  if(brief)brief.textContent=(counts.accepted!=null?counts.accepted:counts.done)+'/'+counts.total+' accepted'+(counts.done_unverified?' · '+counts.done_unverified+' unverified':'');
   const s=d.sprint;
   const sprintEl=document.getElementById('sprint');
   sprintEl.hidden=!s;
@@ -15631,7 +15663,9 @@ function deliveryTags(m){
 }
 function setConn(phase,updated){
   const st=document.getElementById('connStatus'),lu=document.getElementById('lastUpdated');
-  if(st){st.className='conn-status '+phase;st.textContent=phase==='live'?'connected':phase}
+  // T-992: a board refresh proves the page reached the board server, nothing more.
+  // "connected" / "authenticated" / "responding" are agent states with their own evidence (Team).
+  if(st){st.className='conn-status '+phase;st.textContent=phase==='live'?'Board synced':phase}
   if(lu)lu.textContent=updated?('updated '+fmtRel(updated)+' · '+fmtLocal(updated)):'—';
 }
 let firstLoad=true;
@@ -15655,6 +15689,15 @@ document.getElementById('themeBtn').addEventListener('click',()=>{
   updateThemeControl();
 });
 document.getElementById('refreshBtn').addEventListener('click',()=>load(true));
+// T-992: on phones the header status fold starts closed; desktop keeps it open (no toggle shown)
+(function(){
+  const hdr=document.getElementById('hdrStatus');
+  if(!hdr||!window.matchMedia)return;
+  const mq=matchMedia('(max-width:600px)');
+  const sync=()=>{hdr.open=!mq.matches};
+  sync();
+  if(mq.addEventListener)mq.addEventListener('change',sync);else if(mq.addListener)mq.addListener(sync);
+})();
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
 
@@ -16250,7 +16293,13 @@ def _board_snapshot_body(board, messages=40):
     coverage = _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
                                 open_rows, in_flight, review, out_agents)
     attention = _attention_snapshot(health_items, coverage)
-    graph = workflow_graph(tickets)
+    # T-992: done without a structured ACCEPT / merge stays on the Work graph and
+    # list and is never counted as accepted. Structured verdicts live in
+    # review_events / notes / board messages; work_view.review_of is the one judge.
+    unverified_done = _safe(lambda: set(_work_view().unverified_done_ids(tickets, all_msgs)), set())
+    counts["done_unverified"] = len(unverified_done)
+    counts["accepted"] = max(0, counts["done"] - len(unverified_done))
+    graph = workflow_graph(tickets, keep_done=unverified_done)
     objective_view = {
         "text": (obj or {}).get("text", ""),
         "state": objective_state(obj) if obj else "",

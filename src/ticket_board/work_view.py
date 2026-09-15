@@ -279,6 +279,18 @@ def verdict_of(t, msgs_re=None):
     return review_of(t, msgs_re)["label"]
 
 
+def unverified_done_ids(tickets, messages=None):
+    """Done tickets with no structured ACCEPT / merge on their artifact (T-992).
+
+    A worker's done flag or completion note is not verification. These stay on
+    the Work graph and list, labelled "Marked done; verification not recorded",
+    instead of vanishing into the done count as if accepted.
+    """
+    msgs_re = _messages_by_ticket(messages or [])
+    return set(t["id"] for t in tickets
+               if t.get("status") == "done" and not review_of(t, msgs_re.get(t["id"]))["verified"])
+
+
 # --- routing / delivery evidence --------------------------------------------
 
 def _task_messages_by_ticket(messages):
@@ -796,6 +808,8 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
                          "pr": str(t.get("pr") or ""), "sha": review["artifact"]},
             "review": review,
             "verdict": review["label"],
+            # T-992: done without a structured ACCEPT / merge is shown, never hidden
+            "unverified": bool(t.get("status") == "done" and not review["verified"]),
             "since_update_h": since_update,
             "stale": bool(since_update is not None and since_update > STALE_H),
             "claimed_at": t.get("claimed_at") or "",
@@ -818,6 +832,7 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
     counts = dict((p, 0) for p in PHASES)
     for n in nodes:
         counts[n["phase"]] = counts.get(n["phase"], 0) + 1
+    counts["done_unverified"] = sum(1 for n in nodes if n.get("unverified"))
 
     def _pick(ph):
         return [n for n in nodes if n["phase"] == ph]
@@ -917,6 +932,7 @@ body[data-theme=light] .wv{--wv-acc:#6b4f14;--wv-focus:#6b4f14}
 .wv-node .w.warn{color:var(--warn)}
 .wv-node .who .stale{color:var(--bad)}
 .wv-node.ph-done{opacity:.72}
+.wv-node.ph-done.unverified{opacity:1;--wv-c:var(--warn)}
 .wv-node.ph-discarded{opacity:.5;text-decoration:line-through}
 /* status colours are semantic tokens; brass (--acc) is reserved for actions and focus */
 .ph-working{--wv-c:var(--flight)}.ph-review{--wv-c:var(--review)}.ph-blocked{--wv-c:var(--blocked)}
@@ -969,6 +985,7 @@ window.AtmanWork=(function(){
   const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const PH={working:'Working',review:'In review',blocked:'Blocked',posted:'Task posted',reserved:'Reserved',ready:'Ready',waiting:'Waiting',capture:'Capture',hold:'Hold',done:'Done',discarded:'Discarded'};
   const LEGEND=['ready','reserved','posted','working','review','blocked','waiting','capture','hold','done'];
+  const UNVERIFIED='Marked done; verification not recorded';
   const reduced=()=>{try{return window.matchMedia('(prefers-reduced-motion: reduce)').matches}catch(e){return true}};
   const stacked=()=>{try{return window.matchMedia('(max-width: 900px)').matches}catch(e){return false}};
   function ago(h){if(h==null)return '—';if(h<1/60)return 'just now';if(h<1)return Math.round(h*60)+'m ago';if(h<48)return (h<10?h.toFixed(1):Math.round(h))+'h ago';return Math.round(h/24)+'d ago'}
@@ -1018,11 +1035,13 @@ window.AtmanWork=(function(){
     return '<section class="wv-objective" aria-label="Objective"><div><div class="k">Objective</div><div class="v">'+(has?esc(o.text):'No standing objective yet.')+'</div>'+(has?'':'<div class="exit mute">'+cmd('tickets objective --set "what we are finishing" --exit "how we know it is done"')+'</div>')+'</div>'+(has&&o.state?'<span class="state">'+esc(o.state)+'</span>':'')+exitLine(o)+'</section>';
   }
   function nodeBtn(n){
-    const w=n.wait&&n.wait.text?'<span class="w'+(n.wait.kind==='deps'?'':' warn')+'">'+esc(n.wait.text)+'</span>':'';
+    // T-992: a done flag without a structured ACCEPT is shown as unverified, in the node itself
+    const unv=n.phase==='done'&&n.unverified?UNVERIFIED:'';
+    const w=n.wait&&n.wait.text?'<span class="w'+(n.wait.kind==='deps'?'':' warn')+'">'+esc(n.wait.text)+'</span>':(unv?'<span class="w warn">'+esc(unv)+'</span>':'');
     const stale=n.stale?' <span class="stale">silent '+esc(ago(n.since_update_h))+'</span>':'';
     const wh=who(n);
-    return '<button type="button" class="wv-node ph-'+esc(n.phase)+'" data-id="'+esc(n.id)+'" aria-pressed="'+(SEL===n.id?'true':'false')+'" aria-label="'+esc(n.id+' '+n.title+', '+(PH[n.phase]||n.phase)+(wh?', '+wh:'')+(n.wait&&n.wait.text?', '+n.wait.text:''))+'">'+
-      '<span class="top"><span class="id">'+esc(n.id)+'</span><span class="ph">'+esc(PH[n.phase]||n.phase)+'</span></span>'+
+    return '<button type="button" class="wv-node ph-'+esc(n.phase)+(unv?' unverified':'')+'" data-id="'+esc(n.id)+'" aria-pressed="'+(SEL===n.id?'true':'false')+'" aria-label="'+esc(n.id+' '+n.title+', '+(unv?'Done, unverified':(PH[n.phase]||n.phase))+(wh?', '+wh:'')+(n.wait&&n.wait.text?', '+n.wait.text:''))+'">'+
+      '<span class="top"><span class="id">'+esc(n.id)+'</span><span class="ph">'+esc(unv?'Done · unverified':(PH[n.phase]||n.phase))+'</span></span>'+
       '<span class="t">'+esc(n.title)+'</span>'+
       (wh?'<span class="who">'+esc(wh)+stale+'</span>':(stale?'<span class="who">'+stale+'</span>':''))+w+'</button>';
   }
@@ -1181,7 +1200,7 @@ window.AtmanWork=(function(){
     const focusClose=inside&&active.hasAttribute('data-wv-close');
     const focusBack=inside&&active.hasAttribute('data-wv-back');
     const focusMode=(inside&&active.dataset)?active.dataset.wvMode:'';
-    const legend='<span class="legend" aria-label="Phases">'+LEGEND.map(p=>'<span class="ph-'+p+'">'+esc(PH[p])+(w.counts&&w.counts[p]?' '+w.counts[p]:'')+'</span>').join('')+'</span>';
+    const legend='<span class="legend" aria-label="Phases">'+LEGEND.map(p=>'<span class="ph-'+p+'">'+esc(PH[p])+(w.counts&&w.counts[p]?' '+w.counts[p]:'')+(p==='done'&&w.counts&&w.counts.done_unverified?' · '+w.counts.done_unverified+' unverified':'')+'</span>').join('')+'</span>';
     const modes='<span class="wv-modes" role="group" aria-label="Layout"><button type="button" data-wv-mode="graph" aria-pressed="'+(MODE==='graph')+'">Graph</button><button type="button" data-wv-mode="list" aria-pressed="'+(MODE==='list')+'">List</button></span>';
     let main;
     if(w.empty&&!(w.nodes||[]).length)main=emptyHtml(w.empty);
