@@ -1,12 +1,13 @@
 # T-989 independent review: connect and reconnect
 
-Verdict: **ACCEPT for integration** at
+Verdict: **FIX** at
 `cb0ed31` (Atman PR #118).
 
-The candidate is one commit ahead of its merge base and 109 commits behind the
-reviewed current main. A virtual merge into current main was clean. The release
-integrator must preserve the candidate content, produce a new exact SHA, and
-repeat the focused suite; this verdict is not evidence for unrelated changes.
+The original review incorrectly accepted this candidate. Its browser pass did
+not test the transition where an agent first reaches Ready and its executable
+then disappears. Independent T-987 tested that transition and found that
+Reconnect silently returns the old Ready record. This correction supersedes
+the earlier verdict; T-991 owns the bounded repair.
 
 ## Evidence
 
@@ -24,14 +25,26 @@ repeat the focused suite; this verdict is not evidence for unrelated changes.
 - Secret-shaped reconnect payloads, dashboard login attempts, foreign-host
   execution, non-authoritative ready records, quota, network, unsupported, and
   missing-probe cases are covered by the focused suite.
+- Missing coverage in this review: remove the previously resolved provider
+  binary after the seat reaches authoritative Ready. T-987 reproduced that
+  exact path: the fresh probe correctly classified the agent as unavailable,
+  but `merge_auth_check()` discarded it because the execution-context
+  fingerprint changed from the resolved binary path to the unresolved argv0.
+  `POST /auth-reconnect` then returned the previous Ready record with an
+  unchanged check time.
 
-## Integration conditions
+## Required repair
 
-1. Merge or rebase the single candidate commit onto current main without
-   changing its behavior.
-2. Re-run the 56 focused tests at the final SHA. No full-suite rerun is needed.
-3. T-810 owns the separate page-level `connected` to `Board synced` repair;
+1. Accept an authoritative negative reconnect for the same fenced seat when
+   the provider binary disappears, without allowing a different seat or runner
+   to overwrite the enrolled identity.
+2. Prove Ready → unavailable updates the check time and gives a useful recovery
+   action, alongside the existing first-connect, unauthenticated, wrong-seat,
+   board-move, and root/package checks.
+3. Re-run the focused T-685/T-686/T-687 suite at the final successor SHA and
+   obtain independent review before integration.
+4. T-810 owns the separate page-level `connected` to `Board synced` repair;
    this auth card already uses evidence-backed agent states.
-4. T-981 owns repository-wide machine-local path cleanup. Runtime runner
+5. T-981 owns repository-wide machine-local path cleanup. Runtime runner
    identity remains local operational data and must not be copied into public
    screenshots or documentation.
