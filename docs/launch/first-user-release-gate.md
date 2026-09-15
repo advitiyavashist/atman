@@ -59,6 +59,7 @@ Recheck actual heads, base and integration evidence before landing changes.
 | First-session docs | T-972, PR #171 | Keep one entry path. Its stub walkthrough proves command mechanics, not provider support or cross-provider recovery. |
 | README promise | T-969 draft → T-819 | Explain the user's workflow and local/provider boundary. Do not wait for a polished recording to make setup understandable. |
 | Capability evidence | T-975 | One table maps README, landing and app claims to exact-SHA tests/manual evidence and limitations. |
+| Harness support evidence | T-1025, [`docs/launch/harness-support-matrix.md`](harness-support-matrix.md) | Per-harness discovery/auth/launch/wake/completion/recovery, each cell an evidence citation. Feeds T-975. |
 | PR overlap and integration | T-974 triage; T-968 train verification | Existing triage covers 17 stale PRs; do not call it a completed audit of every open PR. Preserve candidate heads during testing. |
 | Install / alias correctness | T-809 and independent FIX T-970 | Resolve source PATH-upgrade and invoked-name findings with a narrow successor; separately exclude unsupported wheel operations. |
 | Claimable dependent plan | T-879 / PR #121, T-917 verification | Test the final guide verbatim. Tasks lacking real cause/change/proof stay capture with an actionable explanation. |
