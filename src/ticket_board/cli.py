@@ -3102,9 +3102,8 @@ entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
 remaining/reset is FAIL.
 
 Ask: **Which of these do you want to use?** Do not spawn until they answer.
-Codex stays in the catalog even with **no usage**. Gemini dispatch records
-harness=gemini; persist/hooks is the wake (do not spawn a Gemini product job).
-No new Claude fable.
+Codex stays in the catalog even with **unknown usage**. Gemini dispatch records
+harness=gemini; persist/hooks is the wake.
 
 ### Step 3 — Announce that name on the board
 
