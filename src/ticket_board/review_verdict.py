@@ -3,7 +3,9 @@
 `atm accept` / `atm reject` write `review_events` on the ticket. Work view and
 any success-trigger reader use only those events as ACCEPT/REJECT. A note or
 message whose text starts with accept/approved is an unstructured note, never
-a verdict. `atm done` is a separate close and is unchanged.
+a verdict. `atm done` is a separate close. T-1031: dependents release only after
+ACCEPT (or a recorded override); accept may bind a done ticket that still
+has a submitted review head so "accept it or reopen" is actionable.
 
 `atm review --pr N` must pin a *verified* head: the SHA is on origin, the PR
 head equals or contains that SHA in the same repository, and the worktree is
@@ -85,8 +87,8 @@ def refuse(t, reviewer, sha, kind, require_full=False, notes="", reason=""):
     """Return a refusal string, or None if the verdict may be recorded."""
     tid = t.get("id") or "?"
     st = t.get("status")
-    if st != "review":
-        return "%s is %s; only IN REVIEW work can be %sed" % (
+    if st not in ("review", "done"):
+        return "%s is %s; only IN REVIEW (or done-unverified) work can be %sed" % (
             tid, STATUS_LABEL.get(st, st or "?"), kind)
     author = (t.get("owner") or "").strip()
     reviewer = (reviewer or "").strip()
