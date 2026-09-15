@@ -1,6 +1,8 @@
 """T-981: packaged modules must not also be importable from the repo root."""
-import importlib.util
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import ticket_board.board_backup as pkg_backup
@@ -35,9 +37,40 @@ def test_packaged_modules_resolve_to_src_ticket_board():
 
 
 def test_top_level_names_are_not_importable():
-    """A checkout must not expose two import paths for the same module."""
-    assert importlib.util.find_spec("board_backup") is None
-    assert importlib.util.find_spec("ticket_coordination") is None
+    """A checkout must not expose two import paths for the same module.
+
+    Isolated subprocess: importing cli.py as a plain script inserts
+    src/ticket_board into the parent sys.path, so in-process find_spec
+    can see the packaged file as a top-level name. The contract is the
+    checkout layout, not leftover path mutations from earlier tests.
+    """
+    env = os.environ.copy()
+    # Package import path only — never src/ticket_board itself.
+    env["PYTHONPATH"] = str(ROOT / "src")
+    script = r"""
+import importlib.util
+import sys
+from pathlib import Path
+
+poison = [p for p in sys.path if Path(p).name == "ticket_board"]
+if poison:
+    raise SystemExit("poisoned path: %s" % poison)
+
+for name in ("board_backup", "ticket_coordination"):
+    spec = importlib.util.find_spec(name)
+    if spec is not None:
+        raise SystemExit("%s is importable from %s" % (name, spec.origin))
+print("ok")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ok" in result.stdout
 
 
 def test_public_onboarding_does_not_link_internal_hygiene_docs():
@@ -88,7 +121,6 @@ BARE_SEAT_NAME_CMD = [
 
 
 def _git_grep(cmd):
-    import subprocess
     result = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
     # git grep exits 1 when there are no matches
     if result.returncode not in (0, 1):
