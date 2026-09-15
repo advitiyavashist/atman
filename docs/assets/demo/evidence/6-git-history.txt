@@ -1,0 +1,11 @@
+== codex-worker ==
+103e2249eeb4d2bf2ccd094b710f78f5cb890168 Atman demo Add regional sales summary with exact revenue totals
+2d3a2f2fe8ed1a21f2dd0533438e33a988b11dbb Atman demo Seed sales CSV
+codex-worker-t001-2m7lr6hm
+
+== cursor-worker ==
+310f465df378725a71a88ac19857f45bc2779ac2 Atman demo Add a report CLI that prints regional totals from summarize().
+103e2249eeb4d2bf2ccd094b710f78f5cb890168 Atman demo Add regional sales summary with exact revenue totals
+2d3a2f2fe8ed1a21f2dd0533438e33a988b11dbb Atman demo Seed sales CSV
+cursor-worker-work
+
