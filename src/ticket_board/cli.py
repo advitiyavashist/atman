@@ -4861,13 +4861,23 @@ def _t427_verified_sha(tickets_py):
     try:
         with open(manifest) as source:
             release = json.load(source)
-        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
-            if name not in release["files"]:
-                if name == "tickets.py":
+        files = release["files"]
+        if "tickets.py" not in files:
+            return ""
+        if any(name.startswith("src/") for name in files):
+            for required in (
+                "src/ticket_board/ticket_coordination.py",
+                "src/ticket_board/board_backup.py",
+            ):
+                if required not in files:
                     return ""
-                continue
-            path = os.path.join(root, name)
-            recorded = release["files"][name]
+        for name in files:
+            rel = name.replace("\\", "/")
+            if (not rel or rel.startswith("/") or ".." in rel.split("/")
+                    or os.path.normpath(rel) != rel):
+                return ""
+            path = os.path.join(root, rel)
+            recorded = files[name]
             expected_sha, expected_size = (
                 (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
                 else (recorded, None))

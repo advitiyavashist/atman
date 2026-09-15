@@ -45,4 +45,4 @@ into the worktree.
 
 The bus is `tickets msg` / `tickets inbox`. If native inject has no live
 endpoint, a live persist watcher is poked (`wake: name -> watch-poked`).
-Spawn the watcher with this `tickets.py`, not the PATH `sol-agy-harness` shim.
+Spawn the watcher with this `tickets.py`, not a stale PATH shim from another project.
