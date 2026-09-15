@@ -1,7 +1,7 @@
 """T-959: a repo with no TICKETS_DIR silently writes to whatever local
 .tickets/ directory happens to already exist, even when that repo has a
 DIFFERENT board configured as its shared board of record. That is how
-/Users/kavana/Downloads/atman/.tickets ended up holding ~48 stale agent
+/Users/<operator>/Downloads/atman/.tickets ended up holding ~48 stale agent
 registrations and messages that never reached the real shared board
 (steer/.tickets): sessions cd'd into the atman repo without TICKETS_DIR,
 found a plain local .tickets dir, and board_dir() happily used it.
