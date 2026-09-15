@@ -31,9 +31,9 @@ def test_empty_board_is_three_command_steps_with_honesty():
     empty_fn = ui[ui.index("function renderEmptyBoard"):ui.index("load();setInterval")]
     assert 'id="emptySteps"' in empty_fn
     assert empty_fn.count("<li>") == 3
-    assert "tickets quickstart --agent" in empty_fn
-    assert "tickets join" in empty_fn and "--harness" in empty_fn
-    assert "tickets objective" in empty_fn
+    assert "atm quickstart --agent" in empty_fn
+    assert "atm join" in empty_fn and "--harness" in empty_fn
+    assert "atm objective" in empty_fn
     assert "Median turns and yield@cost stay — until a done ticket reports." in empty_fn
     assert "Welcome to Atman." not in empty_fn
     assert "Everyone reads the same board state" not in empty_fn
@@ -90,10 +90,10 @@ def test_promise_chips_stay_visible_and_turns_open_when_unknown():
 def test_onboard_merge_is_tickets_merge_and_second_harness():
     ui = _ui_html()
     ob = ui[ui.index("function renderOnboarding"):ui.index("function renderNextStep")]
-    assert "['first_merge','First merge','tickets merge']" in ob
-    assert "tickets done <id>" not in ob
+    assert "['first_merge','First merge','atm merge']" in ob
+    assert "atm done <id>" not in ob
     assert "second_harness" in ob
-    assert "tickets join <name> --harness" in ob
+    assert "atm join <name> --harness" in ob
 
 
 def test_team_ledes_stay_lean():

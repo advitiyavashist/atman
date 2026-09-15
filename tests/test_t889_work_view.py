@@ -115,11 +115,11 @@ def test_ready_reserved_working_are_distinct_evidence(board):
     _chain(board)
     by = _nodes(board)
     assert by["T-001"]["phase"] == "ready"
-    assert by["T-001"]["evidence"] == "Unblocked · no reservation, no task posted · tickets next claims it"
+    assert by["T-001"]["evidence"] == "Unblocked · no reservation, no task posted · atm next claims it"
     assert by["T-001"]["who_kind"] == ""
     assert by["T-002"]["phase"] == "waiting"
     assert by["T-002"]["wait"] == {"kind": "deps", "on": ["T-001"], "text": "waits on T-001",
-                                   "cmd": "tickets show T-001"}
+                                   "cmd": "atm show T-001"}
     assert run(board, "next", agent="alice").returncode == 0
     by = _nodes(board)
     assert by["T-001"]["phase"] == "working"
@@ -187,7 +187,7 @@ def test_capture_hold_blocked_and_review_carry_reason_and_command(board):
     by = _nodes(board)
     assert by["T-002"]["phase"] == "capture"
     assert by["T-002"]["wait"]["text"] == "waits in capture: run sound"
-    assert by["T-002"]["wait"]["cmd"] == "tickets sound T-002"
+    assert by["T-002"]["wait"]["cmd"] == "atm sound T-002"
     assert by["T-002"]["acceptance"]["proof"] == ""
     assert by["T-003"]["phase"] == "hold"
     assert by["T-003"]["wait"]["kind"] == "hold"
@@ -244,17 +244,17 @@ def test_empty_states_never_invent_dependencies(board):
         p.unlink()
     w = _snap(board)["work"]
     assert w["empty"]["kind"] == "no_tickets"
-    assert w["empty"]["cmd"].startswith("tickets plan")
+    assert w["empty"]["cmd"].startswith("atm plan")
     assert run(board, "create", "First", "--role", "docs", agent="planner").returncode == 0
     w = _snap(board)["work"]
     # one ticket: independent work is valid; no self-dependency example
     assert w["empty"]["kind"] == "no_edges" and w["empty"]["lead"] == "No dependencies yet."
-    assert w["empty"]["cmd"] == "tickets plan" and "example" not in w["empty"]
+    assert w["empty"]["cmd"] == "atm plan" and "example" not in w["empty"]
     assert run(board, "create", "Second", "--role", "docs", agent="planner").returncode == 0
     w = _snap(board)["work"]
     ids = sorted(n["id"] for n in w["nodes"])
-    assert w["empty"]["cmd"] == "tickets plan"
-    assert w["empty"]["example"] == "tickets dep %s --after %s" % (ids[1], ids[0])
+    assert w["empty"]["cmd"] == "atm plan"
+    assert w["empty"]["example"] == "atm dep %s --after %s" % (ids[1], ids[0])
 
 
 # --- T-892 item 2: reservation / posting / read / wake / claim are distinct ----
@@ -508,8 +508,8 @@ def test_review_verdicts_fix_accept_none_superseded_and_marked_done():
     _, by = _pure([_rev("done", "br@def5678", [sub2])])
     assert by["T-001"]["review"]["label"] == "Marked done; verification not recorded"
     assert by["T-001"]["review"]["verified"] is False
-    # tickets merge's own note is main evidence for that pin
-    merged = ("planner", "2026-09-13T03:00:00Z", "merged into main as 9999999 (tickets merge; pinned def5678)")
+    # atm merge's own note is main evidence for that pin
+    merged = ("planner", "2026-09-13T03:00:00Z", "merged into main as 9999999 (atm merge; pinned def5678)")
     _, by = _pure([_rev("done", "br@def5678", [sub2, acc, merged])])
     assert by["T-001"]["review"]["label"] == "Merged into main as def5678"
     assert by["T-001"]["review"]["verified"] is True

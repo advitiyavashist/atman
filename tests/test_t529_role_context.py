@@ -47,7 +47,7 @@ def test_prompt_injects_shared_and_backend_role(board):
     assert "Role context" in r.stdout
     assert "shared-memory" in r.stdout
     assert "Lane: backend" in r.stdout
-    assert "tickets next" in r.stdout
+    assert "atm next" in r.stdout
     assert str(board / "briefs" / "_shared.md") in r.stdout
     assert str(board / "briefs" / "roles" / "backend.md") in r.stdout
 
@@ -146,7 +146,7 @@ def test_watch_prompt_file_includes_role_context(board, tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     got = json.loads(record.read_text())
     prompt = got["prompt"]
-    assert "alice" in prompt and "tickets next" in prompt
+    assert "alice" in prompt and "atm next" in prompt
     assert "Role context" in prompt
     assert "shared-memory" in prompt
     assert "Lane: backend" in prompt

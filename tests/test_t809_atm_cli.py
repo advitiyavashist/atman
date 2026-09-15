@@ -141,7 +141,7 @@ def test_worker_prompt_names_atm_primary_and_tickets_alias():
     root = _load(TOOL, "t809_prompt")
     assert "`atm ...`" in root.WORKER_PROMPT
     assert "compatibility alias" in root.WORKER_PROMPT
-    assert "tickets next" in root.WORKER_PROMPT
+    assert "atm next" in root.WORKER_PROMPT
 
 
 @pytest.mark.skipif(

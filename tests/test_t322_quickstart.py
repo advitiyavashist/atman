@@ -1,4 +1,4 @@
-"""T-322: `tickets quickstart` -- zero to a first ticket claimed by a real agent.
+"""T-322: `atm quickstart` -- zero to a first ticket claimed by a real agent.
 
 The acceptance criterion for T-322 is a human one ("a second agent who has not
 read the code reaches 'first ticket claimed by an agent' from a fresh clone

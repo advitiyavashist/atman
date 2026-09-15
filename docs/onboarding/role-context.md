@@ -12,10 +12,10 @@ Product promise (home UI, not CLI-only): **finish more work at least cost — in
 
 ## 1. Know the role
 
-`tickets join` / `spawn` records lanes on the seat:
+`atm join` / `spawn` records lanes on the seat:
 
 ```sh
-tickets join $TICKET_AGENT --roles backend
+atm join $TICKET_AGENT --roles backend
 ```
 
 Comma-separated roles are allowed (`verification,acceptance`). Each named role maps to `.tickets/briefs/roles/<role>.md`. If the seat has no roles yet, the prompt says so.
@@ -31,9 +31,9 @@ On `watch` / `spawn` / first wake, the prompt file includes:
 | Shared | `.tickets/briefs/_shared.md` | Explicit **empty** |
 | Role | `.tickets/briefs/roles/<role>.md` | Explicit **empty** |
 | Agent | `.tickets/briefs/<agent>.md` | Omit or say none |
-| Ticket | Claimed ticket + dependency notes | Printed by `tickets next` / `show` |
+| Ticket | Claimed ticket + dependency notes | Printed by `atm next` / `show` |
 
-Do not invent lore for an empty block. Do not dump `tickets inbox` history into the role block.
+Do not invent lore for an empty block. Do not dump `atm inbox` history into the role block.
 
 Custom harnesses (`custom:<cmd>`) and built-in CLIs use this same contract. BYOA does not get a second prompt shape.
 
@@ -42,10 +42,10 @@ Full seeding walkthrough: [master-howto.md](master-howto.md) Step 4.
 ## 3. Update
 
 ```sh
-tickets brief --role backend --show          # print live role context
-tickets brief --role backend "standing fact"   # append a timestamped line
-tickets brief --role backend --file roles/backend.md   # replace whole file
-tickets brief $TICKET_AGENT "seat-only note"   # per-seat brief
+atm brief --role backend --show          # print live role context
+atm brief --role backend "standing fact"   # append a timestamped line
+atm brief --role backend --file roles/backend.md   # replace whole file
+atm brief $TICKET_AGENT "seat-only note"   # per-seat brief
 ```
 
 `--role _shared` is refused — edit `.tickets/briefs/_shared.md` directly. Exactly one target: agent name, `--role`, or `--ticket`.
@@ -64,9 +64,9 @@ Put lane facts in the role file so two backend seats stay aligned. Put seat-only
 
 ## Checklist (first seat)
 
-- [ ] Unique `TICKET_AGENT`; `tickets join … --roles <lane>`
+- [ ] Unique `TICKET_AGENT`; `atm join … --roles <lane>`
 - [ ] `.tickets/briefs/_shared.md` present or prompt says empty
 - [ ] `.tickets/briefs/roles/<role>.md` present or prompt says empty
-- [ ] Know `tickets brief --role <role> --show` for later updates
+- [ ] Know `atm brief --role <role> --show` for later updates
 - [ ] Custom harness uses the same prompt file
 - [ ] Not treating Atman as a memory brain or graph-docs product

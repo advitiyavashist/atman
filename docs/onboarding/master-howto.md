@@ -1,53 +1,53 @@
 # Master how-to
 
+**You are onboarding.** Say that first. This is not a ticket claim and not a
+merge pass.
+
 Use [coordination and success](coordination-and-success.md) for accepted-merge
 endpoints, batch message handling, master/CoS ownership, and honest efficiency
 measurement. It governs ongoing coordination after onboarding.
 
-**You are onboarding.** Say that first. This is not a ticket claim and not a
-merge pass.
-
-On this Mac, copy-paste [ceo-mac-runbook.md](ceo-mac-runbook.md) (`python3`
+Copy-paste [ceo-mac-runbook.md](ceo-mac-runbook.md) (`python3`
 on a real `tickets.py`; PATH `tickets` is a stale shim).
 
 A new board is set up in this order: **name → integrations → announce that
 name on the board → ask for tasks and the objective**. Probe every catalog
-row with `tickets harness available` (missing is a row). It auto-checks
+row with `atm harness available` (missing is a row). It auto-checks
 usage; missing remaining or reset is a FAIL row. Ask which
 integrations to use; do not spawn until they answer. Codex stays in the
-catalog even with zero usage. Gemini dispatch records harness=gemini;
-persist/hooks is the wake (do not spawn a Gemini product job). No new Claude fable.
+catalog even with unknown usage. Gemini dispatch records harness=gemini;
+persist/hooks is the wake.
 
 After they pick a name and integrations:
 
 ```
-tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
-tickets master log "onboarding: name=<name> integrations=<list>"
-tickets objective "<their sentence>"
-tickets plan <<'EOF'
+atm msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
+atm master log "onboarding: name=<name> integrations=<list>"
+atm objective "<their sentence>"
+atm plan <<'EOF'
 [{"key":"api","title":"Build REST API","role":"backend","deps":[]},
  {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
 EOF
-tickets graph
-tickets map
+atm graph
+atm map
 ```
 
-Do **not** run one `tickets create` per title. Edges must be real `deps` /
-`--after` links. Mid-run: `tickets dep` / `tickets create --blocks`.
-Follow-up (master or CoS): `tickets update` / `here`, reopen silent >90m
-claims, `tickets drive` toward the objective, review queue. Prose-only
+Do **not** run one `atm create` per title. Edges must be real `deps` /
+`--after` links. Mid-run: `atm dep` / `atm create --blocks`.
+Follow-up (master or CoS): `atm update` / `here`, reopen silent >90m
+claims, `atm drive` toward the objective, review queue. Prose-only
 blockers in a ticket body are not edges.
 
-Workers persist unattended to a **reviewable SHA** (`tickets review`). Human review
-is the gate; `tickets merge` is not silent auto-promote. Success of a
-node can start the next unblocked child; HOLD is skipped by `tickets next`.
+Workers persist unattended to a **reviewable SHA** (`atm review`). Human review
+is the gate; `atm merge` is not silent auto-promote. Success of a
+node can start the next unblocked child; HOLD is skipped by `atm next`.
 
-Capture then sound, then CoS dispatch (`tickets capture` / `tickets sound` /
-`tickets dispatch --harness …`). CEO does not `tickets next`. The living
+Capture then sound, then CoS dispatch (`atm capture` / `atm sound` /
+`atm dispatch --harness …`). CEO does not `atm next`. The living
 board is the index; there is no `plans/` folder tree.
 
 CoS onboarding is the same catalog, then the same graph + follow-up loop
-(`tickets master cos <name>`). Do not dump a live-board plan. Auto-start of
+(`atm master cos <name>`). Do not dump a live-board plan. Auto-start of
 children after done is a separate success-trigger, not this step.
 
 You are opening a fresh Claude Code, Cursor, or Codex session that will run
@@ -65,12 +65,12 @@ model router.
 
 1. Put `tickets` on `PATH` (clone symlink **or** a pinned live-release shim —
    know which).
-2. In the **project** repo (not the tickets clone): `tickets quickstart` or
-   `tickets init`, then `tickets join` + `tickets master take`.
+2. In the **project** repo (not the tickets clone): `atm quickstart` or
+   `atm init`, then `atm join` + `atm master take`.
 3. Fill `.tickets/MASTER.md`. Seed `.tickets/briefs/_shared.md` and
-   `.tickets/briefs/roles/<role>.md`. Set `tickets objective`.
-4. Smoke with a **custom dry harness** (no paid model). Then `tickets spawn`
-   / `tickets watch` real workers.
+   `.tickets/briefs/roles/<role>.md`. Set `atm objective`.
+4. Smoke with a **custom dry harness** (no paid model). Then `atm spawn`
+   / `atm watch` real workers.
 5. Role context comes from `.tickets/briefs/`; repo-root `roles/` is a
    **template only**. Separately, the prompt renderer selects a bounded,
    task-relevant subgraph from repo-backed `knowledge/`. See
@@ -78,12 +78,12 @@ model router.
 6. Open `atm ui` (use the local URL it prints). On the board, **`—` means
    unknown** (not measured yet) — it is not zero. Median turns / yield@cost
    stay `—` until a done ticket reports.
-7. **Sound before staff.** `tickets capture` dumps a thought (`lane=capture`,
-   invisible to `tickets next`). `tickets sound` is the high-reasoning write
+7. **Sound before staff.** `atm capture` dumps a thought (`lane=capture`,
+   invisible to `atm next`). `atm sound` is the high-reasoning write
    (cause, change, proof commands, real `--after` deps, no open questions).
-   CoS `tickets dispatch` one ready ticket per Cursor seat. `tickets pr-sync`
-   after `tickets review --pr`. Master still `tickets done`. CEO does not
-   `tickets next`.
+   CoS `atm dispatch` one ready ticket per Cursor seat. `atm pr-sync`
+   after `atm review --pr`. Master still `atm done`. CEO does not
+   `atm next`.
 
 ---
 
@@ -91,10 +91,10 @@ model router.
 
 Do this in the project that will hold the board. Tick every line.
 
-- [ ] `which -a tickets` and `tickets --version` — you know which binary
-      will run (clone vs release shim).
-- [ ] `tickets` from this directory resolves to **this** project's
-      `.tickets/` (`tickets board` prints it; or `export TICKETS_DIR=…`).
+- [ ] `which -a atm` and `atm --version` — you know which binary
+      will run (clone vs release shim). `tickets` is the same CLI.
+- [ ] `atm` from this directory resolves to **this** project's
+      `.tickets/` (`atm board` prints it; or `export TICKETS_DIR=…`).
 - [ ] `.tickets/MASTER.md` exists and is **filled in** (Mission is not the
       template placeholder).
 - [ ] `.tickets/briefs/_shared.md` exists (house rules every seat sees).
@@ -106,14 +106,14 @@ Do this in the project that will hold the board. Tick every line.
 - [ ] `HANDOFF.md` at the repo root if you are taking over existing work.
 - [ ] Optional: `.tickets/CONTEXT.md` if you want a claim-time briefing
       besides MASTER.md.
-- [ ] Objective set: `tickets objective` prints a sentence, not
+- [ ] Objective set: `atm objective` prints a sentence, not
       `no objective set`.
 - [ ] Paid CLIs (`claude`, `codex`, `cursor-agent`) are logged in **only**
       if you intend to burn them. First smoke uses a custom dry harness.
 
 ---
 
-## Step 1 — Install / which `tickets`
+## Step 1 — Install / which `atm`
 
 Two delivery modes. Do not mix them on one machine without knowing which
 `PATH` hits first.
@@ -121,46 +121,46 @@ Two delivery modes. Do not mix them on one machine without knowing which
 **A. Clone on PATH (dev / this checkout)**
 
 ```sh
-git clone <this-repo> ~/tickets
-chmod +x ~/tickets/tickets.py
-mkdir -p ~/.local/bin
-ln -sf ~/tickets/tickets.py ~/.local/bin/tickets
-# add ~/.local/bin to PATH if `which tickets` is empty
-tickets --version
+git clone <this-repo> ~/atman
+cd ~/atman
+./install.sh
+# symlinks tickets.py -> ~/.local/bin/atm and ~/.local/bin/tickets
+export PATH="$HOME/.local/bin:$PATH"
+atm --version
 # expected from a raw checkout:
 #   tickets (uninstalled checkout; no pinned release)
 ```
 
-Same effect: `./install.sh` from the clone (development install).
+Same effect: `chmod +x tickets.py` and `ln -sf` both names by hand.
 
 **B. Pinned live-release shim (shared CLI)**
 
 ```sh
 # from the clone
 ./install.sh --live-release --ref <commit-sha>
-tickets --version
+atm --version
 # expected:
 #   tickets commit <sha> (verified release)
 ```
 
-The live installer writes a **launcher** at `~/.local/bin/tickets` that
-`exec`s a snapshot under `tickets-releases/<sha>/`. Editing the clone does
-**not** change that binary until you install a new ref.
+The live installer writes a **launcher** at `~/.local/bin/atm` (and the
+`tickets` alias) that `exec`s a snapshot under `tickets-releases/<sha>/`.
+Editing the clone does **not** change that binary until you install a new ref.
 
 **Confirm before you trust any command**
 
 ```sh
-which -a tickets
-readlink -f "$(which tickets)"   # GNU; on macOS: realpath or ls -l
-tickets --version
+which -a atm tickets
+readlink -f "$(which atm)"   # GNU; on macOS: realpath or ls -l
+atm --version
 ```
 
 If `--version` says `verified release` but you thought you were running the
 clone, you are on the shim. If it says `uninstalled checkout`, you are on
 whatever file the symlink points at — including a dirty working tree.
 
-`tickets init` / `tickets quickstart` belong in the **project** you are
-coordinating, not inside the tickets clone.
+`atm init` / `atm quickstart` belong in the **project** you are
+coordinating, not inside the Atman clone.
 
 ---
 
@@ -168,20 +168,20 @@ coordinating, not inside the tickets clone.
 
 ```sh
 cd /path/to/your-project
-tickets quickstart --agent boss --roles backend
+atm quickstart --agent boss --roles backend
 # or, empty board only:
-# tickets init
-# tickets join boss --roles backend
+# atm init
+# atm join boss --roles backend
 ```
 
 `quickstart` is safe to run twice. It creates the board if needed, seeds a
 sample epic, registers you, and prints the next three commands. Delete
-samples when you are done: `tickets quickstart --remove`.
+samples when you are done: `atm quickstart --remove`.
 
-`tickets init` writes `.tickets/MASTER.md`, appends the protocol to
+`atm init` writes `.tickets/MASTER.md`, appends the protocol to
 `AGENTS.md`, writes `.cursor/rules/tickets.mdc`, and (unless `--track`)
 appends `.tickets/` to `.gitignore`. It **binds** or it refuses — if the
-printed `board:` and later `tickets board` disagree, stop and read
+printed `board:` and later `atm board` disagree, stop and read
 [board-resolution.md](../board-resolution.md).
 
 Linked worktrees of one repo share the main worktree's board. That is
@@ -197,16 +197,16 @@ Run as-is after Step 2. Replace names only if you must.
 export TICKET_AGENT=boss
 cd /path/to/your-project
 
-tickets join "$TICKET_AGENT" --roles backend
-tickets master take
-tickets master                 # briefing + REVIEW QUEUE + HEALTH
+atm join "$TICKET_AGENT" --roles backend
+atm master take
+atm master                 # briefing + REVIEW QUEUE + HEALTH
 
 # First board: write the template if it is missing
 # (no-op with a message if MASTER.md already exists)
-tickets master init
+atm master init
 
-tickets objective "V1: offline gates green on main; deploy waits on credentials"
-tickets objective              # confirm text + drive status
+atm objective "V1: offline gates green on main; deploy waits on credentials"
+atm objective              # confirm text + drive status
 ```
 
 Fill `.tickets/MASTER.md` **before** you spawn anyone:
@@ -215,7 +215,7 @@ Fill `.tickets/MASTER.md` **before** you spawn anyone:
 - Workforce — real agent names, not `example`.
 - Current state — what is true *now* (this section wins over the decision
   log).
-- Decision log — append only: `tickets master log "why I did X"`.
+- Decision log — append only: `atm master log "why I did X"`.
 
 `handoff-check` fails if Mission still reads
 `(what we are building, one paragraph)` or the workforce table still lists
@@ -227,7 +227,7 @@ python3 /path/to/tickets-clone/scripts/handoff-check.py
 
 You do **not** take feature tickets. Master jobs each wake: unblock stuck
 teammates, review + merge, coordinate (route, spawn, reopen silent claims).
-`tickets merge` never pushes; you run `git push origin main`.
+`atm merge` never pushes; you run `git push origin main`.
 
 ---
 
@@ -241,8 +241,8 @@ guide: [role-context.md](role-context.md). Product spec:
 | File | Who sees it | How you write it |
 |---|---|---|
 | `.tickets/briefs/_shared.md` | every seat | edit the file |
-| `.tickets/briefs/roles/<role>.md` | seats whose `join --roles` include `<role>` | `tickets brief --role <role> "…"` or `--file` |
-| `.tickets/briefs/<agent>.md` | that **worker** on `tickets prompt` / claim | `tickets brief <agent> "…"` or `--file` |
+| `.tickets/briefs/roles/<role>.md` | seats whose `join --roles` include `<role>` | `atm brief --role <role> "…"` or `--file` |
+| `.tickets/briefs/<agent>.md` | that **worker** on `atm prompt` / claim | `atm brief <agent> "…"` or `--file` |
 
 **Path lock:** inject reads only those paths. Repo-root `roles/` and
 `$TICKETS_ROLES_DIR` are **not** sources. `roles/_shared.md` and
@@ -257,26 +257,26 @@ mkdir -p .tickets/briefs/roles
 cat > .tickets/briefs/_shared.md <<'EOF'
 # Shared seat context
 
-- One ticket at a time. Own worktree. Board-only comms (`tickets msg`).
-- If blocked: `tickets msg "stuck: …" --to <master> --re <id>` early.
-- Do not edit `.tickets/` by hand. Do not run `tickets clear`.
+- One ticket at a time. Own worktree. Board-only comms (`atm msg`).
+- If blocked: `atm msg "stuck: …" --to <master> --re <id>` early.
+- Do not edit `.tickets/` by hand. Do not run `atm clear`.
 EOF
 
 # Lane files — append (creates the file) or replace from --file
-tickets brief --role backend "Implementation and wiring. Ship change + tests. Do not hold review."
-tickets brief --role docs "Docs and operator guides. Do not take backend tickets."
+atm brief --role backend "Implementation and wiring. Ship change + tests. Do not hold review."
+atm brief --role docs "Docs and operator guides. Do not take backend tickets."
 
 # Per-agent standing brief (optional). Injected on the *worker* prompt and
 # listed first on a claim. Master/cos prompts do not include this file —
 # use _shared.md + roles, or spawn --brief, for those seats.
-tickets brief scribe "House style: short sentences. No new APIs."
+atm brief scribe "House style: short sentences. No new APIs."
 
 # Confirm what inject will see (run bare — do not pipe tickets through head/tail)
-tickets brief --role backend --show
-tickets prompt --master --agent boss     # master / drive prompt + role context
+atm brief --role backend --show
+atm prompt --master --agent boss     # master / drive prompt + role context
 ```
 
-`tickets brief --role` **appends** a timestamped line. `--file` **replaces**
+`atm brief --role` **appends** a timestamped line. `--file` **replaces**
 the whole file. `--role _shared` is refused — edit `_shared.md` yourself.
 Exactly one target: agent name, `--role`, or `--ticket`.
 
@@ -289,9 +289,9 @@ failures, runbooks, and skills live in the separate repo-backed
 same prompt renderer under a strict budget; tickets may reference their IDs.
 
 ```sh
-tickets knowledge validate
-tickets knowledge query "current component task" --agent boss
-tickets brief --role backend --show   # what inject will actually send
+atm knowledge validate
+atm knowledge query "current component task" --agent boss
+atm brief --role backend --show   # what inject will actually send
 ```
 
 ---
@@ -328,18 +328,18 @@ if __name__ == "__main__":
 PY
 chmod +x /tmp/atman-dry-harness.py
 
-tickets join smoke --roles backend \
+atm join smoke --roles backend \
   --harness custom \
   --cmd '/tmp/atman-dry-harness.py {prompt_file} {cwd} {agent}'
 
-tickets harness check smoke
+atm harness check smoke
 # verdict is exit status only. "replied: no OK" is fine for this stub.
-tickets prompt --agent smoke             # worker prompt: _shared + backend role
+atm prompt --agent smoke             # worker prompt: _shared + backend role
 
 # One-shot wake (cron form). Needs something pending in this agent's lane.
 # After quickstart the sample tickets are already role=backend — skip create.
-tickets create "Dry inject check" --role backend
-tickets watch --agent smoke --every 5 --max-runs 1 --run-timeout 1 \
+atm create "Dry inject check" --role backend
+atm watch --agent smoke --every 5 --max-runs 1 --run-timeout 1 \
   --cwd . \
   --exec '/tmp/atman-dry-harness.py {prompt_file} {cwd} {agent}'
 ```
@@ -359,18 +359,18 @@ When the dry path is green:
 
 ```sh
 # Persistent worker: join + .worktrees/<name> + detached watcher
-tickets spawn scribe --model sonnet --roles docs --brief "house style: short sentences"
-tickets spawn core --model opus --roles backend --cost high
+atm spawn scribe --model sonnet --roles docs --brief "house style: short sentences"
+atm spawn core --model opus --roles backend --cost high
 
 # Master seat that keeps planning (heartbeat even when nothing is pending)
-tickets drive "V1: offline gates green on main; deploy waits on credentials" \
+atm drive "V1: offline gates green on main; deploy waits on credentials" \
   --as boss --heartbeat 30 --tool cursor+claude
 
 # Or spawn the planner without drive:
-# tickets spawn boss --master --model sonnet --heartbeat 30
+# atm spawn boss --master --model sonnet --heartbeat 30
 
-tickets spawn --list
-tickets who
+atm spawn --list
+atm who
 ```
 
 `--wake-mode task-only|continuous|scheduled` is a durable seat policy. Current
@@ -382,23 +382,23 @@ heartbeat or external cadence separately. The policy does not select a model
 or harness.
 
 For a model session hosted elsewhere, register `--harness remote` and install
-`tickets hooks remote`. The schema-2 manifest exposes identity-pinned
+`atm hooks remote`. The schema-2 manifest exposes identity-pinned
 register/heartbeat/long-poll claim/start/end/release commands under one fenced
-lease. A bare remote `tickets spawn` fails closed: queued work stays visible in
+lease. A bare remote `atm spawn` fails closed: queued work stays visible in
 the dashboard until the real bridge reconnects.
 
 `spawn` with no `--harness` uses whatever `join` registered. Passing
 `--harness` overrides **and** re-registers; a harness switch without a new
 `--cmd` **drops** the old command template on purpose.
 
-`tickets watch --once` is the cron/launchd form (exit 0 = there was work).
+`atm watch --once` is the cron/launchd form (exit 0 = there was work).
 A session cannot be woken by a hook after its turn ends — that is why waking
 is a poll plus `--exec`, not a callback.
 
-Interactive Claude: `tickets hooks claude --agent boss` in the intended
-worktree, then start `claude`. One-command enroll: `tickets boot --agent boss
+Interactive Claude: `atm hooks claude --agent boss` in the intended
+worktree, then start `claude`. One-command enroll: `atm boot --agent boss
 --tool claude`.
-Details: `tickets guide`, [connect-claude.md](../connect-claude.md).
+Details: `atm guide`, [connect-claude.md](../connect-claude.md).
 
 ---
 
@@ -414,7 +414,7 @@ Details: `tickets guide`, [connect-claude.md](../connect-claude.md).
 - **Parsed harness stdout.** Only exit code (backoff / `harness check`).
   Everything the board knows, an agent wrote with `tickets`.
 - **Credential management.** API keys and `/login` are yours.
-  `tickets limit` is how you tell the board someone is out.
+  `atm limit` is how you tell the board someone is out.
 - **Sandboxing.** `--safe` only changes built-in CLI permission flags.
 - **Hooks for a custom harness.** Claude / Codex / Cursor only.
   Custom agents get context from the prompt file.
@@ -422,7 +422,7 @@ Details: `tickets guide`, [connect-claude.md](../connect-claude.md).
   You push.
 - **Master to claim feature tickets.** Unblock, review, merge, route, spawn.
 - **A fourth onboarding file.** A fresh master reads
-  `.tickets/MASTER.md`, `HANDOFF.md`, `tickets map`, then
+  `.tickets/MASTER.md`, `HANDOFF.md`, `atm map`, then
   `.tickets/briefs/_shared.md`. If that is not enough, fix those files.
   See [handoff-contract.md](../handoff-contract.md).
 
@@ -431,15 +431,15 @@ Details: `tickets guide`, [connect-claude.md](../connect-claude.md).
 ## Footguns
 
 **PATH shim vs clone.** `~/.local/bin/tickets` may be a live-release
-launcher. Your clone can be newer or dirtier. Always `tickets --version`
-and `readlink -f $(which tickets)` in the session that will spawn workers.
+launcher. Your clone can be newer or dirtier. Always `atm --version`
+and `readlink -f $(which atm)` in the session that will spawn workers.
 Watchers put `~/.local/bin` at the **front** of `PATH`.
 
-**Role mismatch.** `tickets quickstart` seeds `role=backend` sample tickets
+**Role mismatch.** `atm quickstart` seeds `role=backend` sample tickets
 and registers you with `--roles backend`. A BYOA seat joined `--roles docs`
 will not be handed those tickets and will not get
-`.tickets/briefs/roles/backend.md` in the prompt. `tickets route` /
-`tickets next` follow `roles.json` from `join`/`spawn`, not the ticket title.
+`.tickets/briefs/roles/backend.md` in the prompt. `atm route` /
+`atm next` follow `roles.json` from `join`/`spawn`, not the ticket title.
 See [byoa.md](../byoa.md) — register the same lane you intend to work.
 
 **Empty role brief honesty.** No file → no "Role context (…/roles/x.md)"
@@ -447,7 +447,7 @@ block. Inject does not fall back to `roles/backend.md` in the repo. If you
 wanted house rules in every backend wake, you forgot to seed
 `.tickets/briefs/roles/backend.md`.
 
-**Default gitignore vs standing files.** `tickets init` (no `--track`)
+**Default gitignore vs standing files.** `atm init` (no `--track`)
 appends `.tickets/` — a trailing-slash ignore. Git does not descend, so
 `!.tickets/MASTER.md` does nothing. Live JSON should stay local; hand-written
 standing files must be tracked. Use this pattern (see the handoff contract):
@@ -464,7 +464,7 @@ standing files must be tracked. Use this pattern (see the handoff contract):
 That is the other extreme. Prefer the split above.
 
 **Never overwrite MASTER.md without reading it.** Append with
-`tickets master log`. An untracked MASTER.md has no undo.
+`atm master log`. An untracked MASTER.md has no undo.
 
 **`$TICKETS_DIR` wins everything.** An old export from another project
 sends every command to the wrong board. Unset it or set it on purpose.
@@ -475,7 +475,7 @@ point two live seats at the same tree.
 **Paid smoke.** `harness check` and `watch` run the **real** command.
 A Claude/Codex check burns a real call. Use the dry harness in Step 5.
 
-**`tickets prompt` is the worker prompt.** `master take` does not flip it.
+**`atm prompt` is the worker prompt.** `master take` does not flip it.
 Use `--master` or `--cos` to preview those seats. A watcher spawned without
 `--master` will run the worker loop even if that agent is the current
 master.
@@ -497,12 +497,12 @@ genuinely nothing to hand off).
 | Master planner | master while a chief of staff is set | scope, route by cost/model, staffing. Does not merge unless cos is silent | same as master, plus vision drift |
 | Chief of staff | `master cos <name>` or `spawn --cos` | review, unblock, merge. Escalates scope to the planner | same pending keys as master |
 
-`tickets drive "<objective>" --as boss --heartbeat 30` = set objective +
+`atm drive "<objective>" --as boss --heartbeat 30` = set objective +
 `spawn boss --master --heartbeat 30`. Only seats with a heartbeat wake when
 the board is quiet. The Claude Stop hook ignores heartbeats so an
 interactive session is not pinned open.
 
-### Prompt inject order (watch / spawn / `tickets prompt`)
+### Prompt inject order (watch / spawn / `atm prompt`)
 
 One renderer. Built-in CLIs and `{prompt_file}` get the same text.
 
@@ -513,16 +513,16 @@ One renderer. Built-in CLIs and `{prompt_file}` get the same text.
    agent, in listed order (skip `_shared`, skip dupes, skip missing files)
 3. Relevant repo-backed `knowledge/` subgraph, deduplicated and bounded
 
-**Then, workers only** (`tickets prompt`, or watch/spawn without `--master` /
+**Then, workers only** (`atm prompt`, or watch/spawn without `--master` /
 `--cos`):
 
 4. Standing brief `.tickets/briefs/<agent>.md`
 5. Heartbeat / standing-seat block, if `drive_every` is set and an
    objective is open
-6. Ticket context notes (`tickets brief --ticket <id>`) on held tickets
+6. Ticket context notes (`atm brief --ticket <id>`) on held tickets
 7. Any extra text the caller passed
 
-**Then, master / planner / cos** (`tickets prompt --master` / `--cos`, or
+**Then, master / planner / cos** (`atm prompt --master` / `--cos`, or
 `spawn --master` / `--cos`):
 
 3. Drive block (objective + status + "advance the plan or log why not"),
@@ -531,9 +531,9 @@ One renderer. Built-in CLIs and `{prompt_file}` get the same text.
    the cos)
 5. Cos prompt is the master prompt, rewritten for review/unblock/merge
 
-`tickets master take` records who holds the seat. It does **not** change
-what `tickets prompt` prints. Unattended master wakes must use
-`spawn --master` or `tickets prompt --master`.
+`atm master take` records who holds the seat. It does **not** change
+what `atm prompt` prints. Unattended master wakes must use
+`spawn --master` or `atm prompt --master`.
 
 Truncation: role files and agent briefs cap at 6000 characters each, then
 `...(role context truncated; read the file)`.
@@ -569,7 +569,7 @@ over, track standing files and ignore state (pattern in Footguns).
 | `.worktrees/<agent>/` | that agent's git worktree + branch | local (git worktree) |
 | `AGENTS.md`, `.cursor/rules/tickets.mdc` | protocol for Codex / Cursor | track |
 
-`tickets context` prints MASTER.md, CONTEXT.md, and
+`atm context` prints MASTER.md, CONTEXT.md, and
 `docs/handoffs/AGENT_CONTEXT.md` when those files exist. Per-agent briefs
 are listed first on a claim via `context_paths`.
 
@@ -579,30 +579,30 @@ Trajectories: [trajectories.md](../trajectories.md). Board discovery:
 ### Commands you will actually type
 
 ```sh
-tickets master              # briefing
-tickets master take         # become it
-tickets master log "…"      # decision log
-tickets inbox               # messages to you
-tickets plan                # JSON keys + deps → real --after edges
-tickets dep T-004 --after T-003
-tickets map                 # sprint → epic → tickets
-tickets graph               # dependency tree
-tickets update T-002 "…"    # follow-up every 45m
-tickets here                # still here
-tickets reopen T-002        # silent >90m claims
-tickets drive               # toward the objective
-tickets dash --once         # status picture
-tickets route [--claim]     # suggest / assign owners
-tickets limits              # who is out (AUTH vs wait)
-tickets merge               # integration worktree → tests → ff main
-tickets spawn --list        # watchers
-tickets spawn <name> --stop              # this board only
-tickets spawn <name> --stop --all-boards # also loops on other boards
-tickets brief --role docs --show
-tickets knowledge
-tickets knowledge show kb-lock
-tickets prompt --master --agent boss
-tickets prompt --agent smoke
+atm master              # briefing
+atm master take         # become it
+atm master log "…"      # decision log
+atm inbox               # messages to you
+atm plan                # JSON keys + deps → real --after edges
+atm dep T-004 --after T-003
+atm map                 # sprint → epic → tickets
+atm graph               # dependency tree
+atm update T-002 "…"    # follow-up every 45m
+atm here                # still here
+atm reopen T-002        # silent >90m claims
+atm drive               # toward the objective
+atm dash --once         # status picture
+atm route [--claim]     # suggest / assign owners
+atm limits              # who is out (AUTH vs wait)
+atm merge               # integration worktree → tests → ff main
+atm spawn --list        # watchers
+atm spawn <name> --stop              # this board only
+atm spawn <name> --stop --all-boards # also loops on other boards
+atm brief --role docs --show
+atm knowledge
+atm knowledge show kb-lock
+atm prompt --master --agent boss
+atm prompt --agent smoke
 ```
 
 Worker loop and merge rules stay in the [README](../../README.md). Verbs

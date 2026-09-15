@@ -8,14 +8,14 @@ there is exactly one source for what the Work view says about a node.
 
 Evidence states (``phase``) are distinct and never overstate (T-892 review):
 
-* ``ready``     unblocked; no reservation, no task posted; ``tickets next`` claims it
+* ``ready``     unblocked; no reservation, no task posted; ``atm next`` claims it
 * ``reserved``  a reservation names a seat; no task has been posted to it
 * ``posted``    a task message about the ticket was posted to a seat. Inbox read,
                 wake receipt and claim are separate facts; none is implied
 * ``working``   claimed; the evidence is the claim and the last update age
 * ``waiting``   open with unfinished ``--after`` deps
-* ``capture``   open but not sounded (``tickets sound`` promotes it)
-* ``hold``      open but parked (``tickets hold``)
+* ``capture``   open but not sounded (``atm sound`` promotes it)
+* ``hold``      open but parked (``atm hold``)
 * ``blocked`` / ``review`` / ``done`` / ``discarded`` follow the ticket status
 
 Review evidence is separate from ticket status: ``review_of`` reports the
@@ -387,21 +387,21 @@ def wait_of(t, phase, waiting):
     if phase == "waiting":
         return {"kind": "deps", "on": list(waiting),
                 "text": "waits on " + ", ".join(waiting),
-                "cmd": "tickets show %s" % waiting[0]}
+                "cmd": "atm show %s" % waiting[0]}
     if phase == "capture":
         return {"kind": "capture", "on": [],
                 "text": "waits in capture: run sound",
-                "cmd": "tickets sound %s" % tid}
+                "cmd": "atm sound %s" % tid}
     if phase == "hold":
         reason = (t.get("hold_reason") or "").strip()
         return {"kind": "hold", "on": [],
                 "text": "HOLD" + (": " + reason if reason else ""),
-                "cmd": "tickets hold %s --clear" % tid}
+                "cmd": "atm hold %s --clear" % tid}
     if phase == "blocked":
         reason = (_last_note(t).get("text") or "").strip()
         return {"kind": "blocked", "on": [],
                 "text": "blocked" + (": " + reason[:160] if reason else ""),
-                "cmd": "tickets reopen %s" % tid}
+                "cmd": "atm reopen %s" % tid}
     return {"kind": "", "on": [], "text": "", "cmd": ""}
 
 
@@ -442,9 +442,9 @@ def evidence_of(t, phase, dispatch, progress, now):
     if phase == "reserved":
         return "Reserved for @%s · no task posted · not claimed" % reserved + hist
     if phase == "ready":
-        text = "Unblocked · no reservation, no task posted · tickets next claims it"
+        text = "Unblocked · no reservation, no task posted · atm next claims it"
         if progress and progress.get("became_ready"):
-            text = "Became ready when %s finished %s · no reservation, no task posted · tickets next claims it" % (
+            text = "Became ready when %s finished %s · no reservation, no task posted · atm next claims it" % (
                 progress["parent"], _fmt_age(progress.get("age_h")))
         return text + hist
     if phase == "waiting":
@@ -453,9 +453,9 @@ def evidence_of(t, phase, dispatch, progress, now):
                 progress["parent"], _fmt_age(progress.get("age_h")), ", ".join(progress["pending"]))
         return "not claimable until its --after deps finish"
     if phase == "capture":
-        return "Captured, not sounded · invisible to tickets next until tickets sound"
+        return "Captured, not sounded · invisible to atm next until atm sound"
     if phase == "hold":
-        return "Parked · tickets next skips it"
+        return "Parked · atm next skips it"
     if phase == "discarded":
         return "Discarded · stays on the graph for history"
     return ""
@@ -597,21 +597,21 @@ def empty_state(tickets, nodes, edges):
         return {"kind": "no_tickets",
                 "lead": "No work yet.",
                 "detail": "Plan the first tasks; add --after links only where one task really must finish before another.",
-                "cmd": "tickets plan '{\"tasks\":[{\"key\":\"a\",\"title\":\"First task\"},{\"key\":\"b\",\"title\":\"Second task\",\"deps\":[\"a\"]}]}'"}
+                "cmd": "atm plan '{\"tasks\":[{\"key\":\"a\",\"title\":\"First task\"},{\"key\":\"b\",\"title\":\"Second task\",\"deps\":[\"a\"]}]}'"}
     if nodes and not edges:
         ids = sorted(set(n["id"] for n in nodes))
         out = {"kind": "no_edges",
                "lead": "No dependencies yet.",
                "detail": "A board of independent tasks is valid. If one ticket must finish before another, record that order so success can start the next one.",
-               "cmd": "tickets plan"}
+               "cmd": "atm plan"}
         if len(ids) >= 2:
-            out["example"] = "tickets dep %s --after %s" % (ids[1], ids[0])
+            out["example"] = "atm dep %s --after %s" % (ids[1], ids[0])
         return out
     if not nodes:
         return {"kind": "all_done",
                 "lead": "Everything on the board is done.",
                 "detail": "Plan the next slice against the objective.",
-                "cmd": "tickets plan"}
+                "cmd": "atm plan"}
     return None
 
 
@@ -932,7 +932,7 @@ window.AtmanWork=(function(){
   }
   function exitLine(o){
     if(!o||!o.text)return '';
-    return o.exit_criterion?'<div class="exit"><b>Done when</b> '+esc(o.exit_criterion)+'</div>':'<div class="exit missing"><b>Done when</b> no exit criterion yet — '+cmd('tickets objective --set "…" --exit "…"')+'</div>';
+    return o.exit_criterion?'<div class="exit"><b>Done when</b> '+esc(o.exit_criterion)+'</div>':'<div class="exit missing"><b>Done when</b> no exit criterion yet — '+cmd('atm objective --set "…" --exit "…"')+'</div>';
   }
   function objective(o){
     // T-810 shell may carry its own standing-objective strip above the graph. Defer the
@@ -944,7 +944,7 @@ window.AtmanWork=(function(){
       return '<section class="wv-objective" aria-label="Done when">'+exitLine(o)+'</section>';
     }
     const has=o&&o.text;
-    return '<section class="wv-objective" aria-label="Objective"><div><div class="k">Objective</div><div class="v">'+(has?esc(o.text):'No standing objective yet.')+'</div>'+(has?'':'<div class="exit mute">'+cmd('tickets objective --set "what we are finishing" --exit "how we know it is done"')+'</div>')+'</div>'+(has&&o.state?'<span class="state">'+esc(o.state)+'</span>':'')+exitLine(o)+'</section>';
+    return '<section class="wv-objective" aria-label="Objective"><div><div class="k">Objective</div><div class="v">'+(has?esc(o.text):'No standing objective yet.')+'</div>'+(has?'':'<div class="exit mute">'+cmd('atm objective --set "what we are finishing" --exit "how we know it is done"')+'</div>')+'</div>'+(has&&o.state?'<span class="state">'+esc(o.state)+'</span>':'')+exitLine(o)+'</section>';
   }
   function nodeBtn(n){
     const w=n.wait&&n.wait.text?'<span class="w'+(n.wait.kind==='deps'?'':' warn')+'">'+esc(n.wait.text)+'</span>':'';
@@ -1013,17 +1013,17 @@ window.AtmanWork=(function(){
   function detailHtml(n){
     const wh=who(n,true);
     const a=n.acceptance||{};
-    const acc=a.proof?esc(a.proof):(n.lane==='capture'?'<span class="warn">not sounded yet — '+cmd('tickets sound '+n.id)+'</span>':'<span class="mute">none recorded</span>');
+    const acc=a.proof?esc(a.proof):(n.lane==='capture'?'<span class="warn">not sounded yet — '+cmd('atm sound '+n.id)+'</span>':'<span class="mute">none recorded</span>');
     const qs=(a.open_questions||[]).length?'<ul>'+a.open_questions.map(q=>'<li>'+esc(q)+'</li>').join('')+'</ul>':'';
     const hand=(n.handoff||[]).length?'<ul class="wv-handoff">'+n.handoff.map(h=>'<li><span class="from">'+esc(h.from)+'</span> <span class="by">'+esc(h.by||'?')+(h.at?' · '+esc(h.at):'')+'</span><br>'+esc(h.text)+(h.truncated?'…':'')+'</li>').join('')+'</ul>':'';
     const art=n.artifact||{};
     const artTxt=[art.commit?esc(art.commit):'',art.pr?'PR '+esc(art.pr):'',art.branch&&!(art.commit||'').startsWith(art.branch)?esc(art.branch):''].filter(Boolean).join(' · ');
-    const cmds=['tickets show '+n.id];
-    if(n.phase==='ready')cmds.push('tickets next');
-    if(n.phase==='capture')cmds.push('tickets sound '+n.id);
-    if(n.phase==='hold')cmds.push('tickets hold '+n.id+' --clear');
-    if(n.phase==='review')cmds.push('tickets merge '+n.id);
-    if(n.who&&n.who_kind!=='suggested')cmds.push('tickets msg --to '+n.who+' --re '+n.id+' "…"');
+    const cmds=['atm show '+n.id];
+    if(n.phase==='ready')cmds.push('atm next');
+    if(n.phase==='capture')cmds.push('atm sound '+n.id);
+    if(n.phase==='hold')cmds.push('atm hold '+n.id+' --clear');
+    if(n.phase==='review')cmds.push('atm merge '+n.id);
+    if(n.who&&n.who_kind!=='suggested')cmds.push('atm msg --to '+n.who+' --re '+n.id+' "…"');
     const stat=esc(n.evidence);
     return '<button type="button" class="close" data-wv-close aria-label="Close detail">Close</button>'+
       '<div class="hd ph-'+esc(n.phase)+'"><span class="id">'+esc(n.id)+'</span><span class="pill">'+esc(PH[n.phase]||n.phase)+'</span>'+(n.role?'<span class="mute">'+esc(n.role)+'</span>':'')+'<span class="mute">P'+esc(n.priority)+'</span></div>'+

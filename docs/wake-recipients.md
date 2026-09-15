@@ -1,10 +1,10 @@
 # Wake recipients: what each harness can actually receive
 
 A wake receipt is a claim about another process. This page records what was
-measured, per harness, so `tickets msg` never prints `woken` for a seat that
+measured, per harness, so `atm msg` never prints `woken` for a seat that
 did not start a turn. It feeds the T-812 sender x recipient matrix.
 
-The sender never changes the receipt: `tickets msg` runs in the sender's
+The sender never changes the receipt: `atm msg` runs in the sender's
 process and uses the *recipient's* transport, so a Codex sender and a Claude
 sender get the same label for the same seat.
 
@@ -62,7 +62,7 @@ message per row -- the store is in WAL mode and is read read-only):
 * typed, no row within `TICKETS_CURSOR_EVIDENCE_SECS` (default 6) ->
   `delivered-unconfirmed`, and the endpoint heartbeat is **not** refreshed
 * no managed session (stopped, or never on the managed server) ->
-  `supervised (...)`, and `tickets who` says `reachable=no`
+  `supervised (...)`, and `atm who` says `reachable=no`
 
 The `@cursor_workspace_hash` tmux tag is not the `~/.cursor/chats/<dir>` name,
 so the store is located by chat id.
@@ -92,11 +92,11 @@ Measured against `agy 1.2.2`:
   a new run, not an injection into the live one;
 * the supported extension surface is hooks (`PreInvocation`, `Stop`).
 
-So an Agy seat is supervised by design. `tickets join --persistent` refuses
-with that reason instead of registering an endpoint, `tickets msg` prints
+So an Agy seat is supervised by design. `atm join --persistent` refuses
+with that reason instead of registering an endpoint, `atm msg` prints
 `supervised (agy has no live-session injection; mail waits for its next hook or
 persist run)` instead of a fake wake, and mail is delivered by
-`tickets hooks agy` (PreInvocation/Stop) or a persist watcher.
+`atm hooks agy` (PreInvocation/Stop) or a persist watcher.
 
 If a future `agy` build ships a local session API, add it to
 `session_adapters.SUPERVISED_HARNESSES` removal + a probe, with the same rule:
