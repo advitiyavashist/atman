@@ -5506,6 +5506,8 @@ def _poke_persist_watch(board, owner, attempts=None):
     """
     import signal
 
+    if _active_seat_limit(board, owner):
+        return False
     tries = PERSIST_POKE_ATTEMPTS if attempts is None else max(1, int(attempts))
     for _ in range(tries):
         pid = _watcher_pid(board, owner)
@@ -5623,7 +5625,10 @@ def _watch_log_state(board, owner):
     # speed dropped it the moment one of those failures happened to take
     # longer than the usual few seconds.
     streak = []
+    expired_at = ((_agent_rec(board, owner) or {}).get("limit_expired_at") or "")
     for r in reversed(runs):
+        if expired_at and (r["exit_at"] or r["start"]) <= expired_at:
+            break
         if r["exit_at"] is None or r["rc"] in ("0", None):
             break
         streak.append(r)
@@ -5748,10 +5753,10 @@ def agent_liveness(board, rec, peers=None):
     #    saying "I read the log". Keep it, but it is no longer the ONLY path
     #    to a limited render -- that is how an agent can look healthy while
     #    hard-limited for a long window.
-    lim = (rec or {}).get("limit")
+    lim = _active_seat_limit(board, owner, rec or {})
     if lim:
-        out.update(state="limited", source="manual", heuristic=False,
-                   detail="asserted by hand%s%s" % (
+        out.update(state="limited", source=lim.get("source", "manual"), heuristic=False,
+                   detail=("provider usage limit%s%s" if lim.get("source") == "provider" else "asserted by hand%s%s") % (
                        (", back %s" % lim["until"]) if lim.get("until") else "",
                        (" -- %s" % lim["note"]) if lim.get("note") else ""))
         return out
@@ -5781,6 +5786,9 @@ def agent_liveness(board, rec, peers=None):
             # which two we looked for, rather than picking one's error message.
             tdetail = "no Claude or Codex transcript for %s" % _tilde(cwd)
 
+    expired_age = _age_secs(((_agent_rec(board, owner) or {}).get("limit_expired_at")))
+    if tstate == "limited" and expired_age is not None and tage is not None and tage >= expired_age:
+        tstate, tdetail = "unknown", "previous provider reset elapsed; awaiting fresh session evidence"
     if tstate != "unknown":
         out.update(state=tstate, source=tsource, heuristic=False, detail=tdetail)
         # A dead watcher under a quiet transcript is a real dead lane; a dead
@@ -5915,7 +5923,11 @@ def cmd_limit(a, board):
     if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
         checkin(board, owner)
     if a.clear:
-        mutate = lambda rec: rec.pop("limit", None)
+        def mutate(rec):
+            previous = rec.pop("limit", None)
+            if previous and previous.get("source") == "provider":
+                rec["limit_expired_at"] = now()
+                rec.pop("adapter_failure", None)
         msg = "%s is back (limit cleared)" % owner
     else:
         limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
@@ -7622,10 +7634,10 @@ def cmd_who(a, board):
         if r.get("git_mismatch"):
             print("%-14s !! git resolved a repo that does not contain this agent's cwd at its last "
                   "check-in -- branch/sha above are unreliable; cwd is ground truth (T-243)" % "")
-        if r.get("limit"):
-            lim = r["limit"]
+        lim = _active_seat_limit(board, r["owner"], r)
+        if lim:
             print("%-14s !! USAGE LIMIT hit %s ago%s" % ("", fmt_hours(hours_since(lim["at"])),
-                                                        (", back %s" % lim["until"]) if lim.get("until") else ""))
+                                                        (", back %s" % lim["until"]) if lim.get("until") else ", reset unknown"))
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
         entry = wf.get(r["owner"], {}) or {}
@@ -9225,6 +9237,11 @@ def cmd_msg(a, board):
         if _already_autonomous_wake(board, to, mid):
             print("wake: %s -> deduped" % to)
             continue
+        limit = _active_seat_limit(board, to)
+        if limit:
+            print("wake: %s -> limited (reset %s)" % (
+                to, limit.get("reset_at") or limit.get("until") or "unknown"))
+            continue
         harness = _seat_harness(board, to)
         if sa is None:
             sa = _session_adapters()
@@ -10567,8 +10584,9 @@ def pending_work(board, owner):
     if not owner or not os.path.isdir(board):
         return out
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
-    if rec.get("limit"):
-        out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
+    lim = _active_seat_limit(board, owner, rec)
+    if lim:
+        out["limited"] = lim.get("reset_at") or lim.get("until") or "reset unknown"
         return out
     obj = _safe(lambda: load_objective(board), {})
     obj_state = objective_state(obj)
@@ -11141,24 +11159,122 @@ def cmd_remote(a, board):
     print(json.dumps(result, sort_keys=True))
 
 
-def _watch_note_limit_from_log(board, owner, log_slice):
-    """Record limit when the child exits before atm inbox (T-561).
+def _provider_reset_at(text, observed_at):
+    """Normalize only explicit, unambiguous provider reset times.
 
-    pending_work already suppresses wake on rec['limit']; this is the lever for
-    weekly-limit exits that never reach inbox.
+    Bare clock times without a timezone remain display-only. Resolve a daily
+    clock against detection time once, never against each subsequent poll.
     """
-    if not log_slice or not _looks_limited(log_slice):
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    value = (text or "").strip()
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if stamp.tzinfo is not None:
+            return stamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        pass
+    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^()]+)\)", value, re.I)
+    if not match:
+        return ""
+    hour, minute, meridiem, zone = match.groups()
+    if not 1 <= int(hour) <= 12 or not 0 <= int(minute or 0) < 60:
+        return ""
+    try:
+        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(ZoneInfo(zone))
+    except (ValueError, ZoneInfoNotFoundError):
+        return ""
+    reset = observed.replace(hour=int(hour) % 12 + (12 if meridiem.lower() == "pm" else 0),
+                             minute=int(minute or 0), second=0, microsecond=0)
+    if reset <= observed:
+        reset += timedelta(days=1)
+    return reset.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _active_seat_limit(board, owner, rec=None):
+    """Expire observed limits atomically; unknown resets require explicit clear."""
+    rec = rec if rec is not None else (_agent_rec(board, owner) or {})
+    lim = rec.get("limit")
+    if not lim or not lim.get("reset_at"):
+        return lim
+    try:
+        reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
+        expired = reset.tzinfo is not None and reset <= datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        expired = False
+    if not expired:
+        return lim
+    def clear(current):
+        if current.get("limit") != lim:
+            return False
+        current.pop("limit", None)
+        current["limit_expired_at"] = lim["reset_at"]
+        # A quota failure must not keep the same trigger exhausted after reset.
+        current.pop("adapter_failure", None)
+    current = _agent_update(board, owner, clear)
+    return (current if current is not None else (_agent_rec(board, owner) or {})).get("limit")
+
+
+def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
+                               ticket=None, harness="", bound_write=False):
+    """Persist a provider rejection, including exit-zero Claude limit output.
+
+    Match the CLI's own rejection line, not a mention in successful prose or
+    telemetry. Earlier ticket writes cannot invalidate a later rejection.
+    Generic limit text still requires a failed run.
+    """
+    clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", log_slice or "")
+    rejection = re.search(
+        r"^You['’]ve hit your (?:session|weekly|usage) limit[^\r\n]*$", clean, re.M | re.I)
+    structured = _structured_limit_signal(clean)
+    failed = rc not in (0, None) or timed_out
+    if not rejection and not structured and not (failed and _looks_limited(clean)):
         return
-    if (_agent_rec(board, owner) or {}).get("limit"):
-        return
-    import re as _re
-    note = _first_match(log_slice, CLI_LIMIT_STRINGS) or "usage limit"
+    note = rejection.group(0) if rejection else (_first_match(clean, CLI_LIMIT_STRINGS) or "provider rate_limit_error")
+    if structured and not rejection:
+        for blob in _json_candidates(clean):
+            try:
+                event = json.loads(blob)
+            except ValueError:
+                continue
+            error = event.get("error") if isinstance(event, dict) else None
+            if (isinstance(event, dict) and event.get("type") in ("error", "result") and isinstance(error, dict)
+                    and error.get("type") == "rate_limit_error" and isinstance(error.get("message"), str)):
+                note = error["message"]
+                break
     until = ""
-    m = _re.search(r"resets?\s+([^\n\r\.]{3,40})", log_slice, _re.I)
-    if m:
-        until = m.group(1).strip()
-    lim = {"at": now(), "until": until, "note": note}
-    _agent_update(board, owner, lambda rec: rec.update({"limit": lim}))
+    match = re.search(r"resets?\s+(?:at\s+)?([^\r\n]+)", note, re.I)
+    if match:
+        until = match.group(1).strip()
+    observed = now()
+    lim = {"at": observed, "until": until, "note": note[:400],
+           "source": "provider", "harness": harness,
+           "reset_at": _provider_reset_at(until, observed)}
+    def record(rec):
+        if rec.get("limit"):
+            return False
+        rec["limit"] = lim
+        rec.pop("limit_expired_at", None)
+    if _agent_update(board, owner, record) is None:
+        return
+    reason = "LIMITED: %s; %s. Automatic retrigger paused %s." % (
+        owner, lim["note"],
+        ("until " + lim["reset_at"]) if lim["reset_at"] else
+        ("(provider reset %s; explicit limit clear required)" % (until or "unknown")))
+    # Scan actual held claims; a run's stale binding must never annotate work
+    # already transferred to a different seat.
+    from contextlib import nullcontext
+    for held in load_all(board):
+        if held.get("owner") != owner or held.get("status") != "claimed":
+            continue
+        tc = _recovery()
+        lock = tc.ticket_mutation_lock(board, held["id"]) if tc else nullcontext()
+        with lock:
+            current = load(board, held["id"])
+            if current.get("owner") == owner and current.get("status") == "claimed":
+                current.setdefault("notes", []).append({"by": owner, "at": observed, "text": reason})
+                save(board, current)
+    return lim
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
@@ -12371,7 +12487,7 @@ def utilization(board, tickets=None, hours=24, live=None):
         # stale liveness cache is precisely the bug this ticket exists to fix.
         lv = (live.get(n) if live is not None
               else (_safe(lambda: agent_liveness(board, r, list(agents.values())), {}) if r else {})) or {}
-        state = ("DOWN" if lv.get("state") in ("limited", "dead")
+        state = ("LIMITED" if lv.get("state") == "limited" else "DOWN" if lv.get("state") == "dead"
                  else ("busy" if any(t["status"] == "claimed" for t in held) else "idle"))
         rows.append({
             "agent": n, "state": state, "done": len(recent), "done_total": len(done),
@@ -12469,7 +12585,7 @@ def cmd_dash(a, board):
                 ("seen " + fmt_hours(hours_since(r["seen"]))) if r.get("seen") else "never",
                 wnote, ("pending: " + ", ".join(keys)) if keys else (lv.get("detail") or "")[:40]))
         rows, burn = utilization(board, tickets, hours=24, live=live)
-        live = [r for r in rows if r["state"] != "DOWN"]
+        live = [r for r in rows if r["state"] not in ("DOWN", "LIMITED")]
         lines.append("UTILIZATION 24h  (%d live agents, %d down)" % (len(live), len(rows) - len(live)))
         for r in sorted(live, key=lambda r: -r["done"])[:8]:
             lines.append("  %-13s %-4s done %2d  avg %-5s  wip %d  rev %d  util %3.0f%%" % (
@@ -13218,6 +13334,11 @@ def cmd_watch(a, board):
                         cleanup()
                     ended = now()
                     run_output = _read_run_slice(log_path, log_before)
+                    _watch_note_limit_from_log(
+                        board, owner, run_output, rc=rc, timed_out=timed_out,
+                        ticket=held_ticket, harness=_harness_of_cmd(run_cmd),
+                        bound_write=_run_had_bound_write(
+                            board, run_id, held_ticket, agent=owner, run_no=runs))
                     if _auth_gates_spawn(retry_harness) or retry_harness == "cursor":
                         run_auth_state = _classify_auth_output(rc, run_output)
                         if run_auth_state in ("login_required", "expired", "quota", "network") or rc == 0:
@@ -13264,8 +13385,6 @@ def cmd_watch(a, board):
                             lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))
                     log("%s run %d exit %s" % (now(), runs, rc))
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
-                    run_slice = _read_run_slice(log_path, log_before)
-                    _safe(lambda rs=run_slice: _watch_note_limit_from_log(board, owner, rs), None)
                 if not a.once and rc not in (0, None):
                     previous = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
                     attempts = (int(previous.get("attempts") or 0) + 1
@@ -14448,6 +14567,8 @@ def _maybe_resume_auth_wake(board, owner, previous, merged):
     if lifecycle_of(board, owner) != "persistent":
         return
     rec = _agent_rec(board, owner) or {}
+    if _active_seat_limit(board, owner, rec):
+        return
     if rec.get("auth_resume_at"):
         return
     harness, _ = harness_of(board, owner)
@@ -15921,7 +16042,7 @@ function renderSeats(d){
   const placed=new Set();
   const by={};(d.agents||[]).forEach(a=>{if(a.name)by[a.name]=a});
   const operator=[],review=[],flight=[],ready=[],idle=[];
-  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(seatChip(name,cover,kind,by[name]||{}))};
+  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);const a=by[name]||{};if(a.state==='LIMITED'){cover='LIMITED · reset '+(a.limit_until||'unknown');kind='ghost'}arr.push(seatChip(name,cover,kind,a))};
   add(operator,d.master,'master','operator');
   add(operator,d.cos,'CoS','operator');
   (d.review||[]).forEach(t=>add(review,t.owner,t.id+' · review','cover'));
@@ -15935,7 +16056,7 @@ function renderSeats(d){
     const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any lane';
     const u=utilBy[a.name]||{};
     const quota=u.util_pct!=null?' · '+Math.round(u.util_pct)+'%':'';
-    const st=a.state==='DOWN'?'down':'idle';
+    const st=a.state==='LIMITED'?'limited':a.state==='DOWN'?'down':'idle';
     idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'||a.reachable===false?'ghost':'idle'));
   });
   const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
@@ -16417,7 +16538,7 @@ async function load(manual){
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
-    const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
+    const lim=a.limit?'<span class="tag limit">reset '+esc(a.limit_until||'unknown')+'</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
@@ -16997,7 +17118,7 @@ def _board_snapshot_body(board, messages=40):
         rec = agents.get(r["agent"], {})
         agent_wf = wf.get(r["agent"], {}) or {}
         harness_name = agent_wf.get("harness") or agent_wf.get("tool") or "claude"
-        lim = rec.get("limit")
+        lim = _active_seat_limit(board, r["agent"], rec)
         wc = _watcher_count(r["agent"], board)
         wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
         wake_pending = actionable(wake)
@@ -17106,7 +17227,7 @@ def _board_snapshot_body(board, messages=40):
         flag = " FLAG:no-exit" if objective_exit_missing(obj) else ""
         goals = "OBJECTIVE (%s%s)\n%s\nexit: %s\n\n%s" % (
             st, flag, obj.get("text", ""), obj.get("exit_criterion") or "(none)", goals)
-    util_rows = [r for r in rows if r["state"] != "DOWN"]
+    util_rows = [r for r in rows if r["state"] not in ("DOWN", "LIMITED")]
     in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
                   "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
                   "waiting": [d for d in t.get("deps", []) if d not in done],
