@@ -1,0 +1,26 @@
+{
+  "kind": "annotated-screenshot",
+  "v": 1,
+  "ticket": "",
+  "url": "file:///Users/kavana/Downloads/atman/.worktrees/cursor-verify-t1026/tests/fixtures/t1026/state.html",
+  "source_png": "",
+  "selector": ".done-chip",
+  "picked": false,
+  "label": "counted as 1/6 done",
+  "note": "fixture: worker completion is not verification",
+  "bbox": {
+    "x": 24,
+    "y": 90.234375,
+    "width": 82.28125,
+    "height": 30.390625
+  },
+  "captured_at": "2026-09-15T07:45:37Z",
+  "playwright": true,
+  "headed": false,
+  "files": {
+    "png": "20260915-074537-counted-as-1-6-done.png",
+    "html": "20260915-074537-counted-as-1-6-done.html",
+    "json": "20260915-074537-counted-as-1-6-done.json",
+    "annotated_png": "20260915-074537-counted-as-1-6-done-marked.png"
+  }
+}

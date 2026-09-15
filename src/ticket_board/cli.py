@@ -48,6 +48,11 @@ try:
 except ImportError:
     import review_verdict as _rv
 
+try:
+    from . import verify_shot as _shot
+except ImportError:
+    import verify_shot as _shot
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -3675,6 +3680,10 @@ def cmd_board_restore(a, board):
     print(json.dumps(result, indent=2))
 
 
+def cmd_shot(a, board):
+    return _shot.cmd_shot(a, board, load=load, save=save, whoami=whoami, now=now)
+
+
 def cmd_where(a, board):
     print(board)
     kids = child_boards(os.getcwd())
@@ -5582,6 +5591,9 @@ def main():
     )
     c.set_defaults(fn=cmd_board_restore)
 
+    c = _shot.register_parser(sub)
+    c.set_defaults(fn=cmd_shot)
+
     c = sub.add_parser("where", help="print the board directory")
     c.set_defaults(fn=cmd_where)
 
@@ -5642,6 +5654,7 @@ def main():
         "master",
         "connect",
         "board-restore",
+        "shot",
     ):
         if not os.path.isdir(board):
             if a.cmd == "board":
