@@ -6360,9 +6360,12 @@ INTEGRATION_CATALOG = (
      "quota": "optional-admin"},
     {"id": "agy", "name": "Antigravity", "binaries": ("agy",),
      "if_yes": "tickets spawn <seat> --harness agy --persist",
-     # T-988: experimental for the preview, and the seat must be given a model
-     # that currently has quota -- the default model family can be exhausted.
-     "policy": "experimental; ok to spawn if chosen, with a model that has quota",
+     # T-988: experimental is a generic maturity fact and belongs here. WHICH
+     # model a seat needs today does not: that is a transient quota hold, and
+     # T-1005 keeps board-specific model and quota policy in the board's briefs
+     # and prompt context, never in this generic catalog. It lives in
+     # docs/t988-agy-print-mode.md and in the seat brief instead.
+     "policy": "experimental; ok to spawn if chosen",
      # `agy models` replaces `help`: help proves the binary runs, models proves
      # credentials and network reach the provider. Neither reports quota.
      "usage_args": ("models",),
