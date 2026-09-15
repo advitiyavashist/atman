@@ -2782,6 +2782,9 @@ def cmd_dispatch(a, board):
         sys.exit("dispatch: %s is on HOLD" % t["id"])
     if t.get("status") != "open":
         sys.exit("dispatch: %s is %s; only open ready tickets" % (t["id"], t.get("status")))
+    if _reopen_blocks_automation(board, t):
+        sys.exit("dispatch: %s has a same-second-as-reopen task with no event order; "
+                 "post a new explicit --task" % t["id"])
     done = set(x["id"] for x in load_all(board) if x["status"] == "done")
     pending = [d for d in (t.get("deps") or []) if d not in done]
     if pending:
@@ -3538,6 +3541,7 @@ def cmd_next(a, board):
     ready = [t for t in _filter_ready(ready_all, roles) if can_do(board, owner, t)]
     ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
     ready = [t for t in ready if not _ticket_on_hold(t)]
+    ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -8892,8 +8896,55 @@ def fmt_msg(m):
         fmt_local(m.get("at")), m.get("from", "?"), mark, to, re_, m.get("text", ""))
 
 
+def _task_life_actionable(board, message):
+    """False when a ticket-scoped task is previous-life or same-second unknown.
+
+    CEO T-955/T-810: automation must not wake, dispatch, or next-claim from an
+    unknown-ordered pre-reopen post. A new explicit task is required.
+    """
+    tid = (message.get("re") or "").strip()
+    if not tid:
+        return True
+    kind = (message.get("kind") or "").strip()
+    text = str(message.get("text") or "").strip().lower()
+    is_task = kind == "task" or message.get("task") or text.startswith(
+        ("stuck", "blocked", "task:", "task "))
+    if not is_task:
+        return True
+    try:
+        t = load(board, tid)
+    except Exception:
+        return True
+    if not t:
+        return True
+    wv = _work_view()
+    return wv._life_of(t, message) == wv.LIFE_CURRENT
+
+
+def _reopen_blocks_automation(board, t, messages=None):
+    """True when the only ticket-scoped tasks after reopen are unknown-ordered."""
+    if not ((t.get("reopened_at") or "").strip() or t.get("reopened_seen")):
+        return False
+    wv = _work_view()
+    lives = []
+    for m in (messages if messages is not None else load_messages(board)):
+        if (m.get("re") or "").strip() != t["id"]:
+            continue
+        kind = (m.get("kind") or "").strip()
+        text = str(m.get("text") or "").strip().lower()
+        if kind != "task" and not m.get("task") and not text.startswith(
+                ("stuck", "blocked", "task:", "task ")):
+            continue
+        lives.append(wv._life_of(t, m))
+    if not lives:
+        return False
+    return wv.LIFE_CURRENT not in lives and wv.LIFE_UNKNOWN in lives
+
+
 def _message_wakes_seat(board, seat, message):
     """Whether a posted message should attempt a native session wake for seat."""
+    if not _task_life_actionable(board, message):
+        return False
     obj_state = objective_state(_safe(lambda: load_objective(board), {}))
     return (_message_wakes(message, obj_state)
             or _continuous_message_wakes(board, seat, message))
