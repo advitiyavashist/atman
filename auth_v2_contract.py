@@ -520,7 +520,8 @@ def merge_auth_check(previous, incoming, runner_ctx):
     Exception: an authoritative `unavailable` re-probe for the same fenced
     seat may replace stored lineage when only resolved binary / runner_id
     drifted (CLI disappeared). Cross-seat, sandbox, repo, argv0, and Ready
-    claims still cannot overwrite.
+    claims still cannot overwrite. Supported preview install is
+    source-prefix `install.sh`: atm and tickets are the same tickets.py.
 
     Pause and alert identity are derived from trusted stored/incoming
     enrolled context, never from an arbitrary caller.

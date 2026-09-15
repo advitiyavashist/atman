@@ -12,17 +12,36 @@ import pytest
 from auth_v2_contract import merge_auth_check, seat_fence_matches
 from test_t685_auth_v2_contract import runner_ctx, sandbox_ctx, v2_ready
 
-TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
+ROOT = Path(__file__).resolve().parents[1]
+TOOL = ROOT / "tickets.py"
+INSTALL_SH = ROOT / "install.sh"
 
 
-def run(board, *args, agent="operator", env=None):
+def run(board, *args, agent="operator", env=None, cli=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent,
              HOME=str(board.parent.parent / "home"),
              TICKETS_CACHE_DIR=str(board.parent.parent / "cache"))
     if env:
         e.update(env)
-    return subprocess.run([sys.executable, str(TOOL), *args], capture_output=True,
+    return subprocess.run([sys.executable, str(cli or TOOL), *args], capture_output=True,
                           text=True, env=e, cwd=board.parent)
+
+
+def source_prefix_aliases(tmp_path):
+    prefix = tmp_path / "source-prefix-bin"
+    env = dict(os.environ)
+    env.pop("PREFIX", None)
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--prefix", str(prefix)],
+        cwd=str(ROOT), capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    atm = prefix / "atm"
+    tickets = prefix / "tickets"
+    assert atm.is_symlink() and tickets.is_symlink()
+    assert os.readlink(str(atm)) == str(TOOL)
+    assert os.readlink(str(tickets)) == str(TOOL)
+    assert atm.resolve() == tickets.resolve() == TOOL.resolve()
+    return atm, tickets
 
 
 @pytest.fixture
@@ -157,11 +176,16 @@ def test_board_move_repo_root_change_does_not_clear_ready():
     assert merged["execution_context"]["repo_root"] == host["repo_root"]
 
 
-def test_packaged_argv0_cannot_overwrite_root_ready():
+def test_different_argv0_cannot_overwrite_ready():
+    """argv0 is seat-fence identity, not a package-parity claim.
+
+    Supported preview install is source-prefix: both atm and tickets are
+    the same tickets.py. A different invocation name is a different seat.
+    """
     root = runner_ctx(argv0="tickets", binary="/repo/tickets.py")
     stored = merge_auth_check({}, v2_ready(root), root)
-    packaged = runner_ctx(argv0="atm", binary="atm", runner_id="rnr_packaged")
-    merged = merge_auth_check(stored, unavailable_probe(packaged), root)
+    other = runner_ctx(argv0="atm", binary="atm", runner_id="rnr_other_argv0")
+    merged = merge_auth_check(stored, unavailable_probe(other), root)
     assert merged["state"] == "ready"
     assert merged["execution_context"]["argv0"] == "tickets"
 
@@ -215,3 +239,64 @@ def test_harness_first_connect_missing_binary_is_not_ready(board, tmp_path):
     assert rec["state"] == "unavailable", r.stdout + r.stderr
     assert rec["state"] != "ready"
     assert rec.get("identity_label") in ("", None)
+
+
+def test_source_prefix_atm_and_tickets_are_the_same_tickets_py(tmp_path):
+    atm, tickets = source_prefix_aliases(tmp_path)
+    assert atm.resolve() == tickets.resolve() == TOOL.resolve()
+    for cli in (atm, tickets):
+        help_run = subprocess.run(
+            [sys.executable, str(cli), "--help"],
+            capture_output=True, text=True)
+        assert help_run.returncode == 0, help_run.stdout + help_run.stderr
+        assert "harness" in help_run.stdout
+
+
+@pytest.mark.parametrize("alias_name", ["atm", "tickets"])
+def test_source_prefix_alias_ready_then_removed_binary_becomes_unavailable(
+        board, tmp_path, alias_name):
+    atm, tickets = source_prefix_aliases(tmp_path)
+    cli = atm if alias_name == "atm" else tickets
+    env = fake_cli(tmp_path, "agent", "Logged in as dev@example.test")
+    seat = "alias-%s-seat" % alias_name
+    assert run(board, "join", seat, "--roles", "docs",
+               "--harness", "cursor", "--lifecycle", "persistent",
+               env=env, cli=cli).returncode == 0
+    r = run(board, "harness", "auth", seat, env=env, cli=cli)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rec = agent_record(board, seat)["auth_check"]
+    assert rec["state"] == "ready"
+    assert rec.get("authoritative") is True
+    ready_at = rec["at"]
+    resolved = rec["execution_context"]["binary"]
+    assert os.path.isabs(resolved) and os.path.isfile(resolved)
+    time.sleep(1.1)
+    Path(resolved).unlink()
+    r = run(board, "harness", "auth", seat, env=env, cli=cli)
+    rec = agent_record(board, seat)["auth_check"]
+    assert rec["state"] == "unavailable", r.stdout + r.stderr
+    assert rec["authoritative"] is True
+    assert rec["at"] > ready_at
+    assert rec["pause"]["operator_path"] == "unavailable"
+    assert rec["pause"]["paused"] is True
+    assert rec.get("detail")
+
+
+def test_source_prefix_tickets_alias_clears_ready_set_by_atm(board, tmp_path):
+    atm, tickets = source_prefix_aliases(tmp_path)
+    env = fake_cli(tmp_path, "agent", "Logged in as dev@example.test")
+    assert run(board, "join", "shared-alias-seat", "--roles", "docs",
+               "--harness", "cursor", "--lifecycle", "persistent",
+               env=env, cli=atm).returncode == 0
+    r = run(board, "harness", "auth", "shared-alias-seat", env=env, cli=atm)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rec = agent_record(board, "shared-alias-seat")["auth_check"]
+    assert rec["state"] == "ready"
+    ready_at = rec["at"]
+    Path(rec["execution_context"]["binary"]).unlink()
+    time.sleep(1.1)
+    r = run(board, "harness", "auth", "shared-alias-seat", env=env, cli=tickets)
+    rec = agent_record(board, "shared-alias-seat")["auth_check"]
+    assert rec["state"] == "unavailable", r.stdout + r.stderr
+    assert rec["authoritative"] is True
+    assert rec["at"] > ready_at
