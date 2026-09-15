@@ -3,8 +3,8 @@
 Date: 2026-09-08. Operator: Cloud Agent (Advitiya GO via CTO).
 
 This is the post-rewrite leftover-ref deletion + re-scan + visibility
-attempt. It does **not** force-push `main`. Related: `docs/HISTORY_REWRITE.md`,
-`docs/PUBLIC_PREP.md`, closed PR #37.
+attempt. It does **not** force-push `main`. Related: `docs/internal/HISTORY_REWRITE.md`,
+`docs/internal/PUBLIC_PREP.md`, closed PR #37.
 
 ## 1. `origin/main` (unchanged)
 

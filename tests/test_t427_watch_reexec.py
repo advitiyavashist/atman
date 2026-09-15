@@ -19,7 +19,8 @@ import pytest
 from test_wakeup import board  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py", "session_adapters.py")
+FILES = ("tickets.py", "session_adapters.py")
+PACKAGE = ROOT / "src" / "ticket_board"
 START = "# --- T-427: watch idle-boundary self-execv"
 END = "# --- end T-427 ---"
 
@@ -67,6 +68,7 @@ def make_releases(tmp_path, sha_a="a" * 40, sha_b="b" * 40):
         dest.mkdir(parents=True)
         for name in FILES:
             shutil.copy2(ROOT / name, dest / name)
+        shutil.copytree(PACKAGE, dest / "src" / "ticket_board")
         stamp_release(dest, sha)
         copies[sha] = dest
     write_shim(shim, copies[sha_a] / "tickets.py")

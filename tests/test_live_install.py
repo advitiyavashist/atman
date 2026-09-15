@@ -46,7 +46,7 @@ def test_stage_activate_provenance_and_immutable_source(source, tmp_path):
     assert output.strip() == "tickets commit %s (verified release)" % sha
     assert sha in subprocess.check_output([str(live), "--help"], text=True)
     assert str(release / "tickets.py") in live.read_text()
-    target = release / "board_backup.py"
+    target = release / "src" / "ticket_board" / "board_backup.py"
     target.chmod(0o644)
     target.write_text("# modified installed dependency")
     assert "DRIFTED" in subprocess.check_output([str(live), "--version"], text=True)

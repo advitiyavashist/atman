@@ -9,9 +9,9 @@ Activated the reviewed T-623 release on 2026-09-09 from Atman commit
 - Previous launcher SHA-256: `b6e101f58ebd4fde87ec048b3ecffb69953ceddf304c5951f7b65607f17c5823`
 - Active release: `3a641e9e2d9435cfb49c79a3287981f45d4fb17c`
 - Active launcher SHA-256: `86569dbf42fb11f81dcd5cb9e0825bb5df32b5bd16e446b714f1da5fe03aa160`
-- Launcher: `/Users/kavana/.claude/tools/tickets.py`
-- Global command: `/Users/kavana/.local/bin/tickets`, a symlink to the launcher
-- Automatic backup: `/Users/kavana/.claude/tools/tickets-releases/previous-b6e101f58ebd4fde87ec048b3ecffb69953ceddf304c5951f7b65607f17c5823`
+- Launcher: `/Users/<operator>/.claude/tools/tickets.py`
+- Global command: `/Users/<operator>/.local/bin/tickets`, a symlink to the launcher
+- Automatic backup: `/Users/<operator>/.claude/tools/tickets-releases/previous-b6e101f58ebd4fde87ec048b3ecffb69953ceddf304c5951f7b65607f17c5823`
 
 The reviewed rollback command is:
 
@@ -40,8 +40,8 @@ release as verified.
 
 Claude's global hooks still resolve through the live launcher:
 
-- `SessionStart`: `/Users/kavana/.claude/tools/tickets.py board`
-- `Stop`: `/Users/kavana/.claude/tools/tickets.py stop-hook`
+- `SessionStart`: `/Users/<operator>/.claude/tools/tickets.py board`
+- `Stop`: `/Users/<operator>/.claude/tools/tickets.py stop-hook`
 
 The focused release suite passed 13 tests, including disposable staged-copy
 checks for equal-length byte tampering and unmanifested package-file drift:

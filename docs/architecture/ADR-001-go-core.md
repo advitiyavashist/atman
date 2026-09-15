@@ -61,10 +61,10 @@ Measurements at `origin/main@3a19777` are:
 | Python tests | 212 files / 40,899 lines |
 | React/TypeScript UI | 35 files / 5,526 lines |
 
-`ticket_coordination.py` and `board_backup.py` are also byte-for-byte copies of
-their namesakes under `src/ticket_board/`. Tests explicitly describe a
-"two-copy rule" and exercise both entry points. This is already causing fixes
-to require parallel edits and is the first architecture defect to remove.
+Root `ticket_coordination.py` and `board_backup.py` were byte-for-byte copies of
+their namesakes under `src/ticket_board/` until T-981 deleted the root
+duplicates. The live `tickets.py` monolith remains a second CLI surface and is
+out of scope for that hygiene ticket.
 
 The local timing sample below is directional evidence, not a synthetic claim
 that `rg`, `gh`, or Node predict Atman's final performance. Each startup number

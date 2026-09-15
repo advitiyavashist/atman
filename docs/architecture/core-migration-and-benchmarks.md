@@ -14,7 +14,7 @@ implementation:
 2. Replace root `tickets.py` with a launcher of at most 25 lines that prepends
    the repository's `src` directory and calls `ticket_board.cli.main()`.
 3. Delete root `ticket_coordination.py` and `board_backup.py`; import the package
-   modules everywhere.
+   modules everywhere. (T-981 did this; do not restore the root copies.)
 4. Change immutable-release export to package files plus the launcher. Generate
    the release manifest from the Git tree exactly as it does today.
 5. Remove all two-entry-point tests. Replace them with one test that proves the

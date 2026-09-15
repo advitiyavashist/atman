@@ -11,10 +11,9 @@ import subprocess
 import sys
 import tempfile
 
+# Root siblings only. board_backup and ticket_coordination live in the package.
 FILES = (
     "tickets.py",
-    "ticket_coordination.py",
-    "board_backup.py",
     "session_adapters.py",
     "auth_v2_contract.py",
 )
