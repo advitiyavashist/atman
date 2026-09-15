@@ -1981,6 +1981,9 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    if _worktree_gc().is_automated(t):
+        os.unlink(lock)
+        return None
     if _ticket_lane(t) != "ready":
         os.unlink(lock)
         return None
@@ -2171,6 +2174,51 @@ def _review_verdict():
         return m
 
 
+def _worktree_gc():
+    """T-946 automated worktree cleanup + atm gc sweep."""
+    try:
+        from ticket_board import worktree_gc as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import worktree_gc as m
+        return m
+
+
+def _gc_hooks():
+    return _worktree_gc().CliHooks(_GCApi())
+
+
+def _gc_probes():
+    gc = _worktree_gc()
+    mode = (os.environ.get("TICKETS_GC_OPEN_PRS") or "").strip()
+    gh_fn = None
+    if mode == "none":
+        gh_fn = lambda branch, cwd: []
+    elif mode:
+        gh_fn = lambda branch, cwd: [{"number": 1, "url": mode}]
+    extra = [p for p in [(os.environ.get("TICKETS_GC_RUNTIME_LINK") or "").strip()] if p]
+    origin = (os.environ.get("TICKETS_GC_ORIGIN_REF") or "").strip() or None
+    return gc.Probes(gh_fn=gh_fn, runtime_extra=extra, origin_ref=origin)
+
+
+class _GCApi:
+    """Minimal surface worktree_gc.CliHooks needs from this module."""
+
+    load_all = staticmethod(lambda board: load_all(board))
+    load = staticmethod(lambda board, tid: load(board, tid))
+    save = staticmethod(lambda board, t: save(board, t))
+    create = staticmethod(lambda board, title, body="", role="", deps=None,
+                          priority=3, epic="", sprint="", needs=None:
+                          create(board, title, body, role, deps, priority,
+                                 epic, sprint, needs))
+    now = staticmethod(lambda: now())
+    whoami = staticmethod(lambda: whoami())
+    current_master = staticmethod(lambda board: current_master(board))
+
+
 def _ticket_lane(t):
     return _sounding().ticket_lane(t)
 
@@ -2332,6 +2380,10 @@ def line(t, tickets=None):
         bits.append("/".join(tags))
     if t.get("role"):
         bits.append("role=" + t["role"])
+    if (t.get("kind") or "") == "automated":
+        bits.append("automated")
+    elif (t.get("automated") or {}).get("escalated"):
+        bits.append("escalated")
     if t.get("needs"):
         bits.append("needs " + ",".join(t["needs"]))
     if t.get("owner"):
@@ -2432,6 +2484,15 @@ def detail(board, t, tickets):
             stamp += ", last update %s ago" % fmt_hours(tm["since_update"])
         out.append("Time: " + stamp)
     out.append("lane: %s" % _ticket_lane(t))
+    if (t.get("kind") or "") == "automated":
+        auto = t.get("automated") or {}
+        out.append("kind: automated (%s for %s)" % (
+            auto.get("action") or "?", auto.get("target") or "?"))
+    elif (t.get("automated") or {}).get("escalated"):
+        out.append("kind: agent (escalated automated: %s)" % (
+            (t.get("automated") or {}).get("escalate_reason") or "?"))
+    if t.get("worktree"):
+        out.append("worktree: %s" % t["worktree"])
     if t.get("sounded_at"):
         out.append("sounded: %s by %s" % (t.get("sounded_at"), t.get("sounded_by") or "?"))
     if t.get("cause"):
@@ -2507,7 +2568,16 @@ def cmd_create(a, board):
             raise
         for other, d in pending.items():
             set_deps(board, other, d)
-    print("created %s  %s" % (t["id"], t["title"]))
+    wt = (getattr(a, "worktree", "") or "").strip()
+    if wt:
+        child = _worktree_gc().attach_worktree(board, t, wt, _gc_hooks())
+        t = load(board, t["id"])
+        print("created %s  %s" % (t["id"], t["title"]))
+        print("  worktree: %s" % t.get("worktree"))
+        if child:
+            print("  cleanup node: %s (automated, after %s)" % (child["id"], t["id"]))
+    else:
+        print("created %s  %s" % (t["id"], t["title"]))
     if deps:
         print("  waits for: %s" % ", ".join(deps))
     if blocks:
@@ -3239,6 +3309,8 @@ def workflow_graph(tickets, include_done=False, keep_done=None):
             leftover = [d for d in (child.get("deps") or []) if d not in done and d != tid]
             if not leftover and child.get("status") in ("open", "blocked"):
                 success_starts.append(cid)
+        kind = t.get("kind") or "agent"
+        auto = t.get("automated") or {}
         return {
             "id": tid,
             "title": t.get("title", ""),
@@ -3258,6 +3330,9 @@ def workflow_graph(tickets, include_done=False, keep_done=None):
             "handoff": _last_handoff(t),
             "verdict": _ticket_verdict(t),
             "success_starts": success_starts,
+            "kind": kind,
+            "automated": bool(kind == "automated"),
+            "escalated": bool(auto.get("escalated")),
             "deps": deps,
             "waiting": waiting,
             "children": children,
@@ -3322,6 +3397,10 @@ def cmd_graph(a, board):
             bits.append(t["role"])
         if t.get("owner"):
             bits.append("@" + t["owner"])
+        if (t.get("kind") or "") == "automated":
+            bits.append("automated")
+        elif (t.get("automated") or {}).get("escalated"):
+            bits.append("escalated")
         lane = _ticket_lane(t)
         waiting = [d for d in t.get("deps", []) if d not in done]
         if waiting and t["status"] == "open":
@@ -3496,6 +3575,13 @@ def _start_successors(board, finished_id):
         if _ticket_on_hold(child):
             held.append(child["id"])
             continue
+        if _worktree_gc().is_automated(child):
+            # T-946: deterministic executor. No model turn, no task post.
+            result = _worktree_gc().run_cleanup_node(
+                board, child, _gc_hooks(), probes=_gc_probes(),
+                repo_root=os.path.dirname(board), apply=True)
+            started.append("%s [automated:%s]" % (child["id"], result.get("status")))
+            continue
         who = _reserved_agent(child) or (child.get("suggested") or "").strip()
         text = "unblocked %s after %s -- start (success trigger)" % (child["id"], finished_id)
         if who:
@@ -3551,6 +3637,7 @@ def cmd_next(a, board):
     ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
     ready = [t for t in ready if not _ticket_on_hold(t)]
     ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
+    ready = [t for t in ready if not _worktree_gc().is_automated(t)]
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -3652,6 +3739,8 @@ def cmd_next(a, board):
 def cmd_claim(a, board):
     owner = whoami(a.owner)
     t = load(board, a.id)
+    if _worktree_gc().is_automated(t):
+        sys.exit("%s is automated; Atman runs it (no claim, no model)" % a.id)
     lane = _ticket_lane(t)
     if lane != "ready":
         sys.exit("%s is lane=%s; sound it before claiming (atm sound %s)"
@@ -4260,6 +4349,15 @@ def cmd_merge(a, board):
                          to=t2.get("owner", ""), re=t2["id"])
         if closed:
             print("closed: %s" % ", ".join(closed))
+            for tid in closed:
+                freed, started, held, capture_wait = _start_successors(board, tid)
+                if started:
+                    print("  started after %s: %s" % (tid, ", ".join(started)))
+            gc_rows = _safe(lambda: _worktree_gc().sweep(
+                board, _gc_hooks(), probes=_gc_probes(), repo_root=root, apply=True), [])
+            if gc_rows:
+                print("gc: %d worktree decision(s)" % len(gc_rows))
+                print(_worktree_gc().format_digest(gc_rows))
         for b, why in skipped:
             print("  skipped %s: %s" % (b, why))
         for f, alt in resolved_docs:
@@ -6215,6 +6313,22 @@ def cmd_done(a, board):
     _finish_followup(board, a.id, "done")
 
 
+def cmd_gc(a, board):
+    """Preview worktree cleanup by default; --apply authorizes removal."""
+    gc = _worktree_gc()
+    root = artifact_tree(a) or os.path.dirname(board)
+    rows = gc.sweep(board, _gc_hooks(), probes=_gc_probes(), repo_root=root,
+                    apply=getattr(a, "apply", False))
+    if getattr(a, "json", False):
+        print(json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        print("gc: nothing to do")
+        return
+    print("gc: %d decision(s)" % len(rows))
+    print(gc.format_digest(rows))
+
+
 def cmd_block(a, board):
     t = load(board, a.id)
     before = t["status"]
@@ -6299,6 +6413,15 @@ def cmd_assign(a, board):
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
+    if getattr(a, "worktree", None) is not None:
+        wt = (a.worktree or "").strip()
+        if wt:
+            _worktree_gc().attach_worktree(board, t, wt, _gc_hooks())
+            t = load(board, t["id"])
+            changed.append("worktree=%s" % t.get("worktree"))
+        else:
+            t.pop("worktree", None)
+            changed.append("worktree=(none)")
     bind_owner = None
     clear_prev = None
     transfer_owner = None
@@ -10453,6 +10576,8 @@ def cmd_retire(a, board):
         sys.exit("no seat %r on this board" % owner)
     if _agent_holds_ticket(board, owner):
         sys.exit("refusing: %s holds a ticket; reopen or finish it first" % owner)
+    rec = _agent_rec(board, owner) or {}
+    seat_wt = (rec.get("worktree") or rec.get("cwd") or "").strip()
     if os.path.isfile(agent_path):
         os.remove(agent_path)
     if owner in wf:
@@ -10471,6 +10596,26 @@ def cmd_retire(a, board):
     retirer = whoami(getattr(a, "owner", None))
     post_message(board, retirer, "retired seat %s from the board" % owner)
     print("retired %s" % owner)
+    if seat_wt:
+        placeholder = create(
+            board, "cleanup worktree for retired seat %s" % owner,
+            body="Retired seat %s. Same safe-cleanup rules as a merged ticket."
+                 % owner,
+            role="ops", deps=[], priority=3)
+        placeholder["status"] = "done"
+        placeholder["done_at"] = now()
+        placeholder["owner"] = owner
+        placeholder["worktree"] = os.path.abspath(seat_wt)
+        placeholder["notes"] = [{"by": retirer, "at": now(),
+                                 "text": "retired seat; worktree %s" % seat_wt}]
+        save(board, placeholder)
+        child = _worktree_gc().ensure_cleanup_node(
+            board, placeholder, seat_wt, _gc_hooks())
+        if child:
+            result = _worktree_gc().run_cleanup_node(
+                board, child, _gc_hooks(), probes=_gc_probes(),
+                repo_root=os.path.dirname(board), apply=True)
+            print("  seat worktree: %s (%s)" % (seat_wt, result.get("status")))
 
 
 def _apply_connect_roles(board, a):
@@ -18757,6 +18902,7 @@ def main():
     c.add_argument("--sprint", "-s", default=None, help="S-01; default: active sprint if --in-sprint")
     c.add_argument("--in-sprint", action="store_true", help="tag with the active sprint")
     c.add_argument("--needs", default="", help="capabilities required: docker,browser,own-machine")
+    c.add_argument("--worktree", default="", help="implementation checkout; adds automated cleanup child")
     c.set_defaults(fn=cmd_create)
 
     c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, priority")
@@ -18770,6 +18916,7 @@ def main():
     c.add_argument("--title", default="")
     c.add_argument("--by", default="")
     c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
+    c.add_argument("--worktree", default=None, help="record checkout and add automated cleanup child")
     c.set_defaults(fn=cmd_assign)
 
     c = sub.add_parser("reserve", help="reserve a ticket for an agent without claiming it")
@@ -19160,6 +19307,14 @@ def main():
     c.add_argument("--hours", type=int, default=24)
     c.add_argument("--json", action="store_true")
     c.set_defaults(fn=cmd_util)
+
+    c = sub.add_parser("gc", help="sweep merged-ticket worktrees (checkout only; never delete branches)")
+    mode = c.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="report only (default)")
+    mode.add_argument("--apply", action="store_true", help="remove eligible merged worktrees")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--artifact", default="", help="repo whose linked worktrees to inspect")
+    c.set_defaults(fn=cmd_gc)
 
     c = sub.add_parser("dash", help="master dashboard, refreshing in place (Ctrl-C to leave)")
     c.add_argument("--every", type=int, default=10)
