@@ -66,6 +66,8 @@ FORBIDDEN_PUBLIC = (
     "Living Steer",
     "HOLD T-773",
     "HOLD T-774",
+    "Never Grok DMs",
+    "sol-agy-harness",
     "No NER",
     "Cursor-only",
     "this Mac",
@@ -146,6 +148,50 @@ def test_generated_init_files_teach_atm(tmp_path):
         assert found == [], "generated %s still teaches %s" % (label, found)
         assert "atm sprint show" in text
         assert "tickets sprint show" not in text
+
+
+# Runtime connect may print discovered on-disk harness paths under the
+# operator HOME. Those are not hardcoded policy; the leak is board-specific
+# instruction baked into print_ceo_connect().
+FORBIDDEN_CONNECT_OUTPUT = tuple(
+    t for t in FORBIDDEN_PUBLIC if t != "/Users/kavana"
+)
+
+
+def test_connect_ceo_output_has_no_forbidden_public_tokens(tmp_path):
+    """Isolated PATH `atm connect --ceo` must not emit live-board operator policy."""
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    bindir = tmp_path / "prefix" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "atm").symlink_to(TOOL)
+    (bindir / "tickets").symlink_to(TOOL)
+    home = tmp_path / "home"
+    home.mkdir()
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    env = {
+        "PATH": str(bindir) + os.pathsep + str(empty) + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+        "HOME": str(home),
+        "TICKETS_DIR": str(repo / ".tickets"),
+        "TICKET_AGENT": "t1010-ceo",
+        "PYTEST_CURRENT_TEST": "tests/test_t1010_atm_user_facing.py::test_connect_ceo_output_has_no_forbidden_public_tokens (call)",
+    }
+    initialized = subprocess.run(
+        [str(bindir / "atm"), "init"],
+        capture_output=True, text=True, env=env, cwd=str(repo))
+    assert initialized.returncode == 0, initialized.stderr + initialized.stdout
+    r = subprocess.run(
+        [str(bindir / "atm"), "connect", "--ceo"],
+        capture_output=True, text=True, env=env, cwd=str(repo))
+    assert r.returncode == 0, r.stderr + r.stdout
+    out = r.stdout + r.stderr
+    for token in FORBIDDEN_CONNECT_OUTPUT:
+        assert token not in out, "atm connect --ceo still emits %r" % token
+    assert "Use board mail only." in r.stdout
+    assert "stale shim" in r.stdout
+    assert "atm next" not in r.stdout
 
 
 def test_tickets_alias_still_runs_the_same_commands(tmp_path):

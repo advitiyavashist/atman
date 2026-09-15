@@ -6544,10 +6544,10 @@ def print_ceo_connect(board, seat="ceo"):
     print("   Mid-run: atm plan (JSON keys+deps), atm dep, atm create --blocks")
     print("   CoS (%s) staffs workers. CEO does not claim worker tickets." % _cos_label(board))
     print("")
-    print("CoS is %s. Mail: %s. Never Grok DMs." % (
+    print("CoS is %s. Mail: %s. Use board mail only." % (
         _cos_label(board), _onboard_roles().mail_to_cos(current_master(board) or {})))
-    print("HOLD T-773 T-774. No atm clear.")
-    print("If `atm self` still points at sol-agy-harness, recut ~/.local/bin/atm")
+    print("Do not `atm clear`.")
+    print("If `atm self` still points at a stale shim, recut ~/.local/bin/atm")
     print("onto this checkout before trusting PATH `atm connect`.")
 
 
