@@ -4176,8 +4176,16 @@ def _structured_limit_signal(text):
     Recognized envelopes (Anthropic / Claude Code, not invented strings):
       {"type":"error","error":{"type":"rate_limit_error",...}}
       {"type":"result","is_error":true,"error":{"type":"rate_limit_error",...}}
+      agy print-mode result with status ERROR and a limit-shaped error string
     Codex `token_count` `rate_limits` telemetry is NOT a limit (MASTER item 7 /
     T-230: every healthy turn writes that block).
+
+    T-988: agy exits 0 whether the turn succeeded or failed, so an exhausted
+    quota is invisible to the (rc != 0 or timed_out) half of the caller's test.
+    The structured signal is the only thing that can label it, and it is taken
+    from agy's own words -- status ERROR plus an error string that already
+    matches CLI_LIMIT_STRINGS -- never from status ERROR alone, which is also
+    how a plain API or tool failure ends.
     """
     for blob in _json_candidates(text):
         try:
@@ -4185,6 +4193,11 @@ def _structured_limit_signal(text):
         except ValueError:
             continue
         if not isinstance(rec, dict):
+            continue
+        agy = _agy_result(rec)
+        if agy is not None:
+            if agy.get("status") == "ERROR" and _looks_limited(agy.get("error") or ""):
+                return True
             continue
         err = rec.get("error")
         if not isinstance(err, dict) or err.get("type") != "rate_limit_error":
@@ -7522,6 +7535,20 @@ def _num(v):
 # claude's names for the four counts -> the board's landed field names. The
 # board's names are the ones T-311 shipped and the dashboard and the T-372
 # promise surfaces already read; they are not renamed here (T-396 note).
+# Antigravity print mode bounds itself (T-988). agy's own default is 5m, which
+# truncates a real ticket turn and returns partial output with exit 0; the
+# watcher's --run-timeout is in minutes (default 90), so this stays inside it
+# and the watcher stays the outer bound.
+AGY_PRINT_TIMEOUT = "60m"
+
+# agy's result envelope spells the same counts differently again. It also
+# reports thinking_tokens, which is deliberately NOT mapped: the board's usage
+# contract has no field for it, and inventing one would put a count in the
+# trajectory log that nothing reads or prices.
+AGY_USAGE_FIELDS = (("input_tokens", "tokens_in"),
+                    ("output_tokens", "tokens_out"),
+                    ("cache_read_tokens", "tokens_cache_read"))
+
 CLAUDE_USAGE_FIELDS = (("input_tokens", "tokens_in"),
                        ("output_tokens", "tokens_out"),
                        ("cache_read_input_tokens", "tokens_cache_read"),
@@ -7603,6 +7630,64 @@ def _codex_total_usage(info):
     return out or None
 
 
+def _agy_result(rec):
+    """The agy print-mode result object, or None.
+
+    Matched strictly, because it is looked for in the same output as claude's
+    and codex's: agy is the only one of the three that pairs a conversation_id
+    with a SUCCESS/ERROR status. In `--output-format stream-json` the object
+    arrives wrapped as {"event":"result","result":{...}}; in `json` it is bare.
+    """
+    if not isinstance(rec, dict):
+        return None
+    if rec.get("event") == "result" and isinstance(rec.get("result"), dict):
+        rec = rec["result"]
+    if not isinstance(rec.get("conversation_id"), str):
+        return None
+    return rec if rec.get("status") in ("SUCCESS", "ERROR") else None
+
+
+def _usage_from_agy_result(rec):
+    """Tokens off one agy print-mode result (T-988).
+
+    No cost: agy reports none, and a made-up price is worse than an absent one.
+    An errored turn reports all-zero counts, which are real measurements of a
+    turn that never reached the model -- they are recorded as the zeros they
+    are, not dropped.
+    """
+    rec = _agy_result(rec)
+    if rec is None:
+        return None
+    usage = rec.get("usage")
+    if "usage" in rec and not isinstance(usage, dict):
+        raise HarnessUsageError(
+            "agy result 'usage' is %s, not an object" % type(usage).__name__)
+    usage = usage if isinstance(usage, dict) else {}
+    out = {}
+    for src, dst in AGY_USAGE_FIELDS:
+        if src in usage:
+            n = _num(usage[src])
+            if n is None:
+                raise HarnessUsageError(
+                    "agy usage.%s is not a number: %r" % (src, usage[src]))
+            out[dst] = int(n)
+    if "num_turns" in rec:
+        n = _num(rec["num_turns"])
+        if n is None:
+            raise HarnessUsageError("agy num_turns is not a number: %r" % rec["num_turns"])
+        out["turns"] = int(n)
+    if "duration_seconds" in rec:
+        n = _num(rec["duration_seconds"])
+        if n is None:
+            raise HarnessUsageError(
+                "agy duration_seconds is not a number: %r" % rec["duration_seconds"])
+        # The field the board stores is milliseconds; agy is the only harness
+        # that reports seconds, so the unit is converted here rather than
+        # letting a seconds value sit in a field named _ms.
+        out["harness_duration_ms"] = int(round(n * 1000))
+    return out or None
+
+
 def _usage_from_codex_event(rec):
     """One line of `codex exec --json`, or one line of a rollout file."""
     p = rec.get("payload") if isinstance(rec.get("payload"), dict) else rec
@@ -7668,6 +7753,12 @@ def parse_harness_usage(text):
             continue
         if not isinstance(rec, dict):
             continue
+        # agy first: its bare result object also carries a `usage` dict with
+        # `input_tokens`, so the claude parser would half-read it (T-988) and
+        # lose num_turns and the duration unit conversion.
+        out = _usage_from_agy_result(rec)
+        if out:
+            return out
         out = _usage_from_claude_result(rec)
         if out:
             return out
@@ -12695,19 +12786,37 @@ def cmd_watch(a, board):
                         cleanup()
                     ended = now()
                     run_output = _read_run_slice(log_path, log_before)
-                    if _auth_gates_spawn(retry_harness) or retry_harness == "cursor":
+                    # agy joins cursor as a harness that does not gate spawn but
+                    # whose run outcome is still worth recording (T-988): it exits
+                    # 0 on an errored turn, so without this a quota-exhausted Agy
+                    # seat left no auth trace at all.
+                    if (_auth_gates_spawn(retry_harness)
+                            or retry_harness in ("cursor", "agy")):
                         run_auth_state = _classify_auth_output(rc, run_output)
-                        if run_auth_state in ("login_required", "expired", "quota", "network") or rc == 0:
+                        # T-988: exit 0 alone is not evidence of a healthy run.
+                        # agy exits 0 on an errored turn, so filing `ready` off
+                        # rc == 0 would record a quota-exhausted seat as
+                        # authenticated and ready. _classify_auth_output already
+                        # reads the run's own output before falling back to the
+                        # exit code, so a definite failure state wins here and
+                        # only an unclassified rc == 0 is `ready`.
+                        failed_auth = run_auth_state in (
+                            "login_required", "expired", "quota", "network")
+                        if failed_auth or rc == 0:
                             previous_auth = (_agent_rec(board, owner) or {}).get("auth_check") or {}
                             spec = _harness_auth_spec(board, owner, retry_harness)
                             status_cmd, login_cmd = spec if spec else (["status"], [""])
+                            ready = rc == 0 and not failed_auth
+                            # A run that printed only whitespace has no last
+                            # line; without the guard this indexes an empty list
+                            # and takes the whole watch loop down with it.
+                            tail = ((run_output or "").strip().splitlines() or ["run failed"])[-1]
                             run_auth = {
-                                "state": "ready" if rc == 0 else run_auth_state,
+                                "state": "ready" if ready else run_auth_state,
                                 "harness": retry_harness or "cursor", "at": now(), "exit": rc,
-                                "detail": ("headless run succeeded" if rc == 0 else
-                                           ((run_output or "run failed").strip().splitlines()[-1][:240])),
-                                "identity": previous_auth.get("identity", "") if rc == 0 else "",
-                                "identity_label": previous_auth.get("identity_label", "") if rc == 0 else "",
+                                "detail": ("headless run succeeded" if ready else tail[:240]),
+                                "identity": previous_auth.get("identity", "") if ready else "",
+                                "identity_label": previous_auth.get("identity_label", "") if ready else "",
                                 "status_cmd": " ".join(status_cmd),
                                 "login_cmd": " ".join(login_cmd) if login_cmd else previous_auth.get("login_cmd", ""),
                             }
@@ -13210,7 +13319,27 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
     if tool in ("agy", "antigravity"):
         flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
                 else "--mode accept-edits")
-        return 'agy -p %s %s%s' % (prompt, flag, (" --model %s" % model) if model else "")
+        # T-988: the bare `agy -p PROMPT` line could not deliver, for two
+        # reasons that are both in the invocation and neither of which is a
+        # missing --project or a missing TTY (measured: the recipe below
+        # answers in ~5s with stdin closed in a plain worktree).
+        #
+        # 1. --print-timeout defaults to 5m. Real ticket work is cut off
+        #    mid-turn at 5m and what comes back is partial output -- with
+        #    exit 0. The watcher's own cap is --run-timeout, in MINUTES,
+        #    default 90, so AGY_PRINT_TIMEOUT stays inside it.
+        # 2. In the default text output format an errored turn prints NOTHING
+        #    but "[agy] print timeout ... returning partial output", and still
+        #    exits 0. A quota 429 therefore reached the run log as a clean
+        #    empty success, which is why an Agy seat could hold a ticket and
+        #    produce no artifact with nothing in the log to say why. The
+        #    stream-json format carries the real
+        #    {"event":"result","result":{"status":"ERROR","error":...}} that
+        #    _structured_limit_signal and _classify_auth_output read, and its
+        #    per-step lines keep the log advancing while the turn runs, which
+        #    the one-blob-at-the-end `json` format would not.
+        return 'agy -p %s %s --output-format stream-json --print-timeout %s%s' % (
+            prompt, flag, AGY_PRINT_TIMEOUT, (" --model %s" % model) if model else "")
     if tool in ("devin", "cognition"):
         flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
                 else "")
@@ -13609,6 +13738,14 @@ HARNESS_AUTH_COMMANDS = {
     "cursor+claude": (["agent", "status"], ["agent", "login"]),
     "claude": (["claude", "auth", "status"], ["claude", "auth", "login"]),
     "codex": (["codex", "login", "status"], ["codex", "login"]),
+    # T-988: `agy models` is the only non-spawning agy command that reaches the
+    # provider, so it is the credential probe. It proves credentials and
+    # network and NOTHING about quota -- measured: it listed models in 2.7s
+    # while every Gemini model on the same account was 429 quota-exhausted, so
+    # a "ready" from here must never be read as "has quota". agy has no CLI
+    # login (authentication comes from the Antigravity app), so the recovery
+    # command is empty by design rather than a command that does not exist.
+    "agy": (["agy", "models"], []),
 }
 
 _AUTH_ENV_NAMES = (
@@ -13633,6 +13770,7 @@ _DEFAULT_PROFILE_KIND = {
     "cursor+claude": "browser",
     "claude": "subscription",
     "codex": "chatgpt",
+    "agy": "adapter",          # T-988: held by the Antigravity app, not by us
     "remote": "adapter",
     "custom": "adapter",
 }

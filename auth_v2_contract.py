@@ -29,6 +29,12 @@ PROFILE_KINDS = {
     "cursor": ("browser", "api_key", "auth_token"),
     "claude": ("subscription", "api_key"),
     "codex": ("chatgpt", "api_key"),
+    # T-988: Antigravity credentials live in the Antigravity app; there is no
+    # agy CLI login to hold them, so the kind is `adapter` like remote/custom.
+    # Without this row validate_auth_check called every agy record an "unknown
+    # harness" and merge_auth_check silently dropped it, so a healthy agy run
+    # recorded no auth state at all.
+    "agy": ("adapter",),
     "remote": ("adapter",),
     "custom": ("adapter",),
 }
