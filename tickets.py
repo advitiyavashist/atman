@@ -3579,7 +3579,7 @@ def _start_successors(board, finished_id):
             # T-946: deterministic executor. No model turn, no task post.
             result = _worktree_gc().run_cleanup_node(
                 board, child, _gc_hooks(), probes=_gc_probes(),
-                repo_root=os.path.dirname(board))
+                repo_root=os.path.dirname(board), apply=True)
             started.append("%s [automated:%s]" % (child["id"], result.get("status")))
             continue
         who = _reserved_agent(child) or (child.get("suggested") or "").strip()
@@ -4354,7 +4354,7 @@ def cmd_merge(a, board):
                 if started:
                     print("  started after %s: %s" % (tid, ", ".join(started)))
             gc_rows = _safe(lambda: _worktree_gc().sweep(
-                board, _gc_hooks(), probes=_gc_probes(), repo_root=root), [])
+                board, _gc_hooks(), probes=_gc_probes(), repo_root=root, apply=True), [])
             if gc_rows:
                 print("gc: %d worktree decision(s)" % len(gc_rows))
                 print(_worktree_gc().format_digest(gc_rows))
@@ -6314,14 +6314,11 @@ def cmd_done(a, board):
 
 
 def cmd_gc(a, board):
-    """Sweep merged-ticket worktrees. Real removals; report every skip.
-
-    Default is live (not dry-run). Never deletes branches (T-542). After each
-    merge, and on demand / low disk. Removal only when every safety hold is true.
-    """
+    """Preview worktree cleanup by default; --apply authorizes removal."""
     gc = _worktree_gc()
     root = artifact_tree(a) or os.path.dirname(board)
-    rows = gc.sweep(board, _gc_hooks(), probes=_gc_probes(), repo_root=root)
+    rows = gc.sweep(board, _gc_hooks(), probes=_gc_probes(), repo_root=root,
+                    apply=getattr(a, "apply", False))
     if getattr(a, "json", False):
         print(json.dumps(rows, indent=2, default=str))
         return
@@ -10617,7 +10614,7 @@ def cmd_retire(a, board):
         if child:
             result = _worktree_gc().run_cleanup_node(
                 board, child, _gc_hooks(), probes=_gc_probes(),
-                repo_root=os.path.dirname(board))
+                repo_root=os.path.dirname(board), apply=True)
             print("  seat worktree: %s (%s)" % (seat_wt, result.get("status")))
 
 
@@ -19312,6 +19309,9 @@ def main():
     c.set_defaults(fn=cmd_util)
 
     c = sub.add_parser("gc", help="sweep merged-ticket worktrees (checkout only; never delete branches)")
+    mode = c.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="report only (default)")
+    mode.add_argument("--apply", action="store_true", help="remove eligible merged worktrees")
     c.add_argument("--json", action="store_true")
     c.add_argument("--artifact", default="", help="repo whose linked worktrees to inspect")
     c.set_defaults(fn=cmd_gc)

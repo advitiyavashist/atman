@@ -4,6 +4,8 @@ import os
 import subprocess
 import sys
 import time
+
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -295,7 +297,8 @@ def test_evaluate_not_done_waits(tmp_path):
     assert d["action"] == "wait" and d["reason"] == "not_done"
 
 
-def test_gc_sweep_happy_path(tmp_path):
+@pytest.mark.parametrize("flags", [(), ("--dry-run",), ("--apply",)])
+def test_gc_sweep_happy_path(tmp_path, flags):
     repo, _ = make_origin_pair(tmp_path)
     wt = add_worktree(repo)
     commit_on(wt)
@@ -309,10 +312,25 @@ def test_gc_sweep_happy_path(tmp_path):
     t["done_at"] = "2026-09-14T00:00:00Z"
     t["branch"] = "feat"
     (repo / ".tickets" / "T-001.json").write_text(json.dumps(t, indent=2))
-    r = run(repo, "gc", env=env, tmp_path=tmp_path)
+    dirty = add_worktree(repo, "dirty")
+    (dirty / "untracked").write_text("keep me")
+    run(repo, "create", "dirty impl", "--worktree", str(dirty), env=env, tmp_path=tmp_path)
+    t = load_ticket(repo, "T-003")
+    t["status"] = "done"
+    (repo / ".tickets" / "T-003.json").write_text(json.dumps(t))
+    before = {p.name: p.read_bytes() for p in (repo / ".tickets").glob("T-*.json")}
+    r = run(repo, "gc", *flags, env=env, tmp_path=tmp_path)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "removed" in r.stdout
-    assert not wt.exists()
+    assert dirty.exists()
+    if flags == ("--apply",):
+        assert "removed" in r.stdout
+        assert not wt.exists()
+        assert load_ticket(repo, "T-004")["kind"] == "agent"
+    else:
+        assert "would remove" in r.stdout
+        assert "keep" in r.stdout and "dirty" in r.stdout
+        assert wt.exists()
+        assert before == {p.name: p.read_bytes() for p in (repo / ".tickets").glob("T-*.json")}
     show = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", "refs/heads/feat"],
         cwd=str(repo))
@@ -336,3 +354,66 @@ def test_work_payload_escalated_label(tmp_path):
     n2 = dict((n["id"], n) for n in payload["nodes"])["T-002"]
     assert n2["escalated"] is True
     assert "keep/remove" in n2["evidence"]
+
+
+@pytest.mark.parametrize("status,stdout,stderr", [
+    (2, "", "probe failed"),
+    (2, "", ""),
+    (1, "", "permission denied"),
+    (0, "garbage\n", ""),
+    (0, "", ""),
+    (0, "p123\ncsleep\nfcwd\n", ""),
+])
+def test_lsof_error_preserves_and_escalates(tmp_path, monkeypatch, status, stdout, stderr):
+    repo, wt, parent, probes = _eval_repo(tmp_path)
+    env = clean_env(tmp_path)
+    assert run(repo, "init", env=env, tmp_path=tmp_path).returncode == 0
+    assert run(repo, "create", "impl", "--worktree", str(wt),
+               env=env, tmp_path=tmp_path).returncode == 0
+    import tickets as tool
+    board = str(repo / ".tickets")
+    t = load_ticket(repo, "T-001")
+    t["status"] = "done"
+    tool.save(board, t)
+    # Force the BSD/macOS probe on every test host; Git remains real.
+    isdir = gc.os.path.isdir
+    monkeypatch.setattr(gc.os.path, "isdir", lambda p: False if p == "/proc" else isdir(p))
+    monkeypatch.setattr(gc, "_find_lsof", lambda: "lsof")
+    real_run = gc._run
+    monkeypatch.setattr(gc, "_run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, status, stdout, stderr)
+                        if argv[0] == "lsof" else real_run(argv, **kw))
+    proc = subprocess.Popen(["sleep", "300"], cwd=str(wt))
+    try:
+        rows = gc.sweep(board, tool._gc_hooks(), probes=probes, repo_root=str(repo), apply=True)
+        assert wt.exists()
+        assert any(r["status"] == "escalate" for r in rows)
+        child = load_ticket(repo, "T-002")
+        assert child["kind"] == "agent"
+        assert child["automated"]["escalate_reason"] == "live_cwd"
+        git(repo, "show-ref", "--verify", "refs/heads/feat")
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+@pytest.mark.parametrize("failure", ["missing", "exception", "no_matches", "spaces"])
+def test_lsof_probe_protocol(tmp_path, monkeypatch, failure):
+    path = tmp_path / "checkout with spaces"
+    path.mkdir()
+    monkeypatch.setattr(gc.os.path, "isdir", lambda p: False)
+    monkeypatch.setattr(gc, "_find_lsof", lambda: None if failure == "missing" else "lsof")
+    def probe(argv):
+        if failure == "exception":
+            raise OSError("cannot execute")
+        if failure == "no_matches":
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, "p123\ncsleep\nfcwd\nn%s\n" % path, "")
+    monkeypatch.setattr(gc, "_run", probe)
+    result = gc.live_cwds(str(path))
+    if failure in ("missing", "exception"):
+        assert result and result[0]["unknown"]
+    elif failure == "no_matches":
+        assert result == []
+    else:
+        assert result == [{"pid": 123, "cmd": "sleep"}]

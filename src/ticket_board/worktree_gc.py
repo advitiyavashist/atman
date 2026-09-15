@@ -12,6 +12,7 @@ converts the node to an agent ticket (owner or CoS) with keep/remove choices.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -237,15 +238,20 @@ def live_cwds(path, lsof_fn=None):
     if os.path.isdir(proc):
         try:
             names = os.listdir(proc)
-        except OSError:
-            names = []
+        except OSError as exc:
+            return [{"pid": 0, "cmd": "proc scan failed: %s" % exc, "unknown": True}]
         for name in names:
             if not name.isdigit():
                 continue
             try:
                 cwd = os.path.realpath(os.readlink(os.path.join(proc, name, "cwd")))
-            except OSError:
-                continue
+            except OSError as exc:
+                # Processes can exit during enumeration. Other errors leave
+                # their cwd unknown and must not authorize removal.
+                if exc.errno in (errno.ENOENT, errno.ESRCH):
+                    continue
+                return [{"pid": int(name), "cmd": "proc cwd failed: %s" % exc,
+                         "unknown": True}]
             if cwd == real or cwd.startswith(real + os.sep):
                 cmd = name
                 try:
@@ -258,31 +264,40 @@ def live_cwds(path, lsof_fn=None):
     lsof = _find_lsof()
     if not lsof:
         return [{"pid": 0, "cmd": "lsof-missing", "unknown": True}]
+    def unknown(detail):
+        return [{"pid": 0, "cmd": detail, "unknown": True}]
+
     try:
-        r = _run([lsof, "-nP", "-a", "-d", "cwd", "+D", real])
-        if r.returncode != 0 and not (r.stdout or "").strip():
-            r = _run([lsof, "-nP", "-a", "-d", "cwd"])
-    except OSError:
-        return [{"pid": 0, "cmd": "lsof-missing", "unknown": True}]
-    me = {os.getpid(), os.getppid()}
-    for ln in (r.stdout or "").splitlines()[1:]:
-        parts = ln.split()
-        if len(parts) < 2:
-            continue
-        cmd, pid = parts[0], parts[1]
-        if not pid.isdigit():
-            continue
-        pid_i = int(pid)
-        if pid_i in me:
-            continue
-        # last column is NAME (cwd path) for cwd fds
-        name = parts[-1]
-        try:
-            name_real = os.path.realpath(name)
-        except OSError:
-            name_real = name
-        if name_real == real or name_real.startswith(real + os.sep):
-            hits.append({"pid": pid_i, "cmd": cmd})
+        r = _run([lsof, "-nP", "-a", "-d", "cwd", "+D", real, "-Fpcfn"])
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        return unknown("lsof failed: %s" % exc)
+    # Status 1 with no output or diagnostics is lsof's no-match result.
+    # Never retry an error into a success: incomplete evidence must preserve.
+    if r.returncode == 1 and not r.stdout.strip() and not r.stderr.strip():
+        return []
+    if r.returncode != 0 or r.stderr.strip():
+        return unknown("lsof failed (exit %s): %s" % (r.returncode, r.stderr.strip()))
+    pid, cmd, fd = None, None, None
+    complete = False
+    for line in r.stdout.splitlines():
+        tag, value = line[:1], line[1:]
+        if tag == "p" and value.isdigit() and int(value) > 0:
+            if pid is not None and not complete:
+                return unknown("unparseable lsof output")
+            pid, cmd, fd, complete = int(value), None, None, False
+        elif tag == "c" and pid is not None and value:
+            cmd = value
+        elif tag == "f" and pid is not None and value == "cwd":
+            fd = value
+        elif tag == "n" and pid and cmd and fd == "cwd" and os.path.isabs(value):
+            name_real = os.path.realpath(value)
+            complete = True
+            if name_real == real or name_real.startswith(real + os.sep):
+                hits.append({"pid": pid, "cmd": cmd})
+        else:
+            return unknown("unparseable lsof output")
+    if not complete:
+        return unknown("empty or incomplete lsof output")
     return hits
 
 
@@ -432,7 +447,7 @@ def evaluate_cleanup(path, parent=None, repo_root=None, probes=None):
     if lives:
         if any(x.get("unknown") for x in lives):
             decision.update(action="escalate", escalate=True, reason="live_cwd",
-                            detail="cannot prove no live process cwd (lsof missing)")
+                            detail="cannot prove no live process cwd (%s)" % lives[0].get("cmd", "unknown"))
             return decision
         decision.update(action="escalate", escalate=True, reason="live_cwd",
                         detail="live process cwd: %s" % ", ".join(
@@ -615,7 +630,7 @@ def escalate_node(board, child, parent, decision, hooks):
     return child, row
 
 
-def run_cleanup_node(board, child, hooks, probes=None, repo_root=None):
+def run_cleanup_node(board, child, hooks, probes=None, repo_root=None, apply=False):
     """Execute or escalate one automated cleanup node. Never posts a model task."""
     probes = probes or Probes()
     auto = child.get("automated") or {}
@@ -624,6 +639,11 @@ def run_cleanup_node(board, child, hooks, probes=None, repo_root=None):
     path = auto.get("worktree") or (parent or {}).get("worktree") or ""
     repo_root = repo_root or (os.path.dirname(board) if board else None)
     decision = evaluate_cleanup(path, parent=parent, repo_root=repo_root, probes=probes)
+    if not apply:
+        return {"status": "would remove" if decision["action"] == "remove" else "keep",
+                "decision": decision, "ticket": child["id"]}
+    if decision["action"] not in ("remove", "escalate", "wait"):
+        return {"status": "keep", "decision": decision, "ticket": child["id"]}
     if decision["action"] == "wait":
         return {"status": "wait", "decision": decision, "ticket": child["id"]}
     if decision["action"] == "escalate":
@@ -694,15 +714,28 @@ def list_linked_worktrees(repo_root, probes=None):
     return rows
 
 
-def sweep(board, hooks, probes=None, repo_root=None, attach_missing=True):
-    """Run ready automated cleanups and candidates after merge / on demand.
-
-    Real removals (not dry-run). Every remove or skip is noted on the ticket
-    and appended to ``.tickets/gc-digest.jsonl``.
-    """
+def sweep(board, hooks, probes=None, repo_root=None, attach_missing=True, apply=False):
+    """Preview all linked worktrees; apply only with explicit authorization."""
     probes = probes or Probes()
     repo_root = repo_root or os.path.dirname(board)
     tickets = hooks.load_all(board)
+    if not apply:
+        results = []
+        for tree in list_linked_worktrees(repo_root, probes=probes):
+            path = tree.get("path") or ""
+            parents = [t for t in tickets if not t.get("automated") and (
+                os.path.realpath(t.get("worktree") or t.get("artifact_dir") or "/")
+                == os.path.realpath(path) or
+                (tree.get("branch") and t.get("branch") == tree["branch"]))]
+            parent = parents[0] if parents else {}
+            decision = evaluate_cleanup(path, parent=parent, repo_root=repo_root, probes=probes)
+            child = find_cleanup_child(tickets, parent.get("id")) if parent else None
+            if child and (not is_automated(child) or child.get("status") != "open"):
+                decision.update(action="wait", reason="cleanup_held",
+                                detail="cleanup ticket requires agent review or is already closed")
+            results.append({"status": "would remove" if decision["action"] == "remove" else "keep",
+                            "decision": decision, "ticket": parent.get("id", "")})
+        return results
     by_id = dict((t["id"], t) for t in tickets)
     results = []
 
@@ -717,7 +750,7 @@ def sweep(board, hooks, probes=None, repo_root=None, attach_missing=True):
         if deps and not all(d in done for d in deps):
             continue
         results.append(run_cleanup_node(board, t, hooks, probes=probes,
-                                        repo_root=repo_root))
+                                        repo_root=repo_root, apply=True))
 
     # 2. Done tickets that still record a worktree but have no child.
     tickets = hooks.load_all(board)
@@ -733,7 +766,7 @@ def sweep(board, hooks, probes=None, repo_root=None, attach_missing=True):
             child = ensure_cleanup_node(board, t, path, hooks)
             if child and t.get("status") == "done":
                 results.append(run_cleanup_node(board, child, hooks, probes=probes,
-                                                repo_root=repo_root))
+                                                repo_root=repo_root, apply=True))
 
     # 3. Linked worktrees whose branch matches a done ticket.
     tickets = hooks.load_all(board)
@@ -768,7 +801,7 @@ def sweep(board, hooks, probes=None, repo_root=None, attach_missing=True):
             if any(r.get("ticket") == child["id"] for r in results):
                 continue
             results.append(run_cleanup_node(board, child, hooks, probes=probes,
-                                            repo_root=repo_root))
+                                            repo_root=repo_root, apply=True))
 
     return results
 
