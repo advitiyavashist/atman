@@ -66,14 +66,14 @@ def find_cleanup_child(tickets, parent_id):
     return None
 
 
-def _run(args, cwd=None, env=None):
+def _run(args, cwd=None, env=None, timeout=None):
     clean = os.environ.copy()
     for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
         clean.pop(key, None)
     if env:
         clean.update(env)
     return subprocess.run(list(args), cwd=cwd, capture_output=True, text=True,
-                          env=clean)
+                          env=clean, timeout=timeout)
 
 
 def default_origin_ref(cwd, git_fn=None):
@@ -302,21 +302,37 @@ def live_cwds(path, lsof_fn=None):
 
 
 def open_prs_for_branch(branch, cwd, gh_fn=None):
+    """Return matching PRs, or an unknown marker unless absence is proven."""
+    def unknown(detail):
+        return [{"unknown": True, "error": "gh pr list: %s" % detail}]
+
     if not branch:
-        return []
-    if gh_fn:
-        return gh_fn(branch, cwd)
-    r = _run(["gh", "pr", "list", "--head", branch, "--state", "open",
-              "--json", "number,url"], cwd=cwd)
-    if r.returncode != 0:
-        # gh missing or unauthenticated: do not guess; caller treats unknown as escalate
-        err = (r.stderr or r.stdout or "").strip()
-        return [{"unknown": True, "error": err or "gh pr list failed"}]
+        return unknown("branch is unknown")
     try:
-        rows = json.loads(r.stdout or "[]")
-    except ValueError:
-        return [{"unknown": True, "error": "gh pr list: bad JSON"}]
-    return rows if isinstance(rows, list) else []
+        if gh_fn:
+            rows = gh_fn(branch, cwd)
+        else:
+            r = _run(["gh", "pr", "list", "--head", branch, "--state", "open",
+                      "--json", "number,url,headRefName"], cwd=cwd, timeout=30)
+            if r.returncode != 0 or (r.stderr or "").strip():
+                err = (r.stderr or r.stdout or "").strip()
+                return unknown("exit %s: %s" % (r.returncode, err or "lookup failed"))
+            rows = json.loads(r.stdout)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError, TypeError) as exc:
+        return unknown("%s: %s" % (type(exc).__name__, exc))
+    if not isinstance(rows, list):
+        return unknown("expected a JSON list")
+    # Validate the entire response before filtering: an invalid unrelated row
+    # also leaves the result uncertain and must never authorize removal.
+    for index, row in enumerate(rows):
+        if (not isinstance(row, dict)
+                or type(row.get("number")) is not int or row["number"] <= 0
+                or not isinstance(row.get("url"), str) or not row["url"].strip()
+                or not isinstance(row.get("headRefName"), str)
+                or not row["headRefName"].strip()):
+            return unknown("entry %s requires number (positive integer), url and "
+                           "headRefName (non-empty strings)" % index)
+    return [row for row in rows if row["headRefName"] == branch]
 
 
 def head_contained_in_origin(cwd, git_fn=None, origin_ref=None):

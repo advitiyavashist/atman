@@ -285,9 +285,89 @@ def test_evaluate_nested_main_checkout(tmp_path):
 
 def test_evaluate_open_pr(tmp_path):
     repo, wt, parent, _ = _eval_repo(tmp_path)
-    probes = gc.Probes(gh_fn=lambda branch, cwd: [{"number": 7, "url": "https://pr/7"}])
+    probes = gc.Probes(gh_fn=lambda branch, cwd: [
+        {"number": 7, "url": "https://pr/7", "headRefName": branch}])
     d = gc.evaluate_cleanup(str(wt), parent=parent, repo_root=str(repo), probes=probes)
     assert d["action"] == "escalate" and d["reason"] == "open_pr"
+    assert "open PR backs feat" in d["detail"]
+
+
+@pytest.mark.parametrize("result,reason", [
+    (FileNotFoundError("gh missing"), "FileNotFoundError"),
+    (subprocess.TimeoutExpired(["gh", "pr", "list"], 30), "TimeoutExpired"),
+    (PermissionError("gh cannot execute"), "PermissionError"),
+    ((1, "[]", "authentication failed"), "authentication failed"),
+    ((2, "[]", ""), "exit 2"),
+    ((0, "{}", ""), "expected a JSON list"),
+    ((0, '[{"number": 7, "url": "https://pr/7"}]', ""), "headRefName"),
+    ((0, '[{"headRefName": "other"}]', ""), "number"),
+    ((0, '[{"number": true, "url": "x", "headRefName": "other"}]', ""), "number"),
+    ((0, '[{"number": 7, "url": null, "headRefName": "other"}]', ""), "url"),
+    ((0, '[{"number": 7, "url": "x", "headRefName": 5}]', ""), "headRefName"),
+    ((0, '[{"number": 7, "url": "x", "headRefName": "other"}, null]', ""), "entry 1"),
+    ((0, "[null]", ""), "entry 0"),
+    ((0, "null", ""), "expected a JSON list"),
+    ((0, "", ""), "JSONDecodeError"),
+    ((0, "not JSON", ""), "JSONDecodeError"),
+    ((0, "[]", "authentication failed"), "authentication failed"),
+])
+def test_gh_failure_preserves_and_escalates(tmp_path, monkeypatch, result, reason):
+    repo, wt, parent, _ = _eval_repo(tmp_path)
+    env = clean_env(tmp_path)
+    assert run(repo, "init", env=env, tmp_path=tmp_path).returncode == 0
+    assert run(repo, "create", "impl", "--worktree", str(wt),
+               env=env, tmp_path=tmp_path).returncode == 0
+    import tickets as tool
+    board = str(repo / ".tickets")
+    hooks = tool._gc_hooks()
+    real_load = hooks.load
+    # Supply a completed parent without running its automatic cleanup first.
+    monkeypatch.setattr(hooks, "load", lambda b, tid:
+                        dict(real_load(b, tid), status="done")
+                        if tid == parent["id"] else real_load(b, tid))
+    real_run = gc._run
+    calls = []
+
+    def probe(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
+        calls.append(argv)
+        assert kwargs["timeout"] == 30
+        assert argv[-1] == "number,url,headRefName"
+        if isinstance(result, Exception):
+            raise result
+        return subprocess.CompletedProcess(argv, *result)
+
+    monkeypatch.setattr(gc, "_run", probe)
+    row = gc.run_cleanup_node(board, load_ticket(repo, "T-002"), hooks,
+                              probes=gc.Probes(lsof_fn=lambda path: []),
+                              repo_root=str(repo), apply=True)
+    assert len(calls) == 1
+    assert row["status"] == "escalate"
+    assert wt.exists()
+    child = load_ticket(repo, "T-002")
+    assert child["kind"] == "agent"
+    assert child["automated"]["escalated"] is True
+    assert child["automated"]["escalate_reason"] == "open_pr"
+    assert "cannot prove no open PR" in child["body"]
+    assert reason in child["body"]
+    git(repo, "show-ref", "--verify", "refs/heads/feat")
+
+
+@pytest.mark.parametrize("branches,action", [
+    ([], "remove"), (["other"], "remove"), (["other", "feat"], "escalate"),
+])
+def test_gh_valid_response_checks_branch(tmp_path, monkeypatch, branches, action):
+    repo, wt, parent, _ = _eval_repo(tmp_path)
+    real_run = gc._run
+    rows = [{"number": i + 1, "url": "https://pr/%s" % (i + 1), "headRefName": b}
+            for i, b in enumerate(branches)]
+    monkeypatch.setattr(gc, "_run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
+                        if argv[0] == "gh" else real_run(argv, **kw))
+    decision = gc.evaluate_cleanup(str(wt), parent=parent, repo_root=str(repo),
+                                   probes=gc.Probes(lsof_fn=lambda path: []))
+    assert decision["action"] == action
 
 
 def test_evaluate_not_done_waits(tmp_path):
