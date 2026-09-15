@@ -227,6 +227,22 @@ AUTH_CONTEXT_IDENTITY_FIELDS = (
     "agent_id",
 )
 
+# Exact fingerprint includes resolved `binary` and the `runner_id` that
+# hashes it. Those two fields drift when the enrolled CLI disappears
+# (`_which_binary` falls back to argv0). Same-seat fence keeps host, user,
+# argv0, env, repo, origin, and agent — never a cross-seat overwrite.
+SEAT_FENCE_IDENTITY_FIELDS = (
+    "runner_kind",
+    "hostname",
+    "username",
+    "argv0",
+    "env_fingerprint",
+    "repo_root",
+    "origin_url",
+    "expected_origin",
+    "agent_id",
+)
+
 
 def _nonempty_text(value):
     return bool(str(value or "").strip())
@@ -319,6 +335,32 @@ def contexts_match(probe_ctx, runner_ctx):
     left = context_fingerprint(probe_ctx)
     right = context_fingerprint(runner_ctx)
     return bool(left) and left == right
+
+
+def seat_fence_matches(left, right):
+    """True when both contexts are the same fenced seat, ignoring binary drift.
+
+    Resolved binary path and runner_id are not fence identity. A missing
+    CLI must still be the same host, user, argv0, env, repo, origin, and
+    agent. Incomplete or seat-mismatched contexts never match.
+    """
+    if not context_is_complete(left) or not context_is_complete(right):
+        return False
+    if not seat_identity_matches(left.get("agent_id"), left.get("ticket_agent")):
+        return False
+    if not seat_identity_matches(right.get("agent_id"), right.get("ticket_agent")):
+        return False
+    if not seat_identity_matches(left.get("agent_id"), right.get("agent_id")):
+        return False
+    for field in SEAT_FENCE_IDENTITY_FIELDS:
+        lv = left.get(field) or ""
+        rv = right.get(field) or ""
+        if field in ("origin_url", "expected_origin"):
+            lv = normalize_git_origin(lv)
+            rv = normalize_git_origin(rv)
+        if str(lv).strip() != str(rv).strip():
+            return False
+    return True
 
 
 def is_authoritative(auth_check, runner_ctx):
@@ -440,6 +482,33 @@ def _trusted_agent_id(previous, incoming, runner_ctx):
     return ""
 
 
+def _same_seat_unavailable_reprobe(previous, incoming, runner_ctx):
+    """Authoritative unavailable re-probe for the same fenced seat.
+
+    When the previously resolved CLI disappears, the new probe's
+    execution_context has a different `binary` (argv0 fallback) and
+    `runner_id` (hash includes that path). Exact fingerprint match then
+    discards a correct unavailable result and freezes stale Ready. The
+    fence accepts only `unavailable`, never Ready or a cross-seat write.
+    """
+    rec = incoming or {}
+    if rec.get("state") != "unavailable":
+        return False
+    if rec.get("authoritative") is False:
+        return False
+    if not _incoming_is_legal_probe(rec):
+        return False
+    if not _stored_authoritative_lineage(previous):
+        return False
+    prev_ctx = (previous or {}).get("execution_context") or {}
+    inc_ctx = rec.get("execution_context") or {}
+    return (
+        seat_fence_matches(prev_ctx, inc_ctx)
+        and seat_fence_matches(prev_ctx, runner_ctx)
+        and seat_fence_matches(inc_ctx, runner_ctx)
+    )
+
+
 def merge_auth_check(previous, incoming, runner_ctx):
     """Apply an incoming probe to the stored blob.
 
@@ -447,6 +516,11 @@ def merge_auth_check(previous, incoming, runner_ctx):
     *any* authoritative runner blob. For stored lineage, stored,
     incoming, and enrolled caller contexts must all agree. Silent runner
     rebind is forbidden here; T-686 may add an explicit fenced rebind later.
+
+    Exception: an authoritative `unavailable` re-probe for the same fenced
+    seat may replace stored lineage when only resolved binary / runner_id
+    drifted (CLI disappeared). Cross-seat, sandbox, repo, argv0, and Ready
+    claims still cannot overwrite.
 
     Pause and alert identity are derived from trusted stored/incoming
     enrolled context, never from an arbitrary caller.
@@ -459,14 +533,18 @@ def merge_auth_check(previous, incoming, runner_ctx):
     if _stored_authoritative_lineage(previous):
         if not legal_incoming:
             return previous
-        if not (
+        exact = (
             contexts_match(prev_ctx, inc_ctx)
             and contexts_match(prev_ctx, runner_ctx)
             and contexts_match(inc_ctx, runner_ctx)
-        ):
-            return previous
-        incoming_auth = is_authoritative(incoming, prev_ctx)
-        if not incoming_auth:
+        )
+        if exact:
+            incoming_auth = is_authoritative(incoming, prev_ctx)
+            if not incoming_auth:
+                return previous
+        elif _same_seat_unavailable_reprobe(previous, incoming, runner_ctx):
+            incoming_auth = True
+        else:
             return previous
     else:
         if not legal_incoming:

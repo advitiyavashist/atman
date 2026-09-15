@@ -118,6 +118,12 @@ missing / timeout without a transport error). Never classify auth as quota.
   enrolled context, never from an arbitrary caller. A sandbox caller cannot
   unpause a persistent host `network` seat or steal its alert.
 - Matching-context probes replace the stored blob.
+- Exception (T-991): an authoritative `unavailable` re-probe for the **same
+  fenced seat** may replace stored lineage when only the resolved `binary`
+  path and the `runner_id` derived from it have drifted (the enrolled CLI
+  disappeared; `_which_binary` falls back to argv0). Cross-seat, sandbox,
+  repo-root, argv0 (root vs packaged CLI), and Ready-with-new-binary probes
+  still cannot overwrite.
 - Matching authoritative `quota|login_required|expired|…` → `ready` must
   clear `pause.paused` and `alert_id` so a recovered persistent seat resumes
   once.
