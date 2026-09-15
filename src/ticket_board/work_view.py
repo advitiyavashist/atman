@@ -187,13 +187,14 @@ def _verdict_entries(t, msgs_re):
             kind = (r.get("kind") or "").strip().upper()
             sha = (r.get("sha") or "").strip()
             by = r.get("by") or ""
-            key = ("event", kind, by, sha)
+            key = ("event", kind, by, sha, bool(r.get("superseded")))
             if key in seen:
                 continue
             seen.add(key)
             extra = r.get("notes") or r.get("reason") or ""
             entries.append({"kind": kind, "by": by, "at": r.get("at") or "",
-                            "sha": sha, "applies": _applies(sha, art),
+                            "sha": sha, "applies": ("superseded" if r.get("superseded")
+                                                     else _applies(sha, art)),
                             "source": "event", "text": extra[:200]})
             continue
         text = (r.get("text") or "").strip()
@@ -309,6 +310,22 @@ def is_docs_exempt(t):
     return role in DOCS_EXEMPT_ROLES and not went_through_review(t)
 
 
+def supersede_release_evidence(t):
+    """Retain earlier verdicts, but invalidate them even if HEAD is unchanged."""
+    for ev in t.get("review_events") or []:
+        if isinstance(ev, dict):
+            ev["superseded"] = True
+    rec = t.get("merge_record")
+    if isinstance(rec, dict):
+        rec["superseded"] = True
+
+
+def _current_release_head_matches(t, sha):
+    head = (t.get("review_head") or "").strip().lower()
+    return bool(re.fullmatch(r"[0-9a-f]{40}", head)
+                and head == (sha or "").strip().lower())
+
+
 def structured_accept(t):
     """True when review_events has an accept bound to this ticket's review head."""
     head = (t.get("review_head") or "").strip()
@@ -320,7 +337,7 @@ def structured_accept(t):
         if (ev.get("kind") or "").strip().lower() != "accept":
             continue
         sha = (ev.get("sha") or "").strip()
-        if sha and _sha_match(sha, head):
+        if not ev.get("superseded") and _current_release_head_matches(t, sha):
             return True
     return False
 
@@ -343,7 +360,10 @@ def structured_merge(t):
         return False
     if (rec.get("kind") or "").strip().lower() != "merge":
         return False
-    return bool((rec.get("sha") or "").strip() and (rec.get("by") or "").strip())
+    return bool(not rec.get("superseded")
+                and (rec.get("sha") or "").strip()
+                and (rec.get("by") or "").strip()
+                and _current_release_head_matches(t, rec.get("pin")))
 
 
 def dep_released(t, msgs=None):
@@ -392,11 +412,9 @@ def released_ids(tickets, messages=None):
 
 
 def accepted_release_sha(t, msgs=None):
-    r = review_of(t, msgs)
-    if not r.get("verified"):
-        return ""
-    latest = r.get("latest") or {}
-    return (latest.get("sha") or r.get("artifact") or "").strip()
+    if structured_accept(t) or structured_merge(t):
+        return (t.get("review_head") or "").strip().lower()
+    return ""
 
 
 def make_release_override(kind, by, at, reason=""):

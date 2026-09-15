@@ -3811,6 +3811,8 @@ def cmd_review(a, board):
         if err:
             sys.exit(err)
     expected_generation = t.get("owner_generation")
+    _work_view().supersede_release_evidence(t)
+    t.pop("review_head", None)
     t["status"] = "review"
     t["owner"] = owner
     t["review_at"] = now()
@@ -3821,7 +3823,7 @@ def cmd_review(a, board):
         # the artifact's, not the caller's cwd.
         stamp = _record_pin(t, g, art)
         text = "%s -- %s" % (stamp, text)
-        if (a.pr or "").strip() and g.get("sha_full"):
+        if g.get("sha_full"):
             _review_verdict().record_verified_head(t, g["sha_full"], pr=a.pr)
     if a.pr:
         t["pr"] = a.pr
@@ -4346,7 +4348,7 @@ def cmd_merge(a, board):
             t2["status"] = "done"
             t2["done_at"] = now()
             t2["merge_record"] = _work_view().make_merge_record(
-                owner, now(), full_trunk or sha, pin=pin, trunk=trunk)
+                owner, now(), full_trunk or sha, pin=full, trunk=trunk)
             t2["notes"].append({"by": owner, "at": now(),
                                 "text": "merged into %s as %s (atm merge; pinned %s)" % (
                                     trunk, sha, pin)})
@@ -7385,6 +7387,7 @@ def cmd_reopen(a, board):
         t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": notes})
     before = t["status"]
     prev_owner = t.get("owner", "")
+    _work_view().supersede_release_evidence(t)
     t["status"] = "open"
     t["owner"] = ""
     # T-889/T-810 hook: Work treats posts recorded in reopened_seen as the

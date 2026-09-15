@@ -128,6 +128,16 @@ def test_pure_gate_helpers():
     merged = dict(reviewed, merge_record=work_view.make_merge_record(
         "master", "2026-09-15T00:03:00Z", "b" * 40, pin="a" * 40, trunk="main"))
     assert work_view.dep_released(merged) is True
+    stale_merge = dict(merged, review_head="c" * 40)
+    assert work_view.dep_released(stale_merge) is False
+    abbreviated = dict(reviewed, review_events=[{
+        "kind": "accept", "sha": "a" * 7}])
+    assert work_view.dep_released(abbreviated) is False
+    work_view.supersede_release_evidence(accepted)
+    assert work_view.dep_released(accepted) is False
+    accepted["review_events"].append({
+        "kind": "accept", "by": "rev", "sha": "a" * 40})
+    assert work_view.dep_released(accepted) is True
     assert work_view.unreleased_dep_id(
         {"id": "T-003", "deps": ["T-001"]}, [prose]) == "T-001"
     assert work_view.unreleased_dep_id(
@@ -386,3 +396,61 @@ def test_entry_points_call_shared_dep_released():
             nxt = src.find("\ndef ", start + 4)
             body = src[start:nxt]
             assert "_refuse_unreleased_deps" in body
+
+
+def submit_review_without_pr(tool, board):
+    r = run(tool, board, "review", "T-002", "--notes", "review current work",
+            "--force", agent="alice")
+    assert r.returncode == 0, r.stdout + r.stderr
+    return repo_shas(board)[0]
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_reopened_accept_cannot_release_new_review(tool, board):
+    setup_backend(tool, board)
+    sha_a = submit_review_without_pr(tool, board)
+    accepted = run(tool, board, "accept", "T-002", "--sha", sha_a,
+                   "--notes", "verified A", agent="reviewer")
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    reopened = run(tool, board, "reopen", "T-002", "--notes", "revise A",
+                   agent="alice")
+    assert reopened.returncode == 0, reopened.stdout + reopened.stderr
+    parent = load_ticket(board, "T-002")
+    assert parent["review_events"][0]["superseded"] is True
+    assert not work_view.structured_accept(parent)
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com",
+         "commit", "--allow-empty", "-m", "revision B"],
+        cwd=board.parent, check=True, capture_output=True)
+    sha_b = submit_review_without_pr(tool, board)
+    assert sha_b != sha_a
+    done = run(tool, board, "done", "T-002", "--notes", "closed B",
+               "--force", agent="alice")
+    assert done.returncode == 0, done.stdout + done.stderr
+    claim = run(tool, board, "claim", "T-003", agent="bob")
+    assert claim.returncode != 0, claim.stdout + claim.stderr
+    assert load_ticket(board, "T-003")["status"] == "blocked"
+    parent = load_ticket(board, "T-002")
+    assert parent["review_head"] == sha_b
+    assert not work_view.dep_released(parent)
+    accepted = run(tool, board, "accept", "T-002", "--sha", sha_b,
+                   "--notes", "verified B", agent="reviewer")
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    claim = run(tool, board, "claim", "T-003", agent="bob")
+    assert claim.returncode == 0, claim.stdout + claim.stderr
+    assert sha_b in claim.stdout
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_full_sha_accept_without_pr_releases_child(tool, board):
+    setup_backend(tool, board)
+    full = submit_review_without_pr(tool, board)
+    accepted = run(tool, board, "accept", "T-002", "--sha", full,
+                   "--notes", "verified local submission", agent="reviewer")
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    done = run(tool, board, "done", "T-002", "--notes", "handoff",
+               "--force", agent="alice")
+    assert done.returncode == 0, done.stdout + done.stderr
+    claim = run(tool, board, "claim", "T-003", agent="bob")
+    assert claim.returncode == 0, claim.stdout + claim.stderr
+    assert full in claim.stdout
