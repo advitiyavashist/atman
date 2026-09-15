@@ -8,8 +8,8 @@ Release time: 2026-09-12 23:55 SGT
 - Vercel scope/project: `advitiyavashists-projects/atman`
 - Project ID: `prj_qkalfTo59vqaFkTrZT4QsoVzLAbL`
 - Deployment ID: `dpl_AfeoT4gd5TTfQiQAfEsHzqWfsfd9`
-- Immutable deployment: `https://atman-6ecww9ynf-advitiyavashists-projects.vercel.app`
-- Production alias: `https://atman-xi.vercel.app`
+- Immutable deployment: `<retired-hosted-app>`
+- Production alias: `<retired-hosted-app>`
 - Vercel state: `READY`, target `production`
 
 Only the `landing/` directory from the pinned reviewed main commit was uploaded.
@@ -55,17 +55,17 @@ was not mixed into this main-only deployment.
 The existing project was linked from `landing/`, then released with:
 
 ```sh
-vercel link --yes --project atman --scope advitiyavashists-projects
-vercel deploy --prod --yes --scope advitiyavashists-projects
+hosted-app link --yes --project atman --scope advitiyavashists-projects
+hosted-app deploy --prod --yes --scope advitiyavashists-projects
 ```
 
 The previous production deployment was
 `dpl_397FtahhYGGvAzBtw3fPSqnCjTSL` at
-`https://atman-o6a1xjhhe-advitiyavashists-projects.vercel.app`. To roll the
+`<retired-hosted-app>`. To roll the
 production aliases back to it:
 
 ```sh
-vercel rollback dpl_397FtahhYGGvAzBtw3fPSqnCjTSL --yes \
+hosted-app rollback dpl_397FtahhYGGvAzBtw3fPSqnCjTSL --yes \
   --scope advitiyavashists-projects
 ```
 

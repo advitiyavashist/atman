@@ -25,7 +25,7 @@ the CLI product flow that runbook should call.
 ## PATH (do this first)
 
 `~/.local/bin/tickets` has been a stale shim to
-`atman/.worktrees/sol-agy-harness/tickets.py`. A CEO who trusts PATH
+`atman/tickets.py`. A CEO who trusts PATH
 `tickets connect` will get the old worker loop.
 
 Confirm:
@@ -38,7 +38,7 @@ tickets self
 Recut after merge to origin/main:
 
 ```sh
-TICKETS_PY=/Users/<operator>/Downloads/atman/tickets.py
+TICKETS_PY=<repo>/tickets.py
 cat > ~/.claude/tools/tickets.py <<EOF
 #!/usr/bin/env python3
 import os, sys
@@ -58,9 +58,9 @@ Living Steer board. `atman-ceo` is master. CoS is `cursor`.
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-export TICKETS_DIR=/Users/<operator>/Downloads/steer/.tickets
+export TICKETS_DIR=<board>
 export TICKET_AGENT=atman-ceo
-cd /Users/<operator>/Downloads/steer
+cd <steer>
 
 tickets self
 tickets connect

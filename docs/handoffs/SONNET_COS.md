@@ -18,7 +18,7 @@ Health is explicit: reachable endpoint or active runner plus heartbeat, correct 
 4. Obtain updated T-809 actual-wheel candidate and T-811 corrected scorecard/handoff. Follow T-824 explicit-repo worker. Report the actual blocker rather than another vague 'in progress'. T-687 auth staffing resumes only with tested unique seat registration; Claude availability can unblock work, but is not evidence of Cursor login.
 5. Verify CEO <-> CoS <-> planner messages in both directions using the acceptance probe. Distinguish delivered/ACK/work-started; report whether operator keystrokes were required. Do not install a cron that repeatedly buys idle model turns.
 6. Staff the Steer independent label/review/adjudication work. T-814 PR #181 contains 120 unlabeled candidates, not validated performance. Do not close the full corpus gate from protocol tests. Maintain author/reviewer independence and frozen request/gold/prediction digests.
-7. Follow the graph to Atman T-810/T-832/T-812 and Steer T-815/T-823/T-834/T-816. Keep public-site and local-app behavior explicit. Public URLs `https://atman-xi.vercel.app/` and `https://steer-mauve.vercel.app/` are older surfaces, not proof of completed launch deploys.
+7. Follow the graph to Atman T-810/T-832/T-812 and Steer T-815/T-823/T-834/T-816. Keep public-site and local-app behavior explicit. Older third-party hosted previews are not proof of completed launch deploys. The public Atman site is GitHub Pages; the live app is local `atm ui`.
 
 T-830 PR #179 has an automatic approval-review rejection recorded in the CEO packet. Do not retry by a different tool or identity. T-773/T-774 stay HOLD. Canonical `cursor` currently owns no implementation; preserve that while retiring the seat.
 

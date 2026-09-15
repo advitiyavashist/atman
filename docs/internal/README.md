@@ -11,3 +11,4 @@ from `README.md`, `docs/onboarding/`, or `docs/first-session.md`.
 | `VISIBILITY_FLIP.md` | Visibility-flip receipt |
 | `prototype.html` | Clickable Ticket Board fixture, not a live UI |
 | `tickets-py-vs-package.md` | T-981 ownership inventory for T-974 / T-975 |
+| `t821-atman-vercel-release.md` | Retired hosted-app receipt; hostnames redacted |

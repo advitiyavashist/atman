@@ -54,6 +54,51 @@ def test_public_onboarding_does_not_link_internal_hygiene_docs():
     assert not leaked, "public onboarding still points at internal notes: " + ", ".join(leaked)
 
 
+# Exact zero-match commands for T-981 review notes (run from repo root):
+#   git grep -nE '/Users/[A-Za-z0-9_.-]+' -- ':!tests' ':!scripts' ':!docs/internal'
+#   git grep -nE 'vercel\.app|https?://127\.0\.0\.1|https?://localhost' -- README.md docs/onboarding docs/first-session.md landing
+#   git grep -nE '\.worktrees/(cursor-community-t790|master-merge|sol-planner-transfer-t850|atman-runtime-current|sol-agy-harness|sol-ceo-cto|atman-auth-v2|cursor-demo-t190|cursor-t563-t185)' -- ':!tests'
+AUTHOR_HOME_CMD = [
+    "git", "grep", "-nE", r"/Users/[A-Za-z0-9_.-]+",
+    "--", ":!tests", ":!scripts", ":!docs/internal",
+]
+PUBLIC_HOST_CMD = [
+    "git", "grep", "-nE", r"vercel\.app|https?://127\.0\.0\.1|https?://localhost",
+    "--", "README.md", "docs/onboarding", "docs/first-session.md", "landing",
+]
+SEAT_WORKTREE_CMD = [
+    "git", "grep", "-nE",
+    r"\.worktrees/(cursor-community-t790|master-merge|sol-planner-transfer-t850|"
+    r"atman-runtime-current|sol-agy-harness|sol-ceo-cto|atman-auth-v2|"
+    r"cursor-demo-t190|cursor-t563-t185)",
+    "--", ":!tests",
+]
+
+
+def _git_grep(cmd):
+    import subprocess
+    result = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+    # git grep exits 1 when there are no matches
+    if result.returncode not in (0, 1):
+        raise AssertionError("git grep failed: %s\n%s" % (result.returncode, result.stderr))
+    return result.stdout.strip()
+
+
+def test_tracked_tree_has_no_author_machine_homes_outside_allowed_trees():
+    out = _git_grep(AUTHOR_HOME_CMD)
+    assert out == "", "zero-match failed:\n  %s\n%s" % (" ".join(AUTHOR_HOME_CMD), out)
+
+
+def test_public_onboarding_has_no_hosted_app_or_loopback_cta():
+    out = _git_grep(PUBLIC_HOST_CMD)
+    assert out == "", "zero-match failed:\n  %s\n%s" % (" ".join(PUBLIC_HOST_CMD), out)
+
+
+def test_docs_do_not_name_author_seat_worktrees():
+    out = _git_grep(SEAT_WORKTREE_CMD)
+    assert out == "", "zero-match failed:\n  %s\n%s" % (" ".join(SEAT_WORKTREE_CMD), out)
+
+
 def test_docs_and_scripts_do_not_name_a_real_operator_home():
     suffixes = {".py", ".md", ".html", ".txt", ".yaml", ".yml", ".json", ".sh"}
     found = []
