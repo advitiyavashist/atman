@@ -1,0 +1,18 @@
+{
+  "kind": "node",
+  "id": "failure.conformance",
+  "type": "failure",
+  "title": "Conformance failure",
+  "summary": "A portable implementation must preserve the public behavior contract.",
+  "tags": ["atman", "conformance"],
+  "applies_to": ["atman-core"],
+  "source": {"kind": "fixture", "ref": "conformance:v1"},
+  "recorded_at": "2026-09-09T03:00:00Z",
+  "owner": "atman",
+  "last_verified_at": "2026-09-09T03:00:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 3650,
+  "revision": 1,
+  "canonical_key": "atman-core-conformance"
+}

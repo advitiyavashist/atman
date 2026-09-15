@@ -1,0 +1,17 @@
+{
+  "kind": "node",
+  "id": "failure.future",
+  "type": "failure",
+  "title": "Future fact",
+  "summary": "This fixture must be rejected because its clock is far in the future.",
+  "tags": ["atman"],
+  "applies_to": ["atman-core"],
+  "source": {"kind": "fixture", "ref": "conformance:v1"},
+  "recorded_at": "2099-01-01T00:00:00Z",
+  "owner": "atman",
+  "last_verified_at": "2099-01-01T00:00:00Z",
+  "verification": "verified",
+  "confidence": 1.0,
+  "stale_after_days": 30,
+  "revision": 1
+}
