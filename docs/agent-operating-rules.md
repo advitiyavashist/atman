@@ -63,7 +63,7 @@ Check these before the first real command:
 - **Foreground `sleep` may be blocked.**
 - **macOS is BSD, not GNU.** No `cat -A`; `find` and `sed` flags differ. `rg`
   may not be installed.
-- **Do not put working state in `/tmp` or `/private/tmp`.** The OS may clean it
+- **Do not put working state in `/tmp` or `$TMPDIR`.** The OS may clean it
   mid-session.
 - **Read the exact bytes before an edit.** "String to replace not found" usually
   means you edited against remembered content.

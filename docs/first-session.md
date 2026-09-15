@@ -41,7 +41,7 @@ The three commands that matter:
   TICKET_AGENT=alice tickets update <id> "..."         say where you are, at least every 45 min
   TICKET_AGENT=alice tickets review <id> --notes "..." hand it back with evidence
 
-See it: tickets ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)
+See it: atm ui             ->  the local URL it prints (read-only, auto-refresh)
 Learn it: tickets guide   |   docs/first-session.md   |   README.md
 ```
 
@@ -116,8 +116,7 @@ Dependency graph (2 open, 1 claimed)
       `- [ ] T-003 Sample: put a screen on the API  (console; waiting on T-002)
 ```
 
-The same tree is the default Work view in `tickets ui`
-(`http://127.0.0.1:8765/#graph`): ticket ids, status, and `waiting on` edges —
+The same tree is the default Work view in `atm ui` (Work → Graph): ticket ids, status, and `waiting on` edges —
 not a dump of titles. `tickets map` is the sprint/epic listing with the same
 deps. Follow-up is `tickets update` / `tickets here`; silent >90m claims:
 `tickets reopen`; submit with `tickets review` then `tickets merge`.

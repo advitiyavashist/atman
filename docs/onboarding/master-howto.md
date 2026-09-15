@@ -75,7 +75,7 @@ model router.
    **template only**. Separately, the prompt renderer selects a bounded,
    task-relevant subgraph from repo-backed `knowledge/`. See
    [shared knowledge](../knowledge/README.md).
-6. Open `tickets ui` → <http://127.0.0.1:8765>. On the board, **`—` means
+6. Open `atm ui` (use the local URL it prints). On the board, **`—` means
    unknown** (not measured yet) — it is not zero. Median turns / yield@cost
    stay `—` until a done ticket reports.
 7. **Sound before staff.** `tickets capture` dumps a thought (`lane=capture`,

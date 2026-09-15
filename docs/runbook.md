@@ -12,7 +12,7 @@ TICKET_BOARD_CONTRACTS_REQUIRED=1 python3 -m pytest -q tests/acceptance/recovery
 
 Cut from `origin/main` `ea681f3` (advitiyavashist/atman; GitHub `tickets`
 redirects here). Worktree
-`/Users/kavana/Downloads/atman/.worktrees/cursor-t563-t185`, branch
+`$HOME/Downloads/atman/.worktrees/<seat>`, branch
 `cursor/t185-verify`. Own paths: `tests/acceptance/recovery/`, this section.
 
 | acceptance item | evidence |
@@ -239,7 +239,7 @@ mention is a delivery") disagree and that is a product call, not a defect.
 ## Re-running everything
 
 ```
-cd /Users/kavana/Downloads/tickets/.worktrees/cursor-demo-t190
+cd $HOME/Downloads/tickets/.worktrees/<seat>
 TICKET_BOARD_CONTRACTS_REQUIRED=1 python3 -m pytest -q          # whole repo
 python3 -m pytest -q tests/acceptance/messaging                  # this suite
 python3 -m pytest -q tests/acceptance/messaging --runxfail       # see each finding fail for its stated reason

@@ -11,7 +11,8 @@ import subprocess
 import sys
 import tempfile
 
-FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py", "session_adapters.py")
+# Root siblings only. board_backup and ticket_coordination live in the package.
+FILES = ("tickets.py", "session_adapters.py")
 PACKAGE_PREFIX = "src/ticket_board"
 
 

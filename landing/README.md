@@ -85,5 +85,5 @@ GitHub Actions (`.github/workflows/pages.yml`) publishes `landing/` as the
 GitHub Pages root. The product capture is `assets/t971-app-work-1440.png`
 next to `index.html`.
 
-**No custom domain is registered.** Do not invent one. Do not restore
-`atman-ai.vercel.app`.
+**No custom domain is registered.** Do not invent one. Do not restore a
+third-party hosted-app hostname.

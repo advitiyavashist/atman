@@ -6,7 +6,7 @@ tempfile.gettempdir(), which honours $TMPDIR, so the boundary was settable by
 the very caller it polices:
 
     cd <steer> && env -i PATH=... HOME=... \
-        PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=/Users/<operator>/Downloads \
+        PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=$HOME/Downloads \
         python3 tickets.py board --quiet
 
 printed the full live board, exit 0, no refusal. Without the TMPDIR override

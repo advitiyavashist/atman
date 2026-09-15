@@ -16,7 +16,7 @@ Observed failures this contract exists to prevent:
    `login_required`, `expired`, `network`, `unavailable`, `unsupported`).
 2. **Wrong-repository spawn (2026-09-10).** `tickets spawn` used
    `root = dirname(board)` while `--worktree` pointed at
-   `/Users/kavana/Downloads/atman/.worktrees/atman-auth-v2`. The path looked
+   `$HOME/Downloads/atman/.worktrees/<seat>`. The path looked
    like Atman; the git object database was Steer. Repo identity is origin URL,
    not directory spelling and not git HEAD. A shared board in Steer driving an
    Atman worktree is legal.

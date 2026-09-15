@@ -6,7 +6,7 @@ Do not treat a successful same-provider continue as interchangeability.
 import json
 from pathlib import Path
 
-from ticket_coordination import parse_handoff_document, flag_missing_artifacts, apply_context_budget
+from ticket_board.ticket_coordination import parse_handoff_document, flag_missing_artifacts, apply_context_budget
 from test_wakeup import board, run  # noqa: F401
 
 HANDOFF = """\
@@ -227,7 +227,7 @@ def test_packaged_cli_bumps_lease_on_reassign(board):
 
 def test_twice_transferred_original_worker_is_still_fenced(monkeypatch):
     """A->B->C must keep Alice fenced; only the last previous_owner is not enough."""
-    import ticket_coordination as tc
+    from ticket_board import ticket_coordination as tc
 
     monkeypatch.delenv("TICKET_OWNER_GENERATION", raising=False)
     ticket = {"id": "T-001", "status": "claimed", "owner": "alice"}
@@ -343,7 +343,7 @@ def test_handoff_publication_cannot_restore_a_revoked_owner(tmp_path, monkeypatc
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     tc_spec = importlib.util.spec_from_file_location(
-        "handoff_tc_tickets", root / "ticket_coordination.py"
+        "handoff_tc_tickets", root / "src" / "ticket_board" / "ticket_coordination.py"
     )
     tc = importlib.util.module_from_spec(tc_spec)
     tc_spec.loader.exec_module(tc)
