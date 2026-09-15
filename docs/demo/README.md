@@ -1,8 +1,8 @@
 # Atman demo rehearsal (T-924)
 
 This replaces the stale T-940 command recipe for the next recording. It is a
-rehearsal kit, **not a finished demo**. No paid provider run or final cast has
-been made with it. The earlier Opus working directory is untouched.
+rehearsal kit, **not a finished demo**. A real Claude attempt reached a tool-permission denial; there is no
+finished demo cast. See VALIDATION.md for the exact blocker. The earlier Opus working directory is untouched.
 
 ## Local checks: no providers, no remote writes
 
@@ -33,10 +33,11 @@ states, the same handoff text in B's output, and accepted-commit ancestry in
 B's worktree. Echoing success captions cannot pass these checks. These are
 local receipts, not tamper-proof attestation; review the original transcripts.
 
-## Real take: wait for T-1014
+## Real take: pinned current main
 
-Use the reviewed post-T-1014 runtime, with T-972 installation/enrollment
-instructions and T-819's final CTA. Set up an **empty dedicated throwaway GitHub
+CEO decision, 2026-09-15 14:22 +08: record on current main; T-1014 is
+not a prerequisite. Pin the runtime SHA and verify the commands before capture.
+Use the available installation instructions and a verified CTA. Set up an **empty dedicated throwaway GitHub
 repository** for the sample; inspect its ownership and emptiness before pushing.
 Do not use the Atman product repository as the demo origin.
 
@@ -70,7 +71,9 @@ it does not prove Cursor claimed it, started inference, or received A's code.
 The done note must include the accepted full SHA and `summarize(path)` interface.
 
 The real process commands have been checked against local CLI help, but their
-provider execution remains untested until the authorized real take. Logs plus
+the first real Claude attempt was blocked by tool permission. Codex and
+Cursor provider execution remains untested. The launcher returns nonzero when
+a Claude transcript reports denied tools, even if Claude itself exits zero. Logs plus
 state checks do not alone certify model attribution: a reviewer must inspect
 the provider tool calls and uncut handoff before publishing.
 
@@ -97,7 +100,6 @@ sync label, no horizontal overflow and no page errors at 1280×900 and 390×844.
 It writes four labeled captures plus their asserted text to `screenshots.json`.
 Do not present them as continuous browser footage.
 
-Publication still requires: T-1014's final runtime matrix; T-972 clean install
-and recovery; T-819 CTA/copy; real-seat execution and human attribution review;
+Publication requires: a verified CTA; real-seat execution and attribution review;
 the uncut cast plus commands/release SHA/PR/test receipts; and Pages link/mobile
 verification. This kit does not close T-924 or T-976.

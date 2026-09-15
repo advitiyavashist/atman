@@ -48,6 +48,17 @@ def test_echoed_success_is_not_execution():
         verify.verify_events([{"kind": "caption", "stdout": "accepted pinned IN REVIEW Handoff from dependencies"}])
 
 
+@pytest.mark.parametrize("event", [
+    '{"type":"system","subtype":"permission_denied"}',
+    '{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Bash"}]}',
+])
+def test_provider_success_does_not_hide_tool_denial(tmp_path, event):
+    from seat import denied_tools
+    transcript = tmp_path / "provider.jsonl"
+    transcript.write_text(event + "\n")
+    assert denied_tools(transcript)
+
+
 @pytest.mark.parametrize("damage", ["wrong_sha", "wrong_owner", "early_claim", "missing_handoff", "nonzero_exit"])
 def test_forged_or_incomplete_receipts_fail(damage):
     events = fixture_events()

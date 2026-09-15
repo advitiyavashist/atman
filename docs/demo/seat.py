@@ -19,16 +19,30 @@ def log(run, event):
         stream.write(json.dumps(event) + "\n")
 
 
+def denied_tools(path):
+    """A provider may exit zero after every requested tool was denied."""
+    for line in path.read_text().splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and (
+            event.get("subtype") == "permission_denied" or event.get("permission_denials")
+        ):
+            return True
+    return False
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("run")
     p.add_argument("seat", choices=("ceo", "codex-worker", "cursor-worker"))
     p.add_argument("--watch", action="store_true")
-    p.add_argument("--release-approved", action="store_true", help="recorder confirms T-1014 landed and final runtime was checked")
+    p.add_argument("--release-approved", action="store_true", help="recorder confirms the pinned current-main runtime was checked")
     a = p.parse_args()
     run, manifest = load_run(a.run)
     if manifest["mode"] != "real" or not a.release_approved:
-        p.error("real providers require a real setup and --release-approved after T-1014")
+        p.error("real providers require a real setup and --release-approved for the checked current-main runtime")
     env = env_for(run, a.seat)
     cwd = run / "repo/.worktrees" / a.seat
     if a.watch:
@@ -78,6 +92,9 @@ def main():
     rc = child.wait()
     log(run, {"kind": "provider_exit", "seat": a.seat, "pid": child.pid,
               "exit": rc, "end": time.time()})
+    if denied_tools(run / "logs" / (a.seat + ".jsonl")):
+        print("Recording blocked: provider tool permission denied; preserve this take.", file=sys.stderr)
+        return rc or 3
     return rc
 
 
