@@ -1,0 +1,33 @@
+{
+  "applies_to": [
+    "zsh",
+    "shell",
+    "ops"
+  ],
+  "confidence": 1.0,
+  "data": {
+    "evidence": "T-931 swarm-week 2026-09-13",
+    "files": [
+      "*.sh"
+    ]
+  },
+  "id": "lesson.zsh-no-word-split",
+  "kind": "node",
+  "last_verified_at": "2026-09-14T03:00:00Z",
+  "owner": "cursor-onboard",
+  "recorded_at": "2026-09-14T03:00:00Z",
+  "revision": 1,
+  "source": {
+    "kind": "ticket",
+    "ref": "T-931 swarm-week 2026-09-13"
+  },
+  "stale_after_days": 90,
+  "summary": "zsh does not word-split $VAR; use functions or arrays, not unquoted expansion.",
+  "tags": [
+    "lesson",
+    "field-guide"
+  ],
+  "title": "zsh does not word-split $VAR",
+  "type": "lesson",
+  "verification": "verified"
+}
