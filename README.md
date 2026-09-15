@@ -110,8 +110,9 @@ tickets remain T-001 through T-003, the CSV tickets receive later IDs, and the
 commands below operate on the wrong tickets.
 
 `atm connect` walks the tool-specific hook setup for Claude Code, Codex and
-Cursor. `atm join <name> --harness custom --cmd '...'` registers anything
-else ([Bring your own agent](docs/byoa.md)).
+Cursor. A custom harness is any command whose template names `{prompt_file}`,
+for example `atm join qwen --roles backend --harness custom --cmd 'ollama run qwen3:8b < {prompt_file}'`
+([Bring your own agent](docs/byoa.md)).
 
 ## First ticket, objective to accepted result
 
@@ -273,7 +274,7 @@ repository.
 | Claude Code seat takes tickets and reports back | tested on one macOS machine; public tests cover the hook, poke and wake path | `tests/test_t785_t789_all_provider_wake.py`; `tests/test_t857_claude_uds.py` |
 | Codex seat takes tickets | partial: may stop waking after one run; restart the watcher | known issue since the first preview |
 | Cursor seat starts through a supervised watcher | partial: supervised, not a native wake | `docs/wake-recipients.md` |
-| Antigravity seat | experimental: discovery passes (`atm harness available`), headless launch fails, task completion historical only | `docs/connect-agy.md` |
+| Antigravity seat | experimental: discovery is documented; headless launch and task completion are not supported in this preview | `docs/connect-agy.md`; `docs/wake-recipients.md` |
 | Custom harness via `atm join --harness custom --cmd` | documented contract; smoke test pending | `docs/byoa.md` |
 | Dependent ticket invisible until its predecessor is done; handoff notes in the successor's prompt | tested | `tests/test_t780_plan_graph.py`; walkthrough above |
 | Acceptance bound to the full review SHA; author cannot accept own work | tested | `tests/test_t944_accept_reject.py`, `tests/test_t889_work_view.py` |
@@ -334,7 +335,10 @@ working directory and an identity; the harness reports through `atm`.
    `atm graph` to inspect.
 3. Unattended persist to a reviewable SHA on the agent's branch
    (`atm review`).
-4. Human review is the gate. Merge is not silent auto-promote.
+4. Human review before merge is the documented workflow, not an enforced
+   gate: a reviewer other than the author accepts the exact review commit
+   (`atm accept --sha`), and `atm merge` is an explicit command, not a
+   silent auto-promote.
 
 The same four steps under the alias: `tickets harness available`,
 `tickets plan`, `tickets review`, `tickets merge`.
