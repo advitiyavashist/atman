@@ -58,6 +58,12 @@ def test_public_onboarding_does_not_link_internal_hygiene_docs():
 #   git grep -nE '/Users/[A-Za-z0-9_.-]+' -- ':!tests' ':!scripts' ':!docs/internal'
 #   git grep -nE 'vercel\.app|https?://127\.0\.0\.1|https?://localhost' -- README.md docs/onboarding docs/first-session.md landing
 #   git grep -nE '\.worktrees/(cursor-community-t790|master-merge|sol-planner-transfer-t850|atman-runtime-current|sol-agy-harness|sol-ceo-cto|atman-auth-v2|cursor-demo-t190|cursor-t563-t185)' -- ':!tests'
+#   git grep -nE '(cursor-community-t790|master-merge|sol-planner-transfer-t850|atman-runtime-current|sol-agy-harness|sol-ceo-cto|atman-auth-v2|cursor-demo-t190|cursor-t563-t185)' -- README.md docs/onboarding docs/first-session.md docs/connect-agy.md landing
+_SEAT_NAMES = (
+    r"cursor-community-t790|master-merge|sol-planner-transfer-t850|"
+    r"atman-runtime-current|sol-agy-harness|sol-ceo-cto|atman-auth-v2|"
+    r"cursor-demo-t190|cursor-t563-t185"
+)
 AUTHOR_HOME_CMD = [
     "git", "grep", "-nE", r"/Users/[A-Za-z0-9_.-]+",
     "--", ":!tests", ":!scripts", ":!docs/internal",
@@ -68,10 +74,16 @@ PUBLIC_HOST_CMD = [
 ]
 SEAT_WORKTREE_CMD = [
     "git", "grep", "-nE",
-    r"\.worktrees/(cursor-community-t790|master-merge|sol-planner-transfer-t850|"
-    r"atman-runtime-current|sol-agy-harness|sol-ceo-cto|atman-auth-v2|"
-    r"cursor-demo-t190|cursor-t563-t185)",
+    r"\.worktrees/(%s)" % _SEAT_NAMES,
     "--", ":!tests",
+]
+# Bare names: the .worktrees/ prefix is not required. Public reader paths only
+# so historical receipts are not rewritten by this successor.
+BARE_SEAT_NAME_CMD = [
+    "git", "grep", "-nE",
+    r"(^|[^A-Za-z0-9_-])(%s)([^A-Za-z0-9_-]|$)" % _SEAT_NAMES,
+    "--", "README.md", "docs/onboarding", "docs/first-session.md",
+    "docs/connect-agy.md", "landing",
 ]
 
 
@@ -97,6 +109,11 @@ def test_public_onboarding_has_no_hosted_app_or_loopback_cta():
 def test_docs_do_not_name_author_seat_worktrees():
     out = _git_grep(SEAT_WORKTREE_CMD)
     assert out == "", "zero-match failed:\n  %s\n%s" % (" ".join(SEAT_WORKTREE_CMD), out)
+
+
+def test_public_docs_do_not_name_author_seats_without_worktrees_prefix():
+    out = _git_grep(BARE_SEAT_NAME_CMD)
+    assert out == "", "zero-match failed:\n  %s\n%s" % (" ".join(BARE_SEAT_NAME_CMD), out)
 
 
 def test_docs_and_scripts_do_not_name_a_real_operator_home():

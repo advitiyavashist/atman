@@ -32,7 +32,7 @@ Confirm:
 
 ```sh
 tickets self
-# script: must be this checkout or Atman origin/main after merge — not sol-agy-harness
+# script: must be this checkout or Atman origin/main after merge — not a stale shim
 ```
 
 Recut after merge to origin/main:
