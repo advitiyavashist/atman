@@ -107,6 +107,106 @@ def child_boards(cwd):
     return found
 
 
+PRIMARY_BOARD_MARKER = ".primary"
+
+
+def _atman_config_path():
+    """Where the machine-level "which repo uses which shared board" map lives.
+    See tickets.py's copy of this function for the full rationale (T-959);
+    kept identical across both entry points so a fix ported to one does not
+    leave the other behaving differently (T-243)."""
+    override = os.environ.get("ATMAN_BOARD_CONFIG")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.expanduser("~/.config/atman/board.json")
+
+
+def _configured_shared_board(repo_root):
+    if not repo_root:
+        return None
+    try:
+        with open(_atman_config_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    boards = data.get("boards") if isinstance(data, dict) else None
+    if not isinstance(boards, dict):
+        return None
+    real_root = os.path.realpath(repo_root)
+    for key, val in boards.items():
+        if not val:
+            continue
+        try:
+            if os.path.realpath(os.path.expanduser(key)) == real_root:
+                return os.path.abspath(os.path.expanduser(val))
+        except (OSError, TypeError):
+            continue
+    return None
+
+
+def _is_marked_primary(path):
+    return os.path.isfile(os.path.join(path, PRIMARY_BOARD_MARKER))
+
+
+def _board_has_content(path):
+    if _live_board(path):
+        return True
+    if not os.path.isdir(path):
+        return False
+    for name in ("messages.jsonl", "workforce.json", "roles.json"):
+        p = os.path.join(path, name)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return True
+    agents_dir = os.path.join(path, "agents")
+    if os.path.isdir(agents_dir):
+        try:
+            if any(n.endswith(".json") for n in os.listdir(agents_dir)):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _shadow_board_refusal(candidate, configured):
+    real_candidate = os.path.realpath(candidate)
+    sys.exit(
+        "REFUSING BOARD %r: this repo has a configured shared board (%s) that "
+        "disagrees with the local .tickets found here, and the local one is "
+        "NOT empty and NOT marked primary -- resolving to it risks stranding "
+        "real data (messages, agent registrations) on a board nothing else "
+        "reads, the T-959 shape. Pick one:\n"
+        "  * use the shared board:      export TICKETS_DIR=%s\n"
+        "  * inspect what is here:      tickets doctor\n"
+        "  * keep this repo's own board on purpose:\n"
+        "                                tickets board-mark-primary\n"
+        "  * archive this board aside (never deletes):\n"
+        "                                tickets board-archive-shadow %s --yes\n"
+        % (real_candidate, configured, configured, real_candidate)
+    )
+
+
+def _apply_shared_board_config(candidate):
+    if os.environ.get("TICKETS_DIR"):
+        return candidate
+    root = _repo_root()
+    configured = _configured_shared_board(root)
+    if not configured:
+        return candidate
+    configured = os.path.realpath(configured)
+    real_candidate = os.path.realpath(candidate)
+    if configured == real_candidate:
+        return candidate
+    if _is_marked_primary(candidate):
+        return candidate
+    if not _board_has_content(candidate):
+        sys.stderr.write(
+            "tickets: cwd .tickets is empty -- using this repo's configured "
+            "shared board %s\n" % configured
+        )
+        return configured
+    _shadow_board_refusal(candidate, configured)
+
+
 def _repo_root():
     """Root of the MAIN worktree, so every linked worktree shares one board."""
     import subprocess
@@ -403,6 +503,9 @@ def _cwd_belongs_to_board(board_path):
     here = _init_cwd_worktree_root()
     if here and os.path.realpath(os.path.join(here, ".tickets")) == board:
         return True
+    configured = _configured_shared_board(root) if root else None
+    if configured and os.path.realpath(configured) == board:
+        return True
     return False
 
 
@@ -432,6 +535,7 @@ def _refuse_unbound_live_board(path):
 
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
+    result = _apply_shared_board_config(result)
     _refuse_board_outside_pytest_tmp(result)
     _refuse_unbound_live_board(result)
     return result
@@ -3581,6 +3685,158 @@ def cmd_where(a, board):
         print("set TICKETS_DIR to pick one")
 
 
+def _read_jsonl(path):
+    out = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def _shadow_board_summary(path):
+    summary = {
+        "path": path,
+        "ticket_count": len(glob.glob(os.path.join(path, "T-*.json"))),
+        "message_count": 0,
+        "recipients": [],
+        "agent_count": 0,
+        "since": None,
+        "until": None,
+    }
+    messages = _read_jsonl(os.path.join(path, "messages.jsonl"))
+    summary["message_count"] = len(messages)
+    recipients = set()
+    times = []
+    for m in messages:
+        to = (m.get("to") or "").strip() if isinstance(m, dict) else ""
+        if to:
+            recipients.add(to)
+        at = m.get("at") if isinstance(m, dict) else None
+        if at:
+            times.append(at)
+    summary["recipients"] = sorted(recipients)
+    if times:
+        times.sort()
+        summary["since"] = times[0]
+        summary["until"] = times[-1]
+    agents_dir = os.path.join(path, "agents")
+    if os.path.isdir(agents_dir):
+        try:
+            summary["agent_count"] = len([n for n in os.listdir(agents_dir) if n.endswith(".json")])
+        except OSError:
+            pass
+    return summary
+
+
+def cmd_doctor(a):
+    """Diagnose board resolution: what board is in effect, and any shadow
+    boards nearby (T-959). Read-only."""
+    env = os.environ.get("TICKETS_DIR")
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    candidate = _board_dir_uncached()
+
+    print("board resolution order: TICKETS_DIR > configured shared board > cwd .tickets (if primary or empty)")
+    if env:
+        print("  TICKETS_DIR is set: %s  <- in effect" % os.path.abspath(os.path.expanduser(env)))
+    else:
+        print("  TICKETS_DIR is not set")
+    print("  repo root: %s" % (root or "(not inside a git worktree)"))
+    print("  configured shared board: %s" % (configured or "none registered for this repo"))
+
+    effective = candidate
+    if not env and configured and os.path.realpath(configured) != os.path.realpath(candidate):
+        if _is_marked_primary(candidate):
+            print("  cwd .tickets is marked primary -- overrides the configured board")
+        elif not _board_has_content(candidate):
+            effective = configured
+            print("  cwd .tickets is empty -- configured shared board is in effect")
+        else:
+            effective = configured
+            print("  ** shadow board detected at %s -- NOT the configured board and NOT marked "
+                  "primary. Normal commands refuse until this is resolved. **" % candidate)
+    print("effective board: %s" % effective)
+
+    shadows = []
+    if root:
+        local = os.path.join(root, ".tickets")
+        if os.path.isdir(local) and os.path.realpath(local) != os.path.realpath(effective):
+            shadows.append(os.path.abspath(local))
+    for kid in child_boards(os.getcwd()):
+        real_kid = os.path.realpath(kid)
+        if real_kid != os.path.realpath(effective) and kid not in shadows:
+            shadows.append(kid)
+
+    if not shadows:
+        print("\nno shadow boards found")
+        return
+    print("\nshadow boards found (read-only summary -- nothing modified):")
+    for shadow in shadows:
+        s = _shadow_board_summary(shadow)
+        print("  %s" % shadow)
+        print("    tickets: %d, messages: %d, agents: %d" % (
+            s["ticket_count"], s["message_count"], s["agent_count"]))
+        if s["since"]:
+            print("    span: %s .. %s" % (s["since"], s["until"]))
+        if s["recipients"]:
+            shown = s["recipients"][:20]
+            more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
+            print("    messages addressed to: %s%s" % (", ".join(shown), more))
+        print("    fix: tickets board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+
+
+def cmd_board_mark_primary(a):
+    root = _repo_root()
+    board = os.path.join(root, ".tickets") if root else os.path.join(os.getcwd(), ".tickets")
+    if not os.path.isdir(board):
+        sys.exit("no .tickets directory at %s -- nothing to mark" % board)
+    marker = os.path.join(board, PRIMARY_BOARD_MARKER)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("marked primary %s\n" % datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    print("marked %s primary -- it now wins over any configured shared board for this repo" % board)
+
+
+def cmd_board_archive_shadow(a):
+    path = os.path.abspath(os.path.expanduser(a.path))
+    if not os.path.isdir(path):
+        sys.exit("no such directory: %s" % path)
+    env = os.environ.get("TICKETS_DIR")
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    if env:
+        effective = os.path.abspath(os.path.expanduser(env))
+    elif configured:
+        effective = configured
+    else:
+        effective = _board_dir_uncached()
+    if os.path.realpath(path) == os.path.realpath(effective):
+        sys.exit(
+            "REFUSING: %s IS the board currently in effect -- archiving it would "
+            "archive the live board, not a shadow. Nothing was moved." % path
+        )
+    s = _shadow_board_summary(path)
+    dest = "%s.archived-%s" % (path, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    if not getattr(a, "yes", False):
+        sys.exit(
+            "DRY RUN -- pass --yes to actually move this aside (nothing changed):\n"
+            "  shadow:  %s\n"
+            "  tickets: %d, messages: %d, agents: %d\n"
+            "  would move to: %s\n"
+            % (path, s["ticket_count"], s["message_count"], s["agent_count"], dest)
+        )
+    os.rename(path, dest)
+    print("archived shadow board %s -> %s (nothing deleted)" % (path, dest))
+
+
 def cmd_context(a, board):
     paths = context_paths(board)
     if not paths:
@@ -5329,6 +5585,17 @@ def main():
     c = sub.add_parser("where", help="print the board directory")
     c.set_defaults(fn=cmd_where)
 
+    c = sub.add_parser("doctor", help="diagnose board resolution and detect shadow boards (T-959)")
+    c.set_defaults(fn=cmd_doctor)
+
+    c = sub.add_parser("board-mark-primary", help="opt this repo's local .tickets in as its board of record")
+    c.set_defaults(fn=cmd_board_mark_primary)
+
+    c = sub.add_parser("board-archive-shadow", help="move a shadow board aside (never deletes); requires --yes")
+    c.add_argument("path")
+    c.add_argument("--yes", action="store_true", help="actually move it (default is a dry run)")
+    c.set_defaults(fn=cmd_board_archive_shadow)
+
     c = sub.add_parser("context", help="print the shared briefing file")
     c.set_defaults(fn=cmd_context)
 
@@ -5355,6 +5622,12 @@ def main():
     a = p.parse_args()
     if not a.cmd:
         p.print_help()
+        return
+    if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
+        # These diagnose/repair board resolution itself, so they must not go
+        # through board_dir() -- a shadow board is exactly the case they are
+        # for, and board_dir() would refuse before they ever ran (T-959).
+        a.fn(a)
         return
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
