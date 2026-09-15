@@ -1,0 +1,115 @@
+{
+  "sha": "7187c0917e41624722dd2276dfe933f5e51fd6be",
+  "results": [
+    {
+      "shot": "01-transport-label",
+      "ok": true,
+      "detail": "connStatus='Board synced'"
+    },
+    {
+      "shot": "01-header-count",
+      "ok": true,
+      "detail": "chips=master bossCoS \u20140/6 accepted1 done, unverified"
+    },
+    {
+      "shot": "01-desktop-status-open",
+      "ok": true,
+      "detail": "hdrStatus.open=True (no fold on desktop)"
+    },
+    {
+      "shot": "01-legend-unverified",
+      "ok": true,
+      "detail": "legend=Ready Reserved 1 Task posted Working 1 In review 1 Blocked Waiting 1 Capture Hold 1 Done 1 \u00b7 1 unverified"
+    },
+    {
+      "shot": "01-graph-shows-T-006",
+      "ok": true,
+      "detail": "T-006 node count=1 text=T-006Done \u00b7 unverifiedFinished without review@bobMarked done; verification not recorded"
+    },
+    {
+      "shot": "02-T-005-submitted-not-accepted",
+      "ok": true,
+      "detail": "T-005 detail=Close | T-005 | IN REVIEW | backend | P2 | Needs a verdict | STATUS | Submitted by @alice \u00b7 alice@b77f6da | WHO | @alice | ACCEPTANCE | none recorded | ARTIFACT | alice@b77f6da | REVIEW | Awaiting review of b77f6da \u00b7 no verdict recorded | LAST NOTE | alice REVIEW: alice@b77f6da -- paths: tickets.py;"
+    },
+    {
+      "shot": "02-deeplink-T-006-detail",
+      "ok": true,
+      "detail": "T-006 detail=Close | T-006 | DONE | docs | P2 | Finished without review | STATUS | Marked done 1.7h ago by @bob | WHO | @bob | ACCEPTANCE | none recorded | ARTIFACT | \u2014 | REVIEW | Marked done; verification not recorded | LAST NOTE | bob I completed it in chat | tickets show T-006 | tickets msg --to bob --re T-00"
+    },
+    {
+      "shot": "03-list-shows-T-006",
+      "ok": true,
+      "detail": "list rows=1"
+    },
+    {
+      "shot": "04-light-acc",
+      "ok": true,
+      "detail": "light --acc=#6b5344"
+    },
+    {
+      "shot": "05-mobile-status-folded",
+      "ok": true,
+      "detail": "hdrStatus.open=False"
+    },
+    {
+      "shot": "05-mobile-status-brief",
+      "ok": true,
+      "detail": "brief='0/6 accepted \u00b7 1 unverified'"
+    },
+    {
+      "shot": "05-mobile-objective-strip-folded-on-work",
+      "ok": true,
+      "detail": "promiseStrip={'top': 0, 'bottom': 0, 'h': 0, 'visible': False}"
+    },
+    {
+      "shot": "05-mobile-objective-in-first-viewport",
+      "ok": true,
+      "detail": "workObjective={'top': 345, 'bottom': 474, 'h': 129, 'visible': True}"
+    },
+    {
+      "shot": "05-mobile-finishing-starts-in-first-viewport",
+      "ok": true,
+      "detail": "Finishing={'top': 498, 'bottom': 560, 'h': 62, 'visible': True}"
+    },
+    {
+      "shot": "05-mobile-blocked-starts-in-first-viewport",
+      "ok": true,
+      "detail": "Blocked={'top': 570, 'bottom': 653, 'h': 83, 'visible': True}"
+    },
+    {
+      "shot": "05-mobile-next-starts-in-first-viewport",
+      "ok": true,
+      "detail": "Next step={'top': 663, 'bottom': 745, 'h': 83, 'visible': True}"
+    },
+    {
+      "shot": "05-mobile-no-horizontal-overflow",
+      "ok": true,
+      "detail": "scrollWidth=390"
+    },
+    {
+      "shot": "05-mobile-transport-label",
+      "ok": true,
+      "detail": "connStatus='Board synced'"
+    },
+    {
+      "shot": "06-mobile-fold-reachable",
+      "ok": true,
+      "detail": "chips=master bossCoS \u20140/6 accepted1 done, unverified pulse=Warning \u00b7 6"
+    },
+    {
+      "shot": "07-mobile-objective-tab-keeps-strip",
+      "ok": true,
+      "detail": "promiseStrip on Objective tab={'top': 266, 'bottom': 418, 'h': 152, 'visible': True}"
+    },
+    {
+      "shot": "08-mobile-list-shows-T-006",
+      "ok": true,
+      "detail": "rows=1"
+    },
+    {
+      "shot": "09-no-page-errors",
+      "ok": true,
+      "detail": "pageerrors=[]"
+    }
+  ]
+}
