@@ -2040,6 +2040,67 @@ def _ticket_lane(t):
     return _sounding().ticket_lane(t)
 
 
+def _last_handoff(t):
+    notes = t.get("notes") or []
+    if not notes:
+        return ""
+    return ((notes[-1].get("text") or "").strip())[:240]
+
+
+def _ticket_verdict(t):
+    """Review evidence only — never inferred from ticket status (T-892 #4)."""
+    artifact = (t.get("commit") or t.get("sha") or "").strip()
+    latest = ""
+    latest_sha = ""
+    for n in reversed(t.get("notes") or []):
+        text = (n.get("text") or "").strip()
+        low = text.lower()
+        if (low.startswith("review:") or "request fix" in low or "verdict" in low
+                or low.startswith("merged into")):
+            latest = text[:160]
+            found = re.findall(r"\b[0-9a-f]{7,40}\b", text)
+            latest_sha = found[-1] if found else ""
+            break
+    if latest:
+        if artifact and latest_sha and not artifact.startswith(latest_sha) and not latest_sha.startswith(artifact[:7]):
+            return latest + " (historical — artifact is %s)" % artifact[:12]
+        return latest
+    if t.get("status") == "done":
+        return "Marked done; verification not recorded"
+    return ""
+
+
+def _wait_reason(t, waiting):
+    if _ticket_lane(t) == "capture":
+        return "capture"
+    if _ticket_on_hold(t):
+        return "hold"
+    if waiting:
+        return "deps"
+    return ""
+
+
+def _ticket_phase(t, waiting):
+    st = t.get("status")
+    if st == "done":
+        return "done"
+    if st == "review":
+        return "review"
+    if st == "claimed":
+        return "working"
+    if st == "blocked":
+        return "blocked"
+    if _ticket_lane(t) == "capture":
+        return "capture"
+    if _ticket_on_hold(t):
+        return "hold"
+    if waiting:
+        return "waiting"
+    if _reserved_agent(t):
+        return "reserved"
+    return "ready"
+
+
 def unblocked(board, tickets):
     """Open tickets whose dependencies are all done and whose lane is ready.
 
@@ -3002,11 +3063,13 @@ def cmd_board(a, board):
             print(inherited)
 
 
-def workflow_graph(tickets, include_done=False):
+def workflow_graph(tickets, include_done=False, keep_done=None):
     """JSON twin of `atm graph` for the command board.
 
     Active tickets plus the specific deps they wait on. Edges are real
     `--after` links, not a dump of titles and not prose blockers.
+    ``keep_done`` (T-992): done ticket ids that stay in the active view --
+    the app passes done-without-ACCEPT so unverified work never disappears.
     """
     by_id = dict((t["id"], t) for t in tickets)
     done = set(t["id"] for t in tickets if t["status"] == "done")
@@ -3018,6 +3081,7 @@ def workflow_graph(tickets, include_done=False):
         keep = set(by_id)
     else:
         keep = set(t["id"] for t in tickets if t["status"] in ("open", "claimed", "blocked", "review"))
+        keep.update(tid for tid in (keep_done or ()) if tid in by_id and by_id[tid]["status"] == "done")
         for tid in list(keep):
             for d in (by_id.get(tid) or {}).get("deps") or []:
                 if d in by_id:
@@ -3028,6 +3092,13 @@ def workflow_graph(tickets, include_done=False):
         t = by_id[tid]
         deps = list(t.get("deps") or [])
         waiting = [d for d in deps if d not in done]
+        children = [c for c in kids.get(tid, []) if c in keep]
+        success_starts = []
+        for cid in children:
+            child = by_id.get(cid) or {}
+            leftover = [d for d in (child.get("deps") or []) if d not in done and d != tid]
+            if not leftover and child.get("status") in ("open", "blocked"):
+                success_starts.append(cid)
         return {
             "id": tid,
             "title": t.get("title", ""),
@@ -3036,9 +3107,20 @@ def workflow_graph(tickets, include_done=False):
             "mark": MARK.get(t["status"], "[?]"),
             "owner": t.get("owner") or "",
             "role": t.get("role") or "",
+            "lane": _ticket_lane(t),
+            "phase": _ticket_phase(t, waiting),
+            "wait_reason": _wait_reason(t, waiting),
+            "reserved_for": _reserved_agent(t),
+            "hold": _ticket_on_hold(t),
+            "proof": (t.get("proof") or "").strip(),
+            "cause": (t.get("cause") or "").strip(),
+            "change": (t.get("change") or "").strip(),
+            "handoff": _last_handoff(t),
+            "verdict": _ticket_verdict(t),
+            "success_starts": success_starts,
             "deps": deps,
             "waiting": waiting,
-            "children": [c for c in kids.get(tid, []) if c in keep],
+            "children": children,
         }
 
     nodes = [node_of(tid) for tid in order]
@@ -7060,9 +7142,13 @@ def cmd_reopen(a, board):
     prev_owner = t.get("owner", "")
     t["status"] = "open"
     t["owner"] = ""
-    # T-889 hook: the Work view treats task posts and triggers older than this
-    # as the ticket's previous life, never as current dispatch evidence.
+    # T-889/T-810 hook: Work treats posts recorded in reopened_seen as the
+    # previous life. Event order, not UUID lexical order or equal timestamps.
     t["reopened_at"] = now()
+    t["reopened_seen"] = [
+        _msg_id(m) for m in load_messages(board)
+        if (m.get("re") or "").strip() == t["id"]
+    ]
     save(board, t)
     _safe(lambda: traj_event(board, "reopen", agent=whoami(getattr(a, "by", "")),
                              ticket=t, state_before=before, state_after="open",
@@ -14560,7 +14646,10 @@ UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</tit
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{color-scheme:dark;--bg:#0c0e12;--fg:#ece8e1;--mute:#9a958c;--line:#2a2d34;--card:#161820;--surface:#12141a;--chip:#1c2028;--acc:#c4b49a;--on-acc:#14120e;--ok:#6f9e96;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#9a958c;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
-body[data-theme=light]{color-scheme:light;--bg:#f4f1eb;--fg:#14120e;--mute:#6e6a63;--line:#d8d3ca;--card:#fcfaf6;--surface:#eeeae3;--chip:#e8e3d9;--on-acc:#14120e;--ok:#3d6e68;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6e6a63;--flight:#93610a;--review:#6954a5;--progress:#789396}
+body[data-theme=light]{color-scheme:light;--bg:#f4f1eb;--fg:#14120e;--mute:#6e6a63;--line:#d8d3ca;--card:#fcfaf6;--surface:#eeeae3;--chip:#e8e3d9;--acc:#6b5344;--on-acc:#fcfaf6;--ok:#3d6e68;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6e6a63;--flight:#93610a;--review:#6954a5;--progress:#789396}
+body[data-theme=light] .ph-dispatched,
+body[data-theme=light] .ph-reserved,
+body[data-theme=light] .ph-posted{--wv-c:var(--flight)}
 *{box-sizing:border-box}html,body{height:100%;overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;display:flex;flex-direction:column}
 body.loading main{opacity:.55;pointer-events:none}
@@ -14580,7 +14669,13 @@ header.cmd{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px 
 .product-row b{color:var(--fg);font:600 11px/1.35 ui-monospace,Menlo,monospace}
 .product-row small{font-size:11px;line-height:1.35}
 .product-row.current{border-left-color:var(--acc);background:var(--surface)}
+.hdr-status{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;flex:1;min-width:0}
+.hdr-status>summary{display:none;list-style:none;cursor:pointer;align-items:center;gap:6px;padding:2px 4px;color:var(--mute);font:11px/1.3 ui-monospace,Menlo,monospace}
+.hdr-status>summary::-webkit-details-marker{display:none}
+.hdr-status>summary .caret{color:var(--acc);font-weight:800}
+.hdr-status-body{display:contents}
 .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.chip.unverified{border-color:color-mix(in srgb,var(--warn) 55%,var(--line));color:var(--warn)}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;background:var(--chip);border:1px solid var(--line);font-size:12px}
 .chip b{font-weight:650}
 .chip.master,.chip.cos{border-color:var(--line)}
@@ -14643,14 +14738,21 @@ body[data-empty-board][data-tab=board] #turnsPanel,
 body[data-empty-board][data-tab=board] #onboardBox,
 body[data-empty-board][data-tab=board] #workflowGraph,
 body[data-empty-board][data-tab=board] #workViews,
-body[data-empty-board][data-tab=board] #graphLede{display:none}
+body[data-empty-board][data-tab=board] #graphLede,
+body[data-empty-board][data-tab=board] #nowStrip,
+body[data-empty-board][data-tab=board] #workObjective,
+body[data-empty-board][data-tab=board] #workJump,
+body[data-empty-board][data-tab=board] #graphDetail{display:none}
 .kanban{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px;align-items:start}
-body[data-work-view=graph] .kanban{display:none}
+body[data-work-view=graph] .kanban,
+body[data-work-view=list] .kanban{display:none}
 body[data-work-view=columns] #workflowGraph,
-body[data-work-view=columns] #graphLede{display:none}
+body[data-work-view=columns] #graphLede,
+body[data-work-view=columns] #workJump{display:none}
 .work-views{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .work-views button{appearance:none;background:transparent;border:1px solid var(--line);color:var(--mute);padding:4px 10px;font:12px/1 inherit;font-weight:650;border-radius:6px;cursor:pointer}
 .work-views button.on{color:var(--fg);border-color:var(--acc);background:var(--chip)}
+#workViews ~ #workflowGraph .wv-modes{display:none}
 .graph-lede{margin:0;font-size:12px;color:var(--mute);max-width:720px}
 .graph-lede b{color:var(--fg)}
 .workflow-graph{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
@@ -14661,6 +14763,30 @@ body[data-work-view=columns] #graphLede{display:none}
 .g-row .mark{font:12px/1.3 ui-monospace,Menlo,monospace;color:var(--mute)}
 .g-title{font-weight:600;font-size:13px}
 .graph-empty{margin:0 0 10px;font-size:12px;color:var(--mute)}
+.now-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0 0 12px}
+.now-strip article{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.now-strip .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650}
+.now-strip .v{margin-top:4px;font-size:14px;font-weight:650}
+.work-objective{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:0 0 12px}
+.work-objective .v{font-size:15px;font-weight:650}
+.work-done-when{margin:8px 0 0;font-size:13px}
+.work-done-when .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:650;margin-right:8px}
+.work-done-when.missing{color:var(--warn)}
+.now-pick{appearance:none;background:transparent;border:0;padding:0;color:inherit;font:inherit;font-weight:650;text-align:left;cursor:pointer}
+.now-pick:hover{text-decoration:underline}
+.work-jump{display:none;gap:10px;flex-wrap:wrap;margin:0 0 12px}
+.work-jump a{font-size:12px;font-weight:650;color:var(--acc)}
+@media(max-width:700px){.work-jump:not([hidden]){display:flex}.work-jump{position:sticky;bottom:0;z-index:3;padding:8px 0;background:var(--bg);border-top:1px solid var(--line)}}
+.g-node{cursor:pointer}
+.g-node:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.g-node.on .g-row{border-color:var(--acc)}
+.g-row{border:1px solid transparent;border-radius:8px;padding:4px 6px}
+.graph-detail{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:10px;font-size:13px}
+.graph-detail .kv{display:grid;grid-template-columns:120px 1fr;gap:4px 10px;margin-top:8px}
+.graph-detail dt{color:var(--mute)}
+.phase-ready{color:var(--ready)}.phase-dispatched{color:var(--flight)}.phase-working{color:var(--flight)}
+.phase-capture,.phase-waiting,.phase-hold{color:var(--warn)}
+@media(max-width:700px){.now-strip{grid-template-columns:1fr}}
 @media(max-width:980px){.kanban{grid-template-columns:repeat(2,minmax(200px,1fr))}}
 .col{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:120px;display:flex;flex-direction:column}
 .col h2{margin:0;padding:10px 12px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
@@ -14794,9 +14920,23 @@ body[data-work-view=columns] #graphLede{display:none}
 #cTo:disabled{opacity:.7}
 @media(max-width:700px){.seat{min-width:108px}.chat-layout{flex-direction:column}.chat-rail{max-width:none;flex-direction:row;flex-wrap:wrap}}
 @media(max-width:600px){
-  header.cmd{flex-direction:column;align-items:stretch}
-  .conn{display:flex;justify-content:flex-start;margin-left:0}
-  .live-meta-pop{left:0;right:auto}
+  /* T-992: brand + transport on one row, then the folded status line; the objective
+     strip and next-step duplicate the Work pane's own objective/summary cards there */
+  header.cmd{gap:8px 10px;padding:8px 12px}
+  .brand{min-width:0}
+  .conn{margin-left:auto;flex-wrap:nowrap;gap:6px}
+  .live-meta-pop{left:auto;right:0}
+  .portfolio{order:2;flex:1 1 auto}
+  .hdr-status{order:3;flex:1 1 100%;display:block}
+  .hdr-status>summary{display:flex}
+  .hdr-status-body{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:8px 0 2px}
+  .sprint{flex-basis:100%}
+  body[data-tab=board] .promise-strip{display:none}
+  .attention,.onboard{margin:0 12px;padding:6px 0}
+  .onboard .ob-body{margin-top:6px}
+  nav.tabs{padding:6px 12px 0}
+  main{padding:10px 12px}
+  .work-objective{padding:10px 12px}
   .next-step,.promise-strip{flex-direction:column;align-items:flex-start}
   .next-step .cmd{white-space:normal;overflow-wrap:anywhere}
   .promise-strip .msg{max-width:100%;overflow-wrap:anywhere}
@@ -14837,6 +14977,9 @@ body[data-work-view=columns] #graphLede{display:none}
       <div class="product-row"><b>steer.md</b><small>Policy for output · separate product</small></div>
     </div>
   </details>
+  <details class="hdr-status" id="hdrStatus" open><!-- T-992: one fold on ≤600px; always open on desktop -->
+    <summary aria-label="Board status"><span class="caret" aria-hidden="true">^</span><span>Status</span><span class="mute" id="hdrStatusBrief"></span></summary>
+    <div class="hdr-status-body">
   <div class="chips" id="chips"></div>
   <div class="chips promise-chips" id="promiseChips">
     <span class="chip promise" id="hdrMedian"><b>median turns</b> <span id="hdrMedianVal">—</span></span>
@@ -14844,10 +14987,12 @@ body[data-work-view=columns] #graphLede{display:none}
   </div>
   <div class="sprint" id="sprint"></div>
   <div class="health" id="pulse"><i></i><span>No alerts</span></div>
+    </div>
+  </details>
   <div class="conn" id="connBar">
     <details class="live-meta" id="liveMeta">
       <summary aria-label="Connection and last updated">
-        <span id="connStatus" class="conn-status live" aria-live="polite">live</span>
+        <span id="connStatus" class="conn-status reconnecting" aria-live="polite">syncing</span>
       </summary>
       <div class="live-meta-pop">
         <span id="clock"></span>
@@ -14862,7 +15007,7 @@ body[data-work-view=columns] #graphLede{display:none}
   <div class="attn-list" id="attnList"></div></details>
 <div class="next-step" id="nextStep" hidden><span class="lbl">Next</span><span class="msg">loading…</span></div>
 <div class="promise-strip" id="promiseStrip" data-fold="objective"><span class="lbl">Objective</span><span class="msg" id="promiseStripLine">Fewest turns. Max output at least cost.</span><span id="wakeGates" hidden></span></div>
-<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/7</span></summary>
+<details class="onboard" id="onboardBox"><summary>Onboarding <span id="obProgress" class="mute">0/8</span></summary>
   <div class="ob-body"><div class="ob-steps" id="obSteps"></div></div></details>
 <nav class="tabs" role="tablist" aria-label="Atman workspace">
   <button type="button" id="tab-objective" role="tab" aria-controls="pane-objective" aria-selected="false" data-tab-btn="objective">Objective</button>
@@ -14872,10 +15017,35 @@ body[data-work-view=columns] #graphLede{display:none}
 </nav>
 <main>
 <div class="pane" id="pane-objective" role="tabpanel" aria-labelledby="tab-objective" tabindex="0">
-  <details class="mission" id="missionBox" open><summary><span class="k">Standing objective</span><span class="one" id="missionOne"></span></summary><pre id="goals"></pre></details>
+  <section class="promise-panel" id="objectiveCard">
+    <h2>Standing objective</h2>
+    <p class="hero-eyebrow" id="missionOne"></p>
+    <p id="objectiveText" data-testid="objective-text"></p>
+    <div class="kv" style="margin-top:8px">
+      <dt>Exit</dt><dd id="objectiveExit">—</dd>
+      <dt>State</dt><dd id="objectiveState">—</dd>
+    </div>
+    <p class="empty-honesty">read-only — set via <span class="mono">tickets objective</span>. Unknown metrics stay —.</p>
+  </section>
+  <details class="mission" id="missionBox"><summary><span class="k">Board memo</span> MASTER.md (not the standing objective)</summary><pre id="goals"></pre></details>
 </div>
 <div class="pane" id="pane-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0">
   <div id="emptyBoard" class="empty-board" hidden></div>
+  <section class="work-objective" id="workObjective">
+    <p class="hero-eyebrow">Objective</p>
+    <p class="v" id="workObjectiveText">—</p>
+    <p class="work-done-when" id="workDoneWhen" data-done-when><span class="k">Done when</span> <span id="workDoneWhenText">—</span></p>
+    <p class="empty-honesty" id="workObjectiveMissing" hidden>No standing objective — <span class="mono">tickets objective --set "what we are finishing"</span></p>
+  </section>
+  <section class="now-strip" id="nowStrip" aria-label="What the team is finishing">
+    <article><div class="k">Finishing</div><div class="v" id="nowFinishing">—</div></article>
+    <article><div class="k">Blocked</div><div class="v" id="nowBlocked">—</div></article>
+    <article><div class="k">Next step</div><div class="v" id="nowWho">—</div></article>
+  </section>
+  <nav class="work-jump" id="workJump" hidden>
+    <a href="#graphDetail" id="workJumpDetail">Open selected detail</a>
+    <a href="#composer" id="workJumpCompose">Compose about this ticket</a>
+  </nav>
   <section id="epicsPanel" class="epics" hidden aria-label="Epic progress"></section>
   <section id="objectivePromise" data-fold="objective">
     <p class="hero-eyebrow" id="heroEyebrow" hidden>Fewest turns. Max output at least cost.</p>
@@ -14884,12 +15054,14 @@ body[data-work-view=columns] #graphLede{display:none}
       <article class="promise-card" id="heroYield"><div class="k">Yield@cost</div><div class="v" id="heroYieldVal">—</div><div class="h" id="heroYieldHint">Done tickets per USD of harness-reported cost</div></article>
     </div>
   </section>
-  <div class="work-views" id="workViews" role="tablist" aria-label="Work view">
-    <button type="button" id="view-graph" data-work-view="graph" class="on" aria-selected="true">Graph</button>
-    <button type="button" id="view-columns" data-work-view="columns" aria-selected="false">Columns</button>
+  <div class="work-views" id="workViews" role="group" aria-label="Work layout">
+    <button type="button" id="view-graph" data-work-view="graph" class="on" aria-pressed="true">Graph</button>
+    <button type="button" id="view-list" data-work-view="list" aria-pressed="false">List</button>
+    <button type="button" id="view-columns" data-work-view="columns" aria-pressed="false">Columns</button>
   </div>
-  <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">atm graph</span> / <span class="mono">atm map</span> — not a list of titles. Follow-up: <span class="mono">atm update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">atm reopen</span>. Review: <span class="mono">atm review</span> then <span class="mono">atm merge</span>.</p>
+  <p class="graph-lede" id="graphLede"><b>Follow the work.</b> Select a ticket for its blockers, handoff, and review. Same <span class="mono">--after</span> edges as <span class="mono">atm graph</span> / <span class="mono">atm map</span> — not a list of titles.</p>
   <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"><!--WORK_VIEW:html--></div>
+  <aside id="graphDetail" class="graph-detail" hidden role="region" aria-label="Ticket detail"></aside>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
     <section class="col ready"><h2 title="Tickets unblocked and waiting for an agent to claim">Ready <span class="n" id="n-ready">0</span><span class="hint">unowned work anyone can take</span></h2><div class="list" id="col-ready"></div></section>
@@ -14915,7 +15087,7 @@ body[data-work-view=columns] #graphLede{display:none}
       <h2 class="seats-title">Team</h2>
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
       <p class="seats-lede">Auth is the enrolled runner, not this tab. Recheck never asks for provider secrets. Reachable is not Ready.</p>
-      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">atm msg --to</span>.</p>
+      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">atm msg --to</span>. Runtime id is unique; role is coverage.</p>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -14937,13 +15109,14 @@ body[data-work-view=columns] #graphLede{display:none}
   <div class="chat-layout">
     <nav class="chat-rail" id="chatRail" aria-label="Threads"></nav>
     <div class="chat-main">
+      <p class="seats-lede empty-honesty" id="channelHonesty">Board thread is broadcast. Named channels are planned — not routed yet. Delivery badges are receipts (posted / inbox read / wake), never an agent ACK and never ticket progress.</p>
       <div class="chat-head" id="chatHead"></div>
       <div class="msgs" id="msgs"></div>
       <section id="composer">
         <div id="composerRow">
           <label class="who"><small>from</small> <select id="cFrom"></select></label>
           <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
-          <label class="who"><small>re</small> <input id="cRe" placeholder="T-000" size="6" style="width:80px"></label>
+          <label class="who"><small>re</small> <input id="cRe" placeholder="ticket id" size="8" style="width:88px" autocomplete="off"></label>
           <label class="who"><small>type</small> <select id="cKind"><option value="message">message</option><option value="task">task</option></select></label>
         </div>
         <textarea id="cText" aria-label="Message" placeholder="Message the board or a seat. Type @ to tag an agent."></textarea>
@@ -15035,12 +15208,13 @@ function staleClass(t){
   return '';
 }
 function card(t,extra){
-  const waiting=(t.waiting||[]).length?'<div class="wait">waiting on '+esc((t.waiting||[]).join(', '))+'</div>':'';
+  const waiting=(t.waiting||[]).length?'<div class="wait">waiting on '+esc((t.waiting||[]).join(', '))+(t.wait_reason==='deps'?' (deps)':'')+'</div>':(t.wait_reason==='capture'?'<div class="wait">waiting: capture — sound before claim</div>':(t.wait_reason==='hold'?'<div class="wait">HOLD</div>':''));
   const owner=t.owner?who(t.owner):'<span class="mute">unassigned</span>';
   const pri=t.priority!=null?'<span class="pri">P'+esc(t.priority)+'</span>':'';
   const age=t.since_update!=null?'<span class="'+(t.since_update>1.5?'bad':t.since_update>0.75?'warn':'ok')+'">'+h(t.since_update)+'</span>':'';
-  const msg=t.owner?'<button type="button" class="intervene" data-seat-chat="'+esc(t.owner)+'" data-testid="card-msg-'+esc(t.id)+'">Msg</button>':'';
-  return '<article class="card '+staleClass(t)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+msg+(extra||'')+'</article>';
+  const phase=t.phase?'<span class="tag phase-'+esc(t.phase)+'">'+esc(t.phase)+'</span>':'';
+  const msg=t.owner?'<button type="button" class="intervene" data-seat-chat="'+esc(t.owner)+'" data-ticket="'+esc(t.id)+'" data-testid="card-msg-'+esc(t.id)+'">Msg</button>':'';
+  return '<article class="card '+staleClass(t)+'" data-ticket="'+esc(t.id)+'"><div class="card-top"><span class="id">'+esc(t.id)+'</span>'+pri+phase+'</div><div class="card-title">'+esc(t.title)+'</div><div class="card-meta">'+owner+age+'</div>'+waiting+msg+(extra||'')+'</article>';
 }
 function fillCol(id,items,html){
   document.getElementById('n-'+id).textContent=items.length;
@@ -15063,9 +15237,26 @@ function renderObjective(o){
   const line=document.getElementById('promiseStripLine');
   const gates=document.getElementById('wakeGates');
   if(gates)gates.textContent=(o&&o.wake_gates)||'';
+  const text=(o&&o.text)||'';
+  const one=text?text.slice(0,180):'(no standing objective — tickets objective "…")';
+  setTxt('missionOne',one);
+  setTxt('objectiveText',text||'No standing objective yet.');
+  setTxt('workObjectiveText',text||'No standing objective yet.');
+  const exit=(o&&o.exit_criterion)||'';
+  setTxt('workDoneWhenText',exit||(text?'no exit criterion yet':'—'));
+  const dw=document.getElementById('workDoneWhen');
+  if(dw)dw.classList.toggle('missing',!!(text&&!exit));
+  const miss=document.getElementById('workObjectiveMissing');
+  if(miss){
+    if(!text){miss.hidden=false;miss.innerHTML='No standing objective — <span class="mono">tickets objective --set "what we are finishing"</span>'}
+    else if(!exit){miss.hidden=false;miss.innerHTML='Done when is missing — <span class="mono">tickets objective --set "…" --exit "…"</span>'}
+    else miss.hidden=true;
+  }
+  setTxt('objectiveExit',(o&&o.exit_criterion)||((o&&o.exit_missing)?'FLAG: no exit criterion':'—'));
+  setTxt('objectiveState',(o&&o.state)||'—');
   if(!line)return;
-  if(!o||!o.text){line.textContent='Fewest turns. Max output at least cost.';return;}
-  const bits=[(o.state||'active'), o.text];
+  if(!text){line.textContent='Fewest turns. Max output at least cost.';return;}
+  const bits=[(o.state||'active'), text];
   if(o.exit_criterion)bits.push('exit: '+o.exit_criterion);
   else if(o.exit_missing)bits.push('FLAG: no exit criterion');
   if(o.stop_condition)bits.push('stop: '+o.stop_condition);
@@ -15105,15 +15296,21 @@ function renderUsage(u){
   const by=u.by_agent||[];
   tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
 }
-function seatChip(name,cover,kind){
+function seatChip(name,cover,kind,meta){
+  meta=meta||{};
   const chat=kind==='ghost'?'':' data-seat-chat="'+esc(name)+'"';
   const act=kind==='ghost'?'':'<button type="button" class="intervene" data-seat-chat="'+esc(name)+'">Msg</button>';
-  return '<article class="seat '+(kind||'cover')+'"'+chat+'><div class="top"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span></div><span class="cov">'+esc(cover||'')+'</span>'+act+'</article>';
+  const id=meta.agent_id&&meta.agent_id!==name?meta.agent_id:'';
+  const role=(meta.roles&&meta.roles.length)?meta.roles.join('/'):'';
+  const prov=meta.adapter_provider||meta.harness||'';
+  const reach=meta.reachable===false?'unreachable':(meta.adapter_reason||'');
+  return '<article class="seat '+(kind||'cover')+'"'+chat+'><div class="top"><span class="av">'+esc(initials(name))+'</span><span class="nm">'+esc(name)+'</span></div><span class="cov">'+esc(cover||'')+'</span>'+(id?'<span class="cov mono">id '+esc(id)+'</span>':'')+(role?'<span class="cov">role '+esc(role)+'</span>':'')+(prov?'<span class="cov">'+esc(prov)+'</span>':'')+(reach?'<span class="cov">'+esc(reach)+'</span>':'')+act+'</article>';
 }
 function renderSeats(d){
   const placed=new Set();
+  const by={};(d.agents||[]).forEach(a=>{if(a.name)by[a.name]=a});
   const operator=[],review=[],flight=[],ready=[],idle=[];
-  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(seatChip(name,cover,kind))};
+  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(seatChip(name,cover,kind,by[name]||{}))};
   add(operator,d.master,'master','operator');
   add(operator,d.cos,'CoS','operator');
   (d.review||[]).forEach(t=>add(review,t.owner,t.id+' · review','cover'));
@@ -15150,14 +15347,18 @@ function setTab(name){
   });
 }
 function setWorkView(name, persistHash){
-  if(name!=='columns')name='graph';
+  if(name!=='columns'&&name!=='list')name='graph';
   document.body.dataset.workView=name;
   try{localStorage.setItem('tickets-ui-work-view',name)}catch(e){}
   document.querySelectorAll('#workViews [data-work-view]').forEach(b=>{
     const on=b.dataset.workView===name;
     b.classList.toggle('on',on);
-    b.setAttribute('aria-selected',on?'true':'false');
+    b.setAttribute('aria-pressed',on?'true':'false');
+    b.removeAttribute('aria-selected');
   });
+  if(window.AtmanWork&&window.AtmanWork.setMode&&(name==='graph'||name==='list')){
+    window.AtmanWork.setMode(name,true);
+  }
   if(persistHash){
     try{history.replaceState(null,'','#'+name)}catch(e){}
   }
@@ -15166,28 +15367,44 @@ function setWorkView(name, persistHash){
 function renderGraph(g,d){
   const host=document.getElementById('workflowGraph');
   if(!host)return;
-  // T-889 hook: the Work view module owns this pane when its payload is present.
-  if(window.AtmanWork&&d&&d.work){window.AtmanWork.render(d,host);return}
+  if(window.AtmanWork&&d&&d.work){
+    const gd=document.getElementById('graphDetail');
+    if(gd){gd.hidden=true;gd.innerHTML=''}
+    window.AtmanWork.render(d,host);return
+  }
   const by={};(g&&g.nodes||[]).forEach(n=>{by[n.id]=n});
+  GRAPH_BY=by;
   const edges=(g&&g.edges)||[];
   if(!g||!(g.nodes||[]).length){
     host.innerHTML='<p class="graph-empty">No workflow yet. <span class="mono">atm plan</span> creates real --after edges.</p>';
+    showGraphDetail('');
     return;
   }
   const notice=edges.length?'':'<p class="graph-empty">No --after edges on the active board. <span class="mono">atm plan</span> with deps, or <span class="mono">atm dep T-002 --after T-001</span>.</p>';
+  function waitCopy(n){
+    if(n.wait_reason==='capture')return '<span class="wait">waiting: capture</span>';
+    if(n.wait_reason==='hold')return '<span class="wait">HOLD</span>';
+    if((n.waiting||[]).length)return '<span class="wait">waiting on '+esc(n.waiting.join(', '))+'</span>';
+    if((n.deps||[]).length)return '<span class="mute">after '+esc(n.deps.join(', '))+'</span>';
+    return '';
+  }
   function row(n){
-    const wait=(n.waiting||[]).length?'<span class="wait">waiting on '+esc(n.waiting.join(', '))+'</span>':((n.deps||[]).length?'<span class="mute">after '+esc(n.deps.join(', '))+'</span>':'');
+    const wait=waitCopy(n);
     const own=n.owner?'<span class="mute">@'+esc(n.owner)+'</span>':'';
     const role=n.role?'<span class="mute">'+esc(n.role)+'</span>':'';
-    return '<div class="g-row"><span class="mark">'+esc(n.mark||'')+'</span><span class="id">'+esc(n.id)+'</span><span class="g-title">'+esc(n.title)+'</span><span class="tag">'+esc(n.label||n.status||'')+'</span>'+role+own+wait+'</div>';
+    const phase='<span class="tag phase-'+esc(n.phase||'')+'">'+esc(n.phase||n.label||n.status||'')+'</span>';
+    const trig=(n.success_starts||[]).length?'<span class="mute">success starts '+esc(n.success_starts.join(', '))+'</span>':'';
+    return '<div class="g-row"><span class="mark">'+esc(n.mark||'')+'</span><span class="id">'+esc(n.id)+'</span><span class="g-title">'+esc(n.title)+'</span>'+phase+role+own+wait+trig+'</div>';
   }
   function walk(fr){
     const n=by[fr.id]||{id:fr.id,title:'',waiting:[],deps:[]};
     const kids=(fr.children||[]).map(walk).join('');
     const rpt=fr.repeat?'<span class="mute"> [shown above]</span>':'';
-    return '<li class="g-node" data-id="'+esc(n.id)+'">'+row(n)+rpt+(kids?'<ul class="g-kids">'+kids+'</ul>':'')+'</li>';
+    const on=SELECTED_TICKET===n.id?' on':'';
+    return '<li class="g-node'+on+'" data-id="'+esc(n.id)+'" tabindex="0" role="button">'+row(n)+rpt+(kids?'<ul class="g-kids">'+kids+'</ul>':'')+'</li>';
   }
   host.innerHTML=notice+'<ul class="g-roots" id="graphTree">'+(g.forest||[]).map(walk).join('')+'</ul>';
+  if(SELECTED_TICKET&&by[SELECTED_TICKET])showGraphDetail(SELECTED_TICKET);
 }
 document.querySelectorAll('[data-tab-btn]').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tabBtn)));
 document.querySelector('nav.tabs').addEventListener('keydown',e=>{
@@ -15205,16 +15422,18 @@ document.querySelectorAll('#workViews [data-work-view]').forEach(b=>b.addEventLi
 try{const wv=localStorage.getItem('tickets-ui-work-view');if(wv)setWorkView(wv)}catch(e){}
 (function applyWorkHash(){
   const h=(location.hash||'').replace('#','');
-  if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
-  if(h==='agents'||h==='team')setTab('agents');
+  if(h==='graph'||h==='list'||h==='columns'){setTab('board');setWorkView(h)}
+  else if(h==='objective'||h==='agents'||h==='messages'||h==='board'){setTab(h)}
 })();
 window.addEventListener('hashchange',()=>{
   const h=(location.hash||'').replace('#','');
-  if(h==='graph'||h==='columns'){setTab('board');setWorkView(h)}
-  if(h==='agents'||h==='team')setTab('agents');
+  if(h==='graph'||h==='list'||h==='columns'){setTab('board');setWorkView(h)}
+  else if(h==='objective'||h==='agents'||h==='messages'||h==='board'){setTab(h)}
 });
 let AGENTS=[];
 let THREAD_SEAT='';
+let GRAPH_BY={};
+let SELECTED_TICKET='';
 try{THREAD_SEAT=localStorage.getItem('tickets-ui-seat')||''}catch(e){}
 const BROADCAST=new Set(['','all','everyone']);
 function isBoardBroadcast(m){
@@ -15286,14 +15505,155 @@ function loadAgentPickers(){
   if(THREAD_SEAT){ensureToOption(THREAD_SEAT);to.value=THREAD_SEAT;to.disabled=true}
   else{to.disabled=false;if(AGENTS.includes(prevTo))to.value=prevTo}
 }
+function showGraphDetail(id){
+  applyWorkSelect(id||'');
+  const n=GRAPH_BY[id];
+  const el=document.getElementById('graphDetail');
+  document.querySelectorAll('.g-node').forEach(li=>li.classList.toggle('on',li.dataset.id===id));
+  if(!el)return;
+  if(!n){el.hidden=true;el.innerHTML='';return}
+  const waiting=n.wait_reason==='capture'?'capture (not claimable until tickets sound)':n.wait_reason==='hold'?'HOLD':((n.waiting||[]).length?('deps: '+n.waiting.join(', ')):'—');
+  el.hidden=false;
+  el.innerHTML='<strong>'+esc(n.id)+'</strong> '+esc(n.title||'')+
+    '<dl class="kv">'+
+    '<dt>Status</dt><dd>'+esc(n.label||n.status||'—')+'</dd>'+
+    '<dt>Phase</dt><dd>'+esc(n.phase||'—')+'</dd>'+
+    '<dt>Owner</dt><dd>'+esc(n.owner||'unassigned')+'</dd>'+
+    '<dt>Waiting</dt><dd>'+esc(waiting)+'</dd>'+
+    '<dt>Acceptance</dt><dd>'+esc(n.proof||'—')+'</dd>'+
+    '<dt>Handoff</dt><dd>'+esc(n.handoff||'—')+'</dd>'+
+    '<dt>Verdict</dt><dd>'+esc(n.verdict||'—')+'</dd>'+
+    '<dt>Success trigger</dt><dd>'+esc((n.success_starts||[]).join(', ')||'—')+'</dd>'+
+    '</dl>';
+}
+function defaultComposeTicket(d){
+  const re=document.getElementById('cRe');
+  if(!re)return;
+  const known=new Set(((d.graph&&d.graph.nodes)||[]).map(n=>n.id));
+  const cur=re.value.trim();
+  if(cur==='T-000'||(cur&&!known.has(cur)))re.value='';
+  if(re.value.trim())return;
+  if(SELECTED_TICKET&&known.has(SELECTED_TICKET))re.value=SELECTED_TICKET;
+}
+function shortTitle(t){
+  const s=String(t||'').trim();
+  return s.length>42?s.slice(0,40)+'…':s;
+}
+function phaseLabel(n){
+  if(!n)return '';
+  if(n.phase==='ready')return n.owner?('Ready · @'+n.owner):'Ready · unassigned';
+  if(n.phase==='working')return 'Claimed by @'+(n.owner||'?');
+  if(n.phase==='posted'||(n.dispatch&&n.dispatch.to))return 'Task posted to @'+((n.dispatch&&n.dispatch.to)||'?')+' · not claimed';
+  if(n.phase==='reserved'||n.reserved_for)return 'Reserved for @'+(n.reserved_for||'?')+' · no task posted';
+  if(n.phase==='waiting')return 'Waiting on deps';
+  if(n.phase==='capture')return 'Capture';
+  if(n.phase==='hold')return 'Hold';
+  return n.phase||'';
+}
+function pickHtml(id,label){
+  return '<button type="button" class="now-pick" data-work-pick="'+esc(id)+'">'+esc(label)+'</button>';
+}
+function renderNow(d){
+  const w=d.work||{},nodes=w.nodes||[],by={};
+  nodes.forEach(n=>{by[n.id]=n});
+  const fs=d.first_screen||{};
+  const finish=fs.finishing||nodes.filter(n=>n.phase==='working')[0]||(d.in_flight||[])[0];
+  if(finish){
+    const title=finish.title||(by[finish.id]&&by[finish.id].title)||'';
+    setTxt('nowFinishing','');
+    document.getElementById('nowFinishing').innerHTML=pickHtml(finish.id,(finish.id||'')+(title?' '+shortTitle(title):'')+(finish.owner?' · @'+finish.owner:''));
+  }else setTxt('nowFinishing','—');
+  const waiting=fs.waiting||(w.summary&&w.summary.waiting_on)||nodes.filter(n=>n.phase==='waiting');
+  const blk=fs.blocker;
+  const blkN=fs.blocker_count||((blk?1:0)+waiting.length);
+  if(blk){
+    const kind=blk.kind||blk.phase||'blocked';
+    const text=blk.text||(blk.wait&&blk.wait.text)||(kind+' · '+blk.id);
+    const waitN=waiting.length;
+    const more=blkN>1?(' · '+blkN+' blockers'):'';
+    const waitBit=(kind!=='deps'&&waitN)?(' · '+waitN+' waiting on deps'):'';
+    document.getElementById('nowBlocked').innerHTML=pickHtml(blk.id,(blk.id||'')+' '+shortTitle(blk.title||'')+' · '+text)+esc(waitBit+more);
+  }else setTxt('nowBlocked','—');
+  const nxt=fs.next||(w.summary&&w.summary.next);
+  if(nxt){
+    const node=by[nxt.id]||nxt;
+    document.getElementById('nowWho').innerHTML=pickHtml(nxt.id,(nxt.id||'')+' '+shortTitle(node.title||nxt.title||'')+' · '+phaseLabel(node));
+  }else{
+    const ns=d.next_step||{};
+    setTxt('nowWho',((ns.label||'—')+' — '+(ns.message||'')).trim());
+  }
+}
+function applyWorkSelect(id, extra){
+  extra=extra||{};
+  SELECTED_TICKET=id||'';
+  const re=document.getElementById('cRe');
+  if(re){
+    if(id&&/^T-\d+$/.test(id))re.value=id;
+    else if(re.value.trim()==='T-000')re.value='';
+  }
+  const to=document.getElementById('cTo');
+  if(to&&extra.to&&extra.who_kind&&extra.who_kind!=='suggested'){
+    ensureToOption(extra.to);
+    to.value=extra.to;
+  }
+  const jump=document.getElementById('workJump');
+  if(jump){
+    jump.hidden=!id;
+    const d=document.getElementById('workJumpDetail');
+    const c=document.getElementById('workJumpCompose');
+    if(d)d.textContent=id?('Open '+id+' detail'):'Open selected detail';
+    if(c)c.textContent=id?('Compose about '+id):'Compose about this ticket';
+  }
+  if(id&&!extra.initial&&window.matchMedia('(max-width:700px)').matches){
+    const det=document.querySelector('#workflowGraph .wv-detail')||document.getElementById('graphDetail');
+    if(det&&!det.hidden)det.scrollIntoView({block:'nearest'});
+  }
+}
+document.addEventListener('atman:work-select',e=>{
+  const det=e.detail||{};
+  applyWorkSelect(det.id||'',det);
+});
+const workJumpDetail=document.getElementById('workJumpDetail');
+if(workJumpDetail)workJumpDetail.addEventListener('click',e=>{
+  e.preventDefault();
+  setTab('board');
+  const det=document.querySelector('#workflowGraph .wv-detail')||document.getElementById('graphDetail');
+  if(det){det.hidden=false;det.scrollIntoView({block:'nearest'})}
+});
+const workJumpCompose=document.getElementById('workJumpCompose');
+if(workJumpCompose)workJumpCompose.addEventListener('click',e=>{
+  e.preventDefault();
+  setTab('messages');
+  const box=document.getElementById('composer');
+  if(box)box.scrollIntoView({block:'nearest'});
+  const ta=document.getElementById('cText');
+  if(ta)ta.focus();
+});
 document.addEventListener('click',e=>{
   const rec=e.target.closest('[data-auth-reconnect]');
   if(rec){e.preventDefault();reconnectAuth(rec.dataset.authReconnect||'');return}
+  const pick=e.target.closest('[data-work-pick]');
+  if(pick){
+    const id=pick.dataset.workPick||'';
+    if(window.AtmanWork&&window.AtmanWork.select)window.AtmanWork.select(id,{focus:true});
+    else showGraphDetail(id);
+    return;
+  }
+  const node=e.target.closest('.g-node');
+  if(node){showGraphDetail(node.dataset.id||'');return}
   const btn=e.target.closest('[data-seat-chat]');
   if(!btn||btn.closest('#composer'))return;
   e.preventDefault();
+  if(btn.dataset.ticket)showGraphDetail(btn.dataset.ticket);
   openSeatChat(btn.dataset.seatChat||'');
   load();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ')return;
+  const node=e.target.closest('.g-node');
+  if(!node||e.target!==node)return;
+  e.preventDefault();
+  showGraphDetail(node.dataset.id||'');
 });
 function mentionQueryAt(text,caret){
   const upto=text.slice(0,caret);const m=upto.match(/(?:^|[^\w@])@([A-Za-z0-9_-]*)$/);
@@ -15401,24 +15761,28 @@ async function load(manual){
   document.getElementById('chips').innerHTML=
     '<span class="chip master"><b>master</b> '+esc(d.master||'nobody')+'</span>'+
     '<span class="chip cos"><b>CoS</b> '+esc(d.cos||'—')+'</span>'+
-    '<span class="chip"><b>'+esc(counts.done)+'</b>/'+esc(counts.total)+' done</span>';
+    // T-992: the count is accepted work; a done flag without ACCEPT is named, not folded in
+    '<span class="chip"><b>'+esc(counts.accepted!=null?counts.accepted:counts.done)+'</b>/'+esc(counts.total)+' accepted</span>'+
+    (counts.done_unverified?'<span class="chip unverified" title="Marked done; verification not recorded"><b>'+esc(counts.done_unverified)+'</b> done, unverified</span>':'');
+  const brief=document.getElementById('hdrStatusBrief');
+  if(brief)brief.textContent=(counts.accepted!=null?counts.accepted:counts.done)+'/'+counts.total+' accepted'+(counts.done_unverified?' · '+counts.done_unverified+' unverified':'');
   const s=d.sprint;
   const sprintEl=document.getElementById('sprint');
   sprintEl.hidden=!s;
   sprintEl.innerHTML=s
     ?('<div class="row"><span>'+esc(s.id)+(s.goal?' · '+esc(s.goal):'')+'</span><span>'+s.done+'/'+s.total+'</span></div><div class="bar"><i style="width:'+(100*s.done/Math.max(1,s.total))+'%"></i></div>')
     :'';
-  const crit=(d.health||[]).filter(x=>x.sev==='CRIT').length;
-  const warn=(d.health||[]).filter(x=>x.sev==='WARN').length;
+  const goals=d.goals||'(no MASTER.md yet -- atm master init)';
+  document.getElementById('goals').textContent=goals;
+  document.getElementById('missionOne').textContent=missionLine(goals);
+  const crit=(d.attention||[]).filter(x=>x.sev==='CRIT').length;
+  const warn=(d.attention||[]).filter(x=>x.sev==='WARN').length;
   const pulse=document.getElementById('pulse');
   pulse.className='health'+(crit?' bad':warn?' warn':'');
   pulse.innerHTML='<i></i><span>'+(crit?'Critical · '+crit:warn?'Warning · '+warn:'No alerts')+'</span>';
   tickClock();
-  const goals=d.goals||'(no MASTER.md yet -- atm master init)';
-  document.getElementById('goals').textContent=goals;
-  document.getElementById('missionOne').textContent=missionLine(goals);
-  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length);
-  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length);
+  const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length||t.phase==='capture'||t.phase==='hold'||t.phase==='waiting');
+  const ready=(d.open||[]).filter(t=>t.status!=='BLOCKED'&&!(t.waiting||[]).length&&t.phase!=='capture'&&t.phase!=='hold'&&t.phase!=='waiting');
   fillCol('blocked',blocked,blocked.map(t=>card(t)).join(''));
   fillCol('ready',ready,ready.map(t=>card(t)).join(''));
   fillCol('flight',d.in_flight||[],(d.in_flight||[]).map(t=>card(t)).join(''));
@@ -15428,6 +15792,7 @@ async function load(manual){
   renderAttention(d.attention);
   renderEpics(d.epics);
   if(!d.error)renderNextStep(d.next_step);
+  renderNow(d);
   renderOnboarding(d.onboarding);
   renderPromise(d.promise);
   renderObjective(d.objective);
@@ -15435,6 +15800,7 @@ async function load(manual){
   renderUsage(d.usage);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
+  defaultComposeTicket(d);
   renderChatRail(d);renderChatHead();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
@@ -15446,7 +15812,7 @@ async function load(manual){
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
     const onlineDot=(a.reachable!==false && a.adapter_online)?' ●':'';
     return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+lim+wake+'</div>'+
-      '<div class="mute mono">'+esc(a.agent_id||a.name)+' · '+esc(a.adapter_provider||a.harness||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.adapter_delivery||'offline')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
+      '<div class="mute mono">runtime '+esc(a.agent_id||a.name)+' · role '+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+' · '+esc(a.adapter_provider||a.harness||'—')+' · reach '+(a.reachable===false?'no · ':'yes · ')+esc(a.adapter_reason||a.adapter_delivery||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       authReadiness(a)+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
       '<div class="stats"><div><b>'+esc(a.done)+'</b><span class="stat-lbl" title="Tickets this agent finished in the last 24 hours — not lifetime done">Done (24h)</span></div>'+
@@ -15465,6 +15831,7 @@ function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
   const steps=[
     ['initialized','Board ready','atm quickstart --agent <you>'],
+    ['coordinator','Coordinator seated','atm master take'],
     ['first_ticket','Work on the board','atm quickstart'],
     ['first_agent','You registered','atm quickstart --agent <you>'],
     ['first_review','Reviewable SHA','atm review <id> --notes "..."'],
@@ -15530,18 +15897,26 @@ function deliveryTags(m){
   if((m.kind||'message')==='task')tags.push('<span class="tag task">task</span>');
   const d=m.delivery||{};
   if(d.status==='broadcast')tags.push('<span class="tag">broadcast</span>');
-  else if((d.acks||[]).length){
-    const all=d.acks.every(a=>a.acked);
-    const any=d.acks.some(a=>a.acked);
-    if(all)tags.push('<span class="tag ack">acked</span>');
-    else if(any)tags.push('<span class="tag pending">partial ack</span>');
-    else tags.push('<span class="tag pending">pending</span>');
+  else{
+    const recs=d.receipts||[];
+    if(recs.length){
+      const labels=recs.map(r=>r.label).filter(Boolean);
+      const allSame=labels.length&&labels.every(x=>x===labels[0]);
+      tags.push('<span class="tag'+(labels.some(x=>x.indexOf('wake confirmed')!==-1)?' ack':' pending')+'">'+esc(allSame?labels[0]:(labels.filter(x=>x.indexOf('not read')!==0).length?'partial receipt':'not read, wake unconfirmed'))+'</span>');
+    }else if((d.acks||[]).length){
+      const seen=d.acks.filter(a=>a.acked).length;
+      if(seen===d.acks.length)tags.push('<span class="tag pending">inbox read, not acknowledged</span>');
+      else if(seen)tags.push('<span class="tag pending">partial inbox read</span>');
+      else tags.push('<span class="tag pending">not read, wake unconfirmed</span>');
+    }
   }
   return tags.join(' ');
 }
 function setConn(phase,updated){
   const st=document.getElementById('connStatus'),lu=document.getElementById('lastUpdated');
-  if(st){st.className='conn-status '+phase;st.textContent=phase==='live'?'connected':phase}
+  // T-992: a board refresh proves the page reached the board server, nothing more.
+  // "connected" / "authenticated" / "responding" are agent states with their own evidence (Team).
+  if(st){st.className='conn-status '+phase;st.textContent=phase==='live'?'Board synced':phase}
   if(lu)lu.textContent=updated?('updated '+fmtRel(updated)+' · '+fmtLocal(updated)):'—';
 }
 let firstLoad=true;
@@ -15565,6 +15940,15 @@ document.getElementById('themeBtn').addEventListener('click',()=>{
   updateThemeControl();
 });
 document.getElementById('refreshBtn').addEventListener('click',()=>load(true));
+// T-992: on phones the header status fold starts closed; desktop keeps it open (no toggle shown)
+(function(){
+  const hdr=document.getElementById('hdrStatus');
+  if(!hdr||!window.matchMedia)return;
+  const mq=matchMedia('(max-width:600px)');
+  const sync=()=>{hdr.open=!mq.matches};
+  sync();
+  if(mq.addEventListener)mq.addEventListener('change',sync);else if(mq.addListener)mq.addListener(sync);
+})();
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
 
@@ -15583,8 +15967,10 @@ def _onboarding_checklist(board, tickets):
         if rec.get("name"):
             names.add(rec["name"])
     names.update(workforce)
+    master = current_master(board) or {}
     return {
         "initialized": initialized,
+        "coordinator": bool((master.get("owner") or "").strip()),
         "first_ticket": any(t.get("claimed_at") for t in tickets),
         "first_agent": bool(names),
         "second_harness": len(names) >= 2,
@@ -15594,7 +15980,7 @@ def _onboarding_checklist(board, tickets):
     }
 
 
-def _next_step_hint(board, tickets, done_ids):
+def _next_step_hint(board, tickets, done_ids, health_items=None):
     """One-line guidance for the persistent next-step strip."""
     if not tickets:
         return {"kind": "start", "label": "Get started",
@@ -15618,12 +16004,19 @@ def _next_step_hint(board, tickets, done_ids):
                 "message": "No agents on the board yet — register one to claim work.",
                 "cmd": "atm join <name> --roles backend"}
     ready = [t for t in tickets if t.get("status") == "open"
-             and all(d in done_ids for d in t.get("deps", []))]
+             and all(d in done_ids for d in t.get("deps", []))
+             and _ticket_lane(t) == "ready"]
     unowned = [t for t in ready if not t.get("owner")]
     if unowned:
         return {"kind": "route", "label": "Route work",
                 "message": "Ready tickets are unowned — claim or assign them.",
                 "cmd": "atm next"}
+    alerts = [h for h in (health_items or []) if h.get("sev") in ("CRIT", "WARN")]
+    if alerts:
+        top = alerts[0]
+        return {"kind": "attention", "label": "Needs attention",
+                "message": top.get("msg") or "The board has warnings.",
+                "cmd": "atm show"}
     return {"kind": "ok", "label": "On track",
             "message": "Workers are moving — post updates every 45 minutes.",
             "cmd": "atm update <id> \"...\""}
@@ -15820,16 +16213,55 @@ def _agent_acked_message(board, agent, msg, rec=None):
     return not _is_unread(msg, since, remaining)
 
 
+def _message_wake_receipt(rec, msg):
+    """Last-wake receipt for this message, if any. Inbox read is not wake."""
+    if not rec:
+        return None
+    mid = _msg_id(msg)
+    wd = rec.get("wake_delivery") or {}
+    if mid and str(wd.get("message_id") or "") == str(mid):
+        label = wd.get("label") or ""
+        return {"label": label, "confirmed": label in ("woken", "deduped"),
+                "poked": bool(wd.get("poked")), "at": wd.get("at") or ""}
+    if mid and str(mid) in [str(x) for x in (rec.get("wake_delivery_ids") or [])]:
+        return {"label": "recorded", "confirmed": True, "poked": False, "at": ""}
+    return None
+
+
+def _delivery_receipt_label(seen, wake):
+    """Read and wake stay distinct; an unconfirmed wake label never hides inbox-read."""
+    bits = []
+    has_wake = bool(wake and (wake.get("confirmed") or wake.get("label")))
+    if seen:
+        bits.append("inbox read, not acknowledged")
+    elif seen is False:
+        bits.append("not read" if has_wake else "not read, wake unconfirmed")
+    if wake and wake.get("confirmed"):
+        bits.append("wake confirmed")
+    elif wake and wake.get("label"):
+        bits.append("wake: %s" % wake["label"])
+    return " · ".join(bits) if bits else "delivery unknown"
+
+
 def _message_delivery(board, msg, agents_by=None):
-    """Delivery/ack status for the UI composer thread."""
+    """Delivery receipts for the UI thread.
+
+    ``acked`` stays the inbox-seen bit for existing snapshot consumers.
+    It is not an agent acknowledgement. UI labels use ``receipts``.
+    """
     recipients = _message_recipients(msg)
     if not recipients:
         return {"status": "broadcast"}
     acks = []
+    receipts = []
     for r in recipients:
         rec = (agents_by or {}).get(r)
-        acks.append({"agent": r, "acked": _agent_acked_message(board, r, msg, rec=rec)})
-    return {"status": "direct", "acks": acks}
+        seen = _agent_acked_message(board, r, msg, rec=rec)
+        wake = _message_wake_receipt(rec, msg)
+        acks.append({"agent": r, "acked": seen})
+        receipts.append({"agent": r, "seen": seen, "wake": wake,
+                         "label": _delivery_receipt_label(seen, wake)})
+    return {"status": "direct", "acks": acks, "receipts": receipts}
 
 
 def _attention_snapshot(health_items, coverage):
@@ -16066,15 +16498,30 @@ def _board_snapshot_body(board, messages=40):
     util_rows = [r for r in rows if r["state"] != "DOWN"]
     in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
                   "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
-                  "waiting": [d for d in t.get("deps", []) if d not in done]}
+                  "waiting": [d for d in t.get("deps", []) if d not in done],
+                  "phase": "working", "lane": _ticket_lane(t),
+                  "handoff": _last_handoff(t), "verdict": _ticket_verdict(t)}
                  for t in tickets if t["status"] == "claimed"]
     review = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
-               "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", "")}
+               "priority": t.get("priority", 2), "commit": t.get("commit", ""), "pr": t.get("pr", ""),
+               "phase": "review", "lane": _ticket_lane(t),
+               "handoff": _last_handoff(t), "verdict": _ticket_verdict(t)}
               for t in tickets if t["status"] == "review"]
-    open_rows = [{"id": t["id"], "status": LABEL.get(t["status"], t["status"]), "priority": t.get("priority", 2),
-                  "title": t["title"], "role": t.get("role", ""), "owner": t.get("owner", ""),
-                  "waiting": [d for d in t.get("deps", []) if d not in done]}
-                 for t in tickets if t["status"] in ("open", "blocked")]
+    open_rows = []
+    for t in tickets:
+        if t["status"] not in ("open", "blocked"):
+            continue
+        waiting = [d for d in t.get("deps", []) if d not in done]
+        open_rows.append({
+            "id": t["id"], "status": LABEL.get(t["status"], t["status"]),
+            "priority": t.get("priority", 2), "title": t["title"],
+            "role": t.get("role", ""), "owner": t.get("owner", ""),
+            "waiting": waiting, "phase": _ticket_phase(t, waiting),
+            "lane": _ticket_lane(t), "wait_reason": _wait_reason(t, waiting),
+            "reserved_for": _reserved_agent(t),
+            "handoff": _last_handoff(t), "verdict": _ticket_verdict(t),
+            "proof": (t.get("proof") or "").strip(),
+        })
     turns, usage, promise = _cached_turns_usage_promise(board, tickets)
     all_msgs = load_messages(board)
     raw_msgs = []
@@ -16099,13 +16546,32 @@ def _board_snapshot_body(board, messages=40):
     health_items = [{"sev": s, "msg": msg} for s, msg, _fix in health(board, tickets) if s in ("CRIT", "WARN")][:12]
     coverage = _coverage_snapshot(m.get("owner", ""), m.get("cos", ""),
                                 open_rows, in_flight, review, out_agents)
-    graph = workflow_graph(tickets)
+    attention = _attention_snapshot(health_items, coverage)
+    # T-992: done without a structured ACCEPT / merge stays on the Work graph and
+    # list and is never counted as accepted. Structured verdicts live in
+    # review_events / notes / board messages; work_view.review_of is the one judge.
+    unverified_done = _safe(lambda: set(_work_view().unverified_done_ids(tickets, all_msgs)), set())
+    counts["done_unverified"] = len(unverified_done)
+    counts["accepted"] = max(0, counts["done"] - len(unverified_done))
+    graph = workflow_graph(tickets, keep_done=unverified_done)
     objective_view = {
         "text": (obj or {}).get("text", ""),
         "state": objective_state(obj) if obj else "",
         "exit_criterion": (obj or {}).get("exit_criterion") or "",
         "exit_missing": bool(obj) and objective_exit_missing(obj),
     }
+    def _work_payload():
+        fn = _work_view().work_payload
+        kwargs = dict(
+            objective=objective_view,
+            acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who)),
+        )
+        try:
+            return fn(tickets, graph, all_msgs, agents=agents, **kwargs)
+        except TypeError:
+            # 9f50606 work_payload has no agents=; revised T-889 does.
+            return fn(tickets, graph, all_msgs, **kwargs)
+    work = _safe(_work_payload, None)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -16116,7 +16582,7 @@ def _board_snapshot_body(board, messages=40):
         "open": open_rows,
         "agents": out_agents,
         "epics": _epics_snapshot(board, tickets),
-        "attention": _attention_snapshot(health_items, coverage),
+        "attention": attention,
         "health": health_items,
         # "at" is sent as the raw ISO-8601 (UTC, "...Z") timestamp, unmodified,
         # so the UI can render it in whatever timezone the viewer's browser is
@@ -16125,7 +16591,7 @@ def _board_snapshot_body(board, messages=40):
         # Advitiya PRIORITY agent chats: per-seat thread rail from the same log.
         "seat_threads": seat_thread_summaries(raw_msgs, seat_names),
         "onboarding": _onboarding_checklist(board, tickets),
-        "next_step": _next_step_hint(board, tickets, done),
+        "next_step": _next_step_hint(board, tickets, done, attention),
         "empty_board": counts["total"] == 0,
         "turns": turns,
         "usage": usage,
@@ -16138,10 +16604,103 @@ def _board_snapshot_body(board, messages=40):
         "coverage": coverage,
         "graph": graph,
         # T-889 hook: the Work view payload (objective, phases, node detail).
-        "work": _safe(lambda: _work_view().work_payload(
-            tickets, graph, all_msgs, objective=objective_view,
-            acked=lambda who, msg: _agent_acked_message(board, who, msg, rec=agents.get(who)),
-            agents=agents), None),
+        "work": work,
+        "first_screen": _first_screen(work),
+    }
+
+
+def _first_screen(work):
+    """T-810 #1: finishing / named blocker / next ticket from the shared work payload.
+
+    Prefers T-889 ``work.summary`` (finishing / blocked / waiting_on / next).
+    Old 9f50606 summaries lack titles and fold hold/capture into nodes only.
+    """
+    if not work:
+        return {"finishing": None, "blocker": None, "blocker_count": 0, "waiting": [], "next": None}
+    nodes = work.get("nodes") or []
+    summary = work.get("summary") or {}
+    by = dict((n.get("id"), n) for n in nodes if n.get("id"))
+
+    def _node(tid):
+        return by.get(tid) or {}
+
+    finishing_rows = list(summary.get("finishing") or [])
+    finish = None
+    if finishing_rows:
+        n = finishing_rows[0]
+        node = _node(n.get("id"))
+        finish = {
+            "id": n.get("id"),
+            "title": n.get("title") or node.get("title") or "",
+            "owner": n.get("owner") or n.get("who") or node.get("owner") or "",
+            "phase": n.get("phase") or node.get("phase") or "working",
+        }
+    else:
+        working = [n for n in nodes if n.get("phase") == "working"]
+        if working:
+            n = working[0]
+            finish = {"id": n["id"], "title": n.get("title") or "",
+                      "owner": n.get("owner") or "", "phase": "working"}
+
+    blocked = []
+    for row in (summary.get("blocked") or []):
+        node = _node(row.get("id"))
+        wait = node.get("wait") or {}
+        blocked.append({
+            "id": row.get("id"),
+            "title": row.get("title") or node.get("title") or "",
+            "kind": row.get("kind") or wait.get("kind") or node.get("phase") or "",
+            "text": row.get("text") or wait.get("text") or "",
+            "phase": row.get("phase") or node.get("phase") or "",
+            "cmd": row.get("cmd") or wait.get("cmd") or "",
+        })
+    listed = set(r["id"] for r in blocked if r.get("id"))
+    for n in nodes:
+        if n.get("phase") in ("hold", "capture", "blocked") and n.get("id") not in listed:
+            wait = n.get("wait") or {}
+            blocked.append({
+                "id": n["id"], "title": n.get("title") or "",
+                "kind": wait.get("kind") or n.get("phase") or "",
+                "text": wait.get("text") or "", "phase": n.get("phase") or "",
+                "cmd": wait.get("cmd") or "",
+            })
+
+    waiting = list(summary.get("waiting_on") or [])
+    if not waiting:
+        waiting = [{"id": n["id"], "title": n.get("title") or "",
+                    "on": n.get("waiting") or n.get("deps") or []}
+                   for n in nodes if n.get("phase") == "waiting"]
+
+    blocker = blocked[0] if blocked else None
+    if not blocker and waiting:
+        w = waiting[0]
+        node = _node(w.get("id"))
+        wait = node.get("wait") or {}
+        ons = w.get("on") or []
+        blocker = {
+            "id": w.get("id"),
+            "title": w.get("title") or node.get("title") or "",
+            "kind": wait.get("kind") or "deps",
+            "text": wait.get("text") or (("waiting on " + ", ".join(ons)) if ons else "waiting on deps"),
+            "phase": "waiting",
+            "cmd": wait.get("cmd") or "",
+        }
+
+    nxt = summary.get("next")
+    if nxt:
+        node = _node(nxt.get("id"))
+        nxt = dict(nxt)
+        nxt.setdefault("title", node.get("title") or "")
+        nxt.setdefault("phase", node.get("phase") or "")
+        nxt.setdefault("who", nxt.get("who") or node.get("who") or node.get("owner") or "")
+        nxt.setdefault("who_kind", nxt.get("who_kind") or node.get("who_kind") or "")
+
+    return {
+        "finishing": finish,
+        "blocker": blocker,
+        "blocker_count": len(blocked) + len(waiting),
+        "waiting": waiting,
+        "next": nxt,
     }
 
 
