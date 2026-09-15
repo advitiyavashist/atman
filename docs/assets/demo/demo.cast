@@ -1,4 +1,4 @@
-{"version":3,"term":{"cols":80,"rows":24},"timestamp":1789460335,"command":"zsh /private/tmp/claude-502/-Users-kavana/c56f29e3-15c2-449e-b4f3-be0593d819a7/scratchpad/take3.sh","env":{"SHELL":"/bin/zsh"}}
+{"version":3,"term":{"cols":80,"rows":24},"timestamp":1789460335,"command":"zsh docs/assets/demo/record-take.sh <RUN>","env":{"SHELL":"/bin/zsh"}}
 [0.015, "o", "\u001b[3J\u001b[H\u001b[2J"]
 [0.0, "o", "\u001b[1;37m  Atman — your agents, one board, one handoff\u001b[0m\r\n"]
 [3.007, "o", "\r\n\u001b[1;36m  Give a coordinator agent an objective. It plans the work on the board.\u001b[0m\r\n\r\n"]

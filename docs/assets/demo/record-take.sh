@@ -1,6 +1,13 @@
 #!/bin/zsh
-set -u
-R="/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/atman-demo-llt758p0"
+# Corrected replay of the command sequence used for the published take.
+# The original used a temporary absolute path and lost its run directory. This
+# version takes a prepared disposable run as an argument. It does not claim to
+# recreate the original provider outputs byte for byte.
+set -euo pipefail
+R="${1:?usage: record-take.sh <RUN>}"
+for prompt in ceo-plan.prompt codex-worker.prompt ceo-accept.prompt cursor-worker.prompt; do
+  [ -f "$R/$prompt" ] || { echo "missing $R/$prompt; run prepare-replay.py first" >&2; exit 2; }
+done
 export TICKETS_DIR="$R/repo/.tickets"
 export DEMO_RUN="$R"
 export PATH="$R/bin:$PATH"
@@ -13,7 +20,7 @@ sleep 3
 say "Give a coordinator agent an objective. It plans the work on the board."
 run 'codex exec "$(cat $R/ceo-plan.prompt)" --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 2>&1 | tail -5'
 run 'atm list'
-say "Two tickets, one real dependency: B is blocked until A is accepted."
+say "Two tickets, one real dependency: B waits for A."
 sleep 2
 say "A worker agent claims A in its own worktree, tests it, opens a PR."
 cd $R/repo/.worktrees/codex-worker
@@ -23,7 +30,7 @@ run 'atm list'
 say "The coordinator reviews the work itself — then accepts it against the exact commit."
 run 'codex exec "$(cat $R/ceo-accept.prompt)" --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 2>&1 | tail -5'
 run 'atm show T-001 | grep -i -m1 accept | cut -c1-140'
-say "B is unblocked, and A's accepted commit travels with it as the handoff."
+say "A is accepted and done. B unblocks, carrying A's accepted commit in its handoff."
 run 'atm list'
 say "A Cursor agent — different vendor — picks up B. Nobody retypes what A did."
 cd $R/repo/.worktrees/cursor-worker

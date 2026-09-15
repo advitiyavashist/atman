@@ -62,3 +62,19 @@ was started; no completed multi-agent take, hero.gif, demo.mp4, per-beat clips,
 poster.png or timestamped publication captions are claimed. Removing the
 Claude beat alone does not prove a second real seat or the acceptance handoff.
 Do not publish dry receipts or permission-denial footage as a successful demo.
+
+## Completed Codex/Cursor take and recovered evidence
+
+A later run completed with a Codex planner/worker/reviewer and Cursor worker and
+was published in PR #211. The earlier Claude denial remains historical; it is
+not footage from the published take. The original disposable run directory was
+subsequently deleted, but the provider session records survived in the local
+provider stores. T-1034 preserved sanitized excerpts and the exact prompts under
+`docs/assets/demo/evidence/`, with source and excerpt hashes in `manifest.json`.
+
+The evidence shows Codex's board actions, worker edits/tests/PR, the independent
+review and full-SHA acceptance, plus Cursor's own `atm next`, accepted-SHA check,
+ff-only merge, edits, tests and commit. GitHub PR #5 independently resolves to
+the accepted A SHA. B was a local-only commit and its deleted Git object cannot
+be rechecked, so the provider trace is the remaining ancestry evidence; this
+limit is stated beside the published claims. Media bytes were not changed.

@@ -1,8 +1,10 @@
 # Atman demo rehearsal (T-924)
 
-This replaces the stale T-940 command recipe for the next recording. It is a
-rehearsal kit, **not a finished demo**. A real Claude attempt reached a tool-permission denial; there is no
-finished demo cast. See VALIDATION.md for the exact blocker. The earlier Opus working directory is untouched.
+This replaces the stale T-940 command recipe for future recording rehearsals.
+It is a rehearsal kit, separate from the completed Codex/Cursor take published
+under `docs/assets/demo/`. The earlier Claude attempt documented below reached a
+tool-permission denial; it is not the published take. See VALIDATION.md for the
+attempt history and the published take's evidence boundary.
 
 ## Local checks: no providers, no remote writes
 
@@ -103,3 +105,14 @@ Do not present them as continuous browser footage.
 Publication requires: a verified CTA; real-seat execution and attribution review;
 the uncut cast plus commands/release SHA/PR/test receipts; and Pages link/mobile
 verification. This kit does not close T-924 or T-976.
+
+## Published Codex/Cursor take
+
+PR #211 contains a completed terminal take recorded later with Codex as planner,
+worker and independent reviewer, followed by Cursor for the dependent task. Its
+temporary run directory was deleted, but the provider session records survived.
+Sanitized prompt/tool excerpts, their source hashes, the accepted PR snapshot and
+the precise ancestry limitation are preserved in
+`../assets/demo/evidence/README.md`. The published GIF and poster remain
+unchanged. The cast header is sanitized and two narration captions were corrected;
+its command output is unchanged.
