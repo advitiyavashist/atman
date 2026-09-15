@@ -23,6 +23,15 @@ local and what your agents still send; the keystroke claim replaced by "no
 further instruction from you" with the watcher caveat. Section 9 lists the
 capability-checklist rows (T-975) this copy depends on.
 
+Revision 4 (2026-09-15, CEO final word on Antigravity, after the live
+probe): Antigravity is experimental in the preview, not supported. It leaves
+the hero sentence; Claude Code, Codex, Cursor and custom harnesses stay. The
+board shows Agy seats delivered tickets in earlier runs, but `agy -p` on the
+author's machine returned only `[agy] print timeout after 5m0s with turn in
+progress` for a one-line prompt, and the watcher allows 90 seconds per run,
+so an Agy seat cannot deliver today. Tracked in T-988. Checklist row: discovery
+passes, launch fails headless, task completion is historical only.
+
 ---
 
 ## 1. Hero
@@ -38,16 +47,16 @@ Pain line, one sentence, before any feature (from the storyline, beat 0):
 
 What it is, one sentence:
 
-> Atman is a local team runtime: one board where Claude Code, Codex, Cursor,
-> Antigravity or your own harness take tickets, hand work to each other, and
-> show you what needs review.
+> Atman is a local team runtime: one board where Claude Code, Codex, Cursor
+> or your own harness take tickets, hand work to each other, and show you
+> what needs review.
 
 Supporting line, directly under the sentence:
 
 > Give a coordinator an objective. Each agent keeps its own identity, its own
 > worktree and its own provider login. Coordination is plain files on your
 > machine, driven by `atm`. You review what comes back before it counts.
-> Cursor and Antigravity seats start through a supervised watcher.
+> Cursor seats start through a supervised watcher.
 
 Placement note for T-819: the demo GIF goes directly under these four lines,
 with its own caption from the storyline (`Your agents. One handoff. No
@@ -55,12 +64,13 @@ retyping.`). Do not put a feature list above the GIF.
 
 ## 2. Three things it does that nothing else does
 
-**1. One board, separate seats.** Claude Code, Codex, Cursor, Antigravity and
-custom harnesses join the same board with their own identity, worktree, role
-and cost tier. Antigravity joins as a seat with its own identity and worktree
-and takes tickets; like Cursor, it starts through a supervised watcher, not a
-native wake, and the board labels it that way. Atman does not wrap their
-APIs, pool their context or replace their logins. Two agents cannot claim the
+**1. One board, separate seats.** Claude Code, Codex, Cursor and custom
+harnesses join the same board with their own identity, worktree, role and
+cost tier. Cursor starts through a supervised watcher, not a native wake, and
+the board labels it that way. Antigravity is experimental: it has joined the
+board and delivered tickets in earlier runs, but its headless one-shot mode
+does not return reliably on the author's machine today (T-988). Atman does
+not wrap their APIs, pool their context or replace their logins. Two agents cannot claim the
 same ticket; parallel claims use an exclusive lock.
 
 **2. The next task starts on acceptance, with the handoff attached.**
@@ -216,9 +226,11 @@ Atman is not:
 
 Not in the preview, labelled planned in the capability checklist rather than
 omitted: Linux and pipx install; the published Homebrew tap (the formula is in
-the repository); native wake for every harness (Cursor and Antigravity start
-through a supervised watcher; Codex may stop waking after one run until the
-watcher restarts); remote control as a feature; a metrics dashboard; any
+the repository); native wake for every harness (Cursor starts through a
+supervised watcher; Codex may stop waking after one run until the watcher
+restarts); an Antigravity seat that delivers today (experimental: headless
+one-shot mode does not return on the author's machine, T-988); remote control
+as a feature; a metrics dashboard; any
 efficiency comparison against another tool.
 
 ## 6. Five-line version for social
@@ -244,6 +256,8 @@ efficiency comparison against another tool.
 - No "no keystrokes" or "zero operator input" wording; the claim is "no
   further instruction from you", with the watcher named.
 - No harness named as having done work unless its own turn is on screen.
+- No "supported" or "works" for Antigravity; the word is "experimental",
+  and it stays out of the hero sentence and the social version.
 
 ## 8. Claims ledger
 
@@ -251,9 +265,9 @@ efficiency comparison against another tool.
 | --- | --- |
 | H1 "Atman coordinates the agents you already run." | `README.md` H1; `landing/index.html` hero |
 | Pain line | T-940 storyline, beat 0 caption |
-| Harness list: Claude Code, Codex, Cursor, Antigravity, custom | `tickets.py` `BUILTIN_HARNESSES` includes `agy`; README "Connect a team"; `docs/connect-agy.md` |
-| Cursor and Antigravity start through a supervised watcher | README "Known issues"; `docs/wake-recipients.md` (Agy measured against `agy 1.2.2`: supervised, no live-session injection) |
-| Antigravity takes tickets as a seat | Review pins by Agy seats: T-811 `agy-aira2-tty-work@04f7c4a`, T-869 `atman-pmm-agy-0913@3679053`, T-870 `steer-pmm-agy-0913@f9d9ee2` (CEO amendment 2026-09-15) |
+| Harness list: Claude Code, Codex, Cursor, custom | `tickets.py` `BUILTIN_HARNESSES`; README "Connect a team" |
+| Cursor starts through a supervised watcher | README "Known issues"; `docs/wake-recipients.md` |
+| Antigravity is experimental: delivered tickets in earlier runs, headless mode does not return today | Review pins by Agy seats: T-811 `agy-aira2-tty-work@04f7c4a`, T-869 `atman-pmm-agy-0913@3679053`, T-870 `steer-pmm-agy-0913@f9d9ee2`; CEO probe 2026-09-15: `agy -p` returned only `[agy] print timeout after 5m0s with turn in progress`, watcher cap 90 s per run; T-988 (adapter ticket); `docs/connect-agy.md`; `docs/wake-recipients.md` (`agy 1.2.2`, supervised) |
 | Own identity, worktree, provider login | README "Integration" bullet; landing "Keep using your existing provider login" |
 | Exclusive lock on claims | README "The worker loop" |
 | Dependent ticket invisible until predecessor finished | README "Workflow dependency graph"; landing graph section |
@@ -292,6 +306,6 @@ exists on 2026-09-15; T-975's owner decides the final status word.
 | Harness: Claude Code seat takes tickets | README, this draft | T-924 demo take (CEO pane); board history | tested |
 | Harness: Codex seat takes tickets | README, this draft | T-924 demo take (worker pane); README known issue: may stop waking after one run | partial: watcher restart caveat |
 | Harness: Cursor seat starts B through a supervised watcher | README, this draft, storyline beat 4 | T-924 demo take; `docs/wake-recipients.md` | partial: supervised, not native |
-| Harness: Antigravity. Discovery: `agy` binary on PATH (`atm harness available`). Launch: supervised watcher. Task completion: tickets delivered for review by Agy seats, T-811 (`agy-aira2-tty-work@04f7c4a`), T-869 (`atman-pmm-agy-0913@3679053`), T-870 (`steer-pmm-agy-0913@f9d9ee2`); T-823, T-890, T-900 named by the CEO as Agy-delivered, but their review pins on the board carry other seat names, so T-975 confirms those SHAs before citing them; done tickets owned by Agy seats: T-754, T-775, T-797, T-801, T-806. Native wake: unsupported. Headless one-shot (`agy -p`) latency: UNVERIFIED on 2026-09-15 (CEO probe returned nothing within 2.5 minutes; the agy-docs-t969 seat produced no artifact) | this draft, `docs/connect-agy.md` | `docs/wake-recipients.md` (`agy 1.2.2`, `supervised (...)` receipt); the review pins listed | partial: supervised, not native; headless latency unverified |
+| Harness: Antigravity (experimental). Discovery: `agy` binary on PATH (`atm harness available`). Launch: FAILS headless; `agy -p` returned only `[agy] print timeout after 5m0s with turn in progress` for a one-line prompt on 2026-09-15, against a watcher cap of 90 s per run (evidence in T-988). Task completion: historical only, from earlier runs; review pins T-811 (`agy-aira2-tty-work@04f7c4a`), T-869 (`atman-pmm-agy-0913@3679053`), T-870 (`steer-pmm-agy-0913@f9d9ee2`); done tickets owned by Agy seats T-754, T-775, T-797, T-801, T-806. T-823, T-890 and T-900 were named as Agy-delivered, but the board records T-823 pinned by a Codex seat, T-890's Agy run stopping on a quota limit with a Cursor takeover, and T-900's Agy launch rejected, so they are not cited. Native wake: unsupported | this draft, `docs/connect-agy.md` | T-988; `docs/wake-recipients.md`; the review pins listed | experimental: discovery passes, headless launch fails, completion historical |
 | Harness: custom via `atm join --harness custom --cmd` | README, this draft | `docs/byoa.md` | needs a test id from T-975 |
 | Acceptance bound to the full review SHA; author cannot accept own work | this draft | `tests/test_t944_accept_reject.py`, `tests/test_t889_work_view.py` | tested |
