@@ -17,6 +17,7 @@ TICKETS = ROOT / "tickets.py"
 TOOLS = [TICKETS, ROOT / "src" / "ticket_board" / "cli.py"]
 TOOL_IDS = ["tickets.py", "cli.py"]
 SAME = "2026-09-14T12:00:00Z"
+NEWER = "2026-09-14T12:00:01Z"
 
 
 def _mod():
@@ -102,7 +103,7 @@ def _stamp_unknown_reopen(board, tid, to="carol"):
 def _run_tool(tool, board, *args, agent=""):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
-    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
+    for var in ("TICKET_SEAT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
                 "CURSOR_SESSION_ID", "TERM_SESSION_ID"):
         e.pop(var, None)
     actor = agent or "__anonymous__"
@@ -112,6 +113,10 @@ def _run_tool(tool, board, *args, agent=""):
         cwd=str(board.parent), env=e)
 
 
+def _combined(r):
+    return (r.stdout or "") + (r.stderr or "")
+
+
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
 def test_next_refuses_unknown_only_reopen_task_root_and_package(tool, board):
     run(board, "join", "planner", "--roles", "leadership", agent="planner")
@@ -119,10 +124,37 @@ def test_next_refuses_unknown_only_reopen_task_root_and_package(tool, board):
     _stamp_unknown_reopen(board, "T-001", to="docs-worker")
 
     r = _run_tool(tool, board, "next", agent="docs-worker")
-    assert r.returncode != 0, r.stdout + r.stderr
+    out = _combined(r)
+    assert r.returncode != 0, out
+    assert "Traceback" not in out, out
+    assert "no ticket ready" in out, out
     rec = json.loads((board / "T-001.json").read_text())
-    assert rec["status"] == "open", "LIFE_UNKNOWN reopen must not be next-claimed:\n%s" % (
-        r.stdout + r.stderr)
+    assert rec["status"] == "open", "LIFE_UNKNOWN reopen must not be next-claimed:\n%s" % out
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_next_claims_when_strictly_newer_message_root_and_package(tool, board):
+    run(board, "join", "planner", "--roles", "leadership", agent="planner")
+    run(board, "join", "docs-worker", "--roles", "docs", agent="docs-worker")
+    rec = json.loads((board / "T-001.json").read_text())
+    rec["reopened_at"] = SAME
+    rec.pop("reopened_seen", None)
+    (board / "T-001.json").write_text(json.dumps(rec, indent=2))
+    (board / "messages.jsonl").write_text(json.dumps({
+        "id": "m-same", "kind": "task", "re": "T-001", "to": "docs-worker",
+        "from": "planner", "at": SAME, "text": "take T-001", "task": True,
+    }) + "\n" + json.dumps({
+        "id": "m-new", "kind": "task", "re": "T-001", "to": "docs-worker",
+        "from": "planner", "at": NEWER, "text": "take now", "task": True,
+    }) + "\n")
+
+    r = _run_tool(tool, board, "next", agent="docs-worker")
+    out = _combined(r)
+    assert r.returncode == 0, out
+    assert "Traceback" not in out, out
+    rec = json.loads((board / "T-001.json").read_text())
+    assert rec["status"] == "claimed", out
+    assert rec.get("owner") == "docs-worker", rec
 
 
 def test_unknown_reopen_is_not_watch_actionable(board):

@@ -1995,11 +1995,18 @@ def _next_refusal_parts(ready_all, roles, owner, steal_id, board):
 
 
 def _work_view():
+    """T-889 Work view (packaged with sounding). Never import as a top-level
+    module: work_view.py uses relative ``.sounding``, which crashes
+    ``python src/ticket_board/cli.py next`` on every reopened ticket."""
     try:
-        from . import work_view as m
+        from ticket_board import work_view as m
+        return m
     except ImportError:
-        import work_view as m
-    return m
+        src = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import work_view as m
+        return m
 
 
 def _task_life_actionable(board, message):
