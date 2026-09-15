@@ -21,10 +21,11 @@ folders that are not the project. `tickets next` / `show` / `done` do.
 
 Agent identity for a single command comes from $TICKET_AGENT (set it per tool:
 claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
-launched. Session-scoped surfaces (`board`'s "you:" line, `msg`/`inbox` with
-no --owner) resolve through session_seat(): explicit --owner, then
-$TICKET_SEAT, then this session's join record, then $TICKET_AGENT.
-Default roles for those names can be overridden by .tickets/roles.json.
+launched. `note` uses whoami() (T-956/T-958 identity-precedence). Session-
+scoped surfaces (`board`'s "you:" line, `msg`/`inbox` with no --owner)
+resolve through session_seat(): explicit --owner, then $TICKET_SEAT, then
+this session's join record, then $TICKET_AGENT. Default roles for those
+names can be overridden by .tickets/roles.json.
 """
 
 import argparse
