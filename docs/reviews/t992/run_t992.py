@@ -14,7 +14,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-ROOT = Path("/Users/kavana/Downloads/atman/.worktrees/atman-ui-t810-fable-0914")
+ROOT = Path(__file__).resolve().parents[3]
 TOOL = ROOT / "tickets.py"
 BASE = Path("/tmp/atman-t992-verify")
 REPO = BASE / "repo"

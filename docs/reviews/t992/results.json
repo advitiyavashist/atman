@@ -1,5 +1,5 @@
 {
-  "sha": "fbf3a939e8ac084653e874b31c80286423e5ddcf",
+  "sha": "68a054fd26a0bb9e518d5801f4adfc4d80a50374",
   "results": [
     {
       "shot": "01-transport-label",
@@ -29,12 +29,12 @@
     {
       "shot": "02-T-005-submitted-not-accepted",
       "ok": true,
-      "detail": "T-005 detail=Close | T-005 | IN REVIEW | backend | P2 | Needs a verdict | STATUS | Submitted by @alice \u00b7 alice@217a5e6 | WHO | @alice | ACCEPTANCE | none recorded | ARTIFACT | alice@217a5e6 | REVIEW | Awaiting review of 217a5e6 \u00b7 no verdict recorded | LAST NOTE | alice REVIEW: alice@217a5e6 -- paths: tickets.py;"
+      "detail": "T-005 detail=Close | T-005 | IN REVIEW | backend | P2 | Needs a verdict | STATUS | Submitted by @alice \u00b7 alice@2504156 | WHO | @alice | ACCEPTANCE | none recorded | ARTIFACT | alice@2504156 | REVIEW | Awaiting review of 2504156 \u00b7 no verdict recorded | LAST NOTE | alice REVIEW: alice@2504156 -- paths: tickets.py;"
     },
     {
       "shot": "02-deeplink-T-006-detail",
       "ok": true,
-      "detail": "T-006 detail=Close | T-006 | DONE | docs | P2 | Finished without review | STATUS | Marked done 1.8h ago by @bob | WHO | @bob | ACCEPTANCE | none recorded | ARTIFACT | \u2014 | REVIEW | Marked done; verification not recorded | LAST NOTE | bob I completed it in chat | tickets show T-006 | tickets msg --to bob --re T-00"
+      "detail": "T-006 detail=Close | T-006 | DONE | docs | P2 | Finished without review | STATUS | Marked done 3.2h ago by @bob | WHO | @bob | ACCEPTANCE | none recorded | ARTIFACT | \u2014 | REVIEW | Marked done; verification not recorded | LAST NOTE | bob I completed it in chat | tickets show T-006 | tickets msg --to bob --re T-00"
     },
     {
       "shot": "03-list-shows-T-006",

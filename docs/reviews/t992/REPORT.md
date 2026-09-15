@@ -1,11 +1,11 @@
-# T-992 author evidence: launch repair on PR #156
+# T-992 author evidence: launch repair on current main
 
-**App-only successor:** replay T-810/T-884/T-992 onto `origin/main` `457767b` without PR156 ancestry (no train-2 backend heads, no T-931/T-932/T-956, no knowledge/session_boundary). Browser shots below remain the accepted 8bd576 throwaway-board evidence for the same three rendered behaviors.
+**App-only successor:** replay T-810/T-884/T-992 onto `origin/main` `457767b` without PR156 ancestry (no train-2 backend heads, no T-931/T-932/T-956, no knowledge/session_boundary).
 
-**Code SHA:** `fbf3a939e8ac084653e874b31c80286423e5ddcf` (branch `atman-ui-t810-fable-0914`, PR #156; T-992 code landed in `7187c09`, evidence re-run after `tickets sync` merged origin/main; successor to `033cb738ecba2d552304ea2e7a2d46c30b9df476`)
+**Code SHA:** `68a054fd26a0bb9e518d5801f4adfc4d80a50374` (branch `fix/t992-app-only`, PR #203). Evidence below was regenerated from this checkout after `run_t992.py` started deriving `ROOT` from `Path(__file__).resolve().parents[3]` so the documented repro executes this successor, not a prior seat tree.
 **Board:** throwaway `/tmp/atman-t992-verify/repo/.tickets`, seeded exactly like T-986 (six tickets: working, waiting, hold, reserved, REVIEW without verdict, done-in-chat). Never the live board.
 **Driver:** `run_t992.py` (this directory), headless Chrome via Playwright, `tickets.py ui` from this SHA.
-**Focused tests:** 95 passed (`tests/test_t992_launch_repair.py` 6, plus t791 / t889 / t810_* / t884 / t944 / t323), `/usr/bin/python3` 3.9.6, `TICKET_SEAT` unset.
+**Focused tests:** 118 passed (`tests/test_t992_launch_repair.py` plus t791 / t889 / t810_* / t884 / t944 / t323 / t1010 / t1004 / t1005 / t981), `/usr/bin/python3` 3.9.6, `TICKET_SEAT` unset.
 
 ## The three required changes
 
@@ -15,7 +15,7 @@
 
 ## Preserved (re-checked on the same throwaway board)
 
-T-005 REVIEW stays `Submitted … Awaiting review of <sha> · no verdict recorded`, never Accepted (check 02). Light mode `--acc #6b5344` (check 04). Mutation pending/confirmed/failed, offline≠lost, reload resync and the same-second reopen boundary are untouched code paths (T-986 shots 10–17 at 033cb73 still apply; the focused suite covering them passed at this SHA).
+T-005 REVIEW stays `Submitted … Awaiting review of <sha> · no verdict recorded`, never Accepted (check 02). Light mode `--acc #6b5344` (check 04). Mutation pending/confirmed/failed, offline≠lost, reload resync and the same-second reopen boundary are untouched code paths (focused suite covering them passed at this SHA).
 
 ## Shots
 
@@ -37,8 +37,8 @@ T-005 REVIEW stays `Submitted … Awaiting review of <sha> · no verdict recorde
 | `01-desktop-status-open` | PASS | hdrStatus.open=True (no fold on desktop) |
 | `01-legend-unverified` | PASS | legend=Ready Reserved 1 Task posted Working 1 In review 1 Blocked Waiting 1 Capture Hold 1 Done 1 · 1 unverified |
 | `01-graph-shows-T-006` | PASS | T-006 node count=1 text=T-006Done · unverifiedFinished without review@bobMarked done; verification not recorded |
-| `02-T-005-submitted-not-accepted` | PASS | T-005 detail=Close / T-005 / IN REVIEW / backend / P2 / Needs a verdict / STATUS / Submitted by @alice · alice@217a5e6 / WHO / @alice / ACCEPTANCE / none recorded / ARTIFACT / alice@217a5e6 / REVIEW / Awaiting review of 217a5e6 · no verdict recorded / LAST NOTE / alice REVIEW: alice@217a5e6 -- paths: tickets.py; |
-| `02-deeplink-T-006-detail` | PASS | T-006 detail=Close / T-006 / DONE / docs / P2 / Finished without review / STATUS / Marked done 1.8h ago by @bob / WHO / @bob / ACCEPTANCE / none recorded / ARTIFACT / — / REVIEW / Marked done; verification not recorded / LAST NOTE / bob I completed it in chat / tickets show T-006 / tickets msg --to bob --re T-00 |
+| `02-T-005-submitted-not-accepted` | PASS | T-005 detail=Close / T-005 / IN REVIEW / backend / P2 / Needs a verdict / STATUS / Submitted by @alice · alice@2504156 / WHO / @alice / ACCEPTANCE / none recorded / ARTIFACT / alice@2504156 / REVIEW / Awaiting review of 2504156 · no verdict recorded / LAST NOTE / alice REVIEW: alice@2504156 -- paths: tickets.py; |
+| `02-deeplink-T-006-detail` | PASS | T-006 detail=Close / T-006 / DONE / docs / P2 / Finished without review / STATUS / Marked done 3.2h ago by @bob / WHO / @bob / ACCEPTANCE / none recorded / ARTIFACT / — / REVIEW / Marked done; verification not recorded / LAST NOTE / bob I completed it in chat / tickets show T-006 / tickets msg --to bob --re T-00 |
 | `03-list-shows-T-006` | PASS | list rows=1 |
 | `04-light-acc` | PASS | light --acc=#6b5344 |
 | `05-mobile-status-folded` | PASS | hdrStatus.open=False |
