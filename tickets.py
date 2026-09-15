@@ -6331,8 +6331,10 @@ When they name tasks, use `atm plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
-# Probe-only catalog for a new board. Codex stays listed with zero usage.
-# Gemini dispatches like the others; persist/hooks is the wake. No new Claude fable.
+# Probe-only catalog for a new board. Codex stays listed with unknown usage.
+# Gemini dispatches like the others; persist/hooks is the wake.
+# Board-specific model bans, quota holds, and staffing policy stay in that
+# board's briefs and prompt context — never in this generic catalog.
 # usage_args: non-spawning status/about only. Never -p/--print/exec/prompt.
 # quota: supported | unsupported | optional-admin (T-862; not a second registry).
 INTEGRATION_CATALOG = (
@@ -6348,12 +6350,12 @@ INTEGRATION_CATALOG = (
      "quota": "supported"},
     {"id": "claude", "name": "Claude Code", "binaries": ("claude",),
      "if_yes": "tickets spawn <seat> --harness claude",
-     "policy": "ok to spawn if chosen; no new Claude fable",
+     "policy": "ok to spawn if chosen",
      "usage_args": ("auth", "status", "--json"),
      "quota": "supported"},
     {"id": "codex", "name": "Codex", "binaries": ("codex",),
      "if_yes": "tickets spawn <seat> --harness codex",
-     "policy": "catalog even with zero usage; do not spawn unless they say usage is back",
+     "policy": "catalog even with unknown usage; spawn only if the operator chooses",
      "usage_args": ("login", "status"),
      "quota": "supported"},
     {"id": "devin", "name": "Devin", "binaries": ("devin",),
@@ -6363,7 +6365,7 @@ INTEGRATION_CATALOG = (
      "quota": "unsupported"},
     {"id": "gemini", "name": "Gemini CLI", "binaries": ("gemini",),
      "if_yes": "tickets dispatch T-id --to <seat> --harness gemini  # persist/hooks wake",
-     "policy": "ok to dispatch; persist/hooks wake; do not spawn a Gemini product job",
+     "policy": "ok to dispatch if chosen; persist/hooks is the wake",
      "usage_args": ("--version",),
      "quota": "unsupported"},
     {"id": "grok", "name": "Grok (Cursor persist / grokbots)",
@@ -6483,7 +6485,7 @@ def print_ceo_connect(board, seat="ceo"):
     attach_catalog_usage(rows)
     print("1. CATALOG + USAGE")
     print_integration_catalog(rows, note)
-    print("Codex stays in the catalog with unknown usage listed as unknown. Do not spawn Gemini. No new Claude fable.")
+    print("Codex stays in the catalog with unknown usage listed as unknown.")
     print("Spawn only the harnesses the operator chooses. Never auto-assign CoS or master.")
     print("")
     _print_role_discovery(rows)
@@ -6575,8 +6577,7 @@ unknown — never invent 0 or FAIL). Then ask which seat is master, CoS,
 workers, verifiers. Offer a ranked suggestion; never auto-assign. Non-interactive
 `tickets connect` requires explicit `--master` / `--cos` to apply.
 Codex stays in the catalog even with **unknown usage**. Gemini dispatch records
-harness=gemini; persist/hooks is the wake (no Gemini product job).
-No new Claude fable.
+harness=gemini; persist/hooks is the wake.
 
 ### Step 3 — Announce that name on the board
 
@@ -14449,8 +14450,7 @@ def cmd_harness_usage(a, board):
             print("         FAIL %s" % r["policy"])
     print("")
     print("Unsupported or missing remaining/reset is unknown, not exhausted. Codex stays cataloged.")
-    print("Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job).")
-    print("No new Claude fable. Spawn only harnesses the operator chooses.")
+    print("Spawn only harnesses the operator chooses.")
 
 
 def cmd_harness_available(a, board):
@@ -14473,7 +14473,7 @@ def cmd_harness_available(a, board):
         print("Then ask the board/team name, then:")
         print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
         print("Then ask for the objective and tasks. Do not spawn until they answer.")
-    print("Codex stays in the catalog with zero usage. Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job). No new Claude fable.")
+    print("Codex stays in the catalog with unknown usage. Spawn only the harnesses the operator chooses.")
 
 
 def cmd_harness(a, board):
