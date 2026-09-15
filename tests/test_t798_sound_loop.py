@@ -44,7 +44,8 @@ def make_repo(path):
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "-q", "-b", "main")
     (path / "README").write_text("t798\n")
-    git(path, "add", "README")
+    (path / ".gitignore").write_text(".tickets\n")
+    git(path, "add", "README", ".gitignore")
     git(path, "commit", "-qm", "init")
     return path
 
@@ -157,8 +158,24 @@ def test_walk_capture_sound_dispatch_pr_sync_retro(tmp_path):
     assert r.returncode != 0
     assert "--pr" in (r.stderr + r.stdout)
 
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+    git(repo, "remote", "add", "origin", str(origin))
+    git(repo, "push", "-q", "-u", "origin", "worker-a")
+    full = git(repo, "rev-parse", "HEAD").stdout.strip()
+    origin_url = git(repo, "config", "--get", "remote.origin.url").stdout.strip()
+    review_env = dict(
+        env, TICKET_AGENT="worker-a",
+        TICKETS_PR_VIEW=json.dumps({
+            "1": {
+                "headRefOid": full,
+                "headRefName": "worker-a",
+                "headRepository": {"nameWithOwner": origin_url},
+                "repo": origin_url,
+            }
+        }))
     r = run(repo, "review", tid, "--notes", "timeout tightened", "--pr", "1", "--force",
-            env=dict(env, TICKET_AGENT="worker-a"), tmp_path=tmp_path)
+            env=review_env, tmp_path=tmp_path)
     assert r.returncode == 0, r.stderr + r.stdout
     assert "IN REVIEW" in r.stdout
 

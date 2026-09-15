@@ -43,6 +43,11 @@ except ImportError:  # run as a plain script path, not as a package module
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import trajectories as _traj
 
+try:
+    from . import review_verdict as _rv
+except ImportError:
+    import review_verdict as _rv
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -527,6 +532,55 @@ def write_identity(board, name):
     os.replace(tmp, path)
 
 
+def identity_resolution(board, explicit=None):
+    """(seat, why) matching session_seat(). Must match tickets.py."""
+    if explicit:
+        return explicit, "explicit --owner"
+    seat = (os.environ.get("TICKET_SEAT") or "").strip()
+    if seat:
+        return seat, "TICKET_SEAT (supervisor assignment)"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return recorded, "session-keyed join record"
+    env_agent = (os.environ.get("TICKET_AGENT") or "").strip()
+    if env_agent:
+        return env_agent, "TICKET_AGENT"
+    if recorded:
+        return recorded, "legacy flat identity file"
+    return "agent-%d" % os.getpid(), "pid fallback"
+
+
+def _join_binds_this_session(board, owner, on_behalf=False):
+    """True when this join may write the caller's session-keyed identity.
+
+    Must match tickets.py:_join_binds_this_session (T-954 / T-839).
+    """
+    if on_behalf:
+        return False
+    owner = (owner or "").strip()
+    caller = whoami()
+    if owner and owner == caller:
+        return True
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board and keyed:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if recorded:
+        return False
+    if caller and not caller.startswith("agent-") and _agent_rec(board, caller):
+        return False
+    return True
+
+
 def seat_confirmed(board):
     try:
         if os.environ.get("TICKET_SEAT"):
@@ -585,14 +639,67 @@ def load(board, tid):
         sys.exit("no such ticket: %s" % tid)
 
 
-def save(board, t):
+def _recovery():
+    """Optional coordination extension: structured handoff + ownership lease."""
+    try:
+        from . import ticket_coordination as tc
+        return tc
+    except ImportError:
+        try:
+            import ticket_coordination as tc
+            return tc
+        except ImportError:
+            return None
+
+
+def _lease_harness(board, owner):
+    try:
+        return (load_workforce(board).get(owner) or {}).get("harness") or ""
+    except Exception:
+        return ""
+
+
+def save(board, t, expected_generation=None):
     t["updated"] = now()
     path = ticket_path(board, t["id"])
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(t, f, indent=2)
-    os.replace(tmp, path)  # atomic
-    return t
+    tc = _recovery()
+    lock = tc.ticket_mutation_lock(board, t["id"]) if tc is not None else None
+
+    def _publish():
+        if tc is not None and os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    current = json.load(f)
+            except (ValueError, IOError):
+                current = None
+            if current:
+                err = tc.generation_publish_error(current, t, expected_generation)
+                if err:
+                    sys.exit(err)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(t, f, indent=2)
+        if tc is not None and os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    current = json.load(f)
+            except (ValueError, IOError):
+                current = None
+            if current:
+                err = tc.generation_publish_error(current, t, expected_generation)
+                if err:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    sys.exit(err)
+        os.replace(tmp, path)  # atomic
+        return t
+
+    if lock is None:
+        return _publish()
+    with lock:
+        return _publish()
 
 
 def load_all(board):
@@ -852,6 +959,7 @@ def git_state():
         return None
     branch = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
     sha = git("rev-parse", "--short", "HEAD") or "?"
+    sha_full = git("rev-parse", "HEAD") or ""
     dirty = git("status", "--porcelain")
     common = git("rev-parse", "--git-common-dir") or ""
     gitdir = git("rev-parse", "--git-dir") or ""
@@ -860,6 +968,7 @@ def git_state():
         "top": top,
         "branch": branch,
         "sha": sha,
+        "sha_full": sha_full,
         "dirty": len(dirty.splitlines()) if dirty else 0,
         "main_tree": is_main_tree,
     }
@@ -1053,6 +1162,10 @@ def try_claim(board, tid, owner):
     t["owner"] = owner
     t["claimed_at"] = now()
     t["done_at"] = ""
+    tc = _recovery()
+    if tc is not None:
+        tc.issue_owner_lease(t, owner, harness=_lease_harness(board, owner),
+                             reason="claim", previous_owner=prev_owner)
     got = save(board, t)
     # Written here, not in cmd_next/cmd_claim: this is the single point where a
     # claim actually succeeds, so no future caller can add a claim path that
@@ -1062,6 +1175,87 @@ def try_claim(board, tid, owner):
     if prev_owner and prev_owner != owner:
         _clear_agent_ticket(board, prev_owner, tid)
     return got
+
+
+def _try_lock_ticket_excl(board, tid, owner):
+    """Acquire the O_EXCL claim lock. Returns lock path, or None if taken."""
+    lock = os.path.join(board, tid + ".lock")
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            return None
+        raise
+    os.write(fd, owner.encode())
+    os.close(fd)
+    return lock
+
+
+def _release_ticket_excl(lock):
+    if not lock:
+        return
+    try:
+        os.unlink(lock)
+    except OSError:
+        pass
+
+
+def _held_claimed(board, owner, except_id=None):
+    """Claimed tickets currently held by owner (T-979 one-active-hold)."""
+    if not owner:
+        return []
+    return [t for t in load_all(board)
+            if t.get("status") == "claimed"
+            and t.get("owner") == owner
+            and t.get("id") != except_id]
+
+
+def _already_hold_msg(held):
+    ids = ", ".join(t["id"] for t in held)
+    return ("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
+            "more, or pass --another if you really want to work two in parallel." % ids)
+
+
+class _OwnerHoldLock:
+    """Same path as agent_checkin._AgentLock so root and package serialize together."""
+
+    def __init__(self, board, owner):
+        os.makedirs(os.path.join(board, "agents"), exist_ok=True)
+        self.path = os.path.join(board, "agents", owner + ".json.lock")
+        self.fd = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:
+            return self
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
+def try_claim_one_active(board, tid, owner, *, another=False):
+    """Claim tid unless owner already holds a different claimed ticket.
+
+    Serializes on the per-agent lock so concurrent assign/claim/next cannot
+    both create an active hold. Returns (ticket, None) on success, (None, held)
+    when refused for a second hold, or (None, None) when the ticket lock lost.
+    """
+    with _OwnerHoldLock(board, owner):
+        held = _held_claimed(board, owner, except_id=tid)
+        if held and not another:
+            return None, held
+        return try_claim(board, tid, owner), None
 
 
 def fmt_hours(h):
@@ -1290,6 +1484,11 @@ def detail(board, t, tickets):
         out.append("Handoff from earlier ancestors (latest note each):")
         for tid, title, text in earlier:
             out.append("  %s (%s): %s" % (tid, title, text))
+    evs = _rv.format_detail(t)
+    if evs:
+        out.append("")
+        out.append("Review events:")
+        out.extend(evs)
     if t.get("notes"):
         out.append("")
         out.append("Notes:")
@@ -1699,11 +1898,9 @@ def cmd_next(a, board):
         )
         sys.exit(1)
     tickets = load_all(board)
-    held = [t for t in tickets if t["status"] == "claimed" and t.get("owner") == owner]
+    held = _held_claimed(board, owner)
     if held and not a.another:
-        print("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
-              "more, or pass --another if you really want to work two in parallel."
-              % ", ".join(t["id"] for t in held))
+        print(_already_hold_msg(held))
         sys.exit(1)
     steal_id = (getattr(a, "steal", None) or "").strip()
     ready_all = unblocked(board, tickets)
@@ -1727,7 +1924,10 @@ def cmd_next(a, board):
 
     ready.sort(key=order)
     for t in ready:
-        got = try_claim(board, t["id"], owner)
+        got, held_now = try_claim_one_active(board, t["id"], owner, another=a.another)
+        if held_now:
+            print(_already_hold_msg(held_now))
+            sys.exit(1)
         if got:
             checkin(board, owner, got["id"])
             print(detail(board, got, load_all(board)))
@@ -1790,7 +1990,9 @@ def cmd_next(a, board):
 
 def cmd_claim(a, board):
     owner = whoami(a.owner)
-    got = try_claim(board, a.id, owner)
+    got, held = try_claim_one_active(board, a.id, owner)
+    if held:
+        sys.exit(_already_hold_msg(held))
     if not got:
         sys.exit("%s is already taken" % a.id)
     checkin(board, owner, got["id"])
@@ -1818,8 +2020,24 @@ def cmd_review(a, board):
         if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
             sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
+    if (a.pr or "").strip():
+        if not g:
+            sys.exit("review --pr: not in a git working tree; cannot verify a submitted SHA")
+        origin = git("config", "--get", "remote.origin.url") or ""
+        pin_err = _rv.verify_submit(
+            lambda *args, cwd=None: git(*args),
+            sha_full=g.get("sha_full") or "", branch=g.get("branch") or "",
+            origin_url=origin, pr=a.pr, dirty=g.get("dirty") or 0)
+        if pin_err:
+            sys.exit(pin_err)
     owner = t.get("owner") or whoami(a.owner)
     author = whoami(a.owner)
+    tc = _recovery()
+    if tc is not None:
+        err = tc.stale_accept_error(t, author, kind="review")
+        if err:
+            sys.exit(err)
+    expected_generation = t.get("owner_generation")
     t["status"] = "review"
     t["owner"] = owner
     t["review_at"] = now()
@@ -1829,11 +2047,13 @@ def cmd_review(a, board):
         text = "%s -- %s" % (stamp, text)
         t["commit"] = stamp
         t["branch"] = g["branch"]
+        if (a.pr or "").strip() and g.get("sha_full"):
+            _rv.record_verified_head(t, g["sha_full"], pr=a.pr)
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
     t["notes"].append({"by": owner, "at": now(), "text": "REVIEW: " + text})
-    save(board, t)
+    save(board, t, expected_generation=expected_generation)
     checkin(board, author, t["id"], "submitted %s for review" % t["id"])
     if owner != author:
         # T-428: do not copy the submitter's cwd/branch/sha onto the owner.
@@ -1851,6 +2071,28 @@ def cmd_review(a, board):
     tm = timing(t)
     print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
         t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
+
+
+def cmd_accept(a, board):
+    """Record a structured accept bound to the submitted review head (T-944)."""
+    t = load(board, a.id)
+    ev, err = _rv.apply(
+        t, whoami(), a.sha, "accept", notes=a.notes, require_full=True)
+    if err:
+        sys.exit(err)
+    save(board, t)
+    print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
+
+
+def cmd_reject(a, board):
+    """Record a structured reject bound to the submitted review head (T-944)."""
+    t = load(board, a.id)
+    ev, err = _rv.apply(
+        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+    if err:
+        sys.exit(err)
+    save(board, t)
+    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
 
 
 def _trunk():
@@ -2385,6 +2627,13 @@ def cmd_status(a, board):
 
 def cmd_done(a, board):
     t = load(board, a.id)
+    closer = whoami()
+    tc = _recovery()
+    if tc is not None:
+        err = tc.stale_accept_error(t, closer, kind="done")
+        if err:
+            sys.exit(err)
+    expected_generation = t.get("owner_generation")
     if not a.notes and not a.no_notes:
         sys.exit(
             'done needs --notes "paths, names, decisions the next agent must match" '
@@ -2418,7 +2667,7 @@ def cmd_done(a, board):
         t["commit"] = stamp
     if text:
         t["notes"].append({"by": t.get("owner") or "agent", "at": now(), "text": text})
-    save(board, t)
+    save(board, t, expected_generation=expected_generation)
     if t.get("owner"):
         # T-428: checkin() always writes THIS process's cwd/branch/sha. That is
         # the closer's location. Stamping it onto a different owner makes
@@ -2514,27 +2763,85 @@ def cmd_assign(a, board):
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
-    if a.owner is not None:
-        # hard assignment by the master: takes the lock on their behalf
-        prev_owner = t.get("owner") or ""
-        if t["status"] == "open" and a.owner:
-            got = try_claim(board, t["id"], a.owner)
-            if not got:
-                sys.exit("%s was claimed by someone else while assigning" % t["id"])
-            t = got
-            changed.append("claimed for %s" % a.owner)
-            _bind_agent_ticket(board, a.owner, t["id"])
-        elif t["status"] in ("claimed", "review"):
-            t["owner"] = a.owner
-            changed.append("owner=%s" % a.owner)
-            if prev_owner and prev_owner != a.owner:
-                _clear_agent_ticket(board, prev_owner, t["id"])
-            if a.owner:
-                _bind_agent_ticket(board, a.owner, t["id"])
-    if not changed:
-        sys.exit("nothing to change; see tickets assign --help")
-    t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
-    save(board, t)
+    bind_owner = None
+    clear_prev = None
+    transfer_owner = None
+    reserve_lock = None
+    expected_generation = None
+    rewrite_lock_to = None
+    try:
+        if a.owner is not None:
+            # hard assignment by the master: takes the lock on their behalf
+            prev_owner = t.get("owner") or ""
+            if t["status"] == "open" and a.owner:
+                got, held = try_claim_one_active(board, t["id"], a.owner)
+                if held:
+                    # Queued work stays queued: reserve, do not fabricate a
+                    # second in-progress claim (T-979 / T-972). Re-read under
+                    # the claim lock so a concurrent other-owner claim cannot
+                    # be overwritten by this stale open image.
+                    reserve_lock = _try_lock_ticket_excl(board, t["id"], a.owner)
+                    if reserve_lock is None:
+                        sys.exit("%s was claimed by someone else while assigning" % t["id"])
+                    t = load(board, t["id"])
+                    if t.get("status") != "open":
+                        sys.exit("%s was claimed by someone else while assigning" % t["id"])
+                    t["reserved_for"] = a.owner
+                    changed.append("reserved for %s (already holds %s)" % (
+                        a.owner, ", ".join(x["id"] for x in held)))
+                elif not got:
+                    sys.exit("%s was claimed by someone else while assigning" % t["id"])
+                else:
+                    t = got
+                    changed.append("claimed for %s" % a.owner)
+                    bind_owner = a.owner
+            elif t["status"] in ("claimed", "review"):
+                if t["status"] == "claimed" and a.owner and a.owner != prev_owner:
+                    transfer_owner = a.owner
+                t["owner"] = a.owner
+                changed.append("owner=%s" % a.owner)
+                if prev_owner and prev_owner != a.owner:
+                    tc = _recovery()
+                    if tc is not None:
+                        expected_generation = tc.owner_generation(t)
+                        tc.issue_owner_lease(
+                            t, a.owner, harness=_lease_harness(board, a.owner),
+                            reason="reassign", previous_owner=prev_owner)
+                        rewrite_lock_to = a.owner
+                    clear_prev = prev_owner
+                if a.owner:
+                    bind_owner = a.owner
+        if not changed:
+            sys.exit("nothing to change; see tickets assign --help")
+        t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
+
+        def _save_and_rewrite_lock():
+            # Hold/generation already validated. Publish JSON and relabel the
+            # claim lock in the same ticket-json critical section so a refused
+            # transfer or lost-generation save cannot leave Alice on T002.lock.
+            tc_pub = _recovery() if rewrite_lock_to else None
+            if tc_pub is not None:
+                with tc_pub.ticket_mutation_lock(board, t["id"]):
+                    save(board, t, expected_generation=expected_generation)
+                    tc_pub.rewrite_claim_lock(board, t["id"], rewrite_lock_to)
+            else:
+                save(board, t, expected_generation=expected_generation)
+
+        if transfer_owner:
+            with _OwnerHoldLock(board, transfer_owner):
+                held = _held_claimed(board, transfer_owner, except_id=t["id"])
+                if held:
+                    sys.exit("%s already holds %s -- finish that before taking an active assignment of %s"
+                             % (transfer_owner, ", ".join(x["id"] for x in held), t["id"]))
+                _save_and_rewrite_lock()
+        else:
+            _save_and_rewrite_lock()
+    finally:
+        _release_ticket_excl(reserve_lock)
+    if clear_prev:
+        _clear_agent_ticket(board, clear_prev, t["id"])
+    if bind_owner:
+        _bind_agent_ticket(board, bind_owner, t["id"])
     print("%s: %s" % (t["id"], ", ".join(changed)))
 
 
@@ -2714,12 +3021,13 @@ This board is being set up. I will ask you four things, in order:
 3. I will **announce that name** on the board with the integrations you
    picked.
 4. Then I will ask for **tasks and the objective**, and turn tasks into a
-   `tickets plan` graph (real `--after` edges), not a flat list.
+   `atm plan` graph (real `--after` edges), not a flat list.
 
 I will not spawn workers or create tickets until you answer.
-Run `tickets harness available` to probe every catalog row (missing is a row).
+CLI: `atm` (the `tickets` command is an alias).
+Run `atm harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
-When they name tasks, use `tickets plan` so deps are real `--after` edges.
+When they name tasks, use `atm plan` so deps are real `--after` edges.
 Unattended persist ends at a reviewable SHA; human review is the gate.
 """
 
@@ -2855,34 +3163,34 @@ Spawn seats only from the integrations they confirmed, one ticket each.
 
 **You are onboarding as chief of staff.** Master plans and scopes. CoS
 reviews, unblocks, merges, and staffs. Same integration catalog as master.
-After the board has an objective and a `tickets plan` graph:
+After the board has an objective and a `atm plan` graph:
 
-1. `tickets graph` / `tickets map` — statuses and `--after` edges, not prose.
-2. Follow-up: `tickets update` / `here`; `tickets reopen` silent >90m claims;
-   `tickets drive` toward the objective; review queue.
-3. Mid-run graph edits: `tickets dep` / `tickets create --blocks`.
-4. Announce with `tickets master cos <name>` and `tickets msg --to everyone`.
+1. `atm graph` / `atm map` — statuses and `--after` edges, not prose.
+2. Follow-up: `atm update` / `here`; `atm reopen` silent >90m claims;
+   `atm drive` toward the objective; review queue.
+3. Mid-run graph edits: `atm dep` / `atm create --blocks`.
+4. Announce with `atm master cos <name>` and `atm msg --to everyone`.
 
 Do not dump a live-board plan. Do not invent a second planner.
 
 ## CEO ONBOARDING — living board (product flow)
 
 **You are onboarding as Atman CEO.** Connecting is joining Atman, not a
-provider. Identity is `atman-<seat>` (example `atman-ceo`). CoS (`cursor`)
-staffs. CEO does not claim worker tickets on this path.
+provider. Identity is `atman-<seat>` (example `atman-ceo`). The current
+CoS holder staffs (or no CoS yet). CEO does not claim worker tickets.
 
-Run `tickets connect` (or `tickets connect --ceo`). It executes, in order:
+Run `atm connect` (or `atm connect --ceo`). It executes, in order:
 
-1. Catalog + usage (`tickets harness available` + recorded limits)
+1. Catalog + usage (`atm harness available` + recorded limits)
 2. Attach the living board / objective — do not invent a new team
-3. `tickets join atman-<seat> --roles master ...`
-4. Announce the Atman role (`tickets msg --to everyone`)
+3. `atm join atman-<seat> --roles master ...`
+4. Announce the Atman role (`atm msg --to everyone`)
 5. Ask the operator for feedback
-6. `tickets graph` / `tickets map` — tasks they can actually run
+6. `atm graph` / `atm map` — tasks they can actually run
 
 Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
-title — `tickets plan` with real deps if they add work. Cursor-only
-spawns unless they say otherwise. Mail hooks are not Claude-only:
+title — `tickets plan` with real deps if they add work. Spawn only the
+harnesses they confirm. Mail hooks are not Claude-only:
 `tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
 
 HANDOVER dated 2026-09-08 is historical, not live authority. Live:
@@ -3338,8 +3646,45 @@ def messages_path(board):
     return os.path.join(board, "messages.jsonl")
 
 
-def post_message(board, sender, text, to="", re="", kind="", task=False):
+WEAK_SENDER_VIA = ("TICKET_AGENT", "flat", "pid")
+
+
+def _sender_via(board, explicit=None):
+    if explicit:
+        return "explicit"
+    if (os.environ.get("TICKET_SEAT") or "").strip():
+        return "TICKET_SEAT"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return "session-keyed"
+    if (os.environ.get("TICKET_AGENT") or "").strip():
+        return "TICKET_AGENT"
+    if recorded:
+        return "flat"
+    return "pid"
+
+
+def message_provenance_state(m):
+    if not m or "via" not in m:
+        return "absent"
+    if m.get("unverified"):
+        return "unverified"
+    return "verified"
+
+
+def post_message(board, sender, text, to="", re="", kind="", task=False, explicit=None):
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    via = _sender_via(board, explicit)
+    rec["session"] = agent_session_key() or ""
+    rec["via"] = via
+    rec["endpoint_pid"] = ""
+    rec["unverified"] = via in WEAK_SENDER_VIA
     if task or kind == "task":
         rec["kind"] = "task"
     line_ = json.dumps(rec) + "\n"
@@ -3560,14 +3905,21 @@ def unread(board, owner):
 def fmt_msg(m):
     to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
     re_ = (" [%s]" % m["re"]) if m.get("re") else ""
-    return "%s  %s%s%s: %s" % (m["at"][5:16].replace("T", " "), m.get("from", "?"), to, re_, m.get("text", ""))
+    mark = ""
+    if message_provenance_state(m) == "unverified":
+        mark = " [unverified:%s]" % (m.get("via") or "?")
+    if m.get("leadership_flag"):
+        mark += " [leadership-flag:%s]" % m["leadership_flag"]
+    return "%s  %s%s%s%s: %s" % (
+        m["at"][5:16].replace("T", " "), m.get("from", "?"), mark, to, re_, m.get("text", ""))
 
 
 def cmd_msg(a, board):
     sender = session_seat(board, a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
-    m = post_message(board, sender, a.text, a.to or "", a.re or "")
+    m = post_message(board, sender, a.text, a.to or "", a.re or "",
+                     explicit=a.owner or None)
     print("posted: " + fmt_msg(m))
 
 
@@ -4078,12 +4430,29 @@ def cmd_join(a, board):
         board, owner, incoming,
         transfer=bool(getattr(a, "transfer", False)),
         alias=(getattr(a, "alias", "") or "").strip())
+    if not getattr(a, "transfer", False) and owner != whoami():
+        m = current_master(board) or {}
+        leaders = set(n for n in (m.get("owner"), m.get("cos")) if n)
+        for alias, holder in (load_aliases(board) or {}).items():
+            if (alias or "").strip().lower() in ("ceo", "cos") and holder:
+                leaders.add(holder)
+        if owner in leaders:
+            sys.exit("refusing: %s holds or held a leadership role; pass --transfer "
+                     "for an audited handover" % owner)
     # AFTER the guard, never before it: a refused join must leave this session
     # answering as whoever it already was. Stamping first made `join alpha` --
     # refused for provider reuse or a bound alias -- still turn this session
     # into alpha, so a bare `tickets inbox` read alpha's private mail and a
     # bare `tickets msg` posted as alpha. Nothing below can sys.exit.
-    write_identity(board, owner)
+    #
+    # T-954: join on behalf of another seat must not write THIS session.
+    on_behalf = bool(getattr(a, "on_behalf", False))
+    if _join_binds_this_session(board, owner, on_behalf=on_behalf):
+        write_identity(board, owner)
+    else:
+        seat, why = identity_resolution(board)
+        print("session identity unchanged (%s via %s); joined %s on behalf" % (
+            seat, why, owner))
     # Before checkin(), which creates the record: only a genuinely new agent is
     # stamped, so a re-join never moves the watermark over unread mail.
     first_join = not _agent_rec(board, owner)
@@ -4228,20 +4597,20 @@ def cmd_connect(a, board):
             sys.stdout.write("\n")
         print("")
         print("Product flow: catalog + usage → living board → %s → announce → feedback → graph/map" % name)
-        print("Do not invent a new team. CEO does not claim worker tickets. CoS (cursor) staffs.")
-        print("Then probe: `tickets harness available`")
-        print("Join: tickets join %s --roles master --persistent --wake-mode continuous" % name)
-        print("Announce Atman role, ask for feedback, then tickets graph / tickets map.")
+        print("Do not invent a new team. CEO does not claim worker tickets. The current CoS holder staffs (or no CoS yet).")
+        print("Then probe: `atm harness available`")
+        print("Join: atm join %s --roles master --persistent --wake-mode continuous" % name)
+        print("Announce Atman role, ask for feedback, then atm graph / atm map.")
         return
     print_onboarding_startup()
-    print("Then probe integrations: `tickets harness available`")
+    print("Then probe integrations: `atm harness available`")
     print("It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.")
     print("Ask which to integrate; do not spawn until they answer.")
-    print("Announce the board/team name with `tickets msg --to everyone`, then ask")
-    print("for the objective and tasks. Turn tasks into a graph with `tickets plan`")
-    print("(JSON keys + deps), then `tickets graph` / `tickets map`. Follow up with")
-    print("`tickets update` / `here`, reopen silent >90m claims, `tickets drive`.")
-    print("Unattended persist ends at a reviewable SHA; human `tickets review` is the gate.")
+    print("Announce the board/team name with `atm msg --to everyone`, then ask")
+    print("for the objective and tasks. Turn tasks into a graph with `atm plan`")
+    print("(JSON keys + deps), then `atm graph` / `atm map`. Follow up with")
+    print("`atm update` / `here`, reopen silent >90m claims, `atm drive`.")
+    print("Unattended persist ends at a reviewable SHA; human `atm review` is the gate.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
 
@@ -4772,6 +5141,18 @@ def main():
     c.add_argument("--owner", "-o")
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_review)
+
+    c = sub.add_parser("accept", help="record a structured accept of the exact submitted SHA")
+    c.add_argument("id")
+    c.add_argument("--sha", required=True, help="full 40-character git SHA of the submitted review head")
+    c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
+    c.set_defaults(fn=cmd_accept)
+
+    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c.add_argument("id")
+    c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
+    c.add_argument("--reason", required=True, help="why this artifact is rejected")
+    c.set_defaults(fn=cmd_reject)
 
     c = sub.add_parser("sync", help="agent: merge main into my branch now (do this before review)")
     c.add_argument("--force", action="store_true")

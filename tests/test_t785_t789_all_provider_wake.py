@@ -247,3 +247,22 @@ def test_review_and_done_followup_pokes_cos_and_ceo(board, monkeypatch):
     assert "Coordinator follow-up" in msgs
     assert '"to": "cursor"' in msgs
     assert '"to": "atman-ceo"' in msgs
+
+
+def test_throwaway_followup_does_not_wake_unjoined_fleet_names(board, monkeypatch):
+    """T-883: alice/bob demo boards must not address live `cursor` / `atman-ceo`."""
+    tk = _mod()
+    poked = []
+    monkeypatch.setattr(tk, "_poke_persist_watch", lambda board_arg, seat: poked.append(seat) or False)
+    assert run(board, "join", "alice", "--roles", "backend").returncode == 0
+    assert run(board, "join", "bob", "--roles", "backend").returncode == 0
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda *a, **k: captured.append(" ".join(str(x) for x in a)))
+    tk._finish_followup(str(board), "T-001", "done")
+    blob = "\n".join(captured)
+    assert "cursor" not in blob
+    assert "atman-ceo" not in blob
+    assert poked == []
+    msgs = (board / "messages.jsonl").read_text()
+    assert '"to": "cursor"' not in msgs
+    assert '"to": "atman-ceo"' not in msgs
