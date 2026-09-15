@@ -1,0 +1,14 @@
+{
+  "name": "alice",
+  "owner": "alice",
+  "harness": "cursor",
+  "auth": "login_required",
+  "auth_detail": "cursor CLI found; not logged in",
+  "auth_login_cmd": "agent login",
+  "adapter_online": false,
+  "adapter_native_online": false,
+  "reachable": false,
+  "binary_found": true,
+  "ticket": "T-001",
+  "roles": ["backend"]
+}

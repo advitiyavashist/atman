@@ -1,0 +1,5 @@
+{
+  "text": "Ship the coherent Atman app",
+  "state": "active",
+  "exit_criterion": "named blocker and next teammate visible"
+}

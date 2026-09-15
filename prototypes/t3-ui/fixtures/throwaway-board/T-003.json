@@ -1,0 +1,15 @@
+{
+  "id": "T-003",
+  "title": "Parked",
+  "body": "HOLD until the operator clears it.",
+  "status": "open",
+  "role": "docs",
+  "owner": "",
+  "deps": [],
+  "lane": "ready",
+  "hold": true,
+  "priority": 2,
+  "created": "2026-09-15T00:30:00Z",
+  "updated": "2026-09-15T00:30:00Z",
+  "notes": []
+}

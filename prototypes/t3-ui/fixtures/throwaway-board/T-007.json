@@ -1,0 +1,25 @@
+{
+  "id": "T-007",
+  "title": "Independently accepted",
+  "body": "Structured ACCEPT on an exact SHA.",
+  "status": "done",
+  "role": "backend",
+  "owner": "alice",
+  "deps": [],
+  "lane": "ready",
+  "commit": "alice@033cb73",
+  "review_head": "033cb738ecba2d552304ea2e7a2d46c30b9df476",
+  "review_events": [
+    {
+      "kind": "accept",
+      "by": "reviewer",
+      "sha": "033cb738ecba2d552304ea2e7a2d46c30b9df476",
+      "at": "2026-09-15T00:38:00Z"
+    }
+  ],
+  "priority": 2,
+  "created": "2026-09-15T00:30:00Z",
+  "updated": "2026-09-15T00:38:00Z",
+  "done_at": "2026-09-15T00:38:00Z",
+  "notes": []
+}

@@ -1,0 +1,3 @@
+{"id":"msg_obj","at":"2026-09-15T00:35:19Z","from":"boss","to":"","re":"","text":"objective set: Ship the coherent Atman app","kind":"message"}
+{"id":"msg_task","at":"2026-09-15T00:35:23Z","from":"boss","to":"alice","re":"T-001","text":"task: work T-001","kind":"task"}
+{"id":"msg_please","at":"2026-09-15T00:35:22Z","from":"boss","to":"alice","re":"T-004","text":"please pick up T-004","kind":"message"}

@@ -1,0 +1,22 @@
+{
+  "id": "T-006",
+  "title": "Chat said it was done",
+  "body": "Worker marked done in chat. No atm accept.",
+  "status": "done",
+  "role": "docs",
+  "owner": "bob",
+  "deps": [],
+  "lane": "ready",
+  "review_events": [],
+  "priority": 2,
+  "created": "2026-09-15T00:30:00Z",
+  "updated": "2026-09-15T00:37:00Z",
+  "done_at": "2026-09-15T00:37:00Z",
+  "notes": [
+    {
+      "by": "bob",
+      "at": "2026-09-15T00:37:00Z",
+      "text": "I completed it in chat"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "T-002",
+  "title": "Child waits",
+  "body": "Blocked on T-001.",
+  "status": "open",
+  "role": "docs",
+  "owner": "",
+  "deps": ["T-001"],
+  "lane": "ready",
+  "priority": 2,
+  "created": "2026-09-15T00:30:00Z",
+  "updated": "2026-09-15T00:30:00Z",
+  "notes": []
+}
