@@ -575,9 +575,36 @@ def _refuse_unbound_live_board(path):
     )
 
 
+def _refuse_board_outside_declared_tickets_dir(path):
+    """Refuse a board that is not the test's declared TICKETS_DIR.
+
+    T-938 / T-257: PYTEST_CURRENT_TEST plus a declared TICKETS_DIR means the
+    process is a test or verification sandbox. It may only touch that board.
+    T-257 already blocks boards outside trusted tmp; this catches a second
+    tmp board (or any other path) that is not the one the test declared.
+    """
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    declared = os.environ.get("TICKETS_DIR")
+    if not declared:
+        return
+    real = os.path.realpath(path)
+    want = os.path.realpath(os.path.expanduser(declared))
+    if real == want:
+        return
+    sys.exit(
+        "REFUSING TO USE BOARD %r: running under pytest "
+        "(PYTEST_CURRENT_TEST is set) but this board is not the test's "
+        "declared TICKETS_DIR %r (resolved %r). Test/verification contexts "
+        "may only mutate the board they declared -- see T-257 and T-938."
+        % (real, declared, want)
+    )
+
+
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
     _refuse_board_outside_pytest_tmp(result)
+    _refuse_board_outside_declared_tickets_dir(result)
     _refuse_unbound_live_board(result)
     return result
 
@@ -1245,6 +1272,40 @@ def objective_exit_missing(obj):
     if "exit_missing" in obj:
         return bool(obj.get("exit_missing"))
     return not objective_exit_ok(obj) and objective_state(obj) == "active"
+
+
+def _objective_digest(obj):
+    """Stable short digest of the fields a reader treats as the objective."""
+    rec = obj if isinstance(obj, dict) else {}
+    payload = {
+        "text": rec.get("text") or "",
+        "state": objective_state(rec) if rec else "",
+        "exit_criterion": rec.get("exit_criterion") or "",
+        "exit_missing": bool(rec.get("exit_missing")) if rec else False,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _append_objective_history(prev, actor, action, after):
+    hist = list((prev or {}).get("history") or [])
+    hist.append({
+        "at": now(),
+        "actor": actor,
+        "action": action,
+        "before": _objective_digest(prev),
+        "after": _objective_digest(after),
+    })
+    return hist
+
+
+def _write_objective(board, rec):
+    path = objective_path(board)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def drive_status(board, tickets=None):
@@ -3746,6 +3807,35 @@ def require_integrator(board, owner, force_master=False):
         sys.exit("rejected owner: %s is not the designated integrator (master %s, cos %s); "
                  "pass --force-master only for break-glass recovery" % (owner, m["owner"], m.get("cos") or "-"))
     return m
+
+
+def objective_writers(board):
+    """Seats allowed to --set/--replaced: steer.ceo holder and current master.
+
+    Same policy style as T-888 merge executors. Empty set means the board has
+    no CEO and no master yet -- throwaway first-win / unit tests may bootstrap.
+    """
+    allowed = set()
+    m = current_master(board) or {}
+    owner = (m.get("owner") or "").strip()
+    if owner:
+        allowed.add(owner)
+    ceo, _ = _current_durable_holder(board, role_id="steer.ceo", alias="ceo")
+    if ceo:
+        allowed.add(ceo)
+    return allowed
+
+
+def require_objective_writer(board, owner):
+    """Only the steer.ceo holder or master may --set/--replaced (T-938)."""
+    allowed = objective_writers(board)
+    if not allowed:
+        return allowed
+    if owner in allowed:
+        return allowed
+    named = " / ".join(sorted(allowed))
+    sys.exit("refused: board objective policy names %s as the only seats that "
+             "may --set/--replaced (not %s)" % (named, owner))
 
 
 class IntegrationLock:
@@ -10890,8 +10980,8 @@ DRIVE STATUS now:
 
 def cmd_objective(a, board):
     """Set, show or close the standing objective the master drives toward."""
-    path = objective_path(board)
     cur = load_objective(board)
+    actor = whoami(a.by)
     blocked = getattr(a, "blocked", None)
     replaced = getattr(a, "replaced", None)
     done = a.done
@@ -10903,29 +10993,43 @@ def cmd_objective(a, board):
         if not cur:
             sys.exit("no objective set")
         evidence, state = chosen[0]
+        if state == "replaced":
+            require_objective_writer(board, actor)
+        before = dict(cur)
         cur["state"] = state
         cur["done"] = state == "achieved"
         cur["done_at"] = now()
         cur["evidence"] = evidence
-        with open(path, "w") as f:
-            json.dump(cur, f, indent=2)
+        cur["history"] = _append_objective_history(before, actor, state, cur)
+        _write_objective(board, cur)
         label = {"achieved": "met", "blocked": "blocked", "replaced": "replaced"}[state]
-        post_message(board, whoami(a.by), "objective %s: %s -- %s" % (
+        post_message(board, actor, "objective %s: %s -- %s" % (
             label, cur.get("text", "")[:120], evidence))
-        _master_log(board, "objective %s: %s" % (label, evidence), by=whoami(a.by))
+        _master_log(board, "objective %s: %s" % (label, evidence), by=actor)
         print("objective marked %s" % state)
         return
     if a.text and getattr(a, "set_text", ""):
         sys.exit("objective: use positional text or --set, not both")
     text = (a.text or getattr(a, "set_text", "") or "").strip()
     if text:
-        exit_c = (getattr(a, "exit_criterion", None) or "").strip()
-        rec = {"text": text, "set_by": whoami(a.by), "at": now(), "done": False,
-               "state": "active", "exit_criterion": exit_c, "exit_missing": not bool(exit_c)}
-        with open(path, "w") as f:
-            json.dump(rec, f, indent=2)
-        post_message(board, whoami(a.by), "objective set: %s" % text[:200])
-        _master_log(board, "objective set: %s" % text, by=whoami(a.by))
+        require_objective_writer(board, actor)
+        clear_exit = bool(getattr(a, "clear_exit", False))
+        explicit_exit = getattr(a, "exit_criterion", None)
+        if clear_exit and explicit_exit is not None:
+            sys.exit("objective: use --exit or --clear-exit, not both")
+        if clear_exit:
+            exit_c = ""
+        elif explicit_exit is not None:
+            exit_c = explicit_exit.strip()
+        else:
+            exit_c = (cur.get("exit_criterion") or "").strip()
+        rec = {"text": text, "set_by": actor, "at": now(), "done": False,
+               "state": "active", "exit_criterion": exit_c,
+               "exit_missing": not bool(exit_c)}
+        rec["history"] = _append_objective_history(cur, actor, "set", rec)
+        _write_objective(board, rec)
+        post_message(board, actor, "objective set: %s" % text[:200])
+        _master_log(board, "objective set: %s" % text, by=actor)
         print("objective set")
         if rec["exit_missing"]:
             print("FLAG: no measurable exit criterion; add --exit \"<observable end state>\"")
@@ -10953,6 +11057,7 @@ def cmd_drive(a, board):
     owner = whoami(a.by)
     if a.text:
         ns = argparse.Namespace(text=a.text, done=None, by=owner, blocked=None, replaced=None,
+                                set_text="", clear_exit=False,
                                 exit_criterion=getattr(a, "exit_criterion", None))
         cmd_objective(ns, board)
     elif not load_objective(board):
@@ -18227,6 +18332,8 @@ def main():
                    help="same as the positional text: atm objective --set \"<sentence>\"")
     c.add_argument("--exit", dest="exit_criterion", default=None, metavar="CRITERION",
                    help="measurable exit criterion (observable end state)")
+    c.add_argument("--clear-exit", dest="clear_exit", action="store_true",
+                   help="drop the existing exit criterion (default: keep it when --exit is omitted)")
     c.add_argument("--done", "--achieved", dest="done", default=None, metavar="EVIDENCE",
                    help="mark the objective achieved, with evidence")
     c.add_argument("--blocked", default=None, metavar="REASON", help="mark the objective blocked")
