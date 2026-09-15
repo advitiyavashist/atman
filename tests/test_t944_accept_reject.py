@@ -2,7 +2,7 @@
 
 Throwaway boards only. Two-copy: tickets.py and src/ticket_board/cli.py.
 Prose notes that start with accept/approved are unstructured, never Accepted.
-atm done is unchanged and still starts successors without a structured accept.
+T-1031: docs-exempt done still releases dependents, but as a recorded override.
 """
 from __future__ import annotations
 
@@ -241,7 +241,10 @@ def test_done_semantics_unchanged_without_structured_accept(tool, board):
     parent = load_ticket(board, "T-001")
     assert parent["status"] == "done"
     assert not parent.get("review_events")
+    ov = parent.get("release_override") or {}
+    assert ov.get("kind") == "docs-exempt", parent
     assert "unblocked" in r.stdout or "started" in r.stdout
+    assert "docs-exempt" in r.stdout
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)

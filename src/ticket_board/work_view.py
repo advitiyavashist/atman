@@ -291,6 +291,74 @@ def unverified_done_ids(tickets, messages=None):
                if t.get("status") == "done" and not review_of(t, msgs_re.get(t["id"]))["verified"])
 
 
+# --- T-1031 accept gate (dependency release) --------------------------------
+
+UNVERIFIED_BLOCK_REASON = "%s marked done without verification; accept it or reopen"
+DOCS_EXEMPT_ROLES = ("docs", "pm")
+
+
+def went_through_review(t):
+    if t.get("review_at") or t.get("review_head"):
+        return True
+    return any(isinstance(e, dict) for e in (t.get("review_events") or []))
+
+
+def is_docs_exempt(t):
+    """Docs/pm tickets that never entered review may release as a visible override."""
+    role = (t.get("role") or "").strip()
+    return role in DOCS_EXEMPT_ROLES and not went_through_review(t)
+
+
+def dep_released(t, msgs=None):
+    """True when dependents may start: structured ACCEPT/merge or a recorded override."""
+    if t.get("status") != "done":
+        return False
+    if review_of(t, msgs)["verified"]:
+        return True
+    ov = t.get("release_override")
+    return isinstance(ov, dict) and bool(ov.get("kind"))
+
+
+def released_ids(tickets, messages=None):
+    msgs_re = _messages_by_ticket(messages or []) if messages is not None else {}
+    out = set()
+    for t in tickets:
+        msgs = msgs_re.get(t["id"]) if messages is not None else None
+        if dep_released(t, msgs):
+            out.add(t["id"])
+    return out
+
+
+def accepted_release_sha(t, msgs=None):
+    r = review_of(t, msgs)
+    if not r.get("verified"):
+        return ""
+    latest = r.get("latest") or {}
+    return (latest.get("sha") or r.get("artifact") or "").strip()
+
+
+def make_release_override(kind, by, at, reason=""):
+    return {"kind": kind, "by": by, "at": at, "reason": reason or ""}
+
+
+def unverified_block_reason(pred_id):
+    return UNVERIFIED_BLOCK_REASON % pred_id
+
+
+def successors_waiting_on(tickets, finished_id, released):
+    """Children that would be free if ``finished_id`` counted as released."""
+    out = []
+    for x in tickets:
+        deps = x.get("deps") or []
+        if finished_id not in deps:
+            continue
+        if x.get("status") not in ("open", "blocked"):
+            continue
+        if all(d == finished_id or d in released for d in deps):
+            out.append(x)
+    return out
+
+
 # --- routing / delivery evidence --------------------------------------------
 
 def _task_messages_by_ticket(messages):

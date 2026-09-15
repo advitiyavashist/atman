@@ -48,6 +48,19 @@ try:
 except ImportError:
     import review_verdict as _rv
 
+
+def _work_view():
+    """Package-safe Work view import (relative first, then sibling src)."""
+    try:
+        from . import work_view as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import work_view as m
+        return m
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -1389,12 +1402,12 @@ def timing(t):
 
 
 def unblocked(board, tickets):
-    """Open tickets whose dependencies are all done."""
-    done = set(t["id"] for t in tickets if t["status"] == "done")
+    """Open tickets whose dependencies are released (T-1031)."""
+    released = _work_view().released_ids(tickets)
     return [
         t
         for t in tickets
-        if t["status"] == "open" and all(d in done for d in t.get("deps", []))
+        if t["status"] == "open" and all(d in released for d in t.get("deps", []))
     ]
 
 
@@ -1959,6 +1972,8 @@ def cmd_hold(a, board):
 def _start_successors(board, finished_id):
     """T-781: a successful ticket starts unblocked children (no human next)."""
     tickets = load_all(board)
+    pred = next((x for x in tickets if x["id"] == finished_id), None)
+    sha = _work_view().accepted_release_sha(pred) if pred else ""
     children = [x for x in unblocked(board, tickets) if finished_id in x.get("deps", [])]
     freed = [x["id"] for x in children]
     started, held = [], []
@@ -1967,13 +1982,92 @@ def _start_successors(board, finished_id):
             held.append(child["id"])
             continue
         who = _reserved_agent(child) or (child.get("suggested") or "").strip()
-        text = "unblocked %s after %s -- start (success trigger)" % (child["id"], finished_id)
+        text = "unblocked %s after %s" % (child["id"], finished_id)
+        if sha:
+            text += " accepted %s" % sha
+        text += " -- start (success trigger)"
+        child.setdefault("notes", []).append({
+            "by": whoami(), "at": now(), "text": text,
+        })
+        save(board, child)
         if who:
             post_message(board, whoami(), text, to=who, re=child["id"], task=True)
             started.append("%s -> %s" % (child["id"], who))
         else:
             started.append(child["id"])
     return freed, started, held
+
+
+def _block_unverified_successors(board, finished_id):
+    wv = _work_view()
+    reason = wv.unverified_block_reason(finished_id)
+    tickets = load_all(board)
+    released = wv.released_ids(tickets)
+    blocked = []
+    who = whoami()
+    at = now()
+    for child in wv.successors_waiting_on(tickets, finished_id, released):
+        child["status"] = "blocked"
+        child["unverified_block"] = finished_id
+        child.setdefault("notes", []).append({"by": who, "at": at, "text": reason})
+        save(board, child)
+        blocked.append(child["id"])
+    return blocked, reason
+
+
+def _reopen_unverified_successors(board, finished_id):
+    tickets = load_all(board)
+    who = whoami()
+    at = now()
+    opened = []
+    for child in tickets:
+        if child.get("unverified_block") != finished_id:
+            continue
+        if child.get("status") != "blocked":
+            continue
+        child["status"] = "open"
+        child.pop("unverified_block", None)
+        child.setdefault("notes", []).append({
+            "by": who, "at": at,
+            "text": "unblocked after %s accepted" % finished_id,
+        })
+        save(board, child)
+        opened.append(child["id"])
+    return opened
+
+
+def _maybe_record_release_override(t, a, board):
+    wv = _work_view()
+    if wv.dep_released(t):
+        return True
+    closer = whoami()
+    at = now()
+    if getattr(a, "release_unverified", False):
+        t["release_override"] = wv.make_release_override(
+            "operator", closer, at, "operator --release-unverified")
+        save(board, t)
+        return True
+    if wv.is_docs_exempt(t):
+        t["release_override"] = wv.make_release_override(
+            "docs-exempt", closer, at,
+            "docs-exempt: role=%s never submitted for review" % (t.get("role") or ""))
+        save(board, t)
+        return True
+    return False
+
+
+def _print_successor_release(t, freed, started, held):
+    ov = t.get("release_override") or {}
+    verified = _work_view().review_of(t)["verified"]
+    if ov.get("kind") and not verified:
+        print("released (%s override)%s" % (
+            ov["kind"], (": %s" % ", ".join(freed)) if freed else ""))
+    if freed:
+        print("unblocked: %s" % ", ".join(freed))
+    if started:
+        print("started: %s" % ", ".join(started))
+    if held:
+        print("held (not started): %s" % ", ".join(held))
 
 
 def _may_set_reservation(board, who):
@@ -2186,6 +2280,10 @@ def cmd_accept(a, board):
         sys.exit(err)
     save(board, t)
     print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
+    if t.get("status") == "done":
+        _reopen_unverified_successors(board, a.id)
+        freed, started, held = _start_successors(board, a.id)
+        _print_successor_release(t, freed, started, held)
 
 
 def cmd_reject(a, board):
@@ -2795,13 +2893,13 @@ def cmd_done(a, board):
         a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
     if g:
         print("recorded %s" % t["commit"])
-    freed, started, held = _start_successors(board, a.id)
-    if freed:
-        print("unblocked: %s" % ", ".join(freed))
-    if started:
-        print("started: %s" % ", ".join(started))
-    if held:
-        print("held (not started): %s" % ", ".join(held))
+    if _maybe_record_release_override(t, a, board):
+        freed, started, held = _start_successors(board, a.id)
+        _print_successor_release(t, freed, started, held)
+    else:
+        blocked, reason = _block_unverified_successors(board, a.id)
+        if blocked:
+            print("blocked: %s -- %s" % (", ".join(blocked), reason))
 
 
 def cmd_block(a, board):
@@ -4464,7 +4562,7 @@ def cmd_route(a, board):
     roles = load_roles(board)
     agents = dict((r["owner"], r) for r in load_agents(board))
     alive_within = int(getattr(a, "alive_within", None) or DEFAULT_ALIVE_WITHIN_MIN)
-    done = set(t["id"] for t in tickets if t["status"] == "done")
+    released = _work_view().released_ids(tickets)
     load_ = {}
     for t in tickets:
         if t["status"] == "claimed":
@@ -4474,7 +4572,7 @@ def cmd_route(a, board):
         alive_within_min=alive_within)
     print(format_excluded(excluded))
     def _deps_done(t):
-        return all(d in done for d in t.get("deps", []))
+        return all(d in released for d in t.get("deps", []))
 
     def _needs_route(t):
         if t["status"] != "open":
@@ -5526,6 +5624,8 @@ def main():
     c.add_argument("--notes", "-n", default="", help="handoff text for dependent tickets")
     c.add_argument("--no-notes", action="store_true", help="allow empty handoff")
     c.add_argument("--force", action="store_true", help="skip the branch/clean-tree rule")
+    c.add_argument("--release-unverified", action="store_true",
+                   help="operator override: release dependents without ACCEPT (recorded, never silent)")
     c.set_defaults(fn=cmd_done)
 
     c = sub.add_parser("block", help="mark a ticket blocked")
