@@ -1,0 +1,6 @@
+This is a throwaway demonstration. Perform real work; do not simulate output or manufacture evidence. Use atm commands yourself. Stay on this board and your existing worktree. Do not edit .tickets files. You are the reviewer/planner. Run:
+atm objective --set 'Ship a regional sales summary' --exit 'python3 -m saleskit.cli report data/sales.csv prints regional totals'
+atm plan < <RUN>/plan.json
+atm reserve T-001 --for codex-worker
+atm reserve T-002 --for cursor-worker
+Stop after the two tickets exist and are reserved. Do not wait for review, do not plan anything else.
