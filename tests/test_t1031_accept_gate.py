@@ -22,7 +22,7 @@ TOOL_IDS = ["tickets.py", "cli.py"]
 REASON = "T-002 marked done without verification; accept it or reopen"
 
 
-def run(tool, board, *args, agent=""):
+def run(tool, board, *args, agent="", stdin=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
@@ -35,7 +35,7 @@ def run(tool, board, *args, agent=""):
     e["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + e.get("PYTHONPATH", "")
     return subprocess.run(
         [sys.executable, str(tool), *args], capture_output=True, text=True,
-        env=e, cwd=str(board.parent))
+        env=e, cwd=str(board.parent), input=stdin)
 
 
 def load_ticket(board, tid):
@@ -260,6 +260,9 @@ def test_done_then_accept_releases_successor(tool, board):
 # Work-entry points that must share dep_released (CEO T-1036 RULE A).
 # Each refuses a child whose parent is done-unverified.
 WORK_ENTRY_POINTS = (
+    ("status", ("status", "T-003", "in-progress"), "bob"),
+    ("review owner", ("review", "T-003", "--notes", "submit", "--force"), "bob"),
+    ("reserve", ("reserve", "T-003", "--for", "bob"), "planner"),
     ("next", ("next",), "bob"),
     ("claim", ("claim", "T-003"), "bob"),
     ("claim --another", ("claim", "T-003", "--another"), "bob"),
@@ -284,7 +287,7 @@ def _force_open_child(board, tid="T-003"):
 def _assert_child_not_started(board, name):
     child = load_ticket(board, "T-003")
     assert child["status"] != "claimed", "%s claimed T-003: %s" % (name, child)
-    assert child.get("owner") != "bob" or child["status"] != "claimed"
+    assert not child.get("owner"), "%s set an owner: %s" % (name, child)
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
@@ -342,6 +345,8 @@ def test_work_entry_points_refuse_unverified_parent(tool, board):
             continue
         assert r.returncode != 0, "%s should refuse: %s" % (name, out)
         assert REASON in out or name == "dispatch"
+        if name == "reserve":
+            assert not load_ticket(board, "T-003").get("reserved_for")
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
@@ -374,12 +379,21 @@ def test_entry_points_call_shared_dep_released():
     """No start path carries its own copy of the release check."""
     fns = {
         "try_claim": ("_refuse_unreleased_deps", "refuse_unreleased_reason"),
+        "try_claim_one_active": ("try_claim",),
+        "save": ("_refuse_unreleased_deps", "_reopen_unverified_successors"),
         "cmd_claim": ("_refuse_unreleased_deps",),
+        "cmd_status": ("_refuse_unreleased_deps",),
+        "cmd_review": ("_refuse_unreleased_deps",),
         "cmd_assign": ("_refuse_unreleased_deps",),
         "cmd_reopen": ("_refuse_unreleased_deps",),
         "cmd_reserve": ("_refuse_unreleased_deps",),
         "cmd_next": ("unblocked", "try_claim"),
         "cmd_route": ("released_ids", "try_claim"),
+        "cmd_plan": ("_plan_keep_gated_unstarted",),
+        "_plan_keep_gated_unstarted": ("unreleased_dep_id",),
+        "_start_successors": ("unblocked",),
+        "cmd_done": ("_reopen_unverified_successors", "_maybe_record_release_override"),
+        "_reopen_unverified_successors": ("dep_released", "_retire_stale_gated_start"),
     }
     for path in TOOLS:
         src = path.read_text()
@@ -396,6 +410,16 @@ def test_entry_points_call_shared_dep_released():
             nxt = src.find("\ndef ", start + 4)
             body = src[start:nxt]
             assert "_refuse_unreleased_deps" in body
+            start = src.find("def pending_work(")
+            assert start != -1
+            nxt = src.find("\ndef ", start + 4)
+            body = src[start:nxt]
+            assert "unreleased_dep_id" in body
+            start = src.find("def _watch_bind_ticket(")
+            assert start != -1
+            nxt = src.find("\ndef ", start + 4)
+            body = src[start:nxt]
+            assert "unreleased_dep_id" in body
 
 
 def submit_review_without_pr(tool, board):
@@ -454,3 +478,130 @@ def test_full_sha_accept_without_pr_releases_child(tool, board):
     claim = run(tool, board, "claim", "T-003", agent="bob")
     assert claim.returncode == 0, claim.stdout + claim.stderr
     assert full in claim.stdout
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_status_blocked_child_refused(tool, board):
+    setup_backend(tool, board)
+    put_in_review(board)
+    assert run(tool, board, "done", "T-002", "--notes", "early", "--force",
+               agent="alice").returncode == 0
+    before = load_ticket(board, "T-003")
+    r = run(tool, board, "status", "T-003", "in-progress", agent="bob")
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert REASON in r.stderr
+    assert load_ticket(board, "T-003") == before
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+@pytest.mark.parametrize("recovery", ["reopen-review-accept-done", "late-override"])
+@pytest.mark.parametrize("stale_assignment", [False, True])
+def test_release_recovers_claimable_child(tool, board, recovery, stale_assignment):
+    setup_backend(tool, board)
+    full = submit_review_without_pr(tool, board)
+    assert run(tool, board, "done", "T-002", "--notes", "early", "--force",
+               agent="alice").returncode == 0
+    if stale_assignment:
+        child = load_ticket(board, "T-003")
+        child["owner"] = "alice"
+        child["claimed_at"] = "2026-09-15T00:00:00Z"
+        child["owner_generation"] = 1
+        child["owner_lease"] = {"owner": "alice", "generation": 1}
+        save_ticket(board, child)
+        (board / "T-003.lock").write_text("alice")
+    if recovery == "reopen-review-accept-done":
+        r = run(tool, board, "reopen", "T-002", "--notes", "recover", agent="alice")
+        assert r.returncode == 0, r.stdout + r.stderr
+        full = submit_review_without_pr(tool, board)
+        r = run(tool, board, "accept", "T-002", "--sha", full,
+                "--notes", "verified", agent="reviewer")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert load_ticket(board, "T-003")["status"] == "blocked"
+        r = run(tool, board, "done", "T-002", "--notes", "handoff", "--force", agent="alice")
+    else:
+        r = run(tool, board, "done", "T-002", "--notes", "override recovery",
+                "--force", "--release-unverified", agent="alice")
+        ov = load_ticket(board, "T-002")["release_override"]
+        assert ov["kind"] == "operator"
+        assert ov["by"] == "alice"
+        assert "--release-unverified" in ov["reason"]
+    assert r.returncode == 0, r.stdout + r.stderr
+    child = load_ticket(board, "T-003")
+    assert child["status"] == "open"
+    assert not child.get("owner")
+    assert not child.get("unverified_block")
+    assert not (board / "T-003.lock").exists()
+    assert REASON not in json.dumps(child["notes"])
+    r = run(tool, board, "claim", "T-003", agent="bob")
+    assert r.returncode == 0, r.stdout + r.stderr
+    if recovery == "reopen-review-accept-done":
+        assert full in r.stdout
+    else:
+        assert "operator" in r.stdout and "--release-unverified" in r.stdout
+
+
+def import_cli(tool):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gate_cli_" + tool.parent.name, tool)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_internal_entry_points_refuse_gated_child(tool, board, monkeypatch):
+    """Exercise publication, transfers, scheduling and auto-start entry points."""
+    setup_backend(tool, board)
+    put_in_review(board)
+    assert run(tool, board, "done", "T-002", "--notes", "early", "--force",
+               agent="alice").returncode == 0
+    cli = import_cli(tool)
+    monkeypatch.setenv("TICKET_AGENT", "bob")
+    from ticket_board.scheduler import ready_tickets
+    for name in ("try_claim", "try_claim_one_active", "save status", "save owner",
+                 "update", "assign transfer", "success trigger", "scheduler",
+                 "watch/spawn/remote pending", "plan"):
+        _force_open_child(board)
+        child = load_ticket(board, "T-003")
+        child["owner"] = ""
+        child.pop("reserved_for", None)
+        save_ticket(board, child)
+        if name in ("try_claim", "try_claim_one_active"):
+            with pytest.raises(SystemExit, match="without verification"):
+                getattr(cli, name)(str(board), "T-003", "bob")
+        elif name.startswith("save"):
+            if name == "save status":
+                child["status"] = "claimed"
+            child["owner"] = "bob"
+            with pytest.raises(SystemExit, match="without verification"):
+                cli.save(str(board), child)
+        elif name in ("update", "assign transfer"):
+            # Recover a historical bypass: even an already-claimed child
+            # cannot be updated as active or transferred while still gated.
+            child.update(status="claimed", owner="alice")
+            save_ticket(board, child)
+            args = (("update", "T-003", "progress") if name == "update" else
+                    ("assign", "T-003", "--owner", "bob"))
+            r = run(tool, board, *args, agent="alice")
+            assert r.returncode != 0 and REASON in r.stderr, r.stdout + r.stderr
+            assert load_ticket(board, "T-003") == child
+            _force_open_child(board)
+            child.update(status="open", owner="")
+            save_ticket(board, child)
+        elif name == "success trigger":
+            assert not any(cli._start_successors(str(board), "T-002"))
+        elif name == "scheduler":
+            assert "T-003" not in [t["id"] for t in ready_tickets(cli.load_all(str(board)))]
+        elif name == "watch/spawn/remote pending":
+            if hasattr(cli, "pending_work"):
+                pending = cli.pending_work(str(board), "bob")
+                assert "T-003" not in json.dumps(pending)
+        elif name == "plan":
+            r = run(tool, board, "plan", agent="bob", stdin=json.dumps([{
+                "title": "planned gated child", "deps": ["T-002"],
+                "owner": "bob", "status": "claimed"}]))
+            assert r.returncode == 0, r.stdout + r.stderr
+            planned = load_ticket(board, "T-004")
+            assert planned["status"] == "open" and not planned.get("owner")
+            assert planned not in cli.unblocked(str(board), cli.load_all(str(board)))
+        _assert_child_not_started(board, name)

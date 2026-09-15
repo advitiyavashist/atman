@@ -632,21 +632,47 @@ class BoardStore(MessagingMixin):
         ]
 
     def _unmet_dependencies(self, conn, project_id, deps):
-        """Dependencies that are not done. Unknown ids count as unmet.
-
-        An id that does not resolve is treated as unmet rather than ignored --
-        silently satisfying a dependency on a ticket that does not exist is how
-        a board lets work start before its predecessor.
-        """
+        """Use the shared release gate for the SQL representation too."""
+        from ..work_view import dep_released
         unmet = []
         for dep in deps:
             row = conn.execute(
-                "SELECT state FROM tickets WHERE project_id = ? AND id = ?",
+                "SELECT state, evidence FROM tickets WHERE project_id = ? AND id = ?",
                 (project_id, dep),
             ).fetchone()
-            if row is None or row["state"] != "done":
+            if row is None:
+                unmet.append(dep)
+                continue
+            evidence = json.loads(row["evidence"]) if row["evidence"] else {}
+            review = conn.execute(
+                "SELECT state, evidence FROM reviews WHERE project_id = ? AND ticket_id = ?"
+                " ORDER BY submitted_at DESC, rowid DESC LIMIT 1", (project_id, dep),
+            ).fetchone()
+            ticket = {
+                "status": row["state"],
+                "review_head": evidence.get("review_head") or evidence.get("sha", ""),
+                "review_events": list(evidence.get("review_events") or []),
+                "merge_record": evidence.get("merge_record"),
+                "release_override": evidence.get("release_override"),
+            }
+            if review and review["state"] == "accepted":
+                accepted = json.loads(review["evidence"]) if review["evidence"] else {}
+                sha = accepted.get("sha") or ""
+                if sha and not any(
+                    isinstance(ev, dict) and (ev.get("kind") or "").lower() == "accept"
+                    and (ev.get("sha") or "") == sha and not ev.get("superseded")
+                    for ev in ticket["review_events"]
+                ):
+                    ticket["review_events"].append({"kind": "accept", "sha": sha})
+            if not dep_released(ticket):
                 unmet.append(dep)
         return unmet
+
+    def _require_released_dependencies(self, conn, project_id, ticket_id):
+        unmet = self._unmet_dependencies(
+            conn, project_id, self._dependencies(conn, project_id, ticket_id))
+        if unmet:
+            raise DependencyUnmet(ticket_id, unmet)
 
     def _serialize_ticket(self, conn, row):
         deps = self._dependencies(conn, row["project_id"], row["id"])
@@ -860,11 +886,9 @@ class BoardStore(MessagingMixin):
                     "claimed" not in ALLOWED_TRANSITIONS[row["state"]]:
                 raise InvalidStateTransition(ticket_id, row["state"], "claimed")
 
-            if enforce_dependencies:
-                deps = self._dependencies(conn, project_id, ticket_id)
-                unmet = self._unmet_dependencies(conn, project_id, deps)
-                if unmet:
-                    raise DependencyUnmet(ticket_id, unmet)
+            # Legacy callers may pass enforce_dependencies=False; it must
+            # never bypass artifact release when starting real work.
+            self._require_released_dependencies(conn, project_id, ticket_id)
 
             active = conn.execute(
                 "SELECT COUNT(*) FROM tickets WHERE owner = ? AND state IN (?, ?)",
@@ -1030,6 +1054,8 @@ class BoardStore(MessagingMixin):
             if row["version"] != expected_version:
                 raise TicketVersionConflict(ticket_id, expected_version,
                                             row["version"])
+            if to_state in ACTIVE_STATES:
+                self._require_released_dependencies(conn, project_id, ticket_id)
             if to_state not in ALLOWED_TRANSITIONS.get(row["state"], set()):
                 raise InvalidStateTransition(ticket_id, row["state"], to_state)
             if to_state == "review" and not json.loads(row["acceptance"]):
@@ -1314,6 +1340,7 @@ class BoardStore(MessagingMixin):
         aid = ids.assignment_id()
         with write_txn(self.conn) as conn:
             self._ticket_row(conn, project_id, ticket_id)
+            self._require_released_dependencies(conn, project_id, ticket_id)
             conn.execute(
                 "INSERT INTO assignments (id, project_id, ticket_id, agent_id, state,"
                 " reason, created_at, expires_at, lease_epoch, version)"
@@ -1341,6 +1368,8 @@ class BoardStore(MessagingMixin):
                          created_at=None, updated_at=None):
         with write_txn(self.conn) as conn:
             self._ticket_row(conn, project_id, ticket_id)
+            if state in ACTIVE_STATES:
+                self._require_released_dependencies(conn, project_id, ticket_id)
             conn.execute(
                 "UPDATE tickets SET state = ?, handoff = COALESCE(?, handoff),"
                 " created_at = COALESCE(?, created_at),"

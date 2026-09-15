@@ -392,7 +392,7 @@ def unreleased_dep_id(t, tickets, only_done=False):
     for dep_id in t.get("deps") or []:
         pred = by_id.get(dep_id)
         if pred is None:
-            continue
+            return dep_id
         if dep_released(pred):
             continue
         if only_done and pred.get("status") != "done":
