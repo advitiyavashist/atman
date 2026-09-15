@@ -44,7 +44,7 @@ The test gates the regression rather than describing the code.
 
 The second one needs saying plainly: the branch was based on `3679053`, whose
 `tests/test_t790_ceo_onboarding.py` still spelled out a real operator home.
-Main scrubbed those literals to `/Users/<operator>` after `3679053`. The diff
+Main scrubbed those literals to `$HOME` after `3679053`. The diff
 `3679053..236db12` for that file is empty — the branch never touched it, it was
 simply behind. Merging `786be1f` clears it, and it is the only way to compare
 this branch against the main it would land on.

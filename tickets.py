@@ -448,7 +448,7 @@ def _trusted_tmp_roots():
     board before any of this was written:
 
         cd <steer> && env -i PATH=... HOME=... \
-            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=/Users/<operator>/Downloads \
+            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=$HOME/Downloads \
             python3 tickets.py board --quiet
 
     printed the full live 200+-ticket board, exit 0, no refusal; the identical
@@ -911,14 +911,23 @@ def load(board, tid):
         sys.exit("no such ticket: %s" % tid)
 
 
+def _ensure_src_path():
+    """Put checkout/release `src/` on sys.path so `ticket_board` is importable."""
+    src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+    if os.path.isdir(src) and src not in sys.path:
+        sys.path.insert(0, src)
+    return src
+
+
 def _recovery():
     """Optional coordination extension: structured handoff + ownership lease."""
     try:
-        import ticket_coordination as tc
+        _ensure_src_path()
+        from ticket_board import ticket_coordination as tc
         return tc
     except ImportError:
         try:
-            from ticket_board import ticket_coordination as tc
+            import ticket_coordination as tc
             return tc
         except ImportError:
             return None
@@ -7099,7 +7108,11 @@ def cmd_board_backup(a, board):
     """Backup tickets/roles/coordination to a tarball (fixture by default)."""
     from pathlib import Path
 
-    from board_backup import backup
+    _ensure_src_path()
+    try:
+        from ticket_board.board_backup import backup
+    except ImportError:
+        from board_backup import backup
 
     manifest = backup(
         Path(board),
@@ -7113,7 +7126,11 @@ def cmd_board_restore(a, board):
     """Restore a backup into a fixture destination board."""
     from pathlib import Path
 
-    from board_backup import restore
+    _ensure_src_path()
+    try:
+        from ticket_board.board_backup import restore
+    except ImportError:
+        from board_backup import restore
 
     result = restore(
         Path(a.archive),
@@ -12303,9 +12320,23 @@ def _t427_verified_sha(tickets_py):
     try:
         with open(manifest) as source:
             release = json.load(source)
-        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
-            path = os.path.join(root, name)
-            recorded = release["files"][name]
+        files = release["files"]
+        if "tickets.py" not in files:
+            return ""
+        if any(name.startswith("src/") for name in files):
+            for required in (
+                "src/ticket_board/ticket_coordination.py",
+                "src/ticket_board/board_backup.py",
+            ):
+                if required not in files:
+                    return ""
+        for name in files:
+            rel = name.replace("\\", "/")
+            if (not rel or rel.startswith("/") or ".." in rel.split("/")
+                    or os.path.normpath(rel) != rel):
+                return ""
+            path = os.path.join(root, rel)
+            recorded = files[name]
             expected_sha, expected_size = (
                 (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
                 else (recorded, None))
@@ -16667,9 +16698,13 @@ def _pinned_hook_identity(board, owner):
     os.environ["TICKET_SEAT"] = owner
     os.environ["TICKETS_DIR"] = os.path.abspath(board)
     try:
-        from ticket_coordination import run as coordination_run
+        _ensure_src_path()
+        from ticket_board.ticket_coordination import run as coordination_run
     except ImportError:
-        sys.exit("ticket_coordination.py is missing; hook identity cannot be verified")
+        try:
+            from ticket_coordination import run as coordination_run
+        except ImportError:
+            sys.exit("ticket_coordination.py is missing; hook identity cannot be verified")
     capture = io.StringIO()
     with contextlib.redirect_stdout(capture):
         coordination_run("identity", argparse.Namespace(), board, globals())
@@ -18177,13 +18212,17 @@ def main():
                    "the case init would otherwise refuse (T-263)")
     c.set_defaults(fn=cmd_init)
 
-    # Optional extension (identity / role / handover / pulse) installed beside
-    # this file by tools/tickets/install.py; the core CLI must not depend on it.
+    # Optional extension (identity / role / handover / pulse). Packaged copy
+    # is canonical; a sibling file remains a fallback for older flat installs.
     try:
-        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-        from ticket_coordination import register
+        _ensure_src_path()
+        from ticket_board.ticket_coordination import register
     except ImportError:
-        register = None
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+            from ticket_coordination import register
+        except ImportError:
+            register = None
     if register:
         register(sub, globals())
 

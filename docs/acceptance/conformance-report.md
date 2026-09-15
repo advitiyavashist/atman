@@ -1,6 +1,6 @@
 # Conformance report
 
-Target: `http://127.0.0.1:50590`
+Target: `<in-process stub>`
 
 **Target is the in-process fixture-replay stub, not a real server.** T-180 (the board API) does not exist yet. This report is a harness self-check: it proves the harness correctly matches status codes and schemas against known-good fixtures. It is not evidence about any real server's behaviour.
 

@@ -19,7 +19,8 @@ import pytest
 from test_wakeup import board  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py", "session_adapters.py")
+FILES = ("tickets.py", "session_adapters.py")
+PACKAGE = ROOT / "src" / "ticket_board"
 START = "# --- T-427: watch idle-boundary self-execv"
 END = "# --- end T-427 ---"
 
@@ -52,6 +53,14 @@ def stamp_release(release, sha):
     for name in FILES:
         data = (release / name).read_bytes()
         files[name] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    package = release / "src" / "ticket_board"
+    if package.is_dir():
+        for path in package.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(release).as_posix()
+            data = path.read_bytes()
+            files[rel] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
     (release / "release.json").write_text(
         __import__("json").dumps({"commit": sha, "files": files}, sort_keys=True) + "\n"
     )
@@ -67,6 +76,7 @@ def make_releases(tmp_path, sha_a="a" * 40, sha_b="b" * 40):
         dest.mkdir(parents=True)
         for name in FILES:
             shutil.copy2(ROOT / name, dest / name)
+        shutil.copytree(PACKAGE, dest / "src" / "ticket_board")
         stamp_release(dest, sha)
         copies[sha] = dest
     write_shim(shim, copies[sha_a] / "tickets.py")
@@ -226,6 +236,63 @@ def test_helper_unreadable_shim_stays_and_logs_once(tmp_path):
     assert hopped == []
     assert len(logs) == 1
     assert "unreadable" in logs[0]
+
+
+def test_helper_package_coordination_tamper_does_not_hop(tmp_path):
+    """New-format releases pin src/ticket_board/*. Tampering the canonical
+    coordination module must refuse the hop even when tickets.py is intact."""
+    tk = load_tickets()
+    tk.watch_idle_reexec._warned = set()
+    shim, rel_a, rel_b, sha_a, sha_b = make_releases(tmp_path)
+    path = rel_b / "src" / "ticket_board" / "ticket_coordination.py"
+    data = bytearray(path.read_bytes())
+    data[0] ^= 0x01
+    path.write_bytes(bytes(data))
+    recorded = __import__("json").loads((rel_b / "release.json").read_text())
+    assert "src/ticket_board/ticket_coordination.py" in recorded["files"]
+    assert path.stat().st_size == recorded["files"]["src/ticket_board/ticket_coordination.py"]["size"]
+    write_shim(shim, rel_b / "tickets.py")
+    hopped = []
+    logs = []
+    tk.watch_idle_reexec(
+        executing_file=str(rel_a / "tickets.py"),
+        shim_path=str(shim),
+        argv=["watch"],
+        log=logs.append,
+        execv=lambda *a: hopped.append(a),
+    )
+    assert hopped == []
+    assert any("not a verified release" in line for line in logs)
+    assert tk._t427_verified_sha(str(rel_b / "tickets.py")) == ""
+
+
+def test_helper_new_format_requires_canonical_package_modules(tmp_path):
+    tk = load_tickets()
+    shim, rel_a, rel_b, sha_a, sha_b = make_releases(tmp_path)
+    recorded = __import__("json").loads((rel_b / "release.json").read_text())
+    del recorded["files"]["src/ticket_board/ticket_coordination.py"]
+    (rel_b / "release.json").write_text(
+        __import__("json").dumps(recorded, sort_keys=True) + "\n"
+    )
+    assert tk._t427_verified_sha(str(rel_b / "tickets.py")) == ""
+
+
+def test_helper_old_flat_manifest_still_verifies(tmp_path):
+    tk = load_tickets()
+    shim, rel_a, rel_b, sha_a, sha_b = make_releases(tmp_path)
+    tickets = (rel_b / "tickets.py").read_bytes()
+    (rel_b / "release.json").write_text(
+        __import__("json").dumps({
+            "commit": sha_b,
+            "files": {
+                "tickets.py": {
+                    "sha256": hashlib.sha256(tickets).hexdigest(),
+                    "size": len(tickets),
+                }
+            },
+        }, sort_keys=True) + "\n"
+    )
+    assert tk._t427_verified_sha(str(rel_b / "tickets.py")) == sha_b
 
 
 def test_helper_same_size_tamper_does_not_hop(tmp_path):

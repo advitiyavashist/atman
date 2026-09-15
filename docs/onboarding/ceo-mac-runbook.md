@@ -1,19 +1,19 @@
-# Any-CEO onboarding on this Mac
+# Any-CEO onboarding (Cursor, local `tickets.py`)
 
 Copy-paste. Do not guess folders. This is the T-790 path: Cursor harness
 only, `python3` on a real `tickets.py`, never the PATH shim.
 
 **You are onboarding.** This is not a ticket claim.
 
-## Folders (this machine)
+## Folders
+
+Set these to the local checkout and living board. Do not paste a machine path.
 
 ```sh
-TICKETS_PY=/Users/kavana/Downloads/atman/.worktrees/cursor-community-t790/tickets.py
-# After this branch merges, prefer local main:
-# TICKETS_PY=/Users/kavana/Downloads/atman/.worktrees/master-merge/tickets.py
-LIVING_BOARD=/Users/kavana/Downloads/steer/.tickets
-STEER=/Users/kavana/Downloads/steer
-ATMAN=/Users/kavana/Downloads/atman
+TICKETS_PY=<repo>/tickets.py
+LIVING_BOARD=<board>
+STEER=<steer>
+ATMAN=<repo>
 
 t() { python3 "$TICKETS_PY" "$@"; }
 
@@ -38,8 +38,8 @@ Bind the existing board. Do not create a second one.
 
 ```sh
 export TICKET_AGENT=atman-ceo
-export TICKETS_DIR=/Users/kavana/Downloads/steer/.tickets
-cd /Users/kavana/Downloads/atman   # or a dedicated CEO worktree; never steer main
+export TICKETS_DIR="$LIVING_BOARD"
+cd "$ATMAN"   # or a dedicated CEO worktree; never steer main
 
 t harness available
 # Probe every catalog row. Ask which to use. Missing is a row. Do not spawn yet.
@@ -115,7 +115,7 @@ t msg --to cos-cursor "CoS: staff cursor only."
 
 T-778 already productized master onboarding (startup first, probe catalog).
 T-780 (IN REVIEW) teaches the plan/graph/follow-up loop. This file does not
-replace either. It pins **this Mac’s folders** and a Cursor-only sequence a
-CEO can execute without guessing.
+replace either. It pins **portable folder placeholders** (`<repo>`, `<board>`)
+and a Cursor-only sequence a CEO can execute without guessing.
 
 See [master-howto.md](master-howto.md) for the long form.

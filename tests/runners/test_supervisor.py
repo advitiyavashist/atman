@@ -88,7 +88,7 @@ def test_the_child_never_inherits_this_agents_board_identity(monkeypatch):
     monkeypatch.setenv("TICKET_AGENT", "opus-infra")
     # Placeholder, not this machine's board -- tests/test_contracts.py
     # fails the build on a real operator home, and the value is never read.
-    monkeypatch.setenv("TICKETS_DIR", "/Users/<operator>/Downloads/steer/.tickets")
+    monkeypatch.setenv("TICKETS_DIR", "/tmp/placeholder-board/.tickets")
     monkeypatch.setenv("PATH", "/usr/bin")
 
     env = child_env()

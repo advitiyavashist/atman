@@ -303,7 +303,7 @@ def _trusted_tmp_roots():
     board before any of this was written:
 
         cd <steer> && env -i PATH=... HOME=... \
-            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=/Users/<operator>/Downloads \
+            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=$HOME/Downloads \
             python3 tickets.py board --quiet
 
     printed the full live 200+-ticket board, exit 0, no refusal; the identical
@@ -3541,7 +3541,10 @@ def cmd_board_backup(a, board):
     """Backup tickets/roles/coordination to a tarball (fixture by default)."""
     from pathlib import Path
 
-    from board_backup import backup
+    try:
+        from .board_backup import backup
+    except ImportError:
+        from board_backup import backup
 
     manifest = backup(
         Path(board),
@@ -3555,7 +3558,10 @@ def cmd_board_restore(a, board):
     """Restore a backup into a fixture destination board."""
     from pathlib import Path
 
-    from board_backup import restore
+    try:
+        from .board_backup import restore
+    except ImportError:
+        from board_backup import restore
 
     result = restore(
         Path(a.archive),
@@ -4856,9 +4862,23 @@ def _t427_verified_sha(tickets_py):
     try:
         with open(manifest) as source:
             release = json.load(source)
-        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
-            path = os.path.join(root, name)
-            recorded = release["files"][name]
+        files = release["files"]
+        if "tickets.py" not in files:
+            return ""
+        if any(name.startswith("src/") for name in files):
+            for required in (
+                "src/ticket_board/ticket_coordination.py",
+                "src/ticket_board/board_backup.py",
+            ):
+                if required not in files:
+                    return ""
+        for name in files:
+            rel = name.replace("\\", "/")
+            if (not rel or rel.startswith("/") or ".." in rel.split("/")
+                    or os.path.normpath(rel) != rel):
+                return ""
+            path = os.path.join(root, rel)
+            recorded = files[name]
             expected_sha, expected_size = (
                 (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
                 else (recorded, None))

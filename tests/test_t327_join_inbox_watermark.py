@@ -53,9 +53,7 @@ def run(board, *args, agent="", entry="root"):
     e["TICKET_AGENT"] = agent or ""
     if entry == "pkg":
         # The packaged console script (pyproject: tickets = ticket_board.cli:main).
-        # cli.py's main() imports top-level `ticket_coordination`, which lives at
-        # the repo root, so the root is on PYTHONPATH alongside src/ -- that is a
-        # pre-existing packaging wart on main, not something this ticket changes.
+        # cli.py imports packaged ticket_coordination; src/ is on PYTHONPATH.
         e["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(ROOT)])
         cmd = [sys.executable, "-m", "ticket_board", *args]
     else:

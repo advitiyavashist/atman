@@ -3,8 +3,8 @@
 Date: 2026-09-08. Operator: Cloud Agent (Advitiya GO via CTO).
 
 This is the post-rewrite leftover-ref deletion + re-scan + visibility
-attempt. It does **not** force-push `main`. Related: `docs/HISTORY_REWRITE.md`,
-`docs/PUBLIC_PREP.md`, closed PR #37.
+attempt. It does **not** force-push `main`. Related: `docs/internal/HISTORY_REWRITE.md`,
+`docs/internal/PUBLIC_PREP.md`, closed PR #37.
 
 ## 1. `origin/main` (unchanged)
 
@@ -45,7 +45,7 @@ shared object store, which still has dirty local objects).
 | gitleaks 8.30.1 | orphan history (1 commit) | **0 leaks** |
 | gitleaks 8.30.1 | working tree (`gitleaks dir`) | **0 leaks** |
 | trufflehog 2.2.1 (pip) | tree entropy/regex | noisy hex/SHA false positives only (git SHAs, `a1b2c3d4…` fixtures, `0123456789abcdefghijklmnopqrstuvwxyz`). No live tokens. |
-| `git grep '/Users/…'` | tip tree | placeholders + this rewrite docs only (`/Users/someone`, `/Users/<operator>`). **No real operator home handle.** |
+| `git grep '/Users/…'` | tip tree | placeholders + this rewrite docs only (`/Users/someone`, `$HOME`). **No real operator home handle.** |
 | Secret filenames | tip tree | no committed `.env`, `*.pem`, `credentials.json`, `modal.toml` |
 
 **CLEAN** on the advertised `main` tip.

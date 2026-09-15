@@ -418,8 +418,10 @@ def test_secret_bearing_fields_use_placeholders():
 # `/home/agent` are the scrubbed placeholder forms the captured adapter
 # fixtures standardised on; any other first segment names whoever happened to
 # run the capture, which is what T-210 exists to keep out of a shared repo.
+# Negative lookbehind keeps nested `.../home/source/...` fixture paths from
+# looking like a Unix home directory (T-981 docs/scripts extension).
 OPERATOR_HOME_RE = re.compile(
-    r"/(?:Users|home)/([A-Za-z0-9_.-]+)(?:/[A-Za-z0-9_.<>-]+)*"
+    r"(?<![A-Za-z0-9_./-])/(?:Users|home)/([A-Za-z0-9_.-]+)(?:/[A-Za-z0-9_.<>-]+)*"
 )
 PLACEHOLDER_HOME_SEGMENTS = {"agent", "operator", "runner", "user",
                              # synthetic handle in the error-leak test
@@ -480,6 +482,15 @@ def test_no_test_file_names_a_real_operator_home():
     )
 
 
+def test_no_docs_or_script_names_a_real_operator_home():
+    """T-981: the T-210 home-path rule also covers docs and scripts."""
+    paths = _text_files(REPO / "docs") + _text_files(REPO / "scripts")
+    violations = _operator_path_violations(paths, REPO)
+    assert not violations, "docs/scripts name a real operator home: " + ", ".join(
+        "{} -> {}".format(rel, found) for rel, found in violations
+    )
+
+
 def test_operator_home_guard_catches_a_planted_literal(tmp_path):
     """The guard bites, and the placeholder forms stay usable.
 
@@ -504,3 +515,7 @@ def test_operator_home_guard_catches_a_planted_literal(tmp_path):
     assert _operator_path_violations([planted], tmp_path) == [
         ("planted.py", "/Users/%s/Downloads/other-board" % handle)
     ]
+
+    # Nested `.../home/source/...` under a workdir is not an operator home.
+    planted.write_text('p = "$WORKDIR/origins/raw/home/source/Library/x"\n')
+    assert _operator_path_violations([planted], tmp_path) == []

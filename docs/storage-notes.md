@@ -267,18 +267,18 @@ test suite minted a real ticket on the live steer board.
 
 **The boundary is computed from the platform, never from the environment.**
 `_trusted_tmp_roots()` uses `os.confstr(65537)` (`_CS_DARWIN_USER_TEMP_DIR`,
-read from the kernel) plus the fixed POSIX roots `/tmp`, `/private/tmp`,
-`/var/tmp`, `/private/var/tmp`, `/usr/tmp`. It does **not** call
+read from the kernel) plus the fixed POSIX roots `/tmp`, `$TMPDIR`,
+`/var/tmp`, `$TMPDIR/tmp`, `/usr/tmp`. It does **not** call
 `tempfile.gettempdir()` on POSIX, because that honours `$TMPDIR` and made the
 guard's own safety boundary settable by the caller it polices: with
-`TMPDIR=/Users/<operator>/Downloads` the live board resolved as "inside tmp" and the
+`TMPDIR=$HOME/Downloads` the live board resolved as "inside tmp" and the
 guard went quiet (T-273).
 
 Two things that look like fixes and are not:
 
 - **Stripping `TMPDIR` and calling `gettempdir()`.** On macOS pytest's
   `tmp_path` lives under the per-user `/var/folders/<…>/T` that `TMPDIR` points
-  at, while `gettempdir()` without `TMPDIR` returns `/private/tmp`. This would
+  at, while `gettempdir()` without `TMPDIR` returns `$TMPDIR`. This would
   refuse every legitimate run in this suite.
 - **Trusting a `pytest-of-*` path component.** pytest creates that name rather
   than reading it from the environment, which is true and irrelevant: any
