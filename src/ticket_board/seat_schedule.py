@@ -144,6 +144,59 @@ def due_seats(data, now_iso):
     return out
 
 
+def entry_name(name, entry):
+    return ((entry or {}).get("name") or name or "").strip() or name
+
+
+def entry_target(name, entry):
+    return ((entry or {}).get("target") or name or "").strip() or name
+
+
+def entry_action(entry):
+    return ((entry or {}).get("action") or "msg").strip() or "msg"
+
+
+def schedule_when(entry):
+    if (entry or {}).get("every_sec"):
+        return "every %ss" % entry["every_sec"]
+    return ((entry or {}).get("cron") or "-")
+
+
+def public_row(name, entry):
+    """User-facing automation view of one schedule.json seat entry."""
+    entry = entry or {}
+    last_result = entry.get("last_result") or ""
+    last_reason = entry.get("last_reason") or ""
+    if not last_result and entry.get("last"):
+        last_result = "ok"
+    return {
+        "name": entry_name(name, entry),
+        "schedule": schedule_when(entry),
+        "action": entry_action(entry),
+        "target": entry_target(name, entry),
+        "enabled": bool(entry.get("enabled", True)),
+        "last": entry.get("last") or "",
+        "last_result": last_result,
+        "last_reason": last_reason,
+        "next": entry.get("next") or "",
+    }
+
+
+def public_rows(data):
+    rows = [public_row(name, entry)
+            for name, entry in sorted((data.get("seats") or {}).items())]
+    return rows
+
+
+def record_run(entry, now_iso, now_dt, result, reason=""):
+    """Stamp last run on the existing entry. result is ok|skipped|failed."""
+    entry["last"] = now_iso
+    entry["last_result"] = result
+    entry["last_reason"] = reason or ""
+    entry["next"] = bump_next(entry, now_dt)
+    return entry
+
+
 def crontab_path():
     return (os.environ.get("TICKETS_CRONTAB") or "").strip()
 
