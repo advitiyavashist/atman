@@ -21,10 +21,10 @@
 
 A worker saying "done" is not verification.
 
-Atman coordinates the agents you already run. What it adds is a same-author
-check they cannot bypass alone: a submitted review points at one exact
-commit, acceptance is a structured verdict recorded against that commit, and
-the tool refuses an accept from the ticket's own author. Seat identity is
+Atman coordinates the agents you already run. What it adds is a review
+record tied to real commits: a submitted review points at one exact commit,
+acceptance is a structured verdict recorded against that commit, and the tool
+refuses an accept from the ticket's own author. Seat identity is
 operator-set, not a cryptographic trust boundary. `atm done` and an accepted
 review are different states, and the app shows which one a ticket has.
 
@@ -105,9 +105,8 @@ Homebrew on macOS is planned but unavailable: the checked-in formula has a
 placeholder checksum, the tap is unpublished, and no release is tagged. Until
 those release artifacts exist, use the clone path above.
 
-`atm` is the command. `tickets` is the same file under its older name, kept
-as a compatibility alias; every `atm <verb>` in this file also runs as
-`tickets <verb>`.
+`atm` is the command. An older name for the same command is kept as a
+compatibility alias, so existing scripts keep working.
 
 ## Onboard
 
