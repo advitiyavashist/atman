@@ -108,6 +108,32 @@ def _kill_pid_tree(pid: int) -> None:
         pass
 
 
+def leftover_suite_ui_children(pytest_pid: int | None = None) -> list[tuple[int, int, str]]:
+    """ui --port processes still parented by this suite or already reparented to 1."""
+    me = int(pytest_pid or os.getpid())
+    leftover: list[tuple[int, int, str]] = []
+    try:
+        out = subprocess.check_output(["ps", "-x", "-o", "pid=,ppid=,command="], text=True)
+    except OSError:
+        return leftover
+    for line in out.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        cmd = parts[2]
+        if pid == me:
+            continue
+        if " ui " not in cmd or "--port" not in cmd:
+            continue
+        if ppid == me:
+            leftover.append((pid, ppid, cmd))
+    return leftover
+
+
 def reap_stale_ui_servers() -> None:
     """Session-start: kill ui servers left by a killed pytest runner."""
     for pid, _port in _read_pid_entries():
@@ -126,7 +152,8 @@ class UiServer:
         self.marker = _board_marker(board, probe_prefix)
         self.port = _free_port()
         env = dict(os.environ, TICKETS_DIR=str(board))
-        ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port), "--host", "127.0.0.1"]
+        ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
+                  "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]
         self.proc = subprocess.Popen(
             [sys.executable, str(_SUPERVISOR), str(os.getpid())] + ui_cmd,
             env=env,

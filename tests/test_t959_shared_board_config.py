@@ -266,3 +266,24 @@ def test_archive_shadow_refuses_to_archive_the_live_board(tool, tmp_path):
     assert r.returncode != 0
     assert "REFUSING" in (r.stdout + r.stderr)
     assert (shared / ".tickets").is_dir()
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_archive_shadow_honors_local_primary_before_configured(tool, tmp_path):
+    """A marked-primary local board is live even when a shared board is configured."""
+    shared = make_shared_board(git_repo(tmp_path / "shared_repo"), seed_ticket_id="T-910")
+    local = make_shadow_board(git_repo(tmp_path / "local_repo"))
+    conf = write_config(tmp_path, {local: shared / ".tickets"})
+    env = clean_env(tmp_path, ATMAN_BOARD_CONFIG=str(conf))
+
+    r_mark = run(tool, local, "board-mark-primary", env=env)
+    assert r_mark.returncode == 0, r_mark.stdout + r_mark.stderr
+    assert (local / ".tickets" / ".primary").is_file()
+
+    r = run(tool, local, "board-archive-shadow", str(local / ".tickets"), "--yes", env=env)
+
+    assert r.returncode != 0
+    assert "REFUSING" in (r.stdout + r.stderr)
+    assert (local / ".tickets").is_dir()
+    assert (local / ".tickets" / ".primary").is_file()
+    assert list(local.glob(".tickets.archived-*")) == []

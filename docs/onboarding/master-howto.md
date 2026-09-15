@@ -470,7 +470,10 @@ That is the other extreme. Prefer the split above.
 sends every command to the wrong board. Unset it or set it on purpose.
 
 **Two agents, one worktree.** `spawn` gives `.worktrees/<name>`. Do not
-point two live seats at the same tree.
+point two live seats at the same tree. Cross-repo boards need
+`atm spawn --repo /path/to/atman` so worktrees and identity-pinned hooks
+come from the deliverable checkout, not `dirname(board)`. See
+`docs/t824-spawn-target-repo.md`.
 
 **Paid smoke.** `harness check` and `watch` run the **real** command.
 A Claude/Codex check burns a real call. Use the dry harness in Step 5.
