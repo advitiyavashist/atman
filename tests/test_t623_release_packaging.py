@@ -144,6 +144,36 @@ def test_release_manifest_lists_every_exported_byte(source, tmp_path):
         assert recorded["sha256"] == installer.digest(data)
 
 
+def test_staged_release_ships_auth_v2_contract_and_same_size_tamper_is_drifted(source, tmp_path):
+    """T-1013: ui --json imports top-level auth_v2_contract; the payload must
+    ship those exact bytes and integrity-check them."""
+    repo, sha = source
+    live = tmp_path / "tools/tickets.py"
+    installer.install(repo, sha, live, activate=True)
+    release = live.parent / "tickets-releases" / sha
+    target = release / "auth_v2_contract.py"
+    assert target.is_file()
+    manifest = json.loads((release / "release.json").read_text())
+    assert "auth_v2_contract.py" in manifest["files"]
+    recorded = manifest["files"]["auth_v2_contract.py"]
+    original = target.read_bytes()
+    assert recorded["size"] == len(original)
+    assert recorded["sha256"] == installer.digest(original)
+
+    tickets_spec = importlib.util.spec_from_file_location(
+        "tickets_release_auth_%s" % release.name, str(release / "tickets.py"))
+    module = importlib.util.module_from_spec(tickets_spec)
+    tickets_spec.loader.exec_module(module)
+    assert module.release_status() == "tickets commit %s (verified release)" % sha
+
+    target.chmod(0o644)
+    tampered = bytes([original[0] ^ 1]) + original[1:]
+    assert len(tampered) == len(original)
+    target.write_bytes(tampered)
+    assert "DRIFTED" in module.release_status()
+    assert "auth_v2_contract.py" in module.release_status()
+
+
 def test_tampered_package_file_is_drifted(source, tmp_path):
     repo, sha = source
     live = tmp_path / "tools/tickets.py"
