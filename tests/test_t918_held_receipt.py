@@ -113,6 +113,23 @@ def test_wake_seat_reports_peer_status_without_heartbeat(
     assert ep.get("last_delivery_id") == "peer-%s" % status
 
 
+def test_refused_receipt_stays_watcher_eligible():
+    """T-1000: REFUSED is an honest miss, not a native success that silences persist."""
+    import tickets as tk
+
+    assert sa._claude_receipt_label({
+        "type": "control", "action": "peer_message_status", "status": "refused",
+    }) == "refused"
+    assert tk._should_poke_persist("refused") is True
+    assert tk._should_poke_persist(
+        "refused (harness claude != provider cursor; removed stale endpoint)") is True
+    for label in ("delivered-confirmed", "held", "dropped", "expired"):
+        assert tk._should_poke_persist(label) is False, label
+    assert tk._should_poke_persist("woken") is False
+    assert tk._native_wake_succeeded("refused") is False
+    assert tk._native_wake_succeeded("delivered-confirmed") is False
+
+
 def test_held_receipt_prints_named_recovery_action():
     assert "crossSessionInbound accept" in sa.CLAUDE_HELD_RECOVERY
     assert "approve in the recipient session" in sa.CLAUDE_HELD_RECOVERY
