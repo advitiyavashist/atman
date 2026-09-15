@@ -26,7 +26,7 @@ Before a public flip:
    fork, worktree, or CI log derived from it).
 2. Replace `origin/main` with the orphan snapshot
    `cursor/t522-orphan-main-9059` using the force-push runbook in
-   `docs/HISTORY_REWRITE.md` (Advitiya / Mac operator). `--force-with-lease`
+   `docs/internal/HISTORY_REWRITE.md` (Advitiya / Mac operator). `--force-with-lease`
    only; do not rewrite `main` from a Cloud Agent unless the owner orders it.
 3. Delete leftover remote branches (they still reach the old objects).
 4. Scan the rewritten history again in a fresh single-branch clone.

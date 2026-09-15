@@ -303,7 +303,7 @@ Known first-run defects, each with the workaround that was tested:
 
 `atm plan` turns JSON `deps` into real `--after` edges. A plan item is
 **ready** only when it carries real `cause`, `change` and `proof`; items
-without them stay in capture until `tickets sound T-00N`. Plan sounds what it
+without them stay in capture until `atm sound T-00N`. Plan sounds what it
 writes, so a planned code ticket needs `--pr N` at review time; on a repo
 with no pull requests use `atm create --deps` instead.
 

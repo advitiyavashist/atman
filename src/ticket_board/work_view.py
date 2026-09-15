@@ -8,14 +8,14 @@ there is exactly one source for what the Work view says about a node.
 
 Evidence states (``phase``) are distinct and never overstate (T-892 review):
 
-* ``ready``     unblocked; no reservation, no task posted; ``tickets next`` claims it
+* ``ready``     unblocked; no reservation, no task posted; ``atm next`` claims it
 * ``reserved``  a reservation names a seat; no task has been posted to it
 * ``posted``    a task message about the ticket was posted to a seat. Inbox read,
                 wake receipt and claim are separate facts; none is implied
 * ``working``   claimed; the evidence is the claim and the last update age
 * ``waiting``   open with unfinished ``--after`` deps
-* ``capture``   open but not sounded (``tickets sound`` promotes it)
-* ``hold``      open but parked (``tickets hold``)
+* ``capture``   open but not sounded (``atm sound`` promotes it)
+* ``hold``      open but parked (``atm hold``)
 * ``blocked`` / ``review`` / ``done`` / ``discarded`` follow the ticket status
 
 Review evidence is separate from ticket status: ``review_of`` reports the
@@ -79,14 +79,45 @@ def _msg_id(m):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _epoch_of(t):
-    """Messages at or before this stamp belong to the ticket's previous life.
+LIFE_PREVIOUS = "previous"
+LIFE_CURRENT = "current"
+LIFE_UNKNOWN = "unknown"
 
-    T-955: now() is second-granularity, so a message posted in the same
-    wall-clock second as the reopen must count as pre-reopen. Callers
-    compare with ``<=``, not ``<``.
+
+def _epoch_of(t):
+    """Second-precision reopen stamp. Prefer ``_life_of`` for current vs previous.
+
+    now() is second-granularity, so this stamp alone cannot order a message
+    posted in the reopen second (T-955). The ``reopened_seen`` message-id
+    cutoff written by ``tickets reopen`` is the event order; without it an
+    equal-second stamp is unknown, never silently stale or current.
     """
     return (t.get("reopened_at") or "").strip()
+
+
+def _life_of(t, m):
+    """Is this message from the ticket's previous life, current life, or unknown?
+
+    Event order is the recorded ``reopened_seen`` message-id cutoff stamped at
+    reopen. UUID lexical order is never used. Without a cutoff, a strictly
+    earlier stamp is previous and a strictly later stamp is current; equal
+    second-precision stamps are unknown, not current dispatch and not ignored
+    history.
+    """
+    seen = t.get("reopened_seen")
+    if isinstance(seen, list):
+        return LIFE_PREVIOUS if _msg_id(m) in set(seen) else LIFE_CURRENT
+    epoch = _epoch_of(t)
+    if not epoch:
+        return LIFE_CURRENT
+    at = (m.get("at") or "").strip()
+    if not at:
+        return LIFE_UNKNOWN
+    if at < epoch:
+        return LIFE_PREVIOUS
+    if at > epoch:
+        return LIFE_CURRENT
+    return LIFE_UNKNOWN
 
 
 # --- review evidence --------------------------------------------------------
@@ -248,6 +279,18 @@ def verdict_of(t, msgs_re=None):
     return review_of(t, msgs_re)["label"]
 
 
+def unverified_done_ids(tickets, messages=None):
+    """Done tickets with no structured ACCEPT / merge on their artifact (T-992).
+
+    A worker's done flag or completion note is not verification. These stay on
+    the Work graph and list, labelled "Marked done; verification not recorded",
+    instead of vanishing into the done count as if accepted.
+    """
+    msgs_re = _messages_by_ticket(messages or [])
+    return set(t["id"] for t in tickets
+               if t.get("status") == "done" and not review_of(t, msgs_re.get(t["id"]))["verified"])
+
+
 # --- routing / delivery evidence --------------------------------------------
 
 def _task_messages_by_ticket(messages):
@@ -300,48 +343,66 @@ def _receipts(to, m, acked, agents, now):
 
 
 def delivery_text(d):
-    """One honest phrase for a task message's receipts."""
+    """Posted/read/wake facts together; a wake label never hides inbox-read."""
     wake = d.get("wake") if d else None
-    if wake and wake.get("confirmed"):
-        return "wake confirmed" + (" " + _fmt_age(wake.get("age_h")) if wake.get("at") else "")
-    if wake and wake.get("label"):
-        return "wake: %s" % wake["label"]
     seen = d.get("seen") if d else None
+    bits = []
+    has_wake = bool(wake and (wake.get("confirmed") or wake.get("label")))
     if seen is True:
-        return "inbox read, not acknowledged"
-    if seen is False:
-        return "not read, wake unconfirmed"
-    return "delivery unknown"
+        bits.append("inbox read, not acknowledged")
+    elif seen is False:
+        bits.append("not read" if has_wake else "not read, wake unconfirmed")
+    if wake and wake.get("confirmed"):
+        bits.append("wake confirmed" + (" " + _fmt_age(wake.get("age_h")) if wake.get("at") else ""))
+    elif wake and wake.get("label"):
+        bits.append("wake: %s" % wake["label"])
+    return " · ".join(bits) if bits else "delivery unknown"
 
 
 def _dispatch_of(t, task_msgs, acked, agents, now):
     """Newest task message about this ticket that is current: after any reopen,
     and addressed to the reserved seat when a reservation exists. Older or
-    other-recipient posts are counted as ``ignored`` history, never as intent."""
+    other-recipient posts are counted as ``ignored`` history, never as intent.
+    Equal-timestamp posts with no event-order cutoff are ``unknown``."""
     tid = t.get("id", "")
     reserved = (t.get("reserved_for") or "").strip()
-    epoch = _epoch_of(t)
     ignored = 0
+    unknown = 0
+    current = None
     for m in reversed(task_msgs.get(tid) or []):
         to = (m.get("to") or "").strip()
         if not to or to.lower() in ("all", "everyone"):
             continue
-        if epoch and (m.get("at") or "") <= epoch:
+        life = _life_of(t, m)
+        if life == LIFE_PREVIOUS:
             ignored += 1
+            continue
+        if life == LIFE_UNKNOWN:
+            unknown += 1
             continue
         if reserved and to != reserved:
             ignored += 1
             continue
+        if current is not None:
+            continue
         d = _receipts(to, m, acked, agents, now)
         d.update({"to": to, "from": m.get("from") or "", "at": m.get("at") or "",
                   "age_h": _hours_since(m.get("at") or "", now), "msg_id": _msg_id(m),
-                  "text": (m.get("text") or "").strip()[:160], "ignored": ignored,
+                  "text": (m.get("text") or "").strip()[:160],
+                  # T-957 sender provenance: absent on pre-provenance records.
                   "unverified": bool(m.get("unverified")),
                   "via": m.get("via") or "",
                   "provenance": "absent" if "via" not in m else (
                       "unverified" if m.get("unverified") else "verified")})
-        return d
-    return None if not ignored else {"ignored": ignored, "to": "", "msg_id": "", "seen": None, "wake": None}
+        current = d
+    if current is not None:
+        current["ignored"] = ignored
+        current["unknown"] = unknown
+        return current
+    if not ignored and not unknown:
+        return None
+    return {"ignored": ignored, "unknown": unknown, "to": "", "msg_id": "",
+            "seen": None, "wake": None}
 
 
 def phase_of(t, waiting, dispatch):
@@ -387,21 +448,21 @@ def wait_of(t, phase, waiting):
     if phase == "waiting":
         return {"kind": "deps", "on": list(waiting),
                 "text": "waits on " + ", ".join(waiting),
-                "cmd": "tickets show %s" % waiting[0]}
+                "cmd": "atm show %s" % waiting[0]}
     if phase == "capture":
         return {"kind": "capture", "on": [],
                 "text": "waits in capture: run sound",
-                "cmd": "tickets sound %s" % tid}
+                "cmd": "atm sound %s" % tid}
     if phase == "hold":
         reason = (t.get("hold_reason") or "").strip()
         return {"kind": "hold", "on": [],
                 "text": "HOLD" + (": " + reason if reason else ""),
-                "cmd": "tickets hold %s --clear" % tid}
+                "cmd": "atm hold %s --clear" % tid}
     if phase == "blocked":
         reason = (_last_note(t).get("text") or "").strip()
         return {"kind": "blocked", "on": [],
                 "text": "blocked" + (": " + reason[:160] if reason else ""),
-                "cmd": "tickets reopen %s" % tid}
+                "cmd": "atm reopen %s" % tid}
     return {"kind": "", "on": [], "text": "", "cmd": ""}
 
 
@@ -409,8 +470,14 @@ def evidence_of(t, phase, dispatch, progress, now):
     owner = (t.get("owner") or "").strip()
     reserved = (t.get("reserved_for") or "").strip()
     ignored = (dispatch or {}).get("ignored") or 0
-    hist = " · %d earlier task post%s ignored (before reopen or to another seat)" % (
+    unknown = (dispatch or {}).get("unknown") or 0
+    ignored_hist = " · %d earlier task post%s ignored (before reopen or to another seat)" % (
         ignored, "" if ignored == 1 else "s") if ignored else ""
+    # CEO decision (T-810 vs T-955): an equal-second post with no event-order
+    # cutoff is UNKNOWN, never current intent and never silently stale.
+    unknown_hist = " · %d task post%s unknown (same second as reopen)" % (
+        unknown, "" if unknown == 1 else "s") if unknown else ""
+    hist = ignored_hist + unknown_hist
     if phase == "working":
         claimed = _hours_since(t.get("claimed_at") or "", now)
         stamps = [n.get("at") for n in (t.get("notes") or []) if n.get("at")]
@@ -440,11 +507,18 @@ def evidence_of(t, phase, dispatch, progress, now):
             text += " · reserved for @%s" % reserved
         return text + hist
     if phase == "reserved":
+        if unknown:
+            return "Reserved for @%s · %d task post%s unknown (same second as reopen), not current · not claimed" % (
+                reserved, unknown, "" if unknown == 1 else "s") + ignored_hist
         return "Reserved for @%s · no task posted · not claimed" % reserved + hist
     if phase == "ready":
-        text = "Unblocked · no reservation, no task posted · tickets next claims it"
+        if unknown:
+            text = ("Task post unknown (same second as reopen) · not current "
+                    "dispatch · a new explicit task is required")
+            return text + ignored_hist
+        text = "Unblocked · no reservation, no task posted · atm next claims it"
         if progress and progress.get("became_ready"):
-            text = "Became ready when %s finished %s · no reservation, no task posted · tickets next claims it" % (
+            text = "Became ready when %s finished %s · no reservation, no task posted · atm next claims it" % (
                 progress["parent"], _fmt_age(progress.get("age_h")))
         return text + hist
     if phase == "waiting":
@@ -453,9 +527,9 @@ def evidence_of(t, phase, dispatch, progress, now):
                 progress["parent"], _fmt_age(progress.get("age_h")), ", ".join(progress["pending"]))
         return "not claimable until its --after deps finish"
     if phase == "capture":
-        return "Captured, not sounded · invisible to tickets next until tickets sound"
+        return "Captured, not sounded · invisible to atm next until atm sound"
     if phase == "hold":
-        return "Parked · tickets next skips it"
+        return "Parked · atm next skips it"
     if phase == "discarded":
         return "Discarded · stays on the graph for history"
     return ""
@@ -492,8 +566,8 @@ def progress_of(t, by_id, done_ids, task_msgs, acked, agents, now):
     elif ticket_on_hold(t):
         gate = "hold"
     became_ready = bool(all_done and not gate and st in ("open", "claimed", "review", "done"))
-    epoch = _epoch_of(t)
     trigger = None
+    trigger_unknown = 0
     for m in reversed(task_msgs.get(tid) or []):
         text = m.get("text") or ""
         if not _trigger_text_matches(text, tid, parent):
@@ -502,8 +576,12 @@ def progress_of(t, by_id, done_ids, task_msgs, acked, agents, now):
         if at and m_at < at:
             continue          # earlier completion of the same parent; same-second
                               # as done_at still counts (success trigger is written then)
-        if epoch and m_at <= epoch:
-            continue          # T-955: same-second as reopen is the previous life
+        life = _life_of(t, m)
+        if life == LIFE_PREVIOUS:
+            continue          # posted in a previous life
+        if life == LIFE_UNKNOWN:
+            trigger_unknown += 1
+            continue          # equal second, no event-order cutoff
         to = (m.get("to") or "").strip()
         trigger = {"to": to, "from": m.get("from") or "", "at": m_at,
                    "age_h": _hours_since(m_at, now), "msg_id": _msg_id(m)}
@@ -530,7 +608,8 @@ def progress_of(t, by_id, done_ids, task_msgs, acked, agents, now):
             "done_deps": [{"id": d, "title": by_id[d].get("title") or "", "at": by_id[d].get("done_at") or ""}
                           for d in sorted(done_deps, key=lambda d: by_id[d].get("done_at") or "")],
             "pending": pending, "all_done": all_done, "gate": gate,
-            "became_ready": became_ready, "trigger": trigger, "claim": claim}
+            "became_ready": became_ready, "trigger": trigger,
+            "trigger_unknown": trigger_unknown, "claim": claim}
 
 
 def _starts_of(t, kids, by_id, done_ids, phases, dispatches):
@@ -597,21 +676,21 @@ def empty_state(tickets, nodes, edges):
         return {"kind": "no_tickets",
                 "lead": "No work yet.",
                 "detail": "Plan the first tasks; add --after links only where one task really must finish before another.",
-                "cmd": "tickets plan '{\"tasks\":[{\"key\":\"a\",\"title\":\"First task\"},{\"key\":\"b\",\"title\":\"Second task\",\"deps\":[\"a\"]}]}'"}
+                "cmd": "atm plan '{\"tasks\":[{\"key\":\"a\",\"title\":\"First task\"},{\"key\":\"b\",\"title\":\"Second task\",\"deps\":[\"a\"]}]}'"}
     if nodes and not edges:
         ids = sorted(set(n["id"] for n in nodes))
         out = {"kind": "no_edges",
                "lead": "No dependencies yet.",
                "detail": "A board of independent tasks is valid. If one ticket must finish before another, record that order so success can start the next one.",
-               "cmd": "tickets plan"}
+               "cmd": "atm plan"}
         if len(ids) >= 2:
-            out["example"] = "tickets dep %s --after %s" % (ids[1], ids[0])
+            out["example"] = "atm dep %s --after %s" % (ids[1], ids[0])
         return out
     if not nodes:
         return {"kind": "all_done",
                 "lead": "Everything on the board is done.",
                 "detail": "Plan the next slice against the objective.",
-                "cmd": "tickets plan"}
+                "cmd": "atm plan"}
     return None
 
 
@@ -712,6 +791,7 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
             "wait": wait_of(t, ph, waiting),
             "dispatch": disp if (disp and disp.get("to")) else None,
             "stale_posts": (disp or {}).get("ignored") or 0,
+            "unknown_posts": (disp or {}).get("unknown") or 0,
             "progress": progress,
             "starts": _starts_of(t, kids, by_id, done_ids, phases, dispatches) if ph == "done" else [],
             "acceptance": {
@@ -728,6 +808,8 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
                          "pr": str(t.get("pr") or ""), "sha": review["artifact"]},
             "review": review,
             "verdict": review["label"],
+            # T-992: done without a structured ACCEPT / merge is shown, never hidden
+            "unverified": bool(t.get("status") == "done" and not review["verified"]),
             "since_update_h": since_update,
             "stale": bool(since_update is not None and since_update > STALE_H),
             "claimed_at": t.get("claimed_at") or "",
@@ -750,6 +832,7 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
     counts = dict((p, 0) for p in PHASES)
     for n in nodes:
         counts[n["phase"]] = counts.get(n["phase"], 0) + 1
+    counts["done_unverified"] = sum(1 for n in nodes if n.get("unverified"))
 
     def _pick(ph):
         return [n for n in nodes if n["phase"] == ph]
@@ -849,6 +932,7 @@ body[data-theme=light] .wv{--wv-acc:#6b4f14;--wv-focus:#6b4f14}
 .wv-node .w.warn{color:var(--warn)}
 .wv-node .who .stale{color:var(--bad)}
 .wv-node.ph-done{opacity:.72}
+.wv-node.ph-done.unverified{opacity:1;--wv-c:var(--warn)}
 .wv-node.ph-discarded{opacity:.5;text-decoration:line-through}
 /* status colours are semantic tokens; brass (--acc) is reserved for actions and focus */
 .ph-working{--wv-c:var(--flight)}.ph-review{--wv-c:var(--review)}.ph-blocked{--wv-c:var(--blocked)}
@@ -894,33 +978,37 @@ WORK_HTML = r"""<div class="wv" id="workView"><p class="graph-empty" id="workVie
 WORK_JS = r"""
 window.AtmanWork=(function(){
   const LS_MODE='tickets-ui-work-mode',LS_SEL='tickets-ui-work-selected';
-  let MODE='graph',SEL='',W=null,HOST=null,SIG='';
+  let MODE='graph',SEL='',W=null,HOST=null,SIG='',SHELL_SEL=null;
   try{MODE=localStorage.getItem(LS_MODE)==='list'?'list':'graph';SEL=localStorage.getItem(LS_SEL)||''}catch(e){}
   // deep links: /?work=T-012 opens that node; /?mode=list opens the list fallback
   try{const q=new URLSearchParams(location.search);if(q.get('mode'))MODE=q.get('mode')==='list'?'list':'graph';if(/^T-\d+$/.test(q.get('work')||''))SEL=q.get('work')}catch(e){}
   const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const PH={working:'Working',review:'In review',blocked:'Blocked',posted:'Task posted',reserved:'Reserved',ready:'Ready',waiting:'Waiting',capture:'Capture',hold:'Hold',done:'Done',discarded:'Discarded'};
   const LEGEND=['ready','reserved','posted','working','review','blocked','waiting','capture','hold','done'];
+  const UNVERIFIED='Marked done; verification not recorded';
   const reduced=()=>{try{return window.matchMedia('(prefers-reduced-motion: reduce)').matches}catch(e){return true}};
   const stacked=()=>{try{return window.matchMedia('(max-width: 900px)').matches}catch(e){return false}};
   function ago(h){if(h==null)return '—';if(h<1/60)return 'just now';if(h<1)return Math.round(h*60)+'m ago';if(h<48)return (h<10?h.toFixed(1):Math.round(h))+'h ago';return Math.round(h/24)+'d ago'}
   function cmd(s){return '<code class="wv-cmd">'+esc(s)+'</code>'}
-  // receipts are separate facts: wake receipt > inbox read > nothing; none of them is a claim
+  // receipts are separate facts shown together; a wake label never hides inbox-read
   function delivery(d){
     if(!d)return 'delivery unknown';
-    if(d.wake&&d.wake.confirmed)return 'wake confirmed'+(d.wake.at?' '+ago(d.wake.age_h):'');
-    if(d.wake&&d.wake.label)return 'wake: '+d.wake.label;
-    if(d.seen===true)return 'inbox read, not acknowledged';
-    if(d.seen===false)return 'not read, wake unconfirmed';
-    return 'delivery unknown';
+    const bits=[];
+    const hasWake=d.wake&&(d.wake.confirmed||d.wake.label);
+    if(d.seen===true)bits.push('inbox read, not acknowledged');
+    else if(d.seen===false)bits.push(hasWake?'not read':'not read, wake unconfirmed');
+    if(d.wake&&d.wake.confirmed)bits.push('wake confirmed'+(d.wake.at?' '+ago(d.wake.age_h):''));
+    else if(d.wake&&d.wake.label)bits.push('wake: '+d.wake.label);
+    return bits.length?bits.join(' · '):'delivery unknown';
   }
   function shortDelivery(d){
     if(!d)return '';
-    if(d.wake&&d.wake.confirmed)return ' · woken';
-    if(d.wake&&d.wake.label)return ' · wake: '+d.wake.label;
-    if(d.seen===true)return ' · read';
-    if(d.seen===false)return ' · unread';
-    return '';
+    const bits=[];
+    if(d.seen===true)bits.push('read');
+    else if(d.seen===false)bits.push('unread');
+    if(d.wake&&d.wake.confirmed)bits.push('woken');
+    else if(d.wake&&d.wake.label)bits.push('wake: '+d.wake.label);
+    return bits.length?' · '+bits.join(' · '):'';
   }
   function who(n,full){
     if(!n.who)return n.phase==='working'||n.phase==='review'||n.phase==='done'?'unowned':'';
@@ -932,7 +1020,7 @@ window.AtmanWork=(function(){
   }
   function exitLine(o){
     if(!o||!o.text)return '';
-    return o.exit_criterion?'<div class="exit"><b>Done when</b> '+esc(o.exit_criterion)+'</div>':'<div class="exit missing"><b>Done when</b> no exit criterion yet — '+cmd('tickets objective --set "…" --exit "…"')+'</div>';
+    return o.exit_criterion?'<div class="exit"><b>Done when</b> '+esc(o.exit_criterion)+'</div>':'<div class="exit missing"><b>Done when</b> no exit criterion yet — '+cmd('atm objective --set "…" --exit "…"')+'</div>';
   }
   function objective(o){
     // T-810 shell may carry its own standing-objective strip above the graph. Defer the
@@ -944,14 +1032,16 @@ window.AtmanWork=(function(){
       return '<section class="wv-objective" aria-label="Done when">'+exitLine(o)+'</section>';
     }
     const has=o&&o.text;
-    return '<section class="wv-objective" aria-label="Objective"><div><div class="k">Objective</div><div class="v">'+(has?esc(o.text):'No standing objective yet.')+'</div>'+(has?'':'<div class="exit mute">'+cmd('tickets objective --set "what we are finishing" --exit "how we know it is done"')+'</div>')+'</div>'+(has&&o.state?'<span class="state">'+esc(o.state)+'</span>':'')+exitLine(o)+'</section>';
+    return '<section class="wv-objective" aria-label="Objective"><div><div class="k">Objective</div><div class="v">'+(has?esc(o.text):'No standing objective yet.')+'</div>'+(has?'':'<div class="exit mute">'+cmd('atm objective --set "what we are finishing" --exit "how we know it is done"')+'</div>')+'</div>'+(has&&o.state?'<span class="state">'+esc(o.state)+'</span>':'')+exitLine(o)+'</section>';
   }
   function nodeBtn(n){
-    const w=n.wait&&n.wait.text?'<span class="w'+(n.wait.kind==='deps'?'':' warn')+'">'+esc(n.wait.text)+'</span>':'';
+    // T-992: a done flag without a structured ACCEPT is shown as unverified, in the node itself
+    const unv=n.phase==='done'&&n.unverified?UNVERIFIED:'';
+    const w=n.wait&&n.wait.text?'<span class="w'+(n.wait.kind==='deps'?'':' warn')+'">'+esc(n.wait.text)+'</span>':(unv?'<span class="w warn">'+esc(unv)+'</span>':'');
     const stale=n.stale?' <span class="stale">silent '+esc(ago(n.since_update_h))+'</span>':'';
     const wh=who(n);
-    return '<button type="button" class="wv-node ph-'+esc(n.phase)+'" data-id="'+esc(n.id)+'" aria-pressed="'+(SEL===n.id?'true':'false')+'" aria-label="'+esc(n.id+' '+n.title+', '+(PH[n.phase]||n.phase)+(wh?', '+wh:'')+(n.wait&&n.wait.text?', '+n.wait.text:''))+'">'+
-      '<span class="top"><span class="id">'+esc(n.id)+'</span><span class="ph">'+esc(PH[n.phase]||n.phase)+'</span></span>'+
+    return '<button type="button" class="wv-node ph-'+esc(n.phase)+(unv?' unverified':'')+'" data-id="'+esc(n.id)+'" aria-pressed="'+(SEL===n.id?'true':'false')+'" aria-label="'+esc(n.id+' '+n.title+', '+(unv?'Done, unverified':(PH[n.phase]||n.phase))+(wh?', '+wh:'')+(n.wait&&n.wait.text?', '+n.wait.text:''))+'">'+
+      '<span class="top"><span class="id">'+esc(n.id)+'</span><span class="ph">'+esc(unv?'Done · unverified':(PH[n.phase]||n.phase))+'</span></span>'+
       '<span class="t">'+esc(n.title)+'</span>'+
       (wh?'<span class="who">'+esc(wh)+stale+'</span>':(stale?'<span class="who">'+stale+'</span>':''))+w+'</button>';
   }
@@ -979,6 +1069,7 @@ window.AtmanWork=(function(){
     else if(p.became_ready)s='Became ready when '+parent+' finished '+when+' (all '+p.done_deps.length+' '+(p.done_deps.length===1?'dependency':'dependencies')+' done).';
     else s='Dependencies finished ('+parent+' last, '+when+'); readiness not evidenced.';
     if(p.trigger)s+=' Success trigger posted to @'+esc(p.trigger.to||'?')+' '+esc(ago(p.trigger.age_h))+' · '+esc(delivery(p.trigger))+'.';
+    else if(p.trigger_unknown)s+=' Success trigger unknown (same second as reopen); not acted on, a new explicit task is required.';
     else if(p.all_done&&!p.gate)s+=' No trigger message posted.';
     const c=p.claim;
     if(c){
@@ -1013,17 +1104,17 @@ window.AtmanWork=(function(){
   function detailHtml(n){
     const wh=who(n,true);
     const a=n.acceptance||{};
-    const acc=a.proof?esc(a.proof):(n.lane==='capture'?'<span class="warn">not sounded yet — '+cmd('tickets sound '+n.id)+'</span>':'<span class="mute">none recorded</span>');
+    const acc=a.proof?esc(a.proof):(n.lane==='capture'?'<span class="warn">not sounded yet — '+cmd('atm sound '+n.id)+'</span>':'<span class="mute">none recorded</span>');
     const qs=(a.open_questions||[]).length?'<ul>'+a.open_questions.map(q=>'<li>'+esc(q)+'</li>').join('')+'</ul>':'';
     const hand=(n.handoff||[]).length?'<ul class="wv-handoff">'+n.handoff.map(h=>'<li><span class="from">'+esc(h.from)+'</span> <span class="by">'+esc(h.by||'?')+(h.at?' · '+esc(h.at):'')+'</span><br>'+esc(h.text)+(h.truncated?'…':'')+'</li>').join('')+'</ul>':'';
     const art=n.artifact||{};
     const artTxt=[art.commit?esc(art.commit):'',art.pr?'PR '+esc(art.pr):'',art.branch&&!(art.commit||'').startsWith(art.branch)?esc(art.branch):''].filter(Boolean).join(' · ');
-    const cmds=['tickets show '+n.id];
-    if(n.phase==='ready')cmds.push('tickets next');
-    if(n.phase==='capture')cmds.push('tickets sound '+n.id);
-    if(n.phase==='hold')cmds.push('tickets hold '+n.id+' --clear');
-    if(n.phase==='review')cmds.push('tickets merge '+n.id);
-    if(n.who&&n.who_kind!=='suggested')cmds.push('tickets msg --to '+n.who+' --re '+n.id+' "…"');
+    const cmds=['atm show '+n.id];
+    if(n.phase==='ready')cmds.push('atm next');
+    if(n.phase==='capture')cmds.push('atm sound '+n.id);
+    if(n.phase==='hold')cmds.push('atm hold '+n.id+' --clear');
+    if(n.phase==='review')cmds.push('atm merge '+n.id);
+    if(n.who&&n.who_kind!=='suggested')cmds.push('atm msg --to '+n.who+' --re '+n.id+' "…"');
     const stat=esc(n.evidence);
     return '<button type="button" class="close" data-wv-close aria-label="Close detail">Close</button>'+
       '<div class="hd ph-'+esc(n.phase)+'"><span class="id">'+esc(n.id)+'</span><span class="pill">'+esc(PH[n.phase]||n.phase)+'</span>'+(n.role?'<span class="mute">'+esc(n.role)+'</span>':'')+'<span class="mute">P'+esc(n.priority)+'</span></div>'+
@@ -1059,6 +1150,12 @@ window.AtmanWork=(function(){
     }).join('');
   }
   function nodeOf(id){return W&&W.nodes.find(n=>n.id===id)}
+  function emitWorkSelect(opts){
+    opts=opts||{};
+    const n=SEL?nodeOf(SEL):null;
+    SHELL_SEL=SEL;
+    try{document.dispatchEvent(new CustomEvent('atman:work-select',{detail:{id:SEL,title:n?n.title:'',phase:n?n.phase:'',to:n?(n.who_kind==='suggested'?'':n.who):'',who_kind:n?n.who_kind:'',initial:!!opts.initial}}))}catch(e){}
+  }
   function renderDetail(){
     const body=HOST.querySelector('.wv-body'),el=HOST.querySelector('.wv-detail');
     const n=SEL?nodeOf(SEL):null;
@@ -1079,7 +1176,7 @@ window.AtmanWork=(function(){
     const n=SEL?nodeOf(SEL):null;
     if(SEL!==prev)announce(n?n.id+' detail open: '+n.title+'. '+(PH[n.phase]||n.phase)+'.':'Detail closed');
     // the shell's composer follows the selection: who to address and about what
-    try{document.dispatchEvent(new CustomEvent('atman:work-select',{detail:{id:SEL,title:n?n.title:'',phase:n?n.phase:'',to:n?(n.who_kind==='suggested'?'':n.who):'',who_kind:n?n.who_kind:''}}))}catch(e){}
+    emitWorkSelect();
     if(opts.focus&&SEL){const b=HOST.querySelector('.wv-node[data-id="'+SEL+'"]');if(b)b.focus()}
     // stacked layout (≤900px): the detail sits below the graph; bring it into view, Back returns
     if(SEL&&SEL!==prev&&stacked()&&!opts.noScroll){const el=HOST.querySelector('.wv-detail');if(el)el.scrollIntoView({block:'start',behavior:reduced()?'auto':'smooth'})}
@@ -1103,7 +1200,7 @@ window.AtmanWork=(function(){
     const focusClose=inside&&active.hasAttribute('data-wv-close');
     const focusBack=inside&&active.hasAttribute('data-wv-back');
     const focusMode=(inside&&active.dataset)?active.dataset.wvMode:'';
-    const legend='<span class="legend" aria-label="Phases">'+LEGEND.map(p=>'<span class="ph-'+p+'">'+esc(PH[p])+(w.counts&&w.counts[p]?' '+w.counts[p]:'')+'</span>').join('')+'</span>';
+    const legend='<span class="legend" aria-label="Phases">'+LEGEND.map(p=>'<span class="ph-'+p+'">'+esc(PH[p])+(w.counts&&w.counts[p]?' '+w.counts[p]:'')+(p==='done'&&w.counts&&w.counts.done_unverified?' · '+w.counts.done_unverified+' unverified':'')+'</span>').join('')+'</span>';
     const modes='<span class="wv-modes" role="group" aria-label="Layout"><button type="button" data-wv-mode="graph" aria-pressed="'+(MODE==='graph')+'">Graph</button><button type="button" data-wv-mode="list" aria-pressed="'+(MODE==='list')+'">List</button></span>';
     let main;
     if(w.empty&&!(w.nodes||[]).length)main=emptyHtml(w.empty);
@@ -1111,6 +1208,8 @@ window.AtmanWork=(function(){
     HOST.innerHTML='<div class="wv">'+objective(w.objective)+'<p class="wv-lead">Follow the work. Select a ticket for its blockers, handoff, and review.</p><div class="wv-bar">'+legend+modes+'</div><div class="wv-body"><div class="wv-main">'+main+'</div><aside class="wv-detail" aria-label="Ticket detail" hidden></aside></div><div class="wv-sr" aria-live="polite" data-wv-live></div></div>';
     if(SEL&&!nodeOf(SEL))SEL='';
     renderDetail();drawEdges();
+    // stored / deep-linked SEL never goes through select(); tell the shell once, no focus
+    if(SEL!==SHELL_SEL)emitWorkSelect({initial:true});
     if(focusId){const b=HOST.querySelector('.wv-node[data-id="'+focusId+'"]');if(b)b.focus()}
     else if(focusClose){const c=HOST.querySelector('[data-wv-close]');if(c)c.focus()}
     else if(focusBack){const c=HOST.querySelector('[data-wv-back]');if(c)c.focus()}

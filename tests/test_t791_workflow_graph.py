@@ -1,6 +1,6 @@
-"""T-791: workflow dependency graph in tickets ui — edges, not a title dump.
+"""T-791: workflow dependency graph in atm ui — edges, not a title dump.
 
-tickets graph / tickets map already exist. The command board must show the
+atm graph / atm map already exist. The command board must show the
 same --after waiting-on edges (ticket ids + status), not a list of titles.
 Do not remake T-780/T-778/T-781. Throwaway boards only.
 """
@@ -26,8 +26,8 @@ def test_ui_html_has_graph_view_not_title_dump():
     assert 'data-work-view="graph"' in ui
     assert "function renderGraph" in ui
     assert "waiting on " in ui
-    assert "tickets graph" in ui
-    assert "tickets map" in ui
+    assert "atm graph" in ui
+    assert "atm map" in ui
     assert 'id="open"' not in ui
     tabs = ui[ui.index('<nav class="tabs"'):ui.index("</nav>", ui.index('<nav class="tabs"'))]
     assert all(label in tabs for label in [">Objective<", ">Team<", ">Work<", ">Intervene<"])
@@ -72,10 +72,14 @@ def test_active_graph_omits_unrelated_done(board):
     run(board, "create", "Build login UI", "--role", "frontend", "--deps", "T-001")
     extra = run(board, "create", "Unrelated leftover")
     assert extra.returncode == 0, extra.stderr
-    # Force T-003 done without going through review: edit the fixture file.
+    # Force T-003 done with a structured ACCEPT on its artifact: edit the fixture file.
+    # (T-992: a done flag *without* an ACCEPT stays visible -- see test_t992_launch_repair.)
     path = board / "T-003.json"
     rec = json.loads(path.read_text())
     rec["status"] = "done"
+    rec["commit"] = "br@abc1234"
+    rec["review_events"] = [{"kind": "accept", "by": "cos", "at": "2026-09-13T02:10:00Z",
+                             "sha": "abc1234", "notes": "verified"}]
     path.write_text(json.dumps(rec, indent=2) + "\n")
     d = json.loads(run(board, "ui", "--json").stdout)
     ids = [n["id"] for n in d["graph"]["nodes"]]

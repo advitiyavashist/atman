@@ -4,10 +4,10 @@ Start here. Pick one file.
 
 | If you are… | Read |
 |---|---|
-| A CEO on **this Mac** (absolute folders, Cursor only) | [ceo-mac-runbook.md](ceo-mac-runbook.md) |
+| A CEO joining a living board (`python3` on `tickets.py`) | [ceo-mac-runbook.md](ceo-mac-runbook.md) |
 | Taking the **master** seat in a fresh Claude / Cursor / Codex session | [master-howto.md](master-howto.md) |
 | Running `tickets` for the first time as a worker | [../first-session.md](../first-session.md) |
-| Wiring Claude, Codex, or Cursor to a board that already exists | `tickets guide` or `tickets connect` |
+| Wiring Claude, Codex, or Cursor to a board that already exists | `atm guide` or `atm connect` |
 | Registering a custom / local harness | [../byoa.md](../byoa.md) |
 | Seeding role context (know → inject → update) | [role-context.md](role-context.md) |
 | Adding or updating evidence, runbooks, and skills | [../knowledge/README.md](../knowledge/README.md) |
@@ -16,7 +16,7 @@ Atman is a **team runtime**. You bring the harnesses. The board owns the
 objective, the shared state, the task graph, messaging, scheduling, and
 verification. The north star is **task completion in the fewest turns**.
 
-Team intro, in order: probe integrations (`tickets harness available`),
-`tickets plan` with real `--after` edges, unattended persist to a reviewable SHA,
-then human review (`tickets review`) as the gate. See
+Team intro, in order: probe integrations (`atm harness available`),
+`atm plan` with real `--after` edges, unattended persist to a reviewable SHA,
+then human review (`atm review`) as the gate. See
 [master-howto.md](master-howto.md) and [first session](../first-session.md).

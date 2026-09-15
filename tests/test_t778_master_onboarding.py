@@ -1,7 +1,7 @@
 """T-778: productize master onboarding (throwaway board only).
 
-Startup must be the first thing `tickets connect`, `tickets boot`, and
-`tickets master` print — not after MASTER.md history. `tickets harness
+Startup must be the first thing `atm connect`, `atm boot`, and
+`atm master` print — not after MASTER.md history. `atm harness
 available` prints every catalog row, including missing binaries, and never
 spawns. Stale ~/.local/bin/codex is retargeted to the newest openai.chatgpt-*
 extension binary under the test HOME, never the operator's.
@@ -110,7 +110,7 @@ def test_master_init_writes_onboarding_template(tmp_path):
     assert r.returncode == 0, r.stderr
     body = (repo / ".tickets" / "MASTER.md").read_text()
     assert body.lstrip().startswith("**You are onboarding.**")
-    assert "tickets harness available" in body
+    assert "atm harness available" in body
     assert "Onboarding name:" in body
 
 

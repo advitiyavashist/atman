@@ -667,7 +667,7 @@
         "T-001"
       ],
       "exit": 0,
-      "stdout": "[>] IN PROGRESS T-001  T-001  (owner=worker)\n\nBoard: /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3/.tickets  (cwd is /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3)\nTime: active 0m, waited 3.7d before claim, last update 0m ago\nlane: ready\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3 worktree add .worktrees/worker-work -b worker-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3/.worktrees/worker-work\n",
+      "stdout": "[>] IN PROGRESS T-001  T-001  (owner=worker)\n\nBoard: /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3/.tickets  (cwd is $TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3)\nTime: active 0m, waited 3.7d before claim, last update 0m ago\nlane: ready\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C $TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3 worktree add .worktrees/worker-work -b worker-work\n  cd $TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wijp6sx3/.worktrees/worker-work\n",
       "stderr": "",
       "changed": [
         "T-001.json",
@@ -740,7 +740,7 @@
         "T-002"
       ],
       "exit": 0,
-      "stdout": "[>] IN PROGRESS T-002  T-002  (owner=worker; after T-001)\n\nBoard: /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct/.tickets  (cwd is /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct)\nTime: active 0m, waited 3.7d before claim, last update 0m ago\nlane: ready\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct worktree add .worktrees/worker-work -b worker-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct/.worktrees/worker-work\n",
+      "stdout": "[>] IN PROGRESS T-002  T-002  (owner=worker; after T-001)\n\nBoard: /var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct/.tickets  (cwd is $TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct)\nTime: active 0m, waited 3.7d before claim, last update 0m ago\nlane: ready\n\nRULE: you are on branch '?' in the primary worktree. Work on your own tree:\n  git -C $TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct worktree add .worktrees/worker-work -b worker-work\n  cd $TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-wub2bhct/.worktrees/worker-work\n",
       "stderr": "",
       "changed": [
         "T-002.json",
@@ -890,7 +890,7 @@
       ],
       "exit": 1,
       "stdout": "",
-      "stderr": "Traceback (most recent call last):\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 13351, in <module>\n    main()\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 13347, in main\n    a.fn(a, board)\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 1905, in cmd_board\n    tickets = load_all(board)\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 603, in load_all\n    out.append(read_ticket_file(path))\n  File \"/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 572, in read_ticket_file\n    with open(path) as f:\nFileNotFoundError: [Errno 2] No such file or directory: '/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-xnlmg6k2/.tickets/T-002.json'\n",
+      "stderr": "Traceback (most recent call last):\n  File \"$TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 13351, in <module>\n    main()\n  File \"$TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 13347, in main\n    a.fn(a, board)\n  File \"$TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 1905, in cmd_board\n    tickets = load_all(board)\n  File \"$TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 603, in load_all\n    out.append(read_ticket_file(path))\n  File \"$TMPDIR/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-review-g1z4aoe8/repairs/tickets.py\", line 572, in read_ticket_file\n    with open(path) as f:\nFileNotFoundError: [Errno 2] No such file or directory: '/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t805-probe-xnlmg6k2/.tickets/T-002.json'\n",
       "changed": []
     },
     {

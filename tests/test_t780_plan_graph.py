@@ -1,6 +1,6 @@
 """T-780: plan + graph + follow-up as the onboarding loop (throwaway board).
 
-tickets plan must create real --after edges. tickets graph must show statuses.
+atm plan must create real --after edges. atm graph must show statuses.
 MASTER_TEMPLATE / master-howto / CoS onboarding teach that loop — not one
 create per title, and not a second planner product.
 """
@@ -122,27 +122,27 @@ def test_docs_teach_plan_graph_followup_not_create_per_title():
     i = src.find(marker)
     assert i != -1
     template = src[i:i + 8000]
-    assert "tickets plan" in template
-    assert "tickets graph" in template
-    assert "one tickets create per task" not in template
+    assert "atm plan" in template
+    assert "atm graph" in template
+    assert "one atm create per task" not in template
     assert "COS ONBOARDING" in template
     assert "You are onboarding as chief of staff" in template
-    assert "tickets reopen" in template
-    assert "tickets drive" in template
-    assert "tickets update" in template
-    assert "tickets here" in template
-    assert "create --blocks" in template or "tickets create --blocks" in template
+    assert "atm reopen" in template
+    assert "atm drive" in template
+    assert "atm update" in template
+    assert "atm here" in template
+    assert "create --blocks" in template or "atm create --blocks" in template
 
-    assert "tickets plan" in howto
-    assert "one tickets create per task" not in howto
-    assert "tickets graph" in howto
+    assert "atm plan" in howto
+    assert "one atm create per task" not in howto
+    assert "atm graph" in howto
     assert "90m" in howto or "90 m" in howto
-    assert "tickets drive" in howto
+    assert "atm drive" in howto
     assert "chief of staff" in howto.lower() or "CoS" in howto
 
-    assert "tickets plan" in cli
+    assert "atm plan" in cli
     assert "COS ONBOARDING" in cli
-    assert "one tickets create per task" not in cli
+    assert "one atm create per task" not in cli
 
 
 def test_init_master_template_has_plan_loop(tmp_path):
@@ -151,10 +151,10 @@ def test_init_master_template_has_plan_loop(tmp_path):
     r = run(repo, "init", env=env, tmp_path=tmp_path)
     assert r.returncode == 0, r.stderr
     body = (repo / ".tickets" / "MASTER.md").read_text()
-    assert "tickets plan" in body
-    assert "tickets graph" in body
+    assert "atm plan" in body
+    assert "atm graph" in body
     assert "COS ONBOARDING" in body
-    assert "one tickets create per task" not in body
+    assert "one atm create per task" not in body
 
 
 def test_connect_mentions_plan_graph(tmp_path):
@@ -164,6 +164,6 @@ def test_connect_mentions_plan_graph(tmp_path):
     assert r.returncode == 0, r.stderr
     c = run(repo, "connect", env=env, tmp_path=tmp_path)
     assert c.returncode == 0, c.stderr
-    assert "tickets plan" in c.stdout
-    assert "tickets graph" in c.stdout
-    assert c.stdout.find("**You are onboarding.**") < c.stdout.find("tickets plan")
+    assert "atm plan" in c.stdout
+    assert "atm graph" in c.stdout
+    assert c.stdout.find("**You are onboarding.**") < c.stdout.find("atm plan")

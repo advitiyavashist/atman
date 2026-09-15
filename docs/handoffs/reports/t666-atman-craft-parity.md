@@ -23,7 +23,7 @@ Craft bar (both products): easy onboard, fewest turns / least cost visible, slic
 | Server empty copy | `src/ticket_board/server/views.py` `EMPTY_STATES` | `3e184cb2ee4f` |
 | Brand / TEAM IA | `docs/brand/atman-tokens.md`, `docs/brand/atman-brand-direction-v1.md`, `docs/product/atman-team-ia-v1.md` | `2c7362280a9d`, `e9d717a42c93`, `e543720f22e9` |
 | Landing (aligned tokens) | `landing/index.html`, `landing/styles.css` | `b690ce986280`, `711f241d680f` |
-| Stale Ticket Board spec | `docs/interface-v1.md`, `docs/prototype.html`, `ui/README.md` | `4d1716caef4e`, `2dd93aacd3f8`, `a8643e329ff5` |
+| Stale Ticket Board spec | `docs/interface-v1.md`, `docs/internal/prototype.html`, `ui/README.md` | `4d1716caef4e`, `2dd93aacd3f8`, `a8643e329ff5` |
 | Guards | `tests/test_t571_ux_bar.py`, `tests/test_t606_family_identity.py`, `tests/ui/overview.test.tsx`, `tests/ui/copy.test.ts` | `f004b8436cb4`, (family identity), `147ef0c7b089`, copy test |
 
 Prior craft work already on tip: T-571 UX bar (PR #57), T-575 docs (PR #56), T-606 family identity, Team seats no-pitch (PR #48). T-669 PM docs/IA canonical is **DONE**.
@@ -73,7 +73,7 @@ Header on `tickets ui` is the clutter: sprint “no active sprint” + 0-width b
 
 **Allowed Steer `^`:** portfolio caret is the literal `^` (`test_atman_mark_and_portfolio_caret_have_separate_jobs`). `docs/brand/atman-tokens.md` says the caret belongs to steer.md and may appear only on portfolio nav. **T-665 logo HOLD only — not blocking.**
 
-**Fail on React + leftovers:** `ui/src/styles.css` still ships retired blue `--blue:#5b8def` / `#0c0e12` (tokens.md migration table). `docs/prototype.html` still titles “Ticket Board” with `↗`. Brand docs still list `self ↔ whole` as *Use* language while UI tests ban that string from chrome. Token/IA leftovers ride **T-673** (SoT) and, if React ships, **T-676**.
+**Fail on React + leftovers:** `ui/src/styles.css` still ships retired blue `--blue:#5b8def` / `#0c0e12` (tokens.md migration table). `docs/internal/prototype.html` still titles “Ticket Board” with `↗`. Brand docs still list `self ↔ whole` as *Use* language while UI tests ban that string from chrome. Token/IA leftovers ride **T-673** (SoT) and, if React ships, **T-676**.
 
 ### 5. Promise / hero metrics honesty + visibility
 

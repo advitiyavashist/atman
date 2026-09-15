@@ -630,7 +630,7 @@ def run(command, args, board, api):
                     "roles": state["roles"],
                     "active": active,
                     "handovers": state["handovers"][-20:],
-                    "cadence": "tickets here every 15m; tickets update every 45m and milestones",
+                    "cadence": "atm here every 15m; atm update every 45m and milestones",
                 },
             )
         print(json.dumps(result, indent=2))

@@ -11,7 +11,12 @@ import subprocess
 import sys
 import tempfile
 
-FILES = ("tickets.py", "ticket_coordination.py", "board_backup.py", "session_adapters.py")
+# Root siblings only. board_backup and ticket_coordination live in the package.
+FILES = (
+    "tickets.py",
+    "session_adapters.py",
+    "auth_v2_contract.py",
+)
 PACKAGE_PREFIX = "src/ticket_board"
 
 
@@ -113,6 +118,8 @@ def smoke(script, sha):
         if "agents" not in util:
             raise RuntimeError("smoke failed: util --json missing agents")
         run("route")
+        # ui --json imports top-level auth_v2_contract from the staged snapshot.
+        # Missing that file used to crash ModuleNotFoundError outside a checkout.
         snap = json.loads(run("ui", "--json"))
         if snap.get("turns", {}).get("v") != 1:
             raise RuntimeError("smoke failed: ui --json turns snapshot missing v=1")

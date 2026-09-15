@@ -11,9 +11,9 @@ Cursor hooks and stale Codex identities in the same worktree scope.
 - Required rollback launcher SHA-256: `86569dbf42fb11f81dcd5cb9e0825bb5df32b5bd16e446b714f1da5fe03aa160`
 - Active release: `f523e59af461c13023b88c41f444d873d69ee0ae`
 - Active launcher SHA-256: `926c6fd4579120739a6a04c6e3aafa3c40ed3162d33770a33fc3d3957c10d51f`
-- Global command: `/Users/kavana/.local/bin/tickets`
-- Preserved 3a641 launcher: `/Users/kavana/.claude/tools/tickets-releases/previous-86569dbf42fb11f81dcd5cb9e0825bb5df32b5bd16e446b714f1da5fe03aa160`
-- Immediate prior launcher: `/Users/kavana/.claude/tools/tickets-releases/previous-bb4b89676683b86899cf043f4d38026d74ad54620640c07df9f1bfd556df2ee8`
+- Global command: `$HOME/.local/bin/tickets`
+- Preserved 3a641 launcher: `$HOME/.claude/tools/tickets-releases/previous-86569dbf42fb11f81dcd5cb9e0825bb5df32b5bd16e446b714f1da5fe03aa160`
+- Immediate prior launcher: `$HOME/.claude/tools/tickets-releases/previous-bb4b89676683b86899cf043f4d38026d74ad54620640c07df9f1bfd556df2ee8`
 
 If both layers must be restored, run the hook rollback commands below before
 rolling back the CLI. Then restore the CLI to the required release from this
@@ -27,10 +27,10 @@ The four hook installers retained exact byte-level, mode-0600 rollback
 receipts. One-step hook rollback commands are:
 
 ```sh
-tickets hooks claude --agent sol-ceo-cto --settings /Users/kavana/.claude/settings.json --rollback
-tickets hooks codex --agent codex-master --hooks-file /Users/kavana/.codex/hooks.json --rollback
-tickets hooks cursor --agent cursor --worktree /Users/kavana --rollback
-tickets hooks remote --agent grok-worker --wrapper /Users/kavana/.local/bin/tickets-grok-worker --rollback
+tickets hooks claude --agent sol-ceo-cto --settings $HOME/.claude/settings.json --rollback
+tickets hooks codex --agent codex-master --hooks-file $HOME/.codex/hooks.json --rollback
+tickets hooks cursor --agent cursor --worktree $HOME --rollback
+tickets hooks remote --agent grok-worker --wrapper $HOME/.local/bin/tickets-grok-worker --rollback
 ```
 
 Rollback was not executed because the active release passed its gates.
@@ -39,14 +39,14 @@ Rollback was not executed because the active release passed its gates.
 
 | Harness | Durable identity | Installed surface |
 |---|---|---|
-| Claude Code | `sol-ceo-cto` | `/Users/kavana/.claude/settings.json` |
-| Codex | `codex-master` | `/Users/kavana/.codex/hooks.json`, scoped to `/Users/kavana/Downloads/steer/.worktrees/sol-ceo-cto` |
-| Cursor | `cursor` | `/Users/kavana/.cursor/hooks.json` and `/Users/kavana/.cursor/hooks/tickets-board.py` |
-| Grok/custom remote | `grok-worker` | `/Users/kavana/.local/bin/tickets-grok-worker` and its `.hooks.json` manifest |
+| Claude Code | `sol-ceo-cto` | `$HOME/.claude/settings.json` |
+| Codex | `codex-master` | `$HOME/.codex/hooks.json`, scoped to `$HOME/Downloads/steer/.worktrees/<seat>` |
+| Cursor | `cursor` | `$HOME/.cursor/hooks.json` and `$HOME/.cursor/hooks/tickets-board.py` |
+| Grok/custom remote | `grok-worker` | `$HOME/.local/bin/tickets-grok-worker` and its `.hooks.json` manifest |
 
 Each generated command freezes both `TICKET_AGENT` and `TICKETS_DIR`. The live
 upgrade test set hostile ambient values and ran the installed commands from
-`/private/tmp`; all four kept their configured identities. It also proved
+`$TMPDIR`; all four kept their configured identities. It also proved
 there is exactly one generated Codex hook per lifecycle event and one generated
 Cursor hook per lifecycle event. No old `0dbd18` Codex entry or legacy
 `check-message-board.py` Cursor entry remains.
@@ -74,7 +74,7 @@ hook failure.
 
 ## Local command latency
 
-Three runs per command from `/private/tmp`; values include Python startup,
+Three runs per command from `$TMPDIR`; values include Python startup,
 release-manifest verification, board loading, and report rendering.
 
 | Command | p50 | max |

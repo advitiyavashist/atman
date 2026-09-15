@@ -37,7 +37,7 @@ def _run_pkg_cli(board, *args, agent="", cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
-    # cli.py still imports top-level ticket_coordination from the repo root.
+    # Packaged ticket_coordination lives under src/.
     e["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(ROOT)])
     where = cwd or board.parent
     return subprocess.run(

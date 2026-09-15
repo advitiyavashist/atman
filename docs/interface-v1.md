@@ -58,7 +58,7 @@ waiting for agent”, not “Working”. All durations use server timestamps.
 Keyboard: semantic tables/buttons, visible focus, labels, dialog focus trap and
 Escape dismissal, no color-only signals. Mobile becomes stacked rows. Respect
 reduced motion; no chart unless its numerator, denominator and time window exist.
-The companion prototype.html is a clickable fixture, not a running control plane.
+The companion internal fixture (`docs/internal/prototype.html`) is a clickable mock, not a running control plane.
 
 ## Connect an agent
 

@@ -1,7 +1,7 @@
 """T-790: any-CEO executable onboarding path (throwaway board only).
 
-python3 tickets.py — never PATH tickets. Cursor harness only. Real
-tickets plan deps. No living Steer TICKETS_DIR. No tickets clear.
+python3 tickets.py — never PATH tickets. Real
+atm plan deps. No shared living TICKETS_DIR. No atm clear.
 """
 import json
 import os
@@ -61,20 +61,16 @@ def make_repo(path):
     return path
 
 
-def test_runbook_pins_this_mac_and_forbids_shim():
+def test_runbook_pins_placeholders_and_forbids_shim():
     body = RUNBOOK.read_text(encoding="utf-8")
-    pinned = re.sub(
-        r"/(?:Users|home)/[A-Za-z0-9_.-]+",
-        r"/Users/<operator>",
-        body,
-    )
-    assert "/Users/<operator>/Downloads/atman/.worktrees/cursor-community-t790/tickets.py" in pinned
-    assert "/Users/<operator>/Downloads/steer/.tickets" in pinned
+    assert "TICKETS_PY=<repo>/tickets.py" in body
+    assert "LIVING_BOARD=<board>" in body
+    assert "REPO=<repo>" in body
     assert "python3" in body
     assert "stale shim" in body
     assert "~/.local/bin/tickets" in body
-    assert "tickets plan" in body
-    assert "one `tickets create` per title" in body
+    assert "atm plan" in body
+    assert "one `atm create` per title" in body
     assert "--roles master" in body
     assert "--wake-mode continuous" in body
     assert "--harness cursor" in body
@@ -83,9 +79,10 @@ def test_runbook_pins_this_mac_and_forbids_shim():
     assert "objective --set" in body
     assert "master cos" in body
     assert "msg --to" in body
-    assert "tickets init" in body and "tickets clear" in body
-    assert "HOLD T-773" in body
-    assert "steer main" in body
+    assert "atm init" in body and "atm clear" in body
+    assert "HOLD T-773" not in body
+    assert "Living Steer" not in body
+    assert "No NER" not in body
     assert "Minions" not in body and "Inspect" not in body
     assert ONBOARD.read_text(encoding="utf-8").count("ceo-mac-runbook.md") >= 1
     assert "docs/onboarding/ceo-mac-runbook.md" in README.read_text(encoding="utf-8")

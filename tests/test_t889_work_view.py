@@ -115,11 +115,11 @@ def test_ready_reserved_working_are_distinct_evidence(board):
     _chain(board)
     by = _nodes(board)
     assert by["T-001"]["phase"] == "ready"
-    assert by["T-001"]["evidence"] == "Unblocked · no reservation, no task posted · tickets next claims it"
+    assert by["T-001"]["evidence"] == "Unblocked · no reservation, no task posted · atm next claims it"
     assert by["T-001"]["who_kind"] == ""
     assert by["T-002"]["phase"] == "waiting"
     assert by["T-002"]["wait"] == {"kind": "deps", "on": ["T-001"], "text": "waits on T-001",
-                                   "cmd": "tickets show T-001"}
+                                   "cmd": "atm show T-001"}
     assert run(board, "next", agent="alice").returncode == 0
     by = _nodes(board)
     assert by["T-001"]["phase"] == "working"
@@ -187,7 +187,7 @@ def test_capture_hold_blocked_and_review_carry_reason_and_command(board):
     by = _nodes(board)
     assert by["T-002"]["phase"] == "capture"
     assert by["T-002"]["wait"]["text"] == "waits in capture: run sound"
-    assert by["T-002"]["wait"]["cmd"] == "tickets sound T-002"
+    assert by["T-002"]["wait"]["cmd"] == "atm sound T-002"
     assert by["T-002"]["acceptance"]["proof"] == ""
     assert by["T-003"]["phase"] == "hold"
     assert by["T-003"]["wait"]["kind"] == "hold"
@@ -244,17 +244,17 @@ def test_empty_states_never_invent_dependencies(board):
         p.unlink()
     w = _snap(board)["work"]
     assert w["empty"]["kind"] == "no_tickets"
-    assert w["empty"]["cmd"].startswith("tickets plan")
+    assert w["empty"]["cmd"].startswith("atm plan")
     assert run(board, "create", "First", "--role", "docs", agent="planner").returncode == 0
     w = _snap(board)["work"]
     # one ticket: independent work is valid; no self-dependency example
     assert w["empty"]["kind"] == "no_edges" and w["empty"]["lead"] == "No dependencies yet."
-    assert w["empty"]["cmd"] == "tickets plan" and "example" not in w["empty"]
+    assert w["empty"]["cmd"] == "atm plan" and "example" not in w["empty"]
     assert run(board, "create", "Second", "--role", "docs", agent="planner").returncode == 0
     w = _snap(board)["work"]
     ids = sorted(n["id"] for n in w["nodes"])
-    assert w["empty"]["cmd"] == "tickets plan"
-    assert w["empty"]["example"] == "tickets dep %s --after %s" % (ids[1], ids[0])
+    assert w["empty"]["cmd"] == "atm plan"
+    assert w["empty"]["example"] == "atm dep %s --after %s" % (ids[1], ids[0])
 
 
 # --- T-892 item 2: reservation / posting / read / wake / claim are distinct ----
@@ -294,6 +294,7 @@ def test_posted_read_woken_and_claimed_carry_different_labels():
     _, by = _pure([_t("T-001")], [msg], acked=lambda who, m: True, agents=agents)
     assert by["T-001"]["dispatch"]["wake"]["confirmed"] is False
     assert "wake: queued-offline" in by["T-001"]["evidence"]
+    assert "inbox read, not acknowledged" in by["T-001"]["evidence"]
     # a receipt for a different message proves nothing about this one
     agents["bob"]["wake_delivery"] = {"message_id": "other", "label": "woken", "at": T0}
     _, by = _pure([_t("T-001")], [msg], acked=lambda who, m: True, agents=agents)
@@ -305,6 +306,25 @@ def test_posted_read_woken_and_claimed_carry_different_labels():
     assert by["T-001"]["dispatch"] is None
 
 
+def test_inbox_read_stays_visible_beside_unconfirmed_wake():
+    msg = {"id": "m9", "kind": "task", "re": "T-009", "to": "carol", "from": "planner",
+           "at": "2026-09-13T00:00:01Z", "text": "please take T-009"}
+    agents = {"carol": {"owner": "carol", "wake_delivery": {
+        "message_id": "m9", "label": "no live endpoint", "at": "2026-09-13T00:00:02Z"}}}
+    _, before = _pure([_t("T-009")], [msg], acked=lambda who, m: False, agents=agents)
+    _, after = _pure([_t("T-009")], [msg], acked=lambda who, m: True, agents=agents)
+    assert "wake: no live endpoint" in before["T-009"]["evidence"]
+    assert "inbox read, not acknowledged" not in before["T-009"]["evidence"]
+    assert "not read" in before["T-009"]["evidence"]
+    ev = after["T-009"]["evidence"]
+    assert "inbox read, not acknowledged" in ev
+    assert "wake: no live endpoint" in ev
+    assert ev != before["T-009"]["evidence"]
+    assert work_view.delivery_text({"seen": True, "wake": {
+        "label": "no live endpoint", "confirmed": False}}) == (
+        "inbox read, not acknowledged · wake: no live endpoint")
+
+
 def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
     old = {"id": "m0", "kind": "task", "re": "T-001", "to": "carol", "from": "planner",
            "at": "2026-09-12T00:00:00Z", "text": "take T-001"}
@@ -313,6 +333,14 @@ def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
     n = by["T-001"]
     assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
     assert "1 earlier task post ignored" in n["evidence"]
+    # same UTC second, no event-order cutoff: unknown, not posted and not "no task posted"
+    same = dict(old, id="m-eq", at="2026-09-13T00:00:00Z")
+    _, by = _pure([_t("T-001", reopened_at="2026-09-13T00:00:00Z")], [same])
+    n = by["T-001"]
+    assert n["phase"] != "posted" and n["dispatch"] is None
+    assert n["unknown_posts"] == 1 and n["stale_posts"] == 0
+    assert "unknown (same second as reopen)" in n["evidence"]
+    assert "no task posted" not in n["evidence"]
     # reassigned by reservation: a post to another seat does not name the current recipient
     _, by = _pure([_t("T-001", reserved_for="bob")], [old])
     n = by["T-001"]
@@ -320,24 +348,83 @@ def test_stale_task_post_before_reopen_or_to_another_seat_is_ignored():
     assert n["evidence"].startswith("Reserved for @bob · no task posted")
 
 
-def test_same_second_task_post_as_reopen_is_pre_reopen_history():
-    """T-955: now() is whole seconds. m.at == reopened_at is the previous life."""
-    epoch = "2026-09-14T12:00:00Z"
-    same = {"id": "m-same", "kind": "task", "re": "T-001", "to": "carol",
-            "from": "planner", "at": epoch, "text": "take T-001"}
+# --- reopen / same-second boundary (CEO decision, T-810 vs T-955) -----------
+# (1) a shared event order (the reopened_seen cutoff) decides, never the
+#     second-resolution stamp; (2) equal stamps with no shared order are UNKNOWN:
+#     labelled 'unknown (same second as reopen)', never current intent and never
+#     silently stale; (3) automation does not act on an unknown-ordered post.
+
+SAME_EPOCH = "2026-09-14T12:00:00Z"
+SAME_POST = {"id": "m-same", "kind": "task", "re": "T-001", "to": "carol",
+             "from": "planner", "at": SAME_EPOCH, "text": "take T-001"}
+
+
+def test_same_second_task_post_as_reopen_is_never_current_dispatch():
+    """T-955 negative control, the original bug: a task post stamped in the
+    reopen second must never be read as current dispatch intent. No cutoff,
+    no widening: the assertion is the one T-955 opened with."""
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH)], [SAME_POST])
+    n = by["T-001"]
+    assert n["dispatch"] is None
+    assert n["phase"] != "posted"
+    # a strictly later post is current, so the boundary is exact, not a blanket ignore
     later = {"id": "m-new", "kind": "task", "re": "T-001", "to": "bob",
              "from": "planner", "at": "2026-09-14T12:00:01Z", "text": "take T-001 now"}
-    _, by = _pure([_t("T-001", reopened_at=epoch)], [same])
-    n = by["T-001"]
-    assert n["dispatch"] is None and n["stale_posts"] == 1
-    _, by = _pure([_t("T-001", reopened_at=epoch, reserved_for="bob")], [same, later])
-    n = by["T-001"]
-    assert n["dispatch"]["to"] == "bob"
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH, reserved_for="bob")], [SAME_POST, later])
+    assert by["T-001"]["dispatch"]["to"] == "bob"
 
 
-def test_same_second_trigger_as_reopen_is_ignored_but_same_second_as_done_counts():
-    """T-955: reopen epoch uses <=; parent done_at keeps < so a success
-    trigger posted in the completion second still counts."""
+def test_same_second_post_with_sequence_cutoff_is_previous_life():
+    """Sequence path: the reopened_seen cutoff recorded by tickets reopen is
+    the event order, so an equal-second post inside it is stale history."""
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH, reopened_seen=["m-same"])], [SAME_POST])
+    n = by["T-001"]
+    assert n["dispatch"] is None
+    assert n["stale_posts"] == 1 and n["unknown_posts"] == 0
+    assert "1 earlier task post ignored" in n["evidence"]
+    assert "unknown" not in n["evidence"]
+
+
+def test_same_second_post_without_cutoff_is_labelled_unknown():
+    """Unknown label path: equal stamps and no shared order are UNKNOWN. The
+    evidence says so; it is neither 'no task posted' nor silently stale."""
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH)], [SAME_POST])
+    n = by["T-001"]
+    assert n["unknown_posts"] == 1 and n["stale_posts"] == 0
+    assert "unknown (same second as reopen)" in n["evidence"]
+    assert "no task posted" not in n["evidence"]
+    assert "ignored" not in n["evidence"]
+    # reserved seat: the reservation stands, the unknown post is still named
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH, reserved_for="carol")], [SAME_POST])
+    n = by["T-001"]
+    assert n["phase"] == "reserved" and n["dispatch"] is None
+    assert n["evidence"].startswith("Reserved for @carol")
+    assert "1 task post unknown (same second as reopen)" in n["evidence"]
+
+
+def test_unknown_ordered_post_does_not_drive_automation():
+    """Automation no-act path: an unknown-ordered post is not a dispatch (the
+    ticket stays ready, nobody is named) and is not a success trigger."""
+    _, by = _pure([_t("T-001", reopened_at=SAME_EPOCH)], [SAME_POST])
+    n = by["T-001"]
+    assert n["phase"] == "ready" and n["who"] == "" and n["dispatch"] is None
+    assert "a new explicit task is required" in n["evidence"]
+    done = "2026-09-13T01:00:00Z"
+    a = _t("T-001", status="done", owner="x", done_at=done)
+    epoch = "2026-09-13T02:00:00Z"
+    child = _t("T-002", deps=["T-001"], reserved_for="bob", reopened_at=epoch)
+    trig = {"id": "m-ep", "kind": "task", "re": "T-002", "to": "bob", "from": "x",
+            "at": epoch, "text": "unblocked T-002 after T-001 -- start (success trigger)"}
+    _, by = _pure([a, child], [trig])
+    p = by["T-002"]["progress"]
+    assert p["trigger"] is None and p["trigger_unknown"] == 1
+    assert "Success trigger unknown (same second as reopen)" in work_view.WORK_JS
+
+
+def test_same_second_trigger_as_reopen_is_not_current_but_same_second_as_done_counts():
+    """T-955 negative control for the trigger scan: a trigger stamped in the
+    reopen second is never a current trigger; parent done_at keeps < so a
+    success trigger posted in the completion second still counts."""
     done = "2026-09-13T01:00:00Z"
     a = _t("T-001", status="done", owner="x", done_at=done)
     same_done = {"id": "m-eq", "kind": "task", "re": "T-002", "to": "bob", "from": "x",
@@ -367,6 +454,58 @@ def test_reopen_stamps_reopened_at_so_old_posts_drop_out(board):
     n = by["T-001"]
     assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
     assert n["reopened_at"] == t["reopened_at"]
+    assert "reopened_seen" in t and isinstance(t["reopened_seen"], list)
+    assert t["reopened_seen"]  # the pre-reopen task post is in the cutoff
+
+
+def test_same_second_post_order_uses_seen_cutoff_not_uuid():
+    # ids chosen so lexical UUID order would get the chronology backwards
+    before = {"id": "zzz-after-lexically", "kind": "task", "re": "T-001", "to": "carol",
+              "from": "planner", "at": T0, "text": "take T-001 before reopen"}
+    after = {"id": "aaa-before-lexically", "kind": "task", "re": "T-001", "to": "alice",
+             "from": "planner", "at": T0, "text": "take T-001 after reopen"}
+    # post-before-reopen: id recorded in the cutoff, even though it sorts last
+    _, by = _pure([_t("T-001", reopened_at=T0, reopened_seen=["zzz-after-lexically"])], [before])
+    n = by["T-001"]
+    assert n["phase"] == "ready" and n["dispatch"] is None and n["stale_posts"] == 1
+    assert n["unknown_posts"] == 0
+    assert "1 earlier task post ignored" in n["evidence"]
+    # post-after-reopen: id not in the cutoff, even though it sorts first
+    _, by = _pure([_t("T-001", reopened_at=T0, reopened_seen=["zzz-after-lexically"])], [after])
+    n = by["T-001"]
+    assert n["phase"] == "posted" and n["dispatch"]["to"] == "alice"
+    assert n["stale_posts"] == 0 and n["unknown_posts"] == 0
+    assert "Task posted to @alice" in n["evidence"]
+    # both lives in one log: current post wins; previous-life still counted
+    _, by = _pure([_t("T-001", reopened_at=T0, reopened_seen=["zzz-after-lexically"])],
+                  [before, after])
+    n = by["T-001"]
+    assert n["phase"] == "posted" and n["dispatch"]["to"] == "alice"
+    assert n["stale_posts"] == 1 and n["unknown_posts"] == 0
+    assert "1 earlier task post ignored" in n["evidence"]
+
+
+def test_reopen_then_immediate_post_is_current_even_same_second(board):
+    _team(board)
+    assert run(board, "msg", "take T-001", "--to", "bob", "--re", "T-001", "--task",
+               agent="planner").returncode == 0
+    assert run(board, "reopen", "T-001", "--notes", "bob lost the seat",
+               agent="planner").returncode == 0
+    t = json.loads((board / "T-001.json").read_text())
+    seen = list(t.get("reopened_seen") or [])
+    assert seen
+    assert run(board, "msg", "take T-001 now", "--to", "alice", "--re", "T-001", "--task",
+               agent="planner").returncode == 0
+    t2 = json.loads((board / "T-001.json").read_text())
+    by = _nodes(board)
+    n = by["T-001"]
+    assert n["phase"] == "posted" and n["dispatch"]["to"] == "alice"
+    assert n["stale_posts"] == 1
+    # new post is not in the reopen cutoff even if at == reopened_at
+    msgs = [json.loads(ln) for ln in (board / "messages.jsonl").read_text().splitlines() if ln.strip()]
+    newest = [m for m in msgs if m.get("re") == "T-001" and m.get("to") == "alice"][-1]
+    assert work_view._msg_id(newest) not in seen
+    assert t2.get("reopened_at") == t["reopened_at"]
 
 
 # --- T-892 item 3: the success-to-next story --------------------------------
@@ -456,6 +595,36 @@ def test_trigger_causality_needs_matching_completion_then_claim():
     assert "told" not in work_view.WORK_JS
 
 
+def test_same_second_trigger_order_uses_seen_cutoff_not_uuid():
+    a = _t("T-001", status="done", owner="x", done_at=T0)
+    # lexical order of these ids is the opposite of event order
+    after = {"id": "aaa-before-lexically", "kind": "task", "re": "T-002", "to": "bob",
+             "from": "x", "at": T0,
+             "text": "unblocked T-002 after T-001 -- start (success trigger)"}
+    before = dict(after, id="zzz-after-lexically")
+    c = _t("T-002", status="claimed", owner="bob", deps=["T-001"],
+           claimed_at="2026-09-13T00:00:01Z", reopened_at=T0,
+           reopened_seen=["zzz-after-lexically"])
+    _, by = _pure([a, c], [after])
+    p = by["T-002"]["progress"]
+    assert p["trigger"]["to"] == "bob" and p["trigger"]["msg_id"] == "aaa-before-lexically"
+    assert p["trigger_unknown"] == 0
+    assert p["claim"]["causality"] == "after_trigger"
+    # same-second trigger already in the cutoff is previous-life, not current
+    open_child = _t("T-002", deps=["T-001"], reopened_at=T0,
+                    reopened_seen=["zzz-after-lexically"])
+    _, by = _pure([a, open_child], [before])
+    p = by["T-002"]["progress"]
+    assert p["trigger"] is None and p["trigger_unknown"] == 0
+    # equal timestamp, no cutoff: unknown, not a current trigger
+    claimed = _t("T-002", status="claimed", owner="bob", deps=["T-001"],
+                 claimed_at="2026-09-13T00:00:01Z", reopened_at=T0)
+    _, by = _pure([a, claimed], [after])
+    p = by["T-002"]["progress"]
+    assert p["trigger"] is None and p["trigger_unknown"] == 1
+    assert p["claim"]["causality"] == "unverified"
+
+
 # --- T-892 item 4: review evidence for the exact artifact --------------------
 
 def _rev(status, commit, notes):
@@ -508,8 +677,8 @@ def test_review_verdicts_fix_accept_none_superseded_and_marked_done():
     _, by = _pure([_rev("done", "br@def5678", [sub2])])
     assert by["T-001"]["review"]["label"] == "Marked done; verification not recorded"
     assert by["T-001"]["review"]["verified"] is False
-    # tickets merge's own note is main evidence for that pin
-    merged = ("planner", "2026-09-13T03:00:00Z", "merged into main as 9999999 (tickets merge; pinned def5678)")
+    # atm merge's own note is main evidence for that pin
+    merged = ("planner", "2026-09-13T03:00:00Z", "merged into main as 9999999 (atm merge; pinned def5678)")
     _, by = _pure([_rev("done", "br@def5678", [sub2, acc, merged])])
     assert by["T-001"]["review"]["label"] == "Merged into main as def5678"
     assert by["T-001"]["review"]["verified"] is True
@@ -554,6 +723,21 @@ def test_module_uses_semantic_status_tokens_and_readable_light_focus():
     # stacked layout reaches the detail and returns to the node
     assert "data-wv-back" in js and "scrollIntoView" in js
     assert "Follow the work. Select a ticket for its blockers, handoff, and review." in js
+
+
+def test_initial_deeplink_or_stored_sel_notifies_shell_once():
+    js = work_view.WORK_JS
+    assert "q.get('work')" in js and "LS_SEL" in js
+    assert "function emitWorkSelect" in js
+    assert "emitWorkSelect({initial:true})" in js
+    assert "if(SEL!==SHELL_SEL)" in js
+    assert "initial:!!opts.initial" in js
+    # click path still emits without the restore flag; restore does not focus
+    assert "emitWorkSelect();" in js
+    assert "opts.focus&&SEL" in js
+    # wake label and inbox-read stay composed in the module copy
+    assert "inbox read, not acknowledged" in js
+    assert "hasWake?'not read':'not read, wake unconfirmed'" in js
 
 
 def test_work_payload_is_pure_and_survives_bad_ack():

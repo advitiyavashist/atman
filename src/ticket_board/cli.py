@@ -12,12 +12,12 @@ Board location, in order of preference:
   $TICKETS_DIR
   nearest ancestor with a live .tickets/ board
   git worktree/root .tickets
-  the only live .tickets/ in a child directory (so `tickets next` from a
+  the only live .tickets/ in a child directory (so `atm next` from a
   parent folder like Downloads still finds the project)
   cwd/.tickets
 
-`tickets board` does not scan children — SessionStart hooks stay silent in
-folders that are not the project. `tickets next` / `show` / `done` do.
+`atm board` does not scan children — SessionStart hooks stay silent in
+folders that are not the project. `atm next` / `show` / `done` do.
 
 Agent identity for a single command comes from $TICKET_AGENT (set it per tool:
 claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
@@ -51,7 +51,7 @@ except ImportError:
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
-# words agents may type for `tickets status <id> <word>`
+# words agents may type for `atm status <id> <word>`
 STATUS_WORDS = {
     "todo": "open", "to-do": "open", "open": "open", "unassigned": "open", "backlog": "open",
     "in-progress": "claimed", "inprogress": "claimed", "progress": "claimed", "wip": "claimed",
@@ -60,7 +60,7 @@ STATUS_WORDS = {
     "blocked": "blocked", "stuck": "blocked",
     "done": "done", "merged": "done", "closed": "done", "complete": "done",
 }
-UPDATE_EVERY_MIN = 45  # agents must post `tickets update` at least this often
+UPDATE_EVERY_MIN = 45  # agents must post `atm update` at least this often
 
 DEFAULT_ROLES = {
     "codex": ["console"],
@@ -105,6 +105,106 @@ def child_boards(cwd):
     except OSError:
         pass
     return found
+
+
+PRIMARY_BOARD_MARKER = ".primary"
+
+
+def _atman_config_path():
+    """Where the machine-level "which repo uses which shared board" map lives.
+    See tickets.py's copy of this function for the full rationale (T-959);
+    kept identical across both entry points so a fix ported to one does not
+    leave the other behaving differently (T-243)."""
+    override = os.environ.get("ATMAN_BOARD_CONFIG")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.expanduser("~/.config/atman/board.json")
+
+
+def _configured_shared_board(repo_root):
+    if not repo_root:
+        return None
+    try:
+        with open(_atman_config_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    boards = data.get("boards") if isinstance(data, dict) else None
+    if not isinstance(boards, dict):
+        return None
+    real_root = os.path.realpath(repo_root)
+    for key, val in boards.items():
+        if not val:
+            continue
+        try:
+            if os.path.realpath(os.path.expanduser(key)) == real_root:
+                return os.path.abspath(os.path.expanduser(val))
+        except (OSError, TypeError):
+            continue
+    return None
+
+
+def _is_marked_primary(path):
+    return os.path.isfile(os.path.join(path, PRIMARY_BOARD_MARKER))
+
+
+def _board_has_content(path):
+    if _live_board(path):
+        return True
+    if not os.path.isdir(path):
+        return False
+    for name in ("messages.jsonl", "workforce.json", "roles.json"):
+        p = os.path.join(path, name)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return True
+    agents_dir = os.path.join(path, "agents")
+    if os.path.isdir(agents_dir):
+        try:
+            if any(n.endswith(".json") for n in os.listdir(agents_dir)):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _shadow_board_refusal(candidate, configured):
+    real_candidate = os.path.realpath(candidate)
+    sys.exit(
+        "REFUSING BOARD %r: this repo has a configured shared board (%s) that "
+        "disagrees with the local .tickets found here, and the local one is "
+        "NOT empty and NOT marked primary -- resolving to it risks stranding "
+        "real data (messages, agent registrations) on a board nothing else "
+        "reads, the T-959 shape. Pick one:\n"
+        "  * use the shared board:      export TICKETS_DIR=%s\n"
+        "  * inspect what is here:      tickets doctor\n"
+        "  * keep this repo's own board on purpose:\n"
+        "                                tickets board-mark-primary\n"
+        "  * archive this board aside (never deletes):\n"
+        "                                tickets board-archive-shadow %s --yes\n"
+        % (real_candidate, configured, configured, real_candidate)
+    )
+
+
+def _apply_shared_board_config(candidate):
+    if os.environ.get("TICKETS_DIR"):
+        return candidate
+    root = _repo_root()
+    configured = _configured_shared_board(root)
+    if not configured:
+        return candidate
+    configured = os.path.realpath(configured)
+    real_candidate = os.path.realpath(candidate)
+    if configured == real_candidate:
+        return candidate
+    if _is_marked_primary(candidate):
+        return candidate
+    if not _board_has_content(candidate):
+        sys.stderr.write(
+            "tickets: cwd .tickets is empty -- using this repo's configured "
+            "shared board %s\n" % configured
+        )
+        return configured
+    _shadow_board_refusal(candidate, configured)
 
 
 def _repo_root():
@@ -220,7 +320,7 @@ def _init_refusal(target, ambient):
         "live board). Pick one:\n"
         "  * bind this directory:      export TICKETS_DIR=%s\n"
         "  * install into the board\n"
-        "    that is actually in effect: tickets init --board %s\n"
+        "    that is actually in effect: atm init --board %s\n"
         "  * run init in %s instead\n"
         % (target, os.getcwd(), ambient, _init_disagreement_cause(ambient),
            target, ambient, os.path.dirname(ambient))
@@ -303,7 +403,7 @@ def _trusted_tmp_roots():
     board before any of this was written:
 
         cd <steer> && env -i PATH=... HOME=... \
-            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=/Users/<operator>/Downloads \
+            PYTEST_CURRENT_TEST="fake::test (call)" TMPDIR=$HOME/Downloads \
             python3 tickets.py board --quiet
 
     printed the full live 200+-ticket board, exit 0, no refusal; the identical
@@ -403,6 +503,9 @@ def _cwd_belongs_to_board(board_path):
     here = _init_cwd_worktree_root()
     if here and os.path.realpath(os.path.join(here, ".tickets")) == board:
         return True
+    configured = _configured_shared_board(root) if root else None
+    if configured and os.path.realpath(configured) == board:
+        return True
     return False
 
 
@@ -432,6 +535,7 @@ def _refuse_unbound_live_board(path):
 
 def board_dir(discover_children=True):
     result = _board_dir_uncached(discover_children)
+    result = _apply_shared_board_config(result)
     _refuse_board_outside_pytest_tmp(result)
     _refuse_unbound_live_board(result)
     return result
@@ -1064,7 +1168,7 @@ def _current_ticket(board, owner):
 
 
 def _here_ticket(board, owner):
-    """Ticket id for tickets here (T-543 / T-551). Two-copy of tickets.py."""
+    """Ticket id for atm here (T-543 / T-551). Two-copy of tickets.py."""
     claimed = [t["id"] for t in load_all(board)
                if t.get("status") == "claimed" and t.get("owner") == owner]
     if claimed:
@@ -1212,7 +1316,7 @@ def _held_claimed(board, owner, except_id=None):
 
 def _already_hold_msg(held):
     ids = ", ".join(t["id"] for t in held)
-    return ("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
+    return ("you already hold %s -- finish it (atm review/block/reopen) before claiming "
             "more, or pass --another if you really want to work two in parallel." % ids)
 
 
@@ -1649,7 +1753,7 @@ def cmd_board(a, board):
         mine = [t for t in tickets if t.get("sprint") == cur["id"]]
         d, n, _, _ = progress(mine)
         hdr.append("sprint %s %s" % (cur["id"], bar(d, n, 10)))
-    hdr.append("master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    hdr.append("master: %s" % (m["owner"] if m else "nobody (atm master take)"))
     seat = session_seat(board)
     recorded = seat_confirmed(board)
     hdr.append("you: %s%s" % (seat, "" if recorded else " (UNCONFIRMED)"))
@@ -1657,7 +1761,7 @@ def cmd_board(a, board):
     if not recorded:
         print("  ^ this session has NOT recorded a seat; %r is a guess from the "
               "environment." % seat)
-        print("    Run `tickets join <your-name> --roles <role>` before acting on "
+        print("    Run `atm join <your-name> --roles <role>` before acting on "
               "anything addressed to a seat.")
     for t in tickets:
         if t["status"] != "done" or a.all:
@@ -1667,8 +1771,8 @@ def cmd_board(a, board):
         print("  -> ready to claim: %s" % ", ".join(t["id"] for t in ready))
     if not a.quiet:
         print(
-            "Shared across Claude/Codex/Cursor. `tickets next` claims one atomically; "
-            "`tickets done <id> --notes \"...\"` hands off to dependents."
+            "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
+            "`atm done <id> --notes \"...\"` hands off to dependents."
         )
 
 
@@ -1936,8 +2040,8 @@ def cmd_next(a, board):
                 print("")
                 print(warn)
             print("")
-            print("Post progress with `tickets update %s \"...\"` at least every %d min; "
-                  "finish with `tickets done %s --notes \"branch@sha, paths, decisions\"`."
+            print("Post progress with `atm update %s \"...\"` at least every %d min; "
+                  "finish with `atm review %s --notes \"exact SHA, paths, decisions\"`."
                   % (got["id"], UPDATE_EVERY_MIN, got["id"]))
             return
     open_blocked = [t for t in tickets if t["status"] == "open"]
@@ -1952,7 +2056,7 @@ def cmd_next(a, board):
     if cannot:
         print("%d ready ticket(s) need capabilities you have not registered: %s" % (
             len(cannot), "; ".join("%s needs %s" % (t["id"], ",".join(t["needs"])) for t in cannot)))
-        print("register with: tickets join %s --can %s" % (owner, ",".join(sorted(set(
+        print("register with: atm join %s --can %s" % (owner, ",".join(sorted(set(
             n for t in cannot for n in t["needs"])))))
     role_miss, reserved_miss = _next_refusal_parts(
         ready_all, roles, owner, steal_id, board)
@@ -1970,7 +2074,7 @@ def cmd_next(a, board):
     if cyc:
         print(
             "DEADLOCK: dependency cycle %s -- no ticket can ever start.\n"
-            "Fix with: tickets dep %s --drop %s" % (" -> ".join(cyc), cyc[0], cyc[1])
+            "Fix with: atm dep %s --drop %s" % (" -> ".join(cyc), cyc[0], cyc[1])
         )
         sys.exit(2)
     ghosts = dangling(tickets)
@@ -1978,7 +2082,7 @@ def cmd_next(a, board):
         print("BROKEN: these wait on tickets that do not exist:")
         for tid, miss in ghosts.items():
             print("  %s -> %s" % (tid, ", ".join(miss)))
-        print("Fix with: tickets dep <id> --drop <missing-id>")
+        print("Fix with: atm dep <id> --drop <missing-id>")
         sys.exit(2)
     holders = sorted(set(t.get("owner") or "?" for t in tickets if t["status"] == "claimed"))
     msg = "no ticket ready: %d open, all waiting on unfinished work" % len(open_blocked)
@@ -2018,7 +2122,7 @@ def cmd_review(a, board):
     if g and not a.force:
         trunk = _trunk()
         if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
-            sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
+            sys.exit("RULE: your branch is behind %s. Run `atm sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
     if (a.pr or "").strip():
         if not g:
@@ -2145,8 +2249,8 @@ def cmd_sync(a, board):
     print("CONFLICTS merging %s into %s -- these files need you:" % (remote_trunk, g["branch"]))
     for f in conflicted:
         print("  " + f)
-    print("Resolve, `git add` them, `git commit`, then `tickets review` again. "
-          "Or `git merge --abort` and ask the master (`tickets msg`).")
+    print("Resolve, `git add` them, `git commit`, then `atm review` again. "
+          "Or `git merge --abort` and ask the master (`atm msg`).")
     sys.exit(1)
 
 
@@ -2177,10 +2281,10 @@ def parse_review_sha(stamp):
 
 
 def require_integrator(board, owner, force_master=False):
-    """Only the designated master.json owner may run tickets merge."""
+    """Only the designated master.json owner may run atm merge."""
     m = current_master(board)
     if not m or not m.get("owner"):
-        sys.exit("refused: no designated integrator in master.json (tickets master take first)")
+        sys.exit("refused: no designated integrator in master.json (atm master take first)")
     if m["owner"] != owner and not force_master:
         sys.exit("rejected owner: %s is not the designated integrator (%s); "
                  "pass --force-master only for break-glass recovery" % (owner, m["owner"]))
@@ -2329,7 +2433,7 @@ def cmd_merge(a, board):
                     continue
                 short = sh("git", "rev-parse", "--short", pin).stdout.strip() or pin[:12]
                 r = sh("git", "merge", "--no-edit", *extra, "-m",
-                       "Integrate %s@%s into %s (master %s via tickets merge%s)" % (
+                       "Integrate %s@%s into %s (master %s via atm merge%s)" % (
                            b, short, trunk, owner,
                            "; conflicts resolved in favour of the integrated tree" if extra else ""),
                        pin, cwd=idir)
@@ -2367,7 +2471,7 @@ def cmd_merge(a, board):
                 else:
                     sh("git", "merge", "--abort", cwd=idir)
                     skipped.append((b, "code conflicts at %s: %s" % (short, ", ".join(conflicted[:6]))))
-                    print("  SKIPPED %s@%s -- code conflicts in %s; ask its owner to `tickets sync` and resolve"
+                    print("  SKIPPED %s@%s -- code conflicts in %s; ask its owner to `atm sync` and resolve"
                           % (b, short, ", ".join(conflicted[:6])))
 
         if not merged_shas and not merged_branches:
@@ -2408,7 +2512,7 @@ def cmd_merge(a, board):
             if pr.returncode != 0:
                 why = (pr.stderr or pr.stdout).strip()
                 print("PUSH FAILED: could not push %s to origin/%s\n%s" % (trunk, trunk, why))
-                _master_log(board, "tickets merge: integrated %s@%s locally but PUSH FAILED (%s)" % (
+                _master_log(board, "atm merge: integrated %s@%s locally but PUSH FAILED (%s)" % (
                     trunk, sha, why.splitlines()[0] if why else "?"), by=owner)
                 sys.exit(4)
             remote = sh("git", "ls-remote", "--heads", "origin", trunk).stdout.strip().split()
@@ -2416,7 +2520,7 @@ def cmd_merge(a, board):
             if remote_sha != full_trunk:
                 print("PUSH FAILED: origin/%s is %s, expected %s" % (
                     trunk, remote_sha[:12] if remote_sha else "?", sha))
-                _master_log(board, "tickets merge: push reported success but origin/%s != local %s" % (
+                _master_log(board, "atm merge: push reported success but origin/%s != local %s" % (
                     trunk, sha), by=owner)
                 sys.exit(4)
             print("%s -> %s   (pushed to origin/%s)" % (trunk, sha, trunk))
@@ -2447,7 +2551,7 @@ def cmd_merge(a, board):
             t2["status"] = "done"
             t2["done_at"] = now()
             t2["notes"].append({"by": owner, "at": now(),
-                                "text": "merged into %s as %s (tickets merge; pinned %s)" % (
+                                "text": "merged into %s as %s (atm merge; pinned %s)" % (
                                     trunk, sha, pin)})
             save(board, t2)
             closed.append(t2["id"])
@@ -2465,13 +2569,13 @@ def cmd_merge(a, board):
             print("  skipped %s: %s" % (b, why))
         for f, alt in resolved_docs:
             print("  doc conflict %s: kept %s's copy, branch copy at %s" % (f, trunk, alt))
-        _master_log(board, "tickets merge: pins %s -> %s@%s; tests %s; closed %s%s" % (
+        _master_log(board, "atm merge: pins %s -> %s@%s; tests %s; closed %s%s" % (
             ", ".join(p[:7] for p in merged_shas) or "-",
             trunk, sha, "green" if t.returncode == 0 else "skipped",
             ", ".join(closed) or "-",
             ("; skipped " + ", ".join(str(b) for b, _ in skipped)) if skipped else ""), by=owner)
-        post_message(board, owner, "%s is now %s (merged %s). Everyone: run `tickets sync` in your worktree "
-                     "before your next `tickets review`." % (trunk, sha, ", ".join(merged_branches)))
+        post_message(board, owner, "%s is now %s (merged %s). Everyone: run `atm sync` in your worktree "
+                     "before your next `atm review`." % (trunk, sha, ", ".join(merged_branches)))
 
 
 # ---- usage limits -------------------------------------------------------
@@ -2530,7 +2634,7 @@ def cmd_limit(a, board):
     print(msg)
     held = [t for t in load_all(board) if t["status"] == "claimed" and t.get("owner") == owner]
     if held and not a.clear:
-        print("still holding: %s -- master may `tickets reopen` them for someone else" % ", ".join(t["id"] for t in held))
+        print("still holding: %s -- master may `atm reopen` them for someone else" % ", ".join(t["id"] for t in held))
 
 
 def cmd_limits(a, board):
@@ -2545,7 +2649,7 @@ def cmd_limits(a, board):
                                              (", back %s" % lim["until"]) if lim.get("until") else "",
                                              (" -- %s" % lim["note"]) if lim.get("note") else ""))
     if not any_:
-        print("  none (agents record one with `tickets limit --until \"...\"`)")
+        print("  none (agents record one with `atm limit --until \"...\"`)")
     print("")
     print("Probably limited (holding a ticket, silent > %d min):" % (UPDATE_EVERY_MIN * 2))
     quiet = False
@@ -2576,7 +2680,7 @@ def cmd_limits(a, board):
             short = p.replace(home, "~")
             print("  %-7s %3d hits  %s ago  %s" % (tool, n, fmt_hours((datetime.now(timezone.utc).timestamp() - mt) / 3600.0), short[-90:]))
     if not found:
-        print("  none found (grok/other tools: record manually with `tickets limit`)")
+        print("  none found (grok/other tools: record manually with `atm limit`)")
 
 
 def cmd_status(a, board):
@@ -2671,7 +2775,7 @@ def cmd_done(a, board):
     if t.get("owner"):
         # T-428: checkin() always writes THIS process's cwd/branch/sha. That is
         # the closer's location. Stamping it onto a different owner makes
-        # `tickets who` lie (the owner appears to sit in the closer's tree).
+        # `atm who` lie (the owner appears to sit in the closer's tree).
         closer = whoami()
         note = "finished %s by %s" % (a.id, closer)
         if t["owner"] == closer:
@@ -2812,7 +2916,7 @@ def cmd_assign(a, board):
                 if a.owner:
                     bind_owner = a.owner
         if not changed:
-            sys.exit("nothing to change; see tickets assign --help")
+            sys.exit("nothing to change; see atm assign --help")
         t["notes"].append({"by": whoami(a.by), "at": now(), "text": "assign: " + ", ".join(changed)})
 
         def _save_and_rewrite_lock():
@@ -2849,16 +2953,16 @@ def cmd_reserve(a, board):
     """Reserve an open ticket for an agent without claiming (T-552).
 
     Status stays TO DO; no wait-turns. Master/planner/optimizer may --for;
-    anyone may --drop. tickets next --steal <id> and assign --owner override.
+    anyone may --drop. atm next --steal <id> and assign --owner override.
     """
     t = load(board, a.id)
     who = whoami(getattr(a, "owner", "") or "")
     drop = bool(getattr(a, "drop", False))
     target = (getattr(a, "for_agent", None) or "").strip()
     if drop and target:
-        sys.exit("tickets reserve: use --for <agent> or --drop, not both")
+        sys.exit("atm reserve: use --for <agent> or --drop, not both")
     if not drop and not target:
-        sys.exit("tickets reserve <id> --for <agent>  (or --drop)")
+        sys.exit("atm reserve <id> --for <agent>  (or --drop)")
     if drop:
         prev = _reserved_agent(t)
         if not prev:
@@ -2869,7 +2973,7 @@ def cmd_reserve(a, board):
         print("%s: reservation dropped (was %s)" % (t["id"], prev))
         return
     if not _may_set_reservation(board, who):
-        sys.exit("tickets reserve --for is master/planner/optimizer only (anyone may --drop)")
+        sys.exit("atm reserve --for is master/planner/optimizer only (anyone may --drop)")
     if t.get("status") != "open":
         sys.exit("%s is %s; reserve only open tickets" % (t["id"], t.get("status") or "?"))
     unknown = not _agent_rec(board, target)
@@ -2914,7 +3018,7 @@ def cmd_epic(a, board):
         return
     # list
     if not epics:
-        print("no epics (tickets epic create \"title\")")
+        print("no epics (atm epic create \"title\")")
         return
     for e in epics:
         mine = [t for t in tickets if t.get("epic") == e["id"]]
@@ -3002,7 +3106,7 @@ def cmd_sprint(a, board):
     # list
     sprints = load_sprints(board)
     if not sprints:
-        print("no sprints (tickets sprint create \"goal\" --activate)")
+        print("no sprints (atm sprint create \"goal\" --activate)")
         return
     for s in sprints:
         mine = [t for t in tickets if t.get("sprint") == s["id"]]
@@ -3077,7 +3181,7 @@ MASTER_TEMPLATE = """**You are onboarding.**
 
 # MASTER -- coordination node for this board
 
-Any agent can become master: run `tickets master take`, then `tickets master`
+Any agent can become master: run `atm master take`, then `atm master`
 to get the full briefing. Keep this file current; it is the memory that
 survives agent restarts and timeouts.
 
@@ -3096,23 +3200,22 @@ Record it here: `Onboarding name:` _(none yet — ask)_
 
 ### Step 2 — Integrations (check all, then ask)
 
-Run `tickets harness available`. It probes `command -v` for every catalog
+Run `atm harness available`. It probes `command -v` for every catalog
 entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
 `gemini`). Missing is a row, not a skip. Auto-checks usage; missing
 remaining/reset is FAIL.
 
 Ask: **Which of these do you want to use?** Do not spawn until they answer.
-Codex stays in the catalog even with **no usage**. Gemini dispatch records
-harness=gemini; persist/hooks is the wake (do not spawn a Gemini product job).
-No new Claude fable.
+Codex stays in the catalog even with **unknown usage**. Gemini dispatch records
+harness=gemini; persist/hooks is the wake.
 
 ### Step 3 — Announce that name on the board
 
 After they pick a name and integrations:
 
 ```
-tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
-tickets master log "onboarding: name=<name> integrations=<list>"
+atm msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
+atm master log "onboarding: name=<name> integrations=<list>"
 ```
 
 Write the name into `Onboarding name:` above so successors do not re-ask.
@@ -3128,31 +3231,31 @@ Ask, in this order:
 
 Then set the objective and create the graph in one shot. `deps` may be a
 `key` from the same JSON or an existing `T-` id. Do **not** run one
-`tickets create` per title. Do not invent extra tickets. Do not leave
+`atm create` per title. Do not invent extra tickets. Do not leave
 blockers only in the ticket body.
 
 ```
-tickets objective "<their sentence>"
-tickets plan <<'EOF'
+atm objective "<their sentence>"
+atm plan <<'EOF'
 [{"key":"api","title":"Build REST API","role":"backend","deps":[]},
  {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
 EOF
-tickets graph
-tickets map
+atm graph
+atm map
 ```
 
 Mid-run (same loop — not a second planner product):
 
 ```
-tickets dep T-004 --after T-003
-tickets create "DB migration" --blocks T-002
-tickets create "Add rate limiting" --deps T-002
+atm dep T-004 --after T-003
+atm create "DB migration" --blocks T-002
+atm create "Add rate limiting" --deps T-002
 ```
 
-Follow-up every wake (master or CoS): `tickets update` / `tickets here`;
-reopen silent >90m claims (`tickets reopen`); `tickets drive` toward the
-objective; drain the review queue. Show `tickets graph` / `tickets map`.
-If HEALTH flags prose-only deps, wire `tickets dep` instead of leaving
+Follow-up every wake (master or CoS): `atm update` / `atm here`;
+reopen silent >90m claims (`atm reopen`); `atm drive` toward the
+objective; drain the review queue. Show `atm graph` / `atm map`.
+If HEALTH flags prose-only deps, wire `atm dep` instead of leaving
 them in the body.
 
 Do not implement those tasks in this session. Spawning children when a
@@ -3188,13 +3291,13 @@ Run `atm connect` (or `atm connect --ceo`). It executes, in order:
 5. Ask the operator for feedback
 6. `atm graph` / `atm map` — tasks they can actually run
 
-Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
-title — `tickets plan` with real deps if they add work. Spawn only the
+Do not `atm init` or `atm clear`. Do not one `atm create` per
+title — `atm plan` with real deps if they add work. Spawn only the
 harnesses they confirm. Mail hooks are not Claude-only:
-`tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
+`atm hooks cursor|codex|remote|claude --agent atman-<seat>`.
 
 HANDOVER dated 2026-09-08 is historical, not live authority. Live:
-`tickets master`, `tickets role list`, the message board, this section.
+`atm master`, `atm role list`, the message board, this section.
 
 ## Mission
 (what we are building, one paragraph)
@@ -3205,15 +3308,15 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
 | example | Claude Code | backend | .worktrees/example |
 
 ## Rules for every agent
-1. Claim before you work (`tickets next`). Never work without a ticket; never
+1. Claim before you work (`atm next`). Never work without a ticket; never
    edit `.tickets/` by hand.
-2. Finish what you claim. If you cannot, `tickets block` with a reason or
-   `tickets reopen` -- do not go silent. Hold one ticket at a time.
+2. Finish what you claim. If you cannot, `atm block` with a reason or
+   `atm reopen` -- do not go silent. Hold one ticket at a time.
 3. You may create, split, re-wire and assign tickets (`create --blocks`,
    `dep`, `assign`, `plan`). Extending the graph is expected, not exceptional.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `tickets done` refuses from main or with uncommitted files.
-5. Post `tickets update <id> "..."` at least every 45 minutes and at each
+   `atm done` refuses from main or with uncommitted files.
+5. Post `atm update <id> "..."` at least every 45 minutes and at each
    milestone. Silence longer than that is treated as a timeout.
 6. `done --notes` must include branch@sha (added automatically), the paths
    you touched, and every decision a dependent ticket must match. Then merge
@@ -3221,10 +3324,10 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
 7. Set `TICKET_AGENT` to your own name so the board can tell agents apart.
 
 ## Sprint plan
-(goals per sprint; `tickets sprint list` has the live numbers)
+(goals per sprint; `atm sprint list` has the live numbers)
 
 ## Decision log
-(append with `tickets master log "..."`)
+(append with `atm master log "..."`)
 """
 
 
@@ -3246,7 +3349,7 @@ def cmd_master(a, board):
             json.dump({"owner": owner, "since": now()}, f)
         _master_log(board, "%s took over as master%s" % (
             owner, (" from %s" % prev["owner"]) if prev and prev.get("owner") != owner else ""))
-        print("%s is master now. Run `tickets master` for the briefing." % owner)
+        print("%s is master now. Run `atm master` for the briefing." % owner)
         return
     if sub == "release":
         if os.path.exists(master_state_path(board)):
@@ -3271,17 +3374,17 @@ def cmd_master(a, board):
         print("current master: %s (for %s)%s" % (m["owner"], fmt_hours(stale),
               "  <- that is you" if m["owner"] == me else ""))
         if m["owner"] != me:
-            print("TAKING OVER? Masters die on usage limits. Run `tickets master take`, then in order: "
-                  "`tickets limits` (who is out), REVIEW QUEUE below (merge with `tickets merge`), "
-                  "HEALTH below, `tickets who`. Everything decided so far is in the Decision log.")
+            print("TAKING OVER? Masters die on usage limits. Run `atm master take`, then in order: "
+                  "`atm limits` (who is out), REVIEW QUEUE below (merge with `atm merge`), "
+                  "HEALTH below, `atm who`. Everything decided so far is in the Decision log.")
     else:
-        print("current master: nobody -- `tickets master take` to become it, then follow HANDOVER in MASTER.md")
+        print("current master: nobody -- `atm master take` to become it, then follow HANDOVER in MASTER.md")
     print("=" * 72)
     if os.path.exists(path):
         with open(path) as f:
             print(f.read().rstrip())
     else:
-        print("(no MASTER.md yet -- `tickets master init`)")
+        print("(no MASTER.md yet -- `atm master init`)")
     print("")
     print("-" * 72)
     print("LIVE STATUS")
@@ -3333,7 +3436,8 @@ def cmd_master(a, board):
     queue = [t for t in tickets if t["status"] == "review"]
     if queue:
         print("")
-        print("REVIEW QUEUE (%d) -- master: review, merge, then `tickets done <id> --notes \"merged as <sha>\"`:" % len(queue))
+        print("REVIEW QUEUE (%d) -- coordinator close is three distinct steps: "
+              "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
                 t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
@@ -3390,10 +3494,10 @@ def health(board, tickets):
     cyc = find_cycle(tickets)
     if cyc:
         out.append(("CRIT", "dependency cycle %s" % " -> ".join(cyc),
-                    "tickets dep %s --drop %s" % (cyc[0], cyc[1])))
+                    "atm dep %s --drop %s" % (cyc[0], cyc[1])))
     for tid, miss in dangling(tickets).items():
         out.append(("CRIT", "%s depends on non-existent %s" % (tid, ",".join(miss)),
-                    "tickets dep %s --drop %s" % (tid, ",".join(miss))))
+                    "atm dep %s --drop %s" % (tid, ",".join(miss))))
     for t in tickets:
         if t["status"] != "claimed":
             continue
@@ -3402,10 +3506,10 @@ def health(board, tickets):
         if su is not None and su * 60 > UPDATE_EVERY_MIN * 2:
             out.append(("WARN", "%s (@%s) silent for %s -- likely timed out" % (
                 t["id"], t.get("owner"), fmt_hours(su)),
-                "tickets reopen %s   # or ping the agent" % t["id"]))
+                "atm reopen %s   # or ping the agent" % t["id"]))
         elif su is not None and su * 60 > UPDATE_EVERY_MIN:
             out.append(("INFO", "%s (@%s) no update for %s" % (t["id"], t.get("owner"), fmt_hours(su)),
-                        "ask for `tickets update %s`" % t["id"]))
+                        "ask for `atm update %s`" % t["id"]))
     for t in tickets:
         if t["status"] != "blocked":
             continue
@@ -3417,8 +3521,8 @@ def health(board, tickets):
             ready = all(r in done for r in unwired)
             out.append(("WARN", "%s blocked 'on %s' in prose but no graph edge%s" % (
                 t["id"], ",".join(unwired), " -- and those are DONE now" if ready else ""),
-                "tickets dep %s --after %s && tickets reopen %s" % (t["id"], ",".join(unwired), t["id"])
-                if ready else "tickets dep %s --after %s" % (t["id"], ",".join(unwired))))
+                "atm dep %s --after %s && atm reopen %s" % (t["id"], ",".join(unwired), t["id"])
+                if ready else "atm dep %s --after %s" % (t["id"], ",".join(unwired))))
         elif not refs and not t.get("deps"):
             out.append(("INFO", "%s blocked on something outside the board: %s" % (
                 t["id"], reason[:70]), "create a ticket for the prerequisite with --blocks %s" % t["id"]))
@@ -3438,7 +3542,7 @@ def health(board, tickets):
             if missing:
                 out.append(("WARN", "%s needs %s but no registered agent can do that" % (
                     t["id"], ",".join(missing)),
-                    "tickets join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
+                    "atm join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
     for r in load_agents(board):
         if r.get("limit"):
             held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
@@ -3446,7 +3550,7 @@ def health(board, tickets):
                 r["owner"], fmt_hours(hours_since(r["limit"]["at"])),
                 (", back %s" % r["limit"]["until"]) if r["limit"].get("until") else "",
                 (" -- still holds %s" % ",".join(held)) if held else ""),
-                ("tickets reopen %s   # hand to someone else" % held[0]) if held else "tickets limit %s --clear when back" % r["owner"]))
+                ("atm reopen %s   # hand to someone else" % held[0]) if held else "atm limit %s --clear when back" % r["owner"]))
     for r in load_agents(board):
         if r.get("branch") in ("main", "master") and hours_since(r.get("seen", "")) < 24:
             out.append(("WARN", "%s is working on %s (rule 4)" % (r["owner"], r["branch"]),
@@ -3468,15 +3572,15 @@ def health(board, tickets):
         if reason:
             out.append(("WARN", "%s is READY and reserved for %s who is down/limited (%s)" % (
                 t["id"], who, reason),
-                "tickets reserve %s --drop" % t["id"]))
+                "atm reserve %s --drop" % t["id"]))
     if not active_sprint(board):
-        out.append(("INFO", "no active sprint", "tickets sprint create \"goal\" --activate"))
+        out.append(("INFO", "no active sprint", "atm sprint create \"goal\" --activate"))
     loose = [t["id"] for t in tickets if not t.get("epic") and t["status"] != "done"]
     if loose and load_epics(board):
         out.append(("INFO", "%d open tickets have no epic" % len(loose),
-                    "tickets assign <id> --epic E-xxx"))
+                    "atm assign <id> --epic E-xxx"))
     if not os.path.exists(master_path(board)):
-        out.append(("WARN", "no MASTER.md -- nobody can take over cleanly", "tickets master init"))
+        out.append(("WARN", "no MASTER.md -- nobody can take over cleanly", "atm master init"))
     return out
 
 
@@ -3517,11 +3621,11 @@ def cmd_clear(a, board):
     """Delete ticket files — FIXTURE BOARDS ONLY."""
     if not is_fixture_board(board):
         sys.exit(
-            "REFUSED: tickets clear will not wipe a live board (missing .fixture-board).\n"
+            "REFUSED: atm clear will not wipe a live board (missing .fixture-board).\n"
             "This command only deletes tickets on disposable fixture boards.\n"
             "Use a disposable fixture board for tests, or:\n"
-            "  tickets board-backup --out /tmp/board.tgz\n"
-            "  tickets board-restore --archive /tmp/board.tgz --dest /tmp/fixture\n"
+            "  atm board-backup --out /tmp/board.tgz\n"
+            "  atm board-restore --archive /tmp/board.tgz --dest /tmp/fixture\n"
             "There is no --force that clears a live board."
         )
     if not getattr(a, "yes", False):
@@ -3541,7 +3645,10 @@ def cmd_board_backup(a, board):
     """Backup tickets/roles/coordination to a tarball (fixture by default)."""
     from pathlib import Path
 
-    from board_backup import backup
+    try:
+        from .board_backup import backup
+    except ImportError:
+        from board_backup import backup
 
     manifest = backup(
         Path(board),
@@ -3555,7 +3662,10 @@ def cmd_board_restore(a, board):
     """Restore a backup into a fixture destination board."""
     from pathlib import Path
 
-    from board_backup import restore
+    try:
+        from .board_backup import restore
+    except ImportError:
+        from board_backup import restore
 
     result = restore(
         Path(a.archive),
@@ -3573,6 +3683,158 @@ def cmd_where(a, board):
         for k in kids:
             print("  " + k)
         print("set TICKETS_DIR to pick one")
+
+
+def _read_jsonl(path):
+    out = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def _shadow_board_summary(path):
+    summary = {
+        "path": path,
+        "ticket_count": len(glob.glob(os.path.join(path, "T-*.json"))),
+        "message_count": 0,
+        "recipients": [],
+        "agent_count": 0,
+        "since": None,
+        "until": None,
+    }
+    messages = _read_jsonl(os.path.join(path, "messages.jsonl"))
+    summary["message_count"] = len(messages)
+    recipients = set()
+    times = []
+    for m in messages:
+        to = (m.get("to") or "").strip() if isinstance(m, dict) else ""
+        if to:
+            recipients.add(to)
+        at = m.get("at") if isinstance(m, dict) else None
+        if at:
+            times.append(at)
+    summary["recipients"] = sorted(recipients)
+    if times:
+        times.sort()
+        summary["since"] = times[0]
+        summary["until"] = times[-1]
+    agents_dir = os.path.join(path, "agents")
+    if os.path.isdir(agents_dir):
+        try:
+            summary["agent_count"] = len([n for n in os.listdir(agents_dir) if n.endswith(".json")])
+        except OSError:
+            pass
+    return summary
+
+
+def cmd_doctor(a):
+    """Diagnose board resolution: what board is in effect, and any shadow
+    boards nearby (T-959). Read-only."""
+    env = os.environ.get("TICKETS_DIR")
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    candidate = _board_dir_uncached()
+
+    print("board resolution order: TICKETS_DIR > configured shared board > cwd .tickets (if primary or empty)")
+    if env:
+        print("  TICKETS_DIR is set: %s  <- in effect" % os.path.abspath(os.path.expanduser(env)))
+    else:
+        print("  TICKETS_DIR is not set")
+    print("  repo root: %s" % (root or "(not inside a git worktree)"))
+    print("  configured shared board: %s" % (configured or "none registered for this repo"))
+
+    effective = candidate
+    if not env and configured and os.path.realpath(configured) != os.path.realpath(candidate):
+        if _is_marked_primary(candidate):
+            print("  cwd .tickets is marked primary -- overrides the configured board")
+        elif not _board_has_content(candidate):
+            effective = configured
+            print("  cwd .tickets is empty -- configured shared board is in effect")
+        else:
+            effective = configured
+            print("  ** shadow board detected at %s -- NOT the configured board and NOT marked "
+                  "primary. Normal commands refuse until this is resolved. **" % candidate)
+    print("effective board: %s" % effective)
+
+    shadows = []
+    if root:
+        local = os.path.join(root, ".tickets")
+        if os.path.isdir(local) and os.path.realpath(local) != os.path.realpath(effective):
+            shadows.append(os.path.abspath(local))
+    for kid in child_boards(os.getcwd()):
+        real_kid = os.path.realpath(kid)
+        if real_kid != os.path.realpath(effective) and kid not in shadows:
+            shadows.append(kid)
+
+    if not shadows:
+        print("\nno shadow boards found")
+        return
+    print("\nshadow boards found (read-only summary -- nothing modified):")
+    for shadow in shadows:
+        s = _shadow_board_summary(shadow)
+        print("  %s" % shadow)
+        print("    tickets: %d, messages: %d, agents: %d" % (
+            s["ticket_count"], s["message_count"], s["agent_count"]))
+        if s["since"]:
+            print("    span: %s .. %s" % (s["since"], s["until"]))
+        if s["recipients"]:
+            shown = s["recipients"][:20]
+            more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
+            print("    messages addressed to: %s%s" % (", ".join(shown), more))
+        print("    fix: tickets board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+
+
+def cmd_board_mark_primary(a):
+    root = _repo_root()
+    board = os.path.join(root, ".tickets") if root else os.path.join(os.getcwd(), ".tickets")
+    if not os.path.isdir(board):
+        sys.exit("no .tickets directory at %s -- nothing to mark" % board)
+    marker = os.path.join(board, PRIMARY_BOARD_MARKER)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("marked primary %s\n" % datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    print("marked %s primary -- it now wins over any configured shared board for this repo" % board)
+
+
+def cmd_board_archive_shadow(a):
+    path = os.path.abspath(os.path.expanduser(a.path))
+    if not os.path.isdir(path):
+        sys.exit("no such directory: %s" % path)
+    env = os.environ.get("TICKETS_DIR")
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    if env:
+        effective = os.path.abspath(os.path.expanduser(env))
+    elif configured:
+        effective = configured
+    else:
+        effective = _board_dir_uncached()
+    if os.path.realpath(path) == os.path.realpath(effective):
+        sys.exit(
+            "REFUSING: %s IS the board currently in effect -- archiving it would "
+            "archive the live board, not a shadow. Nothing was moved." % path
+        )
+    s = _shadow_board_summary(path)
+    dest = "%s.archived-%s" % (path, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    if not getattr(a, "yes", False):
+        sys.exit(
+            "DRY RUN -- pass --yes to actually move this aside (nothing changed):\n"
+            "  shadow:  %s\n"
+            "  tickets: %d, messages: %d, agents: %d\n"
+            "  would move to: %s\n"
+            % (path, s["ticket_count"], s["message_count"], s["agent_count"], dest)
+        )
+    os.rename(path, dest)
+    print("archived shadow board %s -> %s (nothing deleted)" % (path, dest))
 
 
 def cmd_context(a, board):
@@ -3932,7 +4194,7 @@ def cmd_inbox(a, board):
     if a.all:
         msgs = load_messages(board)[-a.limit:]
         if not msgs:
-            print("no messages yet (tickets msg \"text\" [--to agent] [--re T-001])")
+            print("no messages yet (atm msg \"text\" [--to agent] [--re T-001])")
             return
         for m in msgs:
             print(fmt_msg(m))
@@ -3940,7 +4202,7 @@ def cmd_inbox(a, board):
         scan = _inbox_scan(board, owner)
         msgs = scan[0]
         if not msgs:
-            print("inbox empty for %s (tickets inbox --all for history)" % owner)
+            print("inbox empty for %s (atm inbox --all for history)" % owner)
         else:
             print("%d unread for %s:" % (len(msgs), owner))
             for m in msgs:
@@ -4031,7 +4293,7 @@ def cmd_trajectories(a, board):
     if not events:
         print("no trajectory events yet (%s)" % _traj.trajectories_path(board))
         print("the log fills as agents claim, update, review and run; "
-              "`tickets trajectories backfill` synthesises the history already on the board")
+              "`atm trajectories backfill` synthesises the history already on the board")
         return
     if not shown:
         print("no events match (%d in the log)" % len(events))
@@ -4185,7 +4447,7 @@ def score_agent(board, name, entry, roles, ticket):
 
 def cmd_route(a, board):
     """Suggest an owner for every unassigned open ticket, by model, roles,
-    capabilities and cost. Writes `suggested`; `tickets next` honours it.
+    capabilities and cost. Writes `suggested`; `atm next` honours it.
     Agents still pull -- this is a hint, not a lock -- unless --claim.
 
     `--shadow` (T-315) is print-only plus one `shadow_decision` event per
@@ -4259,9 +4521,9 @@ def cmd_route(a, board):
                                           best or "(nobody fits)", why))
     if changed:
         _master_log(board, "route: suggested owners for %d tickets%s" % (changed, " and claimed ready ones" if a.claim else ""))
-    print("\nAgents pull with `tickets next`; their suggested tickets come first. "
+    print("\nAgents pull with `atm next`; their suggested tickets come first. "
           "Dep-blocked tickets get reserved_for instead of a note. "
-          "`tickets route --claim` hard-assigns the ready ones.")
+          "`atm route --claim` hard-assigns the ready ones.")
 
 
 # ---- onboarding ---------------------------------------------------------
@@ -4273,42 +4535,42 @@ Grok, a human shell). Replace the name and roles.
 
     export TICKET_AGENT=claude-opus          # unique per agent, never reuse
     cd {root}
-    tickets join $TICKET_AGENT --roles backend   # registers you, prints the loop
-    tickets master                            # read the briefing first
-    tickets inbox                             # anything addressed to you
-    tickets next                              # claim work; prints handoffs
+    atm join $TICKET_AGENT --roles backend   # registers you, prints the loop
+    atm master                            # read the briefing first
+    atm inbox                             # anything addressed to you
+    atm next                              # claim work; prints handoffs
 
 `join` without `--harness` prints `harness=claude (default)`: a label on the
-agent record, not a running process. Claude is not started until `tickets watch`
-or `tickets spawn`. Dry BYOA is join then `tickets next` in your own shell;
+agent record, not a running process. Claude is not started until `atm watch`
+or `atm spawn`. Dry BYOA is join then `atm next` in your own shell;
 `--harness custom --cmd '...'` is for when a watcher should run your harness
 (docs/byoa.md).
 
-Then the loop, until `tickets next` says nothing is ready:
+Then the loop, until `atm next` says nothing is ready:
 
     # work on your own worktree (join prints the exact command)
-    tickets update <id> "what changed, what is next"     # every {every} min
-    tickets msg "..." --to <agent> --re <id>             # questions, blockers
+    atm update <id> "what changed, what is next"     # every {every} min
+    atm msg "..." --to <agent> --re <id>             # questions, blockers
     git add -A && git commit -m "..."                    # commit as you go
-    tickets review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
+    atm review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
     # human review is the gate; then:
-    tickets next
+    atm next
 
-Plan dependent work with `tickets plan` so JSON `deps` become real `--after`
-edges (`tickets graph` to inspect). Unattended persist ends at that reviewable
+Plan dependent work with `atm plan` so JSON `deps` become real `--after`
+edges (`atm graph` to inspect). Unattended persist ends at that reviewable
 SHA. Merge is not silent auto-promote.
 
 Tool-specific:
 - Claude Code: `TICKET_AGENT=claude-opus claude` -- the global SessionStart hook
   shows the board automatically; `.tickets/CONTEXT.md` is offered on each claim.
-- Codex: reads AGENTS.md in the repo root (installed by `tickets init`);
+- Codex: reads AGENTS.md in the repo root (installed by `atm init`);
   launch with `TICKET_AGENT=codex codex`.
 - Cursor: reads AGENTS.md and .cursor/rules/tickets.mdc; set TICKET_AGENT in
   the terminal you start it from, or pass `--owner cursor` on each command.
 - Anything else that can run a shell: the same commands work; `tickets` is one
   stdlib Python file at ~/.claude/tools/tickets.py.
 
-To take coordination: `tickets master take`, then `tickets master` and act on
+To take coordination: `atm master take`, then `atm master` and act on
 the HEALTH section.
 """
 
@@ -4370,7 +4632,7 @@ def _identity_reuse_error(owner, prev, incoming):
         "refusing: %s is bound to %s (auth/session/runner). "
         "Join a unique provider-specific agent id and bind it with --alias ceo|cos, "
         "or pass --transfer to audit handover of this name. "
-        "Historical aliases: tickets retire <name>."
+        "Historical aliases: atm retire <name>."
         % (owner, prev)
     )
 
@@ -4424,7 +4686,7 @@ def cmd_join(a, board):
     _refuse_join_tickets_dir_shadow(board)
     owner = a.name or whoami()
     if owner.startswith("agent-"):
-        sys.exit("give yourself a real name: tickets join <name> --roles ...")
+        sys.exit("give yourself a real name: atm join <name> --roles ...")
     incoming = (getattr(a, "harness", "") or a.tool or "").strip()
     _guard_seat_identity(
         board, owner, incoming,
@@ -4442,8 +4704,8 @@ def cmd_join(a, board):
     # AFTER the guard, never before it: a refused join must leave this session
     # answering as whoever it already was. Stamping first made `join alpha` --
     # refused for provider reuse or a bound alias -- still turn this session
-    # into alpha, so a bare `tickets inbox` read alpha's private mail and a
-    # bare `tickets msg` posted as alpha. Nothing below can sys.exit.
+    # into alpha, so a bare `atm inbox` read alpha's private mail and a
+    # bare `atm msg` posted as alpha. Nothing below can sys.exit.
     #
     # T-954: join on behalf of another seat must not write THIS session.
     on_behalf = bool(getattr(a, "on_behalf", False))
@@ -4519,10 +4781,10 @@ def cmd_join(a, board):
         owner, roles.get(owner, DEFAULT_ROLES.get(owner, "any")), entry["can"] or "-", entry["cost"]))
     print("board: %s" % board)
     m = current_master(board)
-    print("master: %s" % (m["owner"] if m else "nobody -- `tickets master take` if you are it"))
+    print("master: %s" % (m["owner"] if m else "nobody -- `atm master take` if you are it"))
     n = len(unread(board, owner))
     if n:
-        print("inbox: %d unread (tickets inbox)" % n)
+        print("inbox: %d unread (atm inbox)" % n)
     warn = worktree_warning(owner)
     print("")
     if warn:
@@ -4532,12 +4794,13 @@ def cmd_join(a, board):
         if g:
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
-    print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
-          "tickets update <id> \"...\" (every %d min)  ->  tickets done <id> --notes \"...\"  "
-          "->  merge  ->  tickets next" % UPDATE_EVERY_MIN)
-    print("Full instructions: tickets connect")
+    print("Loop:  atm master  ->  atm next  ->  work + commit  ->  "
+          "atm update <id> \"...\" (every %d min)  ->  atm review <id> --notes \"<exact artifact>\"  "
+          "->  atm next" % UPDATE_EVERY_MIN)
+    print("Workers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.")
+    print("Full instructions: atm connect")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
-        print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
+        print("(no AGENTS.md here -- run `atm init` once so Codex/Cursor see the rules)")
 
 
 def _agent_holds_ticket(board, owner):
@@ -4723,57 +4986,57 @@ breaks and two agents will do the same work. The primary public name is `atm`;
 `tickets` is a compatibility alias for the same implementation, arguments,
 exit codes, and board.
 
-Run `tickets board` for the current state, or `tickets graph` to see the whole
+Run `atm board` for the current state, or `atm graph` to see the whole
 dependency tree with each node's status and owner.
 
-**Connect first** (once per session; `tickets connect` prints the long form):
+**Connect first** (once per session; `atm connect` prints the long form):
 
     export TICKET_AGENT=<your-unique-name>     # claude-opus, codex, grok ...
-    tickets join $TICKET_AGENT --roles backend --can docker,browser --cost high
+    atm join $TICKET_AGENT --roles backend --can docker,browser --cost high
     # omit --harness: prints harness=claude (default); label only until watch/spawn
-    tickets master                             # briefing + health
-    tickets inbox                              # messages addressed to you
+    atm master                             # briefing + health
+    atm inbox                              # messages addressed to you
 
 **Rules for every agent**
 
-1. Claim before you work (`tickets next`). Never work without a ticket; never
+1. Claim before you work (`atm next`). Never work without a ticket; never
    edit `.tickets/` by hand. Hold one ticket at a time.
-2. Finish what you claim. If you cannot, `tickets block --reason` or
-   `tickets reopen` -- never go silent.
+2. Finish what you claim. If you cannot, `atm block --reason` or
+   `atm reopen` -- never go silent.
 3. You may create, split, re-wire and assign tickets. Extending the graph is
-   expected. Anyone can become master with `tickets master take`.
+   expected. Anyone can become master with `atm master take`.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `tickets review` and `tickets done` refuse from main or with uncommitted files.
-5. Post `tickets update <id> "..."` at least every 45 minutes and at every
+   `atm review` and `atm done` refuse from main or with uncommitted files.
+5. Post `atm update <id> "..."` at least every 45 minutes and at every
    milestone. Longer silence is treated as a timeout and the ticket may be
    reopened for someone else.
-6. When finished, submit -- do not close: `tickets review <id> --notes "paths
+6. When finished, submit -- do not close: `atm review <id> --notes "paths
    touched, tests run, decisions dependents must match"` (branch@sha is added
    automatically; `--pr N` if you opened one). The MASTER reviews, merges to
-   main and closes it with `tickets done`. Claim your next ticket right away.
+   main and closes it with `atm done`. Claim your next ticket right away.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.
 
 Statuses: TO DO -> IN PROGRESS -> IN REVIEW -> DONE, or BLOCKED. Set them with
-`tickets status <id> todo|in-progress|review|blocked|done` or the dedicated
-commands below; `tickets list` shows the label on every line.
+`atm status <id> todo|in-progress|review|blocked|done` or the dedicated
+commands below; `atm list` shows the label on every line.
 
 **The loop**
 
-    tickets next                          # claims -> IN PROGRESS; prints handoffs + timing
-    tickets update T-002 "..."            # progress, every 45 min
-    tickets msg "question" --to claude-opus --re T-002
-    tickets review T-002 --notes "..."    # -> IN REVIEW; master is messaged
-    tickets who                           # where everyone is: worktree, branch, ticket
+    atm next                          # claims -> IN PROGRESS; prints handoffs + timing
+    atm update T-002 "..."            # progress, every 45 min
+    atm msg "question" --to claude-opus --re T-002
+    atm review T-002 --notes "..."    # -> IN REVIEW; master is messaged
+    atm who                           # where everyone is: worktree, branch, ticket
 
-`tickets next` prints the ticket body, briefing paths, every note on direct
+`atm next` prints the ticket body, briefing paths, every note on direct
 dependencies, and the latest note on earlier ancestors. Only one agent can
 ever hold a ticket.
 
 **Epics and sprints.** Tickets carry `epic` (E-001) and `sprint` (S-01).
-`tickets next` prefers the active sprint. `tickets epic list` / `tickets
-sprint show` give progress bars; `tickets sprint close S-01 --carry S-02`
+`atm next` prefers the active sprint. `atm epic list` / `atm sprint show`
+give progress bars; `atm sprint close S-01 --carry S-02`
 rolls unfinished work forward.
 
 The `--notes` text on `done` is shown to whoever picks up a dependent ticket.
@@ -4783,21 +5046,21 @@ Write what the next agent needs -- file paths, names, decisions they must match
 **As the planner**, create the whole dependency graph in one shot. `deps` may
 reference a `key` from the same plan or an existing `T-` id:
 
-    tickets plan <<'EOF'
+    atm plan <<'EOF'
     [{"key":"api","title":"Build REST API","role":"backend","body":"details","deps":[]},
      {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
     EOF
 
-Tickets whose dependencies are unfinished stay invisible to `tickets next`
+Tickets whose dependencies are unfinished stay invisible to `atm next`
 until those dependencies are marked done, so workers cannot start too early.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
 
-    tickets create "Add rate limiting" --deps T-002
-    tickets create "DB migration" --blocks T-002
-    tickets dep T-004 --after T-003
-    tickets dep T-004 --drop T-003
+    atm create "Add rate limiting" --deps T-002
+    atm create "DB migration" --blocks T-002
+    atm dep T-004 --after T-003
+    atm dep T-004 --drop T-003
 """
 
 CURSOR_RULE = """---
@@ -4855,9 +5118,23 @@ def _t427_verified_sha(tickets_py):
     try:
         with open(manifest) as source:
             release = json.load(source)
-        for name in ("tickets.py", "ticket_coordination.py", "board_backup.py"):
-            path = os.path.join(root, name)
-            recorded = release["files"][name]
+        files = release["files"]
+        if "tickets.py" not in files:
+            return ""
+        if any(name.startswith("src/") for name in files):
+            for required in (
+                "src/ticket_board/ticket_coordination.py",
+                "src/ticket_board/board_backup.py",
+            ):
+                if required not in files:
+                    return ""
+        for name in files:
+            rel = name.replace("\\", "/")
+            if (not rel or rel.startswith("/") or ".." in rel.split("/")
+                    or os.path.normpath(rel) != rel):
+                return ""
+            path = os.path.join(root, rel)
+            recorded = files[name]
             expected_sha, expected_size = (
                 (recorded["sha256"], recorded["size"]) if isinstance(recorded, dict)
                 else (recorded, None))
@@ -5073,7 +5350,7 @@ def main():
     c.add_argument("--ceo", action="store_true",
                    help="CEO path even on a blank board (catalog+usage → atman-<seat>)")
     c.add_argument("--worker", action="store_true",
-                   help="worker claim loop (prints tickets next)")
+                   help="worker claim loop (prints atm next)")
     c.add_argument("--seat", default="ceo",
                    help="board identity suffix; join as atman-<seat> (default: ceo)")
     c.set_defaults(fn=cmd_connect)
@@ -5308,6 +5585,17 @@ def main():
     c = sub.add_parser("where", help="print the board directory")
     c.set_defaults(fn=cmd_where)
 
+    c = sub.add_parser("doctor", help="diagnose board resolution and detect shadow boards (T-959)")
+    c.set_defaults(fn=cmd_doctor)
+
+    c = sub.add_parser("board-mark-primary", help="opt this repo's local .tickets in as its board of record")
+    c.set_defaults(fn=cmd_board_mark_primary)
+
+    c = sub.add_parser("board-archive-shadow", help="move a shadow board aside (never deletes); requires --yes")
+    c.add_argument("path")
+    c.add_argument("--yes", action="store_true", help="actually move it (default is a dry run)")
+    c.set_defaults(fn=cmd_board_archive_shadow)
+
     c = sub.add_parser("context", help="print the shared briefing file")
     c.set_defaults(fn=cmd_context)
 
@@ -5334,6 +5622,12 @@ def main():
     a = p.parse_args()
     if not a.cmd:
         p.print_help()
+        return
+    if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
+        # These diagnose/repair board resolution itself, so they must not go
+        # through board_dir() -- a shadow board is exactly the case they are
+        # for, and board_dir() would refuse before they ever ran (T-959).
+        a.fn(a)
         return
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)

@@ -1,5 +1,5 @@
 """Advitiya PRIORITY agent chats: per-seat / 1:1 threads on the existing
-`tickets msg` log — no second store, no shared-memory brain.
+`atm msg` log — no second store, no shared-memory brain.
 """
 import importlib.util
 import json
@@ -133,7 +133,7 @@ def test_ui_html_has_seat_thread_ia_without_football():
         "isBoardBroadcast", "visibleMessages", "seat_threads",
         "data-seat-chat", "it.id||'board'",
         "class=\"intervene\"", ">Msg<", ">Work<",
-        "tickets msg --to",
+        "atm msg --to",
         "Channel-wide", "1:1 with this BYOA seat",
         "Intervene ·",
     ):

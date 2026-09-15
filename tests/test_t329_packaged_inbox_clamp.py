@@ -159,9 +159,8 @@ def test_boundary_message_is_not_redelivered_forever(tmp_path, mod):
 def test_packaged_console_script_sees_mail_after_a_skewed_record(tmp_path):
     """Not the module -- the actual `tickets = ticket_board.cli:main` path.
 
-    cli.py's main() imports top-level `ticket_coordination`, which lives at the
-    repo root, so the root goes on PYTHONPATH beside src/. That is a packaging
-    wart that predates this ticket; it is worked around here rather than fixed.
+    cli.py's main() imports packaged `ticket_board.ticket_coordination`.
+    PYTHONPATH includes src/ so the console script resolves the package.
     """
     root_mod = _load_root()
     b = tmp_path / "repo" / ".tickets"

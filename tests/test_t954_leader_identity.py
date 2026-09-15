@@ -167,3 +167,74 @@ def test_join_current_master_refused_from_other_seat(repo):
     assert r.returncode != 0
     assert "leadership" in (r.stderr + r.stdout)
     assert identity_of(tickets_dir(repo), "worker-sid") is None
+
+
+def test_supervisor_launch_env_strips_inherited_ticket_seat(repo, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tickets_t954", TICKETS)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setenv("TICKET_SEAT", "ceo-seat")
+    monkeypatch.setenv("TICKET_AGENT", "ceo-seat")
+    monkeypatch.setenv("TICKET_SESSION_ID", "ceo-sid")
+    monkeypatch.setenv("CURSOR_SESSION_ID", "ceo-cursor")
+    monkeypatch.setenv("PATH", "/caller/bin:/usr/bin")
+    env = mod._supervisor_launch_env(tickets_dir(repo), "worker")
+    assert env["TICKET_SEAT"] == "worker"
+    assert env["TICKET_AGENT"] == "worker"
+    assert env["TICKETS_WATCH_PINNED"] == "worker"
+    assert env.get("CURSOR_SESSION_ID") is None
+    assert env["TICKET_SESSION_ID"].startswith("launch:worker:")
+    assert "ceo-seat" not in env.get("TICKET_SEAT", "")
+    assert env["TICKET_SESSION_ID"] != "ceo-sid"
+    local = os.path.expanduser("~/.local/bin")
+    assert env["PATH"].startswith("/caller/bin:")
+    assert env["PATH"].index("/caller/bin") < env["PATH"].index(local)
+
+
+def test_watch_from_foreign_ticket_seat_prints_pinned_owner(repo):
+    run(repo, ["join", "worker", "--roles", "backend"], session="w-sid", agent="worker")
+    r = run(
+        repo,
+        ["watch", "--agent", "worker", "--exec", "true", "--once", "--force", "--every", "1"],
+        session="ceo-sid",
+        agent="ceo-seat",
+        env={
+            "TICKET_SEAT": "ceo-seat",
+            "TICKET_AGENT": "ceo-seat",
+            "TICKET_SESSION_ID": "ceo-sid",
+        },
+    )
+    text = r.stdout + r.stderr
+    assert r.returncode == 0, text
+    assert "seat=worker" in text
+    assert "inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped" in text
+
+
+def test_spawn_from_foreign_ticket_seat_child_env(repo):
+    run(repo, ["join", "ceo-seat", "--roles", "review"], session="ceo-sid", agent="ceo-seat")
+    r = run(
+        repo,
+        ["spawn", "worker", "--exec", "true", "--every", "3600", "--max-runs", "1"],
+        session="ceo-sid",
+        agent="ceo-seat",
+        env={
+            "TICKET_SEAT": "ceo-seat",
+            "TICKET_AGENT": "ceo-seat",
+            "TICKET_SESSION_ID": "ceo-sid",
+        },
+    )
+    try:
+        text = r.stdout + r.stderr
+        assert r.returncode == 0, text
+        assert "seat=worker pinned" in text
+        pid_path = Path(tickets_dir(repo)) / "agents" / "worker.watch.pid"
+        assert pid_path.is_file(), text
+        pid = int(pid_path.read_text().strip())
+        env_text = subprocess.check_output(["ps", "eww", "-p", str(pid)], text=True)
+        assert "TICKET_SEAT=worker" in env_text
+        assert "TICKET_AGENT=worker" in env_text
+        assert "TICKET_SEAT=ceo-seat" not in env_text
+        assert identity_of(tickets_dir(repo), "ceo-sid") == "ceo-seat"
+    finally:
+        run(repo, ["spawn", "worker", "--stop"], session="ceo-sid", agent="ceo-seat")

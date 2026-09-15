@@ -1,6 +1,7 @@
 #!/bin/sh
 # Install `atm` on PATH (primary) and `tickets` as the same-file compatibility alias.
 # Optionally install the Claude Code SessionStart hook.
+# Supported macOS developer-preview path. Wheel, pipx, and Homebrew stay planned.
 set -e
 # Production delivery uses immutable snapshots; the legacy mode below is for development.
 if [ "${1:-}" = "--live-release" ]; then

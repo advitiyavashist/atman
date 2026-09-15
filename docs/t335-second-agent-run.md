@@ -70,13 +70,13 @@ $ unset TICKETS_DIR
 $ export PATH="/tmp/t335-bin:$PATH"
 $ cd /tmp/t335-project
 $ tickets quickstart --agent t335-alice
-board: /private/tmp/t335-project/.tickets
+board: $TMPDIR/t335-project/.tickets
   resolved from the current directory (not inside a git worktree)
-wrote: /private/tmp/t335-project/.cursor/rules/tickets.mdc
-wrote: /private/tmp/t335-project/AGENTS.md
-wrote: /private/tmp/t335-project/.gitignore
-wrote: /private/tmp/t335-project/.tickets/MASTER.md
-bound: `tickets` run from /private/tmp/t335-project resolves to this board.
+wrote: $TMPDIR/t335-project/.cursor/rules/tickets.mdc
+wrote: $TMPDIR/t335-project/AGENTS.md
+wrote: $TMPDIR/t335-project/.gitignore
+wrote: $TMPDIR/t335-project/.tickets/MASTER.md
+bound: `tickets` run from $TMPDIR/t335-project resolves to this board.
 ...
 joined as t335-alice  roles=['backend']  can=-  cost=medium
 
@@ -85,7 +85,7 @@ The three commands that matter:
   TICKET_AGENT=t335-alice tickets update <id> "..."         say where you are, at least every 45 min
   TICKET_AGENT=t335-alice tickets review <id> --notes "..." hand it back with evidence
 
-See it: tickets ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)
+See it: atm ui             ->  the local URL it prints (read-only, auto-refresh)
 Learn it: tickets guide   |   docs/first-session.md   |   README.md
 EXIT:0
 ```
@@ -140,11 +140,11 @@ Detected **claude** harness on this machine. Spawn line printed, not launched.
 
 ```console
 $ tickets ui &
-$ curl -s -o /dev/null -w "HTTP:%{http_code}\n" http://127.0.0.1:8765/
+$ curl -s -o /dev/null -w "HTTP:%{http_code}\n" <local-app-url>
 HTTP:200
 ```
 
-Quickstart prints `http://127.0.0.1:8765`; server is **not** auto-started (README
+Quickstart prints the local `atm ui` URL; server is **not** auto-started (README
 line 43: “Watch it live with `tickets ui`”). URL works once started. **PASS**
 with note that quickstart only prints the URL.
 
