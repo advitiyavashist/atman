@@ -2167,6 +2167,23 @@ def _review_verdict():
         return m
 
 
+def _verify_shot():
+    try:
+        from ticket_board import verify_shot as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import verify_shot as m
+        return m
+
+
+def cmd_shot(a, board):
+    return _verify_shot().cmd_shot(
+        a, board, load=load, save=save, whoami=whoami, now=now)
+
+
 def _ticket_lane(t):
     return _sounding().ticket_lane(t)
 
@@ -18694,6 +18711,9 @@ def main():
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
     c.set_defaults(fn=cmd_ui)
 
+    c = _verify_shot().register_parser(sub)
+    c.set_defaults(fn=cmd_shot)
+
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
     c.add_argument("--agent", help="register under this name (default: $TICKET_AGENT)")
     c.add_argument("--roles", default="backend", help="roles for that agent (default: backend)")
@@ -19148,6 +19168,7 @@ def main():
         "board-restore",
         "knowledge",
         "kb",
+        "shot",
     ):
         if not os.path.isdir(board):
             if a.cmd in ("board", "stop-hook"):
