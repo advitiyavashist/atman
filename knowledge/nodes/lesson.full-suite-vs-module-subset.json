@@ -1,0 +1,31 @@
+{
+  "applies_to": [
+    "verification"
+  ],
+  "confidence": 1.0,
+  "data": {
+    "evidence": "T-931 swarm-week 2026-09-13",
+    "files": [
+      "tests/"
+    ]
+  },
+  "id": "lesson.full-suite-vs-module-subset",
+  "kind": "node",
+  "last_verified_at": "2026-09-14T03:00:00Z",
+  "owner": "cursor-onboard",
+  "recorded_at": "2026-09-14T03:00:00Z",
+  "revision": 1,
+  "source": {
+    "kind": "ticket",
+    "ref": "T-931 swarm-week 2026-09-13"
+  },
+  "stale_after_days": 90,
+  "summary": "Module-subset verification missed regressions three times; compare a full clean-env suite to a sealed main baseline.",
+  "tags": [
+    "lesson",
+    "field-guide"
+  ],
+  "title": "module-subset verification missed regressions 3x",
+  "type": "lesson",
+  "verification": "verified"
+}
