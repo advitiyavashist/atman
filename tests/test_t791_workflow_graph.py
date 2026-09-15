@@ -72,10 +72,14 @@ def test_active_graph_omits_unrelated_done(board):
     run(board, "create", "Build login UI", "--role", "frontend", "--deps", "T-001")
     extra = run(board, "create", "Unrelated leftover")
     assert extra.returncode == 0, extra.stderr
-    # Force T-003 done without going through review: edit the fixture file.
+    # Force T-003 done with a structured ACCEPT on its artifact: edit the fixture file.
+    # (T-992: a done flag *without* an ACCEPT stays visible -- see test_t992_launch_repair.)
     path = board / "T-003.json"
     rec = json.loads(path.read_text())
     rec["status"] = "done"
+    rec["commit"] = "br@abc1234"
+    rec["review_events"] = [{"kind": "accept", "by": "cos", "at": "2026-09-13T02:10:00Z",
+                             "sha": "abc1234", "notes": "verified"}]
     path.write_text(json.dumps(rec, indent=2) + "\n")
     d = json.loads(run(board, "ui", "--json").stdout)
     ids = [n["id"] for n in d["graph"]["nodes"]]
