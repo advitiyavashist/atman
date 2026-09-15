@@ -83,12 +83,13 @@ pinned release, or an unrelated tool). Take its advice: `./install.sh
 --prefix DIR` installs somewhere isolated; `--force` replaces the existing one
 on purpose.
 
-macOS, once the tap is published (not yet, T-898):
-
-```sh
-brew install advitiyavashist/homebrew-tap/atman
-atm --version                # verified release, same check as atm self
-```
+Homebrew on macOS is the second official path, but it is not available
+yet: the formula is in `packaging/homebrew/atman.rb` with a placeholder
+checksum, the tap repository does not exist and no release is tagged (T-898).
+When it is published the command will be `brew install
+advitiyavashist/homebrew-tap/atman`, and `atm --version` will report the
+verified release. Until then there is nothing to `brew install`; use the
+clone.
 
 `atm` is the command. `tickets` is the same file under its older name, kept
 as a compatibility alias; every `atm <verb>` in this file also runs as
