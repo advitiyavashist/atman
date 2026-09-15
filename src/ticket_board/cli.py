@@ -4394,6 +4394,119 @@ def _traj_backfill(a, board):
               "is already in the log")
 
 
+def _intake_github():
+    try:
+        from ticket_board import intake_github as m
+        return m
+    except ImportError:
+        import intake_github as m
+        return m
+
+
+def cmd_github_import(a, board):
+    """T-1023: import GitHub issue(s) as lane=capture tickets, linked both ways."""
+    IG = _intake_github()
+    repo = (a.repo or "").strip()
+    if not repo:
+        sys.exit("github-import: --repo owner/name required")
+    tickets = load_all(board)
+    if getattr(a, "issue", None):
+        issue, err = IG.fetch_issue(repo, a.issue)
+        if issue is None:
+            sys.exit("github-import: %s" % err)
+        rows = [issue]
+    else:
+        rows, err = IG.fetch_issues(repo, getattr(a, "state", "open") or "open",
+                                    getattr(a, "limit", 50) or 50)
+        if err:
+            sys.exit("github-import: %s" % err)
+    who = whoami()
+    created, skipped = [], []
+    for issue in rows:
+        number = issue.get("number")
+        existing = IG.already_imported(tickets, repo, number)
+        if existing:
+            skipped.append((number, existing["id"]))
+            continue
+        title = "[%s#%s] %s" % (repo, number, issue.get("title") or "")
+        body = IG.issue_body_with_footer(issue, repo)
+        t = create(board, title, body, getattr(a, "role", "") or "", [],
+                   getattr(a, "priority", 2) or 2, getattr(a, "epic", "") or "",
+                   getattr(a, "sprint", "") or "", [])
+        t["lane"] = "capture"
+        t["github_issue"] = {"repo": repo, "number": number, "url": issue.get("url") or "",
+                             "origin": "import", "imported_by": who, "imported_at": now()}
+        t["notes"] = t.get("notes") or []
+        t["notes"].append({"by": who, "at": now(),
+                           "text": "github-import: %s#%s -> %s (lane=capture)" % (repo, number, t["id"])})
+        save(board, t)
+        ok, cerr = IG.post_link_comment(repo, number, t["id"])
+        if not ok:
+            t["notes"].append({"by": who, "at": now(),
+                               "text": "github-import: link comment failed: %s" % cerr})
+            save(board, t)
+        created.append((number, t["id"]))
+        tickets.append(t)
+    for number, tid in created:
+        print("imported %s#%s -> %s  lane=capture" % (repo, number, tid))
+    for number, tid in skipped:
+        print("skipped %s#%s (already linked to %s)" % (repo, number, tid))
+    if not created and not skipped:
+        print("no issues found (repo=%s)" % repo)
+
+
+def cmd_github_push(a, board):
+    """T-1023: push this ticket's status to its linked GitHub issue (comment + label).
+
+    Refuses unless the board itself created the link (github-import), or the
+    link was explicitly opted in via `tickets github-link --allow-push`.
+    """
+    IG = _intake_github()
+    t = load(board, a.id)
+    ok, why = IG.push_allowed(t)
+    if not ok:
+        sys.exit("github-push: %s -- %s" % (t["id"], why))
+    gi = t["github_issue"]
+    repo, number, status = gi["repo"], gi["number"], t.get("status")
+    ok, err = IG.post_status_comment(repo, number, t["id"], status, getattr(a, "note", "") or "")
+    if not ok:
+        sys.exit("github-push: comment failed: %s" % err)
+    ok2, err2 = IG.apply_status_label(repo, number, status)
+    who = whoami()
+    t["notes"] = t.get("notes") or []
+    t["notes"].append({"by": who, "at": now(),
+                       "text": "github-push: %s -> %s#%s (%s)%s" % (
+                           status, repo, number, "comment+label" if ok2 else "comment only",
+                           "" if ok2 else " label failed: %s" % err2)})
+    save(board, t)
+    print("pushed %s (%s) to %s#%s" % (t["id"], status, repo, number))
+
+
+def cmd_github_link(a, board):
+    """T-1023: attach an existing ticket to an existing issue this board did not create."""
+    IG = _intake_github()
+    t = load(board, a.id)
+    repo = (a.repo or "").strip()
+    number = a.issue
+    if not repo or not number:
+        sys.exit("github-link: --repo owner/name --issue N required")
+    issue, err = IG.fetch_issue(repo, number)
+    if issue is None:
+        sys.exit("github-link: %s" % err)
+    who = whoami()
+    allow_push = bool(getattr(a, "allow_push", False))
+    t["github_issue"] = {"repo": repo, "number": number, "url": issue.get("url") or "",
+                         "origin": "linked", "linked_by": who, "linked_at": now(),
+                         "allow_push": allow_push}
+    t["notes"] = t.get("notes") or []
+    t["notes"].append({"by": who, "at": now(),
+                       "text": "github-link: %s <-> %s#%s%s" % (
+                           t["id"], repo, number, " (push allowed)" if allow_push else "")})
+    save(board, t)
+    print("linked %s <-> %s#%s%s" % (t["id"], repo, number,
+          " (push allowed)" if allow_push else " (push refused: not imported by us)"))
+
+
 def _turns_cmd():
     try:
         from ticket_board.turns import cmd_turns as impl
@@ -5490,6 +5603,30 @@ def main():
 
     c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin")
     c.set_defaults(fn=cmd_plan)
+
+    c = sub.add_parser("github-import", help="T-1023: import GitHub issue(s) as lane=capture tickets, linked both ways")
+    c.add_argument("--repo", required=True, help="owner/name")
+    c.add_argument("--issue", type=int, default=None, help="import just this issue number")
+    c.add_argument("--state", default="open", help="open|closed|all (bulk import only)")
+    c.add_argument("--limit", type=int, default=50)
+    c.add_argument("--role", "-r", default="")
+    c.add_argument("--priority", "-p", type=int, default=2)
+    c.add_argument("--epic", default="")
+    c.add_argument("--sprint", default="")
+    c.set_defaults(fn=cmd_github_import)
+
+    c = sub.add_parser("github-push", help="T-1023: push a ticket's status to its linked GitHub issue")
+    c.add_argument("id")
+    c.add_argument("--note", default="", help="extra context appended to the status comment")
+    c.set_defaults(fn=cmd_github_push)
+
+    c = sub.add_parser("github-link", help="T-1023: attach a ticket to an existing issue this board did not create")
+    c.add_argument("id")
+    c.add_argument("--repo", required=True, help="owner/name")
+    c.add_argument("--issue", type=int, required=True)
+    c.add_argument("--allow-push", action="store_true", dest="allow_push",
+                   help="explicit opt-in: permit tickets github-push to comment/label this issue")
+    c.set_defaults(fn=cmd_github_link)
 
     c = sub.add_parser("list", help="list tickets")
     c.add_argument("--status", choices=STATUSES)
