@@ -43,6 +43,11 @@ except ImportError:  # run as a plain script path, not as a package module
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import trajectories as _traj
 
+try:
+    from . import review_verdict as _rv
+except ImportError:
+    import review_verdict as _rv
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -954,6 +959,7 @@ def git_state():
         return None
     branch = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
     sha = git("rev-parse", "--short", "HEAD") or "?"
+    sha_full = git("rev-parse", "HEAD") or ""
     dirty = git("status", "--porcelain")
     common = git("rev-parse", "--git-common-dir") or ""
     gitdir = git("rev-parse", "--git-dir") or ""
@@ -962,6 +968,7 @@ def git_state():
         "top": top,
         "branch": branch,
         "sha": sha,
+        "sha_full": sha_full,
         "dirty": len(dirty.splitlines()) if dirty else 0,
         "main_tree": is_main_tree,
     }
@@ -1477,6 +1484,11 @@ def detail(board, t, tickets):
         out.append("Handoff from earlier ancestors (latest note each):")
         for tid, title, text in earlier:
             out.append("  %s (%s): %s" % (tid, title, text))
+    evs = _rv.format_detail(t)
+    if evs:
+        out.append("")
+        out.append("Review events:")
+        out.extend(evs)
     if t.get("notes"):
         out.append("")
         out.append("Notes:")
@@ -2008,6 +2020,16 @@ def cmd_review(a, board):
         if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
             sys.exit("RULE: your branch is behind %s. Run `tickets sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
+    if (a.pr or "").strip():
+        if not g:
+            sys.exit("review --pr: not in a git working tree; cannot verify a submitted SHA")
+        origin = git("config", "--get", "remote.origin.url") or ""
+        pin_err = _rv.verify_submit(
+            lambda *args, cwd=None: git(*args),
+            sha_full=g.get("sha_full") or "", branch=g.get("branch") or "",
+            origin_url=origin, pr=a.pr, dirty=g.get("dirty") or 0)
+        if pin_err:
+            sys.exit(pin_err)
     owner = t.get("owner") or whoami(a.owner)
     author = whoami(a.owner)
     tc = _recovery()
@@ -2025,6 +2047,8 @@ def cmd_review(a, board):
         text = "%s -- %s" % (stamp, text)
         t["commit"] = stamp
         t["branch"] = g["branch"]
+        if (a.pr or "").strip() and g.get("sha_full"):
+            _rv.record_verified_head(t, g["sha_full"], pr=a.pr)
     if a.pr:
         t["pr"] = a.pr
         text += " (PR %s)" % a.pr
@@ -2047,6 +2071,28 @@ def cmd_review(a, board):
     tm = timing(t)
     print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
         t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
+
+
+def cmd_accept(a, board):
+    """Record a structured accept bound to the submitted review head (T-944)."""
+    t = load(board, a.id)
+    ev, err = _rv.apply(
+        t, whoami(), a.sha, "accept", notes=a.notes, require_full=True)
+    if err:
+        sys.exit(err)
+    save(board, t)
+    print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
+
+
+def cmd_reject(a, board):
+    """Record a structured reject bound to the submitted review head (T-944)."""
+    t = load(board, a.id)
+    ev, err = _rv.apply(
+        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+    if err:
+        sys.exit(err)
+    save(board, t)
+    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
 
 
 def _trunk():
@@ -5095,6 +5141,18 @@ def main():
     c.add_argument("--owner", "-o")
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_review)
+
+    c = sub.add_parser("accept", help="record a structured accept of the exact submitted SHA")
+    c.add_argument("id")
+    c.add_argument("--sha", required=True, help="full 40-character git SHA of the submitted review head")
+    c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
+    c.set_defaults(fn=cmd_accept)
+
+    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c.add_argument("id")
+    c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
+    c.add_argument("--reason", required=True, help="why this artifact is rejected")
+    c.set_defaults(fn=cmd_reject)
 
     c = sub.add_parser("sync", help="agent: merge main into my branch now (do this before review)")
     c.add_argument("--force", action="store_true")
