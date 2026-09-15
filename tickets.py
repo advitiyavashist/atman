@@ -180,7 +180,11 @@ def _supervisor_launch_env(board, owner):
     env["TICKETS_DIR"] = os.path.abspath(board)
     env["TICKETS_PY"] = os.path.realpath(__file__)
     env["TICKET_SESSION_ID"] = sid
-    env["PATH"] = os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + env.get("PATH", "")
+    # Caller PATH stays first so a re-exec or child probe sees the same
+    # provider binaries the operator (or a test stub) selected. Fallback
+    # dirs are last-resort only (T-985 #163 / T-954).
+    extra = os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin"
+    env["PATH"] = (env.get("PATH") or "") + ":" + extra
     prev = {var: os.environ.get(var) for var in SESSION_ID_VARS}
     for var in SESSION_ID_VARS:
         os.environ.pop(var, None)
@@ -12311,13 +12315,17 @@ watch_idle_reexec._warned = set()
 # --- end T-427 ---
 
 
-def _reexec_watch_if_unpinned(board, owner):
+def _reexec_watch_if_unpinned(board, owner, dry_run=False):
     """Replace this watch process when inherited identity is still present.
 
     Spawn already Popen's with `_supervisor_launch_env`. Direct `tickets watch`
     from a leadership shell does not: the process keeps TICKET_SEAT of the
     caller (CEO impersonation 2026-09-14). One execve pins the seat.
+
+    Dry-run starts no model turn, so skip the auth-bearing re-exec (T-985 #163).
     """
+    if dry_run:
+        return
     if (os.environ.get("TICKETS_WATCH_PINNED") or "").strip() == owner:
         return
     if os.environ.get("TICKETS_NO_WATCH_REEXEC"):
@@ -12341,9 +12349,11 @@ def cmd_watch(a, board):
     owner = whoami(a.agent)
     if owner.startswith("agent-"):
         sys.exit("set --agent or TICKET_AGENT to a real name")
-    _reexec_watch_if_unpinned(board, owner)
-    print("seat=%s (TICKET_SEAT pinned; inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped)"
-          % owner)
+    dry_run = bool(getattr(a, "dry_run", False))
+    _reexec_watch_if_unpinned(board, owner, dry_run=dry_run)
+    if not dry_run:
+        print("seat=%s (TICKET_SEAT pinned; inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped)"
+              % owner)
     _safe(lambda: _drop_unowned_agent_ticket(board, owner), None)
     root = os.path.dirname(board)
     cwd = os.path.abspath(a.cwd or root)
@@ -12521,7 +12531,8 @@ def cmd_watch(a, board):
                     print("%s dispatch %s (attempts=%s; queued trigger unchanged)" % (
                         now(), retry_state.get("state"), retry_state.get("attempts")))
             elif actionable(p):
-                if _auth_gates_spawn(retry_harness) and not getattr(a, "exec", None):
+                if (_auth_gates_spawn(retry_harness) and not getattr(a, "exec", None)
+                        and not getattr(a, "dry_run", False)):
                     auth = _refresh_auth_check(board, owner)
                     if (auth.get("state") != "ready"
                             and ((auth.get("pause") or {}).get("retry_model") is False)):

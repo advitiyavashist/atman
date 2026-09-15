@@ -178,6 +178,7 @@ def test_supervisor_launch_env_strips_inherited_ticket_seat(repo, monkeypatch):
     monkeypatch.setenv("TICKET_AGENT", "ceo-seat")
     monkeypatch.setenv("TICKET_SESSION_ID", "ceo-sid")
     monkeypatch.setenv("CURSOR_SESSION_ID", "ceo-cursor")
+    monkeypatch.setenv("PATH", "/caller/bin:/usr/bin")
     env = mod._supervisor_launch_env(tickets_dir(repo), "worker")
     assert env["TICKET_SEAT"] == "worker"
     assert env["TICKET_AGENT"] == "worker"
@@ -186,6 +187,9 @@ def test_supervisor_launch_env_strips_inherited_ticket_seat(repo, monkeypatch):
     assert env["TICKET_SESSION_ID"].startswith("launch:worker:")
     assert "ceo-seat" not in env.get("TICKET_SEAT", "")
     assert env["TICKET_SESSION_ID"] != "ceo-sid"
+    local = os.path.expanduser("~/.local/bin")
+    assert env["PATH"].startswith("/caller/bin:")
+    assert env["PATH"].index("/caller/bin") < env["PATH"].index(local)
 
 
 def test_watch_from_foreign_ticket_seat_prints_pinned_owner(repo):
@@ -234,3 +238,61 @@ def test_spawn_from_foreign_ticket_seat_child_env(repo):
         assert identity_of(tickets_dir(repo), "ceo-sid") == "ceo-seat"
     finally:
         run(repo, ["spawn", "worker", "--stop"], session="ceo-sid", agent="ceo-seat")
+
+
+def _path_from_ps(env_text):
+    for token in env_text.split():
+        if token.startswith("PATH="):
+            return token[len("PATH="):]
+    return ""
+
+
+def test_watcher_launch_preserves_caller_path_order(repo):
+    """A spawned watcher must keep the caller's PATH ahead of fallback dirs."""
+    caller_first = "/caller-first-bin"
+    local = os.path.expanduser("~/.local/bin")
+    run(repo, ["join", "ceo-seat", "--roles", "review"], session="ceo-sid", agent="ceo-seat")
+    r = run(
+        repo,
+        ["spawn", "worker", "--exec", "true", "--every", "3600", "--max-runs", "1"],
+        session="ceo-sid",
+        agent="ceo-seat",
+        env={
+            "TICKET_SEAT": "ceo-seat",
+            "TICKET_AGENT": "ceo-seat",
+            "TICKET_SESSION_ID": "ceo-sid",
+            "PATH": caller_first + ":" + os.environ.get("PATH", "/usr/bin"),
+        },
+    )
+    try:
+        text = r.stdout + r.stderr
+        assert r.returncode == 0, text
+        pid_path = Path(tickets_dir(repo)) / "agents" / "worker.watch.pid"
+        assert pid_path.is_file(), text
+        pid = int(pid_path.read_text().strip())
+        env_text = subprocess.check_output(["ps", "eww", "-p", str(pid)], text=True)
+        child_path = _path_from_ps(env_text)
+        assert child_path.startswith(caller_first + ":"), child_path
+        assert child_path.index(caller_first) < child_path.index(local), child_path
+    finally:
+        run(repo, ["spawn", "worker", "--stop"], session="ceo-sid", agent="ceo-seat")
+
+
+def test_watch_dry_run_skips_reexec_and_auth(repo):
+    """--dry-run starts no model turn: no identity re-exec and no auth gate."""
+    run(repo, ["join", "worker", "--roles", "backend"], session="w-sid", agent="worker")
+    r = run(
+        repo,
+        ["watch", "--agent", "worker", "--once", "--force", "--every", "1", "--dry-run"],
+        session="ceo-sid",
+        agent="ceo-seat",
+        env={
+            "TICKET_SEAT": "ceo-seat",
+            "TICKET_AGENT": "ceo-seat",
+            "TICKET_SESSION_ID": "ceo-sid",
+        },
+    )
+    text = r.stdout + r.stderr
+    assert r.returncode == 0, text
+    assert "auth paused" not in text
+    assert "inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped" not in text
