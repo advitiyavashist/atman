@@ -7503,6 +7503,26 @@ def cmd_board_mark_primary(a):
     print("marked %s primary -- it now wins over any configured shared board for this repo" % board)
 
 
+def _board_in_effect_for_archive():
+    """Live board for archive-shadow, without refusing an unmarked shadow.
+
+    Same order as board_dir: TICKETS_DIR, then a local .primary, then the
+    configured shared board, then cwd .tickets. A marked-primary local board
+    must not be treated as a shadow of a configured shared board.
+    """
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    candidate = _board_dir_uncached()
+    if _is_marked_primary(candidate):
+        return candidate
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    if configured:
+        return configured
+    return candidate
+
+
 def cmd_board_archive_shadow(a):
     """Move a shadow board aside after the operator confirms -- NEVER deletes
     (T-959). `--yes` is required; without it this only prints what would
@@ -7510,15 +7530,7 @@ def cmd_board_archive_shadow(a):
     path = os.path.abspath(os.path.expanduser(a.path))
     if not os.path.isdir(path):
         sys.exit("no such directory: %s" % path)
-    env = os.environ.get("TICKETS_DIR")
-    root = _repo_root()
-    configured = _configured_shared_board(root) if root else None
-    if env:
-        effective = os.path.abspath(os.path.expanduser(env))
-    elif configured:
-        effective = configured
-    else:
-        effective = _board_dir_uncached()
+    effective = _board_in_effect_for_archive()
     if os.path.realpath(path) == os.path.realpath(effective):
         sys.exit(
             "REFUSING: %s IS the board currently in effect -- archiving it would "
@@ -7536,54 +7548,6 @@ def cmd_board_archive_shadow(a):
         )
     os.rename(path, dest)
     print("archived shadow board %s -> %s (nothing deleted)" % (path, dest))
-
-
-def cmd_context(a, board):
-    paths = context_paths(board)
-    if not paths:
-        print("no CONTEXT.md or docs/handoffs/AGENT_CONTEXT.md next to %s" % board)
-        sys.exit(1)
-    for p in paths:
-        print("# " + p)
-        with open(p) as f:
-            print(f.read().rstrip())
-        print()
-
-
-def cmd_here(a, board):
-    """Manually check in: where am I working, on what."""
-    owner = whoami(a.owner)
-    # T-543/T-551: stamp claimed hold only; never foreign IN REVIEW binds.
-    rec = checkin(board, owner, _here_ticket(board, owner), a.note or "")
-    print("%s @ %s" % (owner, rec["worktree"] or rec["cwd"]))
-    print("  branch %s@%s%s" % (rec["branch"] or "?", rec["sha"] or "?",
-                               "  (%d uncommitted)" % rec["dirty"] if rec["dirty"] else ""))
-    print("  ticket %s" % (rec["ticket"] or "none"))
-    warn = worktree_warning(owner)
-    if warn:
-        print(warn)
-
-
-def cmd_who(a, board):
-    """Everyone's last known location, branch and ticket."""
-    agents = load_agents(board)
-    if not agents:
-        print("nobody has checked in yet (agents check in automatically on next/claim/update/done)")
-        return
-    tickets = dict((t["id"], t) for t in load_all(board))
-    # One `ps` for the whole board: agent_liveness/_watcher_pid used to scan
-    # the process table once per seat (and twice more for watcher_count).
-    if getattr(a, "no_liveness", False):
-        live = {}
-    else:
-        with _shared_watch_table():
-            live = dict(
-                (r["owner"], _safe(lambda r=r: agent_liveness(board, r, agents),
-                                   {"state": "unknown", "detail": "liveness read failed",
-                                    "source": "none", "heuristic": True}))
-                for r in agents)
-    wf = load_workforce(board)
-
 
 
 def cmd_context(a, board):
@@ -10618,8 +10582,7 @@ def pending_work(board, owner):
     if direct:
         out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
         tasks = [_wake_message_summary(m) for m in direct
-                 if (_message_wakes(m, obj_state)
-                     or _continuous_message_wakes(board, owner, m))]
+                 if _pending_message_triggers_wake(board, owner, m, obj_state)]
         if tasks:
             out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
     elif msgs:
@@ -10632,7 +10595,8 @@ def pending_work(board, owner):
     ready = _safe(lambda: [t for t in _filter_ready(unblocked(board, tickets), roles)
                            if can_do(board, owner, t)
                            and not _reservation_blocks(t, owner)
-                           and not _ticket_on_hold(t)], [])
+                           and not _ticket_on_hold(t)
+                           and not _reopen_blocks_automation(board, t)], [])
     mine_first = [t for t in ready if t.get("suggested") == owner or _reserved_agent(t) == owner]
     if mine_first:
         out["suggested_for_me"] = [t["id"] + " " + t.get("title", "")[:60] for t in mine_first[:3]]
@@ -10656,7 +10620,8 @@ def pending_work(board, owner):
                      _safe(lambda: load_messages(board), []), owner,
                      rec.get("joined_at", ""))
                  if x.get("from") != owner and _is_unread(x, since, _rem)
-                 and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
+                 and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))
+                 and _task_life_actionable(board, x)]
         if stuck:
             out["stuck_messages"] = stuck[-WAKE_MESSAGE_LIMIT:]
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
@@ -10686,6 +10651,14 @@ def _message_wakes(m, obj_state=""):
     if text.startswith(("stuck", "blocked", "task:", "task ")):
         return True
     return False
+
+
+def _pending_message_triggers_wake(board, owner, message, obj_state):
+    """True when pending/fingerprint may start a paid turn from this message."""
+    if not (_message_wakes(message, obj_state)
+            or _continuous_message_wakes(board, owner, message)):
+        return False
+    return _task_life_actionable(board, message)
 
 
 def _wake_message_summary(message):
@@ -10768,8 +10741,7 @@ def _watch_trigger_fingerprint(board, owner, pending):
         direct = [m for m in msgs if not is_board_broadcast(m)]
         obj_state = objective_state(_safe(lambda: load_objective(board), {}))
         waking = [m for m in direct
-                  if (_message_wakes(m, obj_state)
-                      or _continuous_message_wakes(board, owner, m))]
+                  if _pending_message_triggers_wake(board, owner, m, obj_state)]
         parts.extend("msg:" + _msg_id(m) for m in waking[-WAKE_MESSAGE_LIMIT:])
     for key in ("holding", "suggested_for_me", "ready_in_my_lane", "review_queue"):
         if key in pending:

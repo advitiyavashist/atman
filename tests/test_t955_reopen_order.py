@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,8 @@ from test_wakeup import board, run  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 TICKETS = ROOT / "tickets.py"
+TOOLS = [TICKETS, ROOT / "src" / "ticket_board" / "cli.py"]
+TOOL_IDS = ["tickets.py", "cli.py"]
 SAME = "2026-09-14T12:00:00Z"
 
 
@@ -82,3 +85,72 @@ def test_dispatch_refuses_unknown_only_reopen_task(board):
             agent="planner")
     assert r.returncode != 0
     assert "same-second-as-reopen" in (r.stderr + r.stdout)
+
+
+def _stamp_unknown_reopen(board, tid, to="carol"):
+    rec = json.loads((board / ("%s.json" % tid)).read_text())
+    rec["reopened_at"] = SAME
+    rec.pop("reopened_seen", None)
+    (board / ("%s.json" % tid)).write_text(json.dumps(rec, indent=2))
+    (board / "messages.jsonl").write_text(json.dumps({
+        "id": "m-same", "kind": "task", "re": tid, "to": to,
+        "from": "planner", "at": SAME, "text": "take %s" % tid, "task": True,
+    }) + "\n")
+    return rec
+
+
+def _run_tool(tool, board, *args, agent=""):
+    e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
+             HOME=str(board.parent.parent / "home"))
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
+                "CURSOR_SESSION_ID", "TERM_SESSION_ID"):
+        e.pop(var, None)
+    actor = agent or "__anonymous__"
+    e["TICKET_SESSION_ID"] = "test-session-" + actor
+    return subprocess.run(
+        [sys.executable, str(tool), *args], capture_output=True, text=True,
+        cwd=str(board.parent), env=e)
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_next_refuses_unknown_only_reopen_task_root_and_package(tool, board):
+    run(board, "join", "planner", "--roles", "leadership", agent="planner")
+    run(board, "join", "docs-worker", "--roles", "docs", agent="docs-worker")
+    _stamp_unknown_reopen(board, "T-001", to="docs-worker")
+
+    r = _run_tool(tool, board, "next", agent="docs-worker")
+    assert r.returncode != 0, r.stdout + r.stderr
+    rec = json.loads((board / "T-001.json").read_text())
+    assert rec["status"] == "open", "LIFE_UNKNOWN reopen must not be next-claimed:\n%s" % (
+        r.stdout + r.stderr)
+
+
+def test_unknown_reopen_is_not_watch_actionable(board):
+    run(board, "join", "planner", "--roles", "leadership", agent="planner")
+    run(board, "join", "carol", "--roles", "backend", agent="carol")
+    run(board, "master", "take", agent="planner")
+    run(board, "create", "Work", "--role", "backend", agent="planner")
+    _stamp_unknown_reopen(board, "T-002", to="carol")
+    (board / "messages.jsonl").write_text(
+        json.dumps({
+            "id": "m-same", "kind": "task", "re": "T-002", "to": "carol",
+            "from": "planner", "at": SAME, "text": "take T-002", "task": True,
+        }) + "\n" + json.dumps({
+            "id": "m-stuck", "kind": "task", "re": "T-002", "to": "planner",
+            "from": "carol", "at": SAME, "text": "stuck: T-002 unknown",
+        }) + "\n"
+    )
+    tk = _mod()
+    pending = tk.pending_work(str(board), "carol")
+    assert "task_messages" not in pending, pending
+    assert "ready_in_my_lane" not in pending, pending
+    assert "suggested_for_me" not in pending, pending
+    assert tk.actionable(pending) is False, pending
+    fp = tk._watch_trigger_fingerprint(str(board), "carol", pending)
+    assert not fp, fp
+
+    master_pending = tk.pending_work(str(board), "planner")
+    assert "stuck_messages" not in master_pending, master_pending
+    master_fp = tk._watch_trigger_fingerprint(str(board), "planner", master_pending)
+    if master_fp:
+        assert not any(part.startswith("stuck:") for part in master_fp), master_fp
