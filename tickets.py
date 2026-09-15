@@ -2946,9 +2946,11 @@ def cmd_schedule(a, board):
     S = _seat_schedule()
     data = S.load_schedule(board)
     seats = data.setdefault("seats", {})
-    seat = (getattr(a, "seat", "") or "").strip()
+    seat = (getattr(a, "seat", "") or getattr(a, "name", "") or "").strip()
     cron = (getattr(a, "cron", "") or "").strip()
     every_spec = (getattr(a, "every", "") or "").strip()
+    target = (getattr(a, "to", "") or "").strip()
+    action = (getattr(a, "action", "") or "msg").strip() or "msg"
     if getattr(a, "uninstall", False):
         found = S.remove_crontab(board)
         print("crontab %s for this board" % ("removed" if found else "had no tickets-schedule line"))
@@ -2960,20 +2962,50 @@ def cmd_schedule(a, board):
             print("no due schedules")
             return
         now_dt = S.parse_iso(now_iso)
+        wf = load_workforce(board)
         for name in due:
-            wf = load_workforce(board)
-            if name not in wf:
-                print("schedule: skip %s (not joined)" % name)
+            entry = seats.setdefault(name, {})
+            dest = S.entry_target(name, entry)
+            act = S.entry_action(entry)
+            if dest not in wf:
+                reason = "target %s not joined" % dest
+                print("schedule: skip %s (%s)" % (name, reason))
+                S.record_run(entry, now_iso, now_dt, "skipped", reason)
+                continue
+            if act != "msg":
+                reason = "action %s unsupported" % act
+                print("schedule: skip %s (%s)" % (name, reason))
+                S.record_run(entry, now_iso, now_dt, "skipped", reason)
                 continue
             ns = argparse.Namespace(
-                owner="", text="scheduled wake", to=name,
+                owner="", text="scheduled wake", to=dest,
                 re=getattr(a, "re", "") or "", task=True)
             cmd_msg(ns, board)
-            entry = seats.setdefault(name, {})
-            entry["last"] = now_iso
-            entry["next"] = S.bump_next(entry, now_dt)
-            entry["enabled"] = True
+            S.record_run(entry, now_iso, now_dt, "ok", "")
         S.save_schedule(board, data)
+        return
+    if getattr(a, "inspect", False):
+        if not seat:
+            sys.exit("schedule --inspect needs a name")
+        if seat not in seats:
+            sys.exit("schedule: no automation %s" % seat)
+        row = S.public_row(seat, seats[seat])
+        print("automation %s" % row["name"])
+        print("  schedule  %s" % row["schedule"])
+        print("  action    %s -> %s" % (row["action"], row["target"]))
+        print("  enabled   %s" % ("yes" if row["enabled"] else "no"))
+        print("  last      %s  %s" % (row["last"] or "never", row["last_result"] or "-"))
+        print("  skipped   %s" % (row["last_reason"] or "(none)"))
+        print("  next      %s" % (row["next"] or "-"))
+        return
+    if getattr(a, "disable", False) or getattr(a, "enable", False):
+        if not seat:
+            sys.exit("schedule --disable/--enable needs a name")
+        if seat not in seats:
+            sys.exit("schedule: no automation %s" % seat)
+        seats[seat]["enabled"] = not getattr(a, "disable", False)
+        S.save_schedule(board, data)
+        print("%s %s" % ("disabled" if getattr(a, "disable", False) else "enabled", seat))
         return
     if getattr(a, "list", False) or (
             not seat and not cron and not every_spec
@@ -2982,11 +3014,13 @@ def cmd_schedule(a, board):
         if not seats:
             print("no scheduled seats")
             return
-        print("%-16s %-22s %-22s %s" % ("seat", "when", "next", "last"))
-        for name, e in sorted(seats.items()):
-            when = ("every %ss" % e["every_sec"]) if e.get("every_sec") else (e.get("cron") or "-")
-            print("%-16s %-22s %-22s %s" % (
-                name, when[:22], (e.get("next") or "-"), (e.get("last") or "-")))
+        print("%-16s %-22s %-22s %-8s %s" % ("name", "when", "next", "last", "result"))
+        for row in S.public_rows(data):
+            print("%-16s %-22s %-22s %-8s %s" % (
+                row["name"][:16], row["schedule"][:22], (row["next"] or "-")[:22],
+                (row["last"] or "-")[:8],
+                (row["last_result"] or "-") + (
+                    (" (%s)" % row["last_reason"]) if row["last_reason"] else "")))
         return
     if getattr(a, "remove", False):
         if not seat:
@@ -3006,13 +3040,16 @@ def cmd_schedule(a, board):
         return
     if not seat:
         sys.exit("schedule SEAT --cron '*/15 * * * *'  or  schedule SEAT --every 15m")
+    dest = target or seat
     wf = load_workforce(board)
-    if seat not in wf:
-        sys.exit("schedule: unknown seat %s (atm join first)" % seat)
+    if dest not in wf:
+        sys.exit("schedule: unknown target %s (atm join first)" % dest)
     if cron and every_spec:
         sys.exit("schedule: pass --cron or --every, not both")
     if not cron and not every_spec:
         sys.exit("schedule %s needs --cron or --every" % seat)
+    if action != "msg":
+        sys.exit("schedule: action %r unsupported (msg is the only action)" % action)
     every_sec = 0
     if every_spec:
         try:
@@ -3027,11 +3064,13 @@ def cmd_schedule(a, board):
         except ValueError as e:
             sys.exit("schedule: %s" % e)
     now_iso = now()
-    now_dt = S.parse_iso(now_iso)
     entry = seats.get(seat) or {}
     entry["enabled"] = True
     entry["by"] = whoami()
     entry["at"] = now_iso
+    entry["name"] = seat
+    entry["target"] = dest
+    entry["action"] = action
     if every_sec:
         entry["every_sec"] = every_sec
         entry.pop("cron", None)
@@ -3041,12 +3080,37 @@ def cmd_schedule(a, board):
     entry["next"] = now_iso  # due on the next `schedule --due`
     seats[seat] = entry
     S.save_schedule(board, data)
-    print("scheduled %s %s next=%s (persist/hooks wake; no product spawn)" % (
-        seat, ("every %s" % every_spec) if every_spec else "cron %s" % cron, entry["next"]))
+    print("scheduled %s %s -> %s next=%s (persist/hooks wake; no product spawn)" % (
+        seat, ("every %s" % every_spec) if every_spec else "cron %s" % cron, dest, entry["next"]))
     if getattr(a, "install", False):
         path, line = S.upsert_crontab(board, os.path.realpath(__file__), sys.executable)
         print("installed crontab (%s)" % path)
         print(line)
+
+
+def cmd_automation(a, board):
+    """User-facing named automations over the existing schedule.json file."""
+    verb = (getattr(a, "verb", "") or "list").strip() or "list"
+    name = (getattr(a, "name", "") or "").strip()
+    mapped = argparse.Namespace(
+        seat=name, name=name, cron=getattr(a, "cron", "") or "",
+        every=getattr(a, "every", "") or "", to=getattr(a, "to", "") or "",
+        action=getattr(a, "action", "") or "msg", re=getattr(a, "re", "") or "",
+        list=(verb == "list"), remove=(verb == "remove"),
+        disable=(verb == "disable"), enable=(verb == "enable"),
+        inspect=(verb == "inspect"), due=False, install=False, uninstall=False)
+    if verb == "add":
+        mapped.list = False
+        if not name:
+            sys.exit("automation add NAME --every 15m --to SEAT")
+    elif verb == "list":
+        mapped.seat = ""
+    elif verb in ("disable", "enable", "inspect", "remove"):
+        if not name:
+            sys.exit("automation %s needs a name" % verb)
+    else:
+        sys.exit("automation list | add | disable | enable | inspect")
+    return cmd_schedule(mapped, board)
 
 
 def cmd_discard(a, board):
@@ -15413,6 +15477,11 @@ body[data-work-view=columns] #workJump{display:none}
     <section class="lane" data-lane="operator"><div class="lbl">Operator · master / CoS</div><div class="row" id="lane-operator"></div></section>
     <section class="lane" data-lane="idle"><div class="lbl">Idle · down</div><div class="row" id="lane-idle"></div></section>
   </div>
+  <section class="promise-panel" id="automationPanel">
+    <h2>Automations</h2>
+    <small class="mute">Named schedule + action + target on the existing scheduler. Last run, result, and skip reason are recorded — never invented.</small>
+    <div id="automationList"></div>
+  </section>
   <section class="promise-panel" id="usagePanel">
     <h2>Usage / cost</h2>
     <small id="usageHonesty" class="mute">Harness-reported only. Not reported by harness stays — never a made-up $0.</small>
@@ -15649,6 +15718,21 @@ function renderSeats(d){
   put('lane-flight',flight.join(''),'nobody in flight');
   put('lane-ready',ready.join(''),'Open seat — uncovered work.');
   put('lane-idle',idle.join(''),'no idle seats');
+}
+function renderAutomations(d){
+  const host=document.getElementById('automationList');
+  if(!host)return;
+  const rows=d.automations||[];
+  if(!rows.length){
+    host.innerHTML='<div class="empty">No automations. <span class="mono">atm automation add NAME --every 15m --to SEAT</span></div>';
+    return;
+  }
+  host.innerHTML='<table class="promise-table"><thead><tr><th>Name</th><th>Schedule</th><th>Action</th><th>Last</th><th>Result</th></tr></thead><tbody>'+
+    rows.map(r=>{
+      const res=r.enabled===false?'disabled':(r.last_result||'—');
+      const why=r.last_reason?' title="'+esc(r.last_reason)+'"':'';
+      return '<tr><td>'+esc(r.name)+'</td><td class="mono">'+esc(r.schedule)+'</td><td>'+esc(r.action)+' → '+esc(r.target)+'</td><td class="mono">'+esc(r.last||'never')+'</td><td'+why+'>'+esc(res)+(r.last_reason?' · '+esc(r.last_reason):'')+'</td></tr>';
+    }).join('')+'</tbody></table>';
 }
 function setTab(name){
   const allowed=new Set(['objective','agents','board','messages']);
@@ -16115,6 +16199,7 @@ async function load(manual){
   renderTurns(d.turns);
   renderUsage(d.usage);
   renderSeats(d);
+  renderAutomations(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
   defaultComposeTicket(d);
   renderChatRail(d);renderChatHead();
@@ -16922,6 +17007,8 @@ def _board_snapshot_body(board, messages=40):
         # T-889 hook: the Work view payload (objective, phases, node detail).
         "work": work,
         "first_screen": _first_screen(work),
+        "automations": _safe(lambda: _seat_schedule().public_rows(
+            _seat_schedule().load_schedule(board)), []),
     }
 
 
@@ -18927,13 +19014,29 @@ def main():
     c.add_argument("seat", nargs="?", default="", help="seat to wake")
     c.add_argument("--cron", default="", help='5-field UTC cron, e.g. "*/15 * * * *"')
     c.add_argument("--every", default="", help="interval: 30s, 15m, 1h")
+    c.add_argument("--to", default="", help="target seat when the automation name is not the seat")
+    c.add_argument("--action", default="msg", help="msg (only supported action)")
     c.add_argument("--list", action="store_true")
     c.add_argument("--remove", action="store_true")
+    c.add_argument("--disable", action="store_true")
+    c.add_argument("--enable", action="store_true")
+    c.add_argument("--inspect", action="store_true")
     c.add_argument("--due", action="store_true", help="fire due entries (crontab runs this)")
     c.add_argument("--install", action="store_true", help="install crontab line for schedule --due")
     c.add_argument("--uninstall", action="store_true")
     c.add_argument("--re", default="", help="ticket id on the wake message")
     c.set_defaults(fn=cmd_schedule)
+
+    c = sub.add_parser("automation", help="named automations (same schedule.json as atm schedule)")
+    c.add_argument("verb", nargs="?", default="list",
+                   help="list | add | disable | enable | inspect | remove")
+    c.add_argument("name", nargs="?", default="")
+    c.add_argument("--cron", default="")
+    c.add_argument("--every", default="")
+    c.add_argument("--to", default="", help="target seat")
+    c.add_argument("--action", default="msg")
+    c.add_argument("--re", default="")
+    c.set_defaults(fn=cmd_automation)
 
     c = sub.add_parser("plan-status", help="capture / ready / waiting-on-merge / blocked-HOLD-discarded")
     c.add_argument("--write-master", action="store_true", help="write a Plan section into MASTER.md")
