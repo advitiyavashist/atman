@@ -318,7 +318,6 @@ atm plan <<'EOF'
   "cause":"A produced hello.txt","change":"Read and use hello.txt","proof":"consumer sees hello.txt"}
 ]}
 EOF
-# tickets plan <<'EOF' ... EOF   (same command under the compatibility alias)
 ```
 
 After A is done, B is offered by `atm next`. `atm map` shows sprint and epic
@@ -340,8 +339,7 @@ working directory and an identity; the harness reports through `atm`.
    (`atm accept --sha`), and `atm merge` is an explicit command, not a
    silent auto-promote.
 
-The same four steps under the alias: `tickets harness available`,
-`tickets plan`, `tickets review`, `tickets merge`.
+The same four steps run unchanged under the `tickets` compatibility alias.
 
 ```sh
 atm master                   # objective, workforce, reviews, health
