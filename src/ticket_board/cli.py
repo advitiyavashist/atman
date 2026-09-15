@@ -1212,7 +1212,7 @@ def _held_claimed(board, owner, except_id=None):
 
 def _already_hold_msg(held):
     ids = ", ".join(t["id"] for t in held)
-    return ("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
+    return ("you already hold %s -- finish it (atm review/block/reopen) before claiming "
             "more, or pass --another if you really want to work two in parallel." % ids)
 
 
@@ -1936,8 +1936,8 @@ def cmd_next(a, board):
                 print("")
                 print(warn)
             print("")
-            print("Post progress with `tickets update %s \"...\"` at least every %d min; "
-                  "finish with `tickets done %s --notes \"branch@sha, paths, decisions\"`."
+            print("Post progress with `atm update %s \"...\"` at least every %d min; "
+                  "finish with `atm review %s --notes \"exact SHA, paths, decisions\"`."
                   % (got["id"], UPDATE_EVERY_MIN, got["id"]))
             return
     open_blocked = [t for t in tickets if t["status"] == "open"]
@@ -3333,7 +3333,8 @@ def cmd_master(a, board):
     queue = [t for t in tickets if t["status"] == "review"]
     if queue:
         print("")
-        print("REVIEW QUEUE (%d) -- master: review, merge, then `tickets done <id> --notes \"merged as <sha>\"`:" % len(queue))
+        print("REVIEW QUEUE (%d) -- coordinator close is three distinct steps: "
+              "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
                 t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
@@ -4532,10 +4533,11 @@ def cmd_join(a, board):
         if g:
             print("working tree OK: %s @ %s" % (g["branch"], g["top"]))
     print("")
-    print("Loop:  tickets master  ->  tickets next  ->  work + commit  ->  "
-          "tickets update <id> \"...\" (every %d min)  ->  tickets done <id> --notes \"...\"  "
-          "->  merge  ->  tickets next" % UPDATE_EVERY_MIN)
-    print("Full instructions: tickets connect")
+    print("Loop:  atm master  ->  atm next  ->  work + commit  ->  "
+          "atm update <id> \"...\" (every %d min)  ->  atm review <id> --notes \"<exact artifact>\"  "
+          "->  atm next" % UPDATE_EVERY_MIN)
+    print("Workers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.")
+    print("Full instructions: atm connect")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
         print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
 

@@ -208,9 +208,10 @@ def test_the_agent_is_registered_so_next_has_someone_to_route_to(fresh, tmp_path
 def test_it_prints_the_three_commands_and_the_ui_url(fresh, tmp_path):
     r = run(fresh, "quickstart", "--agent", "alice", tmp_path=tmp_path)
     out = r.stdout
-    assert "tickets next" in out
-    assert "tickets update" in out
-    assert "tickets review" in out
+    assert "atm next" in out
+    assert "atm update" in out
+    assert "atm review" in out
+    assert "compatibility alias" in out
     assert "http://127.0.0.1:8765" in out
 
 
