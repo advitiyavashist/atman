@@ -2762,11 +2762,13 @@ def cmd_dispatch(a, board):
         return
     ns = argparse.Namespace(
         name=seat, list=False, stop=False, worktree=getattr(a, "worktree", "") or "",
+        repo=getattr(a, "repo", "") or "", base=getattr(a, "base", "") or "",
         harness=harness, tool="", cmd_template=getattr(a, "cmd_template", "") or "",
         roles=None, can=None, cost=None, model="", best_for="", wake_mode=None,
         brief="", exec=getattr(a, "exec", "") or "", master=False, cos=False,
         safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
         max_runs=getattr(a, "max_runs", None), replace=False,
+        transfer=False, alias="",
     )
     try:
         cmd_spawn(ns, board)
@@ -13305,12 +13307,14 @@ Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
   tickets harness check qwen          # runs it on 'reply OK' under a 60s cap, records pass/fail + latency
   tickets spawn qwen                  # no --harness: uses what `join` registered
   Placeholders: {prompt_file} (this wake-up's prompt, fresh per run) {cwd} (the agent's worktree) {agent}.
-  Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
-  a detached watcher that runs the tool with that model only when `tickets pending` says there is
-  work. Workers persist until --stop, logout or reboot; new tickets created later are picked up on
-  the next poll. `tickets watch` and `tickets spawn` share one launch policy:
-  unattended (no permission prompts); --safe keeps prompts. The watcher header
-  prints launch=unattended or launch=safe.
+  Each spawn = register + own worktree (<repo>/.worktrees/<name>, project settings copied from
+  that repo) + identity-pinned hooks for the unique seat + a detached watcher that runs the tool
+  with that model only when `tickets pending` says there is work. Cross-repo boards (Steer
+  `.tickets` driving Atman) must pass `--repo /path/to/atman` (or `owner/repo`); ambiguous
+  `--worktree` under a different origin fails closed. Workers persist until --stop, logout or
+  reboot; new tickets created later are picked up on the next poll. `tickets watch` and
+  `tickets spawn` share one launch policy: unattended (no permission prompts); --safe keeps
+  prompts. The watcher header prints launch=unattended or launch=safe.
   To survive reboot, add the watcher command from `spawn --list`'s log to a login item / launchd job.
 
 Stuck rule (in every worker prompt): if blocked -- permission, failing test, unclear scope, missing
@@ -13751,10 +13755,22 @@ def cmd_spawn(a, board):
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
-    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
-    git_root, origin_err = _spawn_git_root(board, owner, wt)
+    git_root, wt, expected_origin, base, origin_err = _resolve_spawn_target(
+        board, owner,
+        worktree_arg=getattr(a, "worktree", "") or "",
+        repo_arg=getattr(a, "repo", "") or "",
+        base_arg=getattr(a, "base", "") or "")
     if origin_err:
         sys.exit(origin_err)
+    dedicated = os.path.realpath(wt) == os.path.realpath(os.path.join(git_root, ".worktrees", owner))
+    if os.path.isdir(wt) and not dedicated:
+        pinned_hook = _cursor_hook_agent(wt)
+        if pinned_hook and pinned_hook != owner:
+            sys.exit(
+                "refusing to spawn %s into %s: hooks already pin %s. "
+                "Use a dedicated --worktree under the target --repo "
+                "(default <repo>/.worktrees/%s)."
+                % (owner, wt, pinned_hook, owner))
     resolved_harness, _ = harness_of(board, owner, requested_harness,
                                      getattr(a, "cmd_template", ""))
     sa = _session_adapters()
@@ -13774,7 +13790,6 @@ def cmd_spawn(a, board):
             _print_auth_result(owner, auth)
             sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
     if not os.path.isdir(wt):
-        base = a.base or _trunk()
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
                            capture_output=True, text=True)
         if r.returncode != 0:
@@ -13783,6 +13798,17 @@ def cmd_spawn(a, board):
         if r.returncode != 0:
             sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
         print("worktree %s (branch %s)" % (wt, owner))
+    print("target repo %s%s base %s" % (
+        git_root,
+        (" (%s)" % expected_origin) if expected_origin else "",
+        base))
+    if expected_origin:
+        wf = load_workforce(board)
+        entry = wf.get(owner, {})
+        entry["expected_origin"] = expected_origin
+        entry["spawn_repo"] = git_root
+        wf[owner] = entry
+        save_workforce(board, wf)
     ns = _join_namespace(a, owner)
     ns.worktree = wt
     _silent(lambda: cmd_join(ns, board))
@@ -13800,11 +13826,20 @@ def cmd_spawn(a, board):
         bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
                                 role="", by=whoami())
         _silent(lambda: cmd_brief(bn, board))
-    inherited = _inherit_settings(root, wt)
+    inherited = _inherit_settings(git_root, wt)
     if inherited:
         print("inherited project settings into the worktree: %s" % ", ".join(inherited))
+    hooked = _spawn_install_hooks(board, owner, wt, harness)
+    if hooked:
+        print("hooks pinned to %s in %s: %s" % (owner, wt, ", ".join(hooked)))
     if _pin_spawned_worker_hooks(board, owner, wt, harness):
         print("pinned %s hooks to unique worker %s (canonical role hooks not inherited)" % (harness, owner))
+    loc = git_state(cwd=wt) or {}
+    _agent_set(board, owner,
+               cwd=os.path.abspath(wt),
+               worktree=loc.get("top") or os.path.abspath(wt),
+               branch=loc.get("branch") or "",
+               sha=loc.get("sha") or "")
     if a.master:
         prev = current_master(board) or {}
         with open(master_state_path(board), "w") as f:
@@ -14201,34 +14236,223 @@ def _auth_blocks_model(auth):
     return False
 
 
+def _existing_ancestor(path):
+    """First existing ancestor of path, including path itself when it exists."""
+    p = os.path.abspath(os.path.expanduser(path or ""))
+    if not p:
+        return ""
+    while p and not os.path.exists(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            return ""
+        p = parent
+    return p
+
+
+def _git_root_from(path):
+    """Git worktree root containing path, walking through not-yet-created children."""
+    start = _existing_ancestor(path) if path else ""
+    if not start:
+        return ""
+    return _init_cwd_worktree_root(start) or ""
+
+
+def _git_main_worktree(cwd):
+    """Main checkout for `git worktree add`. Linked worktrees share this object DB."""
+    if not cwd:
+        return ""
+    raw = git("rev-parse", "--git-common-dir", cwd=cwd)
+    if not raw:
+        return cwd
+    common = raw if os.path.isabs(raw) else os.path.normpath(os.path.join(cwd, raw))
+    common = os.path.realpath(common)
+    if os.path.basename(common) == ".git":
+        return os.path.dirname(common)
+    return os.path.realpath(cwd)
+
+
+def _origin_key(path):
+    from auth_v2_contract import normalize_git_origin
+    return normalize_git_origin(_git_remote_origin(path)) or ""
+
+
+def _repo_spec_is_path(spec):
+    """True for a filesystem checkout. `owner/repo` origin slugs stay slugs."""
+    spec = (spec or "").strip()
+    if not spec:
+        return False
+    if spec.startswith("~") or spec.startswith(".") or spec.startswith("/"):
+        return True
+    expanded = os.path.expanduser(spec)
+    return os.path.isdir(expanded)
+
+
+def _find_checkout_for_origin(wanted, hints):
+    """First local checkout whose origin matches wanted. Empty if none."""
+    from auth_v2_contract import repo_identity_matches
+    seen = []
+    for hint in hints:
+        if not hint:
+            continue
+        root = _git_root_from(hint)
+        if not root:
+            continue
+        root = os.path.realpath(root)
+        if root in seen:
+            continue
+        seen.append(root)
+        if repo_identity_matches(wanted, _git_remote_origin(root)):
+            return _git_main_worktree(root)
+    return ""
+
+
+def _spawn_base_ref(git_root, requested):
+    """Explicit --base, else origin/main when that ref exists, else local trunk."""
+    base = (requested or "").strip()
+    if base:
+        return base
+    if git("rev-parse", "--verify", "-q", "origin/main", cwd=git_root) is not None:
+        return "origin/main"
+    return _trunk(cwd=git_root)
+
+
+def _cursor_hook_agent(worktree):
+    """Agent baked into a worktree's Cursor board hook, or empty."""
+    script = os.path.join(worktree, ".cursor", "hooks", "tickets-board.py")
+    if not os.path.isfile(script):
+        return ""
+    try:
+        text = open(script, encoding="utf-8").read()
+    except OSError:
+        return ""
+    m = re.search(r"^AGENT = ['\"]([^'\"]+)['\"]", text, re.M)
+    return m.group(1) if m else ""
+
+
+def _resolve_spawn_target(board, owner, worktree_arg="", repo_arg="", base_arg=""):
+    """Choose the git root, worktree path, expected origin, and base ref.
+
+    dirname(board) is not identity. Cross-repo boards (Steer `.tickets` driving
+    Atman work) must pass --repo or fail closed when --worktree sits under a
+    different origin. Same-repo spawn keeps the historic default
+    `<board-parent>/.worktrees/<name>`.
+    """
+    from auth_v2_contract import normalize_git_origin, repo_identity_matches
+    board_root = os.path.dirname(os.path.abspath(board))
+    board_origin = _origin_key(board_root)
+    repo_arg = (repo_arg or "").strip()
+    worktree_arg = (worktree_arg or "").strip()
+    pinned = _expected_origin_for(board, owner, worktree_arg)
+    git_root = ""
+    expected = ""
+
+    if repo_arg:
+        if _repo_spec_is_path(repo_arg):
+            checkout = _git_root_from(os.path.abspath(os.path.expanduser(repo_arg)))
+            if not checkout:
+                return "", "", "", "", (
+                    "spawn --repo %s is not a git checkout" % repo_arg)
+            git_root = _git_main_worktree(checkout)
+            expected = _origin_key(git_root) or pinned
+        else:
+            expected = normalize_git_origin(repo_arg) or repo_arg
+            repo_name = expected.split("/")[-1] if "/" in expected else expected
+            hints = [
+                worktree_arg,
+                os.getcwd(),
+                board_root,
+                os.path.join(os.path.dirname(board_root), repo_name),
+            ]
+            git_root = _find_checkout_for_origin(expected, hints)
+            if not git_root:
+                return "", "", "", "", (
+                    "spawn --repo %s: no local checkout whose origin matches; "
+                    "pass --repo /path/to/checkout" % repo_arg)
+    else:
+        wt_probe = os.path.abspath(os.path.expanduser(worktree_arg)) if worktree_arg else ""
+        inferred_root = _git_main_worktree(_git_root_from(wt_probe)) if wt_probe else ""
+        inferred_origin = _origin_key(inferred_root) if inferred_root else ""
+        if pinned:
+            expected = pinned
+            repo_name = expected.split("/")[-1] if "/" in expected else expected
+            git_root = _find_checkout_for_origin(expected, [
+                wt_probe, os.getcwd(), board_root,
+                os.path.join(os.path.dirname(board_root), repo_name),
+            ])
+            if not git_root:
+                return "", "", "", "", (
+                    "repo_mismatch: spawn git root origin must be %s "
+                    "(dirname(board) is not identity); pass --repo /path/to/checkout"
+                    % expected)
+        elif inferred_root and inferred_origin and board_origin and inferred_origin != board_origin:
+            return "", "", "", "", (
+                "cross-repo spawn is ambiguous: --worktree is under %s but the "
+                "board lives in %s. Pass --repo %s (or the checkout path) to "
+                "derive the worktree from that repository."
+                % (inferred_origin, board_origin, inferred_root))
+        elif inferred_root:
+            git_root = inferred_root
+            expected = inferred_origin or board_origin or pinned
+        else:
+            git_root = board_root
+            expected = board_origin or pinned
+
+    if not git_root:
+        return "", "", "", "", "repo_mismatch: could not resolve a spawn git root"
+    git_root = os.path.realpath(git_root)
+    wt = (os.path.abspath(os.path.expanduser(worktree_arg)) if worktree_arg
+          else os.path.join(git_root, ".worktrees", owner))
+    exists = os.path.isdir(wt)
+    spawn_origin = _origin_key(git_root)
+    if expected and spawn_origin and not repo_identity_matches(expected, spawn_origin):
+        return "", "", "", "", (
+            "repo_mismatch: --repo origin %s does not match checkout %s"
+            % (expected, spawn_origin))
+    wt_origin = _origin_key(wt) if exists else ""
+    if exists and wt_origin and expected and not repo_identity_matches(expected, wt_origin):
+        return "", "", "", "", "repo_mismatch: worktree origin does not match %s" % expected
+    ancestor = _git_main_worktree(_git_root_from(wt)) if (exists or worktree_arg) else ""
+    if ancestor and os.path.realpath(ancestor) != git_root:
+        anc_origin = _origin_key(ancestor)
+        if anc_origin and spawn_origin and not repo_identity_matches(anc_origin, spawn_origin):
+            return "", "", "", "", (
+                "repo_mismatch: --worktree is under %s but --repo is %s"
+                % (anc_origin, spawn_origin or expected))
+    base = _spawn_base_ref(git_root, base_arg)
+    return git_root, wt, expected or spawn_origin, base, ""
+
+
+def _spawn_install_hooks(board, owner, worktree, harness):
+    """Pin unique worktree-scoped hooks. Cursor/Agy read those files; CoS `cursor` must not win.
+
+    Claude project settings stay inherited; `tickets hooks claude` / `boot` still
+    bake that identity. Auto-writing `.claude/settings.json` here would clobber
+    the inherited allow-list (same-repo spawn).
+    """
+    tools = []
+    if harness in ("cursor", "grok", "grokbots", "cursor+claude"):
+        tools.append("cursor")
+    if harness in ("agy", "antigravity"):
+        tools.append("agy")
+    installed = []
+    for tool in tools:
+        ns = argparse.Namespace(
+            tool=tool, agent=owner, worktree=worktree,
+            settings=os.path.join(worktree, ".claude", "settings.json"),
+            hooks_file="", wrapper="", prompt_kind="",
+            stop=True, rollback=False, force=True)
+        cmd_hooks(ns, board)
+        installed.append(tool)
+    return installed
+
+
 def _spawn_git_root(board, owner, worktree):
     """Git object database for `worktree add`. Origin, not dirname(board)."""
-    from auth_v2_contract import repo_identity_matches, spawn_repo_identity_ok
-    board_root = os.path.dirname(board)
-    expected = _expected_origin_for(board, owner, worktree)
-    exists = os.path.isdir(worktree)
-    wt_origin = _git_remote_origin(worktree) if exists else ""
-    if expected:
-        candidates = []
-        for path in (worktree if exists else "", board_root, os.getcwd()):
-            root = _init_cwd_worktree_root(path) if path else ""
-            if root and root not in candidates:
-                candidates.append(root)
-        git_root = ""
-        for root in candidates:
-            if repo_identity_matches(expected, _git_remote_origin(root)):
-                git_root = root
-                break
-        if not git_root:
-            return board_root, (
-                "repo_mismatch: spawn git root origin must be %s (dirname(board) is not identity)"
-                % expected)
-        spawn_origin = _git_remote_origin(git_root)
-        if not spawn_repo_identity_ok(expected, wt_origin or spawn_origin, spawn_origin,
-                                     worktree_exists=exists):
-            return git_root, "repo_mismatch: worktree origin does not match %s" % expected
-        return git_root, ""
-    return board_root, ""
+    git_root, _wt, _expected, _base, err = _resolve_spawn_target(
+        board, owner, worktree_arg=worktree)
+    if err:
+        return os.path.dirname(os.path.abspath(board)), err
+    return git_root, ""
 
 
 def _classify_auth_output(rc, output):
@@ -17998,8 +18222,11 @@ def main():
     c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
                    help="persist the seat's wake policy (master/CoS default continuous; workers task-only)")
     c.add_argument("--brief", default="", help="standing context for this worker")
-    c.add_argument("--worktree", default="", help="default .worktrees/<name>")
-    c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
+    c.add_argument("--worktree", default="", help="default <repo>/.worktrees/<name>")
+    c.add_argument("--repo", default="",
+                   help="target checkout path or origin (owner/repo). Required when the "
+                        "board and the deliverable live in different repositories")
+    c.add_argument("--base", default="", help="branch/ref to create the worktree from (default origin/main)")
     c.add_argument("--every", type=int, default=60)
     c.add_argument("--run-timeout", type=int, default=90)
     c.add_argument("--heartbeat", type=int, default=0,
@@ -18267,6 +18494,8 @@ def main():
     c.add_argument("--cmd", dest="cmd_template", default="")
     c.add_argument("--exec", default="")
     c.add_argument("--worktree", default="")
+    c.add_argument("--repo", default="", help="target checkout path or origin for cross-repo spawn")
+    c.add_argument("--base", default="", help="branch/ref to create the worktree from")
     c.set_defaults(fn=cmd_dispatch)
 
     c = sub.add_parser("pr-sync", help="IN REVIEW + PR: merged+ancestor → ready to close (does not tickets done)")
