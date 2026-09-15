@@ -11133,10 +11133,9 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
     """Persist a provider rejection, including exit-zero Claude limit output.
 
     Match the CLI's own rejection line, not a mention in successful prose or
-    telemetry. Generic limit text still requires a failed run.
+    telemetry. Earlier ticket writes cannot invalidate a later rejection.
+    Generic limit text still requires a failed run.
     """
-    if rc in (0, None) and not timed_out and bound_write:
-        return
     clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", log_slice or "")
     rejection = re.search(
         r"^You['’]ve hit your (?:session|weekly|usage) limit[^\r\n]*$", clean, re.M | re.I)

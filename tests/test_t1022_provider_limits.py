@@ -1,6 +1,8 @@
 """Provider rejections pause seats without losing their held work or mail."""
 import importlib.util
 import json
+import shlex
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import pytest
 
 from test_t478_limit_outcome import _alice_on_docs
 from test_wakeup import board, run  # noqa: F401
+from test_trajectories import events
 
 TOOL = Path(__file__).resolve().parents[1] / 'tickets.py'
 spec = importlib.util.spec_from_file_location('limits_cli', TOOL)
@@ -17,6 +20,35 @@ spec.loader.exec_module(cli)
 
 def record(board):
     return json.loads((board / 'agents/alice.json').read_text())
+
+
+@pytest.mark.parametrize('with_reset', [True, False])
+def test_ticket_update_then_exit_zero_rejection_records_limit(board, monkeypatch, with_reset):
+    repo, tid = _alice_on_docs(board, monkeypatch)
+    reset = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    rejection = "You've hit your session limit" + (' · resets ' + reset if with_reset else '')
+    command = shlex.join([sys.executable, str(TOOL), 'update', tid, 'work before rejection'])
+    command += ' && printf "%s\\n" ' + shlex.quote(rejection) + '; exit 0'
+    result = run(board, 'watch', '--agent', 'alice', '--once', '--exec', command,
+                 '--cwd', str(repo), agent='alice', cwd=repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    ended = events(board, kind='run_end')[-1]
+    assert ended['exit'] == 0 and ended.get('bound_write') is True
+    history = run(board, 'show', tid, agent='alice', cwd=repo).stdout
+    assert 'work before rejection' in history
+    lim = record(board)['limit']
+    assert lim['source'] == 'provider'
+    assert lim['reset_at'] == (reset if with_reset else '')
+    assert 'LIMITED: alice' in history and rejection in history
+    assert 'Automatic retrigger paused' in history
+    assert cli.pending_work(str(board), 'alice').get('limited')
+    marker = repo / 'must-not-retrigger'
+    denied = run(board, 'watch', '--agent', 'alice', '--once', '--force',
+                 '--exec', shlex.join(['touch', str(marker)]), '--cwd', str(repo),
+                 agent='alice', cwd=repo)
+    assert denied.returncode == 1, denied.stdout + denied.stderr
+    assert not marker.exists()
+    assert record(board)['ticket'] == tid
 
 
 @pytest.mark.parametrize('rc', [0, 1])
@@ -114,11 +146,12 @@ def test_limited_overrides_fresh_work_and_team_snapshot(board, monkeypatch):
     assert seat['limit_until'] == ''
 
 
-def test_productive_error_quotation_does_not_pause(board, monkeypatch):
+def test_structured_rejection_after_bound_write_pauses(board, monkeypatch):
     _alice_on_docs(board, monkeypatch)
     cli._watch_note_limit_from_log(str(board), 'alice',
         '{"type":"error","error":{"type":"rate_limit_error"}}', rc=0, bound_write=True)
-    assert not record(board).get('limit')
+    assert record(board)['limit']['source'] == 'provider'
+    assert record(board)['limit']['reset_at'] == ''
 
 
 def test_elapsed_limit_does_not_reappear_from_old_transcript(board, monkeypatch):

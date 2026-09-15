@@ -34,11 +34,14 @@ cannot resurrect the expired hold; a fresh provider rejection can.
 
 ## Validation
 
-`tests/test_t1022_provider_limits.py`: 17 passing targeted cases, including real
+`tests/test_t1022_provider_limits.py`: 19 passing targeted cases, including real
 Claude output at exit 0 and exit 1, reset expiry and midnight rollover, unknown
 reset, explicit clear, ticket history, force suppression, queued mail, Team
 snapshot, fresh-work precedence, stale transcript suppression, and healthy
-telemetry/productive error quotation, and reset text inside a structured error.
+telemetry, and reset text inside a structured error. A provider rejection after
+an earlier ticket update still records LIMITED, including exit-zero runs with
+and without a reset time; prior progress does not suppress structured errors
+either. The regression verifies ticket history and prevents forced retriggers.
 
 Existing limit-outcome, watcher-retrigger, liveness, and watcher-poke regressions
 also passed (27 cases).
