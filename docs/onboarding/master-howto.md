@@ -24,8 +24,7 @@ Name → integrations → announce the name → ask for the objective and the
 tasks. Do not reverse it. An announcement before you know the integrations
 commits you to a team you cannot staff.
 
-Probe with `atm harness available` (the `tickets harness available` alias is
-the same command). Every catalog row prints, including missing binaries;
+Probe with `atm harness available`. Every catalog row prints, including missing binaries;
 missing is a row, not a silence. Usage that reports no remaining and no reset
 is **unknown**, not exhausted. Ask which integrations the operator has a live
 subscription for, and do not spawn until they answer.
@@ -73,10 +72,7 @@ atm graph
 atm map
 ```
 
-(`atm plan` and `tickets plan`, `atm graph` and `tickets graph`, are the
-same commands under the two names the CLI answers to.)
-
-Do **not** run one `tickets create` per title. Edges have to be real `deps` /
+Do **not** run one `atm create` per title. Edges have to be real `deps` /
 `--after` links, because `next`, `route` and `graph` read edges and cannot
 read prose. A blocker described in a ticket body is not an edge. Mid-run, add
 them with `atm dep` or `atm create --blocks`.
@@ -122,7 +118,7 @@ atm master cos <name>
 atm dispatch T-NNN --to <seat> --harness <a harness they subscribe to>
 ```
 
-The CEO seat sounds; the CoS staffs. CEO does not `tickets next`. A
+The CEO seat sounds; the CoS staffs. CEO does not `atm next`. A
 coordinating seat that claims feature tickets stops coordinating.
 
 ---
@@ -180,7 +176,7 @@ then coordinate. You do not take feature tickets.
 - `atm update` / `atm here` — keep your own status honest.
 - Reopen claims that have gone silent for more than 90m with `atm reopen`.
   Silence is not progress.
-- `atm drive` (`tickets drive`) — check the board is still pointed at the
+- `atm drive` — check the board is still pointed at the
   objective.
 - `atm limits` — distinguish an agent that is out of quota from one that is
   merely waiting. They need different actions.
@@ -229,3 +225,10 @@ A fourth onboarding file. A fresh master should be able to read
 `.tickets/briefs/_shared.md` and be oriented. If that is not enough, fix
 those files rather than writing another guide. See
 [../handoff-contract.md](../handoff-contract.md).
+
+## Boards that live in another repository
+
+When the board is not inside the repository your seats should work in, spawn
+with `atm spawn <seat> --repo /path/to/atman` so worktrees and identity-pinned hooks
+come from the deliverable checkout, not from the board's own directory. See
+`docs/t824-spawn-target-repo.md`.

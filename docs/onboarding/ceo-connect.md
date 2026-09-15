@@ -58,6 +58,9 @@ atm connect
 
 ---
 
+Remote sessions and reconnect are experimental and outside the supported
+preview. The commands below enroll local CLI seats.
+
 ## Exact commands a new CEO runs
 
 Living board. Example seat `atman-ceo` is master. Example CoS `cos`.

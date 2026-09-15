@@ -104,14 +104,9 @@ configure a heartbeat or an external cadence separately.
 `--harness` overrides **and** re-registers, and a harness switch without a
 new `--cmd` drops the old command template on purpose.
 
-**Remote sessions are not part of the supported preview.** `--harness remote`
-and `atm hooks remote` exist, but the bridge that would make them reconnect is
-unfinished, so a remote seat is not something to build a first board on. A
-bare remote `spawn` fails closed rather than quietly substituting a local
-model — it refuses with *"uses a remote adapter; connect the generated remote
-hook/bridge or register a custom command"* — and queued work stays visible in
-the dashboard. Treat that as the honest failure it is, not as a working path:
-nothing here should be read as a promise that reconnect works.
+**Remote sessions are experimental and outside the supported preview.**
+Remote control and reconnect are unfinished; use a local Claude, Codex or
+Cursor CLI seat for this onboarding path.
 
 ---
 
@@ -349,7 +344,7 @@ atm spawn <name> --stop
 atm brief --role docs --show
 atm knowledge query "…"
 atm prompt --master --agent boss
-atm ui                      # http://127.0.0.1:8765, read-only
+atm ui                      # prints its local address; composer can post messages
 ```
 
 On the dashboard, `—` means **unknown** — not measured yet. It is not zero.

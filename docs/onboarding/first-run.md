@@ -7,13 +7,12 @@ you recover a ticket from an agent that died holding it, and the objective
 closes with evidence. It works the same for all three subscriptions — you
 pick yours once, in step 3.
 
-Every command and every quoted output on this page was run end to end on a
-throwaway board before the page was written. Where something refuses, the
-refusal is printed here too — those are the parts that cost you time if
-nobody warns you first.
+The command flow was replayed on a throwaway board with an isolated HOME and
+install prefix. Provider binaries were replaced with stubs; this verifies
+coordination and command wiring, not model quality or your subscription.
+Outputs below are illustrative; paths, SHAs, timings and provider text vary.
 
-`atm` is the command. `tickets` is the same file under its older name; every
-`atm <verb>` here also works as `tickets <verb>`.
+`atm` is the public command; `tickets` remains a compatibility alias.
 
 ---
 
@@ -79,7 +78,9 @@ no published tap or release tarball yet — see
 
 ## 1. Point it at your project
 
-Run this in the project you want coordinated, **not** in the `atm` clone.
+Use a small Git project with a committed `main` branch and a clean working
+tree. Python 3 and pytest must already be available to your provider CLI.
+Run this in that project, **not** in the `atm` clone.
 
 ```sh
 cd /path/to/your-project
@@ -136,7 +137,7 @@ atm objective "Ship a greet command with a test and a README section" \
 ```
 
 ```
-boss is master now. Run `tickets master` for the briefing.
+boss is master now. Run `atm master` for the briefing.
 WARNING: boss took master with no live endpoint. Mail stays queued until a
 native session or persist watcher is online.
 objective set
@@ -173,7 +174,7 @@ read per row: `on_disk`, and the usage line.
 id       name           binaries               on_disk  path / policy
 claude   Claude Code    claude                 yes      /opt/homebrew/bin/claude
          ok to spawn if chosen
-         if they say yes: tickets spawn <seat> --harness claude
+         if they say yes: atm spawn <seat> --harness claude
          usage unknown remaining=(missing)  reset=(missing)
 ```
 
@@ -188,28 +189,29 @@ you bought Claude, Codex, or Cursor:
 export HARNESS=claude      # or: codex   |   cursor
 ```
 
-You do **not** need to pass `--model`. Left off, the seat runs your CLI's own
-default, and `spawn` says so with `model=default`. That is the portable form:
-model names are per-provider (`sonnet`/`opus` for Claude, a Codex model name
+For these fresh seat names, omit `--model` to use the provider CLI default.
+An existing seat can retain its registered model; use fresh names for this run.
+Model names are provider-specific (`sonnet`/`opus` for Claude, a Codex model name
 for `codex`), so a hardcoded one is wrong for two of the three. Add `--model`
 later, once you want a specific one.
 
-Each harness resolves to a different real command. `spawn` prints it as
-`cmd:` before it runs anything — these three were captured on the proof run:
+Each harness resolves to a different command in `tickets.py:_worker_cmd`.
+The `cmd:` banner describes it; the watcher can already be starting when you
+see the banner. These default command shapes were verified using stub binaries:
 
 | `--harness` | binary it runs |
 |---|---|
-| `claude` | `claude -p "$(tickets prompt)" --dangerously-skip-permissions` |
-| `codex` | `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "$(tickets prompt)"` |
-| `cursor` | `agent -p --output-format text --force "$(tickets prompt)"` |
+| `claude` | `claude -p "$(atm prompt)" --dangerously-skip-permissions` |
+| `codex` | `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "$(atm prompt)"` |
+| `cursor` | `agent -p --output-format text --force "$(atm prompt)"` |
 
 If that binary is not installed and logged in, `spawn` refuses before it
 starts a watcher, and names the fix:
 
 ```
-probe-claude: Harness unavailable
+probe-claude: Login required
   recover:  claude auth login
-watcher not started; fix the state above, then rerun `tickets spawn probe-claude`
+watcher not started; fix the state above, then rerun `atm spawn probe-claude`
 ```
 
 Antigravity (`agy`) appears in this catalog and is **experimental**. Its
@@ -262,7 +264,7 @@ pinned claude hooks to unique worker dev1 (canonical role hooks not inherited)
 watcher for dev1 started (pid NNNNN); harness=claude; model=default;
   wake=task-only; launch=unattended; persist=no; max-runs=1;
   log <project>/.tickets/agents/dev1.watch.log
-cmd: claude -p "$(tickets prompt)" --dangerously-skip-permissions
+cmd: claude -p "$(atm prompt)" --dangerously-skip-permissions
 ```
 
 (The `harness=` and `cmd:` lines follow your `$HARNESS`; the table in step 3
@@ -311,8 +313,9 @@ notes, including the branch and SHA to look at.
 
 ## 6. Review the artifact yourself and record the verdict
 
-This is the gate. Do not skip it — nothing below the review line happens
-without you.
+Review is your responsibility in this walkthrough. On this main, readiness
+checks the predecessor's `done` status, not an enforced accepted verdict.
+Record acceptance against the reviewed SHA, merge, and only then close it.
 
 ```sh
 cd .worktrees/dev1 && git log --oneline -2 && python3 -m pytest -q ; cd -
@@ -337,10 +340,13 @@ T-001 accepted 8a3a6689e2c305bf8e8920ae34976fe0b80f53d7 by boss
 ```
 
 `accept` records a verdict; it does not close the ticket and does not release
-the work that depends on it. Merge, then close:
+the work that depends on it. Fast-forward main, then close. This keeps the
+accepted SHA as the merged artifact; a new merge commit would have a different
+SHA and the app would mark the earlier verdict superseded. If fast-forward
+refuses, have the worker rebase, resubmit and get its new SHA reviewed first:
 
 ```sh
-git merge --no-ff dev1 -m "Merge dev1: T-001"
+git merge --ff-only dev1
 atm done T-001 --notes "greet.py + tests/test_greet.py merged to main. greet(name) -> 'Hello, {name}!'."
 ```
 
@@ -354,81 +360,47 @@ events**, the agent's evidence under **Notes**.
 
 ---
 
-## 7. The second agent picks up what the first one unblocked
+## 7. Claim the second ticket and interrupt it once
+
+For this bounded recovery exercise, drive the writer seat manually from a
+separate worktree. This avoids racing an unattended model that might finish
+before you can interrupt it. Run from the project root:
 
 ```sh
-atm spawn writer --roles docs --harness "$HARNESS" --every 10 --max-runs 1
+git worktree add .worktrees/writer -b writer main
+cd .worktrees/writer
+export TICKET_AGENT=writer
+atm join writer --roles docs --harness "$HARNESS"
+atm next
+atm update T-002 "Checked greet(name): returns Hello, {name}!; README still needs a Usage section. No file changes yet."
+cd ../..
+export TICKET_AGENT=boss
 ```
 
-```
-run 1 trigger={"broadcasts": 6, "ready_in_my_lane": ["T-002 Document greet in README.md"]}
-```
-
-It woke for T-002 because T-001 is done, claimed it, and — this is the part
-worth checking — it started from the first agent's handoff. `atm show T-002`
-prints, before any of its own notes:
-
-```
-Handoff from dependencies (all notes):
-  T-001 (Add greet.py with a pytest test): REVIEW: dev1@8a3a668 -- greet.py +
-  tests/test_greet.py added ... greet(name) returns 'Hello, {name}!'; CLI
-  defaults to 'world' with no arg.
-```
-
-Nobody re-explained the first ticket to the second agent.
+`atm next` claims T-002 because T-001 is done and prints **Handoff from
+dependencies**, including dev1's review evidence and the coordinator's merge
+note. The progress note deliberately leaves no uncommitted file to recover.
+Stop this manual seat here; do not keep working under its identity.
 
 ---
 
-## 8. When an agent dies mid-ticket
+## 8. Reopen and replace the interrupted seat
 
-Agents get interrupted — a crashed watcher, a closed laptop, an exhausted
-quota. Do this one deliberately, because it will happen to you for real.
-
-The writer posts progress and then goes quiet:
+As coordinator, release the claim with a recorded reason (`--notes` is the
+actual reopen flag):
 
 ```sh
+atm reopen T-002 --notes "Bounded interruption: writer stopped after its progress update; replacement should finish the Usage section."
+atm spawn writer2 --roles docs --harness "$HARNESS" --every 10 --max-runs 1
 atm show T-002
 ```
 
-```
-- [writer] drafted the Usage heading in README.md; still need the example output line
-```
-
-The board does **not** free the ticket on its own. It stays IN PROGRESS under
-an owner who is never coming back, and no other docs seat can claim it. You
-release it, with a reason:
-
-```sh
-atm reopen T-002 --notes "writer went quiet after its last update; releasing so another docs seat can finish it"
-```
-
-```
-T-002 reopened
-```
-
-Now a replacement seat can take it — and starts from what the dead one had
-already done rather than from nothing:
-
-```sh
-atm spawn writer2 --roles docs --harness "$HARNESS" --every 10 --max-runs 1
-```
-
-`atm show T-002` gives it all three layers:
-
-```
-Handoff from dependencies (all notes):
-  T-001 (Add greet.py with a pytest test): REVIEW: dev1@770fa0d -- greet.py +
-  tests/test_greet.py; greet(name) -> 'Hello, {name}!' ... pytest -q -> 2 passed.
-  T-001 (Add greet.py with a pytest test): main@940e09c -- merged to main.
-
-Notes:
-  - [writer] drafted the Usage heading in README.md; still need the example output line
-  - [boss] writer went quiet after its last update; releasing so another docs seat can finish it
-```
-
-The dependency handoff, the interrupted worker's own note, and your reason for
-reopening. This is why the 45-minute `atm update` rule exists: an agent that
-never says where it is leaves its replacement nothing to start from.
+The replacement's `atm next` claim prints the prior notes: T-001's dependency
+handoff, writer's `Checked greet(name)` progress, and boss's `Bounded
+interruption` reason. Check those same notes with `atm show T-002`. Reopening
+releases ownership and preserves notes; it does not copy uncommitted files
+between worktrees. Wait for writer2 to commit and submit `atm review` before
+continuing. Its log is `.tickets/agents/writer2.watch.log`.
 
 ---
 
@@ -437,9 +409,12 @@ never says where it is leaves its replacement nothing to start from.
 Same gate as step 6 — the replacement seat's SHA, not the dead one's:
 
 ```sh
-atm accept T-002 --sha $(git -C .worktrees/writer2 rev-parse HEAD) --notes "…"
-git merge --no-ff writer2 -m "Merge writer2: T-002"
-atm done T-002 --notes "…"
+(cd .worktrees/writer2 && python3 -m pytest -q)
+cat .worktrees/writer2/README.md
+atm accept T-002 --sha $(git -C .worktrees/writer2 rev-parse HEAD) --notes "Tests pass; README Usage section names greet and shows its output."
+git merge --ff-only writer2
+atm done T-002 --notes "README Usage section merged; greet command and tests are on main."
+python3 -m pytest -q
 ```
 
 ---
@@ -478,23 +453,35 @@ looks identical to a team that stalled.
 
 ## 11. Look at what you built
 
+Completed, accepted tickets leave the active Work graph on this main. Post
+one closing handoff so their full review records remain visible in the app's
+**Intervene → Board** thread:
+
 ```sh
+atm msg "First-run closing handoff:
+$(atm show T-001)
+
+$(atm show T-002)" --to everyone
 atm ui
 ```
 
 ```
-board UI: http://127.0.0.1:18891  (Ctrl-C to stop; localhost-only; composer posts via tickets msg)
+board UI: <local address>  (Ctrl-C to stop; localhost-only; composer posts via atm msg)
 ```
 
-Open it. It is read-only, auto-refreshing, and bound to localhost. What should
+Open the local address `atm ui` prints. The app auto-refreshes and binds to localhost;
+its composer can post messages. Stop it with Ctrl-C when finished. What should
 be visible, and is worth checking against what you just did:
 
-- the objective, **achieved**, with your evidence line
-- both tickets done, and the T-001 → T-002 edge that ordered them
-- each accept recorded against its exact SHA, separate from the agent's notes
-- the handoff the second agent inherited
-- turns and cost reading **unknown** — nothing estimates them for you; they
-  are populated by harnesses that report usage
+- **Objective:** state `achieved`; the completion message carries the evidence
+- **Work:** `2/2 accepted`, with no active work left; completed nodes and their
+  edge are omitted from this active graph
+- **Intervene → Board:** the closing handoff contains both tickets, the
+  T-001 → T-002 dependency result, each **accept** event with its full reviewed
+  SHA and reviewer, and the notes writer2 inherited
+- the closing handoff also preserves writer's progress and boss's reopen reason
+- turns and cost reading **unknown** / `—` when no usage was reported, as in
+  the stub replay; a real harness may supply measured usage. Unknown is not zero
 
 `atm ui --json` prints the same snapshot without serving it, which is the
 easier thing to grep:
@@ -504,44 +491,25 @@ atm ui --json | python3 -c "import json,sys; print(json.load(sys.stdin)['counts'
 ```
 
 ```
-{'total': 2, 'done': 2}
+{'total': 2, 'done': 2, 'done_unverified': 0, 'accepted': 2}
 ```
 
 ---
 
 ## Wake an agent without spending a model call
 
-Useful when you are debugging the wiring rather than doing work: `atm` only
-cares about the harness's exit code, and it expands `{prompt_file}`, `{cwd}`
-and `{agent}`.
+This bounded wiring check works even after both tickets are done. A directed
+`--task` message provides the wake; `/usr/bin/true` exits without a model call.
 
 ```sh
-cat > /tmp/dry.sh <<'EOF'
-#!/bin/sh
-echo "woke: agent=$3 cwd=$2 prompt_bytes=$(wc -c < "$1")"
-cp "$1" /tmp/captured-prompt.txt
-EOF
-chmod +x /tmp/dry.sh
-
-atm spawn probe --roles backend --every 10 --max-runs 1 \
-  --exec '/tmp/dry.sh {prompt_file} {cwd} {agent}'
+atm join probe --roles backend --harness custom --cmd /usr/bin/true
+atm msg "Dry wiring check" --to probe --task
+atm watch --agent probe --every 1 --max-runs 1 --cwd . --exec /usr/bin/true
 ```
 
-Give it a role that has **ready** work right now. A watcher wakes on ready
-work in its own lane, so a probe spawned `--roles docs` while the only docs
-ticket is still blocked sits there silently and looks broken. (The `spawn`
-banner still prints `harness=claude` when you pass `--exec`; the `cmd:` line
-below it is the one that tells the truth.)
-
-`/tmp/captured-prompt.txt` is then exactly what a real harness would have
-received — about 1.9 KB on a board this size: the seat's rules, the board
-path, the stuck rule, the loop, and any role context you seeded. The prompt
-file itself is written fresh per run and deleted after, so do not cache its
-path.
-
-This proves wiring only. It is not a substitute for step 5 — a stub that
-never claims a ticket will keep re-firing on the same ready ticket if the
-watcher is continuous, so cap it with `--max-runs`.
+Expect one run, exit 0, then `max-runs reached` and `watch stopped`. This
+proves task delivery and process execution; the stub does not claim or
+complete work. Keep `--max-runs 1` so a diagnostic cannot run indefinitely.
 
 ---
 
@@ -550,7 +518,8 @@ watcher is continuous, so cap it with `--max-runs`.
 ```sh
 atm spawn --list
 atm spawn dev1 --stop
-atm spawn writer --stop
+atm spawn writer2 --stop
+atm spawn probe --stop
 ```
 
 A `task-only` watcher stops itself after its run. A `continuous` one does

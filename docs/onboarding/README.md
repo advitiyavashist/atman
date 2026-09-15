@@ -22,8 +22,8 @@ objective, the shared state, the task graph, messaging, scheduling, and
 verification. The north star is **task completion in the fewest turns**.
 
 The shape of a run, in order: probe what you can actually spend
-(`tickets harness available`), lay out work as a graph with real `--after`
-edges (`tickets plan`, or `tickets create --deps` on a first board), let
+(`atm harness available`), lay out work as a graph with real `--after`
+edges (`atm plan`, or `atm create --deps` on a first board), let
 seats persist unattended to a **reviewable SHA**, and gate it on
 **human review**. [first-run.md](first-run.md) does exactly that, end to end,
 with the output it printed.
