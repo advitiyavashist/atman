@@ -1274,6 +1274,11 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    tickets = load_all(board)
+    reason = _work_view().refuse_unreleased_reason(t, tickets)
+    if reason:
+        os.unlink(lock)
+        sys.exit(reason)
     prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
@@ -1409,6 +1414,13 @@ def unblocked(board, tickets):
         for t in tickets
         if t["status"] == "open" and all(d in released for d in t.get("deps", []))
     ]
+
+
+def _refuse_unreleased_deps(t, tickets, only_done=False):
+    """One gate: refuse if any predecessor is not dep_released (T-1031)."""
+    reason = _work_view().refuse_unreleased_reason(t, tickets, only_done=only_done)
+    if reason:
+        sys.exit(reason)
 
 
 def find_cycle(tickets):
@@ -2195,7 +2207,9 @@ def cmd_next(a, board):
 
 def cmd_claim(a, board):
     owner = whoami(a.owner)
-    got, held = try_claim_one_active(board, a.id, owner)
+    t = load(board, a.id)
+    _refuse_unreleased_deps(t, load_all(board))
+    got, held = try_claim_one_active(board, a.id, owner, another=bool(getattr(a, "another", False)))
     if held:
         sys.exit(_already_hold_msg(held))
     if not got:
@@ -2655,6 +2669,8 @@ def cmd_merge(a, board):
                 continue
             t2["status"] = "done"
             t2["done_at"] = now()
+            t2["merge_record"] = _work_view().make_merge_record(
+                owner, now(), full_trunk or sha, pin=pin, trunk=trunk)
             t2["notes"].append({"by": owner, "at": now(),
                                 "text": "merged into %s as %s (atm merge; pinned %s)" % (
                                     trunk, sha, pin)})
@@ -2983,6 +2999,7 @@ def cmd_assign(a, board):
             # hard assignment by the master: takes the lock on their behalf
             prev_owner = t.get("owner") or ""
             if t["status"] == "open" and a.owner:
+                _refuse_unreleased_deps(t, load_all(board))
                 got, held = try_claim_one_active(board, t["id"], a.owner)
                 if held:
                     # Queued work stays queued: reserve, do not fabricate a
@@ -3081,6 +3098,7 @@ def cmd_reserve(a, board):
         sys.exit("atm reserve --for is master/planner/optimizer only (anyone may --drop)")
     if t.get("status") != "open":
         sys.exit("%s is %s; reserve only open tickets" % (t["id"], t.get("status") or "?"))
+    _refuse_unreleased_deps(t, load_all(board), only_done=True)
     unknown = not _agent_rec(board, target)
     t["reserved_for"] = target
     note = "reserve: for %s" % target
@@ -3691,6 +3709,7 @@ def health(board, tickets):
 
 def cmd_reopen(a, board):
     t = load(board, a.id)
+    _refuse_unreleased_deps(t, load_all(board), only_done=True)
     notes = getattr(a, "notes", "") or ""
     # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
     # ticket to `next` while notes still read as REVIEW. Claimed work that
@@ -5624,6 +5643,7 @@ def main():
     c = sub.add_parser("claim", help="atomically claim a specific ticket")
     c.add_argument("id")
     c.add_argument("--owner", "-o")
+    c.add_argument("--another", action="store_true", help="claim even though I already hold one")
     c.set_defaults(fn=cmd_claim)
 
     c = sub.add_parser("done", help="mark a ticket done")

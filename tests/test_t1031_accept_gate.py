@@ -118,6 +118,20 @@ def test_pure_gate_helpers():
     assert [n["text"] for n in leftover["notes"]] == ["other"]
     assert work_view.is_live_unverified_gate_note(REASON, "T-002") is True
     assert work_view.is_live_unverified_gate_note("resolved: " + REASON, "T-002") is False
+    prose = dict(reviewed, notes=[{
+        "by": "alice", "at": "2026-09-15T00:03:00Z",
+        "text": "Merged into main as " + ("b" * 40)}])
+    assert work_view.review_of(prose)["verified"] is True  # UI may still label MERGED
+    assert work_view.dep_released(prose) is False  # release never trusts prose
+    assert work_view.structured_accept(prose) is False
+    assert work_view.structured_merge(prose) is False
+    merged = dict(reviewed, merge_record=work_view.make_merge_record(
+        "master", "2026-09-15T00:03:00Z", "b" * 40, pin="a" * 40, trunk="main"))
+    assert work_view.dep_released(merged) is True
+    assert work_view.unreleased_dep_id(
+        {"id": "T-003", "deps": ["T-001"]}, [prose]) == "T-001"
+    assert work_view.unreleased_dep_id(
+        {"id": "T-003", "deps": ["T-001"]}, [accepted]) == ""
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
@@ -231,3 +245,144 @@ def test_done_then_accept_releases_successor(tool, board):
     assert full in shown.stdout
     assert release in shown.stdout
     assert REASON not in shown.stdout
+
+
+# Work-entry points that must share dep_released (CEO T-1036 RULE A).
+# Each refuses a child whose parent is done-unverified.
+WORK_ENTRY_POINTS = (
+    ("next", ("next",), "bob"),
+    ("claim", ("claim", "T-003"), "bob"),
+    ("claim --another", ("claim", "T-003", "--another"), "bob"),
+    ("assign", ("assign", "T-003", "--owner", "bob"), "reviewer"),
+    ("reserve-then-claim", None, "bob"),  # special: reserve then claim
+    ("route --claim", ("route", "--claim"), "reviewer"),
+    ("reopen", ("reopen", "T-003"), "bob"),
+    ("dispatch", ("dispatch", "T-003", "--to", "bob"), "reviewer"),
+)
+
+
+def _force_open_child(board, tid="T-003"):
+    child = load_ticket(board, tid)
+    child["status"] = "open"
+    child.pop("unverified_block", None)
+    save_ticket(board, child)
+    lock = board / (tid + ".lock")
+    if lock.exists():
+        lock.unlink()
+
+
+def _assert_child_not_started(board, name):
+    child = load_ticket(board, "T-003")
+    assert child["status"] != "claimed", "%s claimed T-003: %s" % (name, child)
+    assert child.get("owner") != "bob" or child["status"] != "claimed"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_work_entry_points_refuse_unverified_parent(tool, board):
+    """Every start path refuses a child whose parent is done-unverified."""
+    setup_backend(tool, board)
+    put_in_review(board)
+    done = run(tool, board, "done", "T-002", "--notes", "unverified", "--force",
+               agent="alice")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert load_ticket(board, "T-003")["status"] == "blocked"
+
+    reopen = run(tool, board, "reopen", "T-003", agent="bob")
+    out = reopen.stdout + reopen.stderr
+    assert reopen.returncode != 0, out
+    assert REASON in out
+    assert load_ticket(board, "T-003")["status"] == "blocked"
+
+    for name, args, agent in WORK_ENTRY_POINTS:
+        _force_open_child(board)
+        if name == "claim --another":
+            extra = run(tool, board, "create", "unrelated", "--role", "backend",
+                        agent="alice")
+            assert extra.returncode == 0, extra.stderr
+            held = run(tool, board, "claim", "T-004", agent="bob")
+            assert held.returncode == 0, held.stderr + held.stdout
+            r = run(tool, board, *args, agent=agent)
+            out = r.stdout + r.stderr
+            assert r.returncode != 0, out
+            assert REASON in out
+            _assert_child_not_started(board, name)
+            done_extra = run(tool, board, "done", "T-004", "--notes", "park",
+                             "--force", agent="bob")
+            assert done_extra.returncode == 0, done_extra.stderr + done_extra.stdout
+            continue
+        if name == "reserve-then-claim":
+            child = load_ticket(board, "T-003")
+            child["reserved_for"] = "bob"
+            save_ticket(board, child)
+            r = run(tool, board, "claim", "T-003", agent="bob")
+            out = r.stdout + r.stderr
+            assert r.returncode != 0, out
+            assert REASON in out
+            _assert_child_not_started(board, name)
+            continue
+        if name == "dispatch" and tool.name == "cli.py":
+            continue
+        r = run(tool, board, *args, agent=agent)
+        out = r.stdout + r.stderr
+        _assert_child_not_started(board, name)
+        if name == "next":
+            assert "T-003" not in r.stdout
+            continue
+        if name == "route --claim":
+            continue
+        assert r.returncode != 0, "%s should refuse: %s" % (name, out)
+        assert REASON in out or name == "dispatch"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_merge_prose_does_not_release_child(tool, board):
+    """RULE B: a 'Merged into main as <sha>' note is not a release record."""
+    setup_backend(tool, board)
+    full, _ = put_in_review(board)
+    parent = load_ticket(board, "T-002")
+    parent.setdefault("notes", []).append({
+        "by": "alice", "at": "2026-09-15T12:05:00Z",
+        "text": "Merged into main as " + full,
+    })
+    save_ticket(board, parent)
+    done = run(tool, board, "done", "T-002", "--notes", "unverified", "--force",
+               agent="alice")
+    assert done.returncode == 0, done.stderr + done.stdout
+    parent = load_ticket(board, "T-002")
+    assert not parent.get("review_events")
+    assert not parent.get("release_override")
+    assert not parent.get("merge_record")
+    assert work_view.dep_released(parent) is False
+    child = load_ticket(board, "T-003")
+    assert child["status"] == "blocked"
+    nxt = run(tool, board, "next", "--another", agent="bob")
+    assert nxt.returncode != 0, nxt.stdout + nxt.stderr
+    assert load_ticket(board, "T-003")["status"] != "claimed"
+
+
+def test_entry_points_call_shared_dep_released():
+    """No start path carries its own copy of the release check."""
+    fns = {
+        "try_claim": ("_refuse_unreleased_deps", "refuse_unreleased_reason"),
+        "cmd_claim": ("_refuse_unreleased_deps",),
+        "cmd_assign": ("_refuse_unreleased_deps",),
+        "cmd_reopen": ("_refuse_unreleased_deps",),
+        "cmd_reserve": ("_refuse_unreleased_deps",),
+        "cmd_next": ("unblocked", "try_claim"),
+        "cmd_route": ("released_ids", "try_claim"),
+    }
+    for path in TOOLS:
+        src = path.read_text()
+        for fn, needles in fns.items():
+            start = src.find("def %s(" % fn)
+            assert start != -1, "%s missing %s" % (path.name, fn)
+            nxt = src.find("\ndef ", start + 4)
+            body = src[start:nxt if nxt != -1 else None]
+            assert any(n in body for n in needles), (
+                "%s %s does not call shared gate %s" % (path.name, fn, needles))
+        if path.name == "tickets.py":
+            start = src.find("def cmd_dispatch(")
+            assert start != -1
+            nxt = src.find("\ndef ", start + 4)
+            body = src[start:nxt]
+            assert "_refuse_unreleased_deps" in body

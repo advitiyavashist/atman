@@ -309,14 +309,76 @@ def is_docs_exempt(t):
     return role in DOCS_EXEMPT_ROLES and not went_through_review(t)
 
 
+def structured_accept(t):
+    """True when review_events has an accept bound to this ticket's review head."""
+    head = (t.get("review_head") or "").strip()
+    if not head:
+        return False
+    for ev in t.get("review_events") or []:
+        if not isinstance(ev, dict):
+            continue
+        if (ev.get("kind") or "").strip().lower() != "accept":
+            continue
+        sha = (ev.get("sha") or "").strip()
+        if sha and _sha_match(sha, head):
+            return True
+    return False
+
+
+def make_merge_record(by, at, sha, pin="", trunk=""):
+    """Structured close written only by `atm merge` (never a free-text note)."""
+    return {
+        "kind": "merge",
+        "by": by or "",
+        "at": at or "",
+        "sha": (sha or "").strip(),
+        "pin": (pin or "").strip(),
+        "trunk": (trunk or "").strip(),
+    }
+
+
+def structured_merge(t):
+    rec = t.get("merge_record")
+    if not isinstance(rec, dict):
+        return False
+    if (rec.get("kind") or "").strip().lower() != "merge":
+        return False
+    return bool((rec.get("sha") or "").strip() and (rec.get("by") or "").strip())
+
+
 def dep_released(t, msgs=None):
-    """True when dependents may start: structured ACCEPT/merge or a recorded override."""
+    """True when dependents may start. Records only — never note or message text.
+
+    Satisfied by: review_events accept bound to review_head, a merge_record
+    written by `atm merge`, or a recorded release_override naming seat+reason.
+    ``msgs`` is accepted for call-site compatibility and ignored.
+    """
+    del msgs
     if t.get("status") != "done":
         return False
-    if review_of(t, msgs)["verified"]:
+    if structured_accept(t) or structured_merge(t):
         return True
     ov = t.get("release_override")
     return isinstance(ov, dict) and bool(ov.get("kind"))
+
+
+def unreleased_dep_id(t, tickets, only_done=False):
+    """First predecessor that is not dep_released, or ''.
+
+    ``only_done=True`` skips unfinished predecessors so reserve can still
+    point at future work. Claim/assign/reopen refuse every unreleased dep.
+    """
+    by_id = dict((x["id"], x) for x in tickets)
+    for dep_id in t.get("deps") or []:
+        pred = by_id.get(dep_id)
+        if pred is None:
+            continue
+        if dep_released(pred):
+            continue
+        if only_done and pred.get("status") != "done":
+            continue
+        return dep_id
+    return ""
 
 
 def released_ids(tickets, messages=None):
@@ -339,6 +401,14 @@ def accepted_release_sha(t, msgs=None):
 
 def make_release_override(kind, by, at, reason=""):
     return {"kind": kind, "by": by, "at": at, "reason": reason or ""}
+
+
+def refuse_unreleased_reason(t, tickets, only_done=False):
+    """Exit text when t's deps are not released, or ''."""
+    pred = unreleased_dep_id(t, tickets, only_done=only_done)
+    if not pred:
+        return ""
+    return "%s: %s" % (t.get("id") or "?", unverified_block_reason(pred))
 
 
 def unverified_block_reason(pred_id):
