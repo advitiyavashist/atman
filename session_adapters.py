@@ -866,8 +866,25 @@ def _claude_user_envelope(text, msg_id=""):
     }
 
 
+CLAUDE_HELD_RECOVERY = (
+    "approve in the recipient session or set crossSessionInbound accept"
+)
+
+# peer_message_status values are delivery outcomes, never turn-start evidence.
+CLAUDE_PEER_STATUS_LABELS = {
+    "held": "held",
+    "delivered": "delivered-confirmed",
+    "refused": "refused",
+    "dropped": "dropped",
+    "expired": "expired",
+}
+
+
 def _claude_ack_ok(obj):
+    """True only for a generic write-ack. That is delivery, not a wake."""
     if not isinstance(obj, dict):
+        return False
+    if obj.get("type") == "control" and obj.get("action") == "peer_message_status":
         return False
     if obj.get("ok") is True:
         return True
@@ -875,9 +892,24 @@ def _claude_ack_ok(obj):
         return True
     if obj.get("status") in ("delivered", "ok", "accepted"):
         return True
-    if obj.get("type") == "control" and obj.get("action") == "peer_message_status":
-        return obj.get("status") in ("delivered", "held")
     return False
+
+
+def _claude_receipt_label(obj):
+    """Map a Claude inbox object to a wake receipt.
+
+    Write-acks and peer_message_status are delivery outcomes. woken requires
+    verified evidence that the intended message started a recipient turn;
+    no Claude inbox frame currently carries that proof, so do not invent one.
+    """
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("type") == "control" and obj.get("action") == "peer_message_status":
+        status = str(obj.get("status") or "").strip().lower()
+        return CLAUDE_PEER_STATUS_LABELS.get(status)
+    if _claude_ack_ok(obj):
+        return "delivered-confirmed"
+    return None
 
 
 def _recv_json_line(sock, deadline):
@@ -918,13 +950,15 @@ CLAUDE_ACK_WAIT_SECS = 0.0
 
 
 def _poke_claude_wake(ep, text, msg_id=""):
-    """Inject a Claude UDS user envelope. woken only on a real receipt.
+    """Inject a Claude UDS user envelope. Write-ack is not a wake.
 
     Live Claude Code does not write an ack on the injector socket, so the
     honest receipt is delivered-unconfirmed: the bytes left here, nobody
-    confirmed a turn. Raw text after auth is never a wake. Only a failure to
-    connect or to finish the write is a connection error worth retrying --
-    a completed write must never be sent twice under a fresh id.
+    confirmed a turn. A generic write-ack, if one ever arrives, is
+    delivered-confirmed and must not refresh the heartbeat. Raw text after
+    auth is never a wake. Only a failure to connect or to finish the write
+    is a connection error worth retrying -- a completed write must never be
+    sent twice under a fresh id.
     """
     sock_path = ep.get("socket") or ""
     if not sock_path or not os.path.exists(sock_path):
@@ -944,8 +978,9 @@ def _poke_claude_wake(ep, text, msg_id=""):
         except OSError:
             pass
         ack = _recv_json_line(s, time.time() + CLAUDE_ACK_WAIT_SECS)
-        if _claude_ack_ok(ack):
-            return "woken"
+        labeled = _claude_receipt_label(ack)
+        if labeled:
+            return labeled
         return "delivered-unconfirmed"
     except OSError:
         return "queued-offline" if not wrote else "delivered-unconfirmed"
@@ -979,7 +1014,7 @@ def _poke_claude_until(ep, text, attempts=None):
         if poked is True:
             return "woken"
         if poked is False:
-            return "refused"
+            return "inject-refused"
         label = str(poked or "queued-offline")
         if label not in CLAUDE_RETRYABLE:
             return label
@@ -1604,9 +1639,16 @@ def _commit_wake(board, seat, mid, lease, fence, label, ok):
             return "stale (rebound before delivery)"
         ep.pop("last_inflight_id", None)
         ep.pop("last_inflight_epoch", None)
-        delivered = label in ("woken", "queued-offline", "queued-busy",
-                              "delivered-unconfirmed", "delivery-unknown") or str(
-            label).startswith("queued-offline")
+        unlink_refused = label == "inject-refused"
+        if unlink_refused:
+            label = "refused"
+        delivered = (
+            label in (
+                "woken", "queued-offline", "queued-busy",
+                "delivered-unconfirmed", "delivery-unknown",
+                "delivered-confirmed", "held", "dropped", "expired", "refused",
+            ) or str(label).startswith("queued-offline")
+        ) and not unlink_refused
         if mid and delivered:
             ep["last_delivery_id"] = mid
             ep["last_delivery_status"] = label
@@ -1619,7 +1661,7 @@ def _commit_wake(board, seat, mid, lease, fence, label, ok):
             ep["last_attempt_id"] = mid
             ep["last_attempt_status"] = label
         write_endpoint(board, seat, ep)
-        if label == "refused":
+        if unlink_refused or (label == "refused" and not delivered):
             try:
                 os.unlink(endpoint_path(board, seat))
             except OSError:

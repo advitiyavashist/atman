@@ -8912,6 +8912,10 @@ def cmd_msg(a, board):
                 to, label, "run the thread in terminal Codex to enable native wake"))
         else:
             print("wake: %s -> %s" % (to, label))
+        if label == "held":
+            print("  recovery: %s" % getattr(
+                sa, "CLAUDE_HELD_RECOVERY",
+                "approve in the recipient session or set crossSessionInbound accept"))
         _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
@@ -8933,7 +8937,8 @@ def _should_poke_persist(label):
     """
     s = str(label or "")
     if not s or s in ("woken", "deduped", "remote bridge required",
-                      "delivered-unconfirmed", "queued-busy", "delivery-unknown"):
+                      "delivered-unconfirmed", "queued-busy", "delivery-unknown",
+                      "delivered-confirmed", "held", "dropped", "expired", "refused"):
         return False
     if s.startswith("stale (rebound"):
         return False
