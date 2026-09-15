@@ -28,9 +28,9 @@ export const done24hLabel = "Done (24h)";
 export const dayOneLede = "Work · Team · Objective — then intervene when a seat needs you.";
 
 export const DAY_ONE_STEPS = [
-  { key: "work", title: "Work", body: "seed the board and claim a first ticket.", cmd: "tickets quickstart --agent <you>" },
-  { key: "team", title: "Team", body: "plug a second harness. Coverage by work, not a fixed role.", cmd: "tickets join … --harness" },
-  { key: "objective", title: "Objective", body: "name what the team finishes.", cmd: 'tickets objective "…"' },
+  { key: "work", title: "Work", body: "seed the board and claim a first ticket.", cmd: "atm quickstart --agent <you>" },
+  { key: "team", title: "Team", body: "plug a second harness. Coverage by work, not a fixed role.", cmd: "atm join … --harness" },
+  { key: "objective", title: "Objective", body: "name what the team finishes.", cmd: 'atm objective "…"' },
 ] as const;
 
 export const dayOneHonesty = "Median turns and yield@cost stay — until a done ticket reports.";

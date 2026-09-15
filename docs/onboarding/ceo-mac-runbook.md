@@ -1,7 +1,8 @@
-# Any-CEO onboarding (Cursor, local `tickets.py`)
+# Any-CEO onboarding (local `tickets.py`)
 
-Copy-paste. Do not guess folders. This is the T-790 path: Cursor harness
-only, `python3` on a real `tickets.py`, never the PATH shim.
+Copy-paste. Do not guess folders. This is the T-790 path: `python3` on a
+real `tickets.py`, never the PATH shim. Pick harnesses from
+`atm harness available`.
 
 **You are onboarding.** This is not a ticket claim.
 
@@ -12,8 +13,7 @@ Set these to the local checkout and living board. Do not paste a machine path.
 ```sh
 TICKETS_PY=<repo>/tickets.py
 LIVING_BOARD=<board>
-STEER=<steer>
-ATMAN=<repo>
+REPO=<repo>
 
 t() { python3 "$TICKETS_PY" "$@"; }
 
@@ -23,23 +23,21 @@ ls -l ~/.local/bin/tickets
 python3 "$TICKETS_PY" --version
 ```
 
-Do not run `tickets init` or `tickets clear` on the living Steer board.
-Do not work on steer `main`. HOLD T-773 and T-774. No NER flip. No T-095 /
-T-138. Spawn **cursor** only unless the operator names another harness.
-
-`join` uses `--persistent` (seat lifecycle). `spawn --persist` is the watcher
-loop. The ticket’s `--persist` on join means `--persistent`.
+Do not run `atm init` or `atm clear` on a living board you did not create.
+Do not work on `main`. `join` uses `--persistent` (seat lifecycle).
+`spawn --persist` is the watcher loop. The ticket’s `--persist` on join
+means `--persistent`.
 
 ---
 
-## A. Living Steer board (operator CEO — not this ticket’s proof)
+## A. Living board (operator CEO — not this ticket’s proof)
 
 Bind the existing board. Do not create a second one.
 
 ```sh
 export TICKET_AGENT=atman-ceo
 export TICKETS_DIR="$LIVING_BOARD"
-cd "$ATMAN"   # or a dedicated CEO worktree; never steer main
+cd "$REPO"   # or a dedicated CEO worktree; never main
 
 t harness available
 # Probe every catalog row. Ask which to use. Missing is a row. Do not spawn yet.
@@ -62,21 +60,21 @@ EOF
 t graph
 t map
 
-# Cursor only
 t spawn cursor-worker --roles backend --harness cursor --persist --wake-mode task-only
 
-t master cos cursor
-t msg --to cursor "CoS: staff cursor seats only. HOLD T-773 T-774. No live plan dump beyond operator answers."
+t master cos cos
+t msg --to cos "CoS: staff from the catalog the operator chose."
 ```
 
-Do **not** run one `tickets create` per title. Edges must be `tickets plan`
-JSON `deps` (real `--after` links). Mid-run: `tickets dep` / `tickets create --blocks`.
+Do **not** run one `atm create` per title. Edges must be `atm plan`
+JSON `deps` (real `--after` links). Mid-run: `atm dep` / `atm create --blocks`.
 
 ---
 
 ## B. Throwaway-board dry proof (what T-790 automates)
 
-Same verbs, disposable `.tickets`. Never point `TICKETS_DIR` at Steer.
+Same verbs, disposable `.tickets`. Never point `TICKETS_DIR` at a shared
+living board.
 
 ```sh
 TICKETS_PY=/path/to/this/checkout/tickets.py
@@ -104,18 +102,18 @@ t spawn cursor-worker --harness cursor --max-runs 1 \
 t spawn cursor-worker --stop
 t master cos cos-cursor
 t join cos-cursor --roles docs --harness cursor --wake-mode continuous
-t msg --to cos-cursor "CoS: staff cursor only."
+t msg --to cos-cursor "CoS: staff from the catalog the operator chose."
 ```
 
-`tickets graph` must show the UI ticket waiting on the API ticket.
+`atm graph` must show the UI ticket waiting on the API ticket.
 
 ---
 
 ## What this is not
 
 T-778 already productized master onboarding (startup first, probe catalog).
-T-780 (IN REVIEW) teaches the plan/graph/follow-up loop. This file does not
+T-780 teaches the plan/graph/follow-up loop. This file does not
 replace either. It pins **portable folder placeholders** (`<repo>`, `<board>`)
-and a Cursor-only sequence a CEO can execute without guessing.
+and an example sequence a CEO can execute without guessing.
 
 See [master-howto.md](master-howto.md) for the long form.

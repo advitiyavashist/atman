@@ -1648,7 +1648,7 @@ components:
             Proposed command shown to the operator. The agent runs it and is
             prompted for the code on stdin, so the code never enters shell history.
           maxLength: 300
-          examples: ['tickets connect --project prj_demo01 --server http://127.0.0.1:4319']
+          examples: ['atm connect --project prj_demo01 --server http://127.0.0.1:4319']
         config_changes:
           type: array
           description: |

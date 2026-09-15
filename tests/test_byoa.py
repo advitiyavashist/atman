@@ -144,7 +144,7 @@ def test_watch_hands_the_harness_prompt_file_cwd_and_agent(board, tmp_path):
     assert agent == "qwen" and got["agent"] == "qwen"
     assert Path(cwd) == Path(got["cwd"]) == Path(board.parent).resolve()
     assert got["tickets_dir"] == str(board)
-    assert "qwen" in got["prompt"] and "tickets next" in got["prompt"], \
+    assert "qwen" in got["prompt"] and "atm next" in got["prompt"], \
         "a BYOA harness must get the SAME worker prompt the built-in ones get"
     assert not os.path.exists(prompt_file), "the prompt file is removed after the run"
 
@@ -318,7 +318,7 @@ def test_harness_check_probes_the_builtin_command_shape(board):
     assert run(board, "join", "c1", "--roles", "docs", "--harness", "codex").returncode == 0
     r = run(board, "harness", "check", "c1", "--timeout", "5")
     assert "codex exec" in r.stdout and "'reply OK'" in r.stdout
-    assert "$(tickets prompt)" not in r.stdout
+    assert "$(atm prompt)" not in r.stdout
 
 
 def test_harness_list_shows_every_agent(board, tmp_path):
@@ -357,7 +357,7 @@ def test_a_byoa_agent_gets_the_same_claim_and_review_path(board, tmp_path):
 # ---- degenerate registrations --------------------------------------------
 
 def test_watch_without_exec_uses_the_registered_harness(board, tmp_path):
-    """`tickets watch --agent x` is the cron-able form and is used without
+    """`atm watch --agent x` is the cron-able form and is used without
     spawn; defaulting it to claude would launch the wrong harness."""
     script, record = stub_harness(tmp_path)
     assert run(board, "join", "qwen", "--roles", "docs",
@@ -395,10 +395,10 @@ def test_agy_worker_cmd_shape(board):
 
     cmd = mod._worker_cmd(str(board), "agy-worker", model="gemini-3.8-flash-high",
                           permission_mode="bypassPermissions", tool="agy")
-    assert cmd == 'agy -p "$(tickets prompt)" --dangerously-skip-permissions --model gemini-3.8-flash-high'
+    assert cmd == 'agy -p "$(atm prompt)" --dangerously-skip-permissions --model gemini-3.8-flash-high'
 
     cmd_safe = mod._worker_cmd(str(board), "agy-worker", permission_mode="acceptEdits", tool="agy")
-    assert cmd_safe == 'agy -p "$(tickets prompt)" --mode accept-edits'
+    assert cmd_safe == 'agy -p "$(atm prompt)" --mode accept-edits'
 
 
 def test_hooks_agy_writes_agents_hooks_json(board, tmp_path):
@@ -477,10 +477,10 @@ def test_devin_worker_cmd_shape(board):
 
     cmd = mod._worker_cmd(str(board), "devin-worker", model="gpt-5",
                           permission_mode="bypassPermissions", tool="devin")
-    assert cmd == 'devin --print "$(tickets prompt)" --dangerously-skip-permissions --model gpt-5'
+    assert cmd == 'devin --print "$(atm prompt)" --dangerously-skip-permissions --model gpt-5'
 
     cmd_safe = mod._worker_cmd(str(board), "devin-worker", permission_mode="safe", tool="devin")
-    assert cmd_safe == 'devin --print "$(tickets prompt)"'
+    assert cmd_safe == 'devin --print "$(atm prompt)"'
 
 
 def test_hooks_devin_writes_wrapper(board, tmp_path):

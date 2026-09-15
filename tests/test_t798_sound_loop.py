@@ -73,12 +73,12 @@ def test_no_plans_folder_tree():
     assert "def cmd_pr_sync" in src
     howto = (ROOT / "docs/onboarding/master-howto.md").read_text()
     assert "Sound before staff" in howto
-    assert "CEO does not `tickets next`" in howto
+    assert "CEO does not `atm next`" in howto
     assert not (ROOT / "plans").exists()
     ceo = (ROOT / "docs/onboarding/ceo-connect.md").read_text()
-    assert "`tickets capture" in ceo
-    assert "`tickets sound" in ceo
-    assert "`tickets pr-sync`" in ceo
+    assert "`atm capture" in ceo
+    assert "`atm sound" in ceo
+    assert "`atm pr-sync`" in ceo
 
 
 def test_sounding_parsers_start():
@@ -248,8 +248,8 @@ def test_plan_defaults_to_capture_unless_real_fields(tmp_path):
     tid = r.stdout.split()[1]
     n = run(repo, "next", "--owner", "worker-a", env=env, tmp_path=tmp_path)
     assert n.returncode != 0
-    assert "%s waits in capture: run tickets sound %s" % (tid, tid) in (n.stdout + n.stderr)
-    assert "planned in tickets plan" not in (repo / ".tickets" / ("%s.json" % tid)).read_text()
+    assert "%s waits in capture: run atm sound %s" % (tid, tid) in (n.stdout + n.stderr)
+    assert "planned in atm plan" not in (repo / ".tickets" / ("%s.json" % tid)).read_text()
 
     payload = json.dumps([{
         "key": "r", "title": "real fields", "role": "backend",

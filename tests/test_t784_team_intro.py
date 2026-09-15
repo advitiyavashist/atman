@@ -31,8 +31,8 @@ BANNED_DOCS = (
 BANNED_LANDING = BANNED_DOCS + ("shared-memory brain",)
 
 REQUIRED = (
-    "tickets harness available",
-    "tickets plan",
+    "atm harness available",
+    "atm plan",
     "--after",
     "reviewable SHA",
     "human review",
@@ -62,7 +62,7 @@ def test_howto_still_starts_with_onboarding():
     lines = [ln.strip() for ln in HOWTO.read_text().splitlines() if ln.strip()]
     assert lines[0] == "# Master how-to"
     assert "You are onboarding" in lines[1]
-    assert "one `tickets create` per title" in HOWTO.read_text()
+    assert "one `atm create` per title" in HOWTO.read_text()
 
 
 def test_connect_names_plan_and_review_gate(tmp_path):
@@ -94,9 +94,9 @@ def test_connect_names_plan_and_review_gate(tmp_path):
     assert first.startswith("**You are onboarding.**")
     assert "harness available" in c.stdout
     assert "--after" in c.stdout
-    assert "tickets plan" in c.stdout
+    assert "atm plan" in c.stdout
     assert "reviewable SHA" in c.stdout
-    assert "tickets review" in c.stdout
+    assert "atm review" in c.stdout
     for word in ("Minions", "Inspect", "Slack-as-bus"):
         assert word not in c.stdout
 
@@ -105,11 +105,11 @@ def test_ui_and_master_template_name_persist_to_review():
     src = TOOL.read_text(encoding="utf-8")
     ui = _ui_html()
     assert "Reviewable SHA" in ui
-    assert "tickets review <id> --notes" in ui
-    assert "tickets plan" in ui
+    assert "atm review <id> --notes" in ui
+    assert "atm plan" in ui
     assert "reviewable SHA" in ui
-    assert "one tickets create per task they named" not in src
-    assert "tickets plan <<" in src
+    assert "one atm create per task they named" not in src
+    assert "atm plan <<" in src
     assert "--after" in src[src.index("ONBOARDING_STARTUP"):src.index("INTEGRATION_CATALOG")]
     for word in BANNED_LANDING:
         assert word not in ui

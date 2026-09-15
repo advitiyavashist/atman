@@ -160,5 +160,5 @@ def test_fresh_init_master_brief_is_not_steer_operator_policy(tmp_path):
     body = (repo / ".tickets" / "MASTER.md").read_text().lower()
     for leak in OPERATOR_POLICY_LEAKS:
         assert leak not in body, leak
-    assert "tickets harness available" in body
+    assert "atm harness available" in body
     assert "unknown usage" in body

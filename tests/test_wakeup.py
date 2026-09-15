@@ -298,8 +298,8 @@ def test_watch_refuses_anonymous(board):
 
 def test_prompt_mentions_agent_and_loop(board):
     r = run(board, "prompt", "--agent", "doc", "--extra", "EXTRA LINE")
-    assert "You are doc" in r.stdout and "tickets review" in r.stdout and "EXTRA LINE" in r.stdout
-    assert "tickets clear" in r.stdout  # the prohibition is spelled out
+    assert "You are doc" in r.stdout and "atm review" in r.stdout and "EXTRA LINE" in r.stdout
+    assert "atm clear" in r.stdout  # the prohibition is spelled out
 
 
 def test_guide_covers_three_tools(board):
@@ -363,7 +363,7 @@ def test_boot_does_every_step(board, tmp_path):
     r = run(board, "boot", "--agent", "doc", "--tool", "claude", "--roles", "docs", "--settings", str(settings))
     assert r.returncode == 0, r.stderr
     assert "joined as doc" in r.stdout and "hooks installed" in r.stdout and "checked in" in r.stdout
-    assert "ready_in_my_lane" in r.stdout and "NEXT: TICKET_AGENT=doc tickets next" in r.stdout
+    assert "ready_in_my_lane" in r.stdout and "NEXT: TICKET_AGENT=doc atm next" in r.stdout
     assert json.loads(settings.read_text())["hooks"]["Stop"]
     who = run(board, "who").stdout
     assert "doc" in who
@@ -375,7 +375,7 @@ def test_boot_after_claim_points_to_mine(board, tmp_path):
     run(board, "join", "doc", "--roles", "docs")
     run(board, "next", agent="doc")
     r = run(board, "boot", "--agent", "doc")
-    assert "holding" in r.stdout and "NEXT: TICKET_AGENT=doc tickets mine" in r.stdout
+    assert "holding" in r.stdout and "NEXT: TICKET_AGENT=doc atm mine" in r.stdout
 
 
 def test_boot_refuses_without_board(tmp_path):
@@ -435,7 +435,7 @@ def test_prompt_worker_has_stuck_rule_and_no_env_prefix(board):
 def test_prompt_master_variant(board):
     run(board, "master", "take", agent="boss")
     p = run(board, "prompt", "--master", "--agent", "boss").stdout
-    assert "MASTER" in p and "UNBLOCK" in p and "tickets merge" in p and "You do not take feature tickets" in p
+    assert "MASTER" in p and "UNBLOCK" in p and "atm merge" in p and "You do not take feature tickets" in p
 
 
 def test_master_pending_keys(board):
@@ -532,7 +532,7 @@ def test_cos_seat_wakes_and_may_integrate(board):
     rc, p = pending(board, "cos-x")
     assert rc == 0 and "stuck_messages" in p, "cos wakes on stuck messages too"
     cp = run(board, "prompt", "--cos", "--agent", "cos-x").stdout
-    assert "CHIEF OF STAFF" in cp and "tickets merge" in cp
+    assert "CHIEF OF STAFF" in cp and "atm merge" in cp
     pp = run(board, "prompt", "--master", "--agent", "planner").stdout
     assert "MASTER PLANNER" in pp and "cos-x" in pp and "ROUTE BY COMPLEXITY" in pp
     # take keeps the cos; clearing works
@@ -568,7 +568,7 @@ def test_worker_cmd_quotes_model_from_workforce(board):
     spec.loader.exec_module(tk)
     cmd = tk._worker_cmd(str(board), "evil")
     assert "--model 'opus; echo INJECTED >pwned'" in cmd, cmd
-    # T-257: this shells out for real (cmd embeds `$(tickets prompt)`), so it
+    # T-257: this shells out for real (cmd embeds `$(atm prompt)`), so it
     # must not inherit the ambient environment -- an operator's real shell
     # exports TICKETS_DIR pointing at a live board so plain `tickets ...`
     # just works, and that value would otherwise leak straight through here.
@@ -798,7 +798,7 @@ def test_never_checked_in_agent_still_gets_mail_sent_after_it_joined(board):
     since="" -- and unread()'s `if since and (...)` treats that falsy since
     as "skip the archive check", backwards for the agent with the LEAST
     history to fall back on. A DM addressed to a freshly-joined agent and
-    then rotated away before that agent's first `tickets inbox` call was
+    then rotated away before that agent's first `atm inbox` call was
     silently and permanently lost.
 
     Fix: checkin() now stamps inbox_seen to "now" the moment an agent's
@@ -808,7 +808,7 @@ def test_never_checked_in_agent_still_gets_mail_sent_after_it_joined(board):
     path (since predates the live file's oldest survivor) even once it has
     rotated out of the live file.
     """
-    run(board, "join", "dave", "--roles", "backend")  # dave never runs `tickets inbox`
+    run(board, "join", "dave", "--roles", "backend")  # dave never runs `atm inbox`
     env = {"TICKETS_MESSAGES_MAX_BYTES": "200"}
     r = run(board, "msg", "IMPORTANT-FOR-DAVE", "--to", "dave", agent="alice", env=env)
     assert r.returncode == 0, r.stderr
@@ -829,7 +829,7 @@ def test_new_agent_does_not_see_history_from_before_it_joined(board):
     """The flood question the ticket asked to be decided and written down:
     a brand-new agent's inbox_seen is stamped to its join time, so mail
     already on the board before it existed is deliberately NOT unread mail
-    for it -- it is history, visible only via `tickets inbox --all`.
+    for it -- it is history, visible only via `atm inbox --all`.
 
     T-228 note: the sleep below is load-bearing, not padding. `at` and
     `inbox_seen` are both whole-second stamps, so without a real clock gap

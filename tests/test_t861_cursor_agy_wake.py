@@ -193,7 +193,7 @@ def test_cursor_payload_is_typed_as_one_line(board, cursor_seat):
     typed = [a for a in cursor_seat["calls"]() if "-l" in a][0]
     text = typed[typed.index("-l") + 1]
     assert "\n" not in text
-    assert "board mail" in text and "tickets inbox" in text
+    assert "board mail" in text and "atm inbox" in text
 
 
 def test_cursor_gone_persist_session_is_not_reachable(board, cursor_seat):

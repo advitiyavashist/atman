@@ -1,4 +1,4 @@
-"""T-674: tickets ui secondary empties — Team roster + Intervene thread craft."""
+"""T-674: atm ui secondary empties — Team roster + Intervene thread craft."""
 
 from pathlib import Path
 
@@ -27,8 +27,8 @@ def test_agents_empty_has_honesty_and_join_quickstart_cta():
     roster = ui[ui.index("document.getElementById('agents')"):ui.index("function renderOnboarding")]
     assert "No agents checked in." in roster
     assert "until a seat heartbeats" in roster
-    assert "tickets join" in roster and "--harness" in roster
-    assert "tickets quickstart --agent" in roster
+    assert "atm join" in roster and "--harness" in roster
+    assert "atm quickstart --agent" in roster
     assert '<div class="empty">no agents checked in</div>' not in roster
 
 
@@ -38,6 +38,6 @@ def test_messages_empty_board_and_seat_have_honesty_and_msg_cta():
     assert "No messages yet." in msgs
     assert "No messages with this seat yet." in msgs
     assert "never implied progress on tickets" in msgs
-    assert 'tickets msg "text"' in msgs
-    assert "tickets msg --to " in msgs
+    assert 'atm msg "text"' in msgs
+    assert "atm msg --to " in msgs
     assert '<div class="empty">no messages yet</div>' not in ui

@@ -729,7 +729,7 @@ SUPERVISED_HARNESSES = {
             "control socket or RPC, `remote-control` is a cloud (WebRTC-signalled) "
             "daemon for the Antigravity app, and `-p/--prompt`, `-i` and "
             "`--conversation <id>` each start a new run. Board mail reaches the seat "
-            "through the PreInvocation/Stop hooks (`tickets hooks agy`) or a persist "
+            "through the PreInvocation/Stop hooks (`atm hooks agy`) or a persist "
             "watcher"),
 }
 SUPERVISED_HARNESSES["antigravity"] = SUPERVISED_HARNESSES["agy"]
@@ -846,7 +846,7 @@ def register_persistent(board, seat, harness, at_iso):
 
 
 def wake_payload(fmt_msg, message):
-    return "tickets board message -- %s\n(see `tickets inbox` for the rest)" % fmt_msg(message)
+    return "atm board message -- %s\n(see `atm inbox` for the rest)" % fmt_msg(message)
 
 
 def _claude_user_envelope(text, msg_id=""):
@@ -1462,7 +1462,7 @@ def _cursor_pause_resume(ep, text):
 def native_wake_online(board, seat):
     """True when a native poke can resume this seat now.
 
-    Shared by `tickets who` and `tickets msg` so a Codex thread record or a
+    Shared by `atm who` and `atm msg` so a Codex thread record or a
     PID-less session is not reported reachable=yes while wake returns
     queued-offline. Persistent lifecycle is not a transport.
     """

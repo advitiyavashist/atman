@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tickets.py"
 
 PLACEHOLDERS = (
-    "planned in tickets plan",
+    "planned in atm plan",
     "finish the ticket",
-    "finish the ticket; tickets done with notes",
+    "finish the ticket; atm done with notes",
 )
 
 PLAN_WITH_FIELDS = json.dumps({
@@ -133,12 +133,12 @@ def test_plan_without_fields_stays_capture_with_explicit_hint(tmp_path):
     n = run(repo, "next", tmp_path=tmp_path, agent="alice")
     assert n.returncode != 0
     out = n.stdout + n.stderr
-    assert "T-001 waits in capture: run tickets sound T-001" in out
+    assert "T-001 waits in capture: run atm sound T-001" in out
     assert "waiting on unfinished" not in out.lower()
 
     g = run(repo, "graph", tmp_path=tmp_path)
     assert g.returncode == 0, g.stderr
-    assert "T-001 waits in capture: run tickets sound T-001" in g.stdout
+    assert "T-001 waits in capture: run atm sound T-001" in g.stdout
     assert "waiting on T-001" in g.stdout
 
     # Sound A only so it can be claimed; B stays capture until sounded.
@@ -151,16 +151,16 @@ def test_plan_without_fields_stays_capture_with_explicit_hint(tmp_path):
     d = run(repo, "done", "T-001", "--notes", "wrote hello.txt", "--force",
             tmp_path=tmp_path, agent="alice")
     assert d.returncode == 0, d.stderr + d.stdout
-    assert "T-002 waits in capture: run tickets sound T-002" in d.stdout
+    assert "T-002 waits in capture: run atm sound T-002" in d.stdout
 
     n2 = run(repo, "next", tmp_path=tmp_path, agent="bob")
     assert n2.returncode != 0
     out2 = n2.stdout + n2.stderr
-    assert "T-002 waits in capture: run tickets sound T-002" in out2
+    assert "T-002 waits in capture: run atm sound T-002" in out2
     assert "waiting on unfinished" not in out2.lower()
 
     g2 = run(repo, "graph", tmp_path=tmp_path)
-    assert "T-002 waits in capture: run tickets sound T-002" in g2.stdout
+    assert "T-002 waits in capture: run atm sound T-002" in g2.stdout
     assert "waiting on T-001" not in g2.stdout
 
 
@@ -171,13 +171,13 @@ def test_readme_plan_snippet_carries_fields_and_mentions_sound_once():
     next_h = section.find("\n## ", 1)
     section = section if next_h < 0 else section[:next_h]
     fence = section.split("```sh", 1)[1].split("```", 1)[0]
-    assert "tickets plan" in fence
+    assert "atm plan" in fence
     assert '"key":"A"' in fence.replace(" ", "")
     assert '"key":"B"' in fence.replace(" ", "")
     for key in ("cause", "change", "proof"):
         assert '"%s"' % key in fence
-    assert fence.count("tickets sound") == 0
-    assert section.count("tickets sound") == 1
+    assert fence.count("atm sound") == 0
+    assert section.count("atm sound") == 1
     src = TOOL.read_text()
     for ph in PLACEHOLDERS:
         assert ph not in src
