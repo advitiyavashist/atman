@@ -393,12 +393,18 @@ def test_agy_worker_cmd_shape(board):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
+    # T-988 added --output-format stream-json (the text format drops an
+    # errored turn's reason entirely) and --print-timeout (agy's own default
+    # is 5m and truncates a real ticket turn). See test_t988_agy_print_mode.
     cmd = mod._worker_cmd(str(board), "agy-worker", model="gemini-3.8-flash-high",
                           permission_mode="bypassPermissions", tool="agy")
-    assert cmd == 'agy -p "$(tickets prompt)" --dangerously-skip-permissions --model gemini-3.8-flash-high'
+    assert cmd == ('agy -p "$(tickets prompt)" --dangerously-skip-permissions '
+                   '--output-format stream-json --print-timeout %s '
+                   '--model gemini-3.8-flash-high' % mod.AGY_PRINT_TIMEOUT)
 
     cmd_safe = mod._worker_cmd(str(board), "agy-worker", permission_mode="acceptEdits", tool="agy")
-    assert cmd_safe == 'agy -p "$(tickets prompt)" --mode accept-edits'
+    assert cmd_safe == ('agy -p "$(tickets prompt)" --mode accept-edits '
+                        '--output-format stream-json --print-timeout %s' % mod.AGY_PRINT_TIMEOUT)
 
 
 def test_hooks_agy_writes_agents_hooks_json(board, tmp_path):
