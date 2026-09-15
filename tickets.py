@@ -8188,7 +8188,7 @@ def resolve_to_and_mentions(text, to="", registered=None, master_owner=""):
 
 
 def post_message(board, sender, text, to="", re="", kind="", task=False, source="",
-                 explicit=None):
+                 explicit=None, extra=None):
     _rotate_messages_if_big(board)
     holder = ((current_master(board) or {}) or {}).get("owner") or ""
     to, mentions, unknown, explicit_unknown, dropped = resolve_to_and_mentions(
@@ -8225,6 +8225,11 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
         rec["kind"] = kind
     if source:
         rec["source"] = source
+    # T-818 remote control stamps dispatch/receipt ids on the record so evidence is
+    # attributable. Reserved keys never override the fields written above.
+    for k, v in (extra or {}).items():
+        if k not in rec and v not in (None, ""):
+            rec[k] = v
     line_ = json.dumps(rec) + "\n"
     # O_APPEND writes under PIPE_BUF are atomic, so concurrent posters never interleave
     fd = os.open(messages_path(board), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
@@ -8684,6 +8689,14 @@ def _session_adapters():
     return mod
 
 
+def _remote_control():
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import remote_control as mod
+    return mod
+
+
 def cmd_msg(a, board):
     # session_seat, not whoami: with no --owner, "who is sending this" is
     # "who is THIS session", the same question board's "you:" line answers --
@@ -8749,6 +8762,22 @@ def cmd_msg(a, board):
         print("forward: %s -> %s [%s] receipt=%s" % (
             forwarded.get("from"), forwarded.get("to"),
             forwarded.get("role") or "-", forwarded.get("state") or "forwarded"))
+    wake_recipients(board, m)
+
+
+def wake_recipients(board, m, echo=None):
+    """Native wake + persist poke for every directed recipient of a posted message.
+
+    One wake path for `tickets msg` and T-818 remote dispatch, so a remote
+    task cannot reach a seat through a transport the local CLI would not use.
+    (The dashboard composer still posts without waking -- it is deliberately
+    notification-only.) Returns [{seat, label, poked}] in recipient order.
+    `echo` is resolved at call time (not bound at import) so callers and tests
+    that replace print still observe the wake lines.
+    """
+    if echo is None:
+        echo = print
+    out = []
     sa = None
     mid = _msg_id(m)
     for to in _split_to_tokens(m.get("to") or ""):
@@ -8757,7 +8786,8 @@ def cmd_msg(a, board):
         if not _message_wakes_seat(board, to, m):
             continue
         if _already_autonomous_wake(board, to, mid):
-            print("wake: %s -> deduped" % to)
+            echo("wake: %s -> deduped" % to)
+            out.append({"seat": to, "label": "deduped", "poked": False})
             continue
         harness = _seat_harness(board, to)
         if sa is None:
@@ -8770,13 +8800,15 @@ def cmd_msg(a, board):
             if poked:
                 label = "watch-poked"
         if label == "queued-offline":
-            print("wake: %s -> %s (%s)" % (
+            echo("wake: %s -> %s (%s)" % (
                 to, label, "run the thread in terminal Codex to enable native wake"))
         else:
-            print("wake: %s -> %s" % (to, label))
+            echo("wake: %s -> %s" % (to, label))
         _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
+        out.append({"seat": to, "label": label, "poked": poked})
+    return out
 
 
 def _seat_harness(board, seat):
@@ -16160,6 +16192,193 @@ def cmd_ui(a, board):
         pass
 
 
+def _remote_token_from(a):
+    path = (getattr(a, "token_file", "") or "").strip()
+    if path:
+        try:
+            with open(os.path.expanduser(path)) as f:
+                return f.read().strip()
+        except OSError as e:
+            sys.exit("cannot read --token-file: %s" % e)
+    return (os.environ.get("TICKETS_REMOTE_TOKEN") or "").strip()
+
+
+def cmd_remote_control(a, board):
+    """T-818 remote control: authenticated operator command + evidence-only states.
+
+    Host-side admin (mint/tokens/revoke-token/serve) runs on the machine that
+    owns the board. Operator actions (resolve/dispatch/message/status/cancel/
+    retry/reassign/revoke-seat) authenticate with a bearer token from
+    $TICKETS_REMOTE_TOKEN or --token-file, exactly as a phone would over HTTP.
+    Seat receipts (receipt) use the local seat identity ($TICKET_AGENT).
+    """
+    mod = _remote_control()
+    rc = mod.RemoteControl(board, sys.modules[__name__])
+    sub = a.rc_cmd
+    as_json = bool(getattr(a, "json", False))
+
+    def emit(obj):
+        if as_json:
+            print(json.dumps(obj, indent=2, sort_keys=True))
+        return obj
+
+    def show_status(st):
+        if as_json:
+            return emit(st)
+        print("%s  %s -> %s  state=%s%s" % (st["id"], st.get("role"), st.get("seat"), st["state"],
+                                           ("  (%s)" % st["detail"]) if st.get("detail") else ""))
+        for e in st.get("evidence") or []:
+            line = "  %-12s %s  %s" % (e["state"], e.get("at", ""), e.get("evidence", ""))
+            if e.get("recovery"):
+                line += "  -> " + e["recovery"]
+            print(line)
+        if st.get("recovery") and not any(e.get("recovery") for e in st.get("evidence") or []):
+            print("  recovery: " + st["recovery"])
+        c = st.get("cancel") or {}
+        if c:
+            print("  cancel: requested %s by %s; acknowledged=%s; stopped=%s (child-exit receipt)" % (
+                c.get("requested_at", ""), c.get("by", ""), "yes" if c.get("acknowledged") else "no",
+                "yes" if c.get("stopped") else "no"))
+        return st
+
+    def operator():
+        raw = _remote_token_from(a)
+        try:
+            return rc.authenticate(raw)
+        except mod.RemoteError as e:
+            sys.exit("%s: %s%s" % (e.code, e.detail, (" -- " + e.recovery) if e.recovery else ""))
+
+    def key():
+        return (getattr(a, "key", "") or "").strip() or ("cli-" + uuid.uuid4().hex)
+
+    try:
+        if sub == "mint":
+            raw, rec = rc.mint_token(a.operator, grants=a.grant or [], step_up=a.step_up or [],
+                                     expires_in=a.expires, targets=a.target or [], label=a.label or "",
+                                     by=whoami())
+            if as_json:
+                emit({"token": raw, "record": rec})
+            else:
+                print("token (shown once, never stored in clear): %s" % raw)
+                print("id=%s operator=%s grants=%s step_up=%s targets=%s expires=%s" % (
+                    rec["id"], rec["operator"], ",".join(rec["grants"]) or "-",
+                    ",".join(sorted(rec["step_up"])) or "-", ",".join(rec["targets"]) or "board",
+                    rec["expires_at"]))
+                print("export TICKETS_REMOTE_TOKEN=<token> on the client; revoke with "
+                      "tickets rc revoke-token %s" % rec["id"])
+            return
+        if sub == "tokens":
+            rows = rc.list_tokens()
+            if as_json:
+                return emit({"tokens": rows})
+            for r in rows:
+                flag = "revoked" if r["revoked"] else ("expired" if r["expired"] else "live")
+                print("%s %-8s %s grants=%s step_up=%s expires=%s" % (
+                    r["id"], flag, r["operator"], ",".join(r["grants"]) or "-",
+                    ",".join(sorted(r["step_up"])) or "-", r["expires_at"]))
+            if not rows:
+                print("no remote tokens (tickets rc mint --operator <name>)")
+            return
+        if sub == "revoke-token":
+            return emit(rc.revoke_token(a.token_id, by=whoami()))
+        if sub == "serve":
+            def bound(host, port):
+                print("remote control: http://%s:%d/  (Ctrl-C to stop; bearer tokens; "
+                      "no board text is logged)" % (host, port))
+                if a.open:
+                    import subprocess
+                    subprocess.Popen(["open", "http://%s:%d/" % (host, port)])
+            mod.serve(rc, host=a.host, port=a.port, behind_tls_proxy=a.behind_tls_proxy,
+                      on_bound=bound)
+            return
+        if sub == "roles":
+            rows = rc.roles()
+            if as_json:
+                return emit({"roles": rows})
+            for r in rows:
+                print("%-24s -> %-30s [%s]%s" % (r["role"], r.get("seat") or "(ambiguous)", r["source"],
+                                              (" candidates=" + ",".join(r["candidates"])) if r.get("candidates") else ""))
+            return
+        if sub == "audit":
+            rows = rc.audit(limit=a.limit)
+            if as_json:
+                return emit({"audit": rows})
+            for r in rows:
+                print(json.dumps(r, sort_keys=True))
+            return
+        if sub == "receipt":
+            kind = ("ack" if a.ack else "working" if a.working else "submitted" if a.submitted
+                    else "failed" if a.failed else "cancel-ack" if a.cancel_ack
+                    else "canceled" if a.canceled else "")
+            if not kind:
+                sys.exit("receipt needs one of --ack --working --submitted --failed --cancel-ack --canceled")
+            st = rc.receipt(whoami(getattr(a, "owner", None)), a.id, kind, note=a.note or "",
+                            reason=a.reason or "", artifact=a.artifact or "")
+            return show_status(st)
+        if sub == "status":
+            return show_status(rc.status(a.id))
+        if sub == "list":
+            rows = rc.list_dispatches(limit=a.limit, seat=a.seat or "")
+            if as_json:
+                return emit({"dispatches": rows})
+            for st in rows:
+                print("%s %-12s %s -> %s %s%s" % (st["id"], st["state"], st.get("role"), st.get("seat"),
+                                                  st.get("created_at", ""),
+                                                  ("  " + st["detail"]) if st.get("detail") else ""))
+            if not rows:
+                print("no remote dispatches yet")
+            return
+        # ---- operator-authenticated actions ----
+        tok = operator()
+        if sub == "resolve":
+            res = rc.resolve(tok, a.role)
+            if as_json:
+                return emit(res)
+            rt = res["runtime"]
+            print("%s -> %s (via %s)" % (a.role, rt["seat"], res["resolution"]["source"]))
+            print("provider=%s lifecycle=%s wake_mode=%s reachable=%s adapter=%s session=%s auth=%s%s%s" % (
+                rt["provider"] or "?", rt["lifecycle"], rt["wake_mode"], "yes" if rt["reachable"] else "no",
+                rt["adapter_state"] or "-", rt["session"] or "-", rt["auth"] or "unknown",
+                " busy" if rt["busy"] else "", " REVOKED" if rt["revoked"] else ""))
+            perms = res["permissions"]
+            print("granted=%s step_up=%s denied=%s confirm=%s" % (
+                ",".join(perms["granted"]), ",".join(sorted(perms["step_up"])) or "-",
+                ",".join(perms["denied"]), res["confirm"]))
+            return
+        if sub in ("dispatch", "message"):
+            res = rc.resolve(tok, a.role)
+            rt = res["runtime"]
+            if not as_json:
+                print("target %s -> %s (%s) reachable=%s auth=%s; using grants %s" % (
+                    a.role, rt["seat"], rt["provider"] or "?", "yes" if rt["reachable"] else "no",
+                    rt["auth"] or "unknown", ",".join(res["permissions"]["granted"])))
+            if sub == "dispatch":
+                status, body = rc.dispatch(tok, a.role, a.objective, a.exit or "", a.re or "",
+                                           a.expires, confirm=res["confirm"], key=key())
+            else:
+                status, body = rc.message(tok, a.role, a.text, a.re or "", confirm=res["confirm"], key=key())
+            return show_status(body)
+        if sub == "cancel":
+            status, body = rc.cancel(tok, a.id, a.reason or "", key=key())
+            return show_status(body)
+        if sub == "retry":
+            status, body = rc.retry(tok, a.id, key=key())
+            return show_status(body)
+        if sub == "reassign":
+            res = rc.resolve(tok, a.role)
+            status, body = rc.reassign(tok, a.id, a.role, a.reason or "", confirm=res["confirm"], key=key())
+            return show_status(body)
+        if sub == "revoke-seat":
+            status, body = rc.revoke_seat(tok, a.seat, a.reason or "", lift=bool(a.lift), key=key())
+            return emit(body)
+        sys.exit("unknown remote-control action %r" % sub)
+    except mod.RemoteError as e:
+        if as_json:
+            print(json.dumps(e.body(), indent=2, sort_keys=True))
+            sys.exit(1)
+        sys.exit("%s: %s%s" % (e.code, e.detail, (" -- " + e.recovery) if e.recovery else ""))
+
+
 QUICKSTART_MARKER = "quickstart.json"
 
 QUICKSTART_TICKETS = [
@@ -17599,6 +17818,89 @@ def main():
     c.add_argument("--open", action="store_true", help="open it in the browser")
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
     c.set_defaults(fn=cmd_ui)
+
+    c = sub.add_parser("remote-control", aliases=["rc"],
+                       help="T-818 remote control: tokens, serve, resolve, dispatch, states, receipts")
+    c.add_argument("--json", action="store_true")
+    _rj = argparse.ArgumentParser(add_help=False)
+    _rj.add_argument("--json", action="store_true")
+    rs = c.add_subparsers(dest="rc_cmd", metavar="action", parser_class=(
+        lambda **kw: argparse.ArgumentParser(parents=[_rj], **kw)))
+    x = rs.add_parser("mint", help="host: mint an operator bearer token (shown once; hashed at rest)")
+    x.add_argument("--operator", required=True)
+    x.add_argument("--grant", action="append", help="dispatch | retry | review (repeatable)")
+    x.add_argument("--step-up", action="append", dest="step_up", help="cancel | reassign | revoke (short-lived)")
+    x.add_argument("--expires", default="", help="token lifetime, e.g. 12h (max 30d)")
+    x.add_argument("--target", action="append", help="restrict dispatch to these roles/seats (repeatable)")
+    x.add_argument("--label", default="")
+    x = rs.add_parser("tokens", help="host: list tokens (ids only, never secrets)")
+    x = rs.add_parser("revoke-token", help="host: revoke a token by id")
+    x.add_argument("token_id")
+    x = rs.add_parser("serve", help="host: serve the remote API + phone page (loopback by default)")
+    x.add_argument("--host", default="127.0.0.1")
+    x.add_argument("--port", type=int, default=8766)
+    x.add_argument("--behind-tls-proxy", action="store_true", dest="behind_tls_proxy",
+                   help="acknowledge a TLS terminator fronts a non-loopback bind")
+    x.add_argument("--open", action="store_true")
+    x = rs.add_parser("roles", help="names an operator can select and what each resolves to now")
+    x = rs.add_parser("resolve", help="operator: role -> current runtime + granted permissions")
+    x.add_argument("role")
+    x.add_argument("--token-file", default="", dest="token_file")
+    x = rs.add_parser("dispatch", help="operator: send a bounded task (needs the dispatch grant)")
+    x.add_argument("role")
+    x.add_argument("--objective", required=True)
+    x.add_argument("--exit", default="", help="exit criteria")
+    x.add_argument("--re", default="", help="ticket id")
+    x.add_argument("--expires", default="", help="delivery window, e.g. 30m (60s..24h)")
+    x.add_argument("--key", default="", help="idempotency key (default: fresh)")
+    x.add_argument("--token-file", default="", dest="token_file")
+    x = rs.add_parser("message", help="operator: send a message (base grant; task-only seats stay queued)")
+    x.add_argument("role")
+    x.add_argument("text")
+    x.add_argument("--re", default="")
+    x.add_argument("--key", default="")
+    x.add_argument("--token-file", default="", dest="token_file")
+    x = rs.add_parser("status", help="one dispatch: state derived from board evidence")
+    x.add_argument("id")
+    x = rs.add_parser("list", help="recent dispatches")
+    x.add_argument("--limit", type=int, default=20)
+    x.add_argument("--seat", default="")
+    x = rs.add_parser("cancel", help="operator step-up: request cancel; canceled only on child-exit receipt")
+    x.add_argument("id")
+    x.add_argument("--reason", default="")
+    x.add_argument("--key", default="")
+    x.add_argument("--token-file", default="", dest="token_file")
+    x = rs.add_parser("retry", help="operator: retry a failed/expired dispatch as a linked attempt")
+    x.add_argument("id")
+    x.add_argument("--key", default="")
+    x.add_argument("--token-file", default="", dest="token_file")
+    x = rs.add_parser("reassign", help="operator step-up: move a queued dispatch to another role")
+    x.add_argument("id")
+    x.add_argument("role")
+    x.add_argument("--reason", required=True)
+    x.add_argument("--key", default="")
+    x.add_argument("--token-file", default="", dest="token_file")
+    x = rs.add_parser("revoke-seat", help="operator step-up: stop remote delivery to a seat (--lift restores)")
+    x.add_argument("seat")
+    x.add_argument("--reason", default="")
+    x.add_argument("--lift", action="store_true")
+    x.add_argument("--key", default="")
+    x.add_argument("--token-file", default="", dest="token_file")
+    x = rs.add_parser("receipt", help="seat: attributable receipt for a dispatch addressed to me")
+    x.add_argument("id")
+    x.add_argument("--ack", action="store_true")
+    x.add_argument("--working", action="store_true")
+    x.add_argument("--submitted", action="store_true")
+    x.add_argument("--failed", action="store_true")
+    x.add_argument("--cancel-ack", action="store_true", dest="cancel_ack")
+    x.add_argument("--canceled", action="store_true")
+    x.add_argument("--reason", default="")
+    x.add_argument("--note", default="")
+    x.add_argument("--artifact", default="")
+    x.add_argument("--owner", "-o")
+    x = rs.add_parser("audit", help="receipts: actor, action, target, digests; never bodies")
+    x.add_argument("--limit", type=int, default=50)
+    c.set_defaults(fn=cmd_remote_control, rc_cmd="list", limit=20, seat="")
 
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
     c.add_argument("--agent", help="register under this name (default: $TICKET_AGENT)")
