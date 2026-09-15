@@ -6347,7 +6347,11 @@ Unattended persist ends at a reviewable SHA; human review is the gate.
 # Probe-only catalog for a new board. Codex stays listed with zero usage.
 # Gemini dispatches like the others; persist/hooks is the wake. No new Claude fable.
 # usage_args: non-spawning status/about only. Never -p/--print/exec/prompt.
-# quota: supported | unsupported | optional-admin (T-862; not a second registry).
+# quota: supported | unsupported | optional-admin | runtime-observed (T-862;
+# not a second registry). runtime-observed means the provider exposes no quota
+# surface to read, so the only signal is a 429 from a run that already spent
+# the attempt -- onboarding must not present that as proactive discovery
+# (T-988 CEO ruling).
 INTEGRATION_CATALOG = (
     {"id": "cursor", "name": "Cursor", "binaries": ("agent", "cursor-agent"),
      "if_yes": "tickets spawn <seat> --harness cursor --persist",
@@ -6356,9 +6360,13 @@ INTEGRATION_CATALOG = (
      "quota": "optional-admin"},
     {"id": "agy", "name": "Antigravity", "binaries": ("agy",),
      "if_yes": "tickets spawn <seat> --harness agy --persist",
-     "policy": "ok to spawn if chosen",
-     "usage_args": ("help",),
-     "quota": "supported"},
+     # T-988: experimental for the preview, and the seat must be given a model
+     # that currently has quota -- the default model family can be exhausted.
+     "policy": "experimental; ok to spawn if chosen, with a model that has quota",
+     # `agy models` replaces `help`: help proves the binary runs, models proves
+     # credentials and network reach the provider. Neither reports quota.
+     "usage_args": ("models",),
+     "quota": "runtime-observed"},
     {"id": "claude", "name": "Claude Code", "binaries": ("claude",),
      "if_yes": "tickets spawn <seat> --harness claude",
      "policy": "ok to spawn if chosen; no new Claude fable",

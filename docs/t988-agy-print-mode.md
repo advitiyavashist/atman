@@ -106,21 +106,38 @@ stop landing in the trajectory log with no counts. No cost is recorded: agy
 reports none, and a made-up price is worse than an absent one. `thinking_tokens`
 is deliberately not mapped — the board has no field that prices or reads it.
 
-## Still open, deliberately not changed here
+## Quota visibility is runtime-observed, and says so
 
-`INTEGRATION_CATALOG` marks agy `quota: "supported"`, but its `usage_args` is
-`("help",)`, and `agy help` cannot contain the `{"quota": {...}}` shape
+`INTEGRATION_CATALOG` used to mark agy `quota: "supported"`, with `usage_args`
+of `("help",)` — and `agy help` can never contain the `{"quota": {...}}` shape
 `quota_adapters.parse_agy_quota` expects. agy 1.2.2 has **no** status, usage or
 quota subcommand at all (`agent`, `agents`, `changelog`, `help`, `install`,
 `mcp`, `mic-serve`, `models`, `plugin`, `plugins`, `remote-control`, `update`),
-so that row overstates what we can see: today the only way we learn about agy
-quota is a 429 from a run that already spent the attempt. Flipping the row
-changes the T-862 registry contract, so it is reported, not decided here.
+so the only quota signal we ever get is a 429 from a run that already spent the
+attempt.
 
-## Operator note for the current window
+Per the CEO ruling on T-862, that is now labelled for what it is:
 
-The Gemini family is exhausted until roughly 2026-09-18. Until then an Agy
-seat must be launched with a model that has quota, e.g.
-`tickets spawn <seat> --harness agy --model claude-sonnet-4-6`, or it will burn
-its run on a 429 — visibly now, but still uselessly. For the preview
-Antigravity remains labelled experimental, not supported.
+- a fourth quota label, `runtime-observed`, alongside `supported`,
+  `unsupported` and `optional-admin`; agy moves out of
+  `quota_adapters.SUPPORTED_QUOTA` into `RUNTIME_OBSERVED_QUOTA`.
+- `classify_catalog_usage` reports `unknown` with
+  *"quota observed only at runtime (a 429 arrives after a run attempt)"*. Three
+  things stay distinct: we never look (unsupported), we looked and could not
+  read it (supported but incomplete), and there is nothing to look at before
+  spending a run (runtime-observed).
+- `usage_args` becomes `("models",)`. `agy help` proved only that the binary
+  runs; `agy models` proves credentials and network reach the provider. Neither
+  reports quota, and nothing may present either as proactive quota discovery.
+
+**Onboarding must not claim proactive quota discovery for Antigravity.**
+
+## Launch posture (CEO ruling, 2026-09-15)
+
+- Antigravity stays **experimental** for the macOS preview — not supported.
+- **No global product-default model is pinned.** Quota is transient and
+  choosing a model is a routing decision, not an adapter default.
+- While the Gemini family is exhausted (until roughly 2026-09-18), a spawned
+  Agy seat must be given a currently working model *per seat*, e.g.
+  `tickets spawn <seat> --harness agy --model claude-sonnet-4-6`. Without that
+  the run burns on a 429 — visibly now, but still uselessly.

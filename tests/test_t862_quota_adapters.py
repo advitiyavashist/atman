@@ -39,7 +39,12 @@ def test_catalog_is_single_registry():
     by_id = {row["id"]: row for row in mod.INTEGRATION_CATALOG}
     assert by_id["codex"]["quota"] == "supported"
     assert by_id["claude"]["quota"] == "supported"
-    assert by_id["agy"]["quota"] == "supported"
+    # T-988 (CEO ruling on T-862): agy exposes no quota surface at all, so its
+    # visibility is runtime-observed -- a 429 from a run that already spent the
+    # attempt -- never "supported", which would claim proactive discovery.
+    assert by_id["agy"]["quota"] == "runtime-observed"
+    assert "agy" not in qa.SUPPORTED_QUOTA
+    assert qa.RUNTIME_OBSERVED_QUOTA == frozenset({"agy"})
     assert by_id["cursor"]["quota"] == "optional-admin"
     for hid in ("devin", "gemini", "grok"):
         assert by_id[hid]["quota"] == "unsupported"
@@ -169,8 +174,35 @@ def test_probe_missing_binary_is_unknown_not_fail():
     assert catalog_dispatch_fail(got) == ""
 
 
+def test_runtime_observed_quota_is_unknown_not_a_failed_read():
+    """Three different things that must not collapse into one word: we never
+    look (unsupported), we looked and could not read it (supported but
+    incomplete), and there is nothing to look at before spending a run
+    (runtime-observed)."""
+    usage, reason = qa.classify_catalog_usage("agy", None, None)
+    assert usage == "unknown"
+    assert "runtime" in reason and "429" in reason
+    # An explicit upstream reason still wins over the generic sentence.
+    assert qa.classify_catalog_usage("agy", None, None, reason="missing binary")[1] == "missing binary"
+    # And a runtime-observed provider that somehow DID report numbers is read
+    # normally rather than being forced to unknown.
+    assert qa.classify_catalog_usage("agy", "40%", "2026-09-18T00:00:00Z")[0] == "ok"
+    assert qa.classify_catalog_usage("agy", "0%", "2026-09-18T00:00:00Z")[0] == "exhausted"
+
+
+def test_agy_usage_probe_reaches_the_provider_without_spawning():
+    mod = load_tickets()
+    row = next(r for r in mod.INTEGRATION_CATALOG if r["id"] == "agy")
+    assert row["usage_args"] == ("models",), "`agy help` proved nothing at all"
+    for banned in ("-p", "--print", "--prompt", "exec"):
+        assert banned not in row["usage_args"]
+
+
 def test_package_and_root_adapters_match():
     from ticket_board import quota_adapters as packaged
     assert packaged.SUPPORTED_QUOTA == qa.SUPPORTED_QUOTA
+    assert packaged.RUNTIME_OBSERVED_QUOTA == qa.RUNTIME_OBSERVED_QUOTA
+    assert packaged.classify_catalog_usage("agy", None, None) == \
+        qa.classify_catalog_usage("agy", None, None)
     assert packaged.parse_codex_rate_limits(CODEX_READ) == qa.parse_codex_rate_limits(CODEX_READ)
     assert packaged.classify_catalog_usage("gemini", "80%", "soon")[0] == "unknown"

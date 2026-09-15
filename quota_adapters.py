@@ -11,7 +11,15 @@ import re
 # Personal Cursor / Grok / Devin / Gemini have no documented remaining/reset
 # contract. Catalog probes must not treat a missing meter as FAIL/exhausted.
 UNSUPPORTED_QUOTA = frozenset({"cursor", "grok", "devin", "gemini"})
-SUPPORTED_QUOTA = frozenset({"codex", "claude", "agy"})
+SUPPORTED_QUOTA = frozenset({"codex", "claude"})
+# T-988, by CEO ruling on T-862: a provider whose quota is only ever learned
+# from a run that already failed. agy is here because agy 1.2.2 has no status,
+# usage or quota subcommand at all -- `agy models` proves credentials and
+# network and says nothing about remaining quota (measured: it listed models
+# while the same account was 429) -- so the only quota signal is the 429 the
+# next run brings back. That is not proactive discovery and must not be
+# labelled as if it were.
+RUNTIME_OBSERVED_QUOTA = frozenset({"agy"})
 _AUTH_MARKERS = (
     "login required", "not logged", "authentication required",
     "unauthenticated", "auth failed", "please log in", "please login",
@@ -236,6 +244,11 @@ def classify_catalog_usage(provider, remaining, reset, reason="", on_disk=True,
         return "FAIL", reason
     if hid in UNSUPPORTED_QUOTA and not (hid == "cursor" and cursor_admin):
         return "unknown", reason or "unsupported quota adapter"
+    if hid in RUNTIME_OBSERVED_QUOTA and remaining is None and reset is None:
+        # Distinct from "unsupported adapter" (we never look) and from a
+        # supported adapter that failed to read (we looked and could not make
+        # sense of it): here there is nothing to look AT before spending a run.
+        return "unknown", reason or "quota observed only at runtime (a 429 arrives after a run attempt)"
     if remaining is not None and is_exhausted(remaining):
         return "exhausted", reason or "remaining is 0"
     if remaining is not None and reset is not None:
