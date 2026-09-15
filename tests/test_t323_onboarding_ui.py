@@ -36,15 +36,16 @@ def test_board_snapshot_includes_onboarding_and_next_step(board):
     for k in ("onboarding", "next_step", "empty_board"):
         assert k in d
     ob = d["onboarding"]
-    for step in ("initialized", "first_ticket", "first_agent", "second_harness",
+    for step in ("initialized", "coordinator", "first_ticket", "first_agent", "second_harness",
                  "first_review", "first_merge", "objective_set"):
         assert step in ob
         assert isinstance(ob[step], bool)
     assert ob["initialized"] is True
+    assert ob["coordinator"] is True
     assert ob["first_agent"] is True
     assert ob["second_harness"] is False
     ns = d["next_step"]
-    assert ns["kind"] in ("unblock", "merge", "spawn", "route", "start", "ok")
+    assert ns["kind"] in ("unblock", "merge", "spawn", "route", "start", "ok", "attention")
     assert ns.get("message") and ns.get("label")
 
 
