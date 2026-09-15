@@ -7716,9 +7716,100 @@ def _iso_span_secs(a, b):
 
 
 # ---- message board ------------------------------------------------------
+#
+# T-957 provenance: new records carry `session`, `via`, `endpoint_pid`,
+# `unverified`, and optionally `leadership_flag`. Records written before
+# this change have none of those keys. Absence is NOT evidence of forgery
+# -- it means the schema predates provenance. Do not fail closed on it.
+
+WEAK_SENDER_VIA = ("TICKET_AGENT", "flat", "pid")
+
 
 def messages_path(board):
     return os.path.join(board, "messages.jsonl")
+
+
+def _sender_via(board, explicit=None):
+    """Which session_seat() precedence rule named the sender."""
+    if explicit:
+        return "explicit"
+    if (os.environ.get("TICKET_SEAT") or "").strip():
+        return "TICKET_SEAT"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return "session-keyed"
+    if (os.environ.get("TICKET_AGENT") or "").strip():
+        return "TICKET_AGENT"
+    if recorded:
+        return "flat"
+    return "pid"
+
+
+def _board_leadership_names(board):
+    names = set()
+    m = current_master(board) or {}
+    for key in ("owner", "cos"):
+        n = (m.get(key) or "").strip()
+        if n:
+            names.add(n)
+    try:
+        aliases = load_aliases(board)
+    except Exception:
+        aliases = {}
+    for alias, holder in (aliases or {}).items():
+        if (alias or "").strip().lower() in ("ceo", "cos") and holder:
+            names.add(holder)
+    return names
+
+
+def _message_provenance(board, sender, explicit=None):
+    """Provenance recorded on every new message. Never used to reject a post."""
+    via = _sender_via(board, explicit)
+    session = agent_session_key() or ""
+    endpoint_pid = ""
+    endpoint_session = ""
+    try:
+        sa = _session_adapters()
+        ep = sa.read_endpoint(board, sender) or {}
+        if ep:
+            endpoint_pid = str(ep.get("pid") or "")
+            endpoint_session = str(ep.get("session_id") or ep.get("session") or "")
+    except Exception:
+        pass
+    unverified = via in WEAK_SENDER_VIA
+    leadership_flag = ""
+    if sender and sender in _board_leadership_names(board):
+        raw_sid = ""
+        for var in SESSION_ID_VARS:
+            raw_sid = (os.environ.get(var) or "").strip()
+            if raw_sid:
+                break
+        if endpoint_session and raw_sid and endpoint_session != raw_sid:
+            leadership_flag = "session-mismatch"
+        elif not endpoint_session and via in WEAK_SENDER_VIA:
+            leadership_flag = "no-registered-endpoint"
+    return {
+        "session": session,
+        "via": via,
+        "endpoint_pid": endpoint_pid,
+        "unverified": unverified,
+        "leadership_flag": leadership_flag,
+    }
+
+
+def message_provenance_state(m):
+    """absent | unverified | verified -- absence is not a finding."""
+    if not m or "via" not in m:
+        return "absent"
+    if m.get("unverified"):
+        return "unverified"
+    return "verified"
 
 
 def _rotate_messages_if_big(board):
@@ -7869,7 +7960,8 @@ def resolve_to_and_mentions(text, to="", registered=None, master_owner=""):
     return to, mentions, "", empty, empty
 
 
-def post_message(board, sender, text, to="", re="", kind="", task=False, source=""):
+def post_message(board, sender, text, to="", re="", kind="", task=False, source="",
+                 explicit=None):
     _rotate_messages_if_big(board)
     holder = ((current_master(board) or {}) or {}).get("owner") or ""
     to, mentions, unknown, explicit_unknown, dropped = resolve_to_and_mentions(
@@ -7886,6 +7978,13 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
                                 if t.lower() != retired_name.lower()]
     rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
            "to": to, "re": re, "text": text}
+    prov = _message_provenance(board, sender, explicit=explicit)
+    rec["session"] = prov["session"]
+    rec["via"] = prov["via"]
+    rec["endpoint_pid"] = prov["endpoint_pid"]
+    rec["unverified"] = prov["unverified"]
+    if prov["leadership_flag"]:
+        rec["leadership_flag"] = prov["leadership_flag"]
     if forwarded:
         rec["forwarded_from"] = forwarded["from"]
         rec["forward_role"] = forwarded["role"]
@@ -8333,7 +8432,14 @@ def fmt_local(iso):
 def fmt_msg(m):
     to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
     re_ = (" [%s]" % m["re"]) if m.get("re") else ""
-    return "%s  %s%s%s: %s" % (fmt_local(m.get("at")), m.get("from", "?"), to, re_, m.get("text", ""))
+    mark = ""
+    state = message_provenance_state(m)
+    if state == "unverified":
+        mark = " [unverified:%s]" % (m.get("via") or "?")
+    if m.get("leadership_flag"):
+        mark += " [leadership-flag:%s]" % m["leadership_flag"]
+    return "%s  %s%s%s%s: %s" % (
+        fmt_local(m.get("at")), m.get("from", "?"), mark, to, re_, m.get("text", ""))
 
 
 def _message_wakes_seat(board, seat, message):
@@ -8397,7 +8503,7 @@ def cmd_msg(a, board):
         load(board, a.re)  # validate the ticket exists
     # Board first, native wake second: the board is the source of truth.
     m = post_message(board, sender, a.text, a.to or "", a.re or "",
-                     task=is_task)
+                     task=is_task, explicit=a.owner or None)
     unknown = m.pop("_unregistered_implicit", None)
     explicit_unknown = m.pop("_unregistered_explicit", None) or []
     dropped = m.pop("_unregistered_dropped", None) or []

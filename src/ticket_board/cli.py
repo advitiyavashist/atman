@@ -3600,8 +3600,45 @@ def messages_path(board):
     return os.path.join(board, "messages.jsonl")
 
 
-def post_message(board, sender, text, to="", re="", kind="", task=False):
+WEAK_SENDER_VIA = ("TICKET_AGENT", "flat", "pid")
+
+
+def _sender_via(board, explicit=None):
+    if explicit:
+        return "explicit"
+    if (os.environ.get("TICKET_SEAT") or "").strip():
+        return "TICKET_SEAT"
+    keyed = bool(agent_session_key())
+    recorded = None
+    if board:
+        try:
+            recorded = read_identity(board)
+        except Exception:
+            recorded = None
+    if keyed and recorded:
+        return "session-keyed"
+    if (os.environ.get("TICKET_AGENT") or "").strip():
+        return "TICKET_AGENT"
+    if recorded:
+        return "flat"
+    return "pid"
+
+
+def message_provenance_state(m):
+    if not m or "via" not in m:
+        return "absent"
+    if m.get("unverified"):
+        return "unverified"
+    return "verified"
+
+
+def post_message(board, sender, text, to="", re="", kind="", task=False, explicit=None):
     rec = {"at": now(), "from": sender, "to": to, "re": re, "text": text}
+    via = _sender_via(board, explicit)
+    rec["session"] = agent_session_key() or ""
+    rec["via"] = via
+    rec["endpoint_pid"] = ""
+    rec["unverified"] = via in WEAK_SENDER_VIA
     if task or kind == "task":
         rec["kind"] = "task"
     line_ = json.dumps(rec) + "\n"
@@ -3822,14 +3859,21 @@ def unread(board, owner):
 def fmt_msg(m):
     to = (" -> %s" % m["to"]) if m.get("to") and m["to"] != "all" else ""
     re_ = (" [%s]" % m["re"]) if m.get("re") else ""
-    return "%s  %s%s%s: %s" % (m["at"][5:16].replace("T", " "), m.get("from", "?"), to, re_, m.get("text", ""))
+    mark = ""
+    if message_provenance_state(m) == "unverified":
+        mark = " [unverified:%s]" % (m.get("via") or "?")
+    if m.get("leadership_flag"):
+        mark += " [leadership-flag:%s]" % m["leadership_flag"]
+    return "%s  %s%s%s%s: %s" % (
+        m["at"][5:16].replace("T", " "), m.get("from", "?"), mark, to, re_, m.get("text", ""))
 
 
 def cmd_msg(a, board):
     sender = session_seat(board, a.owner)
     if a.re:
         load(board, a.re)  # validate the ticket exists
-    m = post_message(board, sender, a.text, a.to or "", a.re or "")
+    m = post_message(board, sender, a.text, a.to or "", a.re or "",
+                     explicit=a.owner or None)
     print("posted: " + fmt_msg(m))
 
 
