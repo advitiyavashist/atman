@@ -2359,7 +2359,9 @@ def line(t, tickets=None):
 
 
 def _notes(t):
-    return list(t.get("notes") or [])
+    wv = _work_view()
+    return [n for n in (t.get("notes") or [])
+            if not wv.is_live_unverified_gate_note(n.get("text"))]
 
 
 def collect_handoffs(t, tickets):
@@ -3537,9 +3539,13 @@ def _block_unverified_successors(board, finished_id):
     return blocked, reason
 
 
-def _reopen_unverified_successors(board, finished_id):
+def _reopen_unverified_successors(board, finished_id, sha="", seat=""):
     """After ACCEPT on an already-done predecessor, restore dependents we held."""
+    wv = _work_view()
     tickets = load_all(board)
+    pred = next((x for x in tickets if x["id"] == finished_id), None)
+    sha = (sha or "").strip() or (wv.accepted_release_sha(pred) if pred else "")
+    seat = (seat or "").strip() or whoami()
     who = whoami()
     at = now()
     opened = []
@@ -3550,9 +3556,10 @@ def _reopen_unverified_successors(board, finished_id):
             continue
         child["status"] = "open"
         child.pop("unverified_block", None)
+        wv.drop_unverified_gate_notes(child, finished_id)
         child.setdefault("notes", []).append({
             "by": who, "at": at,
-            "text": "unblocked after %s accepted" % finished_id,
+            "text": wv.accepted_release_note(finished_id, sha, seat),
         })
         save(board, child)
         opened.append(child["id"])
@@ -3853,7 +3860,7 @@ def cmd_accept(a, board):
     save(board, t)
     print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
     if t.get("status") == "done":
-        _reopen_unverified_successors(board, a.id)
+        _reopen_unverified_successors(board, a.id, sha=ev["sha"], seat=ev["by"])
         freed, started, held, capture_wait = _start_successors(board, a.id)
         _print_successor_release(t, freed, started, held, capture_wait)
 

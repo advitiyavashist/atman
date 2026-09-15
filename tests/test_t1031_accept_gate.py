@@ -110,6 +110,14 @@ def test_pure_gate_helpers():
         "docs-exempt", "alice", "2026-09-15T00:02:00Z", "docs-exempt")
     assert work_view.dep_released(docs) is True
     assert work_view.unverified_block_reason("T-002") == REASON
+    assert work_view.accepted_release_note("T-002", "a" * 40, "ceo") == (
+        "T-002 accepted at %s by ceo -- unblocked" % ("a" * 40))
+    leftover = {"notes": [{"by": "alice", "text": REASON},
+                          {"by": "alice", "text": "other"}]}
+    work_view.drop_unverified_gate_notes(leftover, "T-002")
+    assert [n["text"] for n in leftover["notes"]] == ["other"]
+    assert work_view.is_live_unverified_gate_note(REASON, "T-002") is True
+    assert work_view.is_live_unverified_gate_note("resolved: " + REASON, "T-002") is False
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
@@ -152,6 +160,11 @@ def test_accept_then_done_releases_handoff_sha(tool, board):
     assert full in handoff
     assert "success trigger" in handoff
     assert "accepted %s" % full in handoff
+    assert REASON not in handoff
+    shown = run(tool, board, "show", "T-003", agent="bob")
+    assert shown.returncode == 0, shown.stderr + shown.stdout
+    assert full in shown.stdout
+    assert REASON not in shown.stdout
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
@@ -205,6 +218,16 @@ def test_done_then_accept_releases_successor(tool, board):
     child = load_ticket(board, "T-003")
     assert child["status"] == "open"
     assert "unverified_block" not in child
-    handoff = " ".join(n.get("text") or "" for n in child.get("notes") or [])
+    notes = [n.get("text") or "" for n in child.get("notes") or []]
+    handoff = " ".join(notes)
+    release = "T-002 accepted at %s by reviewer -- unblocked" % full
     assert full in handoff
+    assert release in notes
     assert "accepted %s" % full in handoff
+    assert REASON not in handoff
+    assert not any(work_view.is_live_unverified_gate_note(t, "T-002") for t in notes)
+    shown = run(tool, board, "show", "T-003", agent="bob")
+    assert shown.returncode == 0, shown.stderr + shown.stdout
+    assert full in shown.stdout
+    assert release in shown.stdout
+    assert REASON not in shown.stdout

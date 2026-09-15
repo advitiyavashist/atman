@@ -345,6 +345,33 @@ def unverified_block_reason(pred_id):
     return UNVERIFIED_BLOCK_REASON % pred_id
 
 
+def accepted_release_note(pred_id, sha, seat):
+    """Child release note: full accepted SHA + accepting seat on every path."""
+    sha = (sha or "").strip()
+    seat = (seat or "").strip() or "?"
+    if sha:
+        return "%s accepted at %s by %s -- unblocked" % (pred_id, sha, seat)
+    return "%s accepted by %s -- unblocked" % (pred_id, seat)
+
+
+def is_live_unverified_gate_note(text, pred_id=None):
+    """True when a note is still the 'accept it or reopen' instruction."""
+    text = (text or "").strip()
+    if not text or text.lower().startswith("resolved:"):
+        return False
+    if pred_id:
+        return text == unverified_block_reason(pred_id)
+    return bool(text.endswith("marked done without verification; accept it or reopen"))
+
+
+def drop_unverified_gate_notes(child, pred_id):
+    """Omit superseded gate notes so the next agent does not read them as current."""
+    notes = child.get("notes") or []
+    child["notes"] = [n for n in notes
+                      if not is_live_unverified_gate_note(n.get("text"), pred_id)]
+    return child
+
+
 def successors_waiting_on(tickets, finished_id, released):
     """Children that would be free if ``finished_id`` counted as released."""
     out = []
