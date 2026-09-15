@@ -1,7 +1,7 @@
 """T-790: any-CEO executable onboarding path (throwaway board only).
 
 python3 tickets.py — never PATH tickets. Cursor harness only. Real
-tickets plan deps. No living Steer TICKETS_DIR. No tickets clear.
+atm plan deps. No living Steer TICKETS_DIR. No atm clear.
 """
 import json
 import os
@@ -73,8 +73,8 @@ def test_runbook_pins_this_mac_and_forbids_shim():
     assert "python3" in body
     assert "stale shim" in body
     assert "~/.local/bin/tickets" in body
-    assert "tickets plan" in body
-    assert "one `tickets create` per title" in body
+    assert "atm plan" in body
+    assert "one `atm create` per title" in body
     assert "--roles master" in body
     assert "--wake-mode continuous" in body
     assert "--harness cursor" in body
@@ -83,7 +83,7 @@ def test_runbook_pins_this_mac_and_forbids_shim():
     assert "objective --set" in body
     assert "master cos" in body
     assert "msg --to" in body
-    assert "tickets init" in body and "tickets clear" in body
+    assert "atm init" in body and "atm clear" in body
     assert "HOLD T-773" in body
     assert "steer main" in body
     assert "Minions" not in body and "Inspect" not in body

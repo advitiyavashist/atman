@@ -116,7 +116,7 @@ def test_legacy_flat_file_is_honoured_only_when_there_is_no_session_key(board):
     that actually names the caller: session-keyed record > explicit
     TICKET_AGENT/TICKET_SEAT > flat legacy file. It only answers when nothing
     else does; the alternative is the regression where `TICKET_AGENT=master
-    tickets msg --to worker`, run after the worker joined, resolves the master
+    atm msg --to worker`, run after the worker joined, resolves the master
     as the worker and refuses the message as self-addressed.
     """
     tickets_dir = os.path.join(board, ".tickets")
@@ -145,7 +145,7 @@ def test_unconfirmed_seat_is_flagged_and_the_agent_is_told_what_to_do(board):
     out = run(board, ["board", "-q"], session="fresh", agent="ambient").stdout
     assert "(UNCONFIRMED)" in out
     assert "is a guess from the environment" in out
-    assert "tickets join" in out
+    assert "atm join" in out
 
     run(board, ["join", "alpha", "--roles", "lead"], session="fresh")
     confirmed = run(board, ["board", "-q"], session="fresh").stdout

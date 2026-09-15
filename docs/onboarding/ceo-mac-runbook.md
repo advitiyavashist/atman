@@ -23,7 +23,7 @@ ls -l ~/.local/bin/tickets
 python3 "$TICKETS_PY" --version
 ```
 
-Do not run `tickets init` or `tickets clear` on the living Steer board.
+Do not run `atm init` or `atm clear` on the living Steer board.
 Do not work on steer `main`. HOLD T-773 and T-774. No NER flip. No T-095 /
 T-138. Spawn **cursor** only unless the operator names another harness.
 
@@ -69,8 +69,8 @@ t master cos cursor
 t msg --to cursor "CoS: staff cursor seats only. HOLD T-773 T-774. No live plan dump beyond operator answers."
 ```
 
-Do **not** run one `tickets create` per title. Edges must be `tickets plan`
-JSON `deps` (real `--after` links). Mid-run: `tickets dep` / `tickets create --blocks`.
+Do **not** run one `atm create` per title. Edges must be `atm plan`
+JSON `deps` (real `--after` links). Mid-run: `atm dep` / `atm create --blocks`.
 
 ---
 
@@ -107,7 +107,7 @@ t join cos-cursor --roles docs --harness cursor --wake-mode continuous
 t msg --to cos-cursor "CoS: staff cursor only."
 ```
 
-`tickets graph` must show the UI ticket waiting on the API ticket.
+`atm graph` must show the UI ticket waiting on the API ticket.
 
 ---
 

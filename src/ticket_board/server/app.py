@@ -940,7 +940,7 @@ class BoardServer(MessagingRoutes, TaskRoutes):
             # Returned exactly once. It is never written to the database (only
             # its hash is), never logged and never put in a URL.
             "code": enrollment["code"],
-            "install_command": "tickets connect --project {} --server {}".format(
+            "install_command": "atm connect --project {} --server {}".format(
                 ctx.project_id, self.base_url),
             "config_changes": _CONFIG_CHANGES,
         })
@@ -1023,7 +1023,7 @@ class BoardServer(MessagingRoutes, TaskRoutes):
             "agent": views.serialize_agent(self.store, agent),
             "expires_at": enrollment["expires_at"],
             "code": enrollment["code"],
-            "install_command": "tickets connect --project {} --server {}".format(
+            "install_command": "atm connect --project {} --server {}".format(
                 ctx.project_id, self.base_url),
             "config_changes": _CONFIG_CHANGES,
         })

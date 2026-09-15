@@ -12,19 +12,19 @@ Board location, in order of preference:
   $TICKETS_DIR
   nearest ancestor with a live .tickets/ board
   git worktree/root .tickets
-  the only live .tickets/ in a child directory (so `tickets next` from a
+  the only live .tickets/ in a child directory (so `atm next` from a
   parent folder like Downloads still finds the project)
   cwd/.tickets
 
-`tickets board` does not scan children — SessionStart hooks stay silent in
-folders that are not the project. `tickets next` / `show` / `done` do.
+`atm board` does not scan children — SessionStart hooks stay silent in
+folders that are not the project. `atm next` / `show` / `done` do.
 
 Agent identity for a single command comes from $TICKET_AGENT (set it per tool:
 claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
 launched. Session-scoped surfaces (`board`'s "you:" line, the stop-hook,
 `msg`/`inbox` with no --owner) resolve through session_seat(): an explicit
 --owner, then a supervisor TICKET_SEAT (authoritative for launched workers),
-then this session's OWN `tickets join` record, then ambient TICKET_AGENT. A
+then this session's OWN `atm join` record, then ambient TICKET_AGENT. A
 join is only "this session's own" when the harness gave us a session id to key
 it by; without one the record is a machine-wide legacy file that any agent may
 have written last, so an explicit TICKET_AGENT beats it. Default roles for
@@ -54,7 +54,7 @@ if os.path.isfile(os.path.join(os.path.dirname(os.path.realpath(__file__)),
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
-# words agents may type for `tickets status <id> <word>`
+# words agents may type for `atm status <id> <word>`
 STATUS_WORDS = {
     "todo": "open", "to-do": "open", "open": "open", "unassigned": "open", "backlog": "open",
     "in-progress": "claimed", "inprogress": "claimed", "progress": "claimed", "wip": "claimed",
@@ -63,7 +63,7 @@ STATUS_WORDS = {
     "blocked": "blocked", "stuck": "blocked",
     "done": "done", "merged": "done", "closed": "done", "complete": "done",
 }
-UPDATE_EVERY_MIN = 45  # agents must post `tickets update` at least this often
+UPDATE_EVERY_MIN = 45  # agents must post `atm update` at least this often
 
 DEFAULT_ROLES = {
     "codex": ["console"],
@@ -365,7 +365,7 @@ def _init_refusal(target, ambient):
         "live board). Pick one:\n"
         "  * bind this directory:      export TICKETS_DIR=%s\n"
         "  * install into the board\n"
-        "    that is actually in effect: tickets init --board %s\n"
+        "    that is actually in effect: atm init --board %s\n"
         "  * run init in %s instead\n"
         % (target, os.getcwd(), ambient, _init_disagreement_cause(ambient),
            target, ambient, os.path.dirname(ambient))
@@ -702,7 +702,7 @@ def write_identity(board, name):
 
 
 def identity_resolution(board, explicit=None):
-    """(seat, why) matching session_seat() -- for `tickets self` / identity."""
+    """(seat, why) matching session_seat() -- for `atm self` / identity."""
     if explicit:
         return explicit, "explicit --owner"
     seat = (os.environ.get("TICKET_SEAT") or "").strip()
@@ -821,8 +821,8 @@ def whoami(explicit=None):
     the ambient TICKET_AGENT a shell inherits, which beats a pid fallback.
 
     This deliberately does NOT consult the session's recorded identity (from
-    `tickets join`) and does NOT discover the board -- `TICKET_AGENT=alice
-    tickets msg --to bob` is the documented way to run a single command as a
+    `atm join`) and does NOT discover the board -- `TICKET_AGENT=alice
+    atm msg --to bob` is the documented way to run a single command as a
     name other than whatever this session joined as, and a recorded identity
     outranking that explicit-for-this-invocation env var would make the
     override silently do nothing.
@@ -848,7 +848,7 @@ def session_seat(board, explicit=None):
     behalf without a human naming it turn by turn: `board`'s "you:" line, an
     `inbox --quiet-if-unidentified` hook, the stop-hook, and `msg`'s sender /
     `inbox`'s owner when no --owner is given. These need the session-recorded
-    identity (from `tickets join`) precisely because nobody is passing an
+    identity (from `atm join`) precisely because nobody is passing an
     explicit name on that particular call.
 
     Precedence: explicit > TICKET_SEAT > a SESSION-KEYED recorded identity >
@@ -865,7 +865,7 @@ def session_seat(board, explicit=None):
     all, the only record available is the flat legacy file, which belongs to
     whichever agent on this machine joined last -- so an explicit
     TICKET_AGENT in the caller's own environment must beat it, exactly as it
-    does in whoami(). Without that, `TICKET_AGENT=master tickets msg --to
+    does in whoami(). Without that, `TICKET_AGENT=master atm msg --to
     worker` run after the worker joined resolves the master as the worker and
     the message is refused as self-addressed. The flat file is still better
     than a pid when nothing names us at all.
@@ -1187,7 +1187,7 @@ def objective_path(board):
 
 
 def load_objective(board):
-    """The standing objective the master drives toward (`tickets objective`).
+    """The standing objective the master drives toward (`atm objective`).
     {} when none is set."""
     try:
         with open(objective_path(board)) as f:
@@ -1314,7 +1314,7 @@ def _notify_review_submitted(board, author, tid, text, master_state=None):
 
 
 def spawn_watch_max_runs(wake_mode="task-only", persist=False, max_runs=None):
-    """Watch --max-runs for `tickets spawn`. 0 loops until spawn --stop.
+    """Watch --max-runs for `atm spawn`. 0 loops until spawn --stop.
 
     A seat's durable wake policy, rather than its harness brand, decides
     whether the adapter remains online. An explicit --max-runs (including 1
@@ -1380,12 +1380,12 @@ def git(*args, cwd=None):
     """Run git and return stdout, or None if it failed.
 
     `cwd=` picks the tree to ask. It matters: T-272 -- every caller used to
-    inherit os.getcwd(), so `tickets review` pinned whichever repo the agent
+    inherit os.getcwd(), so `atm review` pinned whichever repo the agent
     happened to be standing in rather than the repo the deliverable is in.
 
     cwd is necessary and NOT sufficient (T-287). An inherited GIT_DIR,
     GIT_COMMON_DIR or GIT_WORK_TREE overrides cwd-based discovery inside git
-    itself, so under a leaked env `tickets review --artifact <dir>` pinned the
+    itself, so under a leaked env `atm review --artifact <dir>` pinned the
     wrong repo and reported success -- the defect T-272 exists to fix,
     reappearing on the command that fixes it. The scrub and the targeting are
     one mechanism; neither works alone, so they are applied together here at
@@ -1405,7 +1405,7 @@ def git(*args, cwd=None):
 def repo_identity(cwd):
     """A repo identity that is stable across every worktree of the SAME repo.
 
-    T-215: 'tickets review' pins branch@sha from whatever repo the caller
+    T-215: 'atm review' pins branch@sha from whatever repo the caller
     happened to be standing in, and cross-repo work is the norm on this board
     (every agent works in .worktrees/). The worktree's own toplevel path is
     useless for identity -- it differs per worktree of the same repo -- so
@@ -1491,8 +1491,8 @@ def git_state(cwd=None):
     placeholder such as {"branch": "?", "dirty": 0} therefore does not fail
     safe, it fails OPEN: it satisfies `not g`, passes the never-work-on-main
     check ("?" is not main) and passes the clean-tree check (0 is not dirty),
-    so `tickets sync` would go on to run a real merge with all three guards
-    disabled, and `tickets review` would pin an unmergeable "?@?" (T-259
+    so `atm sync` would go on to run a real merge with all three guards
+    disabled, and `atm review` would pin an unmergeable "?@?" (T-259
     defect 2). Unresolved must mean None.
     """
     state, _mismatch = _git_state_raw(cwd)
@@ -1502,7 +1502,7 @@ def git_state(cwd=None):
 def artifact_tree(a):
     """Resolve `--artifact` to a real git working tree, or None meaning "use cwd".
 
-    `tickets review` used to derive branch, sha and repo from whatever
+    `atm review` used to derive branch, sha and repo from whatever
     directory the agent ran it in. That is systematically the wrong tree when
     the CLI is driven from a different clone than the deliverable, so the pin
     named a repo that never built the work.
@@ -1526,7 +1526,7 @@ def artifact_tree(a):
 
 
 def _behind_trunk_refusal(g, art, trunk):
-    """The text `tickets review` refuses with when the branch is behind trunk.
+    """The text `atm review` refuses with when the branch is behind trunk.
 
     T-422. The gate is correct and is T-272 working as designed: it measures
     the ARTIFACT tree. The text did not say so -- it said a bare "Run `tickets
@@ -1550,13 +1550,13 @@ def _behind_trunk_refusal(g, art, trunk):
     --artifact was passed: `--artifact .` is the common path wearing a flag and
     gets the common path's message. Comparing resolved toplevels rather than
     repo_identity() is deliberate -- a second worktree of the SAME repo has an
-    identical identity, and `tickets sync` there merges the cwd worktree's own
+    identical identity, and `atm sync` there merges the cwd worktree's own
     branch, so it cannot clear this refusal either and the agent still has to
     be sent elsewhere.
     """
     tail = ("(merges %s in, so conflicts are yours to fix now, not the master's later), "
             "then submit again." % trunk)
-    plain = "RULE: your branch is behind %s. Run `tickets sync` %s" % (trunk, tail)
+    plain = "RULE: your branch is behind %s. Run `atm sync` %s" % (trunk, tail)
     if not art:
         return plain
     cg = git_state()
@@ -1571,8 +1571,8 @@ def _behind_trunk_refusal(g, art, trunk):
     return (
         "RULE: branch %s in %s (%s) is behind %s.\n"
         "That ARTIFACT tree is what this gate measured (--artifact), NOT %s.\n"
-        "Sync THERE, not here: `tickets sync --artifact %s` %s\n"
-        "A bare `tickets sync` would sync that other %s and cannot clear this refusal."
+        "Sync THERE, not here: `atm sync --artifact %s` %s\n"
+        "A bare `atm sync` would sync that other %s and cannot clear this refusal."
         % (g["branch"], g["top"], g["repo"] or "no origin remote", trunk,
            wrong, art, tail, kind)
     )
@@ -1762,7 +1762,7 @@ def _current_ticket(board, owner):
 
 
 def _here_ticket(board, owner):
-    """Ticket id for tickets here (T-543 / T-551).
+    """Ticket id for atm here (T-543 / T-551).
 
     Stamp the claimed hold when present; otherwise clear. Never stamp an
     IN REVIEW id whose live owner is not me (T-551), and never re-bind stale
@@ -1901,7 +1901,7 @@ def _held_claimed(board, owner, except_id=None):
 
 def _already_hold_msg(held):
     ids = ", ".join(t["id"] for t in held)
-    return ("you already hold %s -- finish it (tickets done/block/reopen) before claiming "
+    return ("you already hold %s -- finish it (atm done/block/reopen) before claiming "
             "more, or pass --another if you really want to work two in parallel." % ids)
 
 
@@ -2035,7 +2035,7 @@ def unblocked(board, tickets):
     """Open tickets whose dependencies are all done and whose lane is ready.
 
     Capture and discarded tickets stay on the graph but are invisible to
-    `tickets next` until a sound pass promotes them (Fatih write gate).
+    `atm next` until a sound pass promotes them (Fatih write gate).
     """
     done = set(t["id"] for t in tickets if t["status"] == "done")
     return [
@@ -2429,7 +2429,7 @@ def _plan_item_sound_fields(it, t):
 
 
 def _capture_sound_hint(tid):
-    return "%s waits in capture: run tickets sound %s" % (tid, tid)
+    return "%s waits in capture: run atm sound %s" % (tid, tid)
 
 
 def _apply_sounded(board, t, fields, who):
@@ -2495,7 +2495,7 @@ def cmd_capture(a, board):
         if not thought:
             sys.exit("capture: message %s has no text" % mid)
     if not thought:
-        sys.exit('capture: tickets capture "a thought"  (or --from-msg <id>)')
+        sys.exit('capture: atm capture "a thought"  (or --from-msg <id>)')
     title = S.capture_title(thought, getattr(a, "area", "") or "")
     body = _capture_snapshot(board, thought)
     t = create(board, title, body, getattr(a, "role", "") or "", [],
@@ -2504,10 +2504,10 @@ def cmd_capture(a, board):
     t["open_questions"] = ["not yet sounded"]
     t["notes"] = t.get("notes") or []
     t["notes"].append({"by": whoami(), "at": now(),
-                       "text": "captured (not claimable until tickets sound)"})
+                       "text": "captured (not claimable until atm sound)"})
     save(board, t)
     print("captured %s  %s  lane=capture" % (t["id"], t["title"]))
-    print("  not visible to tickets next until `tickets sound %s`" % t["id"])
+    print("  not visible to atm next until `atm sound %s`" % t["id"])
 
 
 def cmd_sound(a, board):
@@ -2550,7 +2550,7 @@ def cmd_sound(a, board):
               % t["id"])
     else:
         print("%s -> lane=ready (sounded by %s)" % (t["id"], who))
-        print("  CoS: tickets dispatch %s --to <seat> --harness cursor" % t["id"])
+        print("  CoS: atm dispatch %s --to <seat> --harness cursor" % t["id"])
         print("  cause: %s" % t.get("cause"))
         print("  change: %s" % t.get("change"))
         print("  proof: %s" % t.get("proof"))
@@ -2577,7 +2577,7 @@ def cmd_dispatch(a, board):
     seat = (a.to or "").strip()
     harness = (getattr(a, "harness", "") or "cursor").strip()
     if not seat:
-        sys.exit("dispatch: tickets dispatch T-123 --to <seat> --harness cursor")
+        sys.exit("dispatch: atm dispatch T-123 --to <seat> --harness cursor")
     if _ticket_lane(t) != "ready":
         sys.exit("dispatch: %s is lane=%s; sound it first" % (t["id"], _ticket_lane(t)))
     if S.ticket_on_hold(t):
@@ -2597,7 +2597,7 @@ def cmd_dispatch(a, board):
             break
     if harness != "custom" and not harness.startswith("custom:"):
         if row is None:
-            sys.exit("dispatch: unknown harness %s (tickets harness available)" % harness)
+            sys.exit("dispatch: unknown harness %s (atm harness available)" % harness)
         reason = S.catalog_dispatch_fail(row)
         if reason:
             sys.exit("dispatch: %s -- will not spawn a FAIL seat" % reason)
@@ -2614,7 +2614,7 @@ def cmd_dispatch(a, board):
     t["notes"].append({"by": who, "at": now(),
                        "text": "dispatch: reserved for %s harness=%s" % (seat, harness)})
     save(board, t)
-    print("%s reserved for %s harness=%s (worker claims via tickets next / watch)"
+    print("%s reserved for %s harness=%s (worker claims via atm next / watch)"
           % (t["id"], seat, harness))
     skip_spawn = _dispatch_skip_product_spawn(harness)
     if skip_spawn:
@@ -2669,7 +2669,7 @@ def cmd_pr_sync(a, board):
         if state == "merged":
             if S.pin_is_trunk_ancestor(git, _trunk, t):
                 print("%s  ready to close (PR %s merged; pin is trunk ancestor). "
-                      "Master: tickets done %s --notes \"...\"" % (t["id"], pr, t["id"]))
+                      "Master: atm done %s --notes \"...\"" % (t["id"], pr, t["id"]))
             else:
                 print("%s  waiting: PR %s merged but pin %s is not a trunk ancestor"
                       % (t["id"], pr, t.get("commit") or "(none)"))
@@ -2679,7 +2679,7 @@ def cmd_pr_sync(a, board):
                 post_message(board, whoami(),
                              "pr-sync: %s still waiting on PR %s" % (t["id"], pr),
                              to=owner, re=t["id"])
-                print("  bounced to %s via tickets msg" % owner)
+                print("  bounced to %s via atm msg" % owner)
         else:
             print("%s  ask: could not read PR %s (missing, 403, or no gh)" % (t["id"], pr))
 
@@ -2726,7 +2726,7 @@ def cmd_plan_status(a, board):
             body = open(path).read()
             section = ("\n## Plan\n\n"
                        "capture=%d ready=%d waiting-on-merge=%d parked=%d\n"
-                       "(written by tickets plan-status --write-master)\n"
+                       "(written by atm plan-status --write-master)\n"
                        % (len(capture), len(ready), len(waiting), len(parked)))
             marker = "\n## Plan\n"
             if marker in body:
@@ -2807,7 +2807,7 @@ def cmd_schedule(a, board):
         sys.exit("schedule SEAT --cron '*/15 * * * *'  or  schedule SEAT --every 15m")
     wf = load_workforce(board)
     if seat not in wf:
-        sys.exit("schedule: unknown seat %s (tickets join first)" % seat)
+        sys.exit("schedule: unknown seat %s (atm join first)" % seat)
     if cron and every_spec:
         sys.exit("schedule: pass --cron or --every, not both")
     if not cron and not every_spec:
@@ -2882,13 +2882,13 @@ def cmd_retro(a, board):
         "Proposed edit (do not apply silently): add a paragraph to "
         ".tickets/briefs/_shared.md or the named role brief that states this "
         "once, in plain English.\n\n"
-        "Proof: tickets show %s\n\n"
+        "Proof: atm show %s\n\n"
         "## Cause or spec\n"
         "The same misunderstanding repeated across finished/discarded work.\n\n"
         "## Change\n"
         "(sound this ticket, then a worker edits the brief)\n\n"
         "## Proof\n"
-        "tickets show %s; the brief paragraph is present\n\n"
+        "atm show %s; the brief paragraph is present\n\n"
         "## Deps\n"
         "none\n\n"
         "## Open questions\n"
@@ -2903,7 +2903,7 @@ def cmd_retro(a, board):
                        "text": "retro from %s" % ", ".join(ids)})
     save(board, t)
     print("captured %s  %s  lane=capture" % (t["id"], t["title"]))
-    print("  CoS/master: tickets sound %s after choosing the brief" % t["id"])
+    print("  CoS/master: atm sound %s after choosing the brief" % t["id"])
 
 
 def cmd_list(a, board):
@@ -2929,7 +2929,7 @@ def cmd_list(a, board):
 def cmd_board(a, board):
     tickets = load_all(board)
     if not tickets:
-        # Claude's SessionStart hook calls `tickets board`. An initialized
+        # Claude's SessionStart hook calls `atm board`. An initialized
         # project may legitimately have no tickets yet, but its durable
         # knowledge is still useful. Stay silent when there is no board at
         # all so the global hook remains inert in unrelated directories.
@@ -2955,7 +2955,7 @@ def cmd_board(a, board):
         mine = [t for t in tickets if t.get("sprint") == cur["id"]]
         d, n, _, _ = progress(mine)
         hdr.append("sprint %s %s" % (cur["id"], bar(d, n, 10)))
-    hdr.append("master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    hdr.append("master: %s" % (m["owner"] if m else "nobody (atm master take)"))
     # Name the seat this session is answering as. Without it a human reading a
     # window cannot tell which agent they are talking to, and mail addressed to
     # one seat gets acted on by another.
@@ -2973,7 +2973,7 @@ def cmd_board(a, board):
         # neither of which this session chose.
         print("  ^ this session has NOT recorded a seat; %r is a guess from the "
               "environment." % seat)
-        print("    Run `tickets join <your-name> --roles <role>` before acting on "
+        print("    Run `atm join <your-name> --roles <role>` before acting on "
               "anything addressed to a seat.")
     for t in tickets:
         if t["status"] != "done" or a.all:
@@ -2983,8 +2983,8 @@ def cmd_board(a, board):
         print("  -> ready to claim: %s" % ", ".join(t["id"] for t in ready))
     if not a.quiet:
         print(
-            "Shared across Claude/Codex/Cursor. `tickets next` claims one atomically; "
-            "`tickets done <id> --notes \"...\"` hands off to dependents."
+            "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
+            "`atm done <id> --notes \"...\"` hands off to dependents."
         )
     owner = whoami()
     if not owner.startswith("agent-"):
@@ -2994,7 +2994,7 @@ def cmd_board(a, board):
 
 
 def workflow_graph(tickets, include_done=False):
-    """JSON twin of `tickets graph` for the command board.
+    """JSON twin of `atm graph` for the command board.
 
     Active tickets plus the specific deps they wait on. Edges are real
     `--after` links, not a dump of titles and not prose blockers.
@@ -3352,8 +3352,8 @@ def cmd_next(a, board):
                 print("")
                 print(warn)
             print("")
-            print("Post progress with `tickets update %s \"...\"` at least every %d min; "
-                  "finish with `tickets done %s --notes \"branch@sha, paths, decisions\"`."
+            print("Post progress with `atm update %s \"...\"` at least every %d min; "
+                  "finish with `atm done %s --notes \"branch@sha, paths, decisions\"`."
                   % (got["id"], UPDATE_EVERY_MIN, got["id"]))
             return
     open_blocked = [t for t in tickets if t["status"] == "open"]
@@ -3368,7 +3368,7 @@ def cmd_next(a, board):
     if cannot:
         print("%d ready ticket(s) need capabilities you have not registered: %s" % (
             len(cannot), "; ".join("%s needs %s" % (t["id"], ",".join(t["needs"])) for t in cannot)))
-        print("register with: tickets join %s --can %s" % (owner, ",".join(sorted(set(
+        print("register with: atm join %s --can %s" % (owner, ",".join(sorted(set(
             n for t in cannot for n in t["needs"])))))
     role_miss, reserved_miss = _next_refusal_parts(
         ready_all, roles, owner, steal_id, board)
@@ -3386,7 +3386,7 @@ def cmd_next(a, board):
     if cyc:
         print(
             "DEADLOCK: dependency cycle %s -- no ticket can ever start.\n"
-            "Fix with: tickets dep %s --drop %s" % (" -> ".join(cyc), cyc[0], cyc[1])
+            "Fix with: atm dep %s --drop %s" % (" -> ".join(cyc), cyc[0], cyc[1])
         )
         sys.exit(2)
     ghosts = dangling(tickets)
@@ -3394,7 +3394,7 @@ def cmd_next(a, board):
         print("BROKEN: these wait on tickets that do not exist:")
         for tid, miss in ghosts.items():
             print("  %s -> %s" % (tid, ", ".join(miss)))
-        print("Fix with: tickets dep <id> --drop <missing-id>")
+        print("Fix with: atm dep <id> --drop <missing-id>")
         sys.exit(2)
     holders = sorted(set(t.get("owner") or "?" for t in tickets if t["status"] == "claimed"))
     done_ids = set(t["id"] for t in tickets if t["status"] == "done")
@@ -3422,7 +3422,7 @@ def cmd_claim(a, board):
     t = load(board, a.id)
     lane = _ticket_lane(t)
     if lane != "ready":
-        sys.exit("%s is lane=%s; sound it before claiming (tickets sound %s)"
+        sys.exit("%s is lane=%s; sound it before claiming (atm sound %s)"
                  % (a.id, lane, a.id))
     got, held = try_claim_one_active(board, a.id, owner)
     if held:
@@ -3487,7 +3487,7 @@ def cmd_review(a, board):
     t["review_at"] = now()
     text = a.notes
     if g:
-        # T-215 records WHICH repo the pin belongs to so `tickets merge` can
+        # T-215 records WHICH repo the pin belongs to so `atm merge` can
         # refuse a cross-repo ancestry close. T-272 fixes what that repo is:
         # the artifact's, not the caller's cwd.
         stamp = _record_pin(t, g, art)
@@ -3563,7 +3563,7 @@ def _trunk(cwd=None):
 def cmd_sync(a, board):
     """Agent side: bring main into my branch now, so the master's merge is trivial.
 
-    T-272: `--artifact` syncs the tree the deliverable is in. `tickets review`
+    T-272: `--artifact` syncs the tree the deliverable is in. `atm review`
     checks the artifact branch against ITS trunk, so the sync that clears that
     check has to happen in the same tree -- otherwise the workflow instruction
     "sync before review" quietly syncs a repo the review never looks at.
@@ -3614,8 +3614,8 @@ def cmd_sync(a, board):
     print("CONFLICTS merging %s into %s -- these files need you:" % (remote_trunk, g["branch"]))
     for f in conflicted:
         print("  " + f)
-    print("Resolve, `git add` them, `git commit`, then `tickets review` again. "
-          "Or `git merge --abort` and ask the master (`tickets msg`).")
+    print("Resolve, `git add` them, `git commit`, then `atm review` again. "
+          "Or `git merge --abort` and ask the master (`atm msg`).")
     sys.exit(1)
 
 
@@ -3646,10 +3646,10 @@ def parse_review_sha(stamp):
 
 
 def require_integrator(board, owner, force_master=False):
-    """Only the designated master.json owner may run tickets merge."""
+    """Only the designated master.json owner may run atm merge."""
     m = current_master(board)
     if not m or not m.get("owner"):
-        sys.exit("refused: no designated integrator in master.json (tickets master take first)")
+        sys.exit("refused: no designated integrator in master.json (atm master take first)")
     # The master (planner) and the chief of staff (review/unblock/merge) may both integrate.
     if owner not in (m["owner"], m.get("cos")) and not force_master:
         sys.exit("rejected owner: %s is not the designated integrator (master %s, cos %s); "
@@ -3769,7 +3769,7 @@ def cmd_merge(a, board):
         # they need to know which.
         head_branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=root)
         if head_branch and head_branch != trunk:
-            sys.exit("%s is checked out on %r, not %s. `tickets merge` fast-forwards the "
+            sys.exit("%s is checked out on %r, not %s. `atm merge` fast-forwards the "
                      "branch that is checked out, so merging from here would leave %s "
                      "untouched and close nothing, without saying why. "
                      "`git -C %s checkout %s` first." % (
@@ -3826,7 +3826,7 @@ def cmd_merge(a, board):
                     continue
                 short = sh("git", "rev-parse", "--short", pin).stdout.strip() or pin[:12]
                 r = sh("git", "merge", "--no-edit", *extra, "-m",
-                       "Integrate %s@%s into %s (master %s via tickets merge%s)" % (
+                       "Integrate %s@%s into %s (master %s via atm merge%s)" % (
                            b, short, trunk, owner,
                            "; conflicts resolved in favour of the integrated tree" if extra else ""),
                        pin, cwd=idir)
@@ -3866,7 +3866,7 @@ def cmd_merge(a, board):
                 else:
                     sh("git", "merge", "--abort", cwd=idir)
                     skipped.append((b, "code conflicts at %s: %s" % (short, ", ".join(conflicted[:6]))))
-                    print("  SKIPPED %s@%s -- code conflicts in %s; ask its owner to `tickets sync` and resolve"
+                    print("  SKIPPED %s@%s -- code conflicts in %s; ask its owner to `atm sync` and resolve"
                           % (b, short, ", ".join(conflicted[:6])))
 
         if not merged_shas and not merged_branches:
@@ -3907,7 +3907,7 @@ def cmd_merge(a, board):
             if pr.returncode != 0:
                 why = (pr.stderr or pr.stdout).strip()
                 print("PUSH FAILED: could not push %s to origin/%s\n%s" % (trunk, trunk, why))
-                _master_log(board, "tickets merge: integrated %s@%s locally but PUSH FAILED (%s)" % (
+                _master_log(board, "atm merge: integrated %s@%s locally but PUSH FAILED (%s)" % (
                     trunk, sha, why.splitlines()[0] if why else "?"), by=owner)
                 sys.exit(4)
             remote = sh("git", "ls-remote", "--heads", "origin", trunk).stdout.strip().split()
@@ -3915,7 +3915,7 @@ def cmd_merge(a, board):
             if remote_sha != full_trunk:
                 print("PUSH FAILED: origin/%s is %s, expected %s" % (
                     trunk, remote_sha[:12] if remote_sha else "?", sha))
-                _master_log(board, "tickets merge: push reported success but origin/%s != local %s" % (
+                _master_log(board, "atm merge: push reported success but origin/%s != local %s" % (
                     trunk, sha), by=owner)
                 sys.exit(4)
             print("%s -> %s   (pushed to origin/%s)" % (trunk, sha, trunk))
@@ -3952,7 +3952,7 @@ def cmd_merge(a, board):
                 skipped.append((t2["id"],
                     "no repo recorded on this review pin (reviewed before T-215) -- "
                     "not eligible for an automatic close; verify by hand which repo "
-                    "its deliverable is in, then close it with `tickets done`"))
+                    "its deliverable is in, then close it with `atm done`"))
                 continue
             if recorded_repo != merge_repo:
                 skipped.append((t2["id"],
@@ -4013,7 +4013,7 @@ def cmd_merge(a, board):
             t2["status"] = "done"
             t2["done_at"] = now()
             t2["notes"].append({"by": owner, "at": now(),
-                                "text": "merged into %s as %s (tickets merge; pinned %s)" % (
+                                "text": "merged into %s as %s (atm merge; pinned %s)" % (
                                     trunk, sha, pin)})
             save(board, t2)
             closed.append(t2["id"])
@@ -4032,13 +4032,13 @@ def cmd_merge(a, board):
             print("  skipped %s: %s" % (b, why))
         for f, alt in resolved_docs:
             print("  doc conflict %s: kept %s's copy, branch copy at %s" % (f, trunk, alt))
-        _master_log(board, "tickets merge: pins %s -> %s@%s; tests %s; closed %s%s" % (
+        _master_log(board, "atm merge: pins %s -> %s@%s; tests %s; closed %s%s" % (
             ", ".join(p[:7] for p in merged_shas) or "-",
             trunk, sha, "green" if t.returncode == 0 else "skipped",
             ", ".join(closed) or "-",
             ("; skipped " + ", ".join(str(b) for b, _ in skipped)) if skipped else ""), by=owner)
-        post_message(board, owner, "%s is now %s (merged %s). Everyone: run `tickets sync` in your worktree "
-                     "before your next `tickets review`." % (trunk, sha, ", ".join(merged_branches)))
+        post_message(board, owner, "%s is now %s (merged %s). Everyone: run `atm sync` in your worktree "
+                     "before your next `atm review`." % (trunk, sha, ", ".join(merged_branches)))
         _finish_followup(board, ",".join(closed) if closed else "merge", "done")
 
 
@@ -4203,7 +4203,7 @@ def _run_end_limit_outcome(rc, timed_out, log_text, bound_write=False):
     rate_limit_error) AND (that structured signal OR CLI limit text). An
     exit=0 bound-write run is never limit. Generic exit=1 with no limit
     evidence stays unlabelled so T-425 FLAG still treats it as a non-turn.
-    `tickets limits` / liveness greps are unchanged.
+    `atm limits` / liveness greps are unchanged.
     """
     if (rc in (0, None)) and not timed_out and bound_write:
         return None
@@ -4550,7 +4550,7 @@ def _is_legitimate_watch_script(tok):
     """True when `tok` points at a real tickets CLI, not a grep/search needle.
 
     Installed shims are often `~/.local/bin/tickets` or `atm` (symlinks to
-    tickets.py). T-875 (12): a stale manual `tickets watch` must still count.
+    tickets.py). T-875 (12): a stale manual `atm watch` must still count.
     """
     path = os.path.expanduser(tok or "")
     if _RELEASE_TICKETS_RE.search(path + " "):
@@ -4581,7 +4581,7 @@ def _watch_cmd_agent(cmd):
     tickets-releases/<sha>/, the ~/.claude/tools shim, or an absolute checkout.
 
     T-875 (12): the installed PATH shims `tickets` and `atm` (no .py suffix)
-    are the same CLI. A stale manual `tickets watch` must match here.
+    are the same CLI. A stale manual `atm watch` must match here.
     """
     argv = _split_cmdline(cmd)
     for i, tok in enumerate(argv):
@@ -4758,7 +4758,7 @@ _WATCH_TABLE = threading.local()
 
 
 def _parse_watch_table():
-    """All live `tickets watch` rows from one process-table snapshot.
+    """All live `atm watch` rows from one process-table snapshot.
 
     Returns `(rows, available)`. `available` is False when `ps` could not be
     run at all; an empty `rows` then means "unknown", not "no watchers", and
@@ -4846,13 +4846,13 @@ def _watch_table_available():
 
 
 def _live_watch_pids(owner=None, board=None):
-    """Live `tickets watch --agent <name>` processes from the OS process table.
+    """Live `atm watch --agent <name>` processes from the OS process table.
 
     The pid file only tracks one loop per board; duplicates (interrupted pytest
     runs, races before lock) show up here. `owner` filters to one agent name.
     When `board` is set, a loop counts on three kinds of own-board evidence:
     its --cwd lies under that repo; it carries no --cwd (older releases, and
-    `tickets watch` by hand) but the OS reports a working directory under the
+    `atm watch` by hand) but the OS reports a working directory under the
     repo; or agents/<name>.watch.pid on THIS board names the live pid even
     though --cwd is another repo (Steer board + Atman worktree). Foreign cwd
     without this board's pid file is still excluded (T-554), and no evidence
@@ -4985,7 +4985,7 @@ def _process_cwd(pid):
     """The process's actual working directory, or "" when it cannot be read.
 
     Only consulted for a `watch` row whose command line carries no `--cwd`:
-    releases before that flag, and `tickets watch` started by hand. Without
+    releases before that flag, and `atm watch` started by hand. Without
     it those loops have no board evidence at all, so a board-scoped stop
     would miss a duplicate running right here (T-554 intent) (T-926).
     """
@@ -5495,7 +5495,7 @@ def agent_liveness(board, rec, peers=None):
     run = _read_run(board, owner)
     # Where does this agent's session actually live? The agent RECORD's cwd is
     # whatever directory the last `tickets` command was typed in, and for this
-    # epic that is routinely a second repo -- `tickets review` may run in the
+    # epic that is routinely a second repo -- `atm review` may run in the
     # deliverable clone while the session lives in another worktree. The
     # WATCHER's cwd, recorded in the run file, is the session's
     # own directory and does not move when a command is run elsewhere, so it
@@ -5512,7 +5512,7 @@ def agent_liveness(board, rec, peers=None):
            "run": run if run.get("active") else {},
            "seen_age": _age_secs((rec or {}).get("seen"))}
 
-    # 1. A human asserting a state always wins: `tickets limit` is a person
+    # 1. A human asserting a state always wins: `atm limit` is a person
     #    saying "I read the log". Keep it, but it is no longer the ONLY path
     #    to a limited render -- that is how an agent can look healthy while
     #    hard-limited for a long window.
@@ -5698,7 +5698,7 @@ def cmd_limit(a, board):
     print(msg)
     held = [t for t in load_all(board) if t["status"] == "claimed" and t.get("owner") == owner]
     if held and not a.clear:
-        print("still holding: %s -- master may `tickets reopen` them for someone else" % ", ".join(t["id"] for t in held))
+        print("still holding: %s -- master may `atm reopen` them for someone else" % ", ".join(t["id"] for t in held))
 
 
 def cmd_limits(a, board):
@@ -5713,7 +5713,7 @@ def cmd_limits(a, board):
                                              (", back %s" % lim["until"]) if lim.get("until") else "",
                                              (" -- %s" % lim["note"]) if lim.get("note") else ""))
     if not any_:
-        print("  none (agents record one with `tickets limit --until \"...\"`)")
+        print("  none (agents record one with `atm limit --until \"...\"`)")
     print("")
     print("Probably limited (holding a ticket, silent > %d min):" % (UPDATE_EVERY_MIN * 2))
     quiet = False
@@ -5776,7 +5776,7 @@ def cmd_limits(a, board):
     print("")
     print("AUTH means the session's login died (revoked/expired token): the fix is `/login` in that "
           "session, not waiting. LIMIT means a usage/rate cap: wait for the reset or switch accounts. "
-          "Either way, if the agent holds a ticket, `tickets reopen` it so someone else can continue. "
+          "Either way, if the agent holds a ticket, `atm reopen` it so someone else can continue. "
           "UNKNOWN means this tool cannot tell you -- go read the log; it is not a synonym for fine, "
           "and nothing should be reopened on it alone.")
 
@@ -5832,7 +5832,7 @@ def cmd_repin(a, board):
 
     Backfill. Every pin recorded before `review` learned --artifact was taken
     from the caller's cwd, which on this board is systematically the wrong
-    clone. Re-running `tickets review` would also fix it, but it resets
+    clone. Re-running `atm review` would also fix it, but it resets
     review_at and re-notifies the master once per ticket, which for a queue
     this deep is worse than the problem -- so correcting evidence gets its own
     verb, and leaves an explicit REPIN note rather than silently rewriting
@@ -5947,7 +5947,7 @@ def cmd_done(a, board):
     if t.get("owner"):
         # T-428: checkin() always writes THIS process's cwd/branch/sha. That is
         # the closer's location. Stamping it onto a different owner makes
-        # `tickets who` lie (the owner appears to sit in the closer's tree).
+        # `atm who` lie (the owner appears to sit in the closer's tree).
         closer = whoami()
         note = "finished %s by %s" % (a.id, closer)
         if t["owner"] == closer:
@@ -5985,7 +5985,7 @@ def cmd_block(a, board):
 
 
 def cmd_note(a, board):
-    """Add a note (`tickets note` / `tickets update`).
+    """Add a note (`atm note` / `atm update`).
 
     `by` is always the caller's own identity (`--by`, else $TICKET_AGENT),
     never the ticket's `owner` field. T-238: a fallback to `t.get("owner")`
@@ -5993,7 +5993,7 @@ def cmd_note(a, board):
     the case a duplicate lane needs to be visible -- had its notes silently
     relabeled as the owner's, so nothing in the note history could ever
     reveal the second lane. This was a write-path bug: the on-disk `by` was
-    wrong, not just its rendering in `tickets show`.
+    wrong, not just its rendering in `atm show`.
     """
     t = load(board, a.id)
     who = whoami(a.by)
@@ -6109,7 +6109,7 @@ def cmd_assign(a, board):
                 if a.owner:
                     bind_owner = a.owner
         if not changed:
-            sys.exit("nothing to change; see tickets assign --help")
+            sys.exit("nothing to change; see atm assign --help")
         note_text = "assign: " + ", ".join(changed)
         if getattr(a, "notes", ""):
             note_text += " -- " + a.notes
@@ -6149,16 +6149,16 @@ def cmd_reserve(a, board):
     """Reserve an open ticket for an agent without claiming (T-552).
 
     Status stays TO DO; no wait-turns. Master/planner/optimizer may --for;
-    anyone may --drop. tickets next --steal <id> and assign --owner override.
+    anyone may --drop. atm next --steal <id> and assign --owner override.
     """
     t = load(board, a.id)
     who = whoami(getattr(a, "owner", "") or "")
     drop = bool(getattr(a, "drop", False))
     target = (getattr(a, "for_agent", None) or "").strip()
     if drop and target:
-        sys.exit("tickets reserve: use --for <agent> or --drop, not both")
+        sys.exit("atm reserve: use --for <agent> or --drop, not both")
     if not drop and not target:
-        sys.exit("tickets reserve <id> --for <agent>  (or --drop)")
+        sys.exit("atm reserve <id> --for <agent>  (or --drop)")
     if drop:
         prev = _reserved_agent(t)
         if not prev:
@@ -6169,7 +6169,7 @@ def cmd_reserve(a, board):
         print("%s: reservation dropped (was %s)" % (t["id"], prev))
         return
     if not _may_set_reservation(board, who):
-        sys.exit("tickets reserve --for is master/planner/optimizer only (anyone may --drop)")
+        sys.exit("atm reserve --for is master/planner/optimizer only (anyone may --drop)")
     if t.get("status") != "open":
         sys.exit("%s is %s; reserve only open tickets" % (t["id"], t.get("status") or "?"))
     unknown = not _agent_rec(board, target)
@@ -6214,7 +6214,7 @@ def cmd_epic(a, board):
         return
     # list
     if not epics:
-        print("no epics (tickets epic create \"title\")")
+        print("no epics (atm epic create \"title\")")
         return
     for e in epics:
         mine = [t for t in tickets if t.get("epic") == e["id"]]
@@ -6302,7 +6302,7 @@ def cmd_sprint(a, board):
     # list
     sprints = load_sprints(board)
     if not sprints:
-        print("no sprints (tickets sprint create \"goal\" --activate)")
+        print("no sprints (atm sprint create \"goal\" --activate)")
         return
     for s in sprints:
         mine = [t for t in tickets if t.get("sprint") == s["id"]]
@@ -6321,7 +6321,7 @@ This board is being set up. I will ask you four things, in order:
 3. I will **announce that name** on the board with the integrations you
    picked.
 4. Then I will ask for **tasks and the objective**, and turn tasks into a
-   `tickets plan` graph (real `--after` edges), not a flat list.
+   `atm plan` graph (real `--after` edges), not a flat list.
 
 I will not spawn workers or create tickets until you answer.
 CLI: `atm` (the `tickets` command is an alias).
@@ -6337,38 +6337,38 @@ Unattended persist ends at a reviewable SHA; human review is the gate.
 # quota: supported | unsupported | optional-admin (T-862; not a second registry).
 INTEGRATION_CATALOG = (
     {"id": "cursor", "name": "Cursor", "binaries": ("agent", "cursor-agent"),
-     "if_yes": "tickets spawn <seat> --harness cursor --persist",
+     "if_yes": "atm spawn <seat> --harness cursor --persist",
      "policy": "ok to spawn if chosen",
      "usage_args": ("about", "--format", "json"),
      "quota": "optional-admin"},
     {"id": "agy", "name": "Antigravity", "binaries": ("agy",),
-     "if_yes": "tickets spawn <seat> --harness agy --persist",
+     "if_yes": "atm spawn <seat> --harness agy --persist",
      "policy": "ok to spawn if chosen",
      "usage_args": ("help",),
      "quota": "supported"},
     {"id": "claude", "name": "Claude Code", "binaries": ("claude",),
-     "if_yes": "tickets spawn <seat> --harness claude",
+     "if_yes": "atm spawn <seat> --harness claude",
      "policy": "ok to spawn if chosen; no new Claude fable",
      "usage_args": ("auth", "status", "--json"),
      "quota": "supported"},
     {"id": "codex", "name": "Codex", "binaries": ("codex",),
-     "if_yes": "tickets spawn <seat> --harness codex",
+     "if_yes": "atm spawn <seat> --harness codex",
      "policy": "catalog even with zero usage; do not spawn unless they say usage is back",
      "usage_args": ("login", "status"),
      "quota": "supported"},
     {"id": "devin", "name": "Devin", "binaries": ("devin",),
-     "if_yes": "tickets spawn <seat> --harness devin",
+     "if_yes": "atm spawn <seat> --harness devin",
      "policy": "list; spawn only if the operator confirms the harness exists",
      "usage_args": ("auth", "status"),
      "quota": "unsupported"},
     {"id": "gemini", "name": "Gemini CLI", "binaries": ("gemini",),
-     "if_yes": "tickets dispatch T-id --to <seat> --harness gemini  # persist/hooks wake",
+     "if_yes": "atm dispatch T-id --to <seat> --harness gemini  # persist/hooks wake",
      "policy": "ok to dispatch; persist/hooks wake; do not spawn a Gemini product job",
      "usage_args": ("--version",),
      "quota": "unsupported"},
     {"id": "grok", "name": "Grok (Cursor persist / grokbots)",
      "binaries": ("agent", "cursor-agent"),
-     "if_yes": "tickets spawn <seat> --harness grok --persist",
+     "if_yes": "atm spawn <seat> --harness grok --persist",
      "policy": "Cursor Grok seats and grok-worker; same persist wake as cursor",
      "usage_args": ("about", "--format", "json"),
      "quota": "unsupported"},
@@ -6403,7 +6403,7 @@ Product flow (this order):
 
 
 def board_is_living(board):
-    """True when this is an existing team, not a blank `tickets init`."""
+    """True when this is an existing team, not a blank `atm init`."""
     if not board or not os.path.isdir(board):
         return False
     obj = _safe(lambda: load_objective(board), {}) or {}
@@ -6466,13 +6466,13 @@ def print_recorded_usage(board):
                 (", back %s" % lim["until"]) if lim.get("until") else "",
                 (" -- %s" % lim["note"]) if lim.get("note") else ""))
     if not any_:
-        print("  none recorded (`tickets limit --until` is how a seat says it is out)")
+        print("  none recorded (`atm limit --until` is how a seat says it is out)")
     print("Ask: which of these still have usage, and which should CoS start?")
     print("Installed + no usage = stay on the catalog; CoS does not spawn them.")
 
 
 def print_ceo_connect(board, seat="ceo"):
-    """Executable product flow for any new CEO. Does not print tickets next."""
+    """Executable product flow for any new CEO. Does not print atm next."""
     sys.stdout.write(CEO_ONBOARDING_STARTUP)
     if not CEO_ONBOARDING_STARTUP.endswith("\n"):
         sys.stdout.write("\n")
@@ -6544,7 +6544,7 @@ MASTER_TEMPLATE = """**You are onboarding.**
 
 # MASTER -- coordination node for this board
 
-Any agent can become master: run `tickets master take`, then `tickets master`
+Any agent can become master: run `atm master take`, then `atm master`
 to get the full briefing. Keep this file current; it is the memory that
 survives agent restarts and timeouts.
 
@@ -6563,7 +6563,7 @@ Record it here: `Onboarding name:` _(none yet — ask)_
 
 ### Step 2 — Integrations (check all, then ask)
 
-Run `tickets harness available`. It probes `command -v` for every catalog
+Run `atm harness available`. It probes `command -v` for every catalog
 entry (Cursor `agent`/`cursor-agent`, `agy`, `claude`, `codex`, `devin`,
 `gemini`) and auto-checks usage. Missing binary is a row, not a skip.
 Unsupported or missing remaining/reset is unknown, not exhausted. If `~/.local/bin/codex` is stale,
@@ -6573,7 +6573,7 @@ Ask: **Which of these do you want to use?** Do not spawn until they answer.
 Show the discover table (harness, installed, logged in, remaining/reset or
 unknown — never invent 0 or FAIL). Then ask which seat is master, CoS,
 workers, verifiers. Offer a ranked suggestion; never auto-assign. Non-interactive
-`tickets connect` requires explicit `--master` / `--cos` to apply.
+`atm connect` requires explicit `--master` / `--cos` to apply.
 Codex stays in the catalog even with **unknown usage**. Gemini dispatch records
 harness=gemini; persist/hooks is the wake (no Gemini product job).
 No new Claude fable.
@@ -6583,8 +6583,8 @@ No new Claude fable.
 After they pick a name and integrations:
 
 ```
-tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
-tickets master log "onboarding: name=<name> integrations=<list>"
+atm msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"
+atm master log "onboarding: name=<name> integrations=<list>"
 ```
 
 Write the name into `Onboarding name:` above so successors do not re-ask.
@@ -6600,37 +6600,37 @@ Ask, in this order:
 
 Then set the objective and create the graph in one shot. `deps` may be a
 `key` from the same JSON or an existing `T-` id. Do **not** run one
-`tickets create` per title. Do not invent extra tickets. Do not leave
+`atm create` per title. Do not invent extra tickets. Do not leave
 blockers only in the ticket body.
 
 ```
-tickets objective "<their sentence>"
-tickets plan <<'EOF'
+atm objective "<their sentence>"
+atm plan <<'EOF'
 [{"key":"api","title":"Build REST API","role":"backend","deps":[]},
  {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
 EOF
-tickets graph
-tickets map
+atm graph
+atm map
 ```
 
 Mid-run (same loop — not a second planner product):
 
 ```
-tickets dep T-004 --after T-003
-tickets create "DB migration" --blocks T-002
-tickets create "Add rate limiting" --deps T-002
+atm dep T-004 --after T-003
+atm create "DB migration" --blocks T-002
+atm create "Add rate limiting" --deps T-002
 ```
 
-Follow-up every wake (master or CoS): `tickets update` / `tickets here`;
-reopen silent >90m claims (`tickets reopen`); `tickets drive` toward the
-objective; drain the review queue. Show `tickets graph` / `tickets map`.
-If HEALTH flags prose-only deps, wire `tickets dep` instead of leaving
+Follow-up every wake (master or CoS): `atm update` / `atm here`;
+reopen silent >90m claims (`atm reopen`); `atm drive` toward the
+objective; drain the review queue. Show `atm graph` / `atm map`.
+If HEALTH flags prose-only deps, wire `atm dep` instead of leaving
 them in the body.
 
-Unattended persist ends at `tickets review` (reviewable SHA); human review is
+Unattended persist ends at `atm review` (reviewable SHA); human review is
 the gate. Capture / sound / dispatch (Fatih loop on this board, not a plans/
-tree): `tickets capture`, `tickets sound`, CoS `tickets dispatch --harness …`,
-`tickets pr-sync` after the PR is merged. CEO does not `tickets next`.
+tree): `atm capture`, `atm sound`, CoS `atm dispatch --harness …`,
+`atm pr-sync` after the PR is merged. CEO does not `atm next`.
 
 Do not implement those tasks in this session. Spawning children when a
 parent is done is a separate success-trigger, not this onboarding step.
@@ -6663,15 +6663,15 @@ Run `atm connect` (or `atm connect --ceo`). It executes, in order:
 3. `atm join atman-<seat> --roles master ...`
 4. Announce the Atman role (`atm msg --to everyone`)
 5. Ask the operator for feedback
-6. `tickets graph` / `tickets map` — tasks they can actually run
+6. `atm graph` / `atm map` — tasks they can actually run
 
-Do not `tickets init` or `tickets clear`. Do not one `tickets create` per
-title — `tickets plan` with real deps if they add work. Spawn only the
+Do not `atm init` or `atm clear`. Do not one `atm create` per
+title — `atm plan` with real deps if they add work. Spawn only the
 harnesses they confirm. Mail hooks are not Claude-only:
-`tickets hooks cursor|codex|remote|claude --agent atman-<seat>`.
+`atm hooks cursor|codex|remote|claude --agent atman-<seat>`.
 
 HANDOVER dated 2026-09-08 is historical, not live authority. Live:
-`tickets master`, `tickets role list`, the message board, this section.
+`atm master`, `atm role list`, the message board, this section.
 
 ## Mission
 (what we are building, one paragraph)
@@ -6682,33 +6682,33 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
 | example | Claude Code | backend | .worktrees/example |
 
 ## Rules for every agent
-1. Claim before you work (`tickets next`). Never work without a ticket; never
+1. Claim before you work (`atm next`). Never work without a ticket; never
    edit `.tickets/` by hand.
-2. Finish what you claim. If you cannot, `tickets block` with a reason or
-   `tickets reopen` -- do not go silent. Hold one ticket at a time.
+2. Finish what you claim. If you cannot, `atm block` with a reason or
+   `atm reopen` -- do not go silent. Hold one ticket at a time.
 3. You may create, split, re-wire and assign tickets (`create --blocks`,
    `dep`, `assign`, `plan`). Extending the graph is expected, not exceptional.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `tickets done` refuses from main or with uncommitted files.
-5. Post `tickets update <id> "..."` at least every 45 minutes and at each
+   `atm done` refuses from main or with uncommitted files.
+5. Post `atm update <id> "..."` at least every 45 minutes and at each
    milestone. Silence longer than that is treated as a timeout.
 6. `done --notes` must include branch@sha (added automatically), the paths
    you touched, and every decision a dependent ticket must match. Then merge
    (or open the PR) before claiming the next ticket. Workers submit
-   `tickets review` (sounded code tickets need `--pr`); master `tickets merge`
-   then `tickets done`. `tickets pr-sync` reports ready-to-close and does not
+   `atm review` (sounded code tickets need `--pr`); master `atm merge`
+   then `atm done`. `atm pr-sync` reports ready-to-close and does not
    self-done.
 7. Set `TICKET_AGENT` to your own name so the board can tell agents apart.
-8. Sound before staff: `tickets capture` is not claimable. `tickets sound`
-   fills cause/change/proof/deps. CoS `tickets dispatch`. CEO does not
-   `tickets next`.
+8. Sound before staff: `atm capture` is not claimable. `atm sound`
+   fills cause/change/proof/deps. CoS `atm dispatch`. CEO does not
+   `atm next`.
 
 
 ## Sprint plan
-(goals per sprint; `tickets sprint list` has the live numbers)
+(goals per sprint; `atm sprint list` has the live numbers)
 
 ## Decision log
-(append with `tickets master log "..."`)
+(append with `atm master log "..."`)
 """
 
 
@@ -6726,7 +6726,7 @@ def cmd_master(a, board):
     if sub == "cos":
         prev = current_master(board) or {}
         if not prev.get("owner"):
-            sys.exit("no master yet (tickets master take first)")
+            sys.exit("no master yet (atm master take first)")
         who = a.text or ""
         if not who:
             print("chief of staff: %s" % (prev.get("cos") or "(none)"))
@@ -6747,7 +6747,7 @@ def cmd_master(a, board):
             json.dump({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, f)
         _master_log(board, "%s took over as master%s" % (
             owner, (" from %s" % prev["owner"]) if prev and prev.get("owner") != owner else ""))
-        print("%s is master now. Run `tickets master` for the briefing." % owner)
+        print("%s is master now. Run `atm master` for the briefing." % owner)
         warn_leadership_offline(board, owner, "master")
         return
     if sub == "release":
@@ -6776,17 +6776,17 @@ def cmd_master(a, board):
         print("current master: %s (for %s)%s" % (m["owner"], fmt_hours(stale),
               "  <- that is you" if m["owner"] == me else ""))
         if m["owner"] != me:
-            print("TAKING OVER? Masters die on usage limits. Run `tickets master take`, then in order: "
-                  "`tickets limits` (who is out), REVIEW QUEUE below (merge with `tickets merge`), "
-                  "HEALTH below, `tickets who`. Everything decided so far is in the Decision log.")
+            print("TAKING OVER? Masters die on usage limits. Run `atm master take`, then in order: "
+                  "`atm limits` (who is out), REVIEW QUEUE below (merge with `atm merge`), "
+                  "HEALTH below, `atm who`. Everything decided so far is in the Decision log.")
     else:
-        print("current master: nobody -- `tickets master take` to become it, then follow HANDOVER in MASTER.md")
+        print("current master: nobody -- `atm master take` to become it, then follow HANDOVER in MASTER.md")
     print("=" * 72)
     if os.path.exists(path):
         with open(path) as f:
             print(f.read().rstrip())
     else:
-        print("(no MASTER.md yet -- `tickets master init`)")
+        print("(no MASTER.md yet -- `atm master init`)")
     print("")
     print("-" * 72)
     print("LIVE STATUS")
@@ -6838,7 +6838,7 @@ def cmd_master(a, board):
     queue = [t for t in tickets if t["status"] == "review"]
     if queue:
         print("")
-        print("REVIEW QUEUE (%d) -- master: review, merge, then `tickets done <id> --notes \"merged as <sha>\"`:" % len(queue))
+        print("REVIEW QUEUE (%d) -- master: review, merge, then `atm done <id> --notes \"merged as <sha>\"`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
                 t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
@@ -6893,7 +6893,7 @@ def _trim_decision_log(board, path):
     """MASTER.md's Decision log only ever grows. Once the file passes
     MASTER_LOG_MAX_BYTES, move all but the most recent MASTER_LOG_KEEP_ENTRIES
     '- ' entries to an append-only archive so the briefing stays readable and
-    `tickets master log` stays a small, bounded rewrite."""
+    `atm master log` stays a small, bounded rewrite."""
     try:
         with open(path) as f:
             body = f.read()
@@ -6933,10 +6933,10 @@ def _health_body(board, tickets):
     cyc = find_cycle(tickets)
     if cyc:
         out.append(("CRIT", "dependency cycle %s" % " -> ".join(cyc),
-                    "tickets dep %s --drop %s" % (cyc[0], cyc[1])))
+                    "atm dep %s --drop %s" % (cyc[0], cyc[1])))
     for tid, miss in dangling(tickets).items():
         out.append(("CRIT", "%s depends on non-existent %s" % (tid, ",".join(miss)),
-                    "tickets dep %s --drop %s" % (tid, ",".join(miss))))
+                    "atm dep %s --drop %s" % (tid, ",".join(miss))))
     for t in tickets:
         if t["status"] != "claimed":
             continue
@@ -6945,10 +6945,10 @@ def _health_body(board, tickets):
         if su is not None and su * 60 > UPDATE_EVERY_MIN * 2:
             out.append(("WARN", "%s (@%s) silent for %s -- likely timed out" % (
                 t["id"], t.get("owner"), fmt_hours(su)),
-                "tickets reopen %s   # or ping the agent" % t["id"]))
+                "atm reopen %s   # or ping the agent" % t["id"]))
         elif su is not None and su * 60 > UPDATE_EVERY_MIN:
             out.append(("INFO", "%s (@%s) no update for %s" % (t["id"], t.get("owner"), fmt_hours(su)),
-                        "ask for `tickets update %s`" % t["id"]))
+                        "ask for `atm update %s`" % t["id"]))
     for t in tickets:
         if t["status"] != "blocked":
             continue
@@ -6960,8 +6960,8 @@ def _health_body(board, tickets):
             ready = all(r in done for r in unwired)
             out.append(("WARN", "%s blocked 'on %s' in prose but no graph edge%s" % (
                 t["id"], ",".join(unwired), " -- and those are DONE now" if ready else ""),
-                "tickets dep %s --after %s && tickets reopen %s" % (t["id"], ",".join(unwired), t["id"])
-                if ready else "tickets dep %s --after %s" % (t["id"], ",".join(unwired))))
+                "atm dep %s --after %s && atm reopen %s" % (t["id"], ",".join(unwired), t["id"])
+                if ready else "atm dep %s --after %s" % (t["id"], ",".join(unwired))))
         elif not refs and not t.get("deps"):
             out.append(("INFO", "%s blocked on something outside the board: %s" % (
                 t["id"], reason[:70]), "create a ticket for the prerequisite with --blocks %s" % t["id"]))
@@ -6981,7 +6981,7 @@ def _health_body(board, tickets):
             if missing:
                 out.append(("WARN", "%s needs %s but no registered agent can do that" % (
                     t["id"], ",".join(missing)),
-                    "tickets join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
+                    "atm join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
     for r in load_agents(board):
         if r.get("limit"):
             held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
@@ -6989,7 +6989,7 @@ def _health_body(board, tickets):
                 r["owner"], fmt_hours(hours_since(r["limit"]["at"])),
                 (", back %s" % r["limit"]["until"]) if r["limit"].get("until") else "",
                 (" -- still holds %s" % ",".join(held)) if held else ""),
-                ("tickets reopen %s   # hand to someone else" % held[0]) if held else "tickets limit %s --clear when back" % r["owner"]))
+                ("atm reopen %s   # hand to someone else" % held[0]) if held else "atm limit %s --clear when back" % r["owner"]))
     for r in load_agents(board):
         if r.get("branch") in ("main", "master") and hours_since(r.get("seen", "")) < 24:
             out.append(("WARN", "%s is working on %s (rule 4)" % (r["owner"], r["branch"]),
@@ -6998,7 +6998,7 @@ def _health_body(board, tickets):
         n = _watcher_count(r["owner"], board)
         if n > 1:
             out.append(("WARN", "%s has %d watch loops running (expected 1)" % (r["owner"], n),
-                        "tickets spawn %s --stop" % r["owner"]))
+                        "atm spawn %s --stop" % r["owner"]))
     ready_ids = set(t["id"] for t in unblocked(board, tickets))
     agents_by = dict((r.get("owner"), r) for r in load_agents(board))
     for t in tickets:
@@ -7016,15 +7016,15 @@ def _health_body(board, tickets):
         if reason:
             out.append(("WARN", "%s is READY and reserved for %s who is down/limited (%s)" % (
                 t["id"], who, reason),
-                "tickets reserve %s --drop" % t["id"]))
+                "atm reserve %s --drop" % t["id"]))
     if not active_sprint(board):
-        out.append(("INFO", "no active sprint", "tickets sprint create \"goal\" --activate"))
+        out.append(("INFO", "no active sprint", "atm sprint create \"goal\" --activate"))
     loose = [t["id"] for t in tickets if not t.get("epic") and t["status"] != "done"]
     if loose and load_epics(board):
         out.append(("INFO", "%d open tickets have no epic" % len(loose),
-                    "tickets assign <id> --epic E-xxx"))
+                    "atm assign <id> --epic E-xxx"))
     if not os.path.exists(master_path(board)):
-        out.append(("WARN", "no MASTER.md -- nobody can take over cleanly", "tickets master init"))
+        out.append(("WARN", "no MASTER.md -- nobody can take over cleanly", "atm master init"))
     return out
 
 
@@ -7073,11 +7073,11 @@ def cmd_clear(a, board):
     """Delete ticket files — FIXTURE BOARDS ONLY."""
     if not is_fixture_board(board):
         sys.exit(
-            "REFUSED: tickets clear will not wipe a live board (missing .fixture-board).\n"
+            "REFUSED: atm clear will not wipe a live board (missing .fixture-board).\n"
             "This command only deletes tickets on disposable fixture boards.\n"
             "Use a disposable fixture board for tests, or:\n"
-            "  tickets board-backup --out /tmp/board.tgz\n"
-            "  tickets board-restore --archive /tmp/board.tgz --dest /tmp/fixture\n"
+            "  atm board-backup --out /tmp/board.tgz\n"
+            "  atm board-restore --archive /tmp/board.tgz --dest /tmp/fixture\n"
             "There is no --force that clears a live board."
         )
     if not getattr(a, "yes", False):
@@ -7319,7 +7319,7 @@ def _rotate_trajectories_if_big(board):
 def _objective_id(board):
     """A stable id for the standing objective.
 
-    `tickets objective` stores no id, and adding one would rewrite a file
+    `atm objective` stores no id, and adding one would rewrite a file
     other seats read, so the id is DERIVED: a hash of the objective's text and
     set-time. Same objective -> same id across every agent and every process;
     editing the objective starts a new id, which is the behaviour a reader
@@ -7336,7 +7336,7 @@ def _objective_id(board):
 
 def _agent_harness(board, owner):
     """(harness, model, effort) for an agent, from what it registered with
-    `tickets join`. Unregistered -> empty strings, and the caller omits the
+    `atm join`. Unregistered -> empty strings, and the caller omits the
     fields rather than writing a plausible-looking default."""
     entry = {}
     try:
@@ -7350,7 +7350,7 @@ def _agent_harness(board, owner):
 
 def traj_write(board, rec):
     """Append one event. Best-effort by design: the trajectory log is
-    instrumentation, and instrumentation that can fail a `tickets done` is
+    instrumentation, and instrumentation that can fail a `atm done` is
     worse than a missing line. Every writer here is on a command's success
     path, so a raised exception would abort work that already happened."""
     try:
@@ -8343,7 +8343,7 @@ def is_board_broadcast(msg):
 def message_involves_seat(msg, seat):
     """True if *msg* belongs in the agent-scoped (1:1) thread for *seat*.
 
-    Extends `tickets msg` / inbox — no second chat store, no shared-memory
+    Extends `atm msg` / inbox — no second chat store, no shared-memory
     brain. A seat's own board broadcasts stay on the Board thread.
     """
     target = (seat or "").strip().lower()
@@ -8421,14 +8421,14 @@ def _visible_after_join(msgs, owner, joined):
     this board would feel, and both are silent mail loss:
       * a brief posted with `--to <name>` BEFORE the seat joins is destroyed,
         and posting the brief first is exactly how seats get briefed here;
-      * `tickets spawn` calls cmd_join, so RESPAWNING an existing seat would
+      * `atm spawn` calls cmd_join, so RESPAWNING an existing seat would
         re-stamp its watermark and wipe everything pending -- including the
         master's answer to that agent's own `stuck:` message.
     So scope the suppression to what the ticket actually names, "mail addressed
     to nobody": drop only broadcasts strictly before `joined`. Same-second
     posts after join (the wakeup suite does not sleep) must still count.
     Anything addressed to this agent by name is delivered no matter how old
-    it is. Nothing is deleted -- `tickets inbox --all` still shows history.
+    it is. Nothing is deleted -- `atm inbox --all` still shows history.
     """
     if not joined:
         return msgs  # every pre-existing agent: unchanged, by construction
@@ -8641,7 +8641,7 @@ def fmt_local(iso):
 
     Stored values stay UTC; only the display converts. Falls back to the old
     UTC substring on anything unparseable -- a bad timestamp must never break
-    `tickets msg` or `inbox`, and a wrong-looking time is a smaller failure
+    `atm msg` or `inbox`, and a wrong-looking time is a smaller failure
     than a traceback.
     """
     try:
@@ -8717,7 +8717,7 @@ def cmd_msg(a, board):
                 "RULE: --to %r is your OWN identity, so this message would go to "
                 "yourself, and it would wake you -- this is almost always a "
                 "misdirected --task meant for someone else.\n"
-                "  Your agent_id here is %r (tickets identity).\n"
+                "  Your agent_id here is %r (atm identity).\n"
                 "  Either name a different addressee, or drop --to to broadcast."
                 % (a.to, sender)
             )
@@ -8941,16 +8941,16 @@ def cmd_inbox(a, board):
         msgs = filter_messages_for_scope(
             load_messages(board, include_archives=True), seat)[-a.limit:]
         if not msgs:
-            print("no messages in %s's seat thread (tickets msg \"text\" --to %s)" % (seat, seat))
+            print("no messages in %s's seat thread (atm msg \"text\" --to %s)" % (seat, seat))
             return
-        print("seat thread · %s (%d) — same messages.jsonl as tickets msg --to" % (seat, len(msgs)))
+        print("seat thread · %s (%d) — same messages.jsonl as atm msg --to" % (seat, len(msgs)))
         for m in msgs:
             print(fmt_msg(m))
         return
     if a.all:
         msgs = load_messages(board, include_archives=True)[-a.limit:]
         if not msgs:
-            print("no messages yet (tickets msg \"text\" [--to agent] [--re T-001])")
+            print("no messages yet (atm msg \"text\" [--to agent] [--re T-001])")
             return
         for m in msgs:
             print(fmt_msg(m))
@@ -8958,7 +8958,7 @@ def cmd_inbox(a, board):
         scan = _inbox_scan(board, owner)
         msgs = scan[0]
         if not msgs:
-            print("inbox empty for %s (tickets inbox --all for history)" % owner)
+            print("inbox empty for %s (atm inbox --all for history)" % owner)
         else:
             print("%d unread for %s:" % (len(msgs), owner))
             for m in msgs:
@@ -9062,7 +9062,7 @@ def cmd_trajectories(a, board):
     if not events:
         print("no trajectory events yet (%s)" % trajectories_path(board))
         print("the log fills as agents claim, update, review and run; "
-              "`tickets trajectories backfill` synthesises the history already on the board")
+              "`atm trajectories backfill` synthesises the history already on the board")
         return
     if not shown:
         print("no events match (%d in the log)" % len(events))
@@ -9255,7 +9255,7 @@ def score_agent(board, name, entry, roles, ticket):
 
 def cmd_route(a, board):
     """Suggest an owner for every unassigned open ticket, by model, roles,
-    capabilities and cost. Writes `suggested`; `tickets next` honours it.
+    capabilities and cost. Writes `suggested`; `atm next` honours it.
     Agents still pull -- this is a hint, not a lock -- unless --claim.
 
     `--shadow` (T-315) is print-only plus one `shadow_decision` event per
@@ -9338,9 +9338,9 @@ def cmd_route(a, board):
                                           best or "(nobody fits)", why))
     if changed:
         _master_log(board, "route: suggested owners for %d tickets%s" % (changed, " and claimed ready ones" if a.claim else ""))
-    print("\nAgents pull with `tickets next`; their suggested tickets come first. "
+    print("\nAgents pull with `atm next`; their suggested tickets come first. "
           "Dep-blocked tickets get reserved_for instead of a note. "
-          "`tickets route --claim` hard-assigns the ready ones.")
+          "`atm route --claim` hard-assigns the ready ones.")
 
 
 # ---- onboarding ---------------------------------------------------------
@@ -9352,66 +9352,66 @@ Grok, a human shell). Replace the name and roles.
 
     export TICKET_AGENT=claude-opus          # unique per agent, never reuse
     cd {root}
-    tickets join $TICKET_AGENT --roles backend   # registers you, prints the loop
-    tickets master                            # read the briefing first
-    tickets inbox                             # anything addressed to you
-    tickets next                              # claim work; prints handoffs
+    atm join $TICKET_AGENT --roles backend   # registers you, prints the loop
+    atm master                            # read the briefing first
+    atm inbox                             # anything addressed to you
+    atm next                              # claim work; prints handoffs
 
 `join` without `--harness` prints `harness=claude (default)`: a label on the
-agent record, not a running process. Claude is not started until `tickets watch`
-or `tickets spawn`. Dry BYOA is join then `tickets next` in your own shell;
+agent record, not a running process. Claude is not started until `atm watch`
+or `atm spawn`. Dry BYOA is join then `atm next` in your own shell;
 `--harness custom --cmd '...'` is for when a watcher should run your harness
 (docs/byoa.md).
 
-Then the loop, until `tickets next` says nothing is ready:
+Then the loop, until `atm next` says nothing is ready:
 
     # work on your own worktree (join prints the exact command)
-    tickets update <id> "what changed, what is next"     # every {every} min
-    tickets msg "..." --to <agent> --re <id>             # questions, blockers
+    atm update <id> "what changed, what is next"     # every {every} min
+    atm msg "..." --to <agent> --re <id>             # questions, blockers
     git add -A && git commit -m "..."                    # commit as you go
-    tickets review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
+    atm review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
     # human review is the gate; then:
-    tickets next
+    atm next
 
-Plan dependent work with `tickets plan` so JSON `deps` become real `--after`
-edges (`tickets graph` to inspect). Unattended persist ends at that reviewable
+Plan dependent work with `atm plan` so JSON `deps` become real `--after`
+edges (`atm graph` to inspect). Unattended persist ends at that reviewable
 SHA. Merge is not silent auto-promote.
 
 Tool-specific:
-- Claude Code: `tickets hooks claude --agent claude-opus` installs a project
+- Claude Code: `atm hooks claude --agent claude-opus` installs a project
   SessionStart/inbox/Stop hook with that identity baked in.
-- Codex: reads AGENTS.md in the repo root (installed by `tickets init`);
-  `tickets hooks codex --agent codex --worktree "$PWD"` adds scoped context.
-- Cursor: reads AGENTS.md and .cursor/rules/tickets.mdc; `tickets hooks cursor
+- Codex: reads AGENTS.md in the repo root (installed by `atm init`);
+  `atm hooks codex --agent codex --worktree "$PWD"` adds scoped context.
+- Cursor: reads AGENTS.md and .cursor/rules/tickets.mdc; `atm hooks cursor
   --agent cursor --worktree "$PWD"` adds identity-pinned message hooks.
 - Anything else that can run a shell: the same commands work; `tickets` is one
-  stdlib Python file at ~/.claude/tools/tickets.py. `tickets hooks remote
+  stdlib Python file at ~/.claude/tools/tickets.py. `atm hooks remote
   --agent <name>` creates a pinned wrapper and event-command manifest.
 
-To take coordination: `tickets master take`, then `tickets master` and act on
+To take coordination: `atm master take`, then `atm master` and act on
 the HEALTH section.
 
 ## Making agents start on their own
 
 A session cannot be woken by a hook once its turn has ended, so use both:
 
-- Keep going while there is work (Claude Code): `tickets hooks claude --agent <name>` installs a
+- Keep going while there is work (Claude Code): `atm hooks claude --agent <name>` installs a
   `Stop` hook that blocks the stop when the agent has unread messages or a
   ticket in hand (loop-guarded: one extra continuation per user turn).
 - Start when work appears, without a human: run a watcher per agent from that
-  agent's worktree. It polls `tickets pending` and launches a headless run only
+  agent's worktree. It polls `atm pending` and launches a headless run only
   when there is something to do:
 
       cd {root}/.worktrees/claude-opus
-      TICKET_AGENT=claude-opus tickets watch --every 60 --cwd "$PWD"
+      TICKET_AGENT=claude-opus atm watch --every 60 --cwd "$PWD"
 
-  Default launch policy is unattended (same as `tickets spawn`; header prints
+  Default launch policy is unattended (same as `atm spawn`; header prints
   `launch=unattended`). `--safe` keeps acceptEdits prompts. Any tool works in
   `--exec` (codex, cursor-agent, a shell script). Logs go to
-  `.tickets/agents/<agent>.watch.log`. `tickets watch --once` is the cron-able
+  `.tickets/agents/<agent>.watch.log`. `atm watch --once` is the cron-able
   form (exit 0 = work exists).
 - Interactive sessions you keep open: `/loop 10m` with the prompt
-  `tickets inbox && tickets mine; continue my ticket or tickets next` re-checks
+  `atm inbox && atm mine; continue my ticket or atm next` re-checks
   the board on a timer.
 """
 
@@ -9614,7 +9614,7 @@ def _identity_reuse_error(owner, prev, incoming):
         "refusing: %s is bound to %s (auth/session/runner). "
         "Join a unique provider-specific agent id and bind it with --alias ceo|cos, "
         "or pass --transfer to audit handover of this name. "
-        "Historical aliases: tickets retire <name>."
+        "Historical aliases: atm retire <name>."
         % (owner, prev)
     )
 
@@ -9728,7 +9728,7 @@ def cmd_join(a, board):
     _refuse_join_tickets_dir_shadow(board)
     owner = a.name or whoami()
     if owner.startswith("agent-"):
-        sys.exit("give yourself a real name: tickets join <name> --roles ...")
+        sys.exit("give yourself a real name: atm join <name> --roles ...")
     knowledge_dir = (getattr(a, "knowledge_dir", "") or "").strip()
     if knowledge_dir:
         knowledge_dir = os.path.abspath(os.path.expanduser(knowledge_dir))
@@ -9738,7 +9738,7 @@ def cmd_join(a, board):
             sys.exit("--knowledge-dir needs a graph containing manifest.json: %s" % knowledge_dir)
         _, _, knowledge_errors = _knowledge_records(knowledge_dir)
         if knowledge_errors:
-            sys.exit("--knowledge-dir graph is invalid; run `tickets knowledge validate`: %s" %
+            sys.exit("--knowledge-dir graph is invalid; run `atm knowledge validate`: %s" %
                      knowledge_dir)
     harness, inline_cmd = _split_harness(getattr(a, "harness", "") or a.tool)
     _guard_seat_identity(
@@ -9750,7 +9750,7 @@ def cmd_join(a, board):
         transfer=bool(getattr(a, "transfer", False)),
         on_behalf=bool(getattr(a, "on_behalf", False)))
     # Read this BEFORE checkin(), which creates the record. Only a genuinely new
-    # agent gets a joined_at watermark; a re-join (and `tickets spawn`, which
+    # agent gets a joined_at watermark; a re-join (and `atm spawn`, which
     # calls straight through here) must leave delivery completely alone.
     first_join = not _agent_rec(board, owner)
     roles_path = os.path.join(board, "roles.json")
@@ -9900,13 +9900,13 @@ def cmd_join(a, board):
         # deliberate bare executable, so say which reading was taken rather
         # than discovering it a poll interval later in the watch log.
         print("note: %r is not a built-in harness, so it is run as the command itself; "
-              "`tickets harness check %s` proves it works" % (harness, owner))
+              "`atm harness check %s` proves it works" % (harness, owner))
     print("board: %s" % board)
     m = current_master(board)
-    print("master: %s" % (m["owner"] if m else "nobody -- `tickets master take` if you are it"))
+    print("master: %s" % (m["owner"] if m else "nobody -- `atm master take` if you are it"))
     n = len(unread(board, owner))
     if n:
-        print("inbox: %d unread (tickets inbox)" % n)
+        print("inbox: %d unread (atm inbox)" % n)
     warn = worktree_warning(owner)
     print("")
     if warn:
@@ -9928,7 +9928,7 @@ def cmd_join(a, board):
               "->  merge  ->  atm next" % UPDATE_EVERY_MIN)
         print("Full instructions: atm connect --worker")
     if not os.path.exists(os.path.join(root, "AGENTS.md")):
-        print("(no AGENTS.md here -- run `tickets init` once so Codex/Cursor see the rules)")
+        print("(no AGENTS.md here -- run `atm init` once so Codex/Cursor see the rules)")
     _safe(lambda: _enroll_runner_context(board, owner), None)
 
 
@@ -10658,7 +10658,7 @@ def cmd_remote(a, board):
 
 
 def _watch_note_limit_from_log(board, owner, log_slice):
-    """Record limit when the child exits before tickets inbox (T-561).
+    """Record limit when the child exits before atm inbox (T-561).
 
     pending_work already suppresses wake on rec['limit']; this is the lever for
     weekly-limit exits that never reach inbox.
@@ -10679,20 +10679,20 @@ def _watch_note_limit_from_log(board, owner, log_slice):
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
 TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
-Rules: one ticket at a time; own git worktree, never main; `tickets sync` before `tickets review`;
-`tickets update <id> "..."` every 45 minutes; finish with `tickets review <id> --notes "paths, tests, decisions"`;
-never edit .tickets/ by hand; never run `tickets clear`. Board-only comms: `tickets msg`.
+Rules: one ticket at a time; own git worktree, never main; `atm sync` before `atm review`;
+`atm update <id> "..."` every 45 minutes; finish with `atm review <id> --notes "paths, tests, decisions"`;
+never edit .tickets/ by hand; never run `atm clear`. Board-only comms: `atm msg`.
 STUCK RULE: if anything blocks you -- a permission you cannot get, a failing test you cannot fix,
 an unclear ticket, missing access or a decision that is not yours -- do not wait and do not stop
-silently. Post `tickets msg "stuck: <what, what you tried, what you need>" --to {master} --re <id>`,
-then `tickets update <id> "stuck: ..."`; if you cannot continue at all, `tickets block <id> --reason "..."`.
+silently. Post `atm msg "stuck: <what, what you tried, what you need>" --to {master} --re <id>`,
+then `atm update <id> "stuck: ..."`; if you cannot continue at all, `atm block <id> --reason "..."`.
 The master's job is to unblock you; yours is to say so early.
 Do now, in order:
-1. `tickets inbox` -- read and, if anything is addressed to you, answer with `tickets msg --to <who>`.
-2. `tickets mine` -- if you hold a ticket, continue it from where the notes left off.
-3. Otherwise `tickets next` -- if it hands you a ticket, read the printed briefing files, then work it.
-4. When the ticket is finished and tests pass: commit, `tickets sync`, `tickets review <id> --notes ...`, then go to 3.
-5. If `tickets next` says nothing is ready and you hold nothing: post one line with `tickets msg "idle: <what you checked>"` and stop.
+1. `atm inbox` -- read and, if anything is addressed to you, answer with `atm msg --to <who>`.
+2. `atm mine` -- if you hold a ticket, continue it from where the notes left off.
+3. Otherwise `atm next` -- if it hands you a ticket, read the printed briefing files, then work it.
+4. When the ticket is finished and tests pass: commit, `atm sync`, `atm review <id> --notes ...`, then go to 3.
+5. If `atm next` says nothing is ready and you hold nothing: post one line with `atm msg "idle: <what you checked>"` and stop.
 {extra}"""
 
 MASTER_PROMPT = """You are {agent}, the MASTER of the shared ticket board at {board} (repo {root}).
@@ -10700,64 +10700,64 @@ TICKET_AGENT is set; run `atm ...` plainly (`tickets` is the same CLI). You do n
 This run: pick ONE concrete outcome (one unblock, one merge batch, or one routing act) and stop.
 Ordinary messages and ACKs are notification-only and must not extend the run.
 If there is no standing objective with a measurable --exit criterion, ask for one
-(`tickets objective "<what done looks like>" --exit "<observable end>"`) and do not invent it.
+(`atm objective "<what done looks like>" --exit "<observable end>"`) and do not invent it.
 Transition the objective with `--done`/`--achieved`, `--blocked`, or `--replaced` when that is the outcome.
 Your three jobs, every wake-up:
-1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
-   grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
-   (`tickets create ... --blocks <id>`, `tickets dep`), reassign (`tickets assign <id> --owner <who>`), or
+1. UNBLOCK: `atm inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
+   grant context (`atm brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
+   (`atm create ... --blocks <id>`, `atm dep`), reassign (`atm assign <id> --owner <who>`), or
    decide and say so. Never leave a stuck agent without a reply.
-2. REVIEW + MERGE: `tickets master` shows the REVIEW QUEUE. For each entry read the diff against main
-   (`git diff main...<branch>`), check tests ran, then `tickets merge <branch>` (runs the suite, fast-forwards
-   main, closes the ticket). If it is not mergeable, `tickets msg --to <owner> --re <id>` with what to change
-   and `tickets reopen <id>`. Push main with `git push origin main` after merges.
-3. COORDINATE: `tickets dash --once` and `tickets util` -- reopen tickets whose owner is silent > 90 min
-   (`tickets limits` first: AUTH means /login is needed, not a wait), `tickets route` new tickets,
-   keep one ticket per agent, spawn or brief workers when lanes are empty (`tickets spawn <name> --model ...`).
-   Log every non-obvious call: `tickets master log "..."`. Post a short status pulse with `tickets msg`.
+2. REVIEW + MERGE: `atm master` shows the REVIEW QUEUE. For each entry read the diff against main
+   (`git diff main...<branch>`), check tests ran, then `atm merge <branch>` (runs the suite, fast-forwards
+   main, closes the ticket). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
+   and `atm reopen <id>`. Push main with `git push origin main` after merges.
+3. COORDINATE: `atm dash --once` and `atm util` -- reopen tickets whose owner is silent > 90 min
+   (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
+   keep one ticket per agent, spawn or brief workers when lanes are empty (`atm spawn <name> --model ...`).
+   Log every non-obvious call: `atm master log "..."`. Post a short status pulse with `atm msg`.
 Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
 {extra}"""
 
 COS_PROMPT = """You are {agent}, the CHIEF OF STAFF of the shared ticket board at {board} (repo {root}).
-TICKET_AGENT is set; run `tickets ...` plainly. You do not take feature tickets.
+TICKET_AGENT is set; run `atm ...` plainly (`tickets` is the same CLI). You do not take feature tickets.
 This run: pick ONE concrete outcome (one unblock, one merge batch, or one routing act) and stop.
 Ordinary messages and ACKs are notification-only and must not extend the run.
 Read the current standing objective as context only. Do not ask for, set, replace, or invent an objective;
-escalate those decisions to the master with `tickets msg --to <master>`.
+escalate those decisions to the master with `atm msg --to <master>`.
 The master planner sets scope and routes by complexity; you review, unblock and merge.
 Your three jobs, every wake-up:
-1. UNBLOCK: `tickets inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
-   grant context (`tickets brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
-   (`tickets create ... --blocks <id>`, `tickets dep`), reassign (`tickets assign <id> --owner <who>`), or
+1. UNBLOCK: `atm inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
+   grant context (`atm brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
+   (`atm create ... --blocks <id>`, `atm dep`), reassign (`atm assign <id> --owner <who>`), or
    decide and say so. Never leave a stuck agent without a reply.
-2. REVIEW + MERGE: `tickets master` shows the REVIEW QUEUE. For each entry read the diff against main
-   (`git diff main...<branch>`), check tests ran, then `tickets merge <branch>` (runs the suite, fast-forwards
-   main, closes the ticket). If it is not mergeable, `tickets msg --to <owner> --re <id>` with what to change
-   and `tickets reopen <id>`. Push main with `git push origin main` after merges.
-3. COORDINATE: `tickets dash --once` and `tickets util` -- reopen tickets whose owner is silent > 90 min
-   (`tickets limits` first: AUTH means /login is needed, not a wait), `tickets route` new tickets,
-   keep one ticket per agent, spawn or brief workers when lanes are empty (`tickets spawn <name> --model ...`).
-   Log every non-obvious call: `tickets master log "..."`. Post a short status pulse with `tickets msg`.
+2. REVIEW + MERGE: `atm master` shows the REVIEW QUEUE. For each entry read the diff against main
+   (`git diff main...<branch>`), check tests ran, then `atm merge <branch>` (runs the suite, fast-forwards
+   main, closes the ticket). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
+   and `atm reopen <id>`. Push main with `git push origin main` after merges.
+3. COORDINATE: `atm dash --once` and `atm util` -- reopen tickets whose owner is silent > 90 min
+   (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
+   keep one ticket per agent, spawn or brief workers when lanes are empty (`atm spawn <name> --model ...`).
+   Log every non-obvious call: `atm master log "..."`. Post a short status pulse with `atm msg`.
 Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
 {extra}"""
 
 PLANNER_PROMPT = """You are {agent}, the MASTER PLANNER of the shared ticket board at {board} (repo {root}).
-TICKET_AGENT is set; run `tickets ...` plainly. A chief of staff ({cos}) handles review, merge and day-to-day
+TICKET_AGENT is set; run `atm ...` plainly (`tickets` is the same CLI). A chief of staff ({cos}) handles review, merge and day-to-day
 unblocking; you do not take feature tickets and you do not merge unless the cos is silent.
 You own objective discipline: if none is active, ask for one with --exit; plan and route only work that advances it.
 Do not invent objectives. This run: ONE concrete outcome, then stop. ACKs are notification-only.
 Your jobs, every wake-up:
-1. SCOPE + VISION: `tickets master` and `tickets dash --once`. Keep the sprint pointed at what the user wants
+1. SCOPE + VISION: `atm master` and `atm dash --once`. Keep the sprint pointed at what the user wants
    (MASTER.md "CEO memo" and decision log). Split, re-scope, or cut tickets that drift; add the ones that are missing
-   (`tickets create ... --blocks/--deps`, `tickets plan`). Log every call: `tickets master log "..."`.
-2. ROUTE BY COMPLEXITY: `tickets route`, then hard-assign where it matters (`tickets assign <id> --owner <agent>`):
+   (`atm create ... --blocks/--deps`, `atm plan`). Log every call: `atm master log "..."`.
+2. ROUTE BY COMPLEXITY: `atm route`, then hard-assign where it matters (`atm assign <id> --owner <agent>`):
    priority-1 / contract / migration work to high-tier agents (opus); routine docs, tests, polish to low-tier
-   (sonnet, codex). Give each worker the context it needs: `tickets brief <agent> "..."` or `--ticket <id>`.
+   (sonnet, codex). Give each worker the context it needs: `atm brief <agent> "..."` or `--ticket <id>`.
 3. ESCALATIONS: answer messages addressed to you (scope questions, decisions the cos escalated, anything
    starting with "stuck:" that the cos has not answered within an hour). Decisions the user reserved
-   (spend, deploy provider, default flips) get a `tickets msg` to the user's attention, not a guess.
-4. STAFFING: if a lane has ready work and no live worker, `tickets spawn <name> --model <tier> --roles ...`;
-   if a worker is silent > 90 min, `tickets limits` then `tickets reopen`.
+   (spend, deploy provider, default flips) get a `atm msg` to the user's attention, not a guess.
+4. STAFFING: if a lane has ready work and no live worker, `atm spawn <name> --model <tier> --roles ...`;
+   if a worker is silent > 90 min, `atm limits` then `atm reopen`.
 Stop after that one bounded batch. Do not keep the model awake for acknowledgements or a broad review queue alone.
 {extra}"""
 
@@ -10766,7 +10766,7 @@ STANDING_SEAT_PROMPT = """HEARTBEAT: this seat is woken every {every} minutes on
 Do the standing brief as one bounded batch, post one short finding with numbers, and stop. The board's
 objective, which your brief serves: {objective}"""
 
-DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; state={state}; `tickets objective` to read it in full):
+DRIVE_PROMPT = """OBJECTIVE (set by {set_by}; state={state}; `atm objective` to read it in full):
 {objective}
 EXIT CRITERION: {exit_criterion}
 
@@ -10775,10 +10775,10 @@ DRIVE STATUS now:
 
 5. DRIVE THE OBJECTIVE (one bounded batch this run, then stop):
    compare the status above with the exit criterion. Plan or route only the next slice that advances it:
-   `tickets plan`/`tickets create`, `tickets route` + `tickets assign`, `tickets brief`, `tickets spawn` if a
-   lane has no live worker, and `tickets master log`. If the criterion is met, run
-   `tickets objective --done "<evidence>"`. If blocked on the user, `tickets objective --blocked "<why>"`.
-   If a better objective replaced it, `tickets objective --replaced "<why>"`. Do not invent a new objective.
+   `atm plan`/`atm create`, `atm route` + `atm assign`, `atm brief`, `atm spawn` if a
+   lane has no live worker, and `atm master log`. If the criterion is met, run
+   `atm objective --done "<evidence>"`. If blocked on the user, `atm objective --blocked "<why>"`.
+   If a better objective replaced it, `atm objective --replaced "<why>"`. Do not invent a new objective.
    Stop after this batch; do not keep looping on acknowledgements or an unbounded heartbeat."""
 
 
@@ -10825,7 +10825,7 @@ def cmd_objective(a, board):
             print("FLAG: no measurable exit criterion; add --exit \"<observable end state>\"")
         return
     if not cur:
-        print("no objective set; `tickets objective \"<what done looks like>\" --exit \"<observable end>\"`")
+        print("no objective set; `atm objective \"<what done looks like>\" --exit \"<observable end>\"`")
         return
     st = objective_state(cur).upper()
     print("OBJECTIVE -- %s%s (set by %s, %s)" % (
@@ -10843,17 +10843,17 @@ def cmd_objective(a, board):
 
 def cmd_drive(a, board):
     """Set the objective and spawn the master seat with a heartbeat, in one go:
-    `tickets drive "<objective>" --as boss --tool cursor+claude --heartbeat 30`."""
+    `atm drive "<objective>" --as boss --tool cursor+claude --heartbeat 30`."""
     owner = whoami(a.by)
     if a.text:
         ns = argparse.Namespace(text=a.text, done=None, by=owner, blocked=None, replaced=None,
                                 exit_criterion=getattr(a, "exit_criterion", None))
         cmd_objective(ns, board)
     elif not load_objective(board):
-        sys.exit("give an objective: tickets drive \"<what done looks like>\"")
+        sys.exit("give an objective: atm drive \"<what done looks like>\"")
     argv = [sys.executable, os.path.realpath(__file__), "spawn", owner, "--master",
             "--heartbeat", str(a.heartbeat), "--every", str(a.every)]
-    if a.tool:  # absent means "the harness `tickets join` registered for this seat"
+    if a.tool:  # absent means "the harness `atm join` registered for this seat"
         argv += ["--harness", a.tool]
     if getattr(a, "cmd_template", ""):
         argv += ["--cmd", a.cmd_template]
@@ -11022,7 +11022,7 @@ def prompt_text(a, board):
     """The worker/master/cos prompt as a string.
 
     Split out of cmd_prompt so the watcher can write it to a {prompt_file} for
-    a BYOA harness without shelling back out to `tickets prompt` -- one
+    a BYOA harness without shelling back out to `atm prompt` -- one
     renderer, so a custom harness and the built-in ones cannot drift.
     """
     owner = whoami(a.agent)
@@ -11080,7 +11080,7 @@ def prompt_text(a, board):
 
 def cmd_brief(a, board):
     """Give an agent, a role, or a ticket context. Agent and ticket briefs are
-    shown on every claim, in `tickets prompt`, and in `boot`. `--role` updates
+    shown on every claim, in `atm prompt`, and in `boot`. `--role` updates
     the T-529 inject source at .tickets/briefs/roles/<role>.md (watch/spawn
     reads the same path). Appends with a timestamp; --file replaces from a
     file; --show prints. Exactly one target: agent name, --role, or --ticket."""
@@ -11135,7 +11135,7 @@ def cmd_brief(a, board):
                 sys.exit("knowledge graph must live outside the ticket board: %s" % root)
             nodes, edges, errors = _knowledge_records(root) if _knowledge_graph(root) else ([], [], [])
             if errors:
-                sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+                sys.exit("knowledge graph invalid; run `atm knowledge validate`")
             node_ids = {r["id"] for r in nodes}
             if knowledge_id not in node_ids:
                 if knowledge_id in {r["id"] for r in edges}:
@@ -11547,7 +11547,7 @@ def _knowledge_render(nodes, edges, max_chars):
     if len(text) <= max_chars:
         return text
     kept = [lines[0]]
-    marker = "\n...(knowledge budget reached; run `tickets knowledge query ...`)"
+    marker = "\n...(knowledge budget reached; run `atm knowledge query ...`)"
     for line in lines[1:]:
         candidate = "\n".join(kept + [line]) + marker
         if len(candidate) > max_chars:
@@ -11586,7 +11586,7 @@ def knowledge_context(board, owner, extra="", max_chars=None):
                 chunks.append(note.get("text", ""))
     nodes, edges, errors = _knowledge_query(root, " ".join(chunks), scopes=scopes)
     if errors:
-        return "Knowledge graph invalid; run `tickets knowledge validate`."
+        return "Knowledge graph invalid; run `atm knowledge validate`."
     return _knowledge_render(nodes, edges, _knowledge_budget(root, max_chars))
 
 
@@ -11687,7 +11687,7 @@ def cmd_knowledge(a, board):
         # corrective runbook or superseding evidence for an otherwise valid
         # fact; silently omitting it would turn corruption into bad advice.
         if errors and sub in ("list", "show", "query"):
-            sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+            sys.exit("knowledge graph invalid; run `atm knowledge validate`")
         if sub == "list":
             node_type = (getattr(a, "node_type", "") or "").strip()
             stale_filter = bool(getattr(a, "stale", False))
@@ -11758,7 +11758,7 @@ def cmd_knowledge(a, board):
             selected, selected_edges, query_errors = _knowledge_query(
                 root, query, scopes=scopes, max_nodes=getattr(a, "max_nodes", 12))
             if query_errors:
-                sys.exit("knowledge graph invalid; run `tickets knowledge validate`")
+                sys.exit("knowledge graph invalid; run `atm knowledge validate`")
             if getattr(a, "json", False):
                 print(json.dumps({
                     "query": query, "scopes": sorted(set(x for x in scopes if x)),
@@ -11878,7 +11878,7 @@ def utilization(board, tickets=None, hours=24, live=None):
         held = [t for t in mine if t["status"] in ("claimed", "review")]
         r = agents.get(n, {})
         seen = hours_since(r["seen"]) if r.get("seen") else None
-        # DOWN is no longer reachable only through a hand-typed `tickets limit`
+        # DOWN is no longer reachable only through a hand-typed `atm limit`
         # record: an agent whose sessions cannot start is down whether or not
         # anyone remembered to say so (T-237).
         # `live` is this refresh's already-computed states. Recomputing here
@@ -11956,7 +11956,7 @@ def cmd_dash(a, board):
                 flag = "!!" if su is not None and su * 60 > UPDATE_EVERY_MIN * 2 else ("! " if su is not None and su * 60 > UPDATE_EVERY_MIN else "  ")
                 lines.append(" %s %-6s @%-13s %-40s upd %s" % (flag, t["id"], (t.get("owner") or "?")[:13], t["title"][:40], fmt_hours(su)))
         rq = [t for t in tickets if t["status"] == "review"]
-        lines.append("REVIEW QUEUE (%d)%s" % (len(rq), ": tickets merge" if rq else ""))
+        lines.append("REVIEW QUEUE (%d)%s" % (len(rq), ": atm merge" if rq else ""))
         for t in rq:
             lines.append("    %-6s @%-13s %-40s %s%s" % (t["id"], (t.get("owner") or "?")[:13], t["title"][:40], t.get("commit", "")[:24], (" PR " + t["pr"]) if t.get("pr") else ""))
         lines.append("AGENTS")
@@ -12002,7 +12002,7 @@ def cmd_dash(a, board):
         for mm in load_messages(board)[-a.messages:]:
             lines.append("  " + fmt_msg(mm)[:76])
         lines.append("-" * 78)
-        lines.append("tickets assign <id> --owner X | tickets brief X \"...\" | tickets msg \"...\" --to X | tickets merge | tickets reopen <id>")
+        lines.append("atm assign <id> --owner X | atm brief X \"...\" | atm msg \"...\" --to X | atm merge | atm reopen <id>")
         if not a.once:
             sys.stdout.write("\033[2J\033[H")
         print("\n".join(lines))
@@ -12076,9 +12076,9 @@ def cmd_stop_hook(a, board):
         return
     detail = "; ".join("%s=%s" % (k, v if not isinstance(v, list) else " | ".join(v))
                        for k, v in p.items() if k != "broadcasts")
-    reason = ("Ticket board still has work for %s: %s. Run `TICKET_AGENT=%s tickets inbox`, then "
-              "continue your ticket (`tickets mine`) or claim one (`tickets next`). If you are truly "
-              "done or blocked, say so with `tickets msg` and stop." % (owner, detail, owner))
+    reason = ("Ticket board still has work for %s: %s. Run `TICKET_AGENT=%s atm inbox`, then "
+              "continue your ticket (`atm mine`) or claim one (`atm next`). If you are truly "
+              "done or blocked, say so with `atm msg` and stop." % (owner, detail, owner))
     print(json.dumps({"decision": "block", "reason": reason[:1500]}))
 
 
@@ -12426,8 +12426,8 @@ def cmd_watch(a, board):
     if a.exec:
         cmd = a.exec
     else:
-        # No --exec: run whatever `tickets join` registered for this agent.
-        # Defaulting to claude here would make `tickets watch --agent qwen`
+        # No --exec: run whatever `atm join` registered for this agent.
+        # Defaulting to claude here would make `atm watch --agent qwen`
         # (the cron-able form, used without spawn) launch the wrong harness.
         # Same _worker_cmd as spawn so watch and spawn share one launch policy.
         harness, cmd_template = harness_of(board, owner)
@@ -12559,7 +12559,7 @@ def cmd_watch(a, board):
                     os.unlink(_stop_file(board, owner))
                 except OSError:
                     pass
-                print("stop requested via tickets spawn --stop")
+                print("stop requested via atm spawn --stop")
                 break
             if not a.once:
                 shim = _t427_idle_shim_path(__file__)
@@ -12859,8 +12859,8 @@ def cmd_codex_hook(a, board):
             v = p[k]
             lines.append("- %s: %s" % (k, "; ".join(v) if isinstance(v, list) else v))
     if p.get("broadcasts"):
-        lines.append("- %d unread broadcasts: `tickets inbox`" % p["broadcasts"])
-    lines.append("- Loop: tickets inbox -> tickets mine / tickets next -> work -> tickets update -> tickets sync -> tickets review")
+        lines.append("- %d unread broadcasts: `atm inbox`" % p["broadcasts"])
+    lines.append("- Loop: atm inbox -> atm mine / atm next -> work -> atm update -> atm sync -> atm review")
     used = len("\n".join(lines))
     inherited = knowledge_context(board, owner, max_chars=max(500, 1850 - used))
     if inherited:
@@ -12880,7 +12880,7 @@ def cmd_boot(a, board):
     if owner.startswith("agent-"):
         sys.exit("boot needs --agent <name> or TICKET_AGENT")
     if not os.path.isdir(board):
-        sys.exit("no board at %s (run `tickets init` in the project first)" % board)
+        sys.exit("no board at %s (run `atm init` in the project first)" % board)
     root = os.path.dirname(board)
     steps = []
     # 1. identity + roles
@@ -12911,7 +12911,7 @@ def cmd_boot(a, board):
     print("BOOT %s @ %s" % (owner, board))
     for s in steps:
         print("  - " + s)
-    print("  - master: %s" % (m["owner"] if m else "nobody (tickets master take)"))
+    print("  - master: %s" % (m["owner"] if m else "nobody (atm master take)"))
     if warn:
         print("  ! " + warn.replace("\n", "\n    "))
     if not p:
@@ -12919,9 +12919,9 @@ def cmd_boot(a, board):
     for k, v in p.items():
         print("  - %s: %s" % (k, "; ".join(v) if isinstance(v, list) else v))
     if _join_is_ceo_path(owner, roles_for(board, owner, None) or []):
-        print("NEXT: TICKET_AGENT=%s tickets connect" % owner)
+        print("NEXT: TICKET_AGENT=%s atm connect" % owner)
     else:
-        nxt = ("tickets mine" if p.get("holding") else "tickets next") if actionable(p) else "tickets msg \"idle\""
+        nxt = ("atm mine" if p.get("holding") else "atm next") if actionable(p) else "atm msg \"idle\""
         print("NEXT: TICKET_AGENT=%s %s" % (owner, nxt))
     if a.watch:
         wn = argparse.Namespace(agent=owner, every=a.every, exec=a.exec, cwd=a.cwd or root,
@@ -12948,8 +12948,8 @@ GUIDE = """# Startup guide -- connecting any agent to the board
 
 NEW HERE? Do this first, then come back:
 
-    cd <your repo> && tickets quickstart        # board + sample work + you, registered
-                                                # then: tickets next
+    cd <your repo> && atm quickstart        # board + sample work + you, registered
+                                                # then: atm next
     docs/first-session.md                       # the same run, captured and annotated
     README.md                                   # the model, worker loop, master loop
 
@@ -12960,7 +12960,7 @@ One command does every step (join, hooks, check-in, briefing):
 
     export TICKET_AGENT=<unique-name>          # used for this one-time boot command
     cd <repo or your worktree>
-    tickets boot --tool claude|codex|cursor [--roles backend] [--watch]
+    atm boot --tool claude|codex|cursor [--roles backend] [--watch]
 
 What `boot` guarantees, idempotently:
   1. identity registered (roles/cost/capabilities) so routing knows you
@@ -12968,16 +12968,16 @@ What `boot` guarantees, idempotently:
        claude : SessionStart -> board, UserPromptSubmit -> inbox, Stop -> keep working while work remains
        codex  : SessionStart + UserPromptSubmit -> board context (scoped to your worktree)
        cursor : .cursor/hooks.json sessionStart / beforeSubmitPrompt / stop -> board digest
-  3. check-in (worktree, branch, sha) so `tickets who` is truthful
+  3. check-in (worktree, branch, sha) so `atm who` is truthful
   4. a briefing: unread messages, held ticket, ready tickets in your lane, and the exact NEXT command
 
 Per tool, after boot:
   Claude Code (interactive):  claude                          -- the project hook carries its own identity
-  Claude Code (unattended):   tickets boot --tool claude --watch    (or: tickets watch --every 60)
-                              runs `claude -p "$(tickets prompt)"` only when `tickets pending` says there is work
+  Claude Code (unattended):   atm boot --tool claude --watch    (or: atm watch --every 60)
+                              runs `claude -p "$(atm prompt)"` only when `atm pending` says there is work
   Codex:                      codex                           -- the scoped hook carries its own identity
   Cursor:                     open the configured worktree and enable Hooks in settings
-  Anything else:              `tickets hooks remote --agent <name> --wrapper <path>` writes an identity-pinned
+  Anything else:              `atm hooks remote --agent <name> --wrapper <path>` writes an identity-pinned
                               wrapper plus SessionStart/inbox/Stop/taskWake command manifest
 
 Every generated hook pins both its board and agent. An unrelated
@@ -12988,38 +12988,38 @@ Safety rails (all on by default):
     off with TICKETS_STOP_HOOK=off; never fires without TICKET_AGENT; never for broadcasts only.
   - watch: one watcher per agent name (pid lock), one run at a time, --run-timeout, backoff on failures,
     logs in .tickets/agents/<name>.watch.log, stops on SIGTERM/spawn --stop within WATCH_STOP_SLICE.
-  - An agent that recorded `tickets limit` is never woken until `tickets limit --clear`.
+  - An agent that recorded `atm limit` is never woken until `atm limit --clear`.
 
 Spawning a team from a master session (models per agent):
-  tickets spawn scribe --model sonnet --roles docs --brief "house style: ..."     # cheap worker
-  tickets spawn core   --model opus   --roles backend --cost high                # hard tickets
-  tickets spawn boss   --master --model sonnet                                   # coordinate / unblock / review / merge
-  tickets drive "<what done looks like>" --as boss --heartbeat 30               # objective + master seat that wakes
+  atm spawn scribe --model sonnet --roles docs --brief "house style: ..."     # cheap worker
+  atm spawn core   --model opus   --roles backend --cost high                # hard tickets
+  atm spawn boss   --master --model sonnet                                   # coordinate / unblock / review / merge
+  atm drive "<what done looks like>" --as boss --heartbeat 30               # objective + master seat that wakes
                                                                                 #   every 30 min to plan toward it
-  tickets spawn --list | tickets spawn <name> --stop
+  atm spawn --list | atm spawn <name> --stop
 
 Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
-  tickets join without --harness prints harness=claude (default) — a label, not a process.
-  Claude is not started until watch/spawn. Dry join + tickets next is the BYOA plug path.
-  tickets join qwen --roles backend --harness custom --cmd 'ollama run qwen3:8b < {prompt_file}'
-  tickets harness check qwen          # runs it on 'reply OK' under a 60s cap, records pass/fail + latency
-  tickets spawn qwen                  # no --harness: uses what `join` registered
+  atm join without --harness prints harness=claude (default) — a label, not a process.
+  Claude is not started until watch/spawn. Dry join + atm next is the BYOA plug path.
+  atm join qwen --roles backend --harness custom --cmd 'ollama run qwen3:8b < {prompt_file}'
+  atm harness check qwen          # runs it on 'reply OK' under a 60s cap, records pass/fail + latency
+  atm spawn qwen                  # no --harness: uses what `join` registered
   Placeholders: {prompt_file} (this wake-up's prompt, fresh per run) {cwd} (the agent's worktree) {agent}.
   Each spawn = register + own worktree (.worktrees/<name>, project .claude settings copied in) +
-  a detached watcher that runs the tool with that model only when `tickets pending` says there is
+  a detached watcher that runs the tool with that model only when `atm pending` says there is
   work. Workers persist until --stop, logout or reboot; new tickets created later are picked up on
-  the next poll. `tickets watch` and `tickets spawn` share one launch policy:
+  the next poll. `atm watch` and `atm spawn` share one launch policy:
   unattended (no permission prompts); --safe keeps prompts. The watcher header
   prints launch=unattended or launch=safe.
   To survive reboot, add the watcher command from `spawn --list`'s log to a login item / launchd job.
 
 Stuck rule (in every worker prompt): if blocked -- permission, failing test, unclear scope, missing
-access, a decision that is not yours -- post `tickets msg "stuck: ..." --to <master> --re <id>`
+access, a decision that is not yours -- post `atm msg "stuck: ..." --to <master> --re <id>`
 immediately. The master wakes on stuck messages, the review queue and CRIT health, and its prompt
 is: unblock, review+merge, coordinate. Nobody waits silently.
 
-Check yourself:  tickets pending --agent <name>   (exit 0 = there is work)
-                 tickets who                       (where everyone is)
+Check yourself:  atm pending --agent <name>   (exit 0 = there is work)
+                 atm who                       (where everyone is)
 """
 
 
@@ -13071,7 +13071,7 @@ def _split_harness(spec):
 
 def harness_of(board, owner, harness="", cmd=""):
     """Resolve (harness, cmd_template) for an agent: explicit flags win, then
-    the workforce record written by `tickets join`, then the claude default.
+    the workforce record written by `atm join`, then the claude default.
 
     This is the single place that answers "what runs this agent", so `spawn`,
     `watch` and `harness check` cannot disagree about it.
@@ -13098,7 +13098,7 @@ def _expand_harness_cmd(template, agent="", cwd="", prompt_file=""):
 
     Every substituted value is shell-quoted because the result is run through
     the shell. The TEMPLATE itself is not: it is a command line by definition,
-    and it comes from whoever ran `tickets join` for this agent.
+    and it comes from whoever ran `atm join` for this agent.
     """
     out = template
     for name, value in (("{prompt_file}", prompt_file), ("{cwd}", cwd), ("{agent}", agent)):
@@ -13140,7 +13140,7 @@ def _render_prompt_file(board, owner, kind="", text=""):
 
 
 def resolve_launch_policy(safe=False, permission_mode=""):
-    """One launch policy for `tickets watch` and `tickets spawn`.
+    """One launch policy for `atm watch` and `atm spawn`.
 
     Default is unattended (bypassPermissions / --dangerously-skip-permissions).
     --safe keeps acceptEdits prompts. An explicit --permission-mode wins.
@@ -13164,7 +13164,7 @@ def resolve_launch_policy(safe=False, permission_mode=""):
 def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", tool="claude", master=False,
                 cmd_template="", prompt_expr=""):
     """The headless command a spawned worker runs. Model comes from --model or
-    the workforce record (`tickets join --model`). Watch and spawn share one
+    the workforce record (`atm join --model`). Watch and spawn share one
     launch policy: unattended by default (nobody is there to answer prompts);
     the blast radius is the agent's own worktree and branch (--safe for acceptEdits).
 
@@ -13186,12 +13186,12 @@ def _worker_cmd(board, owner, model="", permission_mode="bypassPermissions", too
         # Without a template there is nothing to run, and the fall-through below
         # would launch a binary literally named "custom".
         sys.exit("%s is registered as a custom harness with no command; "
-                 "re-register it: tickets join %s --harness custom --cmd '<shell template>'" % (owner, owner))
+                 "re-register it: atm join %s --harness custom --cmd '<shell template>'" % (owner, owner))
     if tool == "remote":
         sys.exit("%s uses a remote adapter; connect the generated remote hook/bridge "
                  "or register a custom command. Refusing to substitute a local model." % owner)
-    prompt = {"master": "tickets prompt --master", "cos": "tickets prompt --cos"}.get(
-        master if isinstance(master, str) else ("master" if master else ""), "tickets prompt")
+    prompt = {"master": "atm prompt --master", "cos": "atm prompt --cos"}.get(
+        master if isinstance(master, str) else ("master" if master else ""), "atm prompt")
     prompt = prompt_expr or '"$(%s)"' % prompt
     if tool == "claude":
         flag = ("--dangerously-skip-permissions" if permission_mode == "bypassPermissions"
@@ -13325,7 +13325,7 @@ def _stop_file(board, owner):
 
 
 def _spawn_stop(board, owner, all_boards=False):
-    """`tickets spawn <owner> --stop`: stop that seat's watcher ON THIS BOARD.
+    """`atm spawn <owner> --stop`: stop that seat's watcher ON THIS BOARD.
 
     Scope is the invariant here. The seat name is not globally unique: the
     same person runs one board per repo and gives the seat the same name on
@@ -13358,7 +13358,7 @@ def _spawn_stop(board, owner, all_boards=False):
             if state == "unknown":
                 print("unverified: cannot read the process table, and pid %d from this board's "
                       "pid file could not be identified -- stop requested, liveness unknown. "
-                      "Check the seat before `tickets spawn %s`." % (pid, owner))
+                      "Check the seat before `atm spawn %s`." % (pid, owner))
             else:
                 print("unverified: cannot read the process table and this board has no watcher "
                       "pid file for %s -- stop requested, liveness unknown." % owner)
@@ -13373,7 +13373,7 @@ def _spawn_stop(board, owner, all_boards=False):
             elsewhere = _live_watch_pids(owner)
             if elsewhere:
                 print("note: %d loop(s) for %s are running against another board "
-                      "(pids %s) -- `tickets spawn %s --stop --all-boards` stops those too"
+                      "(pids %s) -- `atm spawn %s --stop --all-boards` stops those too"
                       % (len(elsewhere), owner, ", ".join(str(p) for p in elsewhere), owner))
         return
     busy = [p for p in pids if _watcher_run_active(board, owner, p)]
@@ -13392,7 +13392,7 @@ def _spawn_stop(board, owner, all_boards=False):
         # mid-run. The duplicate guard in the start path below only sees a
         # pid that has actually gone, so say so rather than let the operator
         # spawn into a still-live loop (T-554).
-        print("mid-run: %s -- wait for the pid(s) to exit before `tickets spawn %s`" % (
+        print("mid-run: %s -- wait for the pid(s) to exit before `atm spawn %s`" % (
             ", ".join(str(p) for p in busy), owner))
     post_message(board, whoami(), "%s watcher asked to stop (%d loop(s))" % (owner, stopped))
     return
@@ -13412,7 +13412,7 @@ def cmd_spawn(a, board):
     detached watcher that launches the tool (with the chosen model) whenever the
     board has work for it. --stop asks the watcher to exit at its next poll;
     --list shows who is running. The watcher lives until stopped, logout or
-    reboot; `tickets guide` shows how to make it a login item."""
+    reboot; `atm guide` shows how to make it a login item."""
     import subprocess
 
     root = os.path.dirname(board)
@@ -13472,7 +13472,7 @@ def cmd_spawn(a, board):
         auth = _refresh_auth_check(board, owner, requested_harness)
         if auth.get("state") != "ready":
             _print_auth_result(owner, auth)
-            sys.exit("watcher not started; fix the state above, then rerun `tickets spawn %s`" % owner)
+            sys.exit("watcher not started; fix the state above, then rerun `atm spawn %s`" % owner)
     if not os.path.isdir(wt):
         base = a.base or _trunk()
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
@@ -13488,13 +13488,13 @@ def cmd_spawn(a, board):
     _silent(lambda: cmd_join(ns, board))
     checkin(board, owner, None, "spawned", cwd=wt)
     # --tool/--harness no longer defaults to "claude" in the parser: an absent
-    # flag must mean "use what `tickets join` registered for this agent",
+    # flag must mean "use what `atm join` registered for this agent",
     # otherwise a BYOA agent silently reverts to the Claude CLI on every spawn.
     harness, cmd_template = harness_of(board, owner, getattr(a, "harness", "") or a.tool,
                                        getattr(a, "cmd_template", ""))
     if harness == "remote" and not (cmd_template or a.exec):
         sys.exit("remote adapter is offline; no local executable was selected. "
-                 "Run `tickets hooks remote --agent %s`, connect its long-poll/callback bridge, "
+                 "Run `atm hooks remote --agent %s`, connect its long-poll/callback bridge, "
                  "or pass --cmd for a local adapter. Pending wakes remain queued." % owner)
     if a.brief:
         bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
@@ -14012,7 +14012,7 @@ def _print_auth_result(owner, result):
     path = (result.get("pause") or {}).get("operator_path")
     if result.get("state") in ("login_required", "expired") and result.get("login_cmd"):
         print("  recover:  %s" % result["login_cmd"])
-        print("  verify:   tickets harness auth %s" % owner)
+        print("  verify:   atm harness auth %s" % owner)
     elif path and path != "ready":
         print("  recover:  %s" % (result.get("login_cmd") or path))
 
@@ -14023,7 +14023,7 @@ def cmd_harness_auth(a, board):
 
     owner = a.name or whoami()
     if owner.startswith("agent-"):
-        sys.exit("harness auth needs an agent name: tickets harness auth <name>")
+        sys.exit("harness auth needs an agent name: atm harness auth <name>")
     if a.recover_stale:
         recovered = reclaim_stale_watch_lock(board, owner)
         print("watcher: %s" % recovered["detail"])
@@ -14441,13 +14441,13 @@ def cmd_harness_available(a, board):
         print("CEO does not claim worker tickets.")
     else:
         print("Then ask the board/team name, then:")
-        print('  tickets msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
+        print('  atm msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
         print("Then ask for the objective and tasks. Do not spawn until they answer.")
     print("Codex stays in the catalog with zero usage. Gemini dispatch records harness; persist/hooks wake (do not spawn a Gemini product job). No new Claude fable.")
 
 
 def cmd_harness(a, board):
-    """`tickets harness check <name>` / `tickets harness list` / `available` / `usage`.
+    """`atm harness check <name>` / `atm harness list` / `available` / `usage`.
 
     check: prove the agent's harness actually runs before a watcher spends a
     poll interval discovering it does not. The result is written to the agent
@@ -14466,7 +14466,7 @@ def cmd_harness(a, board):
         wf = load_workforce(board)
         names = sorted(set(list(wf) + [r["owner"] for r in load_agents(board)]))
         if not names:
-            print("no agents registered yet -- tickets join <name> --harness ...")
+            print("no agents registered yet -- atm join <name> --harness ...")
             return
         print("%-16s %-12s %-14s %s" % ("agent", "harness", "check", "cmd"))
         for n in names:
@@ -14479,7 +14479,7 @@ def cmd_harness(a, board):
         return
     owner = a.name or whoami()
     if owner.startswith("agent-"):
-        sys.exit("harness check needs an agent name: tickets harness check <name>")
+        sys.exit("harness check needs an agent name: atm harness check <name>")
     harness, cmd_template = harness_of(board, owner, a.harness, a.cmd_template)
     print("checking %s: harness=%s%s" % (owner, harness, (" cmd=%s" % cmd_template) if cmd_template else ""))
     res = harness_probe(board, owner, a.harness, a.cmd_template, a.model, a.cwd, a.timeout)
@@ -14822,7 +14822,7 @@ body[data-work-view=columns] #graphLede{display:none}
     <button type="button" id="view-graph" data-work-view="graph" class="on" aria-selected="true">Graph</button>
     <button type="button" id="view-columns" data-work-view="columns" aria-selected="false">Columns</button>
   </div>
-  <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">tickets graph</span> / <span class="mono">tickets map</span> — not a list of titles. Follow-up: <span class="mono">tickets update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">tickets reopen</span>. Review: <span class="mono">tickets review</span> then <span class="mono">tickets merge</span>.</p>
+  <p class="graph-lede" id="graphLede"><b>What waits on what.</b> Same <span class="mono">--after</span> edges as <span class="mono">atm graph</span> / <span class="mono">atm map</span> — not a list of titles. Follow-up: <span class="mono">atm update</span> / <span class="mono">here</span>. Silent &gt;90m: <span class="mono">atm reopen</span>. Review: <span class="mono">atm review</span> then <span class="mono">atm merge</span>.</p>
   <div id="workflowGraph" class="workflow-graph" aria-label="Workflow dependency graph"><!--WORK_VIEW:html--></div>
   <div class="kanban">
     <section class="col blocked"><h2 title="Work that cannot proceed until a dependency or blocker is resolved">Blocked <span class="n" id="n-blocked">0</span><span class="hint">waiting on a fix or dependency</span></h2><div class="list" id="col-blocked"></div></section>
@@ -14848,7 +14848,7 @@ body[data-work-view=columns] #graphLede{display:none}
     <div>
       <h2 class="seats-title">Team</h2>
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
-      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">tickets msg --to</span>.</p>
+      <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">atm msg --to</span>.</p>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -14909,7 +14909,7 @@ function mentionText(text){
 }
 function missionLine(goals){
   const raw=String(goals||'').trim();
-  if(!raw)return '(no MASTER.md yet -- tickets master init)';
+  if(!raw)return '(no MASTER.md yet -- atm master init)';
   const lines=raw.split(/\n/).map(l=>l.trim()).filter(Boolean);
   const first=lines.find(l=>!/^(OBJECTIVE|MISSION|CEO MEMO|SPRINT PLAN)\b/i.test(l))||lines[0];
   return first.replace(/^[#>*\-]+\s*/,'').slice(0,180);
@@ -15057,10 +15057,10 @@ function renderGraph(g,d){
   const by={};(g&&g.nodes||[]).forEach(n=>{by[n.id]=n});
   const edges=(g&&g.edges)||[];
   if(!g||!(g.nodes||[]).length){
-    host.innerHTML='<p class="graph-empty">No workflow yet. <span class="mono">tickets plan</span> creates real --after edges.</p>';
+    host.innerHTML='<p class="graph-empty">No workflow yet. <span class="mono">atm plan</span> creates real --after edges.</p>';
     return;
   }
-  const notice=edges.length?'':'<p class="graph-empty">No --after edges on the active board. <span class="mono">tickets plan</span> with deps, or <span class="mono">tickets dep T-002 --after T-001</span>.</p>';
+  const notice=edges.length?'':'<p class="graph-empty">No --after edges on the active board. <span class="mono">atm plan</span> with deps, or <span class="mono">atm dep T-002 --after T-001</span>.</p>';
   function row(n){
     const wait=(n.waiting||[]).length?'<span class="wait">waiting on '+esc(n.waiting.join(', '))+'</span>':((n.deps||[]).length?'<span class="mute">after '+esc(n.deps.join(', '))+'</span>':'');
     const own=n.owner?'<span class="mute">@'+esc(n.owner)+'</span>':'';
@@ -15133,7 +15133,7 @@ function renderChatHead(){
   if(!el)return;
   if(THREAD_SEAT){
     el.innerHTML='<h2 class="seats-title">Seat · '+esc(THREAD_SEAT)+'</h2>'+
-      '<p class="seats-lede">1:1 with this BYOA seat. <span class="mono">tickets msg --to '+esc(THREAD_SEAT)+'</span>.</p>';
+      '<p class="seats-lede">1:1 with this BYOA seat. <span class="mono">atm msg --to '+esc(THREAD_SEAT)+'</span>.</p>';
   }else{
     el.innerHTML='<h2 class="seats-title">Board</h2>'+
       '<p class="seats-lede">Channel-wide. Directed seat mail lives on that seat’s thread.</p>';
@@ -15251,9 +15251,9 @@ async function load(manual){
     snapshotFails++;
     setConn('offline');
     renderNextStep(unreachableNextStep(
-      snapshotFails>2?'Cannot reach the board server — is `tickets ui` still running? ('+e+')'
+      snapshotFails>2?'Cannot reach the board server — is `atm ui` still running? ('+e+')'
         :'Board unreachable — retrying… ('+e+')',
-      'tickets ui'));
+      'atm ui'));
     document.body.classList.remove('loading');
     if(refreshBtn){refreshBtn.disabled=false;refreshBtn.classList.remove('spin')}
     if(_loadCtl===ctl)_loadCtl=null;
@@ -15264,7 +15264,7 @@ async function load(manual){
     snapshotFails++;
     renderNextStep(d.next_step||unreachableNextStep(
       'Board snapshot failed — '+d.error+(snapshotFails>2?' (still failing; check TICKETS_DIR and board files)':''),
-      'tickets ui --json'));
+      'atm ui --json'));
     d.counts=d.counts||{total:0,done:0};
   }else snapshotFails=0;
   setConn('live',d.generated);
@@ -15296,7 +15296,7 @@ async function load(manual){
   pulse.className='health'+(crit?' bad':warn?' warn':'');
   pulse.innerHTML='<i></i><span>'+(crit?'Critical · '+crit:warn?'Warning · '+warn:'No alerts')+'</span>';
   tickClock();
-  const goals=d.goals||'(no MASTER.md yet -- tickets master init)';
+  const goals=d.goals||'(no MASTER.md yet -- atm master init)';
   document.getElementById('goals').textContent=goals;
   document.getElementById('missionOne').textContent=missionLine(goals);
   const blocked=(d.open||[]).filter(t=>t.status==='BLOCKED'||(t.waiting||[]).length);
@@ -15341,24 +15341,24 @@ async function load(manual){
       '<div><b>'+Math.round(u.util_pct||0)+'%</b><span class="stat-lbl" title="Share of the last 24 hours this agent was actively working a ticket">Utilization</span></div>'+
       '<div><b>'+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+'</b><span class="stat-lbl" title="Roles this agent registered — determines which tickets they can claim">Lane</span></div></div>'+
       '<button type="button" class="intervene" data-seat-chat="'+esc(a.name)+'">Msg</button></article>';
-  }).join('')||emptyCraft('Team','<b>No agents checked in.</b> Plug a harness so coverage is by work, not a vacant roster.','Utilization and Done (24h) stay — until a seat heartbeats.',['tickets join &lt;name&gt; --roles … --harness','tickets quickstart --agent &lt;you&gt;']);
+  }).join('')||emptyCraft('Team','<b>No agents checked in.</b> Plug a harness so coverage is by work, not a vacant roster.','Utilization and Done (24h) stay — until a seat heartbeats.',['atm join &lt;name&gt; --roles … --harness','atm quickstart --agent &lt;you&gt;']);
   const thread=visibleMessages(d.messages||[]).slice().reverse();
   const msgEmpty=THREAD_SEAT
-    ?emptyCraft('Intervene','<b>No messages with this seat yet.</b> Msg opens the thread.','Delivery receipts only — never implied progress on tickets.','tickets msg --to '+esc(THREAD_SEAT))
-    :emptyCraft('Intervene','<b>No messages yet.</b> Post when a seat should see something.','Receipts show delivery — never implied progress on tickets.','tickets msg "text" [--to agent] [--re T-001]');
+    ?emptyCraft('Intervene','<b>No messages with this seat yet.</b> Msg opens the thread.','Delivery receipts only — never implied progress on tickets.','atm msg --to '+esc(THREAD_SEAT))
+    :emptyCraft('Intervene','<b>No messages yet.</b> Post when a seat should see something.','Receipts show delivery — never implied progress on tickets.','atm msg "text" [--to agent] [--re T-001]');
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+deliveryTags(m)+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
     ||msgEmpty;
 }
 function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
   const steps=[
-    ['initialized','Board ready','tickets quickstart --agent <you>'],
-    ['first_ticket','Work on the board','tickets quickstart'],
-    ['first_agent','You registered','tickets quickstart --agent <you>'],
-    ['first_review','Reviewable SHA','tickets review <id> --notes "..."'],
-    ['first_merge','First merge','tickets merge'],
-    ['second_harness','Second harness','tickets join <name> --harness …'],
-    ['objective_set','Objective set','tickets objective "..."']
+    ['initialized','Board ready','atm quickstart --agent <you>'],
+    ['first_ticket','Work on the board','atm quickstart'],
+    ['first_agent','You registered','atm quickstart --agent <you>'],
+    ['first_review','Reviewable SHA','atm review <id> --notes "..."'],
+    ['first_merge','First merge','atm merge'],
+    ['second_harness','Second harness','atm join <name> --harness …'],
+    ['objective_set','Objective set','atm objective "..."']
   ];
   const done=steps.filter(s=>ob&&ob[s[0]]).length;
   document.getElementById('obProgress').textContent=done+'/'+steps.length;
@@ -15385,12 +15385,12 @@ function renderEmptyBoard(d){
   el.innerHTML='<p class="empty-kicker">Day one</p>'+
     '<p><b>Three steps.</b> Work · Team · Objective — then intervene when a seat needs you.</p>'+
     '<ol class="empty-steps" id="emptySteps">'+
-      '<li><span class="n">1</span><div><b>Work</b> — seed the board and claim a first ticket.<div class="cta">tickets quickstart --agent &lt;you&gt;</div></div></li>'+
-      '<li><span class="n">2</span><div><b>Team</b> — plug a second harness. Coverage by work, not a fixed role.<div class="cta">tickets join … --harness</div></div></li>'+
-      '<li><span class="n">3</span><div><b>Objective</b> — name what the team finishes.<div class="cta">tickets objective "…"</div></div></li>'+
+      '<li><span class="n">1</span><div><b>Work</b> — seed the board and claim a first ticket.<div class="cta">atm quickstart --agent &lt;you&gt;</div></div></li>'+
+      '<li><span class="n">2</span><div><b>Team</b> — plug a second harness. Coverage by work, not a fixed role.<div class="cta">atm join … --harness</div></div></li>'+
+      '<li><span class="n">3</span><div><b>Objective</b> — name what the team finishes.<div class="cta">atm objective "…"</div></div></li>'+
     '</ol>'+
     '<p class="empty-honesty">Median turns and yield@cost stay — until a done ticket reports.</p>'+
-    '<p class="empty-honesty">Plan with tickets plan (real --after edges). Unattended persist ends at tickets review — a reviewable SHA, not a silent merge.</p>'+
+    '<p class="empty-honesty">Plan with atm plan (real --after edges). Unattended persist ends at atm review — a reviewable SHA, not a silent merge.</p>'+
     '<p class="empty-intervene">Intervene is always available — <b>Msg</b> a seat, route, or unblock.</p>';
 }
 function renderAttention(items){
@@ -15487,34 +15487,34 @@ def _next_step_hint(board, tickets, done_ids):
     if not tickets:
         return {"kind": "start", "label": "Get started",
                 "message": "Board is empty — run quickstart to seed your first tickets.",
-                "cmd": "tickets quickstart --agent <you>"}
+                "cmd": "atm quickstart --agent <you>"}
     blocked = [t for t in tickets if t.get("status") == "blocked"]
     if blocked:
         t = blocked[0]
         return {"kind": "unblock", "label": "Unblock",
                 "message": "%s is blocked — read why and clear the blocker." % t["id"],
-                "cmd": "tickets show %s" % t["id"]}
+                "cmd": "atm show %s" % t["id"]}
     review = [t for t in tickets if t.get("status") == "review"]
     if review:
         return {"kind": "merge", "label": "Review queue",
                 "message": "%d ticket(s) at a reviewable SHA — human review is the gate." % len(review),
-                "cmd": "tickets merge"}
+                "cmd": "atm merge"}
     agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
     workforce = load_workforce(board)
     if not (agents or workforce):
         return {"kind": "spawn", "label": "Spawn an agent",
                 "message": "No agents on the board yet — register one to claim work.",
-                "cmd": "tickets join <name> --roles backend"}
+                "cmd": "atm join <name> --roles backend"}
     ready = [t for t in tickets if t.get("status") == "open"
              and all(d in done_ids for d in t.get("deps", []))]
     unowned = [t for t in ready if not t.get("owner")]
     if unowned:
         return {"kind": "route", "label": "Route work",
                 "message": "Ready tickets are unowned — claim or assign them.",
-                "cmd": "tickets next"}
+                "cmd": "atm next"}
     return {"kind": "ok", "label": "On track",
             "message": "Workers are moving — post updates every 45 minutes.",
-            "cmd": "tickets update <id> \"...\""}
+            "cmd": "atm update <id> \"...\""}
 
 
 def _turns_mod():
@@ -15540,7 +15540,7 @@ def _empty_turns_snapshot():
 
 
 def _turns_snapshot(board, tickets):
-    """Frozen `tickets turns --json` for the console (T-372 / T-344)."""
+    """Frozen `atm turns --json` for the console (T-372 / T-344)."""
     build_turns_report, load_trajectory_events = _turns_mod()
     return build_turns_report(
         load_trajectory_events(board),
@@ -16092,7 +16092,7 @@ def cmd_ui(a, board):
                     "counts": {"total": 0, "done": 0},
                     "next_step": {"kind": "unreachable", "label": "Snapshot failed",
                                   "message": "Could not read the board — check TICKETS_DIR and board files.",
-                                  "cmd": "tickets ui --json"},
+                                  "cmd": "atm ui --json"},
                 })).encode()
                 ctype = "application/json"
             else:
@@ -16150,7 +16150,7 @@ def cmd_ui(a, board):
 
     srv = ThreadingHTTPServer((a.host, a.port), H)
     srv.daemon_threads = True
-    print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via tickets msg)" % (a.host, a.port))
+    print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via atm msg)" % (a.host, a.port))
     if a.open:
         import subprocess
         subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
@@ -16165,19 +16165,19 @@ QUICKSTART_MARKER = "quickstart.json"
 QUICKSTART_TICKETS = [
     {"key": "schema", "title": "Sample: design the data model",
      "role": "backend", "priority": 1,
-     "body": "A sample ticket created by `tickets quickstart`.\n\n"
-             "It has no dependencies, so it is the one `tickets next` hands out first.\n"
+     "body": "A sample ticket created by `atm quickstart`.\n\n"
+             "It has no dependencies, so it is the one `atm next` hands out first.\n"
              "Work it like a real ticket: claim it, post an update, then send it to review.\n"
-             "Delete the samples whenever you like: tickets quickstart --remove"},
+             "Delete the samples whenever you like: atm quickstart --remove"},
     {"key": "api", "title": "Sample: build the API on top of the model",
      "role": "backend", "priority": 2, "deps": ["schema"],
      "body": "A sample ticket that DEPENDS on the first one.\n\n"
-             "`tickets next` will not offer it until the schema ticket is done -- that is\n"
+             "`atm next` will not offer it until the schema ticket is done -- that is\n"
              "the dependency graph doing its job, not the board being empty."},
     {"key": "ui", "title": "Sample: put a screen on the API",
      "role": "console", "priority": 2, "deps": ["api"],
      "body": "The third sample, two hops down the chain.\n\n"
-             "Run `tickets graph` to see all three and what is blocking what."},
+             "Run `atm graph` to see all three and what is blocking what."},
 ]
 
 
@@ -16212,7 +16212,7 @@ def _quickstart_alive(board, state):
 def _quickstart_harness():
     """Which agent harness this machine can actually launch, best first.
 
-    Print-only: T-314's `tickets harness check` is the real probe. Quickstart
+    Print-only: T-314's `atm harness check` is the real probe. Quickstart
     only names a harness so it can print a spawn line; it never starts one.
     Returns (name, argv-prefix) or (None, None).
     """
@@ -16259,7 +16259,7 @@ def cmd_quickstart(a, board):
         sys.exit(_init_refusal(target, board))
 
     if not os.path.isdir(target):
-        # Mirror `tickets init`'s own arguments. The quickstart regression test
+        # Mirror `atm init`'s own arguments. The quickstart regression test
         # runs this path on a fresh repo, so a new init flag fails loudly there
         # rather than silently at a user's first command.
         init_args = argparse.Namespace(
@@ -16279,8 +16279,8 @@ def cmd_quickstart(a, board):
     else:
         epic = _alloc(epics_dir(board), "E", 3, {
             "title": "Sample epic: a first slice end to end",
-            "body": "Created by `tickets quickstart` so the board is not empty on day one.\n"
-                    "Remove the samples with `tickets quickstart --remove`.",
+            "body": "Created by `atm quickstart` so the board is not empty on day one.\n"
+                    "Remove the samples with `atm quickstart --remove`.",
             "status": "open", "created": now(), "updated": now(),
         })
         epic_id = epic["id"]
@@ -16321,13 +16321,13 @@ def cmd_quickstart(a, board):
                 cmd_join(join_args, board)
         except SystemExit:
             print("agent: could not register %r automatically" % agent)
-            print("       run: tickets join <name> --roles backend")
+            print("       run: atm join <name> --roles backend")
         else:
             joined = [ln for ln in buf.getvalue().splitlines() if ln.startswith("joined as ")]
             print(joined[0] if joined else "agent: %s" % agent)
     else:
         agent = ""
-        print("agent: none registered (set TICKET_AGENT, or: tickets join <name> --roles backend)")
+        print("agent: none registered (set TICKET_AGENT, or: atm join <name> --roles backend)")
 
     # 4. optionally put a real worker on it
     if a.with_agent:
@@ -16341,25 +16341,25 @@ def _quickstart_spawn(a, board, name):
     if not harness:
         print("")
         print("--with-agent: no agent harness found on PATH (looked for claude, codex, cursor-agent).")
-        print("  Install one, or start a worker by hand:  TICKET_AGENT=%s tickets next" % name)
+        print("  Install one, or start a worker by hand:  TICKET_AGENT=%s atm next" % name)
         return
     print("")
     print("worker: %s will run as %s" % (harness, name))
-    print("  tickets spawn %s --tool %s" % (name, harness))
+    print("  atm spawn %s --tool %s" % (name, harness))
     print("  (not launched for you -- quickstart never starts a background process without asking;")
-    print("   run the line above, or: TICKET_AGENT=%s %s \"$(tickets prompt)\")" % (name, " ".join(argv)))
+    print("   run the line above, or: TICKET_AGENT=%s %s \"$(atm prompt)\")" % (name, " ".join(argv)))
 
 
 def _quickstart_next_steps(board, agent):
     ident = ("TICKET_AGENT=%s " % agent) if agent else ""
     print("")
     print("The three commands that matter:")
-    print("  %stickets next                      claim the next ready ticket" % ident)
-    print("  %stickets update <id> \"...\"         say where you are, at least every 45 min" % ident)
-    print("  %stickets review <id> --notes \"...\" hand it back with evidence" % ident)
+    print("  %satm next                      claim the next ready ticket" % ident)
+    print("  %satm update <id> \"...\"         say where you are, at least every 45 min" % ident)
+    print("  %satm review <id> --notes \"...\" hand it back with evidence" % ident)
     print("")
-    print("See it: tickets ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
-    print("Learn it: tickets guide   |   docs/first-session.md   |   README.md")
+    print("See it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
+    print("Learn it: atm guide   |   docs/first-session.md   |   README.md")
 
 
 def cmd_guide(a, board):
@@ -16559,9 +16559,9 @@ def cmd_hook_run(a, board):
     sys.exit("unsupported hook event %s" % a.event)
 
 CURSOR_HOOK = r'''#!/usr/bin/env python3
-"""Cursor hook installed by `tickets hooks cursor`: surface new board messages.
+"""Cursor hook installed by `atm hooks cursor`: surface new board messages.
 Reads the hook event JSON on stdin, writes {additional_context, user_message}
-on stdout. Keeps its own watermark so `tickets inbox` read-state is untouched.
+on stdout. Keeps its own watermark so `atm inbox` read-state is untouched.
 Identity and board are baked at install; ambient shell values are ignored."""
 import argparse, json, os, subprocess, sys
 from pathlib import Path
@@ -16617,7 +16617,7 @@ def main():
         new.append(m)
     out = {}
     if new:
-        lines.append("Ticket board: %%d new message(s) for %%s. Reply with `tickets msg`." %% (len(new), AGENT))
+        lines.append("Ticket board: %%d new message(s) for %%s. Reply with `atm msg`." %% (len(new), AGENT))
         for m in new[-12:]:
             lines.append("- %%s %%s -> %%s%%s: %%s" %% (m.get("at","?")[5:16], m.get("from","?"), m.get("to") or "everyone",
                          (" [%%s]" %% m["re"]) if m.get("re") else "", (m.get("text") or "")[:220]))
@@ -16744,7 +16744,7 @@ def cmd_hooks(a, board):
             return
         rendered = CURSOR_HOOK % {"agent": agent, "board": os.path.abspath(board), "script": script}
         existing_script = open(sp).read() if os.path.exists(sp) else ""
-        if (existing_script and "Cursor hook installed by `tickets hooks cursor`" not in existing_script
+        if (existing_script and "Cursor hook installed by `atm hooks cursor`" not in existing_script
                 and not a.force):
             sys.exit("%s is not a Ticket Board hook; pass --force only after reviewing it" % sp)
         if not existing_script or a.force or existing_script != rendered:
@@ -16954,7 +16954,7 @@ def cmd_init(a, board):
             "INIT WROTE THE BOARD BUT IT IS NOT BOUND: wrote %s, yet `tickets` "
             "from %s still resolves to %s. Refusing to report success (T-263)."
             % (board, os.getcwd(), bound))
-    print("\nClaude Code: install a scoped hook with `tickets hooks claude --agent <name>`.")
+    print("\nClaude Code: install a scoped hook with `atm hooks claude --agent <name>`.")
     print("Codex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.")
 
 
@@ -16967,60 +16967,60 @@ breaks and two agents will do the same work. The primary public name is `atm`;
 `tickets` is a compatibility alias for the same implementation, arguments,
 exit codes, and board.
 
-Run `tickets board` for the current state, or `tickets graph` to see the whole
+Run `atm board` for the current state, or `atm graph` to see the whole
 dependency tree with each node's status and owner.
 
-**Connect first** (once per session; `tickets connect` prints the long form):
+**Connect first** (once per session; `atm connect` prints the long form):
 
     export TICKET_AGENT=<your-unique-name>     # claude-opus, codex, grok ...
-    tickets join $TICKET_AGENT --roles backend --can docker,browser --cost high
+    atm join $TICKET_AGENT --roles backend --can docker,browser --cost high
     # omit --harness: prints harness=claude (default); label only until watch/spawn
-    tickets master                             # briefing + health
-    tickets inbox                              # messages addressed to you
+    atm master                             # briefing + health
+    atm inbox                              # messages addressed to you
 
 **Rules for every agent**
 
-1. Claim before you work (`tickets next`). Never work without a ticket; never
+1. Claim before you work (`atm next`). Never work without a ticket; never
    edit `.tickets/` by hand. Hold one ticket at a time.
-2. Finish what you claim. If you cannot, `tickets block --reason` or
-   `tickets reopen` -- never go silent.
+2. Finish what you claim. If you cannot, `atm block --reason` or
+   `atm reopen` -- never go silent.
 3. You may create, split, re-wire and assign tickets. Extending the graph is
-   expected. Anyone can become master with `tickets master take`.
+   expected. Anyone can become master with `atm master take`.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `tickets review` and `tickets done` refuse from main or with uncommitted files.
-5. Post `tickets update <id> "..."` at least every 45 minutes and at every
+   `atm review` and `atm done` refuse from main or with uncommitted files.
+5. Post `atm update <id> "..."` at least every 45 minutes and at every
    milestone. Longer silence is treated as a timeout and the ticket may be
    reopened for someone else.
-6. When finished, submit -- do not close: `tickets review <id> --notes "paths
+6. When finished, submit -- do not close: `atm review <id> --notes "paths
    touched, tests run, decisions dependents must match"` (branch@sha is added
    automatically; `--pr N` if you opened one). The MASTER reviews, merges to
-   main and closes it with `tickets done`. Claim your next ticket right away.
+   main and closes it with `atm done`. Claim your next ticket right away.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.
-8. Stuck? Say so at once: `tickets msg "stuck: <what, tried, need>" --to <master>
-   --re <id>` and `tickets update <id> "stuck: ..."`; `tickets block` if you
+8. Stuck? Say so at once: `atm msg "stuck: <what, tried, need>" --to <master>
+   --re <id>` and `atm update <id> "stuck: ..."`; `atm block` if you
    cannot continue. The master's job is to unblock you. Never wait silently.
 
 Statuses: TO DO -> IN PROGRESS -> IN REVIEW -> DONE, or BLOCKED. Set them with
-`tickets status <id> todo|in-progress|review|blocked|done` or the dedicated
-commands below; `tickets list` shows the label on every line.
+`atm status <id> todo|in-progress|review|blocked|done` or the dedicated
+commands below; `atm list` shows the label on every line.
 
 **The loop**
 
-    tickets next                          # claims -> IN PROGRESS; prints handoffs + timing
-    tickets update T-002 "..."            # progress, every 45 min
-    tickets msg "question" --to claude-opus --re T-002
-    tickets review T-002 --notes "..."    # -> IN REVIEW; master is messaged
-    tickets who                           # where everyone is: worktree, branch, ticket
+    atm next                          # claims -> IN PROGRESS; prints handoffs + timing
+    atm update T-002 "..."            # progress, every 45 min
+    atm msg "question" --to claude-opus --re T-002
+    atm review T-002 --notes "..."    # -> IN REVIEW; master is messaged
+    atm who                           # where everyone is: worktree, branch, ticket
 
-`tickets next` prints the ticket body, briefing paths, every note on direct
+`atm next` prints the ticket body, briefing paths, every note on direct
 dependencies, and the latest note on earlier ancestors. Only one agent can
 ever hold a ticket.
 
 **Epics and sprints.** Tickets carry `epic` (E-001) and `sprint` (S-01).
-`tickets next` prefers the active sprint. `tickets epic list` / `tickets
-sprint show` give progress bars; `tickets sprint close S-01 --carry S-02`
+`atm next` prefers the active sprint. `atm epic list` / `tickets
+sprint show` give progress bars; `atm sprint close S-01 --carry S-02`
 rolls unfinished work forward.
 
 The `--notes` text on `done` is shown to whoever picks up a dependent ticket.
@@ -17030,21 +17030,21 @@ Write what the next agent needs -- file paths, names, decisions they must match
 **As the planner**, create the whole dependency graph in one shot. `deps` may
 reference a `key` from the same plan or an existing `T-` id:
 
-    tickets plan <<'EOF'
+    atm plan <<'EOF'
     [{"key":"api","title":"Build REST API","role":"backend","body":"details","deps":[]},
      {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
     EOF
 
-Tickets whose dependencies are unfinished stay invisible to `tickets next`
+Tickets whose dependencies are unfinished stay invisible to `atm next`
 until those dependencies are marked done, so workers cannot start too early.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
 
-    tickets create "Add rate limiting" --deps T-002
-    tickets create "DB migration" --blocks T-002
-    tickets dep T-004 --after T-003
-    tickets dep T-004 --drop T-003
+    atm create "Add rate limiting" --deps T-002
+    atm create "DB migration" --blocks T-002
+    atm dep T-004 --after T-003
+    atm dep T-004 --drop T-003
 """
 
 CURSOR_RULE = """---
@@ -17062,7 +17062,7 @@ class _LoudArgumentParser(argparse.ArgumentParser):
     rejected argument is free text like a --notes value, the "unrecognized
     arguments" message ECHOES THAT TEXT BACK, so it reads exactly like the
     caller's own note succeeding. (T-246: this masked two silent no-op
-    `tickets reopen --notes ...` calls for a full pass before anyone noticed.)
+    `atm reopen --notes ...` calls for a full pass before anyone noticed.)
     Make the failure impossible to miss: still argparse's own usage+error on
     stderr, but with an explicit NO CHANGE WAS MADE as the trailing line, so
     the tail of the output is the warning rather than the caller's own text.
@@ -17187,11 +17187,11 @@ def cmd_self(a, board):
                 seat, ep.get("provider"), ep.get("pid", "?"), ep.get("at", "?")))
         elif stored and was_stale:
             print("persistent: no -- seat %s native identity is retained but offline after TTL "
-                  "(reconnect with `tickets join %s --persistent` or a session heartbeat)"
+                  "(reconnect with `atm join %s --persistent` or a session heartbeat)"
                   % (seat, seat))
         elif was_stale:
             print("persistent: no -- seat %s had a native endpoint but it went stale "
-                  "(re-register with `tickets join %s --persistent`)" % (seat, seat))
+                  "(re-register with `atm join %s --persistent`)" % (seat, seat))
         else:
             probe = sa.probe_provider(sa.provider_for_harness(harness) or harness)
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
@@ -17388,7 +17388,7 @@ def main():
     c.add_argument("--ceo", action="store_true",
                    help="CEO path even on a blank board (catalog+usage → atman-<seat>)")
     c.add_argument("--worker", action="store_true",
-                   help="worker claim loop (prints tickets next)")
+                   help="worker claim loop (prints atm next)")
     c.add_argument("--seat", default="ceo",
                    help="board identity suffix; join as atman-<seat> (default: ceo)")
     c.add_argument("--master", dest="connect_master", default="",
@@ -17457,7 +17457,7 @@ def main():
     c = sub.add_parser("objective", help="set/show/close the standing objective the master drives toward")
     c.add_argument("text", nargs="?", default="")
     c.add_argument("--set", dest="set_text", default="", metavar="TEXT",
-                   help="same as the positional text: tickets objective --set \"<sentence>\"")
+                   help="same as the positional text: atm objective --set \"<sentence>\"")
     c.add_argument("--exit", dest="exit_criterion", default=None, metavar="CRITERION",
                    help="measurable exit criterion (observable end state)")
     c.add_argument("--done", "--achieved", dest="done", default=None, metavar="EVIDENCE",
@@ -17487,7 +17487,7 @@ def main():
     c.add_argument("--every", type=int, default=60, help="seconds between polls")
     c.add_argument("--heartbeat", type=int, default=0,
                    help="master seat only: also wake every N minutes to drive the objective (0 = off)")
-    c.add_argument("--exec", default="", help="command to run (default: headless claude with `tickets prompt`); "
+    c.add_argument("--exec", default="", help="command to run (default: headless claude with `atm prompt`); "
                                               "{prompt_file} {cwd} {agent} are expanded per run")
     c.add_argument("--prompt-kind", dest="prompt_kind", default="", choices=("", "master", "cos"),
                    help="which prompt to write to {prompt_file} (default: the worker prompt)")
@@ -17525,7 +17525,7 @@ def main():
     c = sub.add_parser("boot", help="every startup step: join, hooks, check-in, briefing (idempotent)")
     c.add_argument("--agent", default="")
     c.add_argument("--tool", default="", help="claude | cursor | codex | agy | gemini | devin | grok | remote")
-    c.add_argument("--harness", default="", help="harness to register for this agent (see `tickets join --harness`)")
+    c.add_argument("--harness", default="", help="harness to register for this agent (see `atm join --harness`)")
     c.add_argument("--cmd", dest="cmd_template", default="", help="shell template for a custom harness")
     c.add_argument("--roles", default=None)
     c.add_argument("--can", default=None)
@@ -17549,7 +17549,7 @@ def main():
     c.add_argument("--model", default="", help="claude: opus | sonnet | haiku (or a full model id); codex: its model name")
     c.add_argument("--harness", default="",
                    help="claude | codex | cursor | cursor+claude | custom:<cmd> | <executable>; "
-                        "default: whatever `tickets join` registered for this agent")
+                        "default: whatever `atm join` registered for this agent")
     c.add_argument("--tool", default="", help="original spelling of --harness")
     c.add_argument("--cmd", dest="cmd_template", default="",
                    help="shell template for a custom harness; placeholders {prompt_file} {cwd} {agent}")
@@ -17802,7 +17802,7 @@ def main():
     c = sub.add_parser("plan", help="bulk-create tickets from JSON on stdin (ready only with cause/change/proof; else capture)")
     c.set_defaults(fn=cmd_plan)
 
-    c = sub.add_parser("capture", help="capture a thought as lane=capture (not claimable until tickets sound)")
+    c = sub.add_parser("capture", help="capture a thought as lane=capture (not claimable until atm sound)")
     c.add_argument("thought", nargs="?", default="", help="the raw idea; no decisions yet")
     c.add_argument("--area", default="", help="optional prefix for the title slug")
     c.add_argument("--from-msg", dest="from_msg", default="", help="board message id to turn into a capture")
@@ -17818,14 +17818,14 @@ def main():
 
     c = sub.add_parser("dispatch", help="CoS: reserve one ready ticket for one seat; spawn if needed")
     c.add_argument("id")
-    c.add_argument("--to", required=True, help="seat that will tickets next")
+    c.add_argument("--to", required=True, help="seat that will atm next")
     c.add_argument("--harness", default="cursor", help="default cursor; FAIL usage rows are refused")
     c.add_argument("--cmd", dest="cmd_template", default="")
     c.add_argument("--exec", default="")
     c.add_argument("--worktree", default="")
     c.set_defaults(fn=cmd_dispatch)
 
-    c = sub.add_parser("pr-sync", help="IN REVIEW + PR: merged+ancestor → ready to close (does not tickets done)")
+    c = sub.add_parser("pr-sync", help="IN REVIEW + PR: merged+ancestor → ready to close (does not atm done)")
     c.add_argument("id", nargs="?", default="")
     c.set_defaults(fn=cmd_pr_sync)
 

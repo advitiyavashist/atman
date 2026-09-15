@@ -1,7 +1,7 @@
 """T-788: any-CEO connect path is the product flow (throwaway board).
 
-Living board `tickets connect` must run catalog+usage → atman-<seat> →
-announce → feedback → graph/map. It must not print tickets next. Fresh
+Living board `atm connect` must run catalog+usage → atman-<seat> →
+announce → feedback → graph/map. It must not print atm next. Fresh
 boards keep the T-778/T-780 new-board script.
 """
 import json
@@ -85,7 +85,7 @@ def test_fresh_connect_keeps_new_board_script(tmp_path):
     c = run(repo, "connect", env=env, tmp_path=tmp_path)
     assert c.returncode == 0, c.stderr
     assert first_nonempty(c.stdout).startswith("**You are onboarding.**")
-    assert "tickets plan" in c.stdout
+    assert "atm plan" in c.stdout
     assert "Connecting an agent" in c.stdout
 
 
@@ -110,7 +110,7 @@ def test_living_connect_is_atman_ceo_product_flow(tmp_path):
     assert "atm hooks cursor" in out
     assert "atm hooks codex" in out
     assert "atm hooks remote" in out
-    assert "tickets next" not in out
+    assert "atm next" not in out
     assert "Paste this at the start of ANY agent session" not in out
 
 
@@ -121,14 +121,14 @@ def test_connect_ceo_flag_on_blank_board(tmp_path):
     c = run(repo, "connect", "--ceo", "--seat", "cto", env=env, tmp_path=tmp_path)
     assert c.returncode == 0, c.stderr
     assert "atman-cto" in c.stdout
-    assert "tickets next" not in c.stdout
+    assert "atm next" not in c.stdout
 
 
 def test_worker_connect_on_living_board_still_has_next(tmp_path):
     repo, env = living_board(tmp_path)
     c = run(repo, "connect", "--worker", env=env, tmp_path=tmp_path)
     assert c.returncode == 0, c.stderr
-    assert "tickets next" in c.stdout
+    assert "atm next" in c.stdout
 
 
 def test_ceo_join_does_not_print_tickets_next(tmp_path):
@@ -140,7 +140,7 @@ def test_ceo_join_does_not_print_tickets_next(tmp_path):
     assert "joined as atman-ceo" in j.stdout
     assert "CEO does not claim worker tickets" in j.stdout
     assert "atm graph / atm map" in j.stdout
-    assert "tickets next" not in j.stdout
+    assert "atm next" not in j.stdout
 
 
 def test_ceo_can_run_graph_and_map(tmp_path):
@@ -189,9 +189,9 @@ def test_docs_and_template_teach_ceo_path():
     assert "Ask the operator for feedback" in src or "ASK FOR FEEDBACK" in src
     assert CEO_DOC.exists()
     body = CEO_DOC.read_text()
-    assert "tickets connect" in body
+    assert "atm connect" in body
     assert "atman-ceo" in body
-    assert "tickets graph" in body and "tickets map" in body
+    assert "atm graph" in body and "atm map" in body
     assert "stale shim" in body.lower() or "sol-agy-harness" in body
 
 

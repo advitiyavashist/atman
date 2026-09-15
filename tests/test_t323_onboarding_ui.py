@@ -72,7 +72,7 @@ def test_ui_html_contains_onboarding_markers():
         "renderEmptyBoard",
         "unreachableNextStep",
         "snapshotFails",
-        "tickets quickstart",
+        "atm quickstart",
         "Board ready",
         "Turns",
         "Utilization",
@@ -80,7 +80,7 @@ def test_ui_html_contains_onboarding_markers():
         "waiting on a fix or dependency",
         "emptySteps",
         "Done (24h)",
-        "tickets merge",
+        "atm merge",
         "second_harness",
         "Median turns and yield@cost stay — until a done ticket reports.",
     ):

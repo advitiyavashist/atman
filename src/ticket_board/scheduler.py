@@ -31,7 +31,7 @@ from ticket_board.turns import (
 MIN_SUPPORT = 5
 MIN_COMPARE = 3
 DEFAULT_ALIVE_WITHIN_MIN = 90
-APPLY_MSG = "tickets route --apply is unimplemented (T-315: shadow only; nothing is assigned)"
+APPLY_MSG = "atm route --apply is unimplemented (T-315: shadow only; nothing is assigned)"
 
 _ACTIVITY_KINDS = frozenset((
     "run_start", "run_end", "claim", "update", "review", "done", "msg", "merge",

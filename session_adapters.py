@@ -846,7 +846,7 @@ def register_persistent(board, seat, harness, at_iso):
 
 
 def wake_payload(fmt_msg, message):
-    return "tickets board message -- %s\n(see `tickets inbox` for the rest)" % fmt_msg(message)
+    return "atm board message -- %s\n(see `atm inbox` for the rest)" % fmt_msg(message)
 
 
 def _claude_user_envelope(text, msg_id=""):

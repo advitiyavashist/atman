@@ -29,7 +29,7 @@ stops — do not restart from chat history.
 ![Atman dashboard showing an objective, agent team, dependency-aware work, and review queue](landing/assets/t732-dashboard-1440.png)
 
 The dashboard above is a checked-in product capture. Open it locally with
-`tickets ui`. It is not a public hosted demo.
+`atm ui`. It is not a public hosted demo.
 
 ## Preview status
 
@@ -139,9 +139,9 @@ atm msg "alice is online"
 atm next
 git worktree add .worktrees/alice -b alice
 cd .worktrees/alice
-tickets update T-001 "working on the data model"
-tickets review T-001 --notes "paths changed, tests run, decisions"
-tickets ui
+atm update T-001 "working on the data model"
+atm review T-001 --notes "paths changed, tests run, decisions"
+atm ui
 ```
 
 `install.sh` refuses to overwrite an existing `~/.local/bin/tickets` that
@@ -152,8 +152,8 @@ isolated instead, or `--force` to replace it anyway.
 `quickstart` creates a local board, registers the first agent, and adds three
 sample tasks in a real dependency chain. It is safe to run twice. Run it inside
 an existing git repo — `git init` first if `your-project` is not one yet — so
-board-resolution reports the worktree and `tickets next` prints the worktree
-RULE. Remove the samples with `tickets quickstart --remove`.
+board-resolution reports the worktree and `atm next` prints the worktree
+RULE. Remove the samples with `atm quickstart --remove`.
 
 **Production** — pin a reviewed commit so every agent runs the same bytes
 (T-223 release mechanism; see `scripts/install_live.py`):
@@ -165,7 +165,7 @@ cd ~/tickets
 # that execs ~/.claude/tools/tickets-releases/<sha>/tickets.py
 ```
 
-Check what is actually running: `tickets self` (script path, PATH entry, release
+Check what is actually running: `atm self` (script path, PATH entry, release
 status). `tickets --version` prints the pinned commit or flags drift.
 
 **macOS (Homebrew)** — same pinned-release mechanism, packaged as a formula
@@ -173,7 +173,7 @@ status). `tickets --version` prints the pinned commit or flags drift.
 
 ```sh
 brew install advitiyavashist/homebrew-tap/atman
-atm --version   # verified release, same check as tickets self
+atm --version   # verified release, same check as atm self
 atm join <name> --roles backend
 atm ui
 ```
@@ -184,18 +184,18 @@ atm ui
 Any first seat: hook Claude Code, Codex, Cursor, Grok Bot, or a custom
 harness (see `install.sh` and [Bring your own agent](docs/byoa.md)).
 
-`tickets ui` prints the local address for the read-only dashboard. For the full
+`atm ui` prints the local address for the read-only dashboard. For the full
 captured session, read [A first session](docs/first-session.md).
 
 ## Team intro
 
 Same loop the dashboard onboarding strip names:
 
-1. Probe integrations: `tickets harness available` (missing is a row).
-2. Plan with `tickets plan` so JSON `deps` become real `--after` edges
-   (`tickets graph` to inspect).
+1. Probe integrations: `atm harness available` (missing is a row).
+2. Plan with `atm plan` so JSON `deps` become real `--after` edges
+   (`atm graph` to inspect).
 3. Unattended persist to a reviewable SHA on the agent's branch
-   (`tickets review`).
+   (`atm review`).
 4. Human review is the gate. Merge is not silent auto-promote.
 
 Start with [Agent onboarding](docs/onboarding/README.md). Community PR path
@@ -208,16 +208,16 @@ working directory, and an identity; the harness reports through `tickets`.
 
 ```sh
 export TICKET_AGENT=claude-opus
-tickets join "$TICKET_AGENT" --roles backend --cost high --model opus
+atm join "$TICKET_AGENT" --roles backend --cost high --model opus
 # omit --harness: prints harness=claude (default) — a label, not a process
-tickets master
-tickets inbox
-tickets next
+atm master
+atm inbox
+atm next
 ```
 
 `join` without `--harness` prints `harness=claude (default)`. That is a field on
-the agent record. Claude is not invoked until `tickets watch` or
-`tickets spawn`. Dry BYOA is `join` then `tickets next` in your own shell; pass
+the agent record. Claude is not invoked until `atm watch` or
+`atm spawn`. Dry BYOA is `join` then `atm next` in your own shell; pass
 `--harness custom --cmd '...'` when a watcher should run your harness
 ([docs/byoa.md](docs/byoa.md)).
 
@@ -226,12 +226,12 @@ The built-in runner names are `claude`, `codex`, `cursor`, `cursor+claude`, and
 installed local model. A custom runner can be any command:
 
 ```sh
-tickets join qwen --roles docs \
+atm join qwen --roles docs \
   --harness custom \
   --cmd 'ollama run qwen3:8b < {prompt_file}'
 
-tickets harness check qwen
-tickets spawn qwen --every 3600
+atm harness check qwen
+atm spawn qwen --every 3600
 ```
 
 Choose message behavior separately with `--wake-mode task-only|continuous|scheduled`.
@@ -240,7 +240,7 @@ Workers default to `task-only`; the current master and CoS default to
 mention. An offline continuous adapter keeps the wake queued and visible until
 its local command or remote session bridge reconnects.
 
-Start with `tickets connect` for tool-specific onboarding. See
+Start with `atm connect` for tool-specific onboarding. See
 [Bring your own agent](docs/byoa.md) for the complete runner contract and
 [Master onboarding](docs/onboarding/master-howto.md) for the coordinating seat.
 This Mac (absolute folders, Cursor only):
@@ -249,28 +249,28 @@ This Mac (absolute folders, Cursor only):
 ## The worker loop
 
 ```sh
-tickets master                    # objective, sprint, workforce, reviews, health
-tickets inbox                     # direct messages and board mentions
-tickets next                      # claim one ready task atomically
-tickets update T-012 "..."        # progress and blockers
-tickets msg "question" --to boss --re T-012
-tickets sync                      # bring main into this agent's branch
-tickets review T-012 --notes "paths, tests, decisions"
+atm master                    # objective, sprint, workforce, reviews, health
+atm inbox                     # direct messages and board mentions
+atm next                      # claim one ready task atomically
+atm update T-012 "..."        # progress and blockers
+atm msg "question" --to boss --re T-012
+atm sync                      # bring main into this agent's branch
+atm review T-012 --notes "paths, tests, decisions"
 ```
 
 Tasks move through `TO DO → IN PROGRESS → IN REVIEW → DONE`, or `BLOCKED`.
-Unfinished dependencies remain invisible to `tickets next`, and parallel claims
+Unfinished dependencies remain invisible to `atm next`, and parallel claims
 use an exclusive lock so two agents cannot receive the same task.
 
 ## The master loop
 
 ```sh
-tickets objective "Ship V1 with the local acceptance gate green"
-tickets master take
-tickets master                    # review queue and health, with recovery actions
-tickets route --claim             # assign by role, capability, cost, and model
-tickets merge                     # test and integrate submitted branches
-tickets objective --done "evidence"
+atm objective "Ship V1 with the local acceptance gate green"
+atm master take
+atm master                    # review queue and health, with recovery actions
+atm route --claim             # assign by role, capability, cost, and model
+atm merge                     # test and integrate submitted branches
+atm objective --done "evidence"
 ```
 
 The master role is replaceable. Its objective, decisions, workforce, health,
@@ -280,7 +280,7 @@ session ends.
 For an unattended coordinator:
 
 ```sh
-tickets drive "Ship V1" --as boss --heartbeat 30 --tool cursor+claude
+atm drive "Ship V1" --as boss --heartbeat 30 --tool cursor+claude
 ```
 
 The heartbeat stops when the objective reaches a terminal state. The master
@@ -291,12 +291,12 @@ endless model turn open.
 
 JSON `deps` become real `--after` edges. A plan item is **ready** only when it
 carries real `cause`, `change`, and `proof` (or `"sounded": true` with those
-fields). Items without them stay in capture until `tickets sound T-00N`.
+fields). Items without them stay in capture until `atm sound T-00N`.
 
 ```sh
-tickets epic create "Auth" -b "..."
-tickets sprint create "Ship auth" --activate
-tickets plan <<'EOF'
+atm epic create "Auth" -b "..."
+atm sprint create "Ship auth" --activate
+atm plan <<'EOF'
 {"epic":"E-001","sprint":"S-01","tickets":[
  {"key":"A","title":"Task A: write hello.txt","role":"backend",
   "cause":"B needs hello.txt on disk","change":"Write hello.txt","proof":"hello.txt exists"},
@@ -306,9 +306,9 @@ tickets plan <<'EOF'
 EOF
 ```
 
-After `tickets done` on A, B is offered by `tickets next` — no extra sound step
-when the snippet carries fields. Use `tickets map` for sprint and epic progress,
-`tickets graph` for dependency diagnosis, and `tickets who` for live ownership
+After `atm done` on A, B is offered by `atm next` — no extra sound step
+when the snippet carries fields. Use `atm map` for sprint and epic progress,
+`atm graph` for dependency diagnosis, and `atm who` for live ownership
 and worktrees.
 
 ## Inspectable by design
@@ -327,7 +327,7 @@ Coordination lives under the project’s `.tickets/` directory:
 Durable facts live separately under tracked `knowledge/`. Closing or clearing a
 ticket does not erase its decisions, evidence, or runbooks.
 
-`tickets init` ignores the live board by default. Standing briefings can be
+`atm init` ignores the live board by default. Standing briefings can be
 tracked when the team needs them to survive clones; see the
 [handoff contract](docs/handoff-contract.md) and
 [board resolution](docs/board-resolution.md).

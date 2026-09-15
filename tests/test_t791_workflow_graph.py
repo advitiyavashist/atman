@@ -1,6 +1,6 @@
-"""T-791: workflow dependency graph in tickets ui — edges, not a title dump.
+"""T-791: workflow dependency graph in atm ui — edges, not a title dump.
 
-tickets graph / tickets map already exist. The command board must show the
+atm graph / atm map already exist. The command board must show the
 same --after waiting-on edges (ticket ids + status), not a list of titles.
 Do not remake T-780/T-778/T-781. Throwaway boards only.
 """
@@ -26,8 +26,8 @@ def test_ui_html_has_graph_view_not_title_dump():
     assert 'data-work-view="graph"' in ui
     assert "function renderGraph" in ui
     assert "waiting on " in ui
-    assert "tickets graph" in ui
-    assert "tickets map" in ui
+    assert "atm graph" in ui
+    assert "atm map" in ui
     assert 'id="open"' not in ui
     tabs = ui[ui.index('<nav class="tabs"'):ui.index("</nav>", ui.index('<nav class="tabs"'))]
     assert all(label in tabs for label in [">Objective<", ">Team<", ">Work<", ">Intervene<"])
