@@ -1,0 +1,22 @@
+{
+  "id": "T-005",
+  "title": "Needs a verdict",
+  "body": "Submitted for review. No structured ACCEPT.",
+  "status": "review",
+  "role": "backend",
+  "owner": "alice",
+  "deps": [],
+  "lane": "ready",
+  "commit": "alice@8cc7f39",
+  "review_events": [],
+  "priority": 2,
+  "created": "2026-09-15T00:30:00Z",
+  "updated": "2026-09-15T00:36:00Z",
+  "notes": [
+    {
+      "by": "alice",
+      "at": "2026-09-15T00:36:00Z",
+      "text": "REVIEW: alice@8cc7f39 -- paths: tickets.py; I finished the work"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "T-004",
+  "title": "Unassigned next",
+  "body": "Reserved, no task posted, not claimed.",
+  "status": "open",
+  "role": "backend",
+  "owner": "",
+  "deps": [],
+  "lane": "ready",
+  "reserved_for": "alice",
+  "priority": 2,
+  "created": "2026-09-15T00:30:00Z",
+  "updated": "2026-09-15T00:30:00Z",
+  "notes": [{ "by": "boss", "at": "2026-09-15T00:31:00Z", "text": "reserve: for alice" }]
+}

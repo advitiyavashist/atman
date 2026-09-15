@@ -1,0 +1,14 @@
+{
+  "name": "bob",
+  "owner": "bob",
+  "harness": "claude",
+  "auth": "expired",
+  "auth_detail": "claude binary found; token expired",
+  "auth_login_cmd": "claude login",
+  "adapter_online": false,
+  "adapter_native_online": false,
+  "reachable": false,
+  "binary_found": true,
+  "ticket": "",
+  "roles": ["docs"]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "T-001",
+  "title": "Ready work",
+  "body": "Claimed in-progress ticket.",
+  "status": "claimed",
+  "role": "backend",
+  "owner": "alice",
+  "deps": [],
+  "lane": "ready",
+  "priority": 2,
+  "created": "2026-09-15T00:30:00Z",
+  "updated": "2026-09-15T00:35:00Z",
+  "claimed_at": "2026-09-15T00:34:00Z",
+  "notes": []
+}
