@@ -1,3 +1,5 @@
+> **Historical.** This describes the rehearsal kit as it stood before the recorded take. The completed take uses Codex and Cursor workers, not a Claude planner; see `docs/assets/demo/captions.md` for what was actually recorded and its evidence.
+
 # Atman demo rehearsal (T-924)
 
 This replaces the stale T-940 command recipe for the next recording. It is a

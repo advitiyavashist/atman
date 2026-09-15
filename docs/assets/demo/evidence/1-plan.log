@@ -1,0 +1,278 @@
+OpenAI Codex v0.154.0-alpha.6.2
+--------
+workdir: <RUN>/repo/.worktrees/ceo
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 01a0a578-f174-7e61-8080-e6b01d2f88b4
+--------
+user
+This is a throwaway demonstration. Perform real work; do not simulate output or manufacture evidence. Use atm commands yourself. Stay on this board and your existing worktree. Do not edit .tickets files. You are the reviewer/planner. Run:
+atm objective --set 'Ship a regional sales summary' --exit 'python3 -m saleskit.cli report data/sales.csv prints regional totals'
+atm plan < <RUN>/plan.json
+atm reserve T-001 --for codex-worker
+atm reserve T-002 --for cursor-worker
+Stop after the two tickets exist and are reserved. Do not wait for review and do not plan anything else.
+codex
+I’ll run the objective, plan, and reservation commands in this worktree, then stop.
+exec
+/bin/zsh -lc "atm objective --set 'Ship a regional sales summary' --exit 'python3 -m saleskit.cli report data/sales.csv prints regional totals'" in <RUN>/repo/.worktrees/ceo
+ succeeded in 28ms:
+objective set
+
+exec
+/bin/zsh -lc 'atm plan < <RUN>/plan.json' in <RUN>/repo/.worktrees/ceo
+ succeeded in 23ms:
+created T-001  Summarize regional sales  lane=ready
+created T-002  Print a regional sales report  lane=ready
+
+exec
+/bin/zsh -lc 'atm reserve T-001 --for codex-worker' in <RUN>/repo/.worktrees/ceo
+ exited 1 in 13ms:
+tickets reserve --for is master/planner/optimizer only (anyone may --drop)
+
+exec
+/bin/zsh -lc 'atm reserve T-002 --for cursor-worker' in <RUN>/repo/.worktrees/ceo
+ exited 1 in 5ms:
+exec
+/bin/zsh -lc 'atm --help' in <RUN>/repo/.worktrees/ceo
+ succeeded in 31ms:
+usage: atm [-h] [--version]
+           {create,assign,reserve,hold,epic,sprint,master,join,retire,harness,route,connect,self,pending,remote,prompt,stop-hook,objective,drive,watch,hook-run,codex-hook,boot,spawn,ui,quickstart,guide,brief,util,dash,hooks,here,who,msg,inbox,trajectories,traj,turns,review,accept,reject,sync,merge,limit,limits,status,update,dep,graph,map,plan,capture,sound,dispatch,pr-sync,schedule,plan-status,discard,retro,list,board,show,next,claim,done,repin,block,note,reopen,clear,board-backup,board-restore,where,context,knowledge,kb,mine,init,identity,role,handover,pulse}
+           ...
+
+A tiny file-based ticket board for coordinating AI coding agents.
+
+positional arguments:
+  {create,assign,reserve,hold,epic,sprint,master,join,retire,harness,route,connect,self,pending,remote,prompt,stop-hook,objective,drive,watch,hook-run,codex-hook,boot,spawn,ui,quickstart,guide,brief,util,dash,hooks,here,who,msg,inbox,trajectories,traj,turns,review,accept,reject,sync,merge,limit,limits,status,update,dep,graph,map,plan,capture,sound,dispatch,pr-sync,schedule,plan-status,discard,retro,list,board,show,next,claim,done,repin,block,note,reopen,clear,board-backup,board-restore,where,context,knowledge,kb,mine,init,identity,role,handover,pulse}
+    create              create one ticket
+    assign              modify a ticket: epic, sprint, role, owner, needs,
+                        priority
+    reserve             reserve a ticket for an agent without claiming it
+    hold                park a ticket so next/route will not claim it (tester-
+                        week HOLD)
+    epic                epics: create | list | show | done
+    sprint              sprints: create | start | add | show | close | list
+    master              master node: brief | take | release | log | init
+    join                register this agent: name, roles, capabilities, cost
+    retire              remove a seat from the board (inverse of join)
+    harness             BYOA: check or list the harness that actually runs
+                        each agent
+    route               master: suggest an owner for every open ticket by
+                        model/roles/capabilities/cost
+    connect             Atman product flow: CEO connect, or worker loop
+    self                print which tickets.py is live (script path and
+                        install kind)
+    pending             exit 0 if there is work for the agent (messages, held
+                        or ready ticket)
+    remote              fenced bridge protocol: register | heartbeat | next |
+                        start | end | retry | release | status
+    prompt              print the standard worker (or --master) prompt for a
+                        headless run
+    stop-hook           Claude Code Stop hook: block the stop while board work
+                        remains
+    objective           set/show/close the standing objective the master
+                        drives toward
+    drive               set the objective and spawn the master seat with a
+                        heartbeat
+    watch               poll the board and launch a worker when there is work
+                        for the agent
+    hook-run            (hook body) run one event under a baked agent identity
+    codex-hook          (hook body) Codex SessionStart/UserPromptSubmit board
+                        context
+    boot                every startup step: join, hooks, check-in, briefing
+                        (idempotent)
+    spawn               start a persistent worker: register, worktree,
+                        detached watcher (model per agent)
+    ui                  local command board: http://localhost:8765 (auto-
+                        refresh + composer)
+    quickstart          zero to a first ticket claimed by an agent, in one
+                        command
+    guide               print the startup guide for claude / codex / cursor
+    brief               give an agent, role, or ticket context (shown on
+                        claim, in prompt, in boot)
+    util                per-agent throughput, cycle time, load and sprint burn
+    dash                master dashboard, refreshing in place (Ctrl-C to
+                        leave)
+    hooks               wire a tool to the board: claude | cursor | codex |
+                        agy | gemini | devin | grok | remote
+    here                check in: record my worktree, branch and ticket
+    who                 where every agent is working
+    msg                 post to the board or a seat thread
+    inbox               unread messages for me
+    trajectories (traj)
+                        the team trajectory log: query | export | backfill
+    turns               watch-run turns per ticket (T-312); --json is frozen
+                        for the optimizer
+    review              submit finished work for the master to review + merge
+    accept              record a structured accept of the exact submitted SHA
+    reject              record a structured reject of the exact submitted SHA
+    sync                agent: merge main into my branch now (do this before
+                        review)
+    merge               master: integrate pinned review SHAs -> test -> FF
+                        main -> close by ancestry
+    limit               record that an agent hit a usage limit (or --clear)
+    limits              who is limited: records, silence, and per-agent live
+                        state
+    status              set status: todo | in-progress | review | blocked |
+                        done
+    update              progress update on a ticket you hold (alias of note)
+    dep                 rewire an existing ticket's dependencies
+    graph               show the dependency graph with statuses
+    map                 sprint -> epic -> tickets, with deps; the whole board
+    plan                bulk-create tickets from JSON on stdin (ready only
+                        with cause/change/proof; else capture)
+    capture             capture a thought as lane=capture (not claimable until
+                        tickets sound)
+    sound               turn a capture into an implementable ticket
+                        (cause/change/proof/deps)
+    dispatch            CoS: reserve one ready ticket for one seat; spawn if
+                        needed
+    pr-sync             IN REVIEW + PR: merged+ancestor → ready to close (does
+                        not tickets done)
+    schedule            cron recurring wake for a named seat (persist poke; no
+                        product spawn)
+    plan-status         capture / ready / waiting-on-merge / blocked-HOLD-
+                        discarded
+    discard             abandon a ticket (lane=discarded, not done)
+    retro               from done+discarded, file a capture proposing a
+                        brief/skill edit
+    list                list tickets
+    board               compact board summary (used by the hook)
+    show                show one ticket in full
+    next                atomically claim the next available ticket
+    claim               atomically claim a specific ticket
+    done                mark a ticket done
+    repin               correct a review pin to name the repo the artifact is
+                        in
+    block               mark a ticket blocked
+    note                add a note to a ticket
+    reopen              release a claimed ticket back to open
+    clear               FIXTURE ONLY: delete T-*.json on a .fixture-board
+                        (never live)
+    board-backup        backup tickets/roles/coordination (fixture board by
+                        default)
+    board-restore       restore a backup into a fixture destination board
+    where               print the board directory
+    context             print the shared briefing file
+    knowledge (kb)      query or author the separate repo-backed knowledge
+                        graph
+    mine                list tickets claimed by this agent
+    init                install the board protocol into this project
+    identity            persist and show this agent's unique identity
+    role                durable role: list, show, take (explicit expected
+                        holder)
+    handover            save recovery context and publish a ticket update
+    pulse               show heartbeat and progress-update deadlines
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+
+tickets (uninstalled checkout; no pinned release)
+
+exec
+/bin/zsh -lc 'atm identity' in <RUN>/repo/.worktrees/ceo
+ exited 1 in 8ms:
+exec
+/bin/zsh -lc 'atm join --help' in <RUN>/repo/.worktrees/ceo
+ succeeded in 0ms:
+usage: atm join [-h] [--roles ROLES] [--can CAN] [--cost {low,medium,high}]
+                [--harness HARNESS] [--tool TOOL] [--cmd CMD_TEMPLATE]
+                [--model MODEL] [--best-for BEST_FOR]
+                [--wake-mode {task-only,continuous,scheduled}]
+                [--lifecycle {persistent,ephemeral}]
+                [--knowledge-dir KNOWLEDGE_DIR] [--persistent] [--alias ALIAS]
+                [--transfer]
+                [name]
+
+positional arguments:
+  name
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --roles ROLES         backend,console
+  --can CAN             docker,browser,own-machine,gpu
+  --cost {low,medium,high}
+  --harness HARNESS     label for watch/spawn, not invoked at join: claude |
+                        codex | cursor | cursor+claude | remote | custom |
+                        custom:<cmd> | <executable>. omit prints
+                        harness=claude (default) and does not start Claude
+  --tool TOOL           original spelling of --harness
+  --cmd CMD_TEMPLATE    shell template for a custom harness; placeholders
+                        {prompt_file} {cwd} {agent}
+  --model MODEL         e.g. opus, sonnet, gpt-5, grok-4
+  --best-for BEST_FOR   free text; keywords are matched against ticket titles
+                        by `route`
+  --wake-mode {task-only,continuous,scheduled}
+                        durable DM policy: continuous wakes on directed
+                        messages; task-only needs --task; scheduled uses
+                        heartbeat/task gates
+  --lifecycle {persistent,ephemeral}
+                        persistent seats stay known after exit; ephemeral
+                        seats are one-shot and not reachable after the session
+                        ends
+  --knowledge-dir KNOWLEDGE_DIR
+                        canonical repo-backed knowledge/ directory inherited
+                        by this seat
+  --persistent          lifecycle=persistent and register this interactive
+                        session's native wake endpoint (socket/queue/resume)
+  --alias ALIAS         stable role alias (ceo or cos) pointing at this unique
+                        runtime identity
+  --transfer            audited handover when this name's
+                        provider/session/runner identity changes; strips auth,
+                        endpoint, session, ticket pointer, and limits; keeps
+                        message history
+
+exec
+/bin/zsh -lc 'atm who' in <RUN>/repo/.worktrees/ceo
+ succeeded in 83ms:
+agent          state     loop-seen branch@sha                     ticket               worktree
+cursor-worker  unknown ? 1m ago   cursor-worker-work@2d3a2f2     -                    ~/.atman-ops/demo-runs/atman-demo-2m7lr6hm/repo/.worktrees/cursor-worker
+               no Claude or Codex transcript for ~/.atman-ops/demo-runs/atman-demo-2m7lr6hm/repo/.worktrees/cursor-
+               "joined (cursor)"
+               lifecycle=ephemeral provider=cursor session=- reachable=no
+codex-worker   unknown ? 1m ago   codex-worker-work@2d3a2f2      -                    ~/.atman-ops/demo-runs/atman-demo-2m7lr6hm/repo/.worktrees/codex-worker
+               no Claude or Codex transcript for ~/.atman-ops/demo-runs/atman-demo-2m7lr6hm/repo/.worktrees/codex-w
+               "joined (codex)"
+               lifecycle=ephemeral provider=codex session=- reachable=no
+ceo            working   1m ago   ceo-work@2d3a2f2               -                    ~/.atman-ops/demo-runs/atman-demo-2m7lr6hm/repo/.worktrees/ceo
+               rollout active 0s ago (no task_complete yet)
+               "joined (claude)"
+               lifecycle=persistent provider=claude session=- reachable=no
+
+state is read from the session's own transcript, not from loop-seen.  ! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- go read the log
+
+exec
+/bin/zsh -lc 'printenv TICKET_AGENT' in <RUN>/repo/.worktrees/ceo
+ exited 1 in 0ms:
+codex
+Both tickets were created. The reservation commands failed because this shell has no agent identity set. I’ll retry using the existing `ceo` identity for this worktree.
+exec
+/bin/zsh -lc 'TICKET_AGENT=ceo atm reserve T-001 --for codex-worker' in <RUN>/repo/.worktrees/ceo
+ succeeded in 12ms:
+T-001: reserved for codex-worker
+
+exec
+/bin/zsh -lc 'TICKET_AGENT=ceo atm reserve T-002 --for cursor-worker' in <RUN>/repo/.worktrees/ceo
+ succeeded in 19ms:
+T-002: reserved for cursor-worker
+
+codex
+Objective and exit condition set. Both tickets created and reserved:
+
+- T-001 → `codex-worker`
+- T-002 → `cursor-worker`
+
+Stopped as requested.
+tokens used
+14,055
+Objective and exit condition set. Both tickets created and reserved:
+
+- T-001 → `codex-worker`
+- T-002 → `cursor-worker`
+
+Stopped as requested.

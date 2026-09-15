@@ -1,3 +1,5 @@
+> **Historical.** This describes the rehearsal kit as it stood before the recorded take. The completed take uses Codex and Cursor workers, not a Claude planner; see `docs/assets/demo/captions.md` for what was actually recorded and its evidence.
+
 # T-924 rehearsal validation — 2026-09-15
 
 Runtime under test: `1e6d595bb7705d319f434659e34ddd60f4b56c66`.
