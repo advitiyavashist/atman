@@ -11145,6 +11145,17 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
     if not rejection and not structured and not (failed and _looks_limited(clean)):
         return
     note = rejection.group(0) if rejection else (_first_match(clean, CLI_LIMIT_STRINGS) or "provider rate_limit_error")
+    if structured and not rejection:
+        for blob in _json_candidates(clean):
+            try:
+                event = json.loads(blob)
+            except ValueError:
+                continue
+            error = event.get("error") if isinstance(event, dict) else None
+            if (isinstance(event, dict) and event.get("type") in ("error", "result") and isinstance(error, dict)
+                    and error.get("type") == "rate_limit_error" and isinstance(error.get("message"), str)):
+                note = error["message"]
+                break
     until = ""
     match = re.search(r"resets?\s+(?:at\s+)?([^\r\n]+)", note, re.I)
     if match:

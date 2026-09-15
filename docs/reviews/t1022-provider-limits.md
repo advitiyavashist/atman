@@ -34,11 +34,14 @@ cannot resurrect the expired hold; a fresh provider rejection can.
 
 ## Validation
 
-`tests/test_t1022_provider_limits.py`: 16 passing targeted cases, including real
+`tests/test_t1022_provider_limits.py`: 17 passing targeted cases, including real
 Claude output at exit 0 and exit 1, reset expiry and midnight rollover, unknown
 reset, explicit clear, ticket history, force suppression, queued mail, Team
 snapshot, fresh-work precedence, stale transcript suppression, and healthy
-telemetry/productive error quotation.
+telemetry/productive error quotation, and reset text inside a structured error.
+
+Existing limit-outcome, watcher-retrigger, liveness, and watcher-poke regressions
+also passed (27 cases).
 
 Run tests with the enclosing worker identity removed from the subprocess
 environment (`TICKET_SEAT`, `TICKET_AGENT`, `TICKET_SESSION_ID`, `CODEX_SESSION_ID`,

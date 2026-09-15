@@ -140,3 +140,11 @@ def test_explicit_clear_releases_unknown_reset(board, monkeypatch):
     assert result.returncode == 0, result.stderr
     assert not record(board).get('limit')
     assert not record(board).get('adapter_failure')
+
+
+def test_structured_error_preserves_provider_reset(board, monkeypatch):
+    _alice_on_docs(board, monkeypatch)
+    cli._watch_note_limit_from_log(str(board), 'alice', json.dumps({
+        'type': 'error', 'error': {'type': 'rate_limit_error',
+                                 'message': 'Quota exhausted; resets 2026-09-16T11:00:00Z'}}), rc=1)
+    assert record(board)['limit']['reset_at'] == '2026-09-16T11:00:00Z'
