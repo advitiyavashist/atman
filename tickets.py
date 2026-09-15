@@ -8566,11 +8566,15 @@ def _should_poke_persist(label):
     mail and wait for a keystroke. A live persist watcher is the autonomous
     path. Remote bridge stays its own transport. Rebound leases belong to
     another live session, so they are not stolen here.
+
+    A REFUSED native delivery is not success (T-985 #146 / T-918). Exact
+    `refused` and `refused (...)` stay watcher-eligible; only
+    delivered-confirmed, held, dropped, and expired suppress persistent poke.
     """
     s = str(label or "")
     if not s or s in ("woken", "deduped", "remote bridge required",
                       "delivered-unconfirmed", "queued-busy", "delivery-unknown",
-                      "delivered-confirmed", "held", "dropped", "expired", "refused"):
+                      "delivered-confirmed", "held", "dropped", "expired"):
         return False
     if s.startswith("stale (rebound"):
         return False
