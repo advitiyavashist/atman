@@ -7,13 +7,15 @@ only, `python3` on a real `tickets.py`, never the PATH shim.
 
 ## Folders (this machine)
 
+Replace `<operator>` with the local home directory name.
+
 ```sh
-TICKETS_PY=/Users/kavana/Downloads/atman/.worktrees/cursor-community-t790/tickets.py
+TICKETS_PY=/Users/<operator>/Downloads/atman/.worktrees/cursor-community-t790/tickets.py
 # After this branch merges, prefer local main:
-# TICKETS_PY=/Users/kavana/Downloads/atman/.worktrees/master-merge/tickets.py
-LIVING_BOARD=/Users/kavana/Downloads/steer/.tickets
-STEER=/Users/kavana/Downloads/steer
-ATMAN=/Users/kavana/Downloads/atman
+# TICKETS_PY=/Users/<operator>/Downloads/atman/.worktrees/master-merge/tickets.py
+LIVING_BOARD=/Users/<operator>/Downloads/steer/.tickets
+STEER=/Users/<operator>/Downloads/steer
+ATMAN=/Users/<operator>/Downloads/atman
 
 t() { python3 "$TICKETS_PY" "$@"; }
 
@@ -38,8 +40,8 @@ Bind the existing board. Do not create a second one.
 
 ```sh
 export TICKET_AGENT=atman-ceo
-export TICKETS_DIR=/Users/kavana/Downloads/steer/.tickets
-cd /Users/kavana/Downloads/atman   # or a dedicated CEO worktree; never steer main
+export TICKETS_DIR=/Users/<operator>/Downloads/steer/.tickets
+cd /Users/<operator>/Downloads/atman   # or a dedicated CEO worktree; never steer main
 
 t harness available
 # Probe every catalog row. Ask which to use. Missing is a row. Do not spawn yet.

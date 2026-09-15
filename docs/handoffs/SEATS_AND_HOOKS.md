@@ -12,9 +12,9 @@ Current activation: Opus has CEO/CTO/master and Sonnet has CoS. Sol's legacy `at
 
 The CLI currently accepts friendly aliases only `ceo` and `cos`; `--alias planner` is unsupported. Address the planner by its full unique ID. Its planner/review roles and persistent continuous native Codex endpoint are registered, and durable `steer.planner` is recorded. Endpoint registration alone is not end-to-end idle-wake acceptance. Sol's generated Codex hooks are pinned to its own transfer worktree, not all Downloads; native transport delivers to the session independently of lifecycle context hooks.
 
-Repos: `/Users/kavana/Downloads/atman` -> `advitiyavashist/atman`; `/Users/kavana/Downloads/steer` -> `advitiyavashist/steer`. Shared board for both: `/Users/kavana/Downloads/steer/.tickets`. Never initialize a second board or edit its JSON. Ticket repo evidence and deliverable origin matter more than folder names.
+Repos: `/Users/<operator>/Downloads/atman` -> `advitiyavashist/atman`; `/Users/<operator>/Downloads/steer` -> `advitiyavashist/steer`. Shared board for both: `/Users/<operator>/Downloads/steer/.tickets`. Never initialize a second board or edit its JSON. Ticket repo evidence and deliverable origin matter more than folder names.
 
-Current CLI: `/Users/kavana/.local/bin/tickets` -> `/Users/kavana/Downloads/atman/.worktrees/atman-runtime-current/tickets.py`, snapshot `3679053`. `atm` rename is T-809 IN REVIEW; use the existing `tickets` or explicit runtime script until its actual install is proven. Update the clean runtime only after approved, tested integration. Never blindly use `tickets merge`: its integration cleanup can delete branches; preserve all foreign branches.
+Current CLI: `/Users/<operator>/.local/bin/tickets` -> `/Users/<operator>/Downloads/atman/.worktrees/atman-runtime-current/tickets.py`, snapshot `3679053`. `atm` rename is T-809 IN REVIEW; use the existing `tickets` or explicit runtime script until its actual install is proven. Update the clean runtime only after approved, tested integration. Never blindly use `tickets merge`: its integration cleanup can delete branches; preserve all foreign branches.
 
 ## Start each Claude seat independently
 
@@ -23,7 +23,7 @@ First create a separate Atman worktree/branch from fetched `origin/main`, for ex
 In each new session's own worktree, substitute its identity and roles:
 
 ```sh
-export TICKETS_DIR=/Users/kavana/Downloads/steer/.tickets
+export TICKETS_DIR=/Users/<operator>/Downloads/steer/.tickets
 export TICKET_AGENT=atman-ceo-opus-0913
 export TICKET_SEAT="$TICKET_AGENT"
 tickets join "$TICKET_AGENT" --roles master,review --can own-machine,network --harness claude --model opus --alias ceo --lifecycle persistent --wake-mode continuous

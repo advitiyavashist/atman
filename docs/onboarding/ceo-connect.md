@@ -38,7 +38,7 @@ tickets self
 Recut after merge to origin/main:
 
 ```sh
-TICKETS_PY=/Users/kavana/Downloads/atman/tickets.py
+TICKETS_PY=/Users/<operator>/Downloads/atman/tickets.py
 cat > ~/.claude/tools/tickets.py <<EOF
 #!/usr/bin/env python3
 import os, sys
@@ -58,9 +58,9 @@ Living Steer board. `atman-ceo` is master. CoS is `cursor`.
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-export TICKETS_DIR=/Users/kavana/Downloads/steer/.tickets
+export TICKETS_DIR=/Users/<operator>/Downloads/steer/.tickets
 export TICKET_AGENT=atman-ceo
-cd /Users/kavana/Downloads/steer
+cd /Users/<operator>/Downloads/steer
 
 tickets self
 tickets connect

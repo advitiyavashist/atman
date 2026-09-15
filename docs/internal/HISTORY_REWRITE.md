@@ -9,7 +9,7 @@ agent got `403` on `gh repo edit --visibility public` (GitHub App token).
 Advitiya must flip it. Receipt: [VISIBILITY_FLIP.md](VISIBILITY_FLIP.md).
 
 Related: tip-only scrub already merged as PR #16 (`0bce0de`, T-362 / T-366).
-That PR did **not** rewrite history. `docs/PUBLIC_PREP.md` is the short
+That PR did **not** rewrite history. `docs/internal/PUBLIC_PREP.md` is the short
 checklist; this file is the evidence and operator runbook.
 
 ## Decision
@@ -278,7 +278,7 @@ test ! -e docs/CROSS_REPO_PINS.md
 ### 4.7 Visibility (separate, owner-only)
 
 Leftover-ref deletion + isolated re-scan completed 2026-09-08. See
-`docs/VISIBILITY_FLIP.md`. `origin/main` is `abfcdae` (1 commit). Remote
+`docs/internal/VISIBILITY_FLIP.md`. `origin/main` is `abfcdae` (1 commit). Remote
 heads are `main` + the two T-522 evidence branches. Tags: none.
 
 The follow-up Cloud Agent ran the owner command and got **403**
@@ -300,7 +300,7 @@ it did **not** force-push `main` again.
 
 ## CLEAN re-scan (orphan isolate)
 
-See section 3 and `docs/VISIBILITY_FLIP.md`. After leftover-ref
+See section 3 and `docs/internal/VISIBILITY_FLIP.md`. After leftover-ref
 deletion, GitHub advertises only `main` + the two T-522 evidence
 branches. Local clones of older workspaces may still contain dirty
 objects until they `fetch --prune` and reset.

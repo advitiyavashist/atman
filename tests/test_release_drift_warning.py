@@ -55,7 +55,7 @@ def test_a_tampered_release_warns_on_an_ordinary_command_and_still_succeeds(sour
     live = tmp_path / "tools/tickets.py"
     installer.install(repo, sha, live, activate=True)
     release = live.parent / "tickets-releases" / sha
-    target = release / "board_backup.py"
+    target = release / "src" / "ticket_board" / "board_backup.py"
     target.chmod(0o644)
     target.write_text("# modified installed dependency")
 
@@ -118,7 +118,7 @@ def test_an_old_format_manifest_without_size_still_detects_drift(source, tmp_pat
     module = _load_release_module(release)
     assert module.release_status() == "tickets commit %s (verified release)" % sha
 
-    target = release / "board_backup.py"
+    target = release / "src" / "ticket_board" / "board_backup.py"
     target.chmod(0o644)
     target.write_text("# modified installed dependency")
     assert "DRIFTED" in module.release_status()
