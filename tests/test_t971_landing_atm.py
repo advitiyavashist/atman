@@ -73,8 +73,8 @@ def test_og_image_stays_the_checked_in_capture_and_hero_has_no_demo_img():
     assert PAGES + CAPTURE in _head()
     assert "../docs/brand/evidence" not in LANDING
     hero = LANDING[LANDING.index('class="hero"') : LANDING.index('id="path"')]
-    assert "<img" not in hero
-    assert "HERO DEMO PLACEHOLDER" in hero
+    assert "../docs/assets/demo/hero.gif" in hero
+    assert "HERO DEMO PLACEHOLDER" not in hero
     path = LANDING_DIR / "assets" / "t971-app-work-1440.png"
     assert path.is_file() and path.stat().st_size > 10_000, path
 

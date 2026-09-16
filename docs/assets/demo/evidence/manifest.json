@@ -1,0 +1,63 @@
+{
+  "assets": {
+    "demo.cast_body": {
+      "events": 31,
+      "sha256": "23527a2bf7aa1e61ba279d9c8d6ccf3bb6fc04fd0b0c23d4b784032dd40f6b8c"
+    },
+    "hero.gif": {
+      "bytes": 750240,
+      "sha256": "be0a24e40ce0836a28d439b7782ccaf8e605519e875db24d8eb36326bf75e1f7"
+    },
+    "poster.png": {
+      "bytes": 6782,
+      "sha256": "5146ead7ed57bbefeb5a6568d69881b02ec68ca43353aa0eabdfb28aa9339d53"
+    }
+  },
+  "claims": {
+    "accepted_commit": "db0849bb7c3928e0123b6007ff6fb8b1a23d352d",
+    "accepted_pr": "https://github.com/advitiyavashist/atman-demo-sales/pull/5",
+    "ancestry_evidence": {
+      "command": "git merge --ff-only db0849bb7c3928e0123b6007ff6fb8b1a23d352d",
+      "independent_object_check": "unavailable: the Cursor commit was local-only and the temporary worktree was deleted",
+      "kind": "provider-tool-trace",
+      "subsequent_commit": "ba286156e85d715815ec90bd18d372bbfde55e8a"
+    },
+    "cursor_commit": "ba286156e85d715815ec90bd18d372bbfde55e8a",
+    "planner": "codex-planner",
+    "reviewer": "codex-reviewer",
+    "reviewer_is_not_worker": true,
+    "worker": "codex-worker"
+  },
+  "published_head": "bac8b4ad1d8af0a0c64f30430e80b04ab5a52b14",
+  "remote_pr_snapshot": "remote-pr.json",
+  "schema": 1,
+  "sources": {
+    "handoff.cursor.jsonl": {
+      "events": 13,
+      "excerpt_sha256": "7ecbb4b0ecb4e211350785d638ca279ca103e937af262f62ba1e9d44bac72209",
+      "source_sha256": "4e0af11faf6ccf71abfe265b3bc562b29a857c7227f3dae09ef335e0bfd238e2"
+    },
+    "plan.codex.jsonl": {
+      "events": 13,
+      "excerpt_sha256": "f4988efc2fa9f40a9f039c8fdd89d9ed1465b5acfeb13603f5fddb13eeb571e3",
+      "source_sha256": "f394238cd167666451250551f2844398ee5586187972c2154c2f5d258bad45dd"
+    },
+    "review.codex.jsonl": {
+      "events": 17,
+      "excerpt_sha256": "1735014e8865018a6b87e478b74a6b2b0d1e085d0331eda204b069f08e3498da",
+      "source_sha256": "490391c0bc9237a535b5ca1eef4e8dc383794aea1f17042bcfca56d40ec20059"
+    },
+    "worker.codex.jsonl": {
+      "events": 32,
+      "excerpt_sha256": "c814b13bd1a390714dba26634b603e79b4190494e98d9bd0a3980e9868a38c98",
+      "source_sha256": "8caee03eb66218ffb21b7fc9ff63adfdc692d8e5df5a93ce9db08571295d7a7f"
+    }
+  },
+  "take": "PR #211 original completed Codex/Cursor take",
+  "transformations": [
+    "cast header command sanitized; body events unchanged",
+    "two narration payloads corrected in bac8b4a; command output unchanged",
+    "GIF rendered with idle-time compression except the uncompressed Cursor handoff beat",
+    "provider receipts selected to user/assistant/tool events and local paths replaced with <RUN>/<HOME>/<TMP>"
+  ]
+}
