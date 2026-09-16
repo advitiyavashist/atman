@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - landing/**
+      - docs/assets/demo/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -25,6 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Copy published demo assets into the Pages artifact
+        run: |
+          mkdir -p landing/assets/demo
+          cp docs/assets/demo/hero.gif landing/assets/demo/hero.gif
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

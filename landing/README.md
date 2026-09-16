@@ -12,19 +12,23 @@ Copy lock (T-1047):
 - **Contact:** GitHub issues. Byline: Built by @abnormal.
 - **CLI name:** `atm` is primary. `tickets` is the compatibility alias,
   once, in Start.
-- **Hero demo:** a placeholder HTML comment only. Do not add a substitute
-  image; wire PR #217 on the next line when it lands.
+- **Hero demo:** `assets/demo/hero.gif` on the page. The file lives at
+  `docs/assets/demo/hero.gif` and is copied into the Pages artifact by
+  `.github/workflows/pages.yml`. Do not commit a second copy under
+  `landing/`.
 
 Do not use jsDelivr, raw GitHub, or `landing/index.html` as the public URL —
 those serve `text/plain`.
 
 ## Captures under `landing/assets/`
 
-Images live next to `index.html` so a deploy that publishes only this
-directory can still load them. The live page does not embed a demo image.
-`t971-app-work-1440.png` remains the `og:image` and the README product
-capture. Never reference `../docs/brand/evidence` from the page. Captures
-are never the live board (`TICKETS_DIR` on a throwaway board).
+Images that are committed live next to `index.html` so a deploy that
+publishes only this directory can still load them. The live hero GIF is
+not committed here: Pages copies `docs/assets/demo/hero.gif` to
+`assets/demo/hero.gif` in the artifact. `t971-app-work-1440.png` remains
+the `og:image` and the README product capture. Never reference
+`../docs/brand/evidence` from the page. Captures are never the live board
+(`TICKETS_DIR` on a throwaway board).
 
 | File | What it is |
 |---|---|
@@ -47,7 +51,8 @@ Then open `/` on the address printed by Python. This is local preview only.
 
 ## Deploy static
 
-GitHub Actions (`.github/workflows/pages.yml`) publishes `landing/` as the
-GitHub Pages root.
+GitHub Actions (`.github/workflows/pages.yml`) copies the published demo
+GIF into `landing/assets/demo/`, then publishes `landing/` as the GitHub
+Pages root.
 
 **No custom domain is registered.** Do not invent one.

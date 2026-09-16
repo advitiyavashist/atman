@@ -69,11 +69,12 @@ def test_one_source_install_creates_sample_then_opens_atm_ui():
         assert "atm next" not in panel and "alice" not in panel
 
 
-def test_og_image_stays_the_checked_in_capture_and_hero_has_no_demo_img():
+def test_og_image_stays_the_checked_in_capture_and_hero_uses_artifact_gif():
     assert PAGES + CAPTURE in _head()
     assert "../docs/brand/evidence" not in LANDING
     hero = LANDING[LANDING.index('class="hero"') : LANDING.index('id="path"')]
-    assert "../docs/assets/demo/hero.gif" in hero
+    assert "assets/demo/hero.gif" in hero
+    assert "../docs/assets/demo/hero.gif" not in LANDING
     assert "HERO DEMO PLACEHOLDER" not in hero
     path = LANDING_DIR / "assets" / "t971-app-work-1440.png"
     assert path.is_file() and path.stat().st_size > 10_000, path
@@ -86,12 +87,22 @@ def test_status_links_the_readme_table_instead_of_duplicating_it():
     assert "brew install" not in LANDING
 
 
+def _copied_into_landing():
+    workflow = (ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
+    dests = set()
+    for _src, dest in re.findall(r"^\s*cp(?:\s+-\S+)*\s+(\S+)\s+(\S+)\s*$", workflow, flags=re.M):
+        if dest.startswith("landing/"):
+            dests.add(dest[len("landing/") :])
+    return dests
+
+
 def test_no_invented_numbers_or_dead_local_references():
     parser = _Refs()
     parser.feed(LANDING)
     assert parser.local, "expected local stylesheet, icon and image references"
+    copied = _copied_into_landing()
     for ref in parser.local:
-        assert (LANDING_DIR / ref).is_file(), ref
+        assert (LANDING_DIR / ref).is_file() or ref in copied, ref
     for banned in ("<dd>0</dd>", "<dd>$0", "roster of", "v1.0", "1.0.0", "brew install"):
         assert banned not in LANDING, banned
     for doc in ("docs/first-session.md", "docs/byoa.md"):

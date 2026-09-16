@@ -1,5 +1,8 @@
 __pycache__/
 *.py[cod]
+
+# Pages copies docs/assets/demo/hero.gif here at deploy time (T-1054)
+landing/assets/demo/
 .venv/
 .venv-*/
 dist/
