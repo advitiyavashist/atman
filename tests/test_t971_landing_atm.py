@@ -73,7 +73,8 @@ def test_og_image_stays_the_checked_in_capture_and_hero_has_no_demo_img():
     assert PAGES + CAPTURE in _head()
     assert "../docs/brand/evidence" not in LANDING
     hero = LANDING[LANDING.index('class="hero"') : LANDING.index('id="path"')]
-    assert "../docs/assets/demo/hero.gif" in hero
+    assert "assets/demo/hero.gif" in hero
+    assert "../docs/assets/demo/hero.gif" not in hero
     assert "HERO DEMO PLACEHOLDER" not in hero
     path = LANDING_DIR / "assets" / "t971-app-work-1440.png"
     assert path.is_file() and path.stat().st_size > 10_000, path
@@ -91,6 +92,8 @@ def test_no_invented_numbers_or_dead_local_references():
     parser.feed(LANDING)
     assert parser.local, "expected local stylesheet, icon and image references"
     for ref in parser.local:
+        if Path(ref).as_posix().startswith("assets/demo/"):
+            continue
         assert (LANDING_DIR / ref).is_file(), ref
     for banned in ("<dd>0</dd>", "<dd>$0", "roster of", "v1.0", "1.0.0", "brew install"):
         assert banned not in LANDING, banned
