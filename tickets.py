@@ -2279,7 +2279,7 @@ def _ticket_lane(t):
 
 
 def _last_handoff(t):
-    notes = t.get("notes") or []
+    notes = _work_view().handoff_notes(t)
     if not notes:
         return ""
     return ((notes[-1].get("text") or "").strip())[:240]
@@ -2477,9 +2477,8 @@ def line(t, tickets=None):
 
 
 def _notes(t):
-    wv = _work_view()
-    return [n for n in (t.get("notes") or [])
-            if not wv.is_live_unverified_gate_note(n.get("text"))]
+    """Successor handoff: accept verdict is current; gate/REVIEW claims are not."""
+    return _work_view().handoff_notes(t)
 
 
 def collect_handoffs(t, tickets):

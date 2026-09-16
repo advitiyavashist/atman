@@ -460,6 +460,60 @@ def drop_unverified_gate_notes(child, pred_id):
     return child
 
 
+def current_accept_event(t):
+    """Current accept bound to review_head, or None. T-1044 handoff source."""
+    if not structured_accept(t):
+        return None
+    head = (t.get("review_head") or "").strip().lower()
+    for ev in reversed(t.get("review_events") or []):
+        if not isinstance(ev, dict) or ev.get("superseded"):
+            continue
+        if (ev.get("kind") or "").strip().lower() != "accept":
+            continue
+        if (ev.get("sha") or "").strip().lower() == head:
+            return ev
+    return None
+
+
+def is_superseded_handoff_text(text, t=None):
+    """Gate notes, and REVIEW claims once a later accept is the current verdict."""
+    text = (text or "").strip()
+    if is_live_unverified_gate_note(text):
+        return True
+    if t is None or not current_accept_event(t):
+        return False
+    low = text.lower()
+    if low.startswith("review:"):
+        return True
+    if "marked done without verification" in low:
+        return True
+    if "closing without a verdict" in low:
+        return True
+    return False
+
+
+def handoff_notes(t):
+    """Notes a successor inherits. Accept verdict is current; gate/REVIEW claims are not."""
+    ev = current_accept_event(t)
+    out = []
+    for n in t.get("notes") or []:
+        if not isinstance(n, dict):
+            continue
+        if is_superseded_handoff_text(n.get("text"), t):
+            continue
+        out.append(n)
+    if ev:
+        notes = (ev.get("notes") or "").strip()
+        if notes and not any((n.get("text") or "").strip() == notes for n in out):
+            out.append({
+                "by": ev.get("by") or "",
+                "at": ev.get("at") or "",
+                "text": notes,
+                "kind": "accept",
+            })
+    return out
+
+
 def successors_waiting_on(tickets, finished_id, released):
     """Children that would be free if ``finished_id`` counted as released."""
     out = []
@@ -939,7 +993,8 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
             dep = by_id.get(d)
             if not dep or d not in done_ids:
                 continue
-            note = _last_note(dep)
+            inherited = handoff_notes(dep)
+            note = inherited[-1] if inherited else {}
             if note:
                 row = _note_view(note)
                 row["from"] = d
