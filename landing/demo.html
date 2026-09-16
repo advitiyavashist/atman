@@ -228,6 +228,11 @@
   .feat>div{background:var(--bg);box-shadow:0 0 0 1px var(--line);padding:20px 22px;display:grid;gap:12px;align-content:start}
   .feat b{font-weight:500;font-size:1.05em}
   .feat p{color:var(--mute);font-size:.88em;max-width:none}
+  .feat>.wide{grid-column:1/-1}
+  .two{display:grid;grid-template-columns:minmax(260px,1.2fr) minmax(240px,1fr);gap:20px;align-items:start}
+  @media (max-width:760px){.two{grid-template-columns:1fr}}
+  .two ul.plain{font-size:.95em;gap:10px}
+  pre.mini .k{color:var(--acc)}pre.mini .t{color:var(--mute)}
   .feat pre.mini{font-size:12px;line-height:1.5;padding:12px 14px}
   .dg{width:100%;max-width:320px;height:auto;display:block}
   .dg line{stroke:var(--mute);stroke-width:1.5}
@@ -428,14 +433,21 @@ T-002  ready      handed 4cfeaf5</pre>
 <section class="slide">
   <p class="eyebrow">What that enables</p>
   <div class="feat">
-    <div class="frag on" data-first>
+    <div class="frag on wide" data-first>
       <b>Interchangeable seats</b>
-      <div class="swap">
-        <span class="seat dead"><i></i><span><b>claude · opus</b><small>usage limit</small></span></span>
-        <span class="arr">T-002 + notes + branch →</span>
-        <span class="seat busy"><i></i><span><b>claude · sonnet</b><small>T-002</small></span></span>
+      <div class="two">
+        <pre class="mini"><span class="c">— new session, next morning, any agent —</span>
+<span class="k">❯</span> continue the auth work
+<span class="t">⏺</span> atm board · objective: Ship auth · T-002 in review · T-003 in flight (cursor)
+<span class="t">⏺</span> atm next · T-006 docs · handoff: uuid keys, soft delete, POST /auth/refresh
+Picking up where sonnet stopped. Nothing to re-explain.</pre>
+        <ul class="plain fix">
+          <li>Open a new session and it is current in one prompt. It reads the board, not your memory.</li>
+          <li>Swap the model. A reopened ticket goes to whichever seat you point at it, with its notes and branch.</li>
+          <li>Lose a seat, keep the work. A limit or a crash reopens the ticket. Nothing to retype.</li>
+        </ul>
       </div>
-      <p>A seat is a lane, not a persona. A reopened ticket carries its notes, branch and messages, and any seat on the board can claim it. Same-provider recovery is tested; cross-provider is not yet verified end to end.</p>
+      <p>A seat is a lane, not a persona. Same-provider recovery is tested; cross-provider is not yet verified end to end.</p>
     </div>
     <div class="frag">
       <b>Persistent plans</b>
