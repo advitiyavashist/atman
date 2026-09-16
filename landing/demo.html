@@ -229,6 +229,13 @@
   .feat b{font-weight:500;font-size:1.05em}
   .feat p{color:var(--mute);font-size:.88em;max-width:none}
   .feat>.wide{grid-column:1/-1}
+  .race{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:760px){.race{grid-template-columns:1fr}}
+  .tbox{background:#090b0f;border:1px solid var(--line);border-radius:8px;display:grid;grid-template-rows:auto 1fr;font:400 13px/1.55 var(--mono);overflow:hidden;height:clamp(240px,34vh,320px)}
+  .tbox .term-head em{margin-left:auto;font-style:normal;color:var(--warn);font-variant-numeric:tabular-nums}
+  .tbox:last-child .term-head em{color:var(--live)}
+  .tbox .term-body{padding:10px 14px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:3px}
+  ul.plain.three{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px 24px;max-width:none;font-size:.92em}
   .two{display:grid;grid-template-columns:minmax(260px,1.2fr) minmax(240px,1fr);gap:20px;align-items:start}
   @media (max-width:760px){.two{grid-template-columns:1fr}}
   .two ul.plain{font-size:.95em;gap:10px}
@@ -430,46 +437,36 @@ T-002  ready      handed 4cfeaf5</pre>
 </section>
 
 <!-- 7 what it enables -->
+<section class="slide" data-scene="compare">
+  <p class="eyebrow">What that enables</p>
+  <h2>Seats are interchangeable.</h2>
+    <div class="race" id="race">
+      <div class="tbox">
+        <div class="term-head"><i></i><i></i><i></i><span>new session · no board</span><em data-clock="a">0:00 · 0 prompts</em></div>
+        <div class="term-body" data-term="a"></div>
+      </div>
+      <div class="tbox">
+        <div class="term-head"><i></i><i></i><i></i><span>new session · atman</span><em data-clock="b">0:00 · 0 prompts</em></div>
+        <div class="term-body" data-term="b"></div>
+      </div>
+    </div>
+  <ul class="plain fix three">
+    <li>A new session is current in one prompt. It reads the board, not your memory.</li>
+    <li>Swap the model. A reopened ticket goes to whichever seat you point at it, with notes and branch.</li>
+    <li>Lose a seat, keep the work. A limit or a crash reopens the ticket. Nothing to retype.</li>
+  </ul>
+</section>
+
+<!-- 7b durable -->
 <section class="slide">
   <p class="eyebrow">What that enables</p>
-  <div class="feat">
-    <div class="frag on wide" data-first>
-      <b>Interchangeable seats</b>
-      <div class="two">
-        <pre class="mini"><span class="c">— new session, next morning, any agent —</span>
-<span class="k">❯</span> continue the auth work
-<span class="t">⏺</span> atm board · Ship auth · T-002 review · T-003 cursor
-<span class="t">⏺</span> atm next · T-006 · handoff: uuid keys, /auth/refresh
-Picking up where sonnet stopped. Nothing to re-explain.</pre>
-        <ul class="plain fix">
-          <li>Open a new session and it is current in one prompt. It reads the board, not your memory.</li>
-          <li>Swap the model. A reopened ticket goes to whichever seat you point at it, with its notes and branch.</li>
-          <li>Lose a seat, keep the work. A limit or a crash reopens the ticket. Nothing to retype.</li>
-        </ul>
-      </div>
-      <p>A seat is a lane, not a persona. Same-provider recovery is tested; cross-provider is not yet verified end to end.</p>
-    </div>
-    <div class="frag">
-      <b>Persistent plans</b>
-      <p>The objective and the dependency graph live in your repo, not in a session. Compaction, a restart or tomorrow morning: the next session reads the plan instead of asking you for it.</p>
-    </div>
-    <div class="frag">
-      <b>Durable knowledge</b>
-      <p>Briefs per role and per seat. What one seat learns is injected into every later wake-up in that lane. Plain files you can read, edit and review, not a hidden memory.</p>
-    </div>
-    <div class="frag">
-      <b>Parallel by default</b>
-      <p>Every ready ticket can be claimed at the same time by a different seat. Claims are atomic, so two seats never do the same work.</p>
-    </div>
-    <div class="frag">
-      <b>Verified handoffs</b>
-      <p>Work comes back as a commit, never a summary. A different seat accepts that exact commit before the dependent ticket opens, and the successor's prompt carries the handoff.</p>
-    </div>
-    <div class="frag">
-      <b>Your model choice, visible</b>
-      <p>Model and cost tier sit on each seat. You put the expensive model where the hard decisions are. Turns and cost per ticket show when measured and stay blank when not.</p>
-    </div>
+  <h2>The plan and the knowledge outlive any session.</h2>
+  <div class="surf">
+    <div class="frag on" data-first><b>Persistent plans</b><p>The objective and the dependency graph live in your repo. After compaction, a restart or a night's sleep, the next session reads the plan instead of asking you for it.</p></div>
+    <div class="frag"><b>Durable knowledge</b><p>Briefs per role and per seat. What one seat learns is injected into every later wake-up in that lane. Plain files you can read and edit, not a hidden memory.</p></div>
+    <div class="frag"><b>Verified handoffs</b><p>Work comes back as a commit, never a summary. A different seat accepts that exact commit before the dependent ticket opens, and the successor's prompt carries the handoff.</p></div>
   </div>
+  <p class="sub">Same-provider recovery is tested. Picking a ticket up across providers works the same way on the board but is not yet verified end to end.</p>
 </section>
 
 <!-- 8 install -->
@@ -492,12 +489,12 @@ cd /path/to/your-project
 
 <div class="nav" aria-label="slide navigation">
   <button data-prev type="button">‹ Back</button>
-  <span class="n"><span id="cur2">1</span> / <span id="tot2">8</span></span>
+  <span class="n"><span id="cur2">1</span> / <span id="tot2">9</span></span>
   <button data-nxt type="button" class="pri">Next ›</button>
 </div>
 <div class="chrome" aria-hidden="true">
   <span class="wordmark" style="font-size:13px;color:var(--mute)">atman</span>
-  <span class="n"><span id="cur">1</span> / <span id="tot">8</span></span>
+  <span class="n"><span id="cur">1</span> / <span id="tot">9</span></span>
 </div>
 
 <script>
@@ -644,6 +641,45 @@ cd /path/to/your-project
     then(function(){if(alive())runSim()});
   }
 
+  /* ---------- compare: new session with and without the board ---------- */
+  var race={root:document.getElementById('race'),gen:0};
+  function raceLine(term,kind,text,hold){
+    var d=document.createElement('div');d.className='ln '+kind;term.appendChild(d);
+    while(term.children.length>9)term.removeChild(term.firstChild);
+    void d.offsetWidth;d.classList.add('on');d.textContent=text;
+    if(kind==='k'&&!RM){var n=0;var iv=setInterval(function(){n=(n+1)%4;d.textContent=text+'.'.repeat(n)},300);return wait(hold||1400).then(function(){clearInterval(iv);d.textContent=text+'…'})}
+    return wait(hold||500);
+  }
+  function runRace(){
+    var g=++race.gen;var alive=function(){return g===race.gen&&race.root.closest('.slide').classList.contains('active')};
+    var ta=race.root.querySelector('[data-term=a]'),tb=race.root.querySelector('[data-term=b]');
+    var ca=race.root.querySelector('[data-clock=a]'),cb=race.root.querySelector('[data-clock=b]');
+    ta.innerHTML='';tb.innerHTML='';
+    var A={t:0,p:0,run:true},B={t:0,p:0,run:true};
+    function fmt(c){return Math.floor(c.t/60)+':'+String(c.t%60).padStart(2,'0')+' · '+c.p+' prompt'+(c.p===1?'':'s')}
+    var iv=setInterval(function(){if(!alive()){clearInterval(iv);return}
+      if(A.run)A.t+=7;if(B.run)B.t+=7;ca.textContent=fmt(A);cb.textContent=fmt(B)},RM?0:120);
+    function seqOn(term,c,steps){var ch=Promise.resolve();steps.forEach(function(st){ch=ch.then(function(){if(!alive())return;if(st[0]==='u')c.p++;return raceLine(term,st[0],st[1],st[2])})});return ch.then(function(){c.run=false})}
+    var left=seqOn(ta,A,[
+      ['u','continue the auth work',600],
+      ['k','Thinking',1600],
+      ['a','I don\'t have context from a previous session. What was decided about the schema, and where is the API branch?',1800],
+      ['u','pasting from yesterday: uuid keys, soft delete, jwt with 15 min expiry, branch is feat/auth… (14 lines)',1400],
+      ['k','Thinking',1600],
+      ['a','Thanks. Is the refresh endpoint POST /auth/refresh or /session/refresh? And was the login form finished?',1600],
+      ['u','/auth/refresh. the form is half done, I think cursor had it open',1200],
+      ['k','Reading the repo',2200],
+      ['a','Found feat/auth. Continuing with the login form.',800]
+    ]);
+    var right=seqOn(tb,B,[
+      ['u','continue the auth work',600],
+      ['t','atm board · Ship auth · T-002 review · T-003 cursor',700],
+      ['t','atm next · T-006 · handoff: uuid keys, /auth/refresh',700],
+      ['a','Picking up where sonnet stopped. Nothing to re-explain.',600]
+    ]);
+    Promise.all([left,right]).then(function(){return wait(3200)}).then(function(){if(alive())runRace()});
+  }
+
   /* ---------- per-slide behaviours ---------- */
   function lightFlow(slide){
     var s=slide.querySelectorAll('.flow span');s.forEach(function(x){x.classList.remove('lit')});
@@ -670,6 +706,7 @@ cd /path/to/your-project
     if(s.hasAttribute('data-count'))countUp(s);
     if(s.getAttribute('data-scene')==='chaos')requestAnimationFrame(runChaos);
     if(s.getAttribute('data-scene')==='sim')requestAnimationFrame(runSim);
+    if(s.getAttribute('data-scene')==='compare')requestAnimationFrame(runRace);
   }
   function show(k,fromEnd){
     var was=i;i=Math.max(0,Math.min(n-1,k));
@@ -698,7 +735,7 @@ cd /path/to/your-project
       case 'ArrowRight':case 'ArrowDown':case ' ':case 'PageDown':case 'Enter':e.preventDefault();next();break;
       case 'ArrowLeft':case 'ArrowUp':case 'PageUp':case 'Backspace':e.preventDefault();prev();break;
       case 'Home':show(0);break;case 'End':show(n-1,true);break;
-      case 'r':case 'R':if(slides[i].getAttribute('data-scene')==='sim')runSim();if(slides[i].getAttribute('data-scene')==='chaos')runChaos();break;
+      case 'r':case 'R':if(slides[i].getAttribute('data-scene')==='sim')runSim();if(slides[i].getAttribute('data-scene')==='chaos')runChaos();if(slides[i].getAttribute('data-scene')==='compare')runRace();break;
     }
   });
   document.getElementById('deck').addEventListener('click',function(e){
