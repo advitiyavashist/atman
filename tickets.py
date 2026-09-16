@@ -6823,18 +6823,41 @@ def print_integration_catalog(rows, note=""):
             _print_catalog_usage_line(r)
 
 
+def _usage_ledger_mod():
+    """T-1040 credentialed usage ledger. Optional so an older checkout still boots."""
+    try:
+        _ensure_src_path()
+        from ticket_board import usage_ledger as ul
+        return ul
+    except ImportError:
+        return None
+
+
+def _refresh_usage_ledger(board):
+    ul = _usage_ledger_mod()
+    if ul is None:
+        return {"updated_at": "", "providers": {}}
+    observed = ul.collect_observed_limits(board, load_agents, load_workforce)
+    return _safe(lambda: ul.refresh_usage_ledger(board, observed=observed),
+                 ul.load_usage_ledger(board)) or {"updated_at": "", "providers": {}}
+
+
 def print_recorded_usage(board):
-    print("USAGE (recorded limits; installed is not quota)")
+    print("USAGE (credentialed read; observed limits are fallback)")
+    ul = _usage_ledger_mod()
+    ledger = _refresh_usage_ledger(board)
+    if ul is not None:
+        print(ul.format_usage_section(ledger))
     any_ = False
     for r in _safe(lambda: load_agents(board), []) or []:
         lim = r.get("limit")
         if lim:
             any_ = True
-            print("  %-14s hit %s ago%s%s" % (
+            print("  observed %-8s hit %s ago%s%s" % (
                 r["owner"], fmt_hours(hours_since(lim["at"])),
                 (", back %s" % lim["until"]) if lim.get("until") else "",
                 (" -- %s" % lim["note"]) if lim.get("note") else ""))
-    if not any_:
+    if not any_ and ul is None:
         print("  none recorded (`atm limit --until` is how a seat says it is out)")
     print("Ask: which of these still have usage, and which should CoS start?")
     print("Installed + no usage = stay on the catalog; CoS does not spawn them.")
@@ -7730,6 +7753,8 @@ def cmd_who(a, board):
                 for r in agents)
     wf = load_workforce(board)
     sa = _session_adapters()
+    ul = _usage_ledger_mod()
+    usage_ledger = _refresh_usage_ledger(board)
     print("%-14s %-9s %-8s %-30s %-20s %s" % ("agent", "state", "loop-seen", "branch@sha", "ticket", "worktree"))
     for r in sorted(agents, key=lambda r: r.get("seen", ""), reverse=True):
         tid = r.get("ticket") or ""
@@ -7761,6 +7786,10 @@ def cmd_who(a, board):
         if lim:
             print("%-14s !! USAGE LIMIT hit %s ago%s" % ("", fmt_hours(hours_since(lim["at"])),
                                                         (", back %s" % lim["until"]) if lim.get("until") else ", reset unknown"))
+        if ul is not None:
+            harness_name = (wf.get(r["owner"], {}) or {}).get("harness") or (
+                wf.get(r["owner"], {}) or {}).get("tool") or "claude"
+            print("%-14s %s" % ("", ul.format_seat_usage_line(harness_name, usage_ledger)))
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
         entry = wf.get(r["owner"], {}) or {}
