@@ -1,6 +1,6 @@
-// Fixture loader. Files under ./data are a verbatim copy of the frozen contract's
-// tests/fixtures/ (docs/contracts/manifest.json is the source of truth for what
-// validates against what), kept byte-identical by tests/ui/fixtures-parity.test.ts.
+// Typed scenario catalog over the frozen contract pack in tests/fixtures/
+// (docs/contracts/manifest.json maps each file to a schema). T-1045 deleted
+// the byte-identical copy that used to live under ./data.
 //
 // SINCE T-184 NO SCREEN READS THESE. Every screen reads the live API through
 // BoardClient; these remain only as canned, contract-exact payloads for the
@@ -18,40 +18,40 @@ import type {
   HookEvent,
 } from "../types";
 
-import overviewPopulated from "./data/overview/populated.json";
-import overviewEmpty from "./data/overview/empty.json";
-import overviewStale from "./data/overview/stale-stream.json";
-import overviewBlockedOffline from "./data/overview/blocked-and-offline.json";
+import overviewPopulated from "../../../tests/fixtures/overview/populated.json";
+import overviewEmpty from "../../../tests/fixtures/overview/empty.json";
+import overviewStale from "../../../tests/fixtures/overview/stale-stream.json";
+import overviewBlockedOffline from "../../../tests/fixtures/overview/blocked-and-offline.json";
 
-import ticketsPopulated from "./data/tickets/list-populated.json";
-import ticketsEmpty from "./data/tickets/list-empty.json";
-import ticketsDependencyBlocked from "./data/tickets/list-dependency-blocked.json";
+import ticketsPopulated from "../../../tests/fixtures/tickets/list-populated.json";
+import ticketsEmpty from "../../../tests/fixtures/tickets/list-empty.json";
+import ticketsDependencyBlocked from "../../../tests/fixtures/tickets/list-dependency-blocked.json";
 
-import ticketDetailClaimed from "./data/tickets/detail-claimed.json";
-import ticketDetailReviewPending from "./data/tickets/detail-review-pending.json";
-import ticketDetailAccepted from "./data/tickets/detail-accepted.json";
-import ticketDetailRejected from "./data/tickets/detail-review-rejected.json";
-import ticketDetailBlocked from "./data/tickets/detail-blocked.json";
-import ticketDetailQueuedAssignment from "./data/tickets/detail-queued-assignment.json";
-import ticketDetailDependencyBlocked from "./data/tickets/detail-dependency-blocked.json";
-import ticketDetailSuperseded from "./data/tickets/detail-superseded-update.json";
+import ticketDetailClaimed from "../../../tests/fixtures/tickets/detail-claimed.json";
+import ticketDetailReviewPending from "../../../tests/fixtures/tickets/detail-review-pending.json";
+import ticketDetailAccepted from "../../../tests/fixtures/tickets/detail-accepted.json";
+import ticketDetailRejected from "../../../tests/fixtures/tickets/detail-review-rejected.json";
+import ticketDetailBlocked from "../../../tests/fixtures/tickets/detail-blocked.json";
+import ticketDetailQueuedAssignment from "../../../tests/fixtures/tickets/detail-queued-assignment.json";
+import ticketDetailDependencyBlocked from "../../../tests/fixtures/tickets/detail-dependency-blocked.json";
+import ticketDetailSuperseded from "../../../tests/fixtures/tickets/detail-superseded-update.json";
 
-import agentsPopulated from "./data/agents/list-populated.json";
-import agentsEmpty from "./data/agents/list-empty.json";
-import agentsHookOnly from "./data/agents/list-hook-only.json";
-import agentsOffline from "./data/agents/list-offline.json";
-import agentsProbeNotAdopted from "./data/agents/list-probe-not-adopted.json";
-import agentsRevoked from "./data/agents/list-revoked.json";
+import agentsPopulated from "../../../tests/fixtures/agents/list-populated.json";
+import agentsEmpty from "../../../tests/fixtures/agents/list-empty.json";
+import agentsHookOnly from "../../../tests/fixtures/agents/list-hook-only.json";
+import agentsOffline from "../../../tests/fixtures/agents/list-offline.json";
+import agentsProbeNotAdopted from "../../../tests/fixtures/agents/list-probe-not-adopted.json";
+import agentsRevoked from "../../../tests/fixtures/agents/list-revoked.json";
 
-import activityPopulated from "./data/activity/populated.json";
-import activityEmpty from "./data/activity/empty.json";
+import activityPopulated from "../../../tests/fixtures/activity/populated.json";
+import activityEmpty from "../../../tests/fixtures/activity/empty.json";
 
-import masterActive from "./data/master/panel-active.json";
-import masterNoEligible from "./data/master/panel-no-eligible-agent.json";
-import masterPaused from "./data/master/panel-paused.json";
-import masterUnheld from "./data/master/panel-unheld.json";
+import masterActive from "../../../tests/fixtures/master/panel-active.json";
+import masterNoEligible from "../../../tests/fixtures/master/panel-no-eligible-agent.json";
+import masterPaused from "../../../tests/fixtures/master/panel-paused.json";
+import masterUnheld from "../../../tests/fixtures/master/panel-unheld.json";
 
-import hookEventStop from "./data/hooks/request-event-stop.json";
+import hookEventStop from "../../../tests/fixtures/hooks/request-event-stop.json";
 
 export interface Scenario<T> {
   key: string;

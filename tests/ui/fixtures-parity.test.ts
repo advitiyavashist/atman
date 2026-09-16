@@ -1,49 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// ui/src/fixtures/data is a copy of the frozen contract's tests/fixtures/
-// (opus-backend/e010-contract@855e15a) so the UI package is self-contained.
-// This test guards against silent drift between the two: if the canonical
-// tests/fixtures/ is present in this checkout (it is, since this branch was
-// cut from the contract commit), every manifest-listed fixture must be
-// byte-for-byte identical, parsed as JSON, to the copy the UI reads.
+// T-1045: tests/fixtures/ is the only contract-fixture tree. The former
+// copies under ui/src/fixtures/data and tests/ui/api/fixtures/data are gone
+// so they cannot drift. Screen tests import the canonical JSON; the API
+// client loader reads the same directory.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
 const canonicalDir = resolve(repoRoot, "tests", "fixtures");
 const uiCopyDir = resolve(repoRoot, "ui", "src", "fixtures", "data");
+const apiCopyDir = resolve(here, "api", "fixtures", "data");
 
-describe("ui fixtures copy stays in sync with tests/fixtures/", () => {
-  const manifestPath = resolve(canonicalDir, "manifest.json");
-  const hasCanonical = existsSync(manifestPath);
+function listJson(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...listJson(full));
+    else if (entry.endsWith(".json")) out.push(full);
+  }
+  return out;
+}
 
-  it.runIf(hasCanonical)("matches every manifest-listed fixture exactly", () => {
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<string, string>;
-    const mismatches: string[] = [];
-    for (const relPath of Object.keys(manifest)) {
-      const canonical = readFileSync(resolve(canonicalDir, relPath), "utf-8");
-      const copyPath = resolve(uiCopyDir, relPath);
-      if (!existsSync(copyPath)) continue; // ui only mirrors the subset it uses
-      const copy = readFileSync(copyPath, "utf-8");
-      if (JSON.parse(canonical) === undefined) continue;
-      if (JSON.stringify(JSON.parse(canonical)) !== JSON.stringify(JSON.parse(copy))) {
-        mismatches.push(relPath);
-      }
-    }
-    expect(mismatches).toEqual([]);
+describe("contract fixtures have one source of truth", () => {
+  it("the canonical fixture pack is present", () => {
+    expect(existsSync(resolve(canonicalDir, "manifest.json"))).toBe(true);
   });
 
-  it("mirrors at least the screens T-183 owns", () => {
-    for (const dir of ["overview", "tickets", "agents", "activity", "master"]) {
-      expect(existsSync(resolve(uiCopyDir, dir))).toBe(true);
-    }
+  it("does not keep a second JSON tree under ui/src/fixtures/data", () => {
+    expect(listJson(uiCopyDir)).toEqual([]);
   });
 
-  it("mirrors the messages domain T-189 owns", () => {
-    for (const dir of ["messages", "errors"]) {
-      expect(existsSync(resolve(uiCopyDir, dir))).toBe(true);
+  it("does not keep a second JSON tree under tests/ui/api/fixtures/data", () => {
+    expect(listJson(apiCopyDir)).toEqual([]);
+  });
+
+  it("keeps the screen domains the UI tests still import", () => {
+    for (const dir of ["overview", "tickets", "agents", "activity", "master", "messages", "errors"]) {
+      expect(existsSync(resolve(canonicalDir, dir))).toBe(true);
     }
   });
 });

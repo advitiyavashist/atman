@@ -4,21 +4,21 @@ import userEvent from "@testing-library/user-event";
 import { Messages } from "../../ui/src/screens/Messages";
 import { boardFetch, renderLive } from "./support/render-live";
 
-import messagesChannelsPopulated from "../../ui/src/fixtures/data/messages/channels-populated.json";
-import messagesMembers from "../../ui/src/fixtures/data/messages/members.json";
-import messagesListPopulated from "../../ui/src/fixtures/data/messages/list-populated.json";
-import messagesListEmpty from "../../ui/src/fixtures/data/messages/list-empty.json";
-import deliveriesAgentBusy from "../../ui/src/fixtures/data/messages/deliveries-agent-busy.json";
-import deliveriesAwaitingApproval from "../../ui/src/fixtures/data/messages/deliveries-awaiting-approval.json";
-import deliveriesDependencyUnmet from "../../ui/src/fixtures/data/messages/deliveries-dependency-unmet.json";
-import responseSend from "../../ui/src/fixtures/data/messages/response-send.json";
-import responseTaskDispatched from "../../ui/src/fixtures/data/messages/response-task-dispatched.json";
-import responseTaskRunnerOffline from "../../ui/src/fixtures/data/messages/response-task-runner-offline.json";
-import responseTaskManualResume from "../../ui/src/fixtures/data/messages/response-task-manual-resume.json";
-import errorNotChannelMember from "../../ui/src/fixtures/data/errors/403-not-channel-member.json";
-import errorMembershipRevoked from "../../ui/src/fixtures/data/errors/403-membership-revoked.json";
-import responseCreateChannel from "../../ui/src/fixtures/data/messages/response-create-channel.json";
-import responseChannelMember from "../../ui/src/fixtures/data/messages/response-channel-member.json";
+import messagesChannelsPopulated from "../fixtures/messages/channels-populated.json";
+import messagesMembers from "../fixtures/messages/members.json";
+import messagesListPopulated from "../fixtures/messages/list-populated.json";
+import messagesListEmpty from "../fixtures/messages/list-empty.json";
+import deliveriesAgentBusy from "../fixtures/messages/deliveries-agent-busy.json";
+import deliveriesAwaitingApproval from "../fixtures/messages/deliveries-awaiting-approval.json";
+import deliveriesDependencyUnmet from "../fixtures/messages/deliveries-dependency-unmet.json";
+import responseSend from "../fixtures/messages/response-send.json";
+import responseTaskDispatched from "../fixtures/messages/response-task-dispatched.json";
+import responseTaskRunnerOffline from "../fixtures/messages/response-task-runner-offline.json";
+import responseTaskManualResume from "../fixtures/messages/response-task-manual-resume.json";
+import errorNotChannelMember from "../fixtures/errors/403-not-channel-member.json";
+import errorMembershipRevoked from "../fixtures/errors/403-membership-revoked.json";
+import responseCreateChannel from "../fixtures/messages/response-create-channel.json";
+import responseChannelMember from "../fixtures/messages/response-channel-member.json";
 
 // msg_00000001 is the message every standalone deliveries-*.json fixture
 // attaches its delivery to (see tests/fixtures/manifest.json) — wrapping it

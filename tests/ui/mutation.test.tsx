@@ -3,8 +3,8 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TicketDetail } from "../../ui/src/screens/TicketDetail";
 import { boardFetch, renderLive } from "./support/render-live";
-import detailReviewPending from "../../ui/src/fixtures/data/tickets/detail-review-pending.json";
-import detailSuperseded from "../../ui/src/fixtures/data/tickets/detail-superseded-update.json";
+import detailReviewPending from "../fixtures/tickets/detail-review-pending.json";
+import detailSuperseded from "../fixtures/tickets/detail-superseded-update.json";
 
 const ticketId = detailReviewPending.ticket.id;
 const pending = detailReviewPending.reviews.find((r) => r.state === "requested")!;

@@ -3,10 +3,10 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Tickets } from "../../ui/src/screens/Tickets";
 import { boardFetch, renderLive } from "./support/render-live";
-import ticketsPopulated from "../../ui/src/fixtures/data/tickets/list-populated.json";
-import ticketsEmpty from "../../ui/src/fixtures/data/tickets/list-empty.json";
-import detailQueued from "../../ui/src/fixtures/data/tickets/detail-queued-assignment.json";
-import detailClaimed from "../../ui/src/fixtures/data/tickets/detail-claimed.json";
+import ticketsPopulated from "../fixtures/tickets/list-populated.json";
+import ticketsEmpty from "../fixtures/tickets/list-empty.json";
+import detailQueued from "../fixtures/tickets/detail-queued-assignment.json";
+import detailClaimed from "../fixtures/tickets/detail-claimed.json";
 
 const listRoutes = { "GET /tickets": ticketsPopulated };
 

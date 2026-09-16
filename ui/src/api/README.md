@@ -85,12 +85,9 @@ job.
 
 ## Fixtures
 
-`tests/ui/api/fixtures/data/` is a **trimmed** copy of the routes this
-client's tests exercise (not the full `tests/fixtures/` set, and not the
-same trimmed set `ui/src/fixtures/` keeps for T-183's screens — that one is
-scoped to screen scenarios, this one to route request/response pairs).
-`tests/ui/api/fixtures-parity.test.ts` fails if any file in the copy drifts
-from the canonical `tests/fixtures/` (compared byte-for-byte, not by parsed
-JSON equality), and fails outright — not skip — if the canonical
-`manifest.json` is missing. Same mechanism as `tests/ui/fixtures-parity.test.ts`
-from T-183.
+Client tests load the canonical `tests/fixtures/` pack through
+`tests/ui/api/support/fixtures.ts` (`loadFixture`). There is no second JSON
+tree under `tests/ui/api/fixtures/data` — T-1045 deleted the trimmed copy
+so it cannot drift. `tests/ui/api/fixtures-parity.test.ts` fails if that
+copy directory grows JSON again, and fails outright if `tests/fixtures/manifest.json`
+is missing.

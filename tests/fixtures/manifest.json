@@ -85,6 +85,7 @@
   "messages/request-task-direct.json": "SendTaskRequest",
   "messages/request-task-via-master.json": "SendTaskRequest",
   "messages/response-channel-member.json": "ChannelMember",
+  "messages/response-create-channel.json": "Channel",
   "messages/response-invitation.json": "CreateInvitationResponse",
   "messages/response-send.json": "SendMessageResponse",
   "messages/response-task-dispatched.json": "SendTaskResponse",

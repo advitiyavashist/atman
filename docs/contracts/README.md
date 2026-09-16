@@ -7,7 +7,7 @@ Frozen interface for epic E-010. Derived from `docs/interface-v1.md` and the
 |---|---|
 | `openapi.yaml` | OpenAPI 3.1. 31 paths, 34 operations, 96 component schemas. |
 | `dependent-notes.md` | Per-ticket handoff for T-179/T-180/T-181/T-183/T-187. |
-| `../../tests/fixtures/` | 124 JSON fixtures, one per screen/state/error. |
+| `../../tests/fixtures/` | 125 JSON fixtures, one per screen/state/error. |
 | `../../tests/fixtures/manifest.json` | Fixture path → component schema name. |
 | `../../tests/test_contracts.py` | The acceptance bar. 138 checks. |
 

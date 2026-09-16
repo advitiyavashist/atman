@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import { Activity } from "../../ui/src/screens/Activity";
 import { boardFetch, renderLive } from "./support/render-live";
-import activityPopulated from "../../ui/src/fixtures/data/activity/populated.json";
+import activityPopulated from "../fixtures/activity/populated.json";
 
 describe("Activity, reading a live board", () => {
   it("shows each event's occurred_at as local wall time, not a raw UTC Z string", async () => {

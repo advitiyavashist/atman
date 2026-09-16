@@ -163,10 +163,9 @@ spawned per file by `board-server.ts`. That is where anything only visible with
 a server on the other end is proved: real cookies and CSRF refusals, a real SSE
 socket that can be cut and resumed, real idempotency keys being spent, real
 409s from two clients racing one claim. The rest of `tests/ui/` mounts screens
-against a mocked fetch, using payloads from `src/fixtures/data/` — which
-`tests/ui/fixtures-parity.test.ts` keeps byte-identical to the canonical
-`tests/fixtures/`, so screen tests assert against shapes the board really
-produces.
+against a mocked fetch, using payloads from the canonical `tests/fixtures/`
+pack. `tests/ui/fixtures-parity.test.ts` fails if a second JSON tree appears
+under `ui/src/fixtures/data` or `tests/ui/api/fixtures/data`.
 
 ## Copy rules enforced here
 

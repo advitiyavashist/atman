@@ -3,8 +3,8 @@ import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../ui/src/App";
 import { TEST_SESSION, boardFetch } from "./support/render-live";
-import overviewPopulated from "../../ui/src/fixtures/data/overview/populated.json";
-import agentsPopulated from "../../ui/src/fixtures/data/agents/list-populated.json";
+import overviewPopulated from "../fixtures/overview/populated.json";
+import agentsPopulated from "../fixtures/agents/list-populated.json";
 
 afterEach(() => {
   cleanup();
