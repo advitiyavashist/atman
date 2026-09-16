@@ -2,11 +2,30 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<p align="center"><b>Run your coding agents as a team, on a board in your own repo — where no task starts until another agent has checked the last one.</b></p>
+<p align="center"><b>One Claude Code session does one task at a time, hits its limit mid-task, and forgets the plan by morning. Atman runs your coding agents as a team, on a board in your own repo — where no task starts until another agent has checked the last one.</b></p>
 
 <p align="center">
   <img src="docs/assets/demo/hero.gif" width="790" alt="Two agents finishing a dependency chain on an Atman board">
 </p>
+
+<p align="center"><a href="https://advitiyavashist.github.io/atman/demo.html">Two-minute deck</a>: one session versus a team, animated. Arrow keys or swipe.</p>
+
+## Why
+
+You give Claude Code a chunk of work. It does the schema, then the API, then
+the UI, on Opus, one at a time. Open a second session to go faster and you
+become the copy-paste bus between them; each one knows half. Somewhere in the
+middle the usage limit lands, and the half-done branch and the reasoning
+behind it sit in a chat window. Meanwhile the Codex and Cursor subscriptions
+you also pay for do nothing.
+
+Atman makes that session the lead. It writes the tickets with real
+dependencies, other seats claim them in parallel, and every decision, handoff
+and message lives on the board in your repo. A ticket that stops mid-way is
+reopened with its notes and branch for the next seat that claims it
+(same-provider recovery is tested; see the [table](#preview-status-and-limitations)).
+You put the expensive model where the hard decisions are and the cheap seat
+gets the README typo. Nothing lives in a chat window.
 
 ## What it does
 
@@ -133,6 +152,8 @@ watcher. A custom harness is any command whose template names
 [GitHub issues](https://github.com/advitiyavashist/atman/issues)
 ·
 [Site](https://advitiyavashist.github.io/atman/)
+·
+[Deck](https://advitiyavashist.github.io/atman/demo.html)
 ·
 [A first session](docs/first-session.md)
 ·
