@@ -32,14 +32,14 @@ timings; T-972 clean-user checks; T-819 copy/CTA and Pages integration.
 
 CEO removed the T-1014 prerequisite at 14:22. Runtime pinned to current main
 `799cc0a6c172b104f86492150880acf44ce5659a` in
-`/private/tmp/atman-t924-runtime-0915`.
+`<RUN>`.
 
 - Recovered `ab3cdb9` pushed before further work; feature branch then rebased.
 - Receipt/permission tests: **9 passed**. The new cases cover a provider's
   zero-exit “success” result containing tool denials and explicit denial events.
 - Fresh dry flow on current main: **passed**, including independent A test,
   exact structured acceptance, B handoff, accepted-code ancestry and CLI test.
-  Dry run: `/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/atman-demo-jk2qvfpr`.
+  Dry run: `<RUN>`.
 - Current-main browser check: **4 asserted frames passed**, A/B at desktop
   and mobile sizes, exact accepted SHA, handoff, synced state and no overflow.
 - Claude and Cursor authentication status reported logged in. No global
@@ -51,7 +51,7 @@ CEO removed the T-1014 prerequisite at 14:22. Runtime pinned to current main
   with `This command requires approval`. Claude exited zero and labeled its
   result success despite completing no board command. Launcher now treats
   those denial receipts as a failed attempt. No bypass was attempted.
-- Real attempt: `/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/atman-demo-8pmzgx4w`.
+- Real attempt: `<RUN>`.
   Original uncut evidence: `logs/ceo-uncut.cast`, `logs/ceo.jsonl`,
   `logs/events.jsonl`; preserve these on disk, including all denials.
 

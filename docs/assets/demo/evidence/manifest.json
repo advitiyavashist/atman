@@ -5,8 +5,8 @@
       "sha256": "23527a2bf7aa1e61ba279d9c8d6ccf3bb6fc04fd0b0c23d4b784032dd40f6b8c"
     },
     "hero.gif": {
-      "bytes": 744883,
-      "sha256": "9641d3d46d6d1a6c555b9a7b4f5654b39613aff6aee12be8347ff84113f8b630"
+      "bytes": 750240,
+      "sha256": "be0a24e40ce0836a28d439b7782ccaf8e605519e875db24d8eb36326bf75e1f7"
     },
     "poster.png": {
       "bytes": 6782,
@@ -57,7 +57,7 @@
   "transformations": [
     "cast header command sanitized; body events unchanged",
     "two narration payloads corrected in bac8b4a; command output unchanged",
-    "GIF rendered with idle-time compression",
+    "GIF rendered with idle-time compression except the uncompressed Cursor handoff beat",
     "provider receipts selected to user/assistant/tool events and local paths replaced with <RUN>/<HOME>/<TMP>"
   ]
 }

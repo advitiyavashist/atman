@@ -23,7 +23,7 @@ def sha256(data):
 
 
 def test_published_media_bytes_and_cast_body_are_preserved():
-    assert sha256((ASSETS / "hero.gif").read_bytes()) == "9641d3d46d6d1a6c555b9a7b4f5654b39613aff6aee12be8347ff84113f8b630"
+    assert sha256((ASSETS / "hero.gif").read_bytes()) == "be0a24e40ce0836a28d439b7782ccaf8e605519e875db24d8eb36326bf75e1f7"
     assert sha256((ASSETS / "poster.png").read_bytes()) == "5146ead7ed57bbefeb5a6568d69881b02ec68ca43353aa0eabdfb28aa9339d53"
     body = (ASSETS / "demo.cast").read_bytes().split(b"\n", 1)[1]
     assert sha256(body) == "23527a2bf7aa1e61ba279d9c8d6ccf3bb6fc04fd0b0c23d4b784032dd40f6b8c"
