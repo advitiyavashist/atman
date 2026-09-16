@@ -72,6 +72,10 @@ atm self                     # which file you are actually running
 `tickets.py` from this checkout. `--force` replaces the existing one on
 purpose. `atm` is the command; `tickets` is a compatibility alias.
 
+Tell us where you got stuck: `atm feedback` prints a local-only, pasteable
+run summary (nothing leaves this machine) for a
+[friction report](https://github.com/advitiyavashist/atman/issues/new?template=friction-report.yml).
+
 In an existing git repo. `atm quickstart --remove` first if sample tickets
 are still T-001 through T-003 — otherwise the commands below hit the wrong
 ids.

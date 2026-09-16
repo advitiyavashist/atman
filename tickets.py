@@ -19213,6 +19213,106 @@ def cmd_self(a, board):
         print("invoked: %s" % sys.argv[0])
 
 
+def _feedback_redact(text, home="", run="", repo_name=""):
+    """Scrub this machine's paths and repo folder name before printing.
+
+    `atm feedback` is meant to be pasted into a public GitHub issue, and the
+    promise is that the board stays on this machine -- so the text is
+    scrubbed here rather than trusting every caller to do it.
+    """
+    out = text
+    if run:
+        out = out.replace(run, "<RUN>")
+    if home:
+        out = out.replace(home, "<HOME>")
+    if repo_name:
+        out = re.sub(r'(?<![\w/.-])%s(?![\w/.-])' % re.escape(repo_name), "<REPO>", out)
+    return out
+
+
+def cmd_feedback(a, board):
+    """Local-only, pasteable board summary for a GitHub issue. Prints to stdout; sends nothing anywhere.
+
+    Reads only existing board data (no new instrumentation) and must work on
+    a board where nothing has succeeded yet -- that is the most informative
+    case, not an error case.
+    """
+    import platform as _platform
+    g = _safe(lambda: git_state(), None)
+    home = os.path.expanduser("~")
+    run = (g or {}).get("top") or ""
+    repo_name = os.path.basename(run.rstrip(os.sep)) if run else ""
+
+    lines = ["Atman feedback summary -- paste into a GitHub issue. Nothing here is sent anywhere.", ""]
+    if g:
+        lines.append("version: %s@%s%s" % (
+            g["branch"], g["sha"], "  (%d uncommitted file(s))" % g["dirty"] if g["dirty"] else ""))
+    else:
+        lines.append("version: %s" % release_status())
+    lines.append("platform: %s" % _platform.platform())
+    lines.append("python: %s" % _platform.python_version())
+    lines.append("board: %s" % (board or "(none)"))
+    lines.append("")
+
+    rows, _note = probe_integration_catalog(home=home)
+    attach_catalog_usage(rows)
+    found = [r["name"] for r in rows if r.get("on_disk")]
+    missing = [r["name"] for r in rows if not r.get("on_disk")]
+    logged_in = [r["name"] for r in rows if r.get("on_disk") and r.get("usage") == "ok"]
+    lines.append("harnesses found on this machine: %s" % (", ".join(found) or "none"))
+    lines.append("harnesses not found: %s" % (", ".join(missing) or "none"))
+    lines.append("harnesses with a usable login: %s" % (
+        ", ".join(logged_in) or "none (unsupported/unknown usage is not the same as exhausted)"))
+    lines.append("")
+
+    tickets = load_all(board)
+    messages = load_messages(board)
+    wv = _work_view()
+    reviewed = sum(1 for t in tickets if wv.went_through_review(t))
+    accepted = sum(1 for t in tickets if wv.review_of(t, None)["verified"])
+    unverified_done = len(wv.unverified_done_ids(tickets, messages))
+    overrides = sum(1 for t in tickets if t.get("release_override"))
+    lines.append("tickets created:          %d" % len(tickets))
+    lines.append("tickets reviewed:         %d" % reviewed)
+    lines.append("tickets accepted:         %d" % accepted)
+    lines.append("tickets done, unverified: %d" % unverified_done)
+    lines.append("release overrides:        %d" % overrides)
+    lines.append("")
+
+    events = load_trajectories(board)
+    reopens = sum(1 for e in events if e.get("kind") == "reopen")
+    lines.append("reopens: %d" % reopens)
+    lines.append("")
+
+    obj = load_objective(board)
+    if obj:
+        state = obj.get("state") or "active"
+        lines.append("objective closed: %s (state: %s) -- %s" % (
+            "no" if state == "active" else "yes", state, (obj.get("text") or "")[:160]))
+    else:
+        lines.append("objective: not set")
+    lines.append("")
+
+    agents = load_agents(board)
+    limited, stalled = [], []
+    for r in agents:
+        owner = r.get("owner") or ""
+        if not owner:
+            continue
+        lv = _safe(lambda r=r: agent_liveness(board, r), {"state": "unknown"})
+        if lv.get("state") == "limited":
+            limited.append(owner)
+        elif lv.get("state") == "dead":
+            stalled.append(owner)
+    lines.append("seats LIMITED (hit a usage limit): %s" % (", ".join(sorted(limited)) or "none"))
+    lines.append("seats with no live response (closest tracked state to \"stalled\"): %s" % (
+        ", ".join(sorted(stalled)) or "none"))
+    lines.append("")
+    lines.append("Redacted before printing: your home directory, this checkout's path, and its folder name.")
+
+    print(_feedback_redact("\n".join(lines), home=home, run=run, repo_name=repo_name))
+
+
 def main():
     status = release_status()
     p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
@@ -19985,6 +20085,12 @@ def main():
 
     c = sub.add_parser("where", help="print the board directory")
     c.set_defaults(fn=cmd_where)
+
+    c = sub.add_parser(
+        "feedback",
+        help="print a local-only, pasteable run summary for a GitHub issue (sends nothing anywhere)",
+    )
+    c.set_defaults(fn=cmd_feedback)
 
     c = sub.add_parser("context", help="print the shared briefing file")
     c.set_defaults(fn=cmd_context)
