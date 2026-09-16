@@ -24,7 +24,8 @@ REASON = "T-002 marked done without verification; accept it or reopen"
 
 def run(tool, board, *args, agent="", stdin=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
-             HOME=str(board.parent.parent / "home"))
+             HOME=str(board.parent.parent / "home"),
+             TICKETS_GC_OPEN_PRS="none")
     e.pop("TICKETS_STOP_HOOK", None)
     e.pop("TICKET_SEAT", None)
     for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
@@ -637,3 +638,33 @@ def test_non_cleanup_automated_successor_stays_gated(tool, board):
         cli.save(str(board), child)
     assert load_ticket(board, "T-003")["status"] == "open"
     assert not any(cli._start_successors(str(board), "T-002"))
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_cleanup_worktree_runs_on_unverified_done(tool, board):
+    """T-946 x T-1031: cleanup_worktree still runs when the parent is unverified."""
+    setup_backend(tool, board)
+    extra = run(tool, board, "create", "cleanup worktree for T-002",
+                "--role", "ops", "--deps", "T-002", agent="alice")
+    assert extra.returncode == 0, extra.stderr + extra.stdout
+    child = load_ticket(board, "T-004")
+    child["kind"] = "automated"
+    child["automated"] = {
+        "action": "cleanup_worktree",
+        "target": "T-002",
+        "worktree": str(board.parent / "missing-wt"),
+        "escalated": False,
+    }
+    save_ticket(board, child)
+    put_in_review(board)
+    done = run(tool, board, "done", "T-002", "--notes", "unverified", "--force",
+               agent="alice")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert "blocked: T-003 -- %s" % REASON in done.stdout
+    assert "cleanup: T-004 [automated:removed]" in done.stdout
+    assert load_ticket(board, "T-003")["status"] == "blocked"
+    cleanup = load_ticket(board, "T-004")
+    assert cleanup["status"] == "done"
+    assert "unverified_block" not in cleanup
+    claim = run(tool, board, "claim", "T-003", agent="bob")
+    assert claim.returncode != 0
