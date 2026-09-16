@@ -2187,6 +2187,29 @@ def _worktree_gc():
         return m
 
 
+def _provider_usage():
+    """T-1040 per-provider usage ledger."""
+    try:
+        from ticket_board import provider_usage as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import provider_usage as m
+        return m
+
+
+def _maybe_refresh_provider_usage(board):
+    """Refresh Claude/Codex usage. Never gated on an idle pane."""
+    if os.environ.get("TICKETS_USAGE_REFRESH") == "0":
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("TICKETS_USAGE_REFRESH") != "1":
+        return
+    pu = _provider_usage()
+    _safe(lambda: pu.refresh_http_providers(board, home=os.path.expanduser("~")), None)
+
+
 def _gc_hooks():
     return _worktree_gc().CliHooks(_GCApi())
 
@@ -6836,8 +6859,12 @@ def print_recorded_usage(board):
                 (" -- %s" % lim["note"]) if lim.get("note") else ""))
     if not any_:
         print("  none recorded (`atm limit --until` is how a seat says it is out)")
+    pu = _provider_usage()
+    for line in pu.format_ledger_lines(board):
+        print(line)
     print("Ask: which of these still have usage, and which should CoS start?")
     print("Installed + no usage = stay on the catalog; CoS does not spawn them.")
+    print("Unknown remaining is UNKNOWN, never available. Cursor/agy stay no data.")
 
 
 def print_ceo_connect(board, seat="ceo"):
@@ -7778,6 +7805,8 @@ def cmd_who(a, board):
             "", life, (ep or {}).get("provider") or harness_name,
             (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
             "yes" if reachable else "no"))
+        usage = _provider_usage().get_reading(board, harness_name)
+        print("%-14s %s" % ("", _provider_usage().format_usage_line(usage).strip()))
     # collisions
     by_branch = {}
     for r in agents:
@@ -11419,6 +11448,14 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
             if current.get("owner") == owner and current.get("status") == "claimed":
                 current.setdefault("notes", []).append({"by": owner, "at": observed, "text": reason})
                 save(board, current)
+    hid = (harness or "").strip().lower() or "unknown"
+    reading = _provider_usage().record_observed_limit(
+        hid, note[:400], observed, reset_at=lim.get("reset_at") or "")
+    tokens = _provider_usage().parse_codex_tokens_used(clean)
+    if tokens is not None:
+        reading["tokens_reported"] = tokens
+        reading["tokens_label"] = "codex tokens used (harness report)"
+    _safe(lambda: _provider_usage().put_reading(board, reading), None)
     return lim
 
 
@@ -15445,6 +15482,9 @@ def cmd_harness_usage(a, board):
     print("")
     print("Unsupported or missing remaining/reset is unknown, not exhausted. Codex stays cataloged.")
     print("Spawn only harnesses the operator chooses.")
+    _maybe_refresh_provider_usage(board)
+    for line in _provider_usage().format_ledger_lines(board):
+        print(line)
 
 
 def cmd_harness_available(a, board):
@@ -15454,6 +15494,7 @@ def cmd_harness_available(a, board):
     attach_catalog_usage(rows)
     print_integration_catalog(rows, note)
     print("")
+    _maybe_refresh_provider_usage(board)
     print_recorded_usage(board)
     print("")
     print("USAGE: unsupported or missing remaining/reset is unknown, not exhausted. Do not spawn a FAIL or exhausted seat.")
@@ -16684,11 +16725,13 @@ async function load(manual){
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
     const lim=a.limit?'<span class="tag limit">reset '+esc(a.limit_until||'unknown')+'</span>':'';
+    const pu=a.provider_usage||{};
+    const usageTag=pu.status?'<span class="tag" title="'+esc((pu.hint||pu.limit_message||pu.age||'')+'')+'">'+esc(pu.provider||a.harness||'?')+' '+esc(pu.status==='no_data'?'no data':pu.status)+'</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
     const onlineDot=(a.reachable!==false && a.adapter_online)?' ●':'';
-    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+lim+wake+'</div>'+
+    return '<article class="agent"><div class="head">'+who(a.name)+'<span class="st '+st+'">'+esc(a.state)+onlineDot+'</span>'+life+lim+usageTag+wake+'</div>'+
       '<div class="mute mono">runtime '+esc(a.agent_id||a.name)+' · role '+esc((a.roles&&a.roles.length)?a.roles.join('/'):'any')+' · '+esc(a.adapter_provider||a.harness||'—')+' · reach '+(a.reachable===false?'no · ':'yes · ')+esc(a.adapter_reason||a.adapter_delivery||'—')+' · '+esc(a.adapter_mode||'supervised')+' · '+esc(a.wake_mode||'task-only')+' · usage '+esc(a.adapter_usage||'unmeasured')+(a.ticket?' · '+esc(a.ticket):'')+seen+'</div>'+
       authReadiness(a)+
       '<div class="bar"><i style="width:'+Math.round(u.util_pct||0)+'%"></i></div>'+
@@ -17351,7 +17394,9 @@ def _board_snapshot_body(board, messages=40):
                            "auth_surface": _agent_auth_surface(
                                board, rec, r["agent"], harness_name, local_host),
                            "limit": lim,
-                           "limit_until": (lim or {}).get("until", "") if lim else ""})
+                           "limit_until": (lim or {}).get("until", "") if lim else "",
+                           "provider_usage": _provider_usage().public_reading(
+                               _provider_usage().get_reading(board, harness_name))})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
     try:
