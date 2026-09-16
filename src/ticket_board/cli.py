@@ -1594,9 +1594,8 @@ def line(t, tickets=None):
 
 
 def _notes(t):
-    wv = _work_view()
-    return [n for n in (t.get("notes") or [])
-            if not wv.is_live_unverified_gate_note(n.get("text"))]
+    """Successor handoff: accept verdict is current; gate/REVIEW claims are not."""
+    return _work_view().handoff_notes(t)
 
 
 def collect_handoffs(t, tickets):
