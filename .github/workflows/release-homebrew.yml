@@ -28,6 +28,11 @@ jobs:
       - name: Build the release tarball
         id: build
         run: |
+          # The redirect below is opened by the shell before the build script
+          # runs, so dist/ has to exist first: without this the job died with
+          # "dist/release.json: No such file or directory" and no release was
+          # ever published (v0.2.0's first attempt).
+          mkdir -p dist
           python3 scripts/build_release_tarball.py --ref "$GITHUB_REF_NAME" --outdir dist --json > dist/release.json
           python3 -c "
           import json
