@@ -19,6 +19,9 @@ NO_DATA_PROVIDERS = frozenset({"cursor", "agy", "antigravity"})
 HTTP_PROVIDERS = frozenset({"claude", "codex"})
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+# Paths found on this machine (Claude Code CLI + Codex CLI), not invented.
+CLAUDE_CREDENTIALS_RELPATH = os.path.join(".claude", ".credentials.json")
+CODEX_AUTH_RELPATH = os.path.join(".codex", "auth.json")
 _CODEX_TOKENS = re.compile(r"tokens used\s*[\r\n]+\s*(\d+)\b", re.I)
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T")
 
@@ -458,6 +461,22 @@ def _read_json(path):
         return None
 
 
+def claude_credentials_file(home=None):
+    """Claude Code CLI credentials file — the path we actually found."""
+    home = os.path.expanduser(home or "~")
+    return os.path.join(home, CLAUDE_CREDENTIALS_RELPATH)
+
+
+def codex_auth_file(home=None, environ=None):
+    """Codex CLI auth.json — $CODEX_HOME/auth.json or ~/.codex/auth.json."""
+    env = environ if environ is not None else os.environ
+    env_home = (env.get("CODEX_HOME") or "").strip()
+    if env_home:
+        return os.path.join(env_home, "auth.json")
+    home = os.path.expanduser(home or "~")
+    return os.path.join(home, CODEX_AUTH_RELPATH)
+
+
 def read_claude_oauth_token(home, environ=None):
     """Return access token string or ''. Never raises. Does not log the token."""
     env = environ if environ is not None else os.environ
@@ -466,7 +485,7 @@ def read_claude_oauth_token(home, environ=None):
         return direct
     home = os.path.expanduser(home or "~")
     candidates = (
-        os.path.join(home, ".claude", ".credentials.json"),
+        claude_credentials_file(home),
         os.path.join(home, ".claude", "credentials.json"),
         os.path.join(home, ".config", "claude", ".credentials.json"),
     )
@@ -488,14 +507,8 @@ def read_codex_auth_token(home, environ=None):
     direct = (env.get("CODEX_AUTH_TOKEN") or env.get("CHATGPT_ACCESS_TOKEN") or "").strip()
     if direct:
         return direct
-    home = os.path.expanduser(home or "~")
-    candidates = (
-        os.path.join(home, ".codex", "auth.json"),
-        os.path.join(home, ".codex", "config.toml"),
-    )
+    candidates = (codex_auth_file(home, environ=env),)
     for path in candidates:
-        if path.endswith(".toml"):
-            continue
         data = _read_json(path)
         if not isinstance(data, dict):
             continue

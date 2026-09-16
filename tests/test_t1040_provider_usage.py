@@ -347,6 +347,19 @@ def run(board, *args, env=None):
         capture_output=True, text=True, cwd=str(board.parent), env=e)
 
 
+def test_credential_paths_are_the_ones_we_found(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".codex").mkdir()
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    assert pu.CLAUDE_CREDENTIALS_RELPATH == os.path.join(".claude", ".credentials.json")
+    assert pu.CODEX_AUTH_RELPATH == os.path.join(".codex", "auth.json")
+    assert pu.claude_credentials_file(str(home)) == str(home / ".claude" / ".credentials.json")
+    assert pu.codex_auth_file(str(home), environ={}) == str(home / ".codex" / "auth.json")
+    assert pu.codex_auth_file(str(home), environ={"CODEX_HOME": str(tmp_path / "alt-codex")}) == str(
+        tmp_path / "alt-codex" / "auth.json")
+
+
 def test_who_and_harness_surface_ledger(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
