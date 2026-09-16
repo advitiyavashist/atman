@@ -879,6 +879,8 @@ def empty_state(tickets, nodes, edges):
 
 def _who_of(n):
     """Who is named for a node and on what evidence -- never 'told' from a reservation."""
+    if n.get("kind") == "automated" and not n.get("escalated"):
+        return "", "automated"
     ph = n["phase"]
     if ph in ("working", "review", "done", "blocked") and n["owner"]:
         return n["owner"], "claimed"
@@ -952,10 +954,16 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
         if not isinstance(qs, list):
             qs = [str(qs)]
         review = review_of(t, msgs_re.get(tid))
+        kind = t.get("kind") or "agent"
+        auto = t.get("automated") or {}
         node = {
             "id": tid,
             "title": t.get("title") or "",
             "status": t.get("status") or "",
+            "kind": kind,
+            "automated": kind == "automated",
+            "escalated": bool(auto.get("escalated")),
+            "automated_action": auto.get("action") or "",
             "phase": ph,
             "evidence": evidence_of(t, ph, disp, progress, now),
             "owner": (t.get("owner") or "").strip(),
@@ -1001,6 +1009,17 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
             "created": t.get("created") or "",
         }
         node["who"], node["who_kind"] = _who_of(node)
+        if node["kind"] == "automated" and not node["escalated"]:
+            if ph == "waiting":
+                node["evidence"] = "Automated · no agent · waits for %s" % (
+                    ", ".join(waiting) or "deps")
+            elif ph in ("ready", "posted", "reserved"):
+                node["evidence"] = "Automated · Atman runs this when deps finish · no model"
+            elif ph == "done":
+                node["evidence"] = (node.get("evidence") or "") + " · automated"
+        elif node["escalated"]:
+            node["evidence"] = "Escalated automated node · needs keep/remove · " + (
+                auto.get("escalate_reason") or "judgment")
         nodes.append(node)
 
     node_by = dict((n["id"], n) for n in nodes)
@@ -1117,6 +1136,9 @@ body[data-theme=light] .wv{--wv-acc:#6b4f14;--wv-focus:#6b4f14}
 .wv-node.ph-done{opacity:.72}
 .wv-node.ph-done.unverified{opacity:1;--wv-c:var(--warn)}
 .wv-node.ph-discarded{opacity:.5;text-decoration:line-through}
+.wv-node.kind-auto{border-style:dashed}
+.wv-node.kind-auto .ph{letter-spacing:.08em}
+.wv-node.kind-esc .ph{color:var(--warn)}
 /* status colours are semantic tokens; brass (--acc) is reserved for actions and focus */
 .ph-working{--wv-c:var(--flight)}.ph-review{--wv-c:var(--review)}.ph-blocked{--wv-c:var(--blocked)}
 .ph-posted{--wv-c:var(--progress)}.ph-reserved{--wv-c:color-mix(in srgb,var(--ok) 45%,var(--mute))}.ph-ready{--wv-c:var(--ok)}.ph-waiting{--wv-c:var(--mute)}
@@ -1194,6 +1216,8 @@ window.AtmanWork=(function(){
     return bits.length?' · '+bits.join(' · '):'';
   }
   function who(n,full){
+    if(n.kind==='automated'&&!n.escalated)return full?'automated · no agent':'';
+    if(n.escalated)return full?'escalated · keep or remove':(n.who?'@'+n.who+' · escalated':'escalated');
     if(!n.who)return n.phase==='working'||n.phase==='review'||n.phase==='done'?'unowned':'';
     if(n.who_kind==='claimed')return '@'+n.who;
     if(n.who_kind==='posted')return full?'task posted to @'+n.who+' · '+delivery(n.dispatch):'posted to @'+n.who+shortDelivery(n.dispatch)+' · not claimed';
@@ -1223,8 +1247,12 @@ window.AtmanWork=(function(){
     const w=n.wait&&n.wait.text?'<span class="w'+(n.wait.kind==='deps'?'':' warn')+'">'+esc(n.wait.text)+'</span>':(unv?'<span class="w warn">'+esc(unv)+'</span>':'');
     const stale=n.stale?' <span class="stale">silent '+esc(ago(n.since_update_h))+'</span>':'';
     const wh=who(n);
-    return '<button type="button" class="wv-node ph-'+esc(n.phase)+(unv?' unverified':'')+'" data-id="'+esc(n.id)+'" aria-pressed="'+(SEL===n.id?'true':'false')+'" aria-label="'+esc(n.id+' '+n.title+', '+(unv?'Done, unverified':(PH[n.phase]||n.phase))+(wh?', '+wh:'')+(n.wait&&n.wait.text?', '+n.wait.text:''))+'">'+
-      '<span class="top"><span class="id">'+esc(n.id)+'</span><span class="ph">'+esc(unv?'Done · unverified':(PH[n.phase]||n.phase))+'</span></span>'+
+    const auto=n.kind==='automated'&&!n.escalated;
+    const phLab=auto?'automated':(n.escalated?'escalated':(unv?'Done · unverified':(PH[n.phase]||n.phase)));
+    const ariaPh=auto?'automated':(n.escalated?'escalated':(unv?'Done, unverified':(PH[n.phase]||n.phase)));
+    const cls='wv-node ph-'+esc(n.phase)+(auto?' kind-auto':'')+(n.escalated?' kind-esc':'')+(unv?' unverified':'');
+    return '<button type="button" class="'+cls+'" data-id="'+esc(n.id)+'" aria-pressed="'+(SEL===n.id?'true':'false')+'" aria-label="'+esc(n.id+' '+n.title+', '+ariaPh+(wh?', '+wh:'')+(n.wait&&n.wait.text?', '+n.wait.text:''))+'">'+
+      '<span class="top"><span class="id">'+esc(n.id)+'</span><span class="ph">'+esc(phLab)+'</span></span>'+
       '<span class="t">'+esc(n.title)+'</span>'+
       (wh?'<span class="who">'+esc(wh)+stale+'</span>':(stale?'<span class="who">'+stale+'</span>':''))+w+'</button>';
   }
@@ -1302,8 +1330,9 @@ window.AtmanWork=(function(){
     return '<button type="button" class="close" data-wv-close aria-label="Close detail">Close</button>'+
       '<div class="hd ph-'+esc(n.phase)+'"><span class="id">'+esc(n.id)+'</span><span class="pill">'+esc(PH[n.phase]||n.phase)+'</span>'+(n.role?'<span class="mute">'+esc(n.role)+'</span>':'')+'<span class="mute">P'+esc(n.priority)+'</span></div>'+
       '<h3>'+esc(n.title)+'</h3><dl>'+
+      row('Kind',n.kind==='automated'&&!n.escalated?'automated':(n.escalated?'escalated agent':'agent'))+
       row('Status',stat,n.stale?'bad':'')+
-      row('Who',wh?esc(wh):'<span class="mute">nobody</span>')+
+      row('Who',wh?esc(wh):'<span class="mute">'+(n.kind==='automated'?'automated':'nobody')+'</span>')+
       row('Waiting',n.wait&&n.wait.text?esc(n.wait.text)+(n.wait.cmd?' · '+cmd(n.wait.cmd):''):'',n.wait&&n.wait.kind&&n.wait.kind!=='deps'?'warn':'')+
       row('Why now',progressHtml(n))+
       row('Started',startsHtml(n))+

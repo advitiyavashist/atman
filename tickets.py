@@ -21,13 +21,15 @@ folders that are not the project. `atm next` / `show` / `done` do.
 
 Agent identity for a single command comes from $TICKET_AGENT (set it per tool:
 claude, codex, cursor), or $TICKET_SEAT for a run a supervisor deliberately
-launched. Session-scoped surfaces (`board`'s "you:" line, the stop-hook,
-`msg`/`inbox` with no --owner) resolve through session_seat(): an explicit
---owner, then a supervisor TICKET_SEAT (authoritative for launched workers),
-then this session's OWN `atm join` record, then ambient TICKET_AGENT. A
-join is only "this session's own" when the harness gave us a session id to key
-it by; without one the record is a machine-wide legacy file that any agent may
-have written last, so an explicit TICKET_AGENT beats it. Default roles for
+launched. `note` is a whoami() surface: a join/spawn must not rebind note
+attribution (T-956/T-958 identity-precedence). Session-scoped surfaces
+(`board`'s "you:" line, the stop-hook, `msg`/`inbox` with no --owner)
+resolve through session_seat(): an explicit --owner, then a supervisor
+TICKET_SEAT (authoritative for launched workers), then this session's OWN
+`atm join` record, then ambient TICKET_AGENT. A join is only "this
+session's own" when the harness gave us a session id to key it by; without
+one the record is a machine-wide legacy file that any agent may have
+written last, so an explicit TICKET_AGENT beats it. Default roles for
 those names can be overridden by .tickets/roles.json.
 """
 
@@ -159,7 +161,7 @@ def _configured_shared_board(repo_root):
 def _is_marked_primary(path):
     """True when this board dir was explicitly opted in as this repo's board
     of record even though a *different* shared board is configured for this
-    repo (see `tickets board-mark-primary`)."""
+    repo (see `atm board-mark-primary`)."""
     return os.path.isfile(os.path.join(path, PRIMARY_BOARD_MARKER))
 
 
@@ -194,11 +196,11 @@ def _shadow_board_refusal(candidate, configured):
         "real data (messages, agent registrations) on a board nothing else "
         "reads, the T-959 shape. Pick one:\n"
         "  * use the shared board:      export TICKETS_DIR=%s\n"
-        "  * inspect what is here:      tickets doctor\n"
+        "  * inspect what is here:      atm doctor\n"
         "  * keep this repo's own board on purpose:\n"
-        "                                tickets board-mark-primary\n"
+        "                                atm board-mark-primary\n"
         "  * archive this board aside (never deletes):\n"
-        "                                tickets board-archive-shadow %s --yes\n"
+        "                                atm board-archive-shadow %s --yes\n"
         % (real_candidate, configured, configured, real_candidate)
     )
 
@@ -223,7 +225,7 @@ def _apply_shared_board_config(candidate):
         return candidate
     if not _board_has_content(candidate):
         sys.stderr.write(
-            "tickets: cwd .tickets is empty -- using this repo's configured "
+            "atm: cwd .tickets is empty -- using this repo's configured "
             "shared board %s\n" % configured
         )
         return configured
@@ -962,8 +964,9 @@ def whoami(explicit=None):
     command act as" -- board's own status line, a hook deciding whether to
     stay quiet, the stop-hook holding a turn open for a seat, `msg`'s sender
     or `inbox`'s owner when no --owner is given -- wants session_seat(), not
-    this. Collapsing the two into one function is the failure this split
-    guards against: it makes a recorded identity outrank an explicit
+    this. `note` stays on whoami() so a join cannot rebind note attribution
+    (T-956/T-958). Collapsing the two into one function is the failure this
+    split guards against: it makes a recorded identity outrank an explicit
     per-command override, breaking the `TICKET_AGENT=X tickets <cmd>`
     pattern this docstring describes.
     """
@@ -980,7 +983,8 @@ def session_seat(board, explicit=None):
     `inbox --quiet-if-unidentified` hook, the stop-hook, and `msg`'s sender /
     `inbox`'s owner when no --owner is given. These need the session-recorded
     identity (from `atm join`) precisely because nobody is passing an
-    explicit name on that particular call.
+    explicit name on that particular call. `note` is not in this list -- it
+    uses whoami() so a join cannot rebind note attribution (T-956/T-958).
 
     Precedence: explicit > TICKET_SEAT > a SESSION-KEYED recorded identity >
     TICKET_AGENT > the flat legacy recorded identity > pid.
@@ -1074,8 +1078,12 @@ def save(board, t, expected_generation=None):
         # Every active write (including update and owner transfers) shares the
         # same dependency gate; command-specific checks are only early errors.
         current = load(board, t["id"]) if os.path.isfile(path) else {}
-        if (t.get("status") == "claimed"
-                or (t.get("owner") and t.get("owner") != current.get("owner"))):
+        # The automated worktree-cleanup node is exempt: it hands no work to
+        # a seat and its own checks escalate instead of deleting unmerged,
+        # dirty or in-use work (see _run_cleanup_nodes).
+        if (not _is_automated_cleanup(t)
+                and (t.get("status") == "claimed"
+                     or (t.get("owner") and t.get("owner") != current.get("owner")))):
             _refuse_unreleased_deps(t, load_all(board))
         if tc is not None and os.path.isfile(path):
             try:
@@ -1994,6 +2002,9 @@ def try_claim(board, tid, owner):
     if t["status"] != "open":  # claimed by a slower path; give the lock back
         os.unlink(lock)
         return None
+    if _worktree_gc().is_automated(t):
+        os.unlink(lock)
+        return None
     if _ticket_lane(t) != "ready":
         os.unlink(lock)
         return None
@@ -2189,6 +2200,57 @@ def _review_verdict():
         return m
 
 
+def _worktree_gc():
+    """T-946 automated worktree cleanup + atm gc sweep."""
+    try:
+        from ticket_board import worktree_gc as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import worktree_gc as m
+        return m
+
+
+def _gc_hooks():
+    return _worktree_gc().CliHooks(_GCApi())
+
+
+def _gc_probes():
+    gc = _worktree_gc()
+    mode = (os.environ.get("TICKETS_GC_OPEN_PRS") or "").strip()
+    gh_fn = None
+    if mode == "none":
+        gh_fn = lambda branch, cwd: []
+    elif mode:
+        gh_fn = lambda branch, cwd: [{"number": 1, "url": mode}]
+    extra = [p for p in [(os.environ.get("TICKETS_GC_RUNTIME_LINK") or "").strip()] if p]
+    origin = (os.environ.get("TICKETS_GC_ORIGIN_REF") or "").strip() or None
+    return gc.Probes(gh_fn=gh_fn, runtime_extra=extra, origin_ref=origin)
+
+
+class _GCApi:
+    """Minimal surface worktree_gc.CliHooks needs from this module."""
+
+    load_all = staticmethod(lambda board: load_all(board))
+    load = staticmethod(lambda board, tid: load(board, tid))
+    save = staticmethod(lambda board, t: save(board, t))
+    create = staticmethod(lambda board, title, body="", role="", deps=None,
+                          priority=3, epic="", sprint="", needs=None:
+                          create(board, title, body, role, deps, priority,
+                                 epic, sprint, needs))
+    now = staticmethod(lambda: now())
+    whoami = staticmethod(lambda: whoami())
+    current_master = staticmethod(lambda board: current_master(board))
+
+
+def _is_automated_cleanup(t):
+    """T-946 x T-1031: only cleanup_worktree is exempt from the accept gate."""
+    return ((t.get("kind") or "").strip() == "automated"
+            and (t.get("automated") or {}).get("action") == "cleanup_worktree")
+
+
 def _ticket_lane(t):
     return _sounding().ticket_lane(t)
 
@@ -2361,6 +2423,10 @@ def line(t, tickets=None):
         bits.append("/".join(tags))
     if t.get("role"):
         bits.append("role=" + t["role"])
+    if (t.get("kind") or "") == "automated":
+        bits.append("automated")
+    elif (t.get("automated") or {}).get("escalated"):
+        bits.append("escalated")
     if t.get("needs"):
         bits.append("needs " + ",".join(t["needs"]))
     if t.get("owner"):
@@ -2463,6 +2529,15 @@ def detail(board, t, tickets):
             stamp += ", last update %s ago" % fmt_hours(tm["since_update"])
         out.append("Time: " + stamp)
     out.append("lane: %s" % _ticket_lane(t))
+    if (t.get("kind") or "") == "automated":
+        auto = t.get("automated") or {}
+        out.append("kind: automated (%s for %s)" % (
+            auto.get("action") or "?", auto.get("target") or "?"))
+    elif (t.get("automated") or {}).get("escalated"):
+        out.append("kind: agent (escalated automated: %s)" % (
+            (t.get("automated") or {}).get("escalate_reason") or "?"))
+    if t.get("worktree"):
+        out.append("worktree: %s" % t["worktree"])
     if t.get("sounded_at"):
         out.append("sounded: %s by %s" % (t.get("sounded_at"), t.get("sounded_by") or "?"))
     if t.get("cause"):
@@ -2538,7 +2613,16 @@ def cmd_create(a, board):
             raise
         for other, d in pending.items():
             set_deps(board, other, d)
-    print("created %s  %s" % (t["id"], t["title"]))
+    wt = (getattr(a, "worktree", "") or "").strip()
+    if wt:
+        child = _worktree_gc().attach_worktree(board, t, wt, _gc_hooks())
+        t = load(board, t["id"])
+        print("created %s  %s" % (t["id"], t["title"]))
+        print("  worktree: %s" % t.get("worktree"))
+        if child:
+            print("  cleanup node: %s (automated, after %s)" % (child["id"], t["id"]))
+    else:
+        print("created %s  %s" % (t["id"], t["title"]))
     if deps:
         print("  waits for: %s" % ", ".join(deps))
     if blocks:
@@ -2837,6 +2921,9 @@ def cmd_dispatch(a, board):
         sys.exit("dispatch: %s is on HOLD" % t["id"])
     if t.get("status") != "open":
         sys.exit("dispatch: %s is %s; only open ready tickets" % (t["id"], t.get("status")))
+    if _reopen_blocks_automation(board, t):
+        sys.exit("dispatch: %s has a same-second-as-reopen task with no event order; "
+                 "post a new explicit --task" % t["id"])
     _refuse_unreleased_deps(t, load_all(board))
     rows, _note = probe_integration_catalog()
     attach_catalog_usage(rows)
@@ -2875,11 +2962,13 @@ def cmd_dispatch(a, board):
         return
     ns = argparse.Namespace(
         name=seat, list=False, stop=False, worktree=getattr(a, "worktree", "") or "",
+        repo=getattr(a, "repo", "") or "", base=getattr(a, "base", "") or "",
         harness=harness, tool="", cmd_template=getattr(a, "cmd_template", "") or "",
         roles=None, can=None, cost=None, model="", best_for="", wake_mode=None,
         brief="", exec=getattr(a, "exec", "") or "", master=False, cos=False,
         safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
         max_runs=getattr(a, "max_runs", None), replace=False,
+        transfer=False, alias="",
     )
     try:
         cmd_spawn(ns, board)
@@ -3279,6 +3368,8 @@ def workflow_graph(tickets, include_done=False, keep_done=None):
             leftover = [d for d in (child.get("deps") or []) if d not in done and d != tid]
             if not leftover and child.get("status") in ("open", "blocked"):
                 success_starts.append(cid)
+        kind = t.get("kind") or "agent"
+        auto = t.get("automated") or {}
         return {
             "id": tid,
             "title": t.get("title", ""),
@@ -3298,6 +3389,9 @@ def workflow_graph(tickets, include_done=False, keep_done=None):
             "handoff": _last_handoff(t),
             "verdict": _ticket_verdict(t),
             "success_starts": success_starts,
+            "kind": kind,
+            "automated": bool(kind == "automated"),
+            "escalated": bool(auto.get("escalated")),
             "deps": deps,
             "waiting": waiting,
             "children": children,
@@ -3362,6 +3456,10 @@ def cmd_graph(a, board):
             bits.append(t["role"])
         if t.get("owner"):
             bits.append("@" + t["owner"])
+        if (t.get("kind") or "") == "automated":
+            bits.append("automated")
+        elif (t.get("automated") or {}).get("escalated"):
+            bits.append("escalated")
         lane = _ticket_lane(t)
         waiting = [d for d in t.get("deps", []) if d not in done]
         if waiting and t["status"] == "open":
@@ -3532,11 +3630,29 @@ def _start_successors(board, finished_id):
     pred = next((x for x in tickets if x["id"] == finished_id), None)
     sha = _work_view().accepted_release_sha(pred) if pred else ""
     children = [x for x in unblocked(board, tickets) if finished_id in x.get("deps", [])]
+    # T-946 x T-1031: the automated worktree-cleanup node decides keep/remove
+    # for the finished ticket's own worktree. It hands no work to a seat, and
+    # its own checks never delete unmerged, dirty or in-use work (they
+    # escalate), so it is not gated on acceptance -- gating it would strand
+    # exactly the worktrees of tickets closed without verification. Every
+    # other successor stays gated.
+    seen = set(x["id"] for x in children)
+    children += [x for x in tickets
+                 if x["id"] not in seen and x.get("status") == "open"
+                 and finished_id in (x.get("deps") or [])
+                 and _is_automated_cleanup(x)]
     freed = [x["id"] for x in children]
     started, held = [], []
     for child in children:
         if _ticket_on_hold(child):
             held.append(child["id"])
+            continue
+        if _worktree_gc().is_automated(child):
+            # T-946: deterministic executor. No model turn, no task post.
+            result = _worktree_gc().run_cleanup_node(
+                board, child, _gc_hooks(), probes=_gc_probes(),
+                repo_root=os.path.dirname(board), apply=True)
+            started.append("%s [automated:%s]" % (child["id"], result.get("status")))
             continue
         who = _reserved_agent(child) or (child.get("suggested") or "").strip()
         text = "unblocked %s after %s" % (child["id"], finished_id)
@@ -3592,6 +3708,12 @@ def _block_unverified_successors(board, finished_id):
     who = whoami()
     at = now()
     for child in wv.successors_waiting_on(tickets, finished_id, released):
+        if _is_automated_cleanup(child):
+            # T-946: the worktree-cleanup node is not work for a seat. It only
+            # decides keep/remove for the finished ticket's own worktree, and
+            # its own checks escalate rather than delete unmerged, dirty or
+            # in-use work. See the matching exemption in _start_successors.
+            continue
         child["status"] = "blocked"
         child["unverified_block"] = finished_id
         _retire_stale_gated_start(board, child)
@@ -3599,6 +3721,28 @@ def _block_unverified_successors(board, finished_id):
         save(board, child)
         blocked.append(child["id"])
     return blocked, reason
+
+
+def _run_cleanup_nodes(board, finished_id):
+    """T-946 x T-1031: run the automated worktree-cleanup node even when the
+    predecessor closed without an ACCEPT.
+
+    The node hands no work to a seat: it decides keep/remove for the finished
+    ticket's own worktree and escalates instead of deleting unmerged, dirty or
+    in-use work. Gating it on acceptance would strand exactly the worktrees of
+    tickets closed unverified. Every other successor stays gated.
+    """
+    gc = _worktree_gc()
+    ran = []
+    for child in load_all(board):
+        if child.get("status") != "open" or finished_id not in (child.get("deps") or []):
+            continue
+        if not _is_automated_cleanup(child):
+            continue
+        result = gc.run_cleanup_node(board, child, _gc_hooks(), probes=_gc_probes(),
+                                    repo_root=os.path.dirname(board), apply=True)
+        ran.append("%s [automated:%s]" % (child["id"], result.get("status")))
+    return ran
 
 
 def _reopen_unverified_successors(board, finished_id, sha="", seat=""):
@@ -3735,6 +3879,8 @@ def cmd_next(a, board):
     ready = [t for t in _filter_ready(ready_all, roles) if can_do(board, owner, t)]
     ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
     ready = [t for t in ready if not _ticket_on_hold(t)]
+    ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
+    ready = [t for t in ready if not _worktree_gc().is_automated(t)]
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -3836,6 +3982,8 @@ def cmd_next(a, board):
 def cmd_claim(a, board):
     owner = whoami(a.owner)
     t = load(board, a.id)
+    if _worktree_gc().is_automated(t):
+        sys.exit("%s is automated; Atman runs it (no claim, no model)" % a.id)
     lane = _ticket_lane(t)
     if lane != "ready":
         sys.exit("%s is lane=%s; sound it before claiming (atm sound %s)"
@@ -4454,6 +4602,15 @@ def cmd_merge(a, board):
                          to=t2.get("owner", ""), re=t2["id"])
         if closed:
             print("closed: %s" % ", ".join(closed))
+            for tid in closed:
+                freed, started, held, capture_wait = _start_successors(board, tid)
+                if started:
+                    print("  started after %s: %s" % (tid, ", ".join(started)))
+            gc_rows = _safe(lambda: _worktree_gc().sweep(
+                board, _gc_hooks(), probes=_gc_probes(), repo_root=root, apply=True), [])
+            if gc_rows:
+                print("gc: %d worktree decision(s)" % len(gc_rows))
+                print(_worktree_gc().format_digest(gc_rows))
         for b, why in skipped:
             print("  skipped %s: %s" % (b, why))
         for f, alt in resolved_docs:
@@ -5700,6 +5857,8 @@ def _poke_persist_watch(board, owner, attempts=None):
     """
     import signal
 
+    if _active_seat_limit(board, owner):
+        return False
     tries = PERSIST_POKE_ATTEMPTS if attempts is None else max(1, int(attempts))
     for _ in range(tries):
         pid = _watcher_pid(board, owner)
@@ -5817,7 +5976,10 @@ def _watch_log_state(board, owner):
     # speed dropped it the moment one of those failures happened to take
     # longer than the usual few seconds.
     streak = []
+    expired_at = ((_agent_rec(board, owner) or {}).get("limit_expired_at") or "")
     for r in reversed(runs):
+        if expired_at and (r["exit_at"] or r["start"]) <= expired_at:
+            break
         if r["exit_at"] is None or r["rc"] in ("0", None):
             break
         streak.append(r)
@@ -5942,10 +6104,10 @@ def agent_liveness(board, rec, peers=None):
     #    saying "I read the log". Keep it, but it is no longer the ONLY path
     #    to a limited render -- that is how an agent can look healthy while
     #    hard-limited for a long window.
-    lim = (rec or {}).get("limit")
+    lim = _active_seat_limit(board, owner, rec or {})
     if lim:
-        out.update(state="limited", source="manual", heuristic=False,
-                   detail="asserted by hand%s%s" % (
+        out.update(state="limited", source=lim.get("source", "manual"), heuristic=False,
+                   detail=("provider usage limit%s%s" if lim.get("source") == "provider" else "asserted by hand%s%s") % (
                        (", back %s" % lim["until"]) if lim.get("until") else "",
                        (" -- %s" % lim["note"]) if lim.get("note") else ""))
         return out
@@ -5975,6 +6137,9 @@ def agent_liveness(board, rec, peers=None):
             # which two we looked for, rather than picking one's error message.
             tdetail = "no Claude or Codex transcript for %s" % _tilde(cwd)
 
+    expired_age = _age_secs(((_agent_rec(board, owner) or {}).get("limit_expired_at")))
+    if tstate == "limited" and expired_age is not None and tage is not None and tage >= expired_age:
+        tstate, tdetail = "unknown", "previous provider reset elapsed; awaiting fresh session evidence"
     if tstate != "unknown":
         out.update(state=tstate, source=tsource, heuristic=False, detail=tdetail)
         # A dead watcher under a quiet transcript is a real dead lane; a dead
@@ -6109,7 +6274,11 @@ def cmd_limit(a, board):
     if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
         checkin(board, owner)
     if a.clear:
-        mutate = lambda rec: rec.pop("limit", None)
+        def mutate(rec):
+            previous = rec.pop("limit", None)
+            if previous and previous.get("source") == "provider":
+                rec["limit_expired_at"] = now()
+                rec.pop("adapter_failure", None)
         msg = "%s is back (limit cleared)" % owner
     else:
         limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
@@ -6395,7 +6564,25 @@ def cmd_done(a, board):
         blocked, reason = _block_unverified_successors(board, a.id)
         if blocked:
             print("blocked: %s -- %s" % (", ".join(blocked), reason))
+        for line in _run_cleanup_nodes(board, a.id):
+            print("cleanup: %s" % line)
     _finish_followup(board, a.id, "done")
+
+
+def cmd_gc(a, board):
+    """Preview worktree cleanup by default; --apply authorizes removal."""
+    gc = _worktree_gc()
+    root = artifact_tree(a) or os.path.dirname(board)
+    rows = gc.sweep(board, _gc_hooks(), probes=_gc_probes(), repo_root=root,
+                    apply=getattr(a, "apply", False))
+    if getattr(a, "json", False):
+        print(json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        print("gc: nothing to do")
+        return
+    print("gc: %d decision(s)" % len(rows))
+    print(gc.format_digest(rows))
 
 
 def cmd_block(a, board):
@@ -6414,13 +6601,13 @@ def cmd_block(a, board):
 def cmd_note(a, board):
     """Add a note (`atm note` / `atm update`).
 
-    `by` is always the caller's own identity (`--by`, else $TICKET_AGENT),
-    never the ticket's `owner` field. T-238: a fallback to `t.get("owner")`
-    here meant a second agent working the same ticket in parallel -- exactly
-    the case a duplicate lane needs to be visible -- had its notes silently
-    relabeled as the owner's, so nothing in the note history could ever
-    reveal the second lane. This was a write-path bug: the on-disk `by` was
-    wrong, not just its rendering in `atm show`.
+    `by` is the caller's posting identity (`whoami`), never the ticket's
+    `owner` field and never a join-written session binding. `--by` still
+    wins as an explicit override. T-238: a fallback to `t.get("owner")`
+    relabeled a parallel agent's notes as the owner's. T-956/T-958:
+    session_seat() here broke identity-precedence -- a join must not rebind
+    note attribution. msg stays on session_seat(); collapsing the two
+    surfaces fails the rest of test_identity_precedence.py.
     """
     t = load(board, a.id)
     who = whoami(a.by)
@@ -6482,6 +6669,15 @@ def cmd_assign(a, board):
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
+    if getattr(a, "worktree", None) is not None:
+        wt = (a.worktree or "").strip()
+        if wt:
+            _worktree_gc().attach_worktree(board, t, wt, _gc_hooks())
+            t = load(board, t["id"])
+            changed.append("worktree=%s" % t.get("worktree"))
+        else:
+            t.pop("worktree", None)
+            changed.append("worktree=(none)")
     bind_owner = None
     clear_prev = None
     transfer_owner = None
@@ -7686,7 +7882,7 @@ def cmd_doctor(a):
             shown = s["recipients"][:20]
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
-        print("    fix: tickets board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+        print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
 
 
 def cmd_board_mark_primary(a):
@@ -7702,6 +7898,26 @@ def cmd_board_mark_primary(a):
     print("marked %s primary -- it now wins over any configured shared board for this repo" % board)
 
 
+def _board_in_effect_for_archive():
+    """Live board for archive-shadow, without refusing an unmarked shadow.
+
+    Same order as board_dir: TICKETS_DIR, then a local .primary, then the
+    configured shared board, then cwd .tickets. A marked-primary local board
+    must not be treated as a shadow of a configured shared board.
+    """
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    candidate = _board_dir_uncached()
+    if _is_marked_primary(candidate):
+        return candidate
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    if configured:
+        return configured
+    return candidate
+
+
 def cmd_board_archive_shadow(a):
     """Move a shadow board aside after the operator confirms -- NEVER deletes
     (T-959). `--yes` is required; without it this only prints what would
@@ -7709,15 +7925,7 @@ def cmd_board_archive_shadow(a):
     path = os.path.abspath(os.path.expanduser(a.path))
     if not os.path.isdir(path):
         sys.exit("no such directory: %s" % path)
-    env = os.environ.get("TICKETS_DIR")
-    root = _repo_root()
-    configured = _configured_shared_board(root) if root else None
-    if env:
-        effective = os.path.abspath(os.path.expanduser(env))
-    elif configured:
-        effective = configured
-    else:
-        effective = _board_dir_uncached()
+    effective = _board_in_effect_for_archive()
     if os.path.realpath(path) == os.path.realpath(effective):
         sys.exit(
             "REFUSING: %s IS the board currently in effect -- archiving it would "
@@ -7810,10 +8018,10 @@ def cmd_who(a, board):
         if r.get("git_mismatch"):
             print("%-14s !! git resolved a repo that does not contain this agent's cwd at its last "
                   "check-in -- branch/sha above are unreliable; cwd is ground truth (T-243)" % "")
-        if r.get("limit"):
-            lim = r["limit"]
+        lim = _active_seat_limit(board, r["owner"], r)
+        if lim:
             print("%-14s !! USAGE LIMIT hit %s ago%s" % ("", fmt_hours(hours_since(lim["at"])),
-                                                        (", back %s" % lim["until"]) if lim.get("until") else ""))
+                                                        (", back %s" % lim["until"]) if lim.get("until") else ", reset unknown"))
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
         entry = wf.get(r["owner"], {}) or {}
@@ -9275,8 +9483,55 @@ def fmt_msg(m):
         fmt_local(m.get("at")), m.get("from", "?"), mark, to, re_, m.get("text", ""))
 
 
+def _task_life_actionable(board, message):
+    """False when a ticket-scoped task is previous-life or same-second unknown.
+
+    CEO T-955/T-810: automation must not wake, dispatch, or next-claim from an
+    unknown-ordered pre-reopen post. A new explicit task is required.
+    """
+    tid = (message.get("re") or "").strip()
+    if not tid:
+        return True
+    kind = (message.get("kind") or "").strip()
+    text = str(message.get("text") or "").strip().lower()
+    is_task = kind == "task" or message.get("task") or text.startswith(
+        ("stuck", "blocked", "task:", "task "))
+    if not is_task:
+        return True
+    try:
+        t = load(board, tid)
+    except Exception:
+        return True
+    if not t:
+        return True
+    wv = _work_view()
+    return wv._life_of(t, message) == wv.LIFE_CURRENT
+
+
+def _reopen_blocks_automation(board, t, messages=None):
+    """True when the only ticket-scoped tasks after reopen are unknown-ordered."""
+    if not ((t.get("reopened_at") or "").strip() or t.get("reopened_seen")):
+        return False
+    wv = _work_view()
+    lives = []
+    for m in (messages if messages is not None else load_messages(board)):
+        if (m.get("re") or "").strip() != t["id"]:
+            continue
+        kind = (m.get("kind") or "").strip()
+        text = str(m.get("text") or "").strip().lower()
+        if kind != "task" and not m.get("task") and not text.startswith(
+                ("stuck", "blocked", "task:", "task ")):
+            continue
+        lives.append(wv._life_of(t, m))
+    if not lives:
+        return False
+    return wv.LIFE_CURRENT not in lives and wv.LIFE_UNKNOWN in lives
+
+
 def _message_wakes_seat(board, seat, message):
     """Whether a posted message should attempt a native session wake for seat."""
+    if not _task_life_actionable(board, message):
+        return False
     obj_state = objective_state(_safe(lambda: load_objective(board), {}))
     return (_message_wakes(message, obj_state)
             or _continuous_message_wakes(board, seat, message))
@@ -9296,7 +9551,8 @@ def cmd_msg(a, board):
     # a recorded `join` is the deliberate, authoritative fact, and it must
     # outrank a stray ambient TICKET_AGENT the way it outranks one everywhere
     # else identity is resolved. whoami() intentionally does not make that
-    # promise; see its docstring.
+    # promise; see its docstring. T-956/T-958: note stays on whoami() so a
+    # join cannot rebind note attribution; do not collapse the two surfaces.
     sender = session_seat(board, a.owner)
     is_task = bool(getattr(a, "task", False))
     if a.to and a.to == sender:
@@ -9365,6 +9621,11 @@ def cmd_msg(a, board):
         if _already_autonomous_wake(board, to, mid):
             print("wake: %s -> deduped" % to)
             continue
+        limit = _active_seat_limit(board, to)
+        if limit:
+            print("wake: %s -> limited (reset %s)" % (
+                to, limit.get("reset_at") or limit.get("until") or "unknown"))
+            continue
         harness = _seat_harness(board, to)
         if sa is None:
             sa = _session_adapters()
@@ -9380,6 +9641,10 @@ def cmd_msg(a, board):
                 to, label, "run the thread in terminal Codex to enable native wake"))
         else:
             print("wake: %s -> %s" % (to, label))
+        if label == "held":
+            print("  recovery: %s" % getattr(
+                sa, "CLAUDE_HELD_RECOVERY",
+                "approve in the recipient session or set crossSessionInbound accept"))
         _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
@@ -9398,10 +9663,15 @@ def _should_poke_persist(label):
     mail and wait for a keystroke. A live persist watcher is the autonomous
     path. Remote bridge stays its own transport. Rebound leases belong to
     another live session, so they are not stolen here.
+
+    A REFUSED native delivery is not success (T-1000). Exact `refused` and
+    `refused (...)` stay watcher-eligible; only delivered-confirmed, held,
+    dropped, and expired suppress persistent poke.
     """
     s = str(label or "")
     if not s or s in ("woken", "deduped", "remote bridge required",
-                      "delivered-unconfirmed", "queued-busy", "delivery-unknown"):
+                      "delivered-unconfirmed", "queued-busy", "delivery-unknown",
+                      "delivered-confirmed", "held", "dropped", "expired"):
         return False
     if s.startswith("stale (rebound"):
         return False
@@ -10569,6 +10839,8 @@ def cmd_retire(a, board):
         sys.exit("no seat %r on this board" % owner)
     if _agent_holds_ticket(board, owner):
         sys.exit("refusing: %s holds a ticket; reopen or finish it first" % owner)
+    rec = _agent_rec(board, owner) or {}
+    seat_wt = (rec.get("worktree") or rec.get("cwd") or "").strip()
     if os.path.isfile(agent_path):
         os.remove(agent_path)
     if owner in wf:
@@ -10587,6 +10859,26 @@ def cmd_retire(a, board):
     retirer = whoami(getattr(a, "owner", None))
     post_message(board, retirer, "retired seat %s from the board" % owner)
     print("retired %s" % owner)
+    if seat_wt:
+        placeholder = create(
+            board, "cleanup worktree for retired seat %s" % owner,
+            body="Retired seat %s. Same safe-cleanup rules as a merged ticket."
+                 % owner,
+            role="ops", deps=[], priority=3)
+        placeholder["status"] = "done"
+        placeholder["done_at"] = now()
+        placeholder["owner"] = owner
+        placeholder["worktree"] = os.path.abspath(seat_wt)
+        placeholder["notes"] = [{"by": retirer, "at": now(),
+                                 "text": "retired seat; worktree %s" % seat_wt}]
+        save(board, placeholder)
+        child = _worktree_gc().ensure_cleanup_node(
+            board, placeholder, seat_wt, _gc_hooks())
+        if child:
+            result = _worktree_gc().run_cleanup_node(
+                board, child, _gc_hooks(), probes=_gc_probes(),
+                repo_root=os.path.dirname(board), apply=True)
+            print("  seat worktree: %s (%s)" % (seat_wt, result.get("status")))
 
 
 def _apply_connect_roles(board, a):
@@ -10700,8 +10992,9 @@ def pending_work(board, owner):
     if not owner or not os.path.isdir(board):
         return out
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
-    if rec.get("limit"):
-        out["limited"] = rec["limit"].get("until") or rec["limit"].get("at") or "yes"
+    lim = _active_seat_limit(board, owner, rec)
+    if lim:
+        out["limited"] = lim.get("reset_at") or lim.get("until") or "reset unknown"
         return out
     obj = _safe(lambda: load_objective(board), {})
     obj_state = objective_state(obj)
@@ -10719,8 +11012,7 @@ def pending_work(board, owner):
     if direct:
         out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
         tasks = [_wake_message_summary(m) for m in direct
-                 if task_released(m) and (_message_wakes(m, obj_state)
-                     or _continuous_message_wakes(board, owner, m))]
+                 if task_released(m) and _pending_message_triggers_wake(board, owner, m, obj_state)]
         if tasks:
             out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
     elif msgs:
@@ -10733,7 +11025,8 @@ def pending_work(board, owner):
     ready = _safe(lambda: [t for t in _filter_ready(unblocked(board, tickets), roles)
                            if can_do(board, owner, t)
                            and not _reservation_blocks(t, owner)
-                           and not _ticket_on_hold(t)], [])
+                           and not _ticket_on_hold(t)
+                           and not _reopen_blocks_automation(board, t)], [])
     mine_first = [t for t in ready if t.get("suggested") == owner or _reserved_agent(t) == owner]
     if mine_first:
         out["suggested_for_me"] = [t["id"] + " " + t.get("title", "")[:60] for t in mine_first[:3]]
@@ -10757,7 +11050,8 @@ def pending_work(board, owner):
                      _safe(lambda: load_messages(board), []), owner,
                      rec.get("joined_at", ""))
                  if x.get("from") != owner and _is_unread(x, since, _rem)
-                 and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))]
+                 and str(x.get("text", "")).lower().startswith(("stuck", "blocked"))
+                 and _task_life_actionable(board, x)]
         if stuck:
             out["stuck_messages"] = stuck[-WAKE_MESSAGE_LIMIT:]
         crit = [i for i in _safe(lambda: health(board, tickets), []) if i[0] == "CRIT"]
@@ -10787,6 +11081,14 @@ def _message_wakes(m, obj_state=""):
     if text.startswith(("stuck", "blocked", "task:", "task ")):
         return True
     return False
+
+
+def _pending_message_triggers_wake(board, owner, message, obj_state):
+    """True when pending/fingerprint may start a paid turn from this message."""
+    if not (_message_wakes(message, obj_state)
+            or _continuous_message_wakes(board, owner, message)):
+        return False
+    return _task_life_actionable(board, message)
 
 
 def _wake_message_summary(message):
@@ -10869,8 +11171,7 @@ def _watch_trigger_fingerprint(board, owner, pending):
         direct = [m for m in msgs if not is_board_broadcast(m)]
         obj_state = objective_state(_safe(lambda: load_objective(board), {}))
         waking = [m for m in direct
-                  if (_message_wakes(m, obj_state)
-                      or _continuous_message_wakes(board, owner, m))]
+                  if _pending_message_triggers_wake(board, owner, m, obj_state)]
         parts.extend("msg:" + _msg_id(m) for m in waking[-WAKE_MESSAGE_LIMIT:])
     for key in ("holding", "suggested_for_me", "ready_in_my_lane", "review_queue"):
         if key in pending:
@@ -11271,24 +11572,122 @@ def cmd_remote(a, board):
     print(json.dumps(result, sort_keys=True))
 
 
-def _watch_note_limit_from_log(board, owner, log_slice):
-    """Record limit when the child exits before atm inbox (T-561).
+def _provider_reset_at(text, observed_at):
+    """Normalize only explicit, unambiguous provider reset times.
 
-    pending_work already suppresses wake on rec['limit']; this is the lever for
-    weekly-limit exits that never reach inbox.
+    Bare clock times without a timezone remain display-only. Resolve a daily
+    clock against detection time once, never against each subsequent poll.
     """
-    if not log_slice or not _looks_limited(log_slice):
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    value = (text or "").strip()
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if stamp.tzinfo is not None:
+            return stamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        pass
+    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^()]+)\)", value, re.I)
+    if not match:
+        return ""
+    hour, minute, meridiem, zone = match.groups()
+    if not 1 <= int(hour) <= 12 or not 0 <= int(minute or 0) < 60:
+        return ""
+    try:
+        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(ZoneInfo(zone))
+    except (ValueError, ZoneInfoNotFoundError):
+        return ""
+    reset = observed.replace(hour=int(hour) % 12 + (12 if meridiem.lower() == "pm" else 0),
+                             minute=int(minute or 0), second=0, microsecond=0)
+    if reset <= observed:
+        reset += timedelta(days=1)
+    return reset.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _active_seat_limit(board, owner, rec=None):
+    """Expire observed limits atomically; unknown resets require explicit clear."""
+    rec = rec if rec is not None else (_agent_rec(board, owner) or {})
+    lim = rec.get("limit")
+    if not lim or not lim.get("reset_at"):
+        return lim
+    try:
+        reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
+        expired = reset.tzinfo is not None and reset <= datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        expired = False
+    if not expired:
+        return lim
+    def clear(current):
+        if current.get("limit") != lim:
+            return False
+        current.pop("limit", None)
+        current["limit_expired_at"] = lim["reset_at"]
+        # A quota failure must not keep the same trigger exhausted after reset.
+        current.pop("adapter_failure", None)
+    current = _agent_update(board, owner, clear)
+    return (current if current is not None else (_agent_rec(board, owner) or {})).get("limit")
+
+
+def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
+                               ticket=None, harness="", bound_write=False):
+    """Persist a provider rejection, including exit-zero Claude limit output.
+
+    Match the CLI's own rejection line, not a mention in successful prose or
+    telemetry. Earlier ticket writes cannot invalidate a later rejection.
+    Generic limit text still requires a failed run.
+    """
+    clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", log_slice or "")
+    rejection = re.search(
+        r"^You['’]ve hit your (?:session|weekly|usage) limit[^\r\n]*$", clean, re.M | re.I)
+    structured = _structured_limit_signal(clean)
+    failed = rc not in (0, None) or timed_out
+    if not rejection and not structured and not (failed and _looks_limited(clean)):
         return
-    if (_agent_rec(board, owner) or {}).get("limit"):
-        return
-    import re as _re
-    note = _first_match(log_slice, CLI_LIMIT_STRINGS) or "usage limit"
+    note = rejection.group(0) if rejection else (_first_match(clean, CLI_LIMIT_STRINGS) or "provider rate_limit_error")
+    if structured and not rejection:
+        for blob in _json_candidates(clean):
+            try:
+                event = json.loads(blob)
+            except ValueError:
+                continue
+            error = event.get("error") if isinstance(event, dict) else None
+            if (isinstance(event, dict) and event.get("type") in ("error", "result") and isinstance(error, dict)
+                    and error.get("type") == "rate_limit_error" and isinstance(error.get("message"), str)):
+                note = error["message"]
+                break
     until = ""
-    m = _re.search(r"resets?\s+([^\n\r\.]{3,40})", log_slice, _re.I)
-    if m:
-        until = m.group(1).strip()
-    lim = {"at": now(), "until": until, "note": note}
-    _agent_update(board, owner, lambda rec: rec.update({"limit": lim}))
+    match = re.search(r"resets?\s+(?:at\s+)?([^\r\n]+)", note, re.I)
+    if match:
+        until = match.group(1).strip()
+    observed = now()
+    lim = {"at": observed, "until": until, "note": note[:400],
+           "source": "provider", "harness": harness,
+           "reset_at": _provider_reset_at(until, observed)}
+    def record(rec):
+        if rec.get("limit"):
+            return False
+        rec["limit"] = lim
+        rec.pop("limit_expired_at", None)
+    if _agent_update(board, owner, record) is None:
+        return
+    reason = "LIMITED: %s; %s. Automatic retrigger paused %s." % (
+        owner, lim["note"],
+        ("until " + lim["reset_at"]) if lim["reset_at"] else
+        ("(provider reset %s; explicit limit clear required)" % (until or "unknown")))
+    # Scan actual held claims; a run's stale binding must never annotate work
+    # already transferred to a different seat.
+    from contextlib import nullcontext
+    for held in load_all(board):
+        if held.get("owner") != owner or held.get("status") != "claimed":
+            continue
+        tc = _recovery()
+        lock = tc.ticket_mutation_lock(board, held["id"]) if tc else nullcontext()
+        with lock:
+            current = load(board, held["id"])
+            if current.get("owner") == owner and current.get("status") == "claimed":
+                current.setdefault("notes", []).append({"by": owner, "at": observed, "text": reason})
+                save(board, current)
+    return lim
 
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
@@ -12501,7 +12900,7 @@ def utilization(board, tickets=None, hours=24, live=None):
         # stale liveness cache is precisely the bug this ticket exists to fix.
         lv = (live.get(n) if live is not None
               else (_safe(lambda: agent_liveness(board, r, list(agents.values())), {}) if r else {})) or {}
-        state = ("DOWN" if lv.get("state") in ("limited", "dead")
+        state = ("LIMITED" if lv.get("state") == "limited" else "DOWN" if lv.get("state") == "dead"
                  else ("busy" if any(t["status"] == "claimed" for t in held) else "idle"))
         rows.append({
             "agent": n, "state": state, "done": len(recent), "done_total": len(done),
@@ -12599,7 +12998,7 @@ def cmd_dash(a, board):
                 ("seen " + fmt_hours(hours_since(r["seen"]))) if r.get("seen") else "never",
                 wnote, ("pending: " + ", ".join(keys)) if keys else (lv.get("detail") or "")[:40]))
         rows, burn = utilization(board, tickets, hours=24, live=live)
-        live = [r for r in rows if r["state"] != "DOWN"]
+        live = [r for r in rows if r["state"] not in ("DOWN", "LIMITED")]
         lines.append("UTILIZATION 24h  (%d live agents, %d down)" % (len(live), len(rows) - len(live)))
         for r in sorted(live, key=lambda r: -r["done"])[:8]:
             lines.append("  %-13s %-4s done %2d  avg %-5s  wip %d  rev %d  util %3.0f%%" % (
@@ -13348,6 +13747,11 @@ def cmd_watch(a, board):
                         cleanup()
                     ended = now()
                     run_output = _read_run_slice(log_path, log_before)
+                    _watch_note_limit_from_log(
+                        board, owner, run_output, rc=rc, timed_out=timed_out,
+                        ticket=held_ticket, harness=_harness_of_cmd(run_cmd),
+                        bound_write=_run_had_bound_write(
+                            board, run_id, held_ticket, agent=owner, run_no=runs))
                     if _auth_gates_spawn(retry_harness) or retry_harness == "cursor":
                         run_auth_state = _classify_auth_output(rc, run_output)
                         if run_auth_state in ("login_required", "expired", "quota", "network") or rc == 0:
@@ -13394,8 +13798,6 @@ def cmd_watch(a, board):
                             lf.write("%s run %d TIMEOUT after %d min\n" % (now(), runs, a.run_timeout))
                     log("%s run %d exit %s" % (now(), runs, rc))
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
-                    run_slice = _read_run_slice(log_path, log_before)
-                    _safe(lambda rs=run_slice: _watch_note_limit_from_log(board, owner, rs), None)
                 if not a.once and rc not in (0, None):
                     previous = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
                     attempts = (int(previous.get("attempts") or 0) + 1
@@ -14104,10 +14506,22 @@ def cmd_spawn(a, board):
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
-    wt = os.path.abspath(a.worktree) if a.worktree else os.path.join(root, ".worktrees", owner)
-    git_root, origin_err = _spawn_git_root(board, owner, wt)
+    git_root, wt, expected_origin, base, origin_err = _resolve_spawn_target(
+        board, owner,
+        worktree_arg=getattr(a, "worktree", "") or "",
+        repo_arg=getattr(a, "repo", "") or "",
+        base_arg=getattr(a, "base", "") or "")
     if origin_err:
         sys.exit(origin_err)
+    dedicated = os.path.realpath(wt) == os.path.realpath(os.path.join(git_root, ".worktrees", owner))
+    if os.path.isdir(wt) and not dedicated:
+        pinned_hook = _cursor_hook_agent(wt)
+        if pinned_hook and pinned_hook != owner:
+            sys.exit(
+                "refusing to spawn %s into %s: hooks already pin %s. "
+                "Use a dedicated --worktree under the target --repo "
+                "(default <repo>/.worktrees/%s)."
+                % (owner, wt, pinned_hook, owner))
     resolved_harness, _ = harness_of(board, owner, requested_harness,
                                      getattr(a, "cmd_template", ""))
     sa = _session_adapters()
@@ -14127,7 +14541,6 @@ def cmd_spawn(a, board):
             _print_auth_result(owner, auth)
             sys.exit("watcher not started; fix the state above, then rerun `atm spawn %s`" % owner)
     if not os.path.isdir(wt):
-        base = a.base or _trunk()
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
                            capture_output=True, text=True)
         if r.returncode != 0:
@@ -14136,6 +14549,17 @@ def cmd_spawn(a, board):
         if r.returncode != 0:
             sys.exit("could not create worktree %s: %s" % (wt, (r.stderr or r.stdout).strip()))
         print("worktree %s (branch %s)" % (wt, owner))
+    print("target repo %s%s base %s" % (
+        git_root,
+        (" (%s)" % expected_origin) if expected_origin else "",
+        base))
+    if expected_origin:
+        wf = load_workforce(board)
+        entry = wf.get(owner, {})
+        entry["expected_origin"] = expected_origin
+        entry["spawn_repo"] = git_root
+        wf[owner] = entry
+        save_workforce(board, wf)
     ns = _join_namespace(a, owner)
     ns.worktree = wt
     _silent(lambda: cmd_join(ns, board))
@@ -14153,11 +14577,11 @@ def cmd_spawn(a, board):
         bn = argparse.Namespace(agent=owner, text=a.brief, ticket="", file="", show=False,
                                 role="", by=whoami())
         _silent(lambda: cmd_brief(bn, board))
-    inherited = _inherit_settings(root, wt)
+    inherited = _inherit_settings(git_root, wt)
     if inherited:
         print("inherited project settings into the worktree: %s" % ", ".join(inherited))
     if _pin_spawned_worker_hooks(board, owner, wt, harness):
-        print("pinned %s hooks to unique worker %s (canonical role hooks not inherited)" % (harness, owner))
+        print("hooks pinned to %s (unique worker; canonical role hooks not inherited)" % owner)
     if a.master:
         prev = current_master(board) or {}
         with open(master_state_path(board), "w") as f:
@@ -14556,6 +14980,8 @@ def _maybe_resume_auth_wake(board, owner, previous, merged):
     if lifecycle_of(board, owner) != "persistent":
         return
     rec = _agent_rec(board, owner) or {}
+    if _active_seat_limit(board, owner, rec):
+        return
     if rec.get("auth_resume_at"):
         return
     harness, _ = harness_of(board, owner)
@@ -14580,6 +15006,192 @@ def _auth_blocks_model(auth):
         if pause.get("paused") or rec.get("state") in NO_SPEND_STATES:
             return True
     return False
+
+
+def _existing_ancestor(path):
+    """First existing ancestor of path, including path itself when it exists."""
+    p = os.path.abspath(os.path.expanduser(path or ""))
+    if not p:
+        return ""
+    while p and not os.path.exists(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            return ""
+        p = parent
+    return p
+
+
+def _git_root_from(path):
+    """Git worktree root containing path, walking through not-yet-created children."""
+    start = _existing_ancestor(path) if path else ""
+    if not start:
+        return ""
+    return _init_cwd_worktree_root(start) or ""
+
+
+def _git_main_worktree(cwd):
+    """Main checkout for `git worktree add`. Linked worktrees share this object DB."""
+    if not cwd:
+        return ""
+    raw = git("rev-parse", "--git-common-dir", cwd=cwd)
+    if not raw:
+        return cwd
+    common = raw if os.path.isabs(raw) else os.path.normpath(os.path.join(cwd, raw))
+    common = os.path.realpath(common)
+    if os.path.basename(common) == ".git":
+        return os.path.dirname(common)
+    return os.path.realpath(cwd)
+
+
+def _origin_key(path):
+    from auth_v2_contract import normalize_git_origin
+    return normalize_git_origin(_git_remote_origin(path)) or ""
+
+
+def _repo_spec_is_path(spec):
+    """True for a filesystem checkout. `owner/repo` origin slugs stay slugs."""
+    spec = (spec or "").strip()
+    if not spec:
+        return False
+    if spec.startswith("~") or spec.startswith(".") or spec.startswith("/"):
+        return True
+    expanded = os.path.expanduser(spec)
+    return os.path.isdir(expanded)
+
+
+def _find_checkout_for_origin(wanted, hints):
+    """First local checkout whose origin matches wanted. Empty if none."""
+    from auth_v2_contract import repo_identity_matches
+    seen = []
+    for hint in hints:
+        if not hint:
+            continue
+        root = _git_root_from(hint)
+        if not root:
+            continue
+        root = os.path.realpath(root)
+        if root in seen:
+            continue
+        seen.append(root)
+        if repo_identity_matches(wanted, _git_remote_origin(root)):
+            return _git_main_worktree(root)
+    return ""
+
+
+def _spawn_base_ref(git_root, requested):
+    """Explicit --base, else origin/main when that ref exists, else local trunk."""
+    base = (requested or "").strip()
+    if base:
+        return base
+    if git("rev-parse", "--verify", "-q", "origin/main", cwd=git_root) is not None:
+        return "origin/main"
+    return _trunk(cwd=git_root)
+
+
+def _cursor_hook_agent(worktree):
+    """Agent baked into a worktree's Cursor board hook, or empty."""
+    script = os.path.join(worktree, ".cursor", "hooks", "tickets-board.py")
+    if not os.path.isfile(script):
+        return ""
+    try:
+        text = open(script, encoding="utf-8").read()
+    except OSError:
+        return ""
+    m = re.search(r"^AGENT = ['\"]([^'\"]+)['\"]", text, re.M)
+    return m.group(1) if m else ""
+
+
+def _resolve_spawn_target(board, owner, worktree_arg="", repo_arg="", base_arg=""):
+    """Choose the git root, worktree path, expected origin, and base ref.
+
+    dirname(board) is not identity. Cross-repo boards (Steer `.tickets` driving
+    Atman work) must pass --repo or fail closed when --worktree sits under a
+    different origin. Same-repo spawn keeps the historic default
+    `<board-parent>/.worktrees/<name>`.
+    """
+    from auth_v2_contract import normalize_git_origin, repo_identity_matches
+    board_root = os.path.dirname(os.path.abspath(board))
+    board_origin = _origin_key(board_root)
+    repo_arg = (repo_arg or "").strip()
+    worktree_arg = (worktree_arg or "").strip()
+    pinned = _expected_origin_for(board, owner, worktree_arg)
+    git_root = ""
+    expected = ""
+
+    if repo_arg:
+        if _repo_spec_is_path(repo_arg):
+            checkout = _git_root_from(os.path.abspath(os.path.expanduser(repo_arg)))
+            if not checkout:
+                return "", "", "", "", (
+                    "spawn --repo %s is not a git checkout" % repo_arg)
+            git_root = _git_main_worktree(checkout)
+            expected = _origin_key(git_root) or pinned
+        else:
+            expected = normalize_git_origin(repo_arg) or repo_arg
+            repo_name = expected.split("/")[-1] if "/" in expected else expected
+            hints = [
+                worktree_arg,
+                os.getcwd(),
+                board_root,
+                os.path.join(os.path.dirname(board_root), repo_name),
+            ]
+            git_root = _find_checkout_for_origin(expected, hints)
+            if not git_root:
+                return "", "", "", "", (
+                    "spawn --repo %s: no local checkout whose origin matches; "
+                    "pass --repo /path/to/checkout" % repo_arg)
+    else:
+        wt_probe = os.path.abspath(os.path.expanduser(worktree_arg)) if worktree_arg else ""
+        inferred_root = _git_main_worktree(_git_root_from(wt_probe)) if wt_probe else ""
+        inferred_origin = _origin_key(inferred_root) if inferred_root else ""
+        if pinned:
+            expected = pinned
+            repo_name = expected.split("/")[-1] if "/" in expected else expected
+            git_root = _find_checkout_for_origin(expected, [
+                wt_probe, os.getcwd(), board_root,
+                os.path.join(os.path.dirname(board_root), repo_name),
+            ])
+            if not git_root:
+                return "", "", "", "", (
+                    "repo_mismatch: spawn git root origin must be %s "
+                    "(dirname(board) is not identity); pass --repo /path/to/checkout"
+                    % expected)
+        elif inferred_root and inferred_origin and board_origin and inferred_origin != board_origin:
+            return "", "", "", "", (
+                "cross-repo spawn is ambiguous: --worktree is under %s but the "
+                "board lives in %s. Pass --repo %s (or the checkout path) to "
+                "derive the worktree from that repository."
+                % (inferred_origin, board_origin, inferred_root))
+        elif inferred_root:
+            git_root = inferred_root
+            expected = inferred_origin or board_origin or pinned
+        else:
+            git_root = board_root
+            expected = board_origin or pinned
+
+    if not git_root:
+        return "", "", "", "", "repo_mismatch: could not resolve a spawn git root"
+    git_root = os.path.realpath(git_root)
+    wt = (os.path.abspath(os.path.expanduser(worktree_arg)) if worktree_arg
+          else os.path.join(git_root, ".worktrees", owner))
+    exists = os.path.isdir(wt)
+    spawn_origin = _origin_key(git_root)
+    if expected and spawn_origin and not repo_identity_matches(expected, spawn_origin):
+        return "", "", "", "", (
+            "repo_mismatch: --repo origin %s does not match checkout %s"
+            % (expected, spawn_origin))
+    wt_origin = _origin_key(wt) if exists else ""
+    if exists and wt_origin and expected and not repo_identity_matches(expected, wt_origin):
+        return "", "", "", "", "repo_mismatch: worktree origin does not match %s" % expected
+    ancestor = _git_main_worktree(_git_root_from(wt)) if (exists or worktree_arg) else ""
+    if ancestor and os.path.realpath(ancestor) != git_root:
+        anc_origin = _origin_key(ancestor)
+        if anc_origin and spawn_origin and not repo_identity_matches(anc_origin, spawn_origin):
+            return "", "", "", "", (
+                "repo_mismatch: --worktree is under %s but --repo is %s"
+                % (anc_origin, spawn_origin or expected))
+    base = _spawn_base_ref(git_root, base_arg)
+    return git_root, wt, expected or spawn_origin, base, ""
 
 
 def _spawn_git_root(board, owner, worktree):
@@ -15843,7 +16455,7 @@ function renderSeats(d){
   const placed=new Set();
   const by={};(d.agents||[]).forEach(a=>{if(a.name)by[a.name]=a});
   const operator=[],review=[],flight=[],ready=[],idle=[];
-  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);arr.push(seatChip(name,cover,kind,by[name]||{}))};
+  const add=(arr,name,cover,kind)=>{if(!name||placed.has(name))return;placed.add(name);const a=by[name]||{};if(a.state==='LIMITED'){cover='LIMITED · reset '+(a.limit_until||'unknown');kind='ghost'}arr.push(seatChip(name,cover,kind,a))};
   add(operator,d.master,'master','operator');
   add(operator,d.cos,'CoS','operator');
   (d.review||[]).forEach(t=>add(review,t.owner,t.id+' · review','cover'));
@@ -15857,7 +16469,7 @@ function renderSeats(d){
     const hint=(a.roles&&a.roles.length)?a.roles.join('/'):'any lane';
     const u=utilBy[a.name]||{};
     const quota=u.util_pct!=null?' · '+Math.round(u.util_pct)+'%':'';
-    const st=a.state==='DOWN'?'down':'idle';
+    const st=a.state==='LIMITED'?'limited':a.state==='DOWN'?'down':'idle';
     idle.push(seatChip(a.name,st+' · '+hint+quota,a.state==='DOWN'||a.reachable===false?'ghost':'idle'));
   });
   const put=(id,html,empty)=>document.getElementById(id).innerHTML=html||('<div class="empty">'+empty+'</div>');
@@ -16339,7 +16951,7 @@ async function load(manual){
   document.getElementById('agents').innerHTML=(d.agents||[]).map(a=>{
     const u=utilBy[a.name]||{};
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
-    const lim=a.limit?'<span class="tag limit" title="'+esc(a.limit_until||'usage limit')+'">limited</span>':'';
+    const lim=a.limit?'<span class="tag limit">reset '+esc(a.limit_until||'unknown')+'</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
@@ -16919,7 +17531,7 @@ def _board_snapshot_body(board, messages=40):
         rec = agents.get(r["agent"], {})
         agent_wf = wf.get(r["agent"], {}) or {}
         harness_name = agent_wf.get("harness") or agent_wf.get("tool") or "claude"
-        lim = rec.get("limit")
+        lim = _active_seat_limit(board, r["agent"], rec)
         wc = _watcher_count(r["agent"], board)
         wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
         wake_pending = actionable(wake)
@@ -17028,7 +17640,7 @@ def _board_snapshot_body(board, messages=40):
         flag = " FLAG:no-exit" if objective_exit_missing(obj) else ""
         goals = "OBJECTIVE (%s%s)\n%s\nexit: %s\n\n%s" % (
             st, flag, obj.get("text", ""), obj.get("exit_criterion") or "(none)", goals)
-    util_rows = [r for r in rows if r["state"] != "DOWN"]
+    util_rows = [r for r in rows if r["state"] not in ("DOWN", "LIMITED")]
     in_flight = [{"id": t["id"], "owner": t.get("owner", ""), "title": t["title"],
                   "priority": t.get("priority", 2), "since_update": timing(t)["since_update"],
                   "waiting": [d for d in t.get("deps", []) if d not in done],
@@ -17449,10 +18061,28 @@ def cmd_ui(a, board):
     if a.open:
         import subprocess
         subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
+    parent_pid = int(getattr(a, "parent_pid", 0) or 0)
+    board_dir = os.path.abspath(board) if board else ""
+    import threading
+    worker = threading.Thread(target=srv.serve_forever, daemon=True)
+    worker.start()
     try:
-        srv.serve_forever()
+        while worker.is_alive():
+            if board_dir and not os.path.isdir(board_dir):
+                print("board UI: board directory gone (%s); exiting" % board_dir)
+                break
+            if parent_pid:
+                try:
+                    os.kill(parent_pid, 0)
+                except ProcessLookupError:
+                    print("board UI: parent pid %d gone; exiting" % parent_pid)
+                    break
+            worker.join(0.25)
     except KeyboardInterrupt:
         pass
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 QUICKSTART_MARKER = "quickstart.json"
@@ -18540,6 +19170,7 @@ def main():
     c.add_argument("--sprint", "-s", default=None, help="S-01; default: active sprint if --in-sprint")
     c.add_argument("--in-sprint", action="store_true", help="tag with the active sprint")
     c.add_argument("--needs", default="", help="capabilities required: docker,browser,own-machine")
+    c.add_argument("--worktree", default="", help="implementation checkout; adds automated cleanup child")
     c.set_defaults(fn=cmd_create)
 
     c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, priority")
@@ -18553,6 +19184,7 @@ def main():
     c.add_argument("--title", default="")
     c.add_argument("--by", default="")
     c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
+    c.add_argument("--worktree", default=None, help="record checkout and add automated cleanup child")
     c.set_defaults(fn=cmd_assign)
 
     c = sub.add_parser("reserve", help="reserve a ticket for an agent without claiming it")
@@ -18871,8 +19503,10 @@ def main():
     c.add_argument("--wake-mode", choices=WAKE_MODES, default=None,
                    help="persist the seat's wake policy (master/CoS default continuous; workers task-only)")
     c.add_argument("--brief", default="", help="standing context for this worker")
-    c.add_argument("--worktree", default="", help="default .worktrees/<name>")
-    c.add_argument("--base", default="", help="branch/ref to create the worktree from (default main)")
+    c.add_argument("--worktree", default="", help="default <repo>/.worktrees/<name>")
+    c.add_argument("--repo", default="",
+                   help="target checkout path or origin slug for cross-repo spawn")
+    c.add_argument("--base", default="", help="branch/ref to create the worktree from (default origin/main)")
     c.add_argument("--every", type=int, default=60)
     c.add_argument("--run-timeout", type=int, default=90)
     c.add_argument("--heartbeat", type=int, default=0,
@@ -18909,6 +19543,8 @@ def main():
     c.add_argument("--host", default="127.0.0.1")
     c.add_argument("--open", action="store_true", help="open it in the browser")
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
+    c.add_argument("--parent-pid", type=int, default=0,
+                   help="exit when this pid disappears (test/supervisor watchdog)")
     c.set_defaults(fn=cmd_ui)
 
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
@@ -18939,6 +19575,14 @@ def main():
     c.add_argument("--hours", type=int, default=24)
     c.add_argument("--json", action="store_true")
     c.set_defaults(fn=cmd_util)
+
+    c = sub.add_parser("gc", help="sweep merged-ticket worktrees (checkout only; never delete branches)")
+    mode = c.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="report only (default)")
+    mode.add_argument("--apply", action="store_true", help="remove eligible merged worktrees")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--artifact", default="", help="repo whose linked worktrees to inspect")
+    c.set_defaults(fn=cmd_gc)
 
     c = sub.add_parser("dash", help="master dashboard, refreshing in place (Ctrl-C to leave)")
     c.add_argument("--every", type=int, default=10)
@@ -19346,9 +19990,8 @@ def main():
         cmd_self(a, found if found and os.path.isdir(found) else None)
         return
     if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
-        # These diagnose/repair board resolution itself, so they must not go
-        # through board_dir() -- a shadow board is exactly the case they are
-        # for, and board_dir() would refuse before they ever ran (T-959).
+        # Diagnose/repair board resolution itself; must not go through
+        # board_dir() or a shadow board is refused before we can report it.
         a.fn(a)
         return
     discover = a.cmd != "board"

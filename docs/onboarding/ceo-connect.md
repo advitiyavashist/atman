@@ -1,5 +1,11 @@
 # Any-CEO connect (product flow)
 
+> **Not a first read.** This page is the CEO-seat wiring for a board that
+> already exists and already has a team on it. If you just installed `atm`,
+> start at [first-run.md](first-run.md) instead. This page will not make
+> sense before you have a board.
+
+
 Connecting is joining **Atman**, not Claude, Cursor, Codex, or another
 provider. Board identity is `atman-<seat>` (example `atman-ceo`). A CoS
 seat staffs workers. Choose harnesses from `atm harness available`; this
@@ -52,6 +58,9 @@ atm connect
 
 ---
 
+Remote sessions and reconnect are experimental and outside the supported
+preview. The commands below enroll local CLI seats.
+
 ## Exact commands a new CEO runs
 
 Living board. Example seat `atman-ceo` is master. Example CoS `cos`.
@@ -72,7 +81,6 @@ atm harness available          # same catalog; usage is recorded limits
 atm join atman-ceo --roles master --can own-machine,browser --cost high --persistent --wake-mode continuous --harness cursor
 atm hooks cursor --agent atman-ceo
 atm hooks codex --agent atman-ceo
-atm hooks remote --agent atman-ceo
 atm master                 # atman-ceo already holds master; take only if vacant
 atm inbox
 atm objective              # attach; do not --set unless empty

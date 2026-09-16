@@ -61,6 +61,57 @@ def _work_view():
         from ticket_board import work_view as m
         return m
 
+
+def _worktree_gc():
+    """T-946 automated worktree cleanup + atm gc sweep."""
+    try:
+        from . import worktree_gc as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import worktree_gc as m
+        return m
+
+
+def _gc_hooks():
+    return _worktree_gc().CliHooks(_GCApi())
+
+
+def _gc_probes():
+    gc = _worktree_gc()
+    mode = (os.environ.get("TICKETS_GC_OPEN_PRS") or "").strip()
+    gh_fn = None
+    if mode == "none":
+        gh_fn = lambda branch, cwd: []
+    elif mode:
+        gh_fn = lambda branch, cwd: [{"number": 1, "url": mode}]
+    extra = [p for p in [(os.environ.get("TICKETS_GC_RUNTIME_LINK") or "").strip()] if p]
+    origin = (os.environ.get("TICKETS_GC_ORIGIN_REF") or "").strip() or None
+    return gc.Probes(gh_fn=gh_fn, runtime_extra=extra, origin_ref=origin)
+
+
+class _GCApi:
+    """Minimal surface worktree_gc.CliHooks needs from this module."""
+
+    load_all = staticmethod(lambda board: load_all(board))
+    load = staticmethod(lambda board, tid: load(board, tid))
+    save = staticmethod(lambda board, t: save(board, t))
+    create = staticmethod(lambda board, title, body="", role="", deps=None,
+                          priority=3, epic="", sprint="", needs=None:
+                          create(board, title, body, role, deps, priority,
+                                 epic, sprint, needs))
+    now = staticmethod(lambda: now())
+    whoami = staticmethod(lambda: whoami())
+    current_master = staticmethod(lambda board: current_master(board))
+
+
+def _is_automated_cleanup(t):
+    """T-946 x T-1031: only cleanup_worktree is exempt from the accept gate."""
+    return ((t.get("kind") or "").strip() == "automated"
+            and (t.get("automated") or {}).get("action") == "cleanup_worktree")
+
 STATUSES = ("open", "claimed", "review", "blocked", "done")
 LABEL = {"open": "TO DO", "claimed": "IN PROGRESS", "review": "IN REVIEW",
          "blocked": "BLOCKED", "done": "DONE"}
@@ -189,11 +240,11 @@ def _shadow_board_refusal(candidate, configured):
         "real data (messages, agent registrations) on a board nothing else "
         "reads, the T-959 shape. Pick one:\n"
         "  * use the shared board:      export TICKETS_DIR=%s\n"
-        "  * inspect what is here:      tickets doctor\n"
+        "  * inspect what is here:      atm doctor\n"
         "  * keep this repo's own board on purpose:\n"
-        "                                tickets board-mark-primary\n"
+        "                                atm board-mark-primary\n"
         "  * archive this board aside (never deletes):\n"
-        "                                tickets board-archive-shadow %s --yes\n"
+        "                                atm board-archive-shadow %s --yes\n"
         % (real_candidate, configured, configured, real_candidate)
     )
 
@@ -213,7 +264,7 @@ def _apply_shared_board_config(candidate):
         return candidate
     if not _board_has_content(candidate):
         sys.stderr.write(
-            "tickets: cwd .tickets is empty -- using this repo's configured "
+            "atm: cwd .tickets is empty -- using this repo's configured "
             "shared board %s\n" % configured
         )
         return configured
@@ -786,8 +837,12 @@ def save(board, t, expected_generation=None):
         # Every active write (including update and owner transfers) shares the
         # same dependency gate; command-specific checks are only early errors.
         current = load(board, t["id"]) if os.path.isfile(path) else {}
-        if (t.get("status") == "claimed"
-                or (t.get("owner") and t.get("owner") != current.get("owner"))):
+        # The automated worktree-cleanup node is exempt: it hands no work to
+        # a seat and its own checks escalate instead of deleting unmerged,
+        # dirty or in-use work (see _run_cleanup_nodes).
+        if (not _is_automated_cleanup(t)
+                and (t.get("status") == "claimed"
+                     or (t.get("owner") and t.get("owner") != current.get("owner")))):
             _refuse_unreleased_deps(t, load_all(board))
         if tc is not None and os.path.isfile(path):
             try:
@@ -2018,11 +2073,29 @@ def _start_successors(board, finished_id):
     pred = next((x for x in tickets if x["id"] == finished_id), None)
     sha = _work_view().accepted_release_sha(pred) if pred else ""
     children = [x for x in unblocked(board, tickets) if finished_id in x.get("deps", [])]
+    # T-946 x T-1031: the automated worktree-cleanup node decides keep/remove
+    # for the finished ticket's own worktree. It hands no work to a seat, and
+    # its own checks never delete unmerged, dirty or in-use work (they
+    # escalate), so it is not gated on acceptance -- gating it would strand
+    # exactly the worktrees of tickets closed without verification. Every
+    # other successor stays gated.
+    seen = set(x["id"] for x in children)
+    children += [x for x in tickets
+                 if x["id"] not in seen and x.get("status") == "open"
+                 and finished_id in (x.get("deps") or [])
+                 and _is_automated_cleanup(x)]
     freed = [x["id"] for x in children]
     started, held = [], []
     for child in children:
         if _ticket_on_hold(child):
             held.append(child["id"])
+            continue
+        if _worktree_gc().is_automated(child):
+            # T-946: deterministic executor. No model turn, no task post.
+            result = _worktree_gc().run_cleanup_node(
+                board, child, _gc_hooks(), probes=_gc_probes(),
+                repo_root=os.path.dirname(board), apply=True)
+            started.append("%s [automated:%s]" % (child["id"], result.get("status")))
             continue
         who = _reserved_agent(child) or (child.get("suggested") or "").strip()
         text = "unblocked %s after %s" % (child["id"], finished_id)
@@ -2068,6 +2141,12 @@ def _block_unverified_successors(board, finished_id):
     who = whoami()
     at = now()
     for child in wv.successors_waiting_on(tickets, finished_id, released):
+        if _is_automated_cleanup(child):
+            # T-946: the worktree-cleanup node is not work for a seat. It only
+            # decides keep/remove for the finished ticket's own worktree, and
+            # its own checks escalate rather than delete unmerged, dirty or
+            # in-use work. See the matching exemption in _start_successors.
+            continue
         child["status"] = "blocked"
         child["unverified_block"] = finished_id
         _retire_stale_gated_start(board, child)
@@ -2075,6 +2154,28 @@ def _block_unverified_successors(board, finished_id):
         save(board, child)
         blocked.append(child["id"])
     return blocked, reason
+
+
+def _run_cleanup_nodes(board, finished_id):
+    """T-946 x T-1031: run the automated worktree-cleanup node even when the
+    predecessor closed without an ACCEPT.
+
+    The node hands no work to a seat: it decides keep/remove for the finished
+    ticket's own worktree and escalates instead of deleting unmerged, dirty or
+    in-use work. Gating it on acceptance would strand exactly the worktrees of
+    tickets closed unverified. Every other successor stays gated.
+    """
+    gc = _worktree_gc()
+    ran = []
+    for child in load_all(board):
+        if child.get("status") != "open" or finished_id not in (child.get("deps") or []):
+            continue
+        if not _is_automated_cleanup(child):
+            continue
+        result = gc.run_cleanup_node(board, child, _gc_hooks(), probes=_gc_probes(),
+                                    repo_root=os.path.dirname(board), apply=True)
+        ran.append("%s [automated:%s]" % (child["id"], result.get("status")))
+    return ran
 
 
 def _reopen_unverified_successors(board, finished_id, sha="", seat=""):
@@ -2189,6 +2290,62 @@ def _next_refusal_parts(ready_all, roles, owner, steal_id, board):
     return role_miss, reserved_miss
 
 
+def _work_view():
+    """T-889 Work view (packaged with sounding). Never import as a top-level
+    module: work_view.py uses relative ``.sounding``, which crashes
+    ``python src/ticket_board/cli.py next`` on every reopened ticket."""
+    try:
+        from ticket_board import work_view as m
+        return m
+    except ImportError:
+        src = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import work_view as m
+        return m
+
+
+def _task_life_actionable(board, message):
+    """False when a ticket-scoped task is previous-life or same-second unknown."""
+    tid = (message.get("re") or "").strip()
+    if not tid:
+        return True
+    kind = (message.get("kind") or "").strip()
+    text = str(message.get("text") or "").strip().lower()
+    is_task = kind == "task" or message.get("task") or text.startswith(
+        ("stuck", "blocked", "task:", "task "))
+    if not is_task:
+        return True
+    try:
+        t = load(board, tid)
+    except Exception:
+        return True
+    if not t:
+        return True
+    wv = _work_view()
+    return wv._life_of(t, message) == wv.LIFE_CURRENT
+
+
+def _reopen_blocks_automation(board, t, messages=None):
+    """True when the only ticket-scoped tasks after reopen are unknown-ordered."""
+    if not ((t.get("reopened_at") or "").strip() or t.get("reopened_seen")):
+        return False
+    wv = _work_view()
+    lives = []
+    for m in (messages if messages is not None else load_messages(board)):
+        if (m.get("re") or "").strip() != t["id"]:
+            continue
+        kind = (m.get("kind") or "").strip()
+        text = str(m.get("text") or "").strip().lower()
+        if kind != "task" and not m.get("task") and not text.startswith(
+                ("stuck", "blocked", "task:", "task ")):
+            continue
+        lives.append(wv._life_of(t, m))
+    if not lives:
+        return False
+    return wv.LIFE_CURRENT not in lives and wv.LIFE_UNKNOWN in lives
+
+
 def cmd_next(a, board):
     owner = whoami(a.owner)
     roles = roles_for(board, owner, a.role)
@@ -2208,6 +2365,7 @@ def cmd_next(a, board):
     ready = [t for t in _filter_ready(ready_all, roles) if can_do(board, owner, t)]
     ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
     ready = [t for t in ready if not _ticket_on_hold(t)]
+    ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -3013,6 +3171,8 @@ def cmd_done(a, board):
         blocked, reason = _block_unverified_successors(board, a.id)
         if blocked:
             print("blocked: %s -- %s" % (", ".join(blocked), reason))
+        for line in _run_cleanup_nodes(board, a.id):
+            print("cleanup: %s" % line)
 
 
 def cmd_block(a, board):
@@ -4007,7 +4167,7 @@ def cmd_doctor(a):
             shown = s["recipients"][:20]
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
-        print("    fix: tickets board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+        print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
 
 
 def cmd_board_mark_primary(a):
@@ -4021,19 +4181,30 @@ def cmd_board_mark_primary(a):
     print("marked %s primary -- it now wins over any configured shared board for this repo" % board)
 
 
+def _board_in_effect_for_archive():
+    """Live board for archive-shadow, without refusing an unmarked shadow.
+
+    Same order as board_dir: TICKETS_DIR, then a local .primary, then the
+    configured shared board, then cwd .tickets.
+    """
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    candidate = _board_dir_uncached()
+    if _is_marked_primary(candidate):
+        return candidate
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    if configured:
+        return configured
+    return candidate
+
+
 def cmd_board_archive_shadow(a):
     path = os.path.abspath(os.path.expanduser(a.path))
     if not os.path.isdir(path):
         sys.exit("no such directory: %s" % path)
-    env = os.environ.get("TICKETS_DIR")
-    root = _repo_root()
-    configured = _configured_shared_board(root) if root else None
-    if env:
-        effective = os.path.abspath(os.path.expanduser(env))
-    elif configured:
-        effective = configured
-    else:
-        effective = _board_dir_uncached()
+    effective = _board_in_effect_for_archive()
     if os.path.realpath(path) == os.path.realpath(effective):
         sys.exit(
             "REFUSING: %s IS the board currently in effect -- archiving it would "
@@ -4051,6 +4222,7 @@ def cmd_board_archive_shadow(a):
         )
     os.rename(path, dest)
     print("archived shadow board %s -> %s (nothing deleted)" % (path, dest))
+
 
 
 def cmd_context(a, board):

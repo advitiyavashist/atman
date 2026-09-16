@@ -605,3 +605,35 @@ def test_internal_entry_points_refuse_gated_child(tool, board, monkeypatch):
             assert planned["status"] == "open" and not planned.get("owner")
             assert planned not in cli.unblocked(str(board), cli.load_all(str(board)))
         _assert_child_not_started(board, name)
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_non_cleanup_automated_successor_stays_gated(tool, board):
+    """kind=automated is not enough; only cleanup_worktree is exempt."""
+    setup_backend(tool, board)
+    put_in_review(board)
+    child = load_ticket(board, "T-003")
+    child["kind"] = "automated"
+    child["automated"] = {"action": "notify", "target": "T-002"}
+    save_ticket(board, child)
+    done = run(tool, board, "done", "T-002", "--notes", "unverified", "--force",
+               agent="alice")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert "blocked: T-003 -- %s" % REASON in done.stdout
+    assert "cleanup:" not in done.stdout
+    child = load_ticket(board, "T-003")
+    assert child["status"] == "blocked"
+    assert child.get("unverified_block") == "T-002"
+    assert child["kind"] == "automated"
+    assert child["automated"]["action"] == "notify"
+    _force_open_child(board)
+    child = load_ticket(board, "T-003")
+    child["kind"] = "automated"
+    child["automated"] = {"action": "notify", "target": "T-002"}
+    child["status"] = "claimed"
+    child["owner"] = "bob"
+    cli = import_cli(tool)
+    with pytest.raises(SystemExit, match="without verification"):
+        cli.save(str(board), child)
+    assert load_ticket(board, "T-003")["status"] == "open"
+    assert not any(cli._start_successors(str(board), "T-002"))

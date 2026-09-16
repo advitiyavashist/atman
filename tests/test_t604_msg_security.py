@@ -1,6 +1,7 @@
 """T-604 security bounce: POST /msg is JSON + same-origin + registered from."""
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -36,8 +37,10 @@ class _Server:
         self.port = port
         env = dict(os.environ, TICKETS_DIR=str(board))
         self.proc = subprocess.Popen(
-            [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1"],
+            [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1",
+             "--parent-pid", str(os.getpid())],
             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         if not _wait_up(port):
             self.stop()
@@ -63,11 +66,18 @@ class _Server:
             return json.loads(r.read())
 
     def stop(self):
-        self.proc.terminate()
+        try:
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            self.proc.terminate()
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                self.proc.kill()
+            self.proc.wait(timeout=2)
 
 
 def _live(board):
