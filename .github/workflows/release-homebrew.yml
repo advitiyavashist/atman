@@ -15,6 +15,12 @@ on:
 
 jobs:
   release:
+    # Creating the GitHub Release needs contents: write. Without it the job
+    # built and smoke-tested the tarball and then died on the publish step with
+    # "Resource not accessible by integration", which is what kept v0.2.0 from
+    # ever appearing and left the Homebrew formula pointing at nothing.
+    permissions:
+      contents: write
     runs-on: macos-latest
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
