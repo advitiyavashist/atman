@@ -4,7 +4,9 @@
 
 <h1 align="center">The next ticket opens only after someone else accepts that commit.</h1>
 
-<!-- HERO DEMO PLACEHOLDER: replace this comment with the PR #217 capture when that PR lands. -->
+<p align="center">
+  <img src="docs/assets/demo/hero.gif" width="790" alt="Terminal take: a coordinator plans two dependent tickets, a worker implements A and opens a PR, the coordinator accepts that exact commit, then a Cursor agent picks up B carrying A's accepted commit — nobody retypes what A did">
+</p>
 
 <p align="center">
   <img src="landing/assets/t971-app-work-1440.png" width="920" alt="The Atman app Work view: objective with its exit criterion, a dependency graph with T-001 done and T-002 working, and median turns and yield at cost left blank">
