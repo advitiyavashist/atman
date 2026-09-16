@@ -1,4 +1,4 @@
-"""T-794: GitHub Pages landing with first-class graph, roadmap, app, efficiency."""
+"""T-794 / T-1047: Pages still publish landing/; four sections, one promise."""
 
 from pathlib import Path
 
@@ -8,94 +8,37 @@ README = (ROOT / "landing" / "README.md").read_text(encoding="utf-8")
 REPO_README = (ROOT / "README.md").read_text(encoding="utf-8")
 WORKFLOW = (ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
 PAGES = "https://advitiyavashist.github.io/atman/"
+PROMISE = "The next ticket opens only after someone else accepts that commit."
 
 
 def test_first_class_section_ids_and_order():
-    for needed in ("workflow", "app", "per-turn", "roadmap"):
+    for needed in ("promise", "path", "status", "start"):
         assert 'id="%s"' % needed in LANDING, needed
-    assert LANDING.index('id="app"') < LANDING.index('id="philosophy"')
-    how = LANDING.index('id="how"')
-    assert how < LANDING.index('id="workflow"')
-    assert LANDING.index('id="workflow"') < LANDING.index('id="per-turn"')
-    assert LANDING.index('id="per-turn"') < LANDING.index('id="roadmap"')
-    assert LANDING.index('id="roadmap"') < LANDING.index('id="start"')
+    assert LANDING.index('id="promise"') < LANDING.index('id="path"')
+    assert LANDING.index('id="path"') < LANDING.index('id="status"')
+    assert LANDING.index('id="status"') < LANDING.index('id="start"')
+    for gone in ("philosophy", "workflow", "per-turn", "roadmap"):
+        assert 'id="%s"' % gone not in LANDING, gone
 
 
-def test_atm_ui_capture_is_shareable():
-    block = LANDING[LANDING.index('id="app"') : LANDING.index('id="philosophy"')]
-    for surface in ("Objective", "Team", "Work", "Intervene"):
-        assert surface in block, surface
-    assert "assets/t971-app-work-1440.png" in block
-    assert "this site shows a product capture" in block.lower()
-    assert "your live team appears in the local app" in block.lower()
-    assert "atm ui" in block
-    assert "og:image" in LANDING
-    assert PAGES + "assets/t971-app-work-1440.png" in LANDING
+def test_hero_and_readme_share_the_promise():
+    assert PROMISE in LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
+    assert PROMISE in REPO_README
     assert "127.0.0.1" not in LANDING
     assert "localhost" not in LANDING.lower()
 
 
-def test_workflow_graph_is_first_class():
-    block = LANDING[LANDING.index('id="workflow"') : LANDING.index('id="per-turn"')]
-    assert "Work stays invisible until its dependencies are done" in block
-    assert "atm ui" in block
-    assert "T-001" in block
-    assert "T-002" in block
-    assert "T-003" in block
-    assert "waiting on T-002" in block
-    assert "hosted board" in block
-
-
-def test_app_is_atm_ui_first_session_not_cloud_demo():
-    block = LANDING[LANDING.index('id="app"') : LANDING.index('id="philosophy"')]
-    assert "atm ui" in block
-    assert "sample project" in block.lower()
-    assert "this site shows a product capture" in block.lower()
-    assert "assets/t971-app-work-1440.png" in block
-    assert "127.0.0.1" not in LANDING
-    assert "localhost" not in LANDING.lower()
-
-
-def test_per_turn_unknown_is_not_zero():
-    block = LANDING[LANDING.index('id="per-turn"') : LANDING.index('id="roadmap"')]
-    assert "Unknown is not zero until a done ticket reports" in block
-    assert block.count("—") >= 2
-    assert "$0" not in block
-    assert "0.0" not in block
-
-
-def test_engineering_roadmap_is_first_class():
-    block = LANDING[LANDING.index('id="roadmap"') : LANDING.index('id="surfaces"')]
-    assert "V0" in block
-    assert "V1" in block
-    assert "V2" in block
-    assert "V3" in block
-    assert "V4" in block
-    assert "atm route" in block
-    assert "named prior" in block.lower() or "named prior" in block
-    assert ">Now<" in block or ">Now</span>" in block
-    assert ">Next<" in block or ">Next</span>" in block
-    assert ">Later<" in block or ">Later</span>" in block
-    assert "No invented ship dates" in block
-    assert "claimable only after cause, change, and proof exist" in block
-    assert "median turns and measured cost only from done tickets" in block
-    assert "atm hooks" in block
-    assert "atman-&lt;seat&gt;" in block
-    assert "not a pasted model setup" in block
+def test_path_is_install_to_accepted_dependent():
+    block = LANDING[LANDING.index('id="path"') : LANDING.index('id="status"')]
+    assert "atm objective" in block
+    assert "atm accept" in block
     assert "atm next" in block
-    assert "--after" in block
-    assert "HOLD" in block
-    assert "atm review" in block
-    assert "SHA on main" in block
-    assert "Load guidance only when the ticket needs it (handoff)" in block
-    assert "not always-on AGENTS.md" in block
-    lowered = block.lower()
-    for banned in ("next week", "q1", "q2", "q3", "q4", "ship by", "astra", "gpt-6", "zodchiii", "openai"):
-        assert banned not in lowered, banned
-    assert "2026-" not in block
-    assert "DAG" not in block
-    assert "task graph" not in lowered
-    assert "multi-agent framework" not in lowered
+    assert "T-002 opens" in block
+
+
+def test_status_points_at_the_readme_table():
+    block = LANDING[LANDING.index('id="status"') : LANDING.index('id="start"')]
+    assert "README.md#preview-status-and-limitations" in block
 
 
 def test_pages_workflow_publishes_landing_directory():

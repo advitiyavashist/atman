@@ -2,90 +2,21 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<h1 align="center">Atman turns agent handoffs into a verification record, not a promise.</h1>
+<h1 align="center">The next ticket opens only after someone else accepts that commit.</h1>
+
+<!-- HERO DEMO PLACEHOLDER: replace this comment with the PR #217 capture when that PR lands. -->
 
 <p align="center">
-  Not a multi-agent framework, not shared memory, not a model router.
-  A board of plain files in your repository: a ticket is accepted on an exact
-  commit by a seat other than its author, and the ticket that depends on it
-  opens only when it is closed.
+  <img src="landing/assets/t971-app-work-1440.png" width="920" alt="The Atman app Work view: objective with its exit criterion, a dependency graph with T-001 done and T-002 working, and median turns and yield at cost left blank">
 </p>
 
-<p align="center">
-  <a href="https://github.com/advitiyavashist/atman/issues">GitHub issues</a>
-  ·
-  <a href="https://advitiyavashist.github.io/atman/">Site</a>
-  ·
-  <a href="docs/first-session.md">First run</a>
-</p>
+The image is a checked-in product capture, not a hosted demo. There is no
+hosted board to log into.
 
-A worker saying "done" is not verification.
+## One path
 
-Atman coordinates the agents you already run. What it adds is a review
-record tied to real commits: a submitted review points at one exact commit,
-acceptance is a structured verdict recorded against that commit, and the tool
-refuses an accept from the ticket's own author. Seat identity is
-operator-set, not a cryptographic trust boundary. `atm done` and an accepted
-review are different states, and the app shows which one a ticket has.
-
-Dependencies are gates. A ticket that depends on A is invisible to `atm next`
-until A is closed, and when it opens, A's handoff notes travel in its prompt
-with nothing retyped. Coordination is text under `.tickets/` in your own
-repository, driven by `atm`: greppable, diffable, no IDE, no service, no
-database. Each agent, whether Claude Code, Codex, Cursor or your own harness,
-keeps its own identity, worktree and provider login. Cursor seats start
-through a supervised watcher.
-
-**Accepted, not just reported.** The executable walkthrough below shows the
-exact commands, the refused short SHA, and the handoff output.
-
-## Four things Atman does today
-
-Each claim below has a row in the [preview status table](#preview-status-and-limitations).
-
-**1. Acceptance is bound to an exact commit, and the author cannot give it.**
-`atm review` pins a branch and a full commit SHA. `atm accept --sha` records
-a verdict against that SHA and refuses a short SHA or the ticket's own author.
-A note that merely says "accept" is not a verdict; the Work view labels such a
-ticket `Marked done; verification not recorded`. This README went through the
-same gate: the review ledger in `docs/reviews/t819-readme-proof.md` records the
-lines it sent back.
-
-**2. The next task opens when its predecessor is done, with the handoff
-attached.** Dependencies are real `--after` edges, so a dependent ticket is
-invisible to `atm next` until its predecessor is finished. When you accept A
-on its exact review commit and mark it done, B becomes ready; if B is reserved
-or suggested for a seat, Atman posts it there, and whichever seat claims B gets
-A's handoff notes in its prompt. You do not type the next instruction. Today a
-seat that receives B unattended starts through a supervised watcher; Atman
-labels that as a watcher, not a native wake.
-
-**3. The board is plain files in your repository.** Tickets, claims, messages,
-handoff notes and verdicts live as text under `.tickets/`. You can grep them,
-diff them in a pull request and back them up with the code. There is no IDE to
-install, no hosted service and no database. Claude Code, Codex, Cursor and
-custom harnesses join the same board with their own identity, worktree, role
-and cost tier; Atman does not wrap their APIs, pool their context or replace
-their logins. Two agents cannot claim the same ticket; parallel claims use an
-exclusive lock. Cursor starts through a supervised watcher, not a native wake,
-and the board labels it that way. Antigravity is experimental: discovery is
-documented, but its current headless one-shot path is not supported in this
-preview.
-
-**4. Evidence over assertion, and the work outlasts the session.** A worker's
-completion message is not verification, and unknown is never zero. When a
-model, session or machine stops, or a seat hits its usage limit, the claim,
-the blocker and the next step stay on the board, and a replacement seat
-inherits the handoff instead of restarting from chat history. The local app
-reports productive watcher-run turns and harness-reported cost for completed
-tickets, leaving missing values blank. `atm turns` can also show clearly
-labelled list-price cost estimates.
-
-## Install
-
-Python 3.9+ and Git are required. The supported developer-preview path is
-`git clone` plus `./install.sh` on macOS; it has been tested on one macOS
-machine. Homebrew, Linux packages and pipx are planned.
+Python 3.9+ and Git. Tested on one macOS machine:
+`git clone` plus `./install.sh`. Homebrew, Linux packages and pipx are planned.
 
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
@@ -95,23 +26,14 @@ export PATH="$HOME/.local/bin:$PATH"
 atm self                     # which file you are actually running
 ```
 
-`install.sh` refuses to overwrite an `atm` or `tickets` it does not own (a
-pinned release, or an unrelated tool). `./install.sh --prefix DIR` places the
-`atm` and `tickets` symlinks in `DIR`; they still run `tickets.py` and its
-sibling modules from this checkout, so keep the clone at the same path.
-`--force` replaces the existing one on purpose.
+`install.sh` refuses to overwrite an `atm` or `tickets` it does not own.
+`./install.sh --prefix DIR` places the symlinks in `DIR`; they still run
+`tickets.py` from this checkout. `--force` replaces the existing one on
+purpose. `atm` is the command; `tickets` is a compatibility alias.
 
-Homebrew on macOS is planned but unavailable: the checked-in formula has a
-placeholder checksum, the tap is unpublished, and no release is tagged. Until
-those release artifacts exist, use the clone path above.
-
-`atm` is the command. An older name for the same command is kept as a
-compatibility alias, so existing scripts keep working.
-
-## Onboard
-
-In an existing git repo. One command writes the board, registers you, and
-adds three sample tasks in a real dependency chain:
+In an existing git repo. `atm quickstart --remove` first if sample tickets
+are still T-001 through T-003 — otherwise the commands below hit the wrong
+ids.
 
 ```sh
 cd /path/to/your-project     # an existing git repo (git init if not)
@@ -121,28 +43,12 @@ atm quickstart --agent boss --roles backend
 atm ui                       # local app: Objective, Team, Work, Intervene
 ```
 
-`quickstart` is safe to run twice; `atm quickstart --remove` deletes the
-samples. It writes `AGENTS.md`, `.gitignore` and `.cursor/rules/tickets.mdc`
-without committing them; commit them before an agent branch is merged back.
-
-Before the walkthrough, run `atm quickstart --remove`. Otherwise the sample
-tickets remain T-001 through T-003, the CSV tickets receive later IDs, and the
-commands below operate on the wrong tickets.
-
-`atm connect` walks the tool-specific hook setup for Claude Code, Codex and
-Cursor. A custom harness is any command whose template names `{prompt_file}`,
-for example `atm join qwen --roles backend --harness custom --cmd 'ollama run qwen3:8b < {prompt_file}'`
-([Bring your own agent](docs/byoa.md)).
-
-## First ticket, objective to accepted result
-
-The path below was run end to end on a throwaway board before this file was
-written; the printed lines are what `atm` prints. Two seats: `boss`
-coordinates, `worker` does the work. Both are your own shell here, so the
-mechanism is visible.
+`quickstart` writes `AGENTS.md`, `.gitignore` and `.cursor/rules/tickets.mdc`
+without committing them. Two seats in your own shell: `boss` accepts,
+`worker` does the work.
 
 ```sh
-atm master take              # the coordinator seat for this walkthrough
+atm master take
 atm objective "Add a CSV summary and a command that uses it" \
   --exit "summary command prints row and column counts"
 atm create "CSV summary function" --role backend \
@@ -152,7 +58,12 @@ atm create "CLI command that calls summarize()" --role backend --deps T-001 \
 atm graph                    # T-002 (backend; waiting on T-001)
 ```
 
-1. A seat claims A in its own worktree, does the work, and hands it back.
+Dependencies are real `--after` edges (`atm create --deps` or `atm plan`).
+`atm review` pins a reviewable SHA. Human review is `atm accept --sha`
+from a seat that is not the author. `atm harness available` lists each
+harness row.
+
+1. Worker claims A, commits, and hands it back.
 
    ```sh
    export TICKET_AGENT=worker
@@ -162,15 +73,11 @@ atm graph                    # T-002 (backend; waiting on T-001)
    # ... write csv_summary.py and its test, commit ...
    atm review T-001 --notes "csv_summary.py summarize(path); test passes"
    # pinned worker@76279da in <repo>/.git
-   # T-001 -> IN REVIEW after 0m of work; master (boss) notified.
    ```
 
-   Review pins the exact branch and commit. That reviewable SHA is what you
-   accept, not the note.
-
-2. You check A and accept it on that exact commit from the `boss` seat, which
-   is not the author. Take the full 40-character SHA from the reviewed worktree
-   (`git rev-parse worker`):
+2. Boss accepts that exact commit, then marks A done. `atm accept` refuses
+   a short SHA, a SHA that is not the submitted review head, and the
+   ticket's author. Done without that accept leaves T-002 closed.
 
    ```sh
    export TICKET_AGENT=boss
@@ -178,105 +85,40 @@ atm graph                    # T-002 (backend; waiting on T-001)
    # T-001 accepted 76279dac... by boss
    atm done T-001 --artifact /path/to/project/.worktrees/worker \
      --notes "summarize(path) -> dict in csv_summary.py"
-   # T-001 done ... recorded worker@76279da ... unblocked: T-002 ... started: T-002
+   # T-001 done ... recorded worker@76279da ... unblocked: T-002
    ```
 
-   Acceptance is bound to that commit. `atm accept` refuses a short SHA, a
-   SHA that is not the submitted review head, and a reviewer who is the
-   ticket's author. A note that merely says "accept" is not a verdict: the
-   Work view shows such a ticket as `Marked done; verification not recorded`.
-   `started: T-002` means B became ready. Because this example does not
-   reserve or suggest B to a seat, that line does not mean a task was posted.
-
-3. Atman unblocks B. In this shell walkthrough, the eligible worker claims B
-   with `atm next`, and its prompt prints A's handoff. Nobody retypes what A
-   did.
+3. T-002 is now visible to `atm next`. The worker's prompt carries A's
+   handoff. Nobody retypes it.
 
    ```sh
    export TICKET_AGENT=worker
    atm next
    # [>] IN PROGRESS T-002  CLI command that calls summarize()  (after T-001)
    # Handoff from dependencies (all notes):
-   #   T-001 (CSV summary function): REVIEW: worker@76279da -- csv_summary.py summarize(path); test passes
-   #   T-001 (CSV summary function): worker@76279da -- summarize(path) -> dict in csv_summary.py
+   #   T-001 ... REVIEW: worker@76279da -- csv_summary.py summarize(path); test passes
+   #   T-001 ... worker@76279da -- summarize(path) -> dict in csv_summary.py
    ```
 
-4. B comes back through `atm review`. You accept it the same way. The Work
-   view shows `Accepted by @boss on <sha7>` for A, B's handoff, and which
-   commit each verdict is bound to.
+Claude Code, Codex and Cursor join the same board with their own identity,
+worktree and provider login. Cursor starts through a supervised watcher,
+not a native wake. Codex may stop waking after one run; restart the
+watcher. A custom harness is any command whose template names
+`{prompt_file}` ([Bring your own agent](docs/byoa.md)).
 
-No further instruction from you after accepting A and marking it done when
-the next seat sits behind `atm spawn` or `atm watch`: the supervised watcher polls the board,
-claims B and starts the agent with A's handoff attached. The watcher's own
-`atm next` call is the mechanism, and the board labels it a watcher, not a
-native wake.
+## Links
 
-## The local app
-
-`atm ui` serves the board on your machine. The first screen answers what we
-are finishing, who is working, what is blocked, and what needs you.
-
-![The Atman app Work view: objective with its exit criterion, a dependency graph with T-001 done and T-002 working, and median turns and yield at cost left blank](landing/assets/t971-app-work-1440.png)
-
-The image is a checked-in product capture, not a hosted demo. There is no
-hosted board to log into. An earlier capture of the same app is
-`landing/assets/t732-dashboard-1440.png`.
-
-## Philosophy
-
-The value is in how your agents work together, and you own the coordination
-records: the board is local, the code is open source, and model calls use your
-own provider subscriptions.
-
-**Agents are teammates with roles and evidence, not a chat.** A seat on the
-board is more than a model. It is the intelligence, the working context it was
-given, the boundary it works inside (tools, worktree, quota) and what it is
-capable of. Atman uses that whole profile to decide who receives ready work
-and what context travels with it.
-
-**The work outlasts the chat.** Tasks, decisions and handoffs stay with the
-project, as files under `.tickets/`. A replacement agent starts from saved
-context and artifacts, with its own identity and worktree. A session ending is
-recovery work on the board, not lost work.
-
-**Planned tickets can carry their own proof.** A sounded plan item is ready
-only when it says what caused it, what changes, and what proves it. A
-submitted review points at an exact commit, and acceptance records a verdict
-on that commit. The app distinguishes a plain done flag from accepted work.
-
-**Review is an explicit step in the documented workflow.** Submitted work goes
-to a review queue. Merge is a command rather than a side effect of a green
-check, and a posted task is not working until it is claimed.
-
-**Context is explicit and inspectable.** What an agent inherits is text you
-can read: the objective, the ticket, the handoff notes of its dependencies,
-messages, and standing briefs. There is no hidden shared memory. Coordination
-(tickets) and durable knowledge (a separate repo-backed graph, see
-[Team knowledge](docs/knowledge/README.md)) are connected layers, not one
-store.
-
-**The north star is task completion in the fewest turns.** Atman records
-productive watcher-run turns and harness-reported cost per finished ticket so
-that routing can improve over time. `atm turns` can add clearly labelled
-list-price estimates, kept apart from measured cost. A blank is unmeasured,
-never a win.
-
-**Local, open source, your own subscriptions.** The MIT-licensed preview
-keeps coordination state in plain files under `.tickets/` and requires no
-hosted Atman service or external database. Atman stores no provider
-credentials; agent CLIs use their own logins and send prompts to their own
-providers.
-
-## Non-goals
-
-Atman is not:
-
-- a multi-agent framework or an agent-orchestration runtime;
-- shared memory for agents, or a context store you cannot read;
-- one API over Claude, Codex, Cursor and the rest;
-- a model router on its own;
-- a hosted service, a pool of cloud machines, or a demo board you log into;
-- a compliance, audit or policy-enforcement layer.
+[GitHub issues](https://github.com/advitiyavashist/atman/issues)
+·
+[Site](https://advitiyavashist.github.io/atman/)
+·
+[A first session](docs/first-session.md)
+·
+[Agent onboarding](docs/onboarding/README.md)
+·
+[Master how-to](docs/onboarding/master-howto.md)
+·
+[Preview status](#preview-status-and-limitations)
 
 ## Preview status and limitations
 
@@ -296,10 +138,11 @@ repository.
 | Cursor seat starts through a supervised watcher | partial: supervised, not a native wake | `docs/wake-recipients.md` |
 | Antigravity seat | experimental: discovery is documented; headless launch and task completion are not supported in this preview | `docs/connect-agy.md`; `docs/wake-recipients.md` |
 | Custom harness via `atm join --harness custom --cmd` | documented contract; smoke test pending | `docs/byoa.md` |
-| Dependent ticket invisible until its predecessor is done; handoff notes in the successor's prompt | tested | `tests/test_t780_plan_graph.py`; walkthrough above |
+| Dependent ticket stays closed until its predecessor is accepted on the full review SHA by a seat other than the author; handoff notes then appear in the successor prompt | tested | `tests/test_t1031_accept_gate.py`; `tests/test_t944_accept_reject.py`; `tests/test_t780_plan_graph.py`; walkthrough above |
 | Acceptance bound to the full review SHA; author cannot accept own work | tested | `tests/test_t944_accept_reject.py`, `tests/test_t889_work_view.py` |
 | Recovery after a seat stops | same-provider restart from the persisted handoff and ownership lease; cross-provider continuation not proven | `docs/recovery-contract.md` |
 | Talk to the coordinator remotely | not supported in the developer preview | `remote` runner contract in `docs/messages-and-runners.md` |
+| Local app: `atm ui` | in the preview; the board stays on this machine; no hosted board | walkthrough above |
 | Local metrics view: turns and cost per finished ticket | in the preview; values stay blank until a finished ticket reports them; `atm turns` estimates are labelled list price | `src/ticket_board/turns.py`; `tests/test_t480_cost_estimate.py` |
 | Efficiency comparison against another tool | not in the preview | none |
 | Native wake for every harness | not in the preview | `docs/wake-recipients.md` |
@@ -319,103 +162,12 @@ Known first-run defects, each with the workaround that was tested:
   point it at the accepted worktree when closing elsewhere.
 - `atm reserve` requires taking master first.
 
-## Plan dependent work
-
-`atm plan` turns JSON `deps` into real `--after` edges. A plan item is
-**ready** only when it carries real `cause`, `change` and `proof`; items
-without them stay in capture until `atm sound T-00N`. Plan sounds what it
-writes, so a planned code ticket needs `--pr N` at review time; on a repo
-with no pull requests use `atm create --deps` instead.
-
-```sh
-atm epic create "Auth" --body "..."
-atm sprint create "Ship auth" --activate
-atm plan <<'EOF'
-{"epic":"E-001","sprint":"S-01","tickets":[
- {"key":"A","title":"Task A: write hello.txt","role":"backend",
-  "cause":"B needs hello.txt on disk","change":"Write hello.txt","proof":"hello.txt exists"},
- {"key":"B","title":"Task B: consume hello.txt","role":"backend","deps":["A"],
-  "cause":"A produced hello.txt","change":"Read and use hello.txt","proof":"consumer sees hello.txt"}
-]}
-EOF
-```
-
-After A is done, B is offered by `atm next`. `atm map` shows sprint and epic
-progress, `atm graph` diagnoses dependencies, and `atm who` shows live
-ownership and worktrees.
-
-## Working as a team
-
-Every harness uses the same small contract: Atman gives it a prompt file, a
-working directory and an identity; the harness reports through `atm`.
-
-1. Probe integrations: `atm harness available` (missing is a row).
-2. Plan with real `--after` edges (`atm plan` or `atm create --deps`);
-   `atm graph` to inspect.
-3. Unattended persist to a reviewable SHA on the agent's branch
-   (`atm review`).
-4. Human review before merge is the documented workflow, not an enforced
-   gate: a reviewer other than the author accepts the exact review commit
-   (`atm accept --sha`), and `atm merge` is an explicit command, not a
-   silent auto-promote.
-
-The same four steps run unchanged under the `tickets` compatibility alias.
-
-```sh
-atm master                   # objective, workforce, reviews, health
-atm inbox                    # direct messages and board mentions
-atm next                     # claim one ready task atomically
-atm update T-012 "..."       # progress and blockers
-atm msg "question" --to boss --re T-012
-atm review T-012 --notes "paths, tests, decisions"
-```
-
-Tasks move through `TO DO → IN PROGRESS → IN REVIEW → DONE`, or `BLOCKED`.
-The master seat is replaceable: its objective, decisions, workforce, health
-and review queue live on the board, so another seat can take over after a
-session ends (`atm master take`). `atm route --claim` assigns by role,
-capability, cost and model; `atm merge` tests and integrates submitted
-branches.
-
-The built-in runner names are `claude`, `codex`, `cursor`, `cursor+claude`
-and `remote` (a fail-closed adapter boundary that never substitutes a local
-model). A custom runner is any command:
-
-```sh
-atm join qwen --roles docs --harness custom \
-  --cmd 'ollama run qwen3:8b < {prompt_file}'
-atm harness check qwen
-atm spawn qwen --every 3600
-```
-
-Message behaviour is chosen per seat with `--wake-mode task-only|continuous`.
-Workers default to `task-only`: an explicit task starts them; ordinary
-messages wait for their next run.
-
-## Inspectable by design
-
-Coordination lives under the project's `.tickets/` directory:
-
-| Path | Purpose |
-| --- | --- |
-| `T-001.json` | One file per task, allowing atomic claims without a central server |
-| `epics/`, `sprints/` | Delivery structure and active scope |
-| `agents/`, `roles.json`, `workforce.json` | Agent identity, capability, cost and availability |
-| `messages.jsonl` | Append-only team and direct messages |
-| `MASTER.md` | Objective context and durable decision log |
-| `briefs/` | Shared, role and agent-specific standing context |
-
-Durable facts live separately under tracked `knowledge/`. Closing a ticket
-does not erase its decisions, evidence or runbooks. See the
-[handoff contract](docs/handoff-contract.md) and
-[board resolution](docs/board-resolution.md).
-
 ## Read next
 
-- [A first session](docs/first-session.md): the captured quickstart
+- [A first session](docs/first-session.md)
 - [Agent onboarding](docs/onboarding/README.md) and [Master onboarding](docs/onboarding/master-howto.md)
 - [Bring your own agent](docs/byoa.md), [Messages and runners](docs/messages-and-runners.md), [Team knowledge](docs/knowledge/README.md)
-- [Design notes](docs/design-notes.md), [Recovery contract](docs/recovery-contract.md)
+- [Recovery contract](docs/recovery-contract.md)
 - [Contributing](CONTRIBUTING.md), [Community](docs/community.md), [Code of Conduct](CODE_OF_CONDUCT.md)
 
 Operator and historical notes, not a first read: the author's

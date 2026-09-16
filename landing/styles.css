@@ -549,11 +549,16 @@ figcaption { margin-top: 0.75rem; color: var(--mute); font-size: 0.76rem; }
   font-size: 0.68rem;
 }
 
+#path .terminal { margin-top: 2rem; }
+
 .start {
   display: grid;
   grid-template-columns: minmax(0, 0.78fr) minmax(0, 1.22fr);
   gap: clamp(2.5rem, 7vw, 5.5rem);
   align-items: start;
+  padding-top: clamp(2.5rem, 6vw, 4.5rem);
+  padding-bottom: clamp(2.5rem, 6vw, 4.5rem);
+  border-top: 1px solid var(--line-soft);
 }
 .start-copy > p:not(.eyebrow, .start-links) {
   max-width: 34rem;

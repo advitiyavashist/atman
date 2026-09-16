@@ -1,4 +1,4 @@
-"""T-713: Atman public landing is team runtime / any first seat; turns/cost secondary."""
+"""T-713 / T-1047: public landing is the accept gate; no fake metrics."""
 
 from pathlib import Path
 
@@ -18,15 +18,11 @@ BANNED = (
     "Try the API",
     "Presidio",
     "/v1/evaluate",
+    "autonomous",
+    "fleet",
 )
 
-SEATS = (
-    "Claude Code",
-    "Codex",
-    "Cursor",
-    "Grok Bot",
-    "Custom",
-)
+PROMISE = "the next ticket opens only after someone else accepts that commit"
 
 
 def _start_block():
@@ -40,61 +36,24 @@ def _start_terminal():
     return start[pre : start.index("</pre>")]
 
 
-def test_hero_is_control_plane_not_turns_or_cost():
+def test_hero_is_the_accept_gate_not_turns_or_cost():
     lowered = HERO.lower()
-    assert "coordinates the agents you already run" in lowered
+    assert PROMISE in lowered
     assert "fewest turns" not in lowered
     assert "measured cost" not in lowered
-
-
-def test_turns_and_cost_are_secondary_honesty_not_fake_metrics():
-    efficiency = LANDING[LANDING.index('id="efficiency"') : LANDING.index('id="graph"')]
-    assert "fewest turns" in efficiency.lower()
-    assert "measured cost" in efficiency.lower()
-    assert efficiency.count("—") >= 2
-    assert "$0" not in efficiency
-    assert "0.0" not in efficiency
-    assert "Unknown until a done ticket reports" in efficiency
-    assert "fewest turns" not in HERO.lower()
-
-
-def test_first_seat_examples_appear_in_order():
-    lowered = LANDING[LANDING.index('class="roster"') : LANDING.index('class="lanes"')]
-    positions = [lowered.index(name) for name in SEATS]
-    assert positions == sorted(positions)
+    assert "coordinates the agents you already run" not in lowered
 
 
 def test_start_is_source_install_then_sample_project_then_atm_ui():
     start = _start_block()
     term = _start_terminal()
     assert "git clone https://github.com/advitiyavashist/atman.git" in start
-    assert "your choice of agents" in LANDING.lower()
     assert "./install.sh --prefix" in term
     assert "unset TICKETS_DIR" in term
     assert "atm ui" in term
     assert term.index("atm where") < term.index("atm quickstart") < term.index("atm ui")
     assert "atm next" not in term
     assert "alice" not in term
-    for name in SEATS:
-        assert name in start or name in LANDING
-
-
-def test_usage_limit_recovery_appears_before_start_section():
-    before_start = LANDING[: LANDING.index('id="start"')]
-    assert "usage limit" in before_start.lower() or "usage-limit" in before_start.lower()
-    assert "recover" in before_start.lower()
-
-
-def test_example_roster_does_not_lock_claude_as_the_only_first_seat():
-    assert "Example first seat" in LANDING
-    assert "Sit Claude Code first" not in LANDING
-    assert "Claude Code as the first seat" not in LANDING
-
-
-def test_brahman_is_research_not_required():
-    assert "Brahman · research" not in LANDING
-    assert "multi-agent framework" in LANDING.lower()
-    assert "not required for the first win" not in LANDING.lower()
 
 
 def test_keeps_local_mit_formation_dots_and_distinct_dark_brand():
