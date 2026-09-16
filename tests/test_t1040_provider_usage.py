@@ -301,7 +301,7 @@ def test_failed_read_does_not_erase_observed_limit(tmp_path):
     assert before["status"] == "limited"
     assert "You've hit your limit" in before["limit_message"]
     assert before["reset_at"] == "2026-09-16T09:00:00Z"
-    before_line = pu.format_usage_line(before)
+    before_line = pu.format_usage_line(before, now=now_obs)
     assert "limited" in before_line
     assert "You've hit your limit" in before_line
 
@@ -314,7 +314,7 @@ def test_failed_read_does_not_erase_observed_limit(tmp_path):
     assert "You've hit your limit" in mid["limit_message"]
     assert mid["reset_at"] == "2026-09-16T09:00:00Z"
     assert "re-login" in mid["hint"]
-    mid_line = pu.format_usage_line(mid)
+    mid_line = pu.format_usage_line(mid, now=now_fail)
     assert "limited" in mid_line
     assert mid["status"] != "unknown"
 
