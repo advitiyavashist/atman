@@ -9,7 +9,7 @@ Copy lock (T-1047):
 - **Four sections only:** the promise, one path (install → objective →
   two agents → accept → the dependent opens), tested vs planned (link the
   README table, do not duplicate it), how to start.
-- **Contact:** GitHub issues. Byline: Built by @abnormal.
+- **Contact:** GitHub issues. No byline.
 - **CLI name:** `atm` is primary. `tickets` is the compatibility alias,
   once, in Start.
 - **Hero demo:** `assets/demo/hero.gif` inside the published tree. Pages

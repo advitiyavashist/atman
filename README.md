@@ -2,18 +2,38 @@
   <img src="docs/brand/assets/lockup.svg" width="176" alt="atman">
 </p>
 
-<h1 align="center">The next ticket opens only after someone else accepts that commit.</h1>
+<p align="center"><b>Run your coding agents as a team, on a board in your own repo — where no task starts until another agent has checked the last one.</b></p>
 
 <p align="center">
-  <img src="docs/assets/demo/hero.gif" width="790" alt="Terminal take: a coordinator plans two dependent tickets, a worker implements A and opens a PR, the coordinator accepts that exact commit, then a Cursor agent picks up B carrying A's accepted commit — nobody retypes what A did">
+  <img src="docs/assets/demo/hero.gif" width="790" alt="Two agents finishing a dependency chain on an Atman board">
 </p>
+
+## What it does
+
+You give one agent an objective. It writes tickets with real dependencies. Agents
+claim them, and each hands work back as a **commit**, not a summary.
+
+Then the part that makes it a team instead of a queue:
+
+1. A worker finishes A and submits it, pinned to an exact commit.
+2. **A different agent** — never the author — checks that commit and accepts it.
+3. Only then does B open, and B's agent is handed A's accepted commit.
+
+So the next task starts from work someone verified, and a "done" nobody checked
+stops the chain instead of quietly feeding the next agent.
+
+Claude Code, Codex and Cursor join the same board, each with its own identity,
+worktree and provider login. Atman is a CLI (`atm`) plus a local app
+(`atm ui`): the board is plain files under `.tickets/` in your repository —
+greppable, diffable, reviewable in a pull request. No hosted service, no
+database, no shared memory, and nothing leaves your machine except your agents
+talking to their own providers.
 
 <p align="center">
-  <img src="landing/assets/t971-app-work-1440.png" width="920" alt="The Atman app Work view: objective with its exit criterion, a dependency graph with T-001 done and T-002 working, and median turns and yield at cost left blank">
+  <img src="landing/assets/t971-app-work-1440.png" width="920" alt="The Atman app Work view: objective, dependency graph, and cost left blank when unmeasured">
 </p>
 
-The image is a checked-in product capture, not a hosted demo. There is no
-hosted board to log into.
+<p align="center"><i>A checked-in capture of the local app. There is no hosted board to log into.</i></p>
 
 ## One path
 
@@ -179,5 +199,3 @@ Operator and historical notes, not a first read: the author's
 [License](LICENSE) (MIT). Fork, branch off `main`, and open a pull request.
 Questions and bug reports go to
 [GitHub issues](https://github.com/advitiyavashist/atman/issues).
-
-Built by @abnormal.
