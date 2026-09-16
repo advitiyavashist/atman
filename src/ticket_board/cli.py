@@ -2346,7 +2346,10 @@ def _reopen_blocks_automation(board, t, messages=None):
 
 
 def cmd_next(a, board):
+    if getattr(a, "dispatch", False):
+        return _cmd_next_dispatch(a, board)
     owner = whoami(a.owner)
+    _refuse_limited_seat(board, owner, "next")
     roles = roles_for(board, owner, a.role)
     if roles == [] and not a.role:
         print(
@@ -4820,6 +4823,124 @@ def _scheduler_cmd():
 
 # ---- routing: which agent should take which open ticket -----------------
 
+def _route_headroom():
+    try:
+        from ticket_board import route_headroom as m
+        return m
+    except ImportError:
+        import route_headroom as m
+        return m
+
+
+def _cli_active_limit(board, name):
+    rec = _agent_rec(board, name) or {}
+    lim = rec.get("limit")
+    if not isinstance(lim, dict):
+        return None
+    if not (lim.get("at") or lim.get("note") or lim.get("reset_at") or lim.get("until")):
+        return None
+    reset = (lim.get("reset_at") or "").strip()
+    if reset:
+        try:
+            dt = datetime.fromisoformat(reset.replace("Z", "+00:00"))
+            if dt.tzinfo is not None and dt <= datetime.now(timezone.utc):
+                return None
+        except (ValueError, TypeError):
+            pass
+    return lim
+
+
+def _refuse_limited_seat(board, seat, verb):
+    lim = _cli_active_limit(board, seat)
+    if not lim:
+        return
+    sys.exit("%s: %s -- not dispatching" % (
+        verb, _route_headroom().limit_label(lim)))
+
+
+def _seat_route_row(board, name, entry, score):
+    rh = _route_headroom()
+    lim = _cli_active_limit(board, name)
+    return {
+        "name": name,
+        "limited": bool(lim),
+        "remaining": None,
+        "cost": rh.cost_rank(entry),
+        "score": score,
+        "limit_label": rh.limit_label(lim) if lim else "",
+    }
+
+
+def _route_candidate_rows(board, ticket, eligible, wf, roles, load_, pool=None):
+    names = list(dict.fromkeys(list(eligible or []) + list(pool or [])))
+    rows = []
+    for n in names:
+        e = wf.get(n, {})
+        s = score_agent(board, n, e, roles, ticket)
+        if s is None:
+            continue
+        s -= 1.5 * load_.get(n, 0)
+        rows.append(_seat_route_row(board, n, e, s))
+    return rows
+
+
+def _write_route_pick(board, t, rows, deps_done):
+    best, why = _route_headroom().pick_seat(rows)
+    if not best:
+        if rows and all(r.get("limited") for r in rows):
+            t["hold"] = True
+            t["hold_reason"] = why
+            t.setdefault("notes", []).append({"by": whoami(), "at": now(), "text": why})
+            save(board, t)
+        return None, why
+    if deps_done:
+        t["suggested"] = best
+    else:
+        t["reserved_for"] = best
+        why = ("reserved  " + why).strip()
+    t.setdefault("notes", []).append({"by": whoami(), "at": now(), "text": why})
+    save(board, t)
+    return best, why
+
+
+def _cmd_next_dispatch(a, board):
+    from ticket_board.scheduler import (
+        DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, _candidate_names)
+    tickets = load_all(board)
+    wf = load_workforce(board)
+    roles = load_roles(board)
+    agents = dict((r["owner"], r) for r in load_agents(board))
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    load_ = {}
+    for t in tickets:
+        if t["status"] == "claimed":
+            load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    raw_names = _candidate_names(wf, roles, only=getattr(a, "only", None))
+    names, _excluded = filter_eligible(
+        raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
+        alive_within_min=DEFAULT_ALIVE_WITHIN_MIN)
+
+    def _deps_done(t):
+        return all(d in done for d in t.get("deps", []))
+
+    ready = [t for t in tickets
+             if t["status"] == "open"
+             and not _ticket_on_hold(t)
+             and _deps_done(t)
+             and not _reserved_agent(t)]
+    ready.sort(key=lambda t: (t.get("priority", 2), t["id"]))
+    if not ready:
+        print("next --dispatch: no ready ticket")
+        sys.exit(1)
+    t = ready[0]
+    rows = _route_candidate_rows(board, t, names, wf, roles, load_, pool=raw_names)
+    best, why = _write_route_pick(board, t, rows, False)
+    if not best:
+        print("%s %s" % (t["id"], why))
+        sys.exit(0 if t.get("hold") else 1)
+    print("%s reserved for %s (%s)" % (t["id"], best, why))
+
+
 def score_agent(board, name, entry, roles, ticket):
     """Higher is better. None = cannot take it."""
     if ticket.get("needs") and not all(n in entry.get("can", []) for n in ticket["needs"]):
@@ -4870,8 +4991,9 @@ def cmd_route(a, board):
     for t in tickets:
         if t["status"] == "claimed":
             load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    raw_names = _candidate_names(wf, roles, only=a.only)
     names, excluded = filter_eligible(
-        _candidate_names(wf, roles, only=a.only), wf, roles, agents, load_, DEFAULT_ROLES,
+        raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=alive_within)
     print(format_excluded(excluded))
     def _deps_done(t):
@@ -4896,23 +5018,9 @@ def cmd_route(a, board):
     print("%-6s %-3s %-44s %-14s %s" % ("ticket", "pri", "title", "suggested", "why"))
     changed = 0
     for t in ready_first:
-        best, best_s, why = None, None, ""
-        for n in names:
-            e = wf.get(n, {})
-            s = score_agent(board, n, e, roles, t)
-            if s is None:
-                continue
-            s -= 1.5 * load_.get(n, 0)  # spread work; agents already holding tickets rank lower
-            if best_s is None or s > best_s:
-                best, best_s = n, s
-                why = "%s %s" % (e.get("model") or e.get("tool") or "", e.get("cost", ""))
+        rows = _route_candidate_rows(board, t, names, wf, roles, load_, pool=raw_names)
+        best, why = _write_route_pick(board, t, rows, _deps_done(t))
         if best:
-            if _deps_done(t):
-                t["suggested"] = best
-            else:
-                t["reserved_for"] = best
-                why = ("reserved  " + why).strip()
-            save(board, t)
             changed += 1
             load_[best] = load_.get(best, 0) + 0.5  # soft-count suggestions too
             if a.claim and t["status"] == "open" and _deps_done(t):
@@ -4920,8 +5028,9 @@ def cmd_route(a, board):
                 if got:
                     t = got
                     why += "  CLAIMED"
+        label = best or ("(held)" if t.get("hold") else "(nobody fits)")
         print("%-6s %-3s %-44s %-14s %s" % (t["id"], t.get("priority", 2), t["title"][:44],
-                                          best or "(nobody fits)", why))
+                                          label, why))
     if changed:
         _master_log(board, "route: suggested owners for %d tickets%s" % (changed, " and claimed ready ones" if a.claim else ""))
     print("\nAgents pull with `atm next`; their suggested tickets come first. "
@@ -5925,6 +6034,8 @@ def main():
     c.add_argument("--another", action="store_true", help="claim even though I already hold one")
     c.add_argument("--steal", default="", metavar="ID",
                    help="claim this ticket even if reserved_for someone else")
+    c.add_argument("--dispatch", action="store_true",
+                   help="CoS: reserve the next ready ticket for the best non-limited seat")
     c.set_defaults(fn=cmd_next)
 
     c = sub.add_parser("claim", help="atomically claim a specific ticket")
