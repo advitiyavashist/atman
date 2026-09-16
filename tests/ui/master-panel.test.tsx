@@ -3,11 +3,11 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MasterPanel } from "../../ui/src/screens/MasterPanel";
 import { boardFetch, renderLive } from "./support/render-live";
-import masterActive from "../../ui/src/fixtures/data/master/panel-active.json";
-import masterUnheld from "../../ui/src/fixtures/data/master/panel-unheld.json";
-import masterNoEligible from "../../ui/src/fixtures/data/master/panel-no-eligible-agent.json";
-import ticketsPopulated from "../../ui/src/fixtures/data/tickets/list-populated.json";
-import agentsPopulated from "../../ui/src/fixtures/data/agents/list-populated.json";
+import masterActive from "../fixtures/master/panel-active.json";
+import masterUnheld from "../fixtures/master/panel-unheld.json";
+import masterNoEligible from "../fixtures/master/panel-no-eligible-agent.json";
+import ticketsPopulated from "../fixtures/tickets/list-populated.json";
+import agentsPopulated from "../fixtures/agents/list-populated.json";
 
 const base = {
   "GET /tickets": ticketsPopulated,

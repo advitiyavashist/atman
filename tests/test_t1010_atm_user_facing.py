@@ -61,8 +61,26 @@ PUBLIC_PATHS = [
 
 # Live-board / author-machine tokens must not appear on the public first-read
 # path. Historical receipts live under docs/internal.
+# Derive the operator home at runtime so the guard still fails a real home
+# without publishing that home as a string in the repo (T-1045).
+PLACEHOLDER_USER_HOMES = (
+    "/Users/someone",
+)
+
+
+def _runtime_operator_home() -> str:
+    return os.path.expanduser("~")
+
+
+def _forbidden_operator_home() -> tuple[str, ...]:
+    home = _runtime_operator_home()
+    if home in PLACEHOLDER_USER_HOMES:
+        return ()
+    return (home,)
+
+
 FORBIDDEN_PUBLIC = (
-    "/Users/kavana",
+    *_forbidden_operator_home(),
     "Living Steer",
     "HOLD T-773",
     "HOLD T-774",
@@ -154,7 +172,7 @@ def test_generated_init_files_teach_atm(tmp_path):
 # operator HOME. Those are not hardcoded policy; the leak is board-specific
 # instruction baked into print_ceo_connect().
 FORBIDDEN_CONNECT_OUTPUT = tuple(
-    t for t in FORBIDDEN_PUBLIC if t != "/Users/kavana"
+    t for t in FORBIDDEN_PUBLIC if t not in _forbidden_operator_home()
 )
 
 

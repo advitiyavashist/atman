@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import { Overview } from "../../ui/src/screens/Overview";
 import { boardFetch, renderLive } from "./support/render-live";
-import overviewPopulated from "../../ui/src/fixtures/data/overview/populated.json";
-import overviewEmpty from "../../ui/src/fixtures/data/overview/empty.json";
+import overviewPopulated from "../fixtures/overview/populated.json";
+import overviewEmpty from "../fixtures/overview/empty.json";
 
 describe("Overview, reading a live board", () => {
   it("renders counts it fetched from GET /overview, not from an imported fixture", async () => {

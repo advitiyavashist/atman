@@ -3,10 +3,10 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Agents } from "../../ui/src/screens/Agents";
 import { boardFetch, renderLive } from "./support/render-live";
-import agentsPopulated from "../../ui/src/fixtures/data/agents/list-populated.json";
-import agentsHookOnly from "../../ui/src/fixtures/data/agents/list-hook-only.json";
-import agentsRevoked from "../../ui/src/fixtures/data/agents/list-revoked.json";
-import agentsProbe from "../../ui/src/fixtures/data/agents/list-probe-not-adopted.json";
+import agentsPopulated from "../fixtures/agents/list-populated.json";
+import agentsHookOnly from "../fixtures/agents/list-hook-only.json";
+import agentsRevoked from "../fixtures/agents/list-revoked.json";
+import agentsProbe from "../fixtures/agents/list-probe-not-adopted.json";
 
 describe("Agents, reading a live board", () => {
   it("shows heartbeat and last progress separately", async () => {

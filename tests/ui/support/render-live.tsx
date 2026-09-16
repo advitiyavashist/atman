@@ -16,10 +16,8 @@ import { matchPost201RequestSchema, validatePostRequestBody } from "./openapi-re
  * response validation, and a screen that stopped calling the right route fails
  * rather than quietly rendering a stale import.
  *
- * Payloads still come from `ui/src/fixtures/data/`, which
- * `tests/ui/fixtures-parity.test.ts` keeps byte-identical to the frozen
- * contract's `tests/fixtures/`. So these are contract-exact shapes, not shapes
- * a test author invented.
+ * Payloads come from the canonical `tests/fixtures/` pack. So these are
+ * contract-exact shapes, not shapes a test author invented.
  */
 
 export interface RouteMap {
