@@ -146,6 +146,40 @@ def test_http_401_and_empty_credential_unknown_with_relogin():
     assert ok_http["status"] == "ok"
 
 
+PARSEABLE_CLAUDE_BODY = json.dumps({
+    "five_hour": {"used_percent": 40, "resets_at": "2026-09-16T17:40:00Z"},
+})
+
+
+@pytest.mark.parametrize("code", [500, 503, 429, 302])
+def test_non_200_parseable_body_is_unknown(code):
+    rec = pu.reading_from_http("claude", code, PARSEABLE_CLAUDE_BODY)
+    assert rec["status"] == "unknown"
+    assert rec["remaining"] is None
+    assert rec["windows"] == []
+    assert str(code) in rec["hint"]
+    assert "ok" not in rec["status"]
+
+
+@pytest.mark.parametrize("code", [500, 503, 429, 302])
+def test_fetch_non_200_parseable_body_is_unknown(tmp_path, code):
+    home = tmp_path / "home"
+    cred = home / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True)
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "secret-token"}}))
+
+    def transport(url, headers, timeout):
+        return code, PARSEABLE_CLAUDE_BODY
+
+    rec = pu.fetch_provider_usage(
+        "claude", home=str(home), transport=transport,
+        environ={}, now=utc("2026-09-16T10:00:00Z"))
+    assert rec["status"] == "unknown"
+    assert rec["remaining"] is None
+    assert str(code) in rec["hint"]
+    assert "secret-token" not in json.dumps(rec)
+
+
 def test_timeout_is_unknown():
     rec = pu.timeout_reading("codex", "2026-09-16T10:00:00Z")
     assert rec["status"] == "unknown"
@@ -249,6 +283,55 @@ def test_refresh_persists_and_skips_busy_gate(tmp_path):
     assert "claude ok" in lines
     assert "cursor no_data" in lines
     assert "agy no_data" in lines
+
+
+def test_failed_read_does_not_erase_observed_limit(tmp_path):
+    """Observed limit, then failed read, then successful 200 — merge, not replace."""
+    board = tmp_path / ".tickets"
+    board.mkdir()
+    now_obs = utc("2026-09-16T02:00:00Z")
+    observed = pu.record_observed_limit(
+        "claude",
+        "You've hit your limit, resets 5pm",
+        "2026-09-16T02:00:00Z",
+        reset_at="2026-09-16T09:00:00Z",
+    )
+    pu.put_reading(str(board), observed, now=now_obs)
+    before = pu.get_reading(str(board), "claude", now=now_obs)
+    assert before["status"] == "limited"
+    assert "You've hit your limit" in before["limit_message"]
+    assert before["reset_at"] == "2026-09-16T09:00:00Z"
+    before_line = pu.format_usage_line(before)
+    assert "limited" in before_line
+    assert "You've hit your limit" in before_line
+
+    failed = pu.empty_credential_reading("claude", "2026-09-16T02:05:00Z")
+    assert failed["status"] == "unknown"
+    now_fail = utc("2026-09-16T02:05:00Z")
+    pu.put_reading(str(board), failed, now=now_fail)
+    mid = pu.get_reading(str(board), "claude", now=now_fail)
+    assert mid["status"] == "limited"
+    assert "You've hit your limit" in mid["limit_message"]
+    assert mid["reset_at"] == "2026-09-16T09:00:00Z"
+    assert "re-login" in mid["hint"]
+    mid_line = pu.format_usage_line(mid)
+    assert "limited" in mid_line
+    assert mid["status"] != "unknown"
+
+    ok = pu.reading_from_http(
+        "claude", 200,
+        json.dumps({
+            "five_hour": {"used_percent": 10, "resets_at": "2026-09-16T18:00:00Z"},
+        }),
+        checked_at="2026-09-16T02:10:00Z",
+        account_state="ready")
+    assert ok["status"] == "ok"
+    now_ok = utc("2026-09-16T02:10:00Z")
+    pu.put_reading(str(board), ok, now=now_ok)
+    after = pu.get_reading(str(board), "claude", now=now_ok)
+    assert after["status"] == "ok"
+    assert after["remaining"] == "90%"
+    assert after["reset_at"] == "2026-09-16T18:00:00Z"
 
 
 def run(board, *args, env=None):

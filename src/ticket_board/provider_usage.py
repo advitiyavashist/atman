@@ -310,10 +310,38 @@ def save_ledger(board, ledger):
     return payload
 
 
+def _is_failed_reading(reading):
+    """Unknown/failed credentialed read — never a successful 200 or observation."""
+    return bool(reading) and reading.get("status") == "unknown"
+
+
+def _is_observed_limit(reading):
+    """A real observed limit (T-1022 watch rejection or a prior limited reading)."""
+    if not reading or reading.get("status") != "limited":
+        return False
+    return True
+
+
+def merge_reading(existing, incoming, now=None):
+    """Keep an observed limit when a later read fails; a 200 may supersede."""
+    incoming = expire_stale_resets(dict(incoming or {}), now)
+    existing = expire_stale_resets(dict(existing), now) if existing else None
+    if existing and _is_observed_limit(existing) and _is_failed_reading(incoming):
+        out = dict(existing)
+        fail_hint = (incoming.get("hint") or "").strip()
+        if fail_hint:
+            prev = (out.get("hint") or "").strip()
+            if fail_hint not in prev:
+                out["hint"] = ("%s; %s" % (prev, fail_hint)).strip("; ") if prev else fail_hint
+        return expire_stale_resets(out, now)
+    return incoming
+
+
 def put_reading(board, reading, now=None):
     ledger = load_ledger(board)
     hid = reading["provider"]
-    ledger["providers"][hid] = expire_stale_resets(reading, now)
+    existing = (ledger.get("providers") or {}).get(hid)
+    ledger["providers"][hid] = merge_reading(existing, reading, now)
     ledger["updated"] = iso_now(now)
     save_ledger(board, ledger)
     return ledger["providers"][hid]
@@ -390,6 +418,12 @@ def reading_from_http(provider, status_code, body, checked_at="",
         rec = empty_reading(hid, status="unknown", checked_at=checked_at,
                             source="http_401", account_state="signed_out")
         rec["hint"] = "re-login required"
+        return rec
+    if status_code != 200:
+        rec = empty_reading(hid, status="unknown", checked_at=checked_at,
+                            source="http_%s" % status_code,
+                            account_state=account_state)
+        rec["hint"] = "HTTP %s" % status_code
         return rec
     if hid == "claude":
         rec = parse_claude_oauth_usage(body, checked_at)
