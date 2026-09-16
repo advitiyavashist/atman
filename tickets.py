@@ -2348,6 +2348,53 @@ def _live_watch_stall(board, owner, rec, run=None, clear=False):
     return None
 
 
+def _preflight():
+    try:
+        from ticket_board import preflight as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import preflight as m
+        return m
+
+
+def _preflight_seat(board, owner, harness="", mode="dispatch"):
+    """Probe binary+auth unless a positive check is still fresh.
+
+    mode=dispatch/spawn: missing binary refuses.
+    mode=route: only confirmed logged-out accounts are skipped.
+    Usage/quota never blocks.
+    """
+    pf = _preflight()
+    rec = _agent_rec(board, owner) or {}
+    cached = pf.cached_positive(rec, now())
+    if cached:
+        return {"state": cached.get("state") or "ready",
+                "harness": cached.get("harness") or harness,
+                "cached": True, "at": cached.get("at")}
+    if not _auth_gates_spawn(harness):
+        resolved, _ = harness_of(board, owner, harness, "")
+        if not _auth_gates_spawn(resolved):
+            return {"state": "unsupported", "harness": resolved or harness, "cached": False}
+    incoming = harness_auth_probe(board, owner, harness)
+    stored = _store_auth_check(board, owner, incoming)
+    result = stored if isinstance(stored, dict) else incoming
+    refuse = pf.dispatch_refuse(result, harness or result.get("harness"))
+    if not refuse:
+        _agent_set(board, owner, preflight=pf.snapshot(result, True))
+    return result
+
+
+def _refuse_preflight(board, owner, harness, verb):
+    result = _preflight_seat(board, owner, harness, mode="dispatch")
+    reason = _preflight().dispatch_refuse(result, harness or result.get("harness"))
+    if reason:
+        sys.exit("%s: %s" % (verb, reason))
+    return result
+
+
 def _worktree_gc():
     """T-946 automated worktree cleanup + atm gc sweep."""
     try:
@@ -3108,6 +3155,8 @@ def cmd_dispatch(a, board):
         sys.exit("dispatch: %s has a same-second-as-reopen task with no event order; "
                  "post a new explicit --task" % t["id"])
     _refuse_unreleased_deps(t, load_all(board))
+    if _auth_gates_spawn(harness):
+        _refuse_preflight(board, seat, harness, "dispatch")
     rows, _note = probe_integration_catalog()
     attach_catalog_usage(rows)
     row = None
@@ -10610,6 +10659,12 @@ def cmd_route(a, board):
         best, best_s, why = None, None, ""
         for n in names:
             e = wf.get(n, {})
+            hid = (e.get("harness") or e.get("tool") or "").strip()
+            if _auth_gates_spawn(hid):
+                auth = _preflight_seat(board, n, hid, mode="route")
+                skip = _preflight().route_skip(auth, hid)
+                if skip:
+                    continue
             s = score_agent(board, n, e, roles, t)
             if s is None:
                 continue
@@ -14998,10 +15053,11 @@ def cmd_spawn(a, board):
     # must be ready before a watcher starts. Keep this before cmd_join so a
     # failed relaunch cannot alter roles/harness/worktree. --exec skips it.
     if _auth_gates_spawn(resolved_harness) and not a.exec:
-        auth = _refresh_auth_check(board, owner, requested_harness)
-        if auth.get("state") != "ready":
+        auth = _preflight_seat(board, owner, requested_harness or resolved_harness, mode="spawn")
+        reason = _preflight().dispatch_refuse(auth, resolved_harness)
+        if reason:
             _print_auth_result(owner, auth)
-            sys.exit("watcher not started; fix the state above, then rerun `atm spawn %s`" % owner)
+            sys.exit("watcher not started; %s" % reason)
     if not os.path.isdir(wt):
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
                            capture_output=True, text=True)
