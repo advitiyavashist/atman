@@ -1,15 +1,21 @@
-"""T-1040: per-provider usage ledger. Observed limits + credentialed reads.
+"""T-1040 / T-1056: per-provider usage ledger. Observed limits + credentialed reads.
 
 Honesty: unknown remaining is unknown (never zero, never 'fine'/'available').
 No reset unless the provider gave one. Token counts are the harness's own
 report. Cursor and Antigravity stay 'no data'. Credentials are never stored
-on the board, logged, or returned in readings.
+on the board, logged, printed, or returned in readings.
+
+Claude Code on macOS keeps OAuth in the login keychain (generic password,
+service Claude Code-credentials). ~/.claude/.credentials.json is the
+fallback for platforms that still write that file; it is absent on this Mac.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import subprocess
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -21,6 +27,8 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 # Paths found on this machine (Claude Code CLI + Codex CLI), not invented.
 CLAUDE_CREDENTIALS_RELPATH = os.path.join(".claude", ".credentials.json")
+# macOS login keychain service Claude Code itself uses (generic password).
+CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 CODEX_AUTH_RELPATH = os.path.join(".codex", "auth.json")
 _CODEX_TOKENS = re.compile(r"tokens used\s*[\r\n]+\s*(\d+)\b", re.I)
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T")
@@ -139,12 +147,14 @@ def _as_float(value):
 def _used_percent(item):
     if not isinstance(item, dict):
         return None
+    # Live Claude /api/oauth/usage (2026-09-16) uses utilization in 0..1,
+    # not used_percent. Treat it like `used`: a fraction, not a percent.
     for key in ("used_percent", "used_percentage", "usedPercent",
-                "percent_used", "percentUsed", "used"):
+                "percent_used", "percentUsed", "used", "utilization"):
         pct = _as_float(item.get(key))
         if pct is None:
             continue
-        if 0 <= pct <= 1 and key in ("used",):
+        if 0 <= pct <= 1 and key in ("used", "utilization"):
             pct = pct * 100.0
         if 0 <= pct <= 100:
             return pct
@@ -462,7 +472,7 @@ def _read_json(path):
 
 
 def claude_credentials_file(home=None):
-    """Claude Code CLI credentials file — the path we actually found."""
+    """Claude Code CLI credentials file — fallback when the keychain is empty."""
     home = os.path.expanduser(home or "~")
     return os.path.join(home, CLAUDE_CREDENTIALS_RELPATH)
 
@@ -477,12 +487,78 @@ def codex_auth_file(home=None, environ=None):
     return os.path.join(home, CODEX_AUTH_RELPATH)
 
 
-def read_claude_oauth_token(home, environ=None):
-    """Return access token string or ''. Never raises. Does not log the token."""
+def _oauth_token_from_blob(data):
+    """Extract an access token from a Claude Code credentials blob. Never logs."""
+    if isinstance(data, (bytes, bytearray)):
+        try:
+            data = data.decode("utf-8", "replace")
+        except Exception:
+            return ""
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            return ""
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            return ""
+    if not isinstance(data, dict):
+        return ""
+    oauth = data.get("claudeAiOauth") or data.get("oauth") or data
+    if not isinstance(oauth, dict):
+        return ""
+    return (oauth.get("accessToken") or oauth.get("access_token") or "").strip()
+
+
+def macos_keychain_generic_password(service, account="", runner=None):
+    """Read a macOS generic password. Returns '' on miss/fail. Never logs the value."""
+    if not service:
+        return ""
+    cmd = ["security", "find-generic-password", "-s", service, "-w"]
+    if account:
+        cmd = ["security", "find-generic-password", "-a", account,
+               "-s", service, "-w"]
+    run = runner or subprocess.run
+    try:
+        proc = run(cmd, capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if getattr(proc, "returncode", 1) != 0:
+        return ""
+    out = getattr(proc, "stdout", None) or b""
+    if isinstance(out, bytes):
+        return out.decode("utf-8", "replace").strip()
+    return str(out).strip()
+
+
+def default_claude_keychain_reader():
+    """Claude Code's login-keychain item. Never logs or writes the value."""
+    return macos_keychain_generic_password(CLAUDE_KEYCHAIN_SERVICE)
+
+
+def read_claude_oauth_token(home, environ=None, keychain_reader=None,
+                            platform=None):
+    """Return access token string or ''. Never raises. Does not log the token.
+
+    Order: ANTHROPIC_OAUTH_TOKEN, then macOS login keychain (Claude Code's
+    generic-password item), then ~/.claude/.credentials.json and siblings.
+    """
     env = environ if environ is not None else os.environ
     direct = (env.get("ANTHROPIC_OAUTH_TOKEN") or "").strip()
     if direct:
         return direct
+    plat = sys.platform if platform is None else platform
+    reader = keychain_reader
+    if reader is None and str(plat).startswith("darwin"):
+        reader = default_claude_keychain_reader
+    if reader is not None:
+        try:
+            blob = reader()
+        except Exception:
+            blob = ""
+        token = _oauth_token_from_blob(blob)
+        if token:
+            return token
     home = os.path.expanduser(home or "~")
     candidates = (
         claude_credentials_file(home),
@@ -490,13 +566,7 @@ def read_claude_oauth_token(home, environ=None):
         os.path.join(home, ".config", "claude", ".credentials.json"),
     )
     for path in candidates:
-        data = _read_json(path)
-        if not isinstance(data, dict):
-            continue
-        oauth = data.get("claudeAiOauth") or data.get("oauth") or data
-        if not isinstance(oauth, dict):
-            continue
-        token = (oauth.get("accessToken") or oauth.get("access_token") or "").strip()
+        token = _oauth_token_from_blob(_read_json(path))
         if token:
             return token
     return ""
@@ -538,7 +608,8 @@ def default_transport(url, headers, timeout):
 
 
 def fetch_provider_usage(provider, home="~", timeout=8, transport=None,
-                         environ=None, now=None):
+                         environ=None, now=None, keychain_reader=None,
+                         platform=None):
     """Credentialed read. Failures are unknown. Credentials never leave this fn."""
     hid = (provider or "").strip().lower()
     checked = iso_now(now)
@@ -549,7 +620,8 @@ def fetch_provider_usage(provider, home="~", timeout=8, transport=None,
         return empty_reading(hid, status="unknown", checked_at=checked,
                              hint="no usage source")
     if hid == "claude":
-        token = read_claude_oauth_token(home, environ)
+        token = read_claude_oauth_token(
+            home, environ, keychain_reader=keychain_reader, platform=platform)
         url = CLAUDE_USAGE_URL
         headers = {"Authorization": "Bearer %s" % token,
                    "Accept": "application/json"}
@@ -576,13 +648,15 @@ def fetch_provider_usage(provider, home="~", timeout=8, transport=None,
 
 
 def refresh_http_providers(board, home="~", timeout=8, transport=None,
-                           environ=None, now=None):
+                           environ=None, now=None, keychain_reader=None,
+                           platform=None):
     """Refresh Claude and Codex. Never skips because a seat is busy."""
     out = {}
     for hid in ("claude", "codex"):
         reading = fetch_provider_usage(
             hid, home=home, timeout=timeout, transport=transport,
-            environ=environ, now=now)
+            environ=environ, now=now, keychain_reader=keychain_reader,
+            platform=platform)
         out[hid] = put_reading(board, reading, now=now)
     for hid in ("cursor", "agy"):
         out[hid] = put_reading(board, empty_reading(hid, status="no_data",

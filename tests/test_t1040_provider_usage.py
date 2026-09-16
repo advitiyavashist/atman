@@ -15,6 +15,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from ticket_board import provider_usage as pu  # noqa: E402
 
 TOOL = ROOT / "tickets.py"
+# T-1056: isolate T-1040 file-path tests from the real macOS keychain.
+_NO_KEYCHAIN = lambda: ""  # noqa: E731
 
 
 def utc(ts):
@@ -173,7 +175,8 @@ def test_fetch_non_200_parseable_body_is_unknown(tmp_path, code):
 
     rec = pu.fetch_provider_usage(
         "claude", home=str(home), transport=transport,
-        environ={}, now=utc("2026-09-16T10:00:00Z"))
+        environ={}, now=utc("2026-09-16T10:00:00Z"),
+        keychain_reader=_NO_KEYCHAIN)
     assert rec["status"] == "unknown"
     assert rec["remaining"] is None
     assert str(code) in rec["hint"]
@@ -217,13 +220,15 @@ def test_fetch_uses_injected_transport_and_never_returns_token(tmp_path):
 
     rec = pu.fetch_provider_usage(
         "claude", home=str(home), transport=transport,
-        environ={}, now=utc("2026-09-16T10:00:00Z"))
+        environ={}, now=utc("2026-09-16T10:00:00Z"),
+        keychain_reader=_NO_KEYCHAIN)
     assert rec["status"] == "ok"
     assert seen["url"] == pu.CLAUDE_USAGE_URL
     assert seen["auth"] == "Bearer secret-token"
     dumped = json.dumps(rec)
     assert "secret-token" not in dumped
-    assert pu.read_claude_oauth_token(str(home), environ={}) == "secret-token"
+    assert pu.read_claude_oauth_token(
+        str(home), environ={}, keychain_reader=_NO_KEYCHAIN) == "secret-token"
 
 
 def test_fetch_empty_credential_does_not_call_transport(tmp_path):
@@ -231,7 +236,8 @@ def test_fetch_empty_credential_does_not_call_transport(tmp_path):
     rec = pu.fetch_provider_usage(
         "claude", home=str(tmp_path / "empty"),
         transport=lambda *a: called.append(a) or (200, "{}"),
-        environ={}, now=utc("2026-09-16T10:00:00Z"))
+        environ={}, now=utc("2026-09-16T10:00:00Z"),
+        keychain_reader=_NO_KEYCHAIN)
     assert called == []
     assert rec["status"] == "unknown"
     assert rec["hint"] == "re-login required"
@@ -274,7 +280,8 @@ def test_refresh_persists_and_skips_busy_gate(tmp_path):
                                        "resets_at": "2026-09-19T15:17:00Z"}}})
 
     out = pu.refresh_http_providers(
-        str(board), home=str(home), transport=transport, environ={})
+        str(board), home=str(home), transport=transport, environ={},
+        keychain_reader=_NO_KEYCHAIN)
     assert out["claude"]["status"] == "ok"
     assert out["codex"]["status"] == "ok"
     assert out["cursor"]["status"] == "no_data"
