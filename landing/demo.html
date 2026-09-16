@@ -1,0 +1,707 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Atman: one Claude Code session versus a team of seats across every agent subscription you have.">
+<title>Atman Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --bg:#0c0e12;
+    --fg:#e8e6e1;
+    --mute:#8a8d96;
+    --line:#22262e;
+    --card:#141820;
+    --acc:#5b8def;
+    --warn:#e0a53d;
+    --bad:#e85d4c;
+    --ok:#3dbe7a;
+    --review:#9b7dff;
+    --live:#3ee8c5;
+    --sans:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --t:.45s;
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font:400 clamp(16px,1.25vw,20px)/1.5 var(--sans);
+    -webkit-font-smoothing:antialiased;
+    padding-inline:16px;
+  }
+  a{color:var(--fg)}
+  .deck{position:relative;min-height:100dvh}
+  .slide{
+    display:none;min-height:100dvh;
+    padding:clamp(48px,8vh,96px) clamp(8px,5vw,80px) 96px;
+    max-width:1220px;margin:0 auto;
+    flex-direction:column;justify-content:center;gap:clamp(18px,3vh,32px);
+  }
+  .slide.active{display:flex}
+  @media (prefers-reduced-motion:no-preference){
+    .slide.active{animation:in .4s ease-out}
+    @keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  }
+  @media (prefers-reduced-motion:reduce){
+    :root{--t:0s}
+    *{transition:none!important;animation:none!important}
+  }
+
+  .eyebrow{font:500 12px/1 var(--sans);letter-spacing:.18em;text-transform:uppercase;color:var(--mute);margin:0}
+  h1,h2{margin:0;text-wrap:balance;font-weight:500;letter-spacing:-.015em}
+  h1{font-size:clamp(34px,4.6vw,62px);line-height:1.08;max-width:18ch}
+  h2{font-size:clamp(26px,3.2vw,44px);line-height:1.12;max-width:24ch}
+  h3.lab{margin:0 0 14px;font:500 12px/1 var(--sans);letter-spacing:.18em;text-transform:uppercase;color:var(--mute)}
+  p{margin:0;max-width:62ch}
+  .lede{font-size:clamp(18px,1.6vw,25px);line-height:1.4;max-width:42ch}
+  .mute{color:var(--mute)}
+  .sub{max-width:56ch;color:var(--mute)}
+
+  .wordmark{font:600 16px/1.2 var(--sans);letter-spacing:.22em;text-transform:lowercase;color:var(--fg)}
+  .mark{width:56px;height:56px;display:block}
+  .brand{display:flex;align-items:center;gap:18px}
+  .mark .seat{transform-origin:16px 24.6px}
+  @media (prefers-reduced-motion:no-preference){
+    .mark .seat{animation:pulse 2.6s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+  }
+
+  /* fragments */
+  .frag{opacity:0;transform:translateY(6px);transition:opacity var(--t) ease,transform var(--t) ease}
+  .frag.on{opacity:1;transform:none}
+
+  /* lists */
+  ul.plain{list-style:none;margin:0;padding:0;display:grid;gap:14px;max-width:62ch}
+  ul.plain li{display:grid;grid-template-columns:22px 1fr;gap:12px;align-items:baseline}
+  ul.plain li::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--mute);transform:translateY(-2px)}
+  ul.plain.fail li::before{background:var(--bad)}
+  ul.plain.fix li::before{background:var(--live)}
+
+  .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:clamp(24px,4vw,64px);align-items:start}
+  .cols.wide{grid-template-columns:minmax(280px,5fr) minmax(320px,7fr)}
+  @media (max-width:900px){.cols.wide{grid-template-columns:1fr}}
+
+  /* tables */
+  .tbl{width:100%;border-collapse:collapse;font-size:.95em}
+  .tbl th,.tbl td{text-align:left;padding:12px 16px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}
+  .tbl th{font:500 12px/1 var(--sans);letter-spacing:.18em;text-transform:uppercase;color:var(--mute);padding-bottom:10px}
+  .tbl tr:last-child td{border-bottom:0}
+  .tbl td:first-child{white-space:nowrap;color:var(--fg)}
+  .tbl td:last-child{color:var(--mute)}
+  .tbl tr.frag{display:table-row}
+  .scroll{overflow-x:auto;max-width:100%}
+
+  /* code */
+  pre{
+    margin:0;background:var(--card);border:1px solid var(--line);border-radius:6px;
+    padding:18px 22px;overflow-x:auto;
+    font:400 clamp(13px,1vw,16px)/1.65 var(--mono);color:var(--fg);
+  }
+  pre .c{color:var(--mute)}
+  pre .k{color:var(--acc)}
+  pre .o{color:var(--warn)}
+  code{font:400 .92em var(--mono);color:var(--fg)}
+
+  /* flow */
+  .flow{display:flex;flex-wrap:wrap;gap:10px 0;align-items:center;font-size:clamp(19px,2.1vw,30px);font-weight:500;letter-spacing:-.01em}
+  .flow span{color:var(--mute);transition:color .4s ease}
+  .flow span.lit{color:var(--fg)}
+  .flow span+span::before{content:"→";color:var(--line);margin:0 .5em;font-weight:400;transition:color .4s ease}
+  .flow span.lit+span.lit::before,.flow span.lit::before{color:var(--mute)}
+
+  /* surfaces */
+  .surf{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .surf div{background:var(--bg);padding:18px 22px;display:grid;gap:8px;align-content:start}
+  .surf b{font-weight:500;font-size:1.05em}
+  .surf p{color:var(--mute);font-size:.92em;max-width:none}
+
+  /* stats */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:24px 32px;font-variant-numeric:tabular-nums;margin:0}
+  .stats dt{font:500 12px/1 var(--sans);letter-spacing:.18em;text-transform:uppercase;color:var(--mute);margin-bottom:10px}
+  .stats dd{margin:0;font-size:clamp(34px,3.6vw,52px);line-height:1;font-weight:500;letter-spacing:-.02em}
+  .stats dd small{display:block;margin-top:8px;font-size:14px;letter-spacing:0;font-weight:400;color:var(--mute)}
+
+  /* ===== stage: chat over board ===== */
+  .stage{position:relative;height:clamp(400px,54vh,540px);max-width:100%}
+  .bp{
+    position:absolute;right:0;top:0;width:55%;height:100%;
+    background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;
+    display:grid;grid-template-rows:auto auto 1fr auto;gap:10px;font-size:12px;overflow:hidden;
+    opacity:.85;transition:opacity var(--t) ease;
+  }
+  .bp.dim{opacity:.5}
+  .bp-head{display:flex;justify-content:space-between;gap:12px;color:var(--mute);font:500 11px/1 var(--mono);letter-spacing:.06em}
+  .bp-head .obj{color:var(--fg);font-weight:400;letter-spacing:0;text-transform:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bp-seats{display:flex;flex-wrap:wrap;gap:8px}
+  .seat{
+    display:inline-grid;grid-template-columns:7px auto;gap:8px;align-items:center;
+    padding:6px 10px;border:1px solid var(--line);border-radius:5px;background:var(--bg);
+    font:400 11.5px/1.25 var(--mono);transition:opacity var(--t) ease,border-color var(--t) ease;
+  }
+  .seat i{width:7px;height:7px;border-radius:50%;background:var(--line);transition:background var(--t) ease}
+  .seat.busy i{background:var(--live)}
+  .seat.dead{opacity:.5}.seat.dead i{background:var(--bad)}
+  .seat.off{opacity:.35}
+  .seat b{font-weight:500;display:block}
+  .seat small{color:var(--mute);display:block;font-size:10.5px;min-height:1.2em}
+  .bp-tasks{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:8px;align-content:start;overflow:hidden}
+  .task{
+    position:relative;border:1px solid var(--line);border-radius:6px;background:var(--bg);padding:8px 10px;
+    display:grid;gap:5px;transition:border-color var(--t) ease,opacity .5s ease,transform .5s ease;min-height:72px;
+  }
+  .task.new{opacity:0;transform:translateY(8px)}
+  .task .id{font:500 11px/1 var(--mono);color:var(--mute);display:flex;justify-content:space-between;gap:6px}
+  .task .id em{font-style:normal;color:var(--mute);opacity:.8}
+  .task .ti{font-size:12px;line-height:1.25}
+  .task .st{
+    display:inline-flex;justify-self:start;font:500 10px/1 var(--sans);letter-spacing:.1em;text-transform:uppercase;
+    padding:4px 6px;border-radius:3px;border:1px solid var(--line);color:var(--mute);transition:all var(--t) ease;
+  }
+  .task .ow{font:400 10.5px/1.2 var(--mono);color:var(--mute);min-height:11px}
+  .task .note{font-size:10.5px;color:var(--mute);border-top:1px dashed var(--line);padding-top:4px;max-height:0;overflow:hidden;opacity:0;transition:all var(--t) ease}
+  .task.has-note .note{max-height:40px;opacity:1}
+  .task.s-ready .st{color:var(--acc);border-color:var(--acc)}
+  .task.s-wait .st{color:var(--mute)}
+  .task.s-flight .st{color:var(--warn);border-color:var(--warn)}
+  .task.s-review .st{color:var(--review);border-color:var(--review)}
+  .task.s-done .st{color:var(--ok);border-color:var(--ok)}
+  .task.s-reopen .st{color:var(--warn);border-color:var(--warn)}
+  .task.s-dead{border-color:var(--bad)}.task.s-dead .st{color:var(--bad);border-color:var(--bad)}
+  .task.hit{animation:hit .6s ease}
+  @keyframes hit{0%{box-shadow:0 0 0 0 rgba(62,232,197,.6)}100%{box-shadow:0 0 0 10px rgba(62,232,197,0)}}
+  .bp-log{display:grid;gap:3px;font:400 11px/1.4 var(--mono);color:var(--mute);border-top:1px solid var(--line);padding-top:8px;min-height:58px}
+  .bp-log div{opacity:0;transform:translateY(4px);transition:all .4s ease;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bp-log div.on{opacity:1;transform:none}
+  .bp-log b{font-weight:500;color:var(--fg)}
+  .bp-log .br{color:var(--live)}
+
+  .term{
+    position:absolute;left:0;bottom:0;width:43.5%;height:90%;
+    background:#090b0f;border:1px solid var(--line);border-radius:8px;
+    box-shadow:0 24px 60px rgba(0,0,0,.65);display:grid;grid-template-rows:auto 1fr;
+    font:400 12.5px/1.55 var(--mono);overflow:hidden;
+  }
+  .term-head{padding:8px 12px;border-bottom:1px solid var(--line);color:var(--mute);font-size:11px;display:flex;gap:8px;align-items:center}
+  .term-head i{width:9px;height:9px;border-radius:50%;background:var(--line);display:inline-block}
+  .term-head span{margin-left:6px}
+  .term-body{padding:10px 14px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:3px}
+  .ln{opacity:0;transform:translateY(3px);transition:opacity .3s ease,transform .3s ease;white-space:pre-wrap;word-break:break-word}
+  .ln.on{opacity:1;transform:none}
+  .ln.u{color:var(--fg)}.ln.u::before{content:"❯ ";color:var(--acc)}
+  .ln.a{color:var(--fg)}
+  .ln.t{color:var(--mute)}.ln.t::before{content:"⏺ ";color:var(--mute)}
+  .ln.k{color:var(--acc)}.ln.k::before{content:"✻ "}
+  .ln.w{color:var(--bad)}.ln.w::before{content:"⚠ "}
+  .ln.h{color:var(--live)}.ln.h::before{content:"♥ "}
+  .ln.s{color:var(--mute);border-top:1px dashed var(--line);padding-top:4px;margin-top:4px}
+  .ln .cur{display:inline-block;width:7px;height:13px;background:var(--fg);vertical-align:-2px;margin-left:1px}
+  @media (prefers-reduced-motion:no-preference){.ln .cur{animation:blink 1s steps(2) infinite}@keyframes blink{50%{opacity:0}}}
+  .cap{
+    display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start;min-height:52px;
+    border-top:1px solid var(--line);padding-top:12px;
+  }
+  .cap .txt{font-size:14px;line-height:1.45;color:var(--fg);max-width:none}
+  .cap .txt code{font-size:12.5px;color:var(--acc)}
+  .cap .txt .why{display:block;color:var(--mute);margin-top:3px}
+  .ctl{display:flex;gap:8px;flex-wrap:wrap}
+  button{
+    font:500 13px/1 var(--sans);letter-spacing:.02em;color:var(--fg);background:transparent;
+    border:1px solid var(--mute);border-radius:5px;padding:9px 14px;cursor:pointer;
+    transition:border-color .15s ease,background .15s ease;
+  }
+  button:hover{border-color:var(--fg)}
+  button.pri{border-color:var(--acc);background:var(--acc);color:#0c0e12}
+  button.pri:hover{background:#6f9bf2;border-color:#6f9bf2}
+  button:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+  button[disabled]{opacity:.4;cursor:default}
+  .badge{display:inline-block;font:500 11px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--mute);padding:4px 7px;border:1px solid var(--line);border-radius:4px;margin-right:6px}
+  @media (max-width:760px){
+    .stage{height:auto}
+    .bp,.term{position:static;width:100%;height:auto}
+    .term{margin-top:12px;min-height:260px}
+    .term-body{justify-content:flex-start}
+  }
+
+  /* features */
+  .feat{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1px;background:var(--bg);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .feat>div{background:var(--bg);box-shadow:0 0 0 1px var(--line);padding:20px 22px;display:grid;gap:12px;align-content:start}
+  .feat b{font-weight:500;font-size:1.05em}
+  .feat p{color:var(--mute);font-size:.88em;max-width:none}
+  .feat pre.mini{font-size:12px;line-height:1.5;padding:12px 14px}
+  .dg{width:100%;max-width:320px;height:auto;display:block}
+  .dg line{stroke:var(--mute);stroke-width:1.5}
+  .dg .n rect{fill:var(--card);stroke:var(--line);stroke-width:1.5}
+  .dg .n text{font:500 11px var(--mono);fill:var(--fg);text-anchor:middle}
+  .dg .n.done rect{stroke:var(--ok)}.dg .n.flight rect{stroke:var(--warn)}.dg .n.wait rect{stroke:var(--line)}
+  .dg .n.wait text{fill:var(--mute)}
+  .swap{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .slide>.swap .seat{font-size:13px;padding:8px 12px}
+  .swap .arr{font:400 12px var(--mono);color:var(--mute)}
+  .par{color:var(--live)}
+
+  /* mobile nav */
+  .nav{display:none;position:fixed;left:0;right:0;bottom:0;z-index:5;padding:10px 16px calc(10px + env(safe-area-inset-bottom));
+    background:var(--bg);border-top:1px solid var(--line);grid-template-columns:1fr auto 1fr;align-items:center;gap:12px}
+  .nav button{min-height:44px;min-width:88px;font-size:15px}
+  .nav button[data-prev]{justify-self:start}.nav button[data-nxt]{justify-self:end}
+  .nav .n{font:400 13px/1 var(--mono);color:var(--mute);font-variant-numeric:tabular-nums}
+  @media (max-width:760px), (pointer:coarse){
+    .nav{display:grid}
+    .chrome{display:none}
+    .slide{padding-bottom:110px;justify-content:flex-start;padding-top:32px;min-height:auto}
+    .deck{padding-bottom:0}
+  }
+
+  /* chrome */
+  .chrome{
+    position:fixed;left:0;right:0;bottom:0;padding:18px clamp(24px,6vw,96px);
+    display:flex;justify-content:space-between;align-items:center;
+    font:400 13px/1 var(--mono);color:var(--mute);pointer-events:none;
+  }
+  .chrome .n{font-variant-numeric:tabular-nums}
+  .hint{position:fixed;top:18px;right:clamp(24px,6vw,96px);font:400 12px/1 var(--mono);color:var(--mute);opacity:.75}
+  .progress{position:fixed;left:0;top:0;height:2px;background:var(--acc);width:0;transition:width .2s}
+  .deck:focus{outline:none}
+
+  @media (max-width:640px){
+    .slide{padding-top:44px;padding-bottom:88px}
+    .flow{font-size:19px}
+    .hint{display:none}
+  }
+  @media print{
+    body{background:#fff;color:#111;padding:0}
+    .slide{display:flex;min-height:auto;page-break-after:always;padding:48px}
+    .frag{opacity:1;transform:none}
+    .chrome,.hint,.progress,.ctl{display:none}
+    pre,.scene{border-color:#ccc;background:#f4f4f4;color:#111}
+  }
+</style>
+
+<div class="progress" id="progress"></div>
+<div class="hint">→ next · ← back</div>
+
+<main class="deck" id="deck" tabindex="0" aria-live="polite">
+
+<!-- 1 -->
+<section class="slide">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 32 32" role="img" aria-label="atman mark">
+      <circle cx="10.0" cy="7.8" r="3.35" fill="#e8e6e1"/>
+      <circle cx="22.4" cy="8.8" r="3.35" fill="#e8e6e1"/>
+      <circle cx="6.6" cy="17.6" r="3.35" fill="#e8e6e1"/>
+      <circle cx="25.4" cy="18.2" r="3.35" fill="#e8e6e1"/>
+      <circle class="seat" cx="16.0" cy="24.6" r="3.35" fill="#3ee8c5"/>
+    </svg>
+    <span class="wordmark">atman</span>
+  </div>
+  <h1>Bring the agents you already use. We make them one team.</h1>
+  <p class="sub">Turn one Claude Code session into a team that works in parallel across the subscriptions you already pay for.</p>
+  <p class="mute" style="font:400 14px/1 var(--mono)">Demo deck · September 2026 · <a href="https://github.com/advitiyavashist/atman">github.com/advitiyavashist/atman</a></p>
+</section>
+
+<!-- 2 problem -->
+<section class="slide">
+  <p class="eyebrow">Today</p>
+  <h2>One Claude Code session. One subscription. One task at a time.</h2>
+  <ul class="plain fail">
+    <li class="frag">Sequential. Schema, then API, then UI. Nothing runs while you wait.</li>
+    <li class="frag">Open a second session to go faster and you become the copy-paste bus between them. Each one knows half.</li>
+    <li class="frag">Expensive. Opus does the hard design and the typo fix. Both count against the same limit.</li>
+    <li class="frag">The limit hits mid-task. Work stops until the window resets. The half-done branch and its reasoning sit in a chat.</li>
+    <li class="frag">Context does not survive. Compaction, a new session, tomorrow morning: you re-explain the plan.</li>
+    <li class="frag">Your Codex, Cursor and local models sit idle while Claude is capped.</li>
+  </ul>
+</section>
+
+<!-- 3 problem scene -->
+<section class="slide" data-scene="chaos">
+  <p class="eyebrow">Today · one session</p>
+  <div class="stage" id="chaos">
+    <div class="bp dim">
+      <div class="bp-head"><span>the work</span><span class="obj" data-obj>no plan on disk</span></div>
+      <div class="bp-seats" data-seats></div>
+      <div class="bp-tasks" data-tasks></div>
+      <div class="bp-log" data-log></div>
+    </div>
+    <div class="term">
+      <div class="term-head"><i></i><i></i><i></i><span>claude code · ~/project · opus</span></div>
+      <div class="term-body" data-term></div>
+    </div>
+  </div>
+  <div class="cap"><div class="txt" data-cap>You describe the work. The session does it in order.</div></div>
+</section>
+
+<!-- 4 with atman -->
+<section class="slide">
+  <p class="eyebrow">With Atman</p>
+  <h2>Your session plans and leads. Seats on every subscription do the work.</h2>
+  <ul class="plain fix">
+    <li class="frag">Parallel. Independent tasks run at the same time on different seats.</li>
+    <li class="frag">You put the expensive model where the hard decisions are. Cost tiers are on the board, so the choice is visible.</li>
+    <li class="frag">A limit reopens the ticket with its notes and branch, so another seat can pick it up.</li>
+    <li class="frag">Context lives on the board. Plan, decisions, handoffs and messages survive any session.</li>
+    <li class="frag">Codex, Cursor and local models join the same board as seats, each with its own identity, worktree and provider login.</li>
+  </ul>
+</section>
+
+<!-- 5 sim -->
+<section class="slide" data-scene="sim">
+  <p class="eyebrow">With Atman · the same request</p>
+  <div class="stage" id="sim">
+    <div class="bp">
+      <div class="bp-head"><span>atman · board</span><span class="obj" data-obj>objective: none</span></div>
+      <div class="bp-seats" data-seats></div>
+      <div class="bp-tasks" data-tasks></div>
+      <div class="bp-log" data-log></div>
+    </div>
+    <div class="term">
+      <div class="term-head"><i></i><i></i><i></i><span>claude code · ~/project · lead</span></div>
+      <div class="term-body" data-term></div>
+    </div>
+  </div>
+  <div class="cap"><div class="txt" data-cap>Same chat window. Your session is now the lead on an Atman board.</div></div>
+</section>
+
+<!-- 6 under the hood -->
+<section class="slide">
+  <p class="eyebrow">Under the hood</p>
+  <div class="feat">
+    <div class="frag on" data-first>
+      <b>A board of plain files</b>
+      <pre class="mini">.tickets/
+  T-001.json      one file per ticket
+  agents/         seats and harnesses
+  messages.jsonl  append-only
+  briefs/         skills per lane</pre>
+      <p>Lives in your repo. Greppable, diffable, reviewable in a pull request. No server, no database, nothing leaves your machine except your agents talking to their own providers.</p>
+    </div>
+    <div class="frag">
+      <b>Tickets with a dependency graph</b>
+      <svg viewBox="0 0 300 96" class="dg" aria-label="dependency graph">
+        <line x1="62" y1="28" x2="118" y2="28"/><line x1="182" y1="28" x2="238" y2="28"/>
+        <g class="n done"><rect x="6" y="14" width="56" height="28" rx="5"/><text x="34" y="32">T-001</text></g>
+        <g class="n flight"><rect x="118" y="14" width="64" height="28" rx="5"/><text x="150" y="32">T-002</text></g>
+        <g class="n wait"><rect x="238" y="14" width="56" height="28" rx="5"/><text x="266" y="32">T-003</text></g>
+        <g class="n done"><rect x="6" y="60" width="56" height="28" rx="5"/><text x="34" y="78">T-004</text></g>
+        <g class="n flight"><rect x="118" y="60" width="64" height="28" rx="5"/><text x="150" y="78">T-005</text></g>
+      </svg>
+      <p>Ready is computed from the graph. A ticket opens the moment its prerequisites are accepted. Claims are atomic, so two seats never take the same one.</p>
+    </div>
+    <div class="frag">
+      <b>Message board</b>
+      <pre class="mini">cursor → sonnet   re T-003
+  which endpoint refreshes the session?
+sonnet → cursor   re T-003
+  POST /auth/refresh, see T-002 notes</pre>
+      <p>Tied to the ticket, kept forever, read by whoever holds it next. A seat wakes when a message is addressed to it.</p>
+    </div>
+    <div class="frag">
+      <b>Skills and briefs</b>
+      <pre class="mini">briefs/roles/docs.md
+  login flow is now /auth/session
+briefs/codex-mini.md
+  run pytest before review; never push main</pre>
+      <p>What one seat learns becomes standing context for every seat in that lane. Created from the chat, injected into every wake-up.</p>
+    </div>
+    <div class="frag">
+      <b>How a seat is spun up</b>
+      <pre class="mini">atm spawn codex-mini
+  prompt   objective + role brief + seat brief
+           + ticket body + handoff from deps + inbox
+  cwd      its own git worktree
+  identity TICKET_AGENT, TICKETS_DIR
+  exec     codex -p "$(cat prompt)"   <span class="c"># or claude, cursor, your script</span></pre>
+      <p>The CLI writes one prompt with everything the seat needs, starts the harness in its own worktree with its own identity and provider login, and wakes it again whenever there is work for it: a ready ticket, a held ticket, or a message addressed to it. No SDK, no protocol.</p>
+    </div>
+    <div class="frag">
+      <b>Review by a different seat</b>
+      <pre class="mini">T-001  submitted  opus    @ 4cfeaf5
+T-001  accepted   sonnet  @ 4cfeaf5
+T-002  ready      handed 4cfeaf5</pre>
+      <p>Work comes back as a commit, never a summary. Another agent checks that exact commit before the next ticket opens. A "done" nobody checked stops the chain.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 7 what it enables -->
+<section class="slide">
+  <p class="eyebrow">What that enables</p>
+  <div class="feat">
+    <div class="frag on" data-first>
+      <b>Interchangeable seats</b>
+      <div class="swap">
+        <span class="seat dead"><i></i><span><b>claude · opus</b><small>usage limit</small></span></span>
+        <span class="arr">T-002 + notes + branch →</span>
+        <span class="seat busy"><i></i><span><b>claude · sonnet</b><small>T-002</small></span></span>
+      </div>
+      <p>A seat is a lane, not a persona. A reopened ticket carries its notes, branch and messages, and any seat on the board can claim it. Same-provider recovery is tested; cross-provider is not yet verified end to end.</p>
+    </div>
+    <div class="frag">
+      <b>Persistent plans</b>
+      <p>The objective and the dependency graph live in your repo, not in a session. Compaction, a restart or tomorrow morning: the next session reads the plan instead of asking you for it.</p>
+    </div>
+    <div class="frag">
+      <b>Durable knowledge</b>
+      <p>Briefs per role and per seat. What one seat learns is injected into every later wake-up in that lane. Plain files you can read, edit and review, not a hidden memory.</p>
+    </div>
+    <div class="frag">
+      <b>Parallel by default</b>
+      <p>Every ready ticket can be claimed at the same time by a different seat. Claims are atomic, so two seats never do the same work.</p>
+    </div>
+    <div class="frag">
+      <b>Verified handoffs</b>
+      <p>Work comes back as a commit, never a summary. A different seat accepts that exact commit before the dependent ticket opens, and the successor's prompt carries the handoff.</p>
+    </div>
+    <div class="frag">
+      <b>Your model choice, visible</b>
+      <p>Model and cost tier sit on each seat. You put the expensive model where the hard decisions are. Turns and cost per ticket show when measured and stay blank when not.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 8 install -->
+<section class="slide">
+  <p class="eyebrow">Install</p>
+  <h2>Clone it. Then point your Claude Code at your project.</h2>
+  <pre>git clone https://github.com/advitiyavashist/atman.git
+cd atman && ./install.sh                  <span class="c"># Python 3.9 + Git. Links atm into ~/.local/bin</span>
+
+cd /path/to/your-project
+<span class="k">atm</span> quickstart --agent boss              <span class="c"># board, AGENTS.md and Cursor rules, so every agent sees it</span></pre>
+  <ul class="plain">
+    <li>Open Claude Code in the project and give it the objective. It plans on the board and spawns the seats.</li>
+    <li>Codex and Cursor pick up the same board from AGENTS.md. Local models join with one line.</li>
+    <li>macOS developer preview today. Open source, MIT.</li>
+  </ul>
+</section>
+
+</main>
+
+<div class="nav" aria-label="slide navigation">
+  <button data-prev type="button">‹ Back</button>
+  <span class="n"><span id="cur2">1</span> / <span id="tot2">8</span></span>
+  <button data-nxt type="button" class="pri">Next ›</button>
+</div>
+<div class="chrome" aria-hidden="true">
+  <span class="wordmark" style="font-size:13px;color:var(--mute)">atman</span>
+  <span class="n"><span id="cur">1</span> / <span id="tot">8</span></span>
+</div>
+
+<script>
+(function(){
+  var RM=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var wait=function(ms){return new Promise(function(r){setTimeout(r,RM?0:ms)})};
+
+  /* ---------- stage engine: chat over board ---------- */
+  function Stage(root){
+    this.root=root;this.gen=0;
+    this.term=root.querySelector('[data-term]');this.seats=root.querySelector('[data-seats]');
+    this.tasks=root.querySelector('[data-tasks]');this.log=root.querySelector('[data-log]');
+    this.obj=root.querySelector('[data-obj]');this.cap=root.closest('.slide').querySelector('[data-cap]');
+    this.bp=root.querySelector('.bp');
+  }
+  Stage.prototype.clear=function(){
+    this.gen++;this.term.innerHTML='';this.seats.innerHTML='';this.tasks.innerHTML='';this.log.innerHTML='';this.T={};this.S={};
+  };
+  Stage.prototype.say=function(html){this.cap.innerHTML=html};
+  Stage.prototype.objective=function(t){this.obj.textContent=t};
+  Stage.prototype.seat=function(name,state,cls){
+    var el=this.S[name];
+    if(!el){el=document.createElement('div');el.className='seat off';el.innerHTML='<i></i><span><b></b><small></small></span>';el.querySelector('b').textContent=name;this.seats.appendChild(el);this.S[name]=el}
+    el.className='seat'+(cls?' '+cls:'');el.querySelector('small').textContent=state||'';
+  };
+  Stage.prototype.task=function(id,title,dep){
+    var el=document.createElement('div');el.className='task new s-wait';
+    el.innerHTML='<span class="id"><span></span><em></em></span><span class="ti"></span><span class="st">queued</span><span class="ow"></span><span class="note"></span>';
+    el.querySelector('.id span').textContent=id;el.querySelector('.ti').textContent=title;if(dep)el.querySelector('em').textContent='after '+dep;
+    this.tasks.appendChild(el);this.T[id]=el;void el.offsetWidth;el.classList.remove('new');return el;
+  };
+  Stage.prototype.set=function(id,cls,label,owner){
+    var t=this.T[id];if(!t)return;t.className='task s-'+cls+(t.classList.contains('has-note')?' has-note':'');
+    t.querySelector('.st').textContent=label;if(owner!==undefined)t.querySelector('.ow').textContent=owner;
+    if(cls==='flight'||cls==='ready'){t.classList.remove('hit');void t.offsetWidth;t.classList.add('hit')}
+  };
+  Stage.prototype.note=function(id,text){var t=this.T[id];if(!t)return;t.querySelector('.note').textContent=text;t.classList.toggle('has-note',!!text)};
+  Stage.prototype.logLine=function(html){
+    var d=document.createElement('div');d.innerHTML=html;this.log.appendChild(d);
+    while(this.log.children.length>4)this.log.removeChild(this.log.firstChild);
+    void d.offsetWidth;d.classList.add('on');
+  };
+  Stage.prototype.line=function(kind,text,opts){
+    opts=opts||{};var self=this,g=this.gen;
+    var d=document.createElement('div');d.className='ln '+kind;this.term.appendChild(d);
+    while(this.term.children.length>11)this.term.removeChild(this.term.firstChild);
+    void d.offsetWidth;d.classList.add('on');
+    if(kind==='u'&&!RM){
+      var cur=document.createElement('span');cur.className='cur';d.appendChild(cur);var k=0;
+      return new Promise(function(res){(function step(){if(g!==self.gen)return res();
+        if(k<text.length){d.insertBefore(document.createTextNode(text[k++]),cur);setTimeout(step,18)}else{cur.remove();setTimeout(res,opts.hold||350)}})()});
+    }
+    d.textContent=text;
+    if(kind==='k'&&!RM){var n=0,base=text;var iv=setInterval(function(){n=(n+1)%4;d.textContent=base+'.'.repeat(n)},300);
+      return wait(opts.hold||1400).then(function(){clearInterval(iv);d.textContent=base+'…'})}
+    return wait(opts.hold||420);
+  };
+
+  /* ---------- problem: one session, auto loop ---------- */
+  var chaos=new Stage(document.getElementById('chaos'));
+  function runChaos(){
+    var c=chaos;c.clear();var g=c.gen;
+    var alive=function(){return g===c.gen&&c.root.closest('.slide').classList.contains('active')};
+    var B='';
+    c.objective('no plan on disk');
+    c.seat('you · claude code','idle','');c.seat('codex · mini','paid for, unused','off');c.seat('cursor','paid for, unused','off');c.obj.innerHTML='no plan on disk · 1 seat';
+    c.task('T-001','Users schema');c.task('T-002','Auth API');c.task('T-003','Login UI');c.task('T-004','README typo');
+    c.say('You describe the work. The session does it in order.');
+    var chain=Promise.resolve();
+    function then(f){chain=chain.then(function(){if(alive())return f()})}
+    then(function(){return c.line('u','Ship auth: users schema, auth API, login UI. Also fix the README typo.')});
+    then(function(){return c.line('k','Thinking',{hold:1500})});
+    then(function(){c.seat('you · claude code','T-001 · opus','busy');c.set('T-001','flight','in flight','opus');c.logLine('opus · started T-001');return c.line('a','I\'ll start with the users schema, then the API, then the UI.')});
+    then(function(){return c.line('t','Write db/schema.sql',{hold:700})});
+    then(function(){return c.line('t','Bash(pytest tests/db) · 12 passed',{hold:700})});
+    then(function(){c.set('T-001','done','done','opus · 4 turns');c.note('T-001','decided: uuid keys, soft delete');c.say(B+'Sequential. Everything else waited. Codex and Cursor sat idle.');return c.line('a','Schema done. Moving on to the auth API.')});
+    then(function(){c.say(B+'You open a second session to go faster. Now you copy-paste between them, and each one knows half.');c.seat('you · session 2','T-003 · opus','busy');c.set('T-003','flight','in flight','session 2');c.logLine('<b>session 2</b> · started T-003 · has not seen T-001');return c.line('s','— you open a second session for the UI —',{hold:900})});
+    then(function(){return c.line('u','pasting from my other window: users have uuid ids and soft delete, build the login form against that')});
+    then(function(){c.note('T-003','built on a pasted summary');return c.line('t','session 2 · Edit ui/Login.tsx · assumed old user shape, redoing',{hold:1100})});
+    then(function(){c.seat('you · claude code','T-002 · opus','busy');c.set('T-002','flight','in flight','opus');c.logLine('opus · started T-002');return c.line('k','Thinking',{hold:1300})});
+    then(function(){return c.line('t','Edit api/auth.py',{hold:700})});
+    then(function(){return c.line('t','Edit api/routes.py',{hold:600})});
+    then(function(){c.say(B+'Expensive. The README typo is queued for Opus on the same limit.');return c.line('t','Bash(pytest tests/api) · 3 failed',{hold:900})});
+    then(function(){return c.line('k','Thinking',{hold:1200})});
+    then(function(){c.seat('you · claude code','usage limit · resets 6:00 PM','dead');c.set('T-002','dead','stopped','opus · half done');c.logLine('<b>opus</b> · usage limit reached');c.say(B+'Limit hit mid-task. The half-done branch and its reasoning sit in this chat.');return c.line('w','Usage limit reached. Resets at 6:00 PM.',{hold:2200})});
+    then(function(){return c.line('s','— new session, next morning —',{hold:700})});
+    then(function(){c.note('T-001','');return c.line('u','continue the auth work')});
+    then(function(){return c.line('k','Thinking',{hold:1200})});
+    then(function(){c.say(B+'Context did not survive. You re-explain the plan.');return c.line('a','I don\'t have context from a previous session. Could you describe the schema decisions and what the API should do?',{hold:3000})});
+    then(function(){if(alive())runChaos()});
+  }
+
+  /* ---------- with Atman: auto loop ---------- */
+  var sim=new Stage(document.getElementById('sim'));
+  function runSim(){
+    var c=sim;c.clear();var g=c.gen;
+    var alive=function(){return g===c.gen&&c.root.closest('.slide').classList.contains('active')};
+    var chain=Promise.resolve();
+    function then(f){chain=chain.then(function(){if(alive())return f()})}
+    function par(n){c.obj.innerHTML='objective: Ship auth · <span class="par">'+n+' seat'+(n===1?'':'s')+' working in parallel</span>'}
+    c.objective('objective: none');c.seat('you · lead','planning','');
+    c.say('Same chat window. Your session is now the lead on an Atman board.');
+    then(function(){return c.line('u','Ship auth: users schema, auth API, login UI, rate-limit tests. Also fix the README typo.')});
+    then(function(){return c.line('k','Planning on the board',{hold:1300})});
+    then(function(){c.objective('objective: Ship auth');c.logLine('<b>lead</b> · objective set');c.say('The lead plans instead of doing. Five tickets, a dependency chain, and a seat per subscription.');return c.line('t','atm objective "Ship auth"',{hold:450})});
+    then(function(){c.task('T-001','Users schema');c.set('T-001','ready','ready','');return wait(260)});
+    then(function(){c.task('T-002','Auth API','T-001');c.set('T-002','wait','waiting on T-001','');return wait(260)});
+    then(function(){c.task('T-003','Login UI','T-002');c.set('T-003','wait','waiting on T-002','');return wait(260)});
+    then(function(){c.task('T-004','README typo');c.set('T-004','ready','ready','');return wait(260)});
+    then(function(){c.task('T-005','Rate-limit tests');c.set('T-005','ready','ready','');return c.line('t','atm plan · 5 tickets · 3 ready · T-001 → T-002 → T-003',{hold:700})});
+    then(function(){c.seat('claude · opus','idle','');c.seat('claude · sonnet','idle','');c.seat('codex · mini','idle','');c.seat('cursor','idle','');c.logLine('<b>lead</b> · spawned 4 seats');return c.line('t','atm spawn claude-opus · claude-sonnet · codex-mini · cursor',{hold:700})});
+    then(function(){return c.line('a','Planned 5 tickets. 4 seats up. Opus on the design, the cheap seat on the typo.')});
+    // parallel start
+    then(function(){c.say('Three ready tickets start at the same time. The lead put Opus on the design, Sonnet on tests, the cheapest seat on the typo.');return c.line('h','route · T-001 → opus · T-005 → sonnet · T-004 → codex-mini',{hold:500})});
+    then(function(){c.seat('claude · opus','T-001','busy');c.set('T-001','flight','in flight','opus');par(1);c.logLine('<b>opus</b> · claimed T-001 schema');return wait(300)});
+    then(function(){c.seat('claude · sonnet','T-005','busy');c.set('T-005','flight','in flight','sonnet');par(2);c.logLine('<b>sonnet</b> · claimed T-005 tests');return wait(300)});
+    then(function(){c.seat('codex · mini','T-004','busy');c.set('T-004','flight','in flight','codex-mini');par(3);c.logLine('<b>codex-mini</b> · claimed T-004 typo');return c.line('t','3 in flight · opus, sonnet, codex-mini',{hold:1400})});
+    then(function(){c.set('T-004','done','done','codex-mini · 1 turn');c.seat('codex · mini','idle','');par(2);c.logLine('<b>codex-mini</b> · T-004 done');return c.line('t','T-004 done · codex-mini · 1 turn · cost: cents',{hold:600})});
+    // message + skill
+    then(function(){c.say('Seats message the lead. What they learn becomes a skill brief every future seat in that lane reads.');c.logLine('<b>codex-mini → lead</b> · README documents the old login flow. Docs task?');return c.line('t','msg codex-mini re T-004: README documents the old login flow. Docs task?',{hold:1000})});
+    then(function(){return c.line('k','Thinking',{hold:800})});
+    then(function(){c.task('T-006','Docs: new auth flow','T-003');c.set('T-006','wait','waiting on T-003','');c.logLine('<b>lead</b> · created T-006 after T-003');return c.line('t','atm create "Docs: new auth flow" --role docs --after T-003',{hold:600})});
+    then(function(){c.logLine('<span class="br">skill created · briefs/roles/docs.md</span>');return c.line('t','atm brief docs "login flow is now /auth/session; old page deprecated"',{hold:800})});
+    // review -> ready -> handoff
+    then(function(){c.say('T-001 reviewed. T-002 becomes ready by itself and the handoff notes travel with it.');c.set('T-001','review','in review','opus');c.note('T-001','uuid keys, soft delete, tests green');c.seat('claude · opus','idle','');par(1);c.logLine('<b>opus</b> · T-001 in review');return c.line('t','T-001 in review · notes: uuid keys, soft delete, tests green',{hold:600})});
+    then(function(){c.set('T-002','ready','ready','');c.logLine('<b>board</b> · T-002 ready (T-001 reviewed)');return c.line('h','follow-up · T-002 ready · reviewing T-001',{hold:700})});
+    then(function(){c.set('T-001','done','done','opus');c.seat('claude · opus','T-002','busy');c.set('T-002','flight','in flight','opus');c.note('T-002','from T-001: uuid keys, soft delete');par(2);c.logLine('<b>opus</b> · claimed T-002 with handoff from T-001');return c.line('t','T-001 accepted · T-002 → opus · handoff attached',{hold:900})});
+    then(function(){c.set('T-005','done','done','sonnet · 3 turns');c.seat('claude · sonnet','idle','');par(1);c.logLine('<b>sonnet</b> · T-005 done');return c.line('t','T-005 done · sonnet · 3 turns',{hold:500})});
+    // limit -> inherit
+    then(function(){c.say('Opus hits its usage limit mid-task. The ticket reopens with its notes and branch, and Sonnet picks it up.');c.seat('claude · opus','usage limit','dead');c.set('T-002','reopen','reopened','notes kept');par(0);c.logLine('<b>opus</b> · usage limit · T-002 reopened');return c.line('w','claude-opus: usage limit. T-002 reopened, notes kept.',{hold:1000})});
+    then(function(){return c.line('k','Routing',{hold:700})});
+    then(function(){c.seat('claude · sonnet','T-002','busy');c.set('T-002','flight','in flight','sonnet');par(1);c.logLine('<b>sonnet</b> · claimed T-002 · inherited notes');return c.line('t','T-002 → sonnet · inherited: uuid keys, soft delete, half-done api/auth.py',{hold:900})});
+    then(function(){return c.line('a','Rerouted. Nothing lost, nothing re-explained.')});
+    // api done -> ui + docs in parallel, seat to seat msg
+    then(function(){c.say('API reviewed. UI and docs start in parallel, and the seats ask each other, not you.');c.set('T-002','review','in review','sonnet');c.note('T-002','refresh: POST /auth/refresh');c.seat('claude · sonnet','idle','');c.set('T-003','ready','ready','');par(0);c.logLine('<b>board</b> · T-003 ready (T-002 reviewed)');return c.line('t','T-002 in review · T-003 ready',{hold:600})});
+    then(function(){c.set('T-002','done','done','sonnet');c.seat('cursor','T-003','busy');c.set('T-003','flight','in flight','cursor');par(1);c.logLine('<b>cursor</b> · claimed T-003 UI');return wait(400)});
+    then(function(){c.logLine('<b>cursor → sonnet</b> · which endpoint refreshes the session?');return c.line('t','msg cursor → sonnet re T-003: which endpoint refreshes the session?',{hold:900})});
+    then(function(){c.logLine('<b>sonnet → cursor</b> · POST /auth/refresh, see T-002 notes');return c.line('t','msg sonnet → cursor: POST /auth/refresh, see T-002 notes',{hold:800})});
+    then(function(){c.set('T-003','review','in review','cursor');c.seat('cursor','idle','');c.set('T-006','ready','ready','');par(0);c.logLine('<b>board</b> · T-006 ready (T-003 reviewed)');return c.line('h','follow-up · T-003 in review · T-006 ready',{hold:600})});
+    then(function(){c.set('T-003','done','done','cursor');c.seat('codex · mini','T-006','busy');c.set('T-006','flight','in flight','codex-mini');c.note('T-006','brief: /auth/session, old page deprecated');par(1);c.logLine('<b>codex-mini</b> · claimed T-006 · read docs brief');return c.line('t','T-006 → codex-mini · docs brief attached',{hold:900})});
+    // done
+    then(function(){c.say('Objective met. You typed one message.<span class="why">Six tickets, four seats, three models, one limit hit, zero re-explanations.</span>');c.set('T-006','done','done','codex-mini');c.seat('codex · mini','idle','');c.obj.innerHTML='objective: Ship auth · <span class="par">met</span>';c.logLine('<b>lead</b> · objective met · 6/6 merged');return c.line('t','atm objective --done "6/6 merged on main, tests green"',{hold:600})});
+    then(function(){return c.line('a','Objective met: 6 tickets, 4 seats, 3 models, 1 limit hit, 0 re-explanations.',{hold:5000})});
+    then(function(){if(alive())runSim()});
+  }
+
+  /* ---------- per-slide behaviours ---------- */
+  function lightFlow(slide){
+    var s=slide.querySelectorAll('.flow span');s.forEach(function(x){x.classList.remove('lit')});
+    s.forEach(function(x,j){setTimeout(function(){x.classList.add('lit')},RM?0:220+j*260)});
+  }
+  function countUp(slide){
+    slide.querySelectorAll('[data-n]').forEach(function(el){
+      var end=+el.getAttribute('data-n'),t0=null,dur=RM?0:1100;
+      function f(ts){if(!t0)t0=ts;var p=dur?Math.min(1,(ts-t0)/dur):1;p=1-Math.pow(1-p,3);
+        el.textContent=Math.round(end*p).toLocaleString();if(p<1)requestAnimationFrame(f)}
+      requestAnimationFrame(f);
+    });
+  }
+
+  /* ---------- deck ---------- */
+  var slides=[].slice.call(document.querySelectorAll('.slide'));
+  var cur=document.getElementById('cur'),tot=document.getElementById('tot'),bar=document.getElementById('progress');
+  var i=0,n=slides.length;tot.textContent=n;
+  var COARSE=matchMedia('(pointer:coarse)').matches||innerWidth<=760;
+  function frags(s){return COARSE?[]:[].slice.call(s.querySelectorAll('.frag'))}
+  if(COARSE)document.querySelectorAll('.frag').forEach(function(x){x.classList.add('on')});
+  function enter(s){
+    if(s.hasAttribute('data-flow'))lightFlow(s);
+    if(s.hasAttribute('data-count'))countUp(s);
+    if(s.getAttribute('data-scene')==='chaos')requestAnimationFrame(runChaos);
+    if(s.getAttribute('data-scene')==='sim')requestAnimationFrame(runSim);
+  }
+  function show(k,fromEnd){
+    var was=i;i=Math.max(0,Math.min(n-1,k));
+    slides.forEach(function(s,j){s.classList.toggle('active',j===i)});
+    frags(slides[i]).forEach(function(x){x.classList.toggle('on',!!fromEnd||x.hasAttribute('data-first'))});
+    cur.textContent=i+1;document.getElementById('cur2').textContent=i+1;document.getElementById('tot2').textContent=n;bar.style.width=((i+1)/n*100)+'%';
+    if(history.replaceState)history.replaceState(null,'','#'+(i+1));
+    window.scrollTo(0,0);
+    if(was!==i||!slides[i].dataset.entered){slides[i].dataset.entered=1;enter(slides[i])}
+  }
+  function next(){
+    var s=slides[i];
+    var f=frags(s).filter(function(x){return !x.classList.contains('on')});
+    if(f.length){f[0].classList.add('on');return}
+    if(i<n-1)show(i+1);
+  }
+  function prev(){
+    var on=frags(slides[i]).filter(function(x){return x.classList.contains('on')&&!x.hasAttribute('data-first')});
+    if(on.length){on[on.length-1].classList.remove('on');return}
+    if(i>0)show(i-1,true);
+  }
+  var h=parseInt(location.hash.slice(1),10);show(isNaN(h)?0:h-1);
+  document.addEventListener('keydown',function(e){
+    if(e.metaKey||e.ctrlKey||e.altKey)return;
+    switch(e.key){
+      case 'ArrowRight':case 'ArrowDown':case ' ':case 'PageDown':case 'Enter':e.preventDefault();next();break;
+      case 'ArrowLeft':case 'ArrowUp':case 'PageUp':case 'Backspace':e.preventDefault();prev();break;
+      case 'Home':show(0);break;case 'End':show(n-1,true);break;
+      case 'r':case 'R':if(slides[i].getAttribute('data-scene')==='sim')runSim();if(slides[i].getAttribute('data-scene')==='chaos')runChaos();break;
+    }
+  });
+  document.getElementById('deck').addEventListener('click',function(e){
+    if(COARSE||e.target.closest('a,pre,button,.stage,.ctl'))return;
+    e.clientX<window.innerWidth*0.25?prev():next();
+  });
+  document.querySelector('[data-prev]').addEventListener('click',function(e){e.stopPropagation();prev()});
+  document.querySelector('[data-nxt]').addEventListener('click',function(e){e.stopPropagation();next()});
+  var x0=null;
+  document.addEventListener('touchstart',function(e){x0=e.touches[0].clientX},{passive:true});
+  document.addEventListener('touchend',function(e){
+    if(x0===null)return;var dx=e.changedTouches[0].clientX-x0;x0=null;
+    if(Math.abs(dx)>50)dx<0?next():prev();
+  });
+  window.addEventListener('hashchange',function(){var k=parseInt(location.hash.slice(1),10);if(!isNaN(k)&&k-1!==i)show(k-1)});
+  document.getElementById('deck').focus({preventScroll:true});
+})();
+</script>
