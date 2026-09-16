@@ -50,9 +50,9 @@ def test_react_parity_surface_uses_the_same_action_accent():
     assert "--live:" not in REACT_CSS
 
 
-def test_landing_and_readme_point_at_the_t732_product_capture():
-    assert EVIDENCE in README
-    assert 'src="assets/t971-app-work-1440.png"' in LANDING  # T-971: current atm ui capture
+def test_landing_and_readme_point_at_the_current_product_capture():
+    assert "landing/assets/t971-app-work-1440.png" in README
+    assert "assets/t971-app-work-1440.png" in LANDING
     assert "../docs/brand/evidence" not in LANDING
     assert "t606-atman-dark-desktop.png" not in README
     assert "t606-atman-dark-desktop.png" not in LANDING

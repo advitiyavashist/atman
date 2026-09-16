@@ -1,4 +1,4 @@
-"""T-726: Atman landing is a distinct team-runtime surface, any first seat."""
+"""T-726 / T-1047: landing is the accept-gate surface, not a coordination slogan."""
 
 from pathlib import Path
 
@@ -17,6 +17,8 @@ BANNED = (
     "task graph",
     "DAG",
     "Claude Code is an example, not a requirement",
+    "autonomous",
+    "fleet",
 )
 
 STEER_CHROME = (
@@ -25,48 +27,21 @@ STEER_CHROME = (
     "chevron",
 )
 
+PROMISE = "the next ticket opens only after someone else accepts that commit"
+
 
 def _start_block():
     start = LANDING.index('id="start"')
     return LANDING[start:]
 
 
-def test_hero_leads_with_category_then_team_runtime_line():
+def test_hero_leads_with_the_accept_gate():
     hero = LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
     lede = LANDING[LANDING.index('class="lede"') : LANDING.index('class="ctas"')]
-    assert "coordinates the agents you already run" in hero.lower()
-    assert "Give a coordinator an objective" in lede
-    assert "usual providers" in lede
+    assert PROMISE in hero.lower()
+    assert "atm accept" in lede.lower()
     assert "fewest turns" not in hero.lower()
-
-
-def test_fewest_turns_and_cost_are_secondary_dashes():
-    efficiency = LANDING[LANDING.index('id="efficiency"') : LANDING.index('id="graph"')]
-    assert efficiency.count("—") >= 2
-    assert "$0" not in efficiency
-    assert "0.0" not in efficiency
-    assert "Unknown until a done ticket reports" in efficiency
-    assert "fewest turns" in LANDING.lower()
-    assert "measured cost" in LANDING.lower()
-
-
-def test_claude_code_is_example_first_seat_not_requirement():
-    assert "Example first seat" in LANDING
-    assert "Sit Claude Code first" not in LANDING
-    assert "Sit Claude Code." not in LANDING
-    assert "Claude Code is an example, not a requirement" not in LANDING
-
-
-def test_provider_order_is_claude_codex_cursor_grok_custom():
-    roster = LANDING[LANDING.index('class="roster"') : LANDING.index('class="lanes"')]
-    order = [
-        roster.index("<strong>Claude Code</strong>"),
-        roster.index("<strong>Codex</strong>"),
-        roster.index("<strong>Cursor</strong>"),
-        roster.index("<strong>Grok Bot</strong>"),
-        roster.index("<strong>Custom</strong>"),
-    ]
-    assert order == sorted(order)
+    assert "coordinates the agents you already run" not in hero.lower()
 
 
 def test_quickstart_has_one_project_setup_path():
@@ -79,23 +54,6 @@ def test_quickstart_has_one_project_setup_path():
     assert "CoS is cursor" not in start
     assert "atm ui" in start
     assert "alice" not in start
-
-
-def test_surfaces_explain_team_ia():
-    lowered = LANDING.lower()
-    for phrase in (
-        "objective",
-        "team",
-        "work",
-        "intervene",
-        "messages",
-        "liveness",
-        "durable handoff",
-    ):
-        assert phrase in lowered
-    assert "Blocked" in LANDING
-    assert "In flight" in LANDING
-    assert "No silent auto-promote" in LANDING or "does not silently auto-promote" in LANDING
 
 
 def test_visual_tokens_are_bone_brass_not_steer_lime():
@@ -112,14 +70,6 @@ def test_visual_tokens_are_bone_brass_not_steer_lime():
     assert LANDING.count("<circle ") >= 10
     assert 'wordmark">atman' in LANDING
     assert "MIT licensed" in LANDING
-
-
-def test_no_fake_progress_or_cloud_claim():
-    assert "3 / 5" not in LANDING
-    assert "progress-track" not in LANDING
-    assert "this site shows a product capture" in LANDING.lower()
-    assert "your live team appears in the local app" in LANDING.lower()
-    assert "sample project" in LANDING.lower()
 
 
 def test_no_swarm_hype_or_localhost_product_link():

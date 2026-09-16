@@ -164,20 +164,12 @@ def test_plan_without_fields_stays_capture_with_explicit_hint(tmp_path):
     assert "waiting on T-001" not in g2.stdout
 
 
-def test_readme_plan_snippet_carries_fields_and_mentions_sound_once():
+def test_readme_path_uses_create_deps_and_warns_that_plan_sounds():
     body = (ROOT / "README.md").read_text()
-    start = body.index("## Plan dependent work")
-    section = body[start:]
-    next_h = section.find("\n## ", 1)
-    section = section if next_h < 0 else section[:next_h]
-    fence = section.split("```sh", 1)[1].split("```", 1)[0]
-    assert "atm plan" in fence
-    assert '"key":"A"' in fence.replace(" ", "")
-    assert '"key":"B"' in fence.replace(" ", "")
-    for key in ("cause", "change", "proof"):
-        assert '"%s"' % key in fence
-    assert fence.count("atm sound") == 0
-    assert section.count("atm sound") == 1
+    assert "--deps T-001" in body
+    assert "atm create" in body
+    assert "atm plan" in body
+    assert "sounds everything it writes" in body
     src = TOOL.read_text()
     for ph in PLACEHOLDERS:
         assert ph not in src

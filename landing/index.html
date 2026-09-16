@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Atman · coordinates the agents you already run</title>
-  <meta name="description" content="Atman coordinates the agents you already run. atm is the CLI; atm ui is the local app: Objective, Team, Work, Intervene. The board stays on your machine.">
+  <title>Atman · the next ticket opens only after someone else accepts that commit</title>
+  <meta name="description" content="The next ticket opens only after someone else accepts that commit. atm is the CLI. The board stays on your machine.">
   <meta name="theme-color" content="#0c0e12">
   <meta property="og:title" content="Atman · atm">
-  <meta property="og:description" content="Objective, Team, Work, Intervene. atm is the CLI. The board stays on your machine.">
+  <meta property="og:description" content="The next ticket opens only after someone else accepts that commit.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://advitiyavashist.github.io/atman/">
   <meta property="og:image" content="https://advitiyavashist.github.io/atman/assets/t971-app-work-1440.png">
@@ -30,382 +30,80 @@
       <span class="wordmark">atman</span>
     </a>
     <nav aria-label="Page">
-      <a href="#app">App</a>
-      <a href="#workflow">Graph</a>
-      <a href="#roadmap">Roadmap</a>
-      <a href="#per-turn">Efficiency</a>
-      <a class="nav-contact" href="https://github.com/advitiyavashist/atman/issues" rel="noopener">Contact us</a>
+      <a href="#path">Path</a>
+      <a href="#status">Status</a>
+      <a href="#start">Start</a>
+      <a class="nav-contact" href="https://github.com/advitiyavashist/atman/issues" rel="noopener">GitHub issues</a>
       <a class="nav-github" href="https://github.com/advitiyavashist/atman" rel="noopener">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
   </header>
 
   <main id="main">
-    <section class="hero">
+    <section class="hero" id="promise">
       <div class="hero-copy">
-        <p class="kicker">local · atm · the agents you already run</p>
-        <h1>Atman coordinates the agents you already run.</h1>
-        <p class="lede">Give a coordinator an objective. Claude Code, Codex, Cursor, or your own harness can share tasks, messages and handoffs while you review the work. Start with <code>atm</code>. Coordination stays on your machine; models use their usual providers.</p>
+        <p class="kicker">local · atm · accepted, not just done</p>
+        <h1>The next ticket opens only after someone else accepts that commit.</h1>
+        <!-- HERO DEMO PLACEHOLDER: replace this comment with the PR #217 capture when that PR lands. -->
+        <p class="lede">Start with <code>atm</code>. <code>atm accept --sha</code> records a verdict on the full review commit. A seat that is not the author must give it. Until then <code>atm next</code> cannot claim the dependent.</p>
         <p class="ctas">
-          <a class="btn" href="#app">See the app <span aria-hidden="true">→</span></a>
+          <a class="btn" href="#path">Walk the path <span aria-hidden="true">→</span></a>
           <a class="ghost" href="#start">Get started</a>
         </p>
-        <ul class="trust" aria-label="Product properties">
-          <li>Local workspace</li>
-          <li>Your choice of agents</li>
-          <li>Human review</li>
-          <li>No hosted service</li>
-          <li>MIT licensed</li>
-        </ul>
-        <p class="product-jumps" aria-label="First-class product areas">
-          <a href="#app">The app</a>
-          <a href="#workflow">Workflow graph</a>
-          <a href="#roadmap">Engineering roadmap</a>
-          <a href="#per-turn">Per-turn efficiency</a>
+      </div>
+    </section>
+
+    <section id="path" class="feature" aria-labelledby="path-title">
+      <div class="section-heading">
+        <p class="eyebrow">one path</p>
+        <h2 id="path-title">Install, set an objective, run two agents, accept, the dependent opens.</h2>
+        <p>Two seats in your own shell. <code>atm done</code> without that accept leaves the next ticket closed.</p>
+      </div>
+      <div class="terminal">
+        <div class="terminal-bar"><span></span><span></span><span></span><p>install · objective · two agents · accept · next opens</p></div>
+        <pre><code><span class="comment"># install (clone + ./install.sh; one macOS machine)</span>
+git clone https://github.com/advitiyavashist/atman.git
+cd atman
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+
+<span class="comment"># your project</span>
+cd /path/to/your-project
+unset TICKETS_DIR
+atm where
+atm quickstart --agent boss --roles backend
+atm quickstart --remove
+atm objective "Add a CSV summary and a command that uses it" \
+  --exit "summary command prints row and column counts"
+atm create "CSV summary function" --role backend
+atm create "CLI command that calls summarize()" --role backend --deps T-001
+
+<span class="comment"># agent 1 — worker</span>
+export TICKET_AGENT=worker
+atm join worker --roles backend
+atm next
+<span class="comment"># ... commit the work ...</span>
+atm review T-001 --notes "summarize() and test"
+
+<span class="comment"># agent 2 — not the author</span>
+export TICKET_AGENT=boss
+atm accept T-001 --sha &lt;full 40-character SHA&gt; --notes "test passes"
+atm done T-001 --notes "summarize() in csv_summary.py"
+<span class="comment"># T-002 opens</span>
+
+export TICKET_AGENT=worker
+atm next
+<span class="comment"># T-002, with T-001's accept note in the prompt</span></code></pre>
+      </div>
+    </section>
+
+    <section id="status" class="feature" aria-labelledby="status-title">
+      <div class="section-heading">
+        <p class="eyebrow">tested vs planned</p>
+        <h2 id="status-title">What this preview has proven, and what it has not.</h2>
+        <p>Do not take a claim from this page that is not a row in the README table. Homebrew, Linux, pipx, remote control, native wake and any comparison against another tool are planned or unsupported.</p>
+        <p class="start-links">
+          <a href="https://github.com/advitiyavashist/atman/blob/main/README.md#preview-status-and-limitations">Preview status and limitations <span aria-hidden="true">↗</span></a>
         </p>
-      </div>
-    </section>
-
-    <section id="app" class="capture" aria-labelledby="app-title">
-      <div class="section-heading">
-        <p class="eyebrow">atm ui · product capture</p>
-        <h2 id="app-title">See the work and what needs you.</h2>
-        <p>Open the local app with <code>atm ui</code>. Follow the objective, see who owns each task, and inspect blockers, handoffs and review evidence. The capture below uses a sample project.</p>
-      </div>
-      <ol class="ia-strip" aria-label="atm ui surfaces">
-        <li>
-          <h3>Objective</h3>
-          <p>What the team is finishing and how you will judge success.</p>
-        </li>
-        <li>
-          <h3>Team</h3>
-          <p>Your agents, their availability and assigned work.</p>
-        </li>
-        <li>
-          <h3>Work</h3>
-          <p>Tasks, dependencies, blockers and results ready for review.</p>
-        </li>
-        <li>
-          <h3>Intervene</h3>
-          <p>Send a message, resolve a blocker or choose the next worker.</p>
-        </li>
-      </ol>
-      <figure class="product-frame ui-capture">
-        <div class="frame-bar" aria-hidden="true">
-          <span></span><span></span><span></span>
-          <p>atm ui · local · sample board</p>
-        </div>
-        <p class="ui-tabs" aria-hidden="true">
-          <span>Objective</span>
-          <span>Team</span>
-          <span class="on">Work</span>
-          <span>Intervene</span>
-        </p>
-        <img src="assets/t971-app-work-1440.png" srcset="assets/t971-app-work-768.png 768w, assets/t971-app-work-1440.png 1440w" sizes="(max-width: 940px) 100vw, min(74rem, 92vw)" alt="atm ui capture on Work: objective with its done-when above a dependency graph of five sample tickets, one working and four waiting on real --after edges, with Objective, Team, Work and Intervene tabs" width="1440" height="1000">
-        <figcaption>Sample project built with <code>atm quickstart</code>, captured from <code>main</code>. Median turns and cost show <code>—</code> until work reports them. Your live team appears in the local app; this site shows a product capture.</figcaption>
-      </figure>
-
-      <dl class="status-strip" aria-label="What is shipped, in review, and planned">
-        <div class="status-current">
-          <dt>On main</dt>
-          <dd><code>atm</code> is the CLI, <code>tickets</code> the alias — one file, one board. The local app with Objective, Team, Work, Intervene. Work → Graph: the objective and its done-when above real <code>--after</code> edges, one detail pane per node with blockers, handoff and review evidence.</dd>
-        </div>
-        <div class="status-review">
-          <dt>In review · not on main yet</dt>
-          <dd>One first screen: objective, then the titled next step and named blockers. Delivery receipts on channels — inbox read is not an acknowledgement. Select a node to compose a message about it. Lands only after independent verification.</dd>
-        </div>
-        <div class="status-planned">
-          <dt>Planned · not built or not published</dt>
-          <dd>Homebrew is not published; use the source install below. Connect/reconnect, remote control and a metrics dashboard are not ready for the preview.</dd>
-        </div>
-      </dl>
-
-      <aside class="command-board" id="board" aria-label="Example Atman command board and team roster">
-        <div class="board-topline">
-          <span>command board · example</span>
-          <span class="live-label"><i class="live-dot" aria-hidden="true"></i> live seat</span>
-        </div>
-
-        <div class="objective-strip">
-          <span class="map-label">objective</span>
-          <strong>Ship the release with the agents already on the team</strong>
-          <p>Standing mission. Met / not met from the board — no invented progress.</p>
-        </div>
-
-        <div class="roster" aria-label="Team roster">
-          <p class="map-label">team · who’s present · what’s uncovered</p>
-          <ul>
-            <li>
-              <span class="seat-mark live">CC</span>
-              <div><strong>Claude Code</strong><small>Example first seat · in flight</small></div>
-              <span class="state live">live</span>
-            </li>
-            <li>
-              <span class="seat-mark">CX</span>
-              <div><strong>Codex</strong><small>Ready · same objective</small></div>
-              <span class="state">ready</span>
-            </li>
-            <li>
-              <span class="seat-mark">CR</span>
-              <div><strong>Cursor</strong><small>Review lane</small></div>
-              <span class="state">ready</span>
-            </li>
-            <li>
-              <span class="seat-mark">GB</span>
-              <div><strong>Grok Bot</strong><small>Remote adapter</small></div>
-              <span class="state">ready</span>
-            </li>
-            <li>
-              <span class="seat-mark open">+</span>
-              <div><strong>Custom</strong><small>Open seat — uncovered work</small></div>
-              <span class="state">open</span>
-            </li>
-          </ul>
-        </div>
-
-        <div class="lanes" aria-label="Work lanes">
-          <p class="map-label">work</p>
-          <ol>
-            <li>Blocked</li>
-            <li>Ready</li>
-            <li>In flight</li>
-            <li>Review</li>
-          </ol>
-        </div>
-
-        <div class="intervene">
-          <span class="map-label warn">intervene</span>
-          <p>Operator actions stay amber: route, unblock, reassign, nudge, msg. No silent auto-promote.</p>
-        </div>
-
-        <div class="handoff">
-          <p><span>messages</span> @cursor API is ready for review.</p>
-          <strong>durable handoff</strong>
-        </div>
-        <p class="map-foot">Liveness is a sparse mint mark on a live seat. Handoffs survive session ends and usage limits.</p>
-      </aside>
-    </section>
-
-    <section id="philosophy" class="philosophy" aria-labelledby="philosophy-title">
-      <p class="eyebrow">philosophy</p>
-      <h2 id="philosophy-title">The work outlasts the chat.</h2>
-      <p>Tasks, decisions and handoffs stay with the project. A replacement agent can start from saved context and artifacts, with its own identity and worktree. You review what comes back before accepting it.</p>
-    </section>
-
-    <section id="how" class="pillars" aria-labelledby="how-title">
-      <div class="section-heading">
-        <p class="eyebrow">how it works</p>
-        <h2 id="how-title">One objective. Work the team can follow.</h2>
-      </div>
-      <ul class="pillar-grid">
-        <li id="integration">
-          <h3>Integration</h3>
-          <p>Connect Claude Code, Codex, Cursor, or your own harness to the same project. Keep using your existing provider login.</p>
-        </li>
-        <li id="flow">
-          <h3>Product flow</h3>
-          <p>Claim work from the board, read the saved handoff and submit a result for review. If work stops, use the saved artifacts and recovery steps to continue.</p>
-        </li>
-        <li id="efficiency">
-          <h3>Efficiency</h3>
-          <p>Fewest turns and measured cost stay blank until a finished ticket reports them; unknown is not zero.</p>
-          <dl class="promise" aria-label="Operational outcomes, unmeasured until a done ticket reports">
-            <div>
-              <dt>median turns</dt>
-              <dd>—</dd>
-            </div>
-            <div>
-              <dt>measured cost</dt>
-              <dd>—</dd>
-            </div>
-          </dl>
-          <p class="promise-note">Unknown until a done ticket reports. Unknown is not zero.</p>
-        </li>
-        <li id="graph">
-          <h3>Workflow dependency graph</h3>
-          <p>Work stays invisible until its dependencies are done, so nobody starts too early.</p>
-          <ol class="dep-graph" aria-label="Example workflow dependency graph">
-            <li class="done">T-001 <span>done</span></li>
-            <li class="ready">T-002 <span>ready</span></li>
-            <li class="wait">T-003 <span>waiting</span></li>
-          </ol>
-        </li>
-      </ul>
-    </section>
-
-    <section id="workflow" class="feature" aria-labelledby="workflow-title">
-      <div class="section-heading">
-        <p class="eyebrow">workflow dependency graph</p>
-        <h2 id="workflow-title">Work stays invisible until its dependencies are done.</h2>
-        <p>The live view is <code>atm ui</code> Work → Graph. Edges are real <code>--after</code> links, not a title dump. This page is not a hosted board — the graph runs on your machine.</p>
-      </div>
-      <ol class="workflow-map" aria-label="Example workflow dependency graph">
-        <li class="done">
-          <span class="wid">T-001</span>
-          <strong>Land the runtime</strong>
-          <span class="wstate">done</span>
-        </li>
-        <li class="ready">
-          <span class="edge" aria-hidden="true"></span>
-          <span class="wid">T-002</span>
-          <strong>Connect a first seat</strong>
-          <span class="wstate">ready · after T-001</span>
-        </li>
-        <li class="wait">
-          <span class="edge" aria-hidden="true"></span>
-          <span class="wid">T-003</span>
-          <strong>Review the handoff</strong>
-          <span class="wstate">waiting on T-002</span>
-        </li>
-      </ol>
-      <figure class="product-frame workflow-capture">
-        <div class="frame-bar" aria-hidden="true">
-          <span></span><span></span><span></span>
-          <p>atm ui · Work → Graph · sample board</p>
-        </div>
-        <img src="assets/t889-work-graph-1400.png" alt="atm ui Work graph capture: a layered dependency graph where T-001 is done, T-002 shows a task posted to bob that was read but not claimed, T-003 waits on T-002, and reserved, working, in review, blocked, capture and hold appear as distinct phases" width="1400" height="900" loading="lazy">
-        <figcaption>Checked-in capture of the Work graph on <code>main</code>: done → task posted → waiting, with reserved, working, in review, blocked, capture and hold as distinct phases. A posted task that was read is still not an acknowledgement. Dashed edges are unsatisfied <code>--after</code> links.</figcaption>
-      </figure>
-    </section>
-
-    <section id="per-turn" class="feature" aria-labelledby="per-turn-title">
-      <div class="section-heading">
-        <p class="eyebrow">per-turn efficiency</p>
-        <h2 id="per-turn-title">Unknown is not zero until a done ticket reports.</h2>
-        <p>Median turns and measured cost stay blank on purpose. A missing number is unmeasured, not a win. No sample scores.</p>
-      </div>
-      <dl class="turns-panel" aria-label="Per-turn efficiency, unmeasured until a done ticket reports">
-        <div>
-          <dt>median turns</dt>
-          <dd>—</dd>
-        </div>
-        <div>
-          <dt>measured cost</dt>
-          <dd>—</dd>
-        </div>
-      </dl>
-      <p class="promise-note">Unknown until a done ticket reports. Unknown is not zero.</p>
-    </section>
-
-    <section id="roadmap" class="feature" aria-labelledby="roadmap-title">
-      <div class="section-heading">
-        <p class="eyebrow">engineering roadmap</p>
-        <h2 id="roadmap-title">The control plane stays. The intelligence behind route improves.</h2>
-        <p><code>atm route</code> is stable. Later levels unlock only when the trajectory log can support them. No invented ship dates.</p>
-      </div>
-      <ol class="horizon" aria-label="Now, next, later — no ship dates">
-        <li>
-          <span>Now</span>
-          <h3>Published rules, a named prior, human review</h3>
-          <p>Role, cost, and load pick the seat. Shadow compares that rule to a learned or prior pick. Support n=0 prints the prior — it does not invent a median. Review stays a gate. Isolation is a git worktree, not a hosted factory. Quality per cost is median turns and measured cost only from done tickets. Exact config is <code>atm connect</code> as <code>atman-&lt;seat&gt;</code> — small, not a pasted model setup. Triggers are <code>atm next</code>, <code>--after</code>, and HOLD. Done is <code>atm review</code> notes plus the SHA on main.</p>
-        </li>
-        <li>
-          <span>Next</span>
-          <h3>Richer rules, then start the next ready child</h3>
-          <p>Capability + cost + task still publish as a rule. A ticket is claimable only after cause, change, and proof exist. When a ticket finishes, ready children can start. Quality per cost is median turns and measured cost only from done tickets — unmeasured stays omitted. Exact config is a small <code>atm hooks</code> / <code>atman-&lt;seat&gt;</code> connect, not a pasted model setup.</p>
-        </li>
-        <li>
-          <span>Later</span>
-          <h3>Learned route only when the log can carry it</h3>
-          <p>Not a V1 promise. Organic <code>run_end</code> only. Then model, effort, compute, and text vs latent — when those fields exist, not defaulted. Load guidance only when the ticket needs it (handoff), not always-on AGENTS.md.</p>
-        </li>
-      </ol>
-      <ol class="roadmap-grid">
-        <li>
-          <span>V0 · today</span>
-          <h3>Rules, with a named prior when data is thin</h3>
-          <p>Role, cost, and load pick the seat. Shadow compares that rule to a learned or prior pick. Support n=0 prints the prior — it does not invent a median.</p>
-        </li>
-        <li>
-          <span>V1</span>
-          <h3>Capability + cost + task → agent</h3>
-          <p>Still a published rule, with richer features. Needs stable <code>needs</code> / <code>can</code> and enough finished tickets that an ablation is not noise.</p>
-        </li>
-        <li>
-          <span>V2</span>
-          <h3>Learned router</h3>
-          <p>The model behind <code>route</code> is fit on trajectories, not a median table. Organic <code>run_end</code> only — unmeasured stays omitted.</p>
-        </li>
-        <li>
-          <span>V3</span>
-          <h3>Model and reasoning effort</h3>
-          <p>The router also picks model and effort when those fields are present on events, not omitted.</p>
-        </li>
-        <li>
-          <span>V4</span>
-          <h3>Agent, model, compute, text vs latent</h3>
-          <p>Budget and comms-mode fields when the harness reports them. A field that does not exist yet is not defaulted.</p>
-        </li>
-      </ol>
-    </section>
-
-    <section id="surfaces" class="surfaces" aria-labelledby="surfaces-title">
-      <div class="section-heading">
-        <p class="eyebrow">the team surface</p>
-        <h2 id="surfaces-title">Objective, Team, Work, Intervene — then messages and recovery.</h2>
-        <p>The product is the team runtime. <code>atm</code> is how it runs today; <code>atm ui</code> is how you see it. Coverage is by work, not a fixed persona.</p>
-      </div>
-      <ul class="surface-grid">
-        <li>
-          <h3>Objective</h3>
-          <p>The standing mission and its done-when. Set it on the board. The runtime allocates ready work against it.</p>
-        </li>
-        <li>
-          <h3>Team</h3>
-          <p>Seats you already bring. Who’s present. What’s uncovered. Empty seat means uncovered work.</p>
-        </li>
-        <li>
-          <h3>Work</h3>
-          <p>Blocked, Ready, In flight, Review. The graph shows what waits on what; each node explains its state with evidence.</p>
-        </li>
-        <li>
-          <h3>Intervene</h3>
-          <p>You route, unblock, reassign, nudge, or message. The product does not silently auto-promote.</p>
-        </li>
-        <li>
-          <h3>Messages</h3>
-          <p>Board thread plus seat-scoped 1:1. Same log the agents use. Not a second chat product.</p>
-        </li>
-        <li>
-          <h3>Liveness</h3>
-          <p>Who is actually running. Usage limits and stale seats surface as recovery work, not fake telemetry.</p>
-        </li>
-        <li class="span-2">
-          <h3>Durable handoffs</h3>
-          <p>When a session ends or a seat hits a limit, the claim, blocker, and next step stay on the board. A new seat inherits the handoff instead of restarting from chat history.</p>
-        </li>
-      </ul>
-    </section>
-
-    <section class="boundary" aria-labelledby="boundary-title">
-      <div class="section-heading">
-        <p class="eyebrow">same product</p>
-        <h2 id="boundary-title">Seats you already run, one local board, a handoff the next seat can pick up.</h2>
-        <p>Atman coordinates who works and how the team finishes. It is not a multi-agent framework, not shared memory, not a model router.</p>
-      </div>
-      <div class="layers">
-        <article class="layer-current">
-          <p class="status">Atman · on main</p>
-          <h3>Team runtime</h3>
-          <p>Objective, ownership, dependencies, messages, liveness, review, recovery, and measured turns/cost when the board has them.</p>
-          <ol class="product-flow">
-            <li><strong>Sit a seat.</strong> Clone, <code>atm connect</code>, pick Claude Code, Codex, Cursor, Grok Bot, or your own harness.</li>
-            <li><strong>Take ready work.</strong> The board shows blocked, ready, in flight, and review.</li>
-            <li><strong>Read the handoff.</strong> Notes, decisions, and artifacts travel with the ticket.</li>
-            <li><strong>Review or recover.</strong> If a seat hits a usage limit, another seat continues from the board.</li>
-          </ol>
-          <ul>
-            <li>Claude Code</li>
-            <li>Codex</li>
-            <li>Cursor</li>
-            <li>Grok Bot</li>
-            <li>Custom agents</li>
-          </ul>
-        </article>
-        <article class="layer-knowledge">
-          <p class="status">Atman · on main</p>
-          <h3>Team knowledge</h3>
-          <p>Tickets keep who owns the work. <code>atm knowledge</code> keeps the facts a new or returning seat needs for that work.</p>
-        </article>
       </div>
     </section>
 
@@ -413,11 +111,11 @@
       <div class="start-copy">
         <p class="eyebrow">first run</p>
         <h2 id="start-title">Start with a local project.</h2>
-        <p>You need Python 3.9+ and Git. Install Atman in an isolated prefix, create a sample board in your project and open the app. Then follow the first-session guide to connect the agents you use. <code>tickets</code> remains a compatibility alias for <code>atm</code>.</p>
+        <p>You need Python 3.9+ and Git. Install Atman in an isolated prefix, create a sample board and open the app. <code>tickets</code> remains a compatibility alias for <code>atm</code>.</p>
         <p class="start-links">
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/first-session.md">Read the first session <span aria-hidden="true">↗</span></a>
           <a href="https://github.com/advitiyavashist/atman/blob/main/docs/byoa.md">Bring your own agent <span aria-hidden="true">↗</span></a>
-          <a href="https://github.com/advitiyavashist/atman/issues">Contact us <span aria-hidden="true">↗</span></a>
+          <a href="https://github.com/advitiyavashist/atman/issues">GitHub issues <span aria-hidden="true">↗</span></a>
         </p>
       </div>
 
@@ -450,8 +148,8 @@ atm ui</code></pre>
       </svg>
       <span class="wordmark">atman</span>
     </a>
-    <p>Open source · local by default · MIT</p>
-    <a href="https://github.com/advitiyavashist/atman/issues" rel="noopener">Contact us</a>
+    <p>MIT licensed · Built by @abnormal</p>
+    <a href="https://github.com/advitiyavashist/atman/issues" rel="noopener">GitHub issues</a>
     <a href="https://github.com/advitiyavashist/atman" rel="noopener">GitHub <span aria-hidden="true">↗</span></a>
   </footer>
 </body>

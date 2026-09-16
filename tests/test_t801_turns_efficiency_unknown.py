@@ -91,24 +91,13 @@ def test_promise_hero_median_turns_null_until_done_ticket_reports():
     assert hero_costed["yield_per_usd"] == 2.0
 
 
-def test_landing_per_turn_copy_honesty():
-    """Atman landing per-turn copy audit: median turns and cost stay — until a done ticket reports."""
+def test_landing_does_not_sell_turns_or_invent_numbers():
+    """T-1047: turns/cost honesty lives in the README table, not as landing copy."""
     assert LANDING.is_file(), "landing/index.html must exist"
     html = LANDING.read_text()
-
-    # Must contain the explicit honesty promise copy
-    assert "Fewest turns and measured cost stay blank until a finished ticket reports them; unknown is not zero." in html
-    assert "Unknown is not zero until a done ticket reports." in html
-    assert "Median turns and measured cost stay blank on purpose." in html
-    assert "Unknown until a done ticket reports. Unknown is not zero." in html
-
-    # The metric definitions must display emdash —
-    # Both in feature overview and per-turn efficiency panel
-    assert "<dt>median turns</dt>" in html
-    assert "<dt>measured cost</dt>" in html
-    assert html.count("<dd>—</dd>") >= 4
-
-    # Must not contain fake/invented numbers in promise/per-turn panels
+    assert "fewest turns" not in html.lower()
     banned_fake_metrics = ["<dd>0</dd>", "<dd>0.0</dd>", "<dd>$0</dd>", "<dd>$0.00</dd>"]
     for b in banned_fake_metrics:
         assert b not in html, f"Landing HTML contains forbidden fake measurement: {b}"
+    readme = (ROOT / "README.md").read_text()
+    assert "values stay blank until a finished ticket reports them" in readme

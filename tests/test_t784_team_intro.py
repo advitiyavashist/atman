@@ -115,20 +115,11 @@ def test_ui_and_master_template_name_persist_to_review():
         assert word not in ui
 
 
-def test_landing_pins_untouched():
+def test_landing_pins_the_accept_gate_promise():
     landing = LANDING.read_text(encoding="utf-8")
     hero = landing[landing.index("<h1>") : landing.index("</h1>")]
-    assert "coordinates the agents you already run" in hero.lower()
+    assert "the next ticket opens only after someone else accepts that commit" in hero.lower()
     assert "fewest turns" not in hero.lower()
-    assert "fewest turns" in landing.lower()
-    roster = landing[landing.index('class="roster"') : landing.index('class="lanes"')]
-    order = [
-        roster.index("<strong>Claude Code</strong>"),
-        roster.index("<strong>Codex</strong>"),
-        roster.index("<strong>Cursor</strong>"),
-        roster.index("<strong>Grok Bot</strong>"),
-        roster.index("<strong>Custom</strong>"),
-    ]
-    assert order == sorted(order)
+    assert "coordinates the agents you already run" not in hero.lower()
     for word in BANNED_LANDING:
         assert word not in landing
