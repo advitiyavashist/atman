@@ -4796,6 +4796,20 @@ def cmd_turns(a, board):
     return _turns_cmd()(a, board, load_all, load_workforce, load_messages)
 
 
+def _trace_cmd():
+    try:
+        from .trace import cmd_trace as impl
+        return impl
+    except ImportError:
+        from trace import cmd_trace as impl
+        return impl
+
+
+def cmd_trace(a, board):
+    """T-1051: one greppable timeline for an objective or ticket."""
+    return _trace_cmd()(a, board)
+
+
 def _scheduler_cmd():
     try:
         from ticket_board.scheduler import cmd_route_shadow as impl
@@ -5800,6 +5814,14 @@ def main():
     c.add_argument("--json", action="store_true", dest="json",
                    help="frozen shape: tickets[] + aggregates mean/median")
     c.set_defaults(fn=cmd_turns)
+
+    c = sub.add_parser("trace",
+                       help="one greppable timeline for an objective or ticket")
+    c.add_argument("target", nargs="?", default="",
+                   help="ticket id (T-001) or objective text/id; omit for the standing objective")
+    c.add_argument("--json", action="store_true", dest="json",
+                   help="machine-readable event list")
+    c.set_defaults(fn=cmd_trace)
 
     c = sub.add_parser("review", help="submit finished work for the master to review + merge")
     c.add_argument("id")
