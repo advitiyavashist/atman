@@ -187,13 +187,14 @@ def _verdict_entries(t, msgs_re):
             kind = (r.get("kind") or "").strip().upper()
             sha = (r.get("sha") or "").strip()
             by = r.get("by") or ""
-            key = ("event", kind, by, sha)
+            key = ("event", kind, by, sha, bool(r.get("superseded")))
             if key in seen:
                 continue
             seen.add(key)
             extra = r.get("notes") or r.get("reason") or ""
             entries.append({"kind": kind, "by": by, "at": r.get("at") or "",
-                            "sha": sha, "applies": _applies(sha, art),
+                            "sha": sha, "applies": ("superseded" if r.get("superseded")
+                                                     else _applies(sha, art)),
                             "source": "event", "text": extra[:200]})
             continue
         text = (r.get("text") or "").strip()
@@ -289,6 +290,188 @@ def unverified_done_ids(tickets, messages=None):
     msgs_re = _messages_by_ticket(messages or [])
     return set(t["id"] for t in tickets
                if t.get("status") == "done" and not review_of(t, msgs_re.get(t["id"]))["verified"])
+
+
+# --- T-1031 accept gate (dependency release) --------------------------------
+
+UNVERIFIED_BLOCK_REASON = "%s marked done without verification; accept it or reopen"
+DOCS_EXEMPT_ROLES = ("docs", "pm")
+
+
+def went_through_review(t):
+    if t.get("review_at") or t.get("review_head"):
+        return True
+    return any(isinstance(e, dict) for e in (t.get("review_events") or []))
+
+
+def is_docs_exempt(t):
+    """Docs/pm tickets that never entered review may release as a visible override."""
+    role = (t.get("role") or "").strip()
+    return role in DOCS_EXEMPT_ROLES and not went_through_review(t)
+
+
+def supersede_release_evidence(t):
+    """Retain earlier verdicts, but invalidate them even if HEAD is unchanged."""
+    for ev in t.get("review_events") or []:
+        if isinstance(ev, dict):
+            ev["superseded"] = True
+    rec = t.get("merge_record")
+    if isinstance(rec, dict):
+        rec["superseded"] = True
+
+
+def _current_release_head_matches(t, sha):
+    head = (t.get("review_head") or "").strip().lower()
+    return bool(re.fullmatch(r"[0-9a-f]{40}", head)
+                and head == (sha or "").strip().lower())
+
+
+def structured_accept(t):
+    """True when review_events has an accept bound to this ticket's review head."""
+    head = (t.get("review_head") or "").strip()
+    if not head:
+        return False
+    for ev in t.get("review_events") or []:
+        if not isinstance(ev, dict):
+            continue
+        if (ev.get("kind") or "").strip().lower() != "accept":
+            continue
+        sha = (ev.get("sha") or "").strip()
+        if not ev.get("superseded") and _current_release_head_matches(t, sha):
+            return True
+    return False
+
+
+def make_merge_record(by, at, sha, pin="", trunk=""):
+    """Structured close written only by `atm merge` (never a free-text note)."""
+    return {
+        "kind": "merge",
+        "by": by or "",
+        "at": at or "",
+        "sha": (sha or "").strip(),
+        "pin": (pin or "").strip(),
+        "trunk": (trunk or "").strip(),
+    }
+
+
+def structured_merge(t):
+    rec = t.get("merge_record")
+    if not isinstance(rec, dict):
+        return False
+    if (rec.get("kind") or "").strip().lower() != "merge":
+        return False
+    return bool(not rec.get("superseded")
+                and (rec.get("sha") or "").strip()
+                and (rec.get("by") or "").strip()
+                and _current_release_head_matches(t, rec.get("pin")))
+
+
+def dep_released(t, msgs=None):
+    """True when dependents may start. Records only — never note or message text.
+
+    Satisfied by: review_events accept bound to review_head, a merge_record
+    written by `atm merge`, or a recorded release_override naming seat+reason.
+    ``msgs`` is accepted for call-site compatibility and ignored.
+    """
+    del msgs
+    if t.get("status") != "done":
+        return False
+    if structured_accept(t) or structured_merge(t):
+        return True
+    ov = t.get("release_override")
+    return isinstance(ov, dict) and bool(ov.get("kind"))
+
+
+def unreleased_dep_id(t, tickets, only_done=False):
+    """First predecessor that is not dep_released, or ''.
+
+    ``only_done=True`` skips unfinished predecessors so reserve can still
+    point at future work. Claim/assign/reopen refuse every unreleased dep.
+    """
+    by_id = dict((x["id"], x) for x in tickets)
+    for dep_id in t.get("deps") or []:
+        pred = by_id.get(dep_id)
+        if pred is None:
+            return dep_id
+        if dep_released(pred):
+            continue
+        if only_done and pred.get("status") != "done":
+            continue
+        return dep_id
+    return ""
+
+
+def released_ids(tickets, messages=None):
+    msgs_re = _messages_by_ticket(messages or []) if messages is not None else {}
+    out = set()
+    for t in tickets:
+        msgs = msgs_re.get(t["id"]) if messages is not None else None
+        if dep_released(t, msgs):
+            out.add(t["id"])
+    return out
+
+
+def accepted_release_sha(t, msgs=None):
+    if structured_accept(t) or structured_merge(t):
+        return (t.get("review_head") or "").strip().lower()
+    return ""
+
+
+def make_release_override(kind, by, at, reason=""):
+    return {"kind": kind, "by": by, "at": at, "reason": reason or ""}
+
+
+def refuse_unreleased_reason(t, tickets, only_done=False):
+    """Exit text when t's deps are not released, or ''."""
+    pred = unreleased_dep_id(t, tickets, only_done=only_done)
+    if not pred:
+        return ""
+    return "%s: %s" % (t.get("id") or "?", unverified_block_reason(pred))
+
+
+def unverified_block_reason(pred_id):
+    return UNVERIFIED_BLOCK_REASON % pred_id
+
+
+def accepted_release_note(pred_id, sha, seat):
+    """Child release note: full accepted SHA + accepting seat on every path."""
+    sha = (sha or "").strip()
+    seat = (seat or "").strip() or "?"
+    if sha:
+        return "%s accepted at %s by %s -- unblocked" % (pred_id, sha, seat)
+    return "%s accepted by %s -- unblocked" % (pred_id, seat)
+
+
+def is_live_unverified_gate_note(text, pred_id=None):
+    """True when a note is still the 'accept it or reopen' instruction."""
+    text = (text or "").strip()
+    if not text or text.lower().startswith("resolved:"):
+        return False
+    if pred_id:
+        return text == unverified_block_reason(pred_id)
+    return bool(text.endswith("marked done without verification; accept it or reopen"))
+
+
+def drop_unverified_gate_notes(child, pred_id):
+    """Omit superseded gate notes so the next agent does not read them as current."""
+    notes = child.get("notes") or []
+    child["notes"] = [n for n in notes
+                      if not is_live_unverified_gate_note(n.get("text"), pred_id)]
+    return child
+
+
+def successors_waiting_on(tickets, finished_id, released):
+    """Children that would be free if ``finished_id`` counted as released."""
+    out = []
+    for x in tickets:
+        deps = x.get("deps") or []
+        if finished_id not in deps:
+            continue
+        if x.get("status") not in ("open", "blocked"):
+            continue
+        if all(d == finished_id or d in released for d in deps):
+            out.append(x)
+    return out
 
 
 # --- routing / delivery evidence --------------------------------------------

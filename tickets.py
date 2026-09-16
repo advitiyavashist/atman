@@ -1075,6 +1075,16 @@ def save(board, t, expected_generation=None):
     lock = tc.ticket_mutation_lock(board, t["id"]) if tc is not None else None
 
     def _publish():
+        # Every active write (including update and owner transfers) shares the
+        # same dependency gate; command-specific checks are only early errors.
+        current = load(board, t["id"]) if os.path.isfile(path) else {}
+        # The automated worktree-cleanup node is exempt: it hands no work to
+        # a seat and its own checks escalate instead of deleting unmerged,
+        # dirty or in-use work (see _run_cleanup_nodes).
+        if (not _is_automated_cleanup(t)
+                and (t.get("status") == "claimed"
+                     or (t.get("owner") and t.get("owner") != current.get("owner")))):
+            _refuse_unreleased_deps(t, load_all(board))
         if tc is not None and os.path.isfile(path):
             try:
                 with open(path) as f:
@@ -1106,9 +1116,15 @@ def save(board, t, expected_generation=None):
         return t
 
     if lock is None:
-        return _publish()
-    with lock:
-        return _publish()
+        result = _publish()
+    else:
+        with lock:
+            result = _publish()
+    # Run after the parent mutation lock: child recovery takes its own lock.
+    # This covers accept, merge records, overrides and done after accept.
+    if _work_view().dep_released(t):
+        _reopen_unverified_successors(board, t["id"])
+    return result
 
 
 def load_all(board):
@@ -1926,7 +1942,10 @@ def _watch_bind_ticket(board, owner):
     blocked only — never IN REVIEW when mine is empty (T-543/T-563). T-425
     idle pulses pair via run_id, not a stale review ticket= field.
     """
-    for t in load_all(board):
+    tickets = load_all(board)
+    for t in tickets:
+        if _work_view().unreleased_dep_id(t, tickets):
+            continue
         if t.get("status") == "claimed" and t.get("owner") == owner:
             return t["id"]
     rec = _agent_rec(board, owner) or {}
@@ -1937,6 +1956,8 @@ def _watch_bind_ticket(board, owner):
         with open(ticket_path(board, tid)) as f:
             t = json.load(f)
     except (IOError, ValueError):
+        return ""
+    if (isinstance(t, dict) and _work_view().unreleased_dep_id(t, tickets)):
         return ""
     if isinstance(t, dict) and t.get("owner") == owner and t.get("status") in (
             "claimed", "blocked"):
@@ -1987,6 +2008,11 @@ def try_claim(board, tid, owner):
     if _ticket_lane(t) != "ready":
         os.unlink(lock)
         return None
+    tickets = load_all(board)
+    reason = _work_view().refuse_unreleased_reason(t, tickets)
+    if reason:
+        os.unlink(lock)
+        sys.exit(reason)
     prev_owner = t.get("owner") or ""
     t["status"] = "claimed"
     t["owner"] = owner
@@ -2219,6 +2245,12 @@ class _GCApi:
     current_master = staticmethod(lambda board: current_master(board))
 
 
+def _is_automated_cleanup(t):
+    """T-946 x T-1031: only cleanup_worktree is exempt from the accept gate."""
+    return ((t.get("kind") or "").strip() == "automated"
+            and (t.get("automated") or {}).get("action") == "cleanup_worktree")
+
+
 def _ticket_lane(t):
     return _sounding().ticket_lane(t)
 
@@ -2285,19 +2317,30 @@ def _ticket_phase(t, waiting):
 
 
 def unblocked(board, tickets):
-    """Open tickets whose dependencies are all done and whose lane is ready.
+    """Open tickets whose dependencies are released and whose lane is ready.
 
     Capture and discarded tickets stay on the graph but are invisible to
     `atm next` until a sound pass promotes them (Fatih write gate).
+
+    T-1031: ``done`` is not enough. A predecessor must have a structured
+    ACCEPT (or merge) on its review head, or a recorded docs-exempt /
+    operator override.
     """
-    done = set(t["id"] for t in tickets if t["status"] == "done")
+    released = _work_view().released_ids(tickets)
     return [
         t
         for t in tickets
         if t["status"] == "open"
         and _ticket_lane(t) == "ready"
-        and all(d in done for d in t.get("deps", []))
+        and all(d in released for d in t.get("deps", []))
     ]
+
+
+def _refuse_unreleased_deps(t, tickets, only_done=False):
+    """One gate: refuse if any predecessor is not dep_released (T-1031)."""
+    reason = _work_view().refuse_unreleased_reason(t, tickets, only_done=only_done)
+    if reason:
+        sys.exit(reason)
 
 
 def find_cycle(tickets):
@@ -2411,7 +2454,9 @@ def line(t, tickets=None):
 
 
 def _notes(t):
-    return list(t.get("notes") or [])
+    wv = _work_view()
+    return [n for n in (t.get("notes") or [])
+            if not wv.is_live_unverified_gate_note(n.get("text"))]
 
 
 def collect_handoffs(t, tickets):
@@ -2677,7 +2722,24 @@ def cmd_plan(a, board):
         else:
             t["lane"] = "capture"
             save(board, t)
+        t = load(board, t0["id"])
+        _plan_keep_gated_unstarted(board, it, t)
         print("created %s  %s  lane=%s" % (t["id"], t["title"], _ticket_lane(t)))
+
+
+def _plan_keep_gated_unstarted(board, item, t):
+    """Plan JSON owner/status cannot start work whose deps are not released."""
+    want_owner = (item.get("owner") or "").strip()
+    want_status = str(item.get("status") or "").lower()
+    if not want_owner and want_status not in (
+            "claimed", "in-progress", "inprogress", "wip", "started"):
+        return t
+    if _work_view().unreleased_dep_id(t, load_all(board)):
+        t["owner"] = ""
+        t["status"] = "open"
+        t.pop("claimed_at", None)
+        return save(board, t)
+    return t
 
 
 def _plan_item_sound_fields(it, t):
@@ -2862,10 +2924,7 @@ def cmd_dispatch(a, board):
     if _reopen_blocks_automation(board, t):
         sys.exit("dispatch: %s has a same-second-as-reopen task with no event order; "
                  "post a new explicit --task" % t["id"])
-    done = set(x["id"] for x in load_all(board) if x["status"] == "done")
-    pending = [d for d in (t.get("deps") or []) if d not in done]
-    if pending:
-        sys.exit("dispatch: %s still waits on %s" % (t["id"], ", ".join(pending)))
+    _refuse_unreleased_deps(t, load_all(board))
     rows, _note = probe_integration_catalog()
     attach_catalog_usage(rows)
     row = None
@@ -3568,7 +3627,20 @@ def cmd_hold(a, board):
 def _start_successors(board, finished_id):
     """T-781: a successful ticket starts unblocked children (no human next)."""
     tickets = load_all(board)
+    pred = next((x for x in tickets if x["id"] == finished_id), None)
+    sha = _work_view().accepted_release_sha(pred) if pred else ""
     children = [x for x in unblocked(board, tickets) if finished_id in x.get("deps", [])]
+    # T-946 x T-1031: the automated worktree-cleanup node decides keep/remove
+    # for the finished ticket's own worktree. It hands no work to a seat, and
+    # its own checks never delete unmerged, dirty or in-use work (they
+    # escalate), so it is not gated on acceptance -- gating it would strand
+    # exactly the worktrees of tickets closed without verification. Every
+    # other successor stays gated.
+    seen = set(x["id"] for x in children)
+    children += [x for x in tickets
+                 if x["id"] not in seen and x.get("status") == "open"
+                 and finished_id in (x.get("deps") or [])
+                 and _is_automated_cleanup(x)]
     freed = [x["id"] for x in children]
     started, held = [], []
     for child in children:
@@ -3583,22 +3655,193 @@ def _start_successors(board, finished_id):
             started.append("%s [automated:%s]" % (child["id"], result.get("status")))
             continue
         who = _reserved_agent(child) or (child.get("suggested") or "").strip()
-        text = "unblocked %s after %s -- start (success trigger)" % (child["id"], finished_id)
+        text = "unblocked %s after %s" % (child["id"], finished_id)
+        if sha:
+            text += " accepted %s" % sha
+        text += " -- start (success trigger)"
+        child.setdefault("notes", []).append({
+            "by": whoami(), "at": now(), "text": text,
+        })
+        save(board, child)
         if who:
             post_message(board, whoami(), text, to=who, re=child["id"], task=True)
             started.append("%s -> %s" % (child["id"], who))
         else:
             started.append(child["id"])
-    done = set(t["id"] for t in tickets if t["status"] == "done")
+    released = _work_view().released_ids(tickets)
     capture_wait = []
     for x in tickets:
         if x["status"] != "open" or finished_id not in (x.get("deps") or []):
             continue
         if _ticket_lane(x) != "capture":
             continue
-        if all(d in done for d in x.get("deps") or []):
+        if all(d in released for d in x.get("deps") or []):
             capture_wait.append(x["id"])
     return freed, started, held, capture_wait
+
+
+def _retire_stale_gated_start(board, child):
+    """Drop owner/lock left by a start that never became IN PROGRESS."""
+    tc = _recovery()
+    previous_owner = child.get("owner") or ""
+    if previous_owner and tc:
+        tc.issue_owner_lease(child, "", reason="dependency released",
+                             previous_owner=previous_owner)
+    child["owner"] = ""
+    child.pop("claimed_at", None)
+    lock = os.path.join(board, child["id"] + ".lock")
+    if os.path.exists(lock):
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+    return child
+
+
+def _block_unverified_successors(board, finished_id):
+    """T-1031: done without ACCEPT leaves dependents blocked with an explicit reason."""
+    wv = _work_view()
+    reason = wv.unverified_block_reason(finished_id)
+    tickets = load_all(board)
+    released = wv.released_ids(tickets)
+    blocked = []
+    who = whoami()
+    at = now()
+    for child in wv.successors_waiting_on(tickets, finished_id, released):
+        if _is_automated_cleanup(child):
+            # T-946: the worktree-cleanup node is not work for a seat. It only
+            # decides keep/remove for the finished ticket's own worktree, and
+            # its own checks escalate rather than delete unmerged, dirty or
+            # in-use work. See the matching exemption in _start_successors.
+            continue
+        child["status"] = "blocked"
+        child["unverified_block"] = finished_id
+        _retire_stale_gated_start(board, child)
+        child.setdefault("notes", []).append({"by": who, "at": at, "text": reason})
+        save(board, child)
+        blocked.append(child["id"])
+    return blocked, reason
+
+
+def _run_cleanup_nodes(board, finished_id):
+    """T-946 x T-1031: run the automated worktree-cleanup node even when the
+    predecessor closed without an ACCEPT.
+
+    The node hands no work to a seat: it decides keep/remove for the finished
+    ticket's own worktree and escalates instead of deleting unmerged, dirty or
+    in-use work. Gating it on acceptance would strand exactly the worktrees of
+    tickets closed unverified. Every other successor stays gated.
+    """
+    gc = _worktree_gc()
+    ran = []
+    for child in load_all(board):
+        if child.get("status") != "open" or finished_id not in (child.get("deps") or []):
+            continue
+        if not _is_automated_cleanup(child):
+            continue
+        result = gc.run_cleanup_node(board, child, _gc_hooks(), probes=_gc_probes(),
+                                    repo_root=os.path.dirname(board), apply=True)
+        ran.append("%s [automated:%s]" % (child["id"], result.get("status")))
+    return ran
+
+
+def _reopen_unverified_successors(board, finished_id, sha="", seat=""):
+    """Reconcile gate-owned blocks whenever a predecessor becomes released."""
+    from contextlib import nullcontext
+    wv = _work_view()
+    tickets = load_all(board)
+    pred = next((x for x in tickets if x["id"] == finished_id), None)
+    if not pred or not wv.dep_released(pred):
+        return []
+    sha = sha or wv.accepted_release_sha(pred)
+    accepts = [e for e in pred.get("review_events", [])
+               if e.get("kind") == "accept" and not e.get("superseded")
+               and (e.get("sha") or "").strip().lower() == (sha or "").strip().lower()]
+    seat = seat or (accepts[-1].get("by") if accepts else "") or whoami()
+    opened = []
+    for snapshot in tickets:
+        if finished_id not in snapshot.get("deps", []):
+            continue
+        tc = _recovery()
+        lock = tc.ticket_mutation_lock(board, snapshot["id"]) if tc else nullcontext()
+        with lock:
+            child = load(board, snapshot["id"])
+            gated = (child.get("unverified_block") == finished_id or any(
+                wv.is_live_unverified_gate_note(n.get("text"), finished_id)
+                for n in child.get("notes", [])))
+            # Claimed+gated is a start that was refused or bypassed, not real work.
+            never_started = child.get("status") in ("blocked", "open") or (
+                gated and child.get("status") == "claimed")
+            claim_lock = os.path.join(board, child["id"] + ".lock")
+            stale_start = never_started and bool(
+                child.get("owner") or os.path.exists(claim_lock))
+            if not gated and not stale_start:
+                continue
+            if gated:
+                wv.drop_unverified_gate_notes(child, finished_id)
+                if child.get("unverified_block") == finished_id:
+                    child.pop("unverified_block", None)
+            if never_started:
+                # Assignment never started. Keep routing hints, retire the
+                # lease and lock so a real claim is not "already taken".
+                _retire_stale_gated_start(board, child)
+                child["status"] = "open"
+                remaining = wv.unreleased_dep_id(child, load_all(board))
+                if remaining:
+                    child["status"] = "blocked"
+                    child["unverified_block"] = remaining
+                    child.setdefault("notes", []).append({
+                        "by": whoami(), "at": now(),
+                        "text": wv.unverified_block_reason(remaining)})
+                else:
+                    opened.append(child["id"])
+            override = pred.get("release_override") or {}
+            text = (wv.accepted_release_note(finished_id, sha, seat) if sha else
+                    "%s released (%s override) by %s -- %s" % (
+                        finished_id, override.get("kind", ""),
+                        override.get("by", seat), override.get("reason", "")))
+            if not any((n.get("text") or "") == text for n in child.get("notes") or []):
+                child.setdefault("notes", []).append(
+                    {"by": whoami(), "at": now(), "text": text})
+            save(board, child)
+    return opened
+
+
+def _maybe_record_release_override(t, a, board):
+    """Record a visible override, or refuse silent release. Returns True to start successors."""
+    wv = _work_view()
+    if wv.dep_released(t):
+        return True
+    closer = whoami()
+    at = now()
+    if getattr(a, "release_unverified", False):
+        t["release_override"] = wv.make_release_override(
+            "operator", closer, at, "operator --release-unverified")
+        save(board, t)
+        return True
+    if wv.is_docs_exempt(t):
+        t["release_override"] = wv.make_release_override(
+            "docs-exempt", closer, at,
+            "docs-exempt: role=%s never submitted for review" % (t.get("role") or ""))
+        save(board, t)
+        return True
+    return False
+
+
+def _print_successor_release(t, freed, started, held, capture_wait=None):
+    ov = t.get("release_override") or {}
+    verified = _work_view().review_of(t)["verified"]
+    if ov.get("kind") and not verified:
+        print("released (%s override)%s" % (
+            ov["kind"], (": %s" % ", ".join(freed)) if freed else ""))
+    if freed:
+        print("unblocked: %s" % ", ".join(freed))
+    if started:
+        print("started: %s" % ", ".join(started))
+    if held:
+        print("held (not started): %s" % ", ".join(held))
+    for tid in (capture_wait or []):
+        print(_capture_sound_hint(tid))
 
 
 def _may_set_reservation(board, who):
@@ -3716,10 +3959,10 @@ def cmd_next(a, board):
         print("Fix with: atm dep <id> --drop <missing-id>")
         sys.exit(2)
     holders = sorted(set(t.get("owner") or "?" for t in tickets if t["status"] == "claimed"))
-    done_ids = set(t["id"] for t in tickets if t["status"] == "done")
+    released_ids = _work_view().released_ids(tickets)
     capture_ready, dep_waits = [], []
     for t in open_blocked:
-        waiting = [d for d in t.get("deps", []) if d not in done_ids]
+        waiting = [d for d in t.get("deps", []) if d not in released_ids]
         if waiting:
             dep_waits.append("%s waits on %s" % (t["id"], ",".join(waiting)))
         elif _ticket_lane(t) == "capture":
@@ -3745,7 +3988,8 @@ def cmd_claim(a, board):
     if lane != "ready":
         sys.exit("%s is lane=%s; sound it before claiming (atm sound %s)"
                  % (a.id, lane, a.id))
-    got, held = try_claim_one_active(board, a.id, owner)
+    _refuse_unreleased_deps(t, load_all(board))
+    got, held = try_claim_one_active(board, a.id, owner, another=bool(getattr(a, "another", False)))
     if held:
         sys.exit(_already_hold_msg(held))
     if not got:
@@ -3761,6 +4005,7 @@ def cmd_claim(a, board):
 def cmd_review(a, board):
     """Agent finished: submit for the master to review + merge. Records branch@sha."""
     t = load(board, a.id)
+    _refuse_unreleased_deps(t, load_all(board))
     if t["status"] not in ("claimed", "blocked", "open"):
         sys.exit("%s is %s; only in-progress work can be submitted" % (a.id, LABEL[t["status"]]))
     if not a.notes:
@@ -3803,6 +4048,8 @@ def cmd_review(a, board):
         if err:
             sys.exit(err)
     expected_generation = t.get("owner_generation")
+    _work_view().supersede_release_evidence(t)
+    t.pop("review_head", None)
     t["status"] = "review"
     t["owner"] = owner
     t["review_at"] = now()
@@ -3813,7 +4060,7 @@ def cmd_review(a, board):
         # the artifact's, not the caller's cwd.
         stamp = _record_pin(t, g, art)
         text = "%s -- %s" % (stamp, text)
-        if (a.pr or "").strip() and g.get("sha_full"):
+        if g.get("sha_full"):
             _review_verdict().record_verified_head(t, g["sha_full"], pr=a.pr)
     if a.pr:
         t["pr"] = a.pr
@@ -3861,6 +4108,10 @@ def cmd_accept(a, board):
         sys.exit(err)
     save(board, t)
     print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
+    if t.get("status") == "done":
+        _reopen_unverified_successors(board, a.id, sha=ev["sha"], seat=ev["by"])
+        freed, started, held, capture_wait = _start_successors(board, a.id)
+        _print_successor_release(t, freed, started, held, capture_wait)
 
 
 def cmd_reject(a, board):
@@ -4333,6 +4584,8 @@ def cmd_merge(a, board):
                     continue
             t2["status"] = "done"
             t2["done_at"] = now()
+            t2["merge_record"] = _work_view().make_merge_record(
+                owner, now(), full_trunk or sha, pin=full, trunk=trunk)
             t2["notes"].append({"by": owner, "at": now(),
                                 "text": "merged into %s as %s (atm merge; pinned %s)" % (
                                     trunk, sha, pin)})
@@ -6130,6 +6383,8 @@ def cmd_status(a, board):
     if not target:
         sys.exit("unknown status %r; use one of: %s" % (a.status, ", ".join(sorted(STATUS_WORDS))))
     t = load(board, a.id)
+    if target == "claimed":
+        _refuse_unreleased_deps(t, load_all(board))
     if target == t["status"]:
         print("%s already %s" % (a.id, LABEL[target]))
         return
@@ -6301,15 +6556,16 @@ def cmd_done(a, board):
         a.id, fmt_hours(tm["active"]), fmt_hours(tm["wait"])))
     if g:
         print("recorded %s" % t["commit"])
-    freed, started, held, capture_wait = _start_successors(board, a.id)
-    if freed:
-        print("unblocked: %s" % ", ".join(freed))
-    if started:
-        print("started: %s" % ", ".join(started))
-    if held:
-        print("held (not started): %s" % ", ".join(held))
-    for tid in capture_wait:
-        print(_capture_sound_hint(tid))
+    if _maybe_record_release_override(t, a, board):
+        _reopen_unverified_successors(board, a.id)
+        freed, started, held, capture_wait = _start_successors(board, a.id)
+        _print_successor_release(t, freed, started, held, capture_wait)
+    else:
+        blocked, reason = _block_unverified_successors(board, a.id)
+        if blocked:
+            print("blocked: %s -- %s" % (", ".join(blocked), reason))
+        for line in _run_cleanup_nodes(board, a.id):
+            print("cleanup: %s" % line)
     _finish_followup(board, a.id, "done")
 
 
@@ -6432,6 +6688,8 @@ def cmd_assign(a, board):
         if a.owner is not None:
             # hard assignment by the master: takes the lock on their behalf
             prev_owner = t.get("owner") or ""
+            if a.owner:
+                _refuse_unreleased_deps(t, load_all(board))
             if t["status"] == "open" and a.owner:
                 got, held = try_claim_one_active(board, t["id"], a.owner)
                 if held:
@@ -6539,6 +6797,7 @@ def cmd_reserve(a, board):
         sys.exit("atm reserve --for is master/planner/optimizer only (anyone may --drop)")
     if t.get("status") != "open":
         sys.exit("%s is %s; reserve only open tickets" % (t["id"], t.get("status") or "?"))
+    _refuse_unreleased_deps(t, load_all(board), only_done=True)
     unknown = not _agent_rec(board, target)
     t["reserved_for"] = target
     note = "reserve: for %s" % target
@@ -7399,6 +7658,7 @@ def _health_body(board, tickets):
 
 def cmd_reopen(a, board):
     t = load(board, a.id)
+    _refuse_unreleased_deps(t, load_all(board), only_done=True)
     notes = getattr(a, "notes", "") or ""
     # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
     # ticket to `next` while notes still read as REVIEW. Claimed work that
@@ -7416,6 +7676,7 @@ def cmd_reopen(a, board):
         t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": notes})
     before = t["status"]
     prev_owner = t.get("owner", "")
+    _work_view().supersede_release_evidence(t)
     t["status"] = "open"
     t["owner"] = ""
     # T-889/T-810 hook: Work treats posts recorded in reopened_seen as the
@@ -9894,7 +10155,7 @@ def cmd_route(a, board):
     roles = load_roles(board)
     agents = dict((r["owner"], r) for r in load_agents(board))
     alive_within = int(getattr(a, "alive_within", None) or DEFAULT_ALIVE_WITHIN_MIN)
-    done = set(t["id"] for t in tickets if t["status"] == "done")
+    released = _work_view().released_ids(tickets)
     load_ = {}
     for t in tickets:
         if t["status"] == "claimed":
@@ -9904,9 +10165,11 @@ def cmd_route(a, board):
         alive_within_min=alive_within)
     print(format_excluded(excluded))
     def _deps_done(t):
-        return all(d in done for d in t.get("deps", []))
+        return all(d in released for d in t.get("deps", []))
 
     def _needs_route(t):
+        if _work_view().unreleased_dep_id(t, tickets, only_done=True):
+            return False
         if t["status"] != "open":
             return False
         if _ticket_on_hold(t):
@@ -10740,17 +11003,22 @@ def pending_work(board, owner):
     # suppressed the author's own mail. Anything non-broadcast in that result
     # is therefore a DM or named mention for this seat. This also collapses a
     # message carrying BOTH --to and @mention to one record / one wake.
+    tickets = load_all(board)
+    by_id = {t["id"]: t for t in tickets}
+    def task_released(message):
+        ticket = by_id.get(message.get("re"))
+        return not ticket or not _work_view().unreleased_dep_id(ticket, tickets)
     direct = [m for m in msgs if not is_board_broadcast(m)]
     if direct:
         out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
         tasks = [_wake_message_summary(m) for m in direct
-                 if _pending_message_triggers_wake(board, owner, m, obj_state)]
+                 if task_released(m) and _pending_message_triggers_wake(board, owner, m, obj_state)]
         if tasks:
             out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
     elif msgs:
         out["broadcasts"] = len(msgs)
-    tickets = _safe(lambda: load_all(board), [])
-    held = [t for t in tickets if t.get("status") == "claimed" and t.get("owner") == owner]
+    held = [t for t in tickets if t.get("status") == "claimed" and t.get("owner") == owner
+            and not _work_view().unreleased_dep_id(t, tickets)]
     if held:
         out["holding"] = [t["id"] + " " + t.get("title", "")[:60] for t in held]
     roles = _safe(lambda: roles_for(board, owner, None), None)
@@ -19569,6 +19837,7 @@ def main():
     c = sub.add_parser("claim", help="atomically claim a specific ticket")
     c.add_argument("id")
     c.add_argument("--owner", "-o")
+    c.add_argument("--another", action="store_true", help="claim even though I already hold one")
     c.set_defaults(fn=cmd_claim)
 
     c = sub.add_parser("done", help="mark a ticket done")
@@ -19577,6 +19846,8 @@ def main():
     c.add_argument("--no-notes", action="store_true", help="allow empty handoff")
     c.add_argument("--artifact", default="", metavar="DIR", help='directory the DELIVERABLE lives in, when that is a different repo from the one you are running this command in; branch, sha and repo are all derived from that tree')
     c.add_argument("--force", action="store_true", help="skip the branch/clean-tree rule")
+    c.add_argument("--release-unverified", action="store_true",
+                   help="operator override: release dependents without ACCEPT (recorded, never silent)")
     c.set_defaults(fn=cmd_done)
 
     c = sub.add_parser("repin", help="correct a review pin to name the repo the artifact is in")

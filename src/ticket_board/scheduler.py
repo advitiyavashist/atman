@@ -474,7 +474,8 @@ def decide_ticket(board, ticket, estimates, names, workforce, roles, score_agent
 
 
 def ready_tickets(tickets):
-    done = set(t["id"] for t in tickets if t.get("status") == "done")
+    from ticket_board.work_view import released_ids
+    done = released_ids(tickets)
     ready = [t for t in tickets
              if t.get("status") == "open" and all(d in done for d in t.get("deps") or [])]
     ready.sort(key=lambda t: (t.get("priority", 2), t.get("id") or ""))
