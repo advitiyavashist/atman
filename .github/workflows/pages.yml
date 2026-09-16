@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - landing/**
+      - docs/assets/demo/hero.gif
+      - docs/assets/demo/poster.png
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -26,6 +28,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - name: Copy demo assets into the published tree
+        run: mkdir -p landing/assets/demo && cp docs/assets/demo/hero.gif docs/assets/demo/poster.png landing/assets/demo/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: landing

@@ -1,0 +1,2 @@
+# Build-time copies from docs/assets/demo — do not commit a second blob.
+/assets/demo/

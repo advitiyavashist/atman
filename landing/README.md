@@ -12,19 +12,23 @@ Copy lock (T-1047):
 - **Contact:** GitHub issues. Byline: Built by @abnormal.
 - **CLI name:** `atm` is primary. `tickets` is the compatibility alias,
   once, in Start.
-- **Hero demo:** a placeholder HTML comment only. Do not add a substitute
-  image; wire PR #217 on the next line when it lands.
+- **Hero demo:** `assets/demo/hero.gif` inside the published tree. Pages
+  copies it at build time from `docs/assets/demo/hero.gif`. Do not commit
+  a second copy under `landing/assets/demo/`.
 
 Do not use jsDelivr, raw GitHub, or `landing/index.html` as the public URL —
 those serve `text/plain`.
 
 ## Captures under `landing/assets/`
 
-Images live next to `index.html` so a deploy that publishes only this
-directory can still load them. The live page does not embed a demo image.
+Checked-in captures live next to `index.html` so a deploy that publishes
+only this directory can still load them. The live page embeds the hero
+GIF from `assets/demo/hero.gif` after `.github/workflows/pages.yml`
+copies `docs/assets/demo/{hero.gif,poster.png}` into the artifact.
 `t971-app-work-1440.png` remains the `og:image` and the README product
-capture. Never reference `../docs/brand/evidence` from the page. Captures
-are never the live board (`TICKETS_DIR` on a throwaway board).
+capture. Never reference `../docs/brand/evidence` or `../docs/assets`
+from the page. Captures are never the live board (`TICKETS_DIR` on a
+throwaway board).
 
 | File | What it is |
 |---|---|
