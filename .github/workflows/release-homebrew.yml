@@ -45,7 +45,11 @@ jobs:
         run: |
           mkdir -p /tmp/atman-extract
           tar -xzf "${{ steps.build.outputs.tarball }}" -C /tmp/atman-extract
-          EXTRACTED=$(find /tmp/atman-extract -maxdepth 1 -type d -name 'atman-*')
+          # -mindepth 1 matters: without it the extract root itself
+          # (/tmp/atman-extract) also matches 'atman-*', so EXTRACTED became two
+          # newline-joined paths and python was handed a filename that cannot
+          # exist. That is what failed the v0.2.0 release run.
+          EXTRACTED=$(find /tmp/atman-extract -mindepth 1 -maxdepth 1 -type d -name 'atman-*' | head -1)
           python3 "$EXTRACTED/tickets.py" --version | grep -q 'verified release'
           TICKETS_DIR="$RUNNER_TEMP/board" TICKET_AGENT=release-ci HOME="$RUNNER_TEMP" \
             python3 "$EXTRACTED/tickets.py" join release-ci-seat --roles backend | grep -q 'joined as'
