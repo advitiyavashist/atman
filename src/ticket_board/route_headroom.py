@@ -140,6 +140,29 @@ def eligible_limited(limited, agents, eligible_fn):
     return dict((n, limited[n]) for n in names)
 
 
+def drop_logged_out(names, limited, skip_of):
+    """(names, limited, skipped): confirmed logged-out seats removed from both.
+
+    skip_of(name) -> reason, or empty to keep (T-1043 preflight route_skip).
+    Runs after eligibility, so dormant/busy seats are never probed, and a
+    logged-out seat is neither a candidate nor a limited row / HOLD reason.
+    """
+    skipped = {}
+    for n in list(names or []) + sorted(limited or {}):
+        if n in skipped:
+            continue
+        reason = skip_of(n)
+        if reason:
+            skipped[n] = reason
+    kept = [n for n in (names or []) if n not in skipped]
+    still = dict((n, lim) for n, lim in (limited or {}).items() if n not in skipped)
+    return kept, still, skipped
+
+
+def format_logged_out(skipped):
+    return "\n".join("skipped %s: %s" % (n, skipped[n]) for n in sorted(skipped or {}))
+
+
 def rank_key(limited, remaining, cost, score, load=0):
     """Lower is better. Limited last, confirmed-zero headroom next to last.
 

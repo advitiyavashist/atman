@@ -4845,6 +4845,34 @@ def _refuse_limited_seat(board, seat, verb):
         verb, _route_headroom().limit_label(lim)))
 
 
+# Same harnesses tickets.py `_auth_gates_spawn` preflights.
+_ROUTE_AUTH_GATED = ("claude", "codex", "cursor", "cursor+claude")
+
+
+def _route_logged_out(board, wf, name):
+    """T-1043 route_skip for one seat: confirmed logged-out reason, or empty.
+
+    The packaged CLI has no auth probe, so it honours the auth_check that
+    tickets.py stored (`atm harness auth`, dispatch/route preflight) for the
+    seat's harness. A fresh positive preflight wins; no record keeps the seat.
+    """
+    try:
+        from ticket_board import preflight as pf
+    except ImportError:
+        import preflight as pf
+    e = wf.get(name, {}) or {}
+    hid = (e.get("harness") or e.get("tool") or "").strip()
+    if hid not in _ROUTE_AUTH_GATED:
+        return ""
+    rec = _agent_rec(board, name) or {}
+    if pf.cached_positive(rec, now(), harness=hid):
+        return ""
+    auth = rec.get("auth_check")
+    if not isinstance(auth, dict) or (auth.get("harness") or "") != hid:
+        return ""
+    return pf.route_skip(auth, hid)
+
+
 def _write_route_pick(board, t, rows, deps_done):
     """Apply pick_seat: suggest or reserve. All-limited is reported, never stored."""
     best, why = _route_headroom().pick_seat(rows)
@@ -4883,6 +4911,10 @@ def _cmd_next_dispatch(a, board):
         limited, agents, lambda ns, ag: filter_eligible(
             ns, wf, roles, ag, load_, DEFAULT_ROLES,
             alive_within_min=DEFAULT_ALIVE_WITHIN_MIN))
+    names, limited, logged_out = _route_headroom().drop_logged_out(
+        names, limited, lambda n: _route_logged_out(board, wf, n))
+    if logged_out:
+        print(_route_headroom().format_logged_out(logged_out))
 
     def _deps_done(t):
         return all(d in done for d in t.get("deps", []))
@@ -4973,7 +5005,11 @@ def cmd_route(a, board):
     limited = _route_headroom().eligible_limited(
         limited, agents, lambda ns, ag: filter_eligible(
             ns, wf, roles, ag, load_, DEFAULT_ROLES, alive_within_min=alive_within))
+    names, limited, logged_out = _route_headroom().drop_logged_out(
+        names, limited, lambda n: _route_logged_out(board, wf, n))
     print(format_excluded(excluded))
+    if logged_out:
+        print(_route_headroom().format_logged_out(logged_out))
     def _deps_done(t):
         return all(d in released for d in t.get("deps", []))
 

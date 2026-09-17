@@ -1,6 +1,7 @@
 """T-1041: skip LIMITED seats; prefer headroom then cheaper --cost; hold all-limited."""
 import json
 import os
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -18,10 +19,28 @@ RESET = "2099-09-20T11:00:00Z"
 RESET2 = "2099-09-21T00:00:00Z"
 
 
+READY_TEXT = "Logged in as fixture@example.test"
+LOGGED_OUT_TEXT = "Not logged in"
+
+
+def _fake_bin(dirpath, text, names=("claude", "codex", "agent")):
+    """Fake harness CLIs: route/dispatch preflight (T-1043) never runs a real
+    binary, so no real credentials or keychain are read."""
+    dirpath.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        script = dirpath / name
+        script.write_text("#!/bin/sh\necho %s\nexit 0\n" % repr(text))
+        script.chmod(stat.S_IRWXU)
+    return dirpath
+
+
 def run(tool, board, *args, agent="", env=None):
+    ready = _fake_bin(board.parent.parent / "fake-bin-ready", READY_TEXT)
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"),
              TICKETS_DISPATCH_NO_SPAWN="1",
+             TICKETS_CACHE_DIR=str(board.parent.parent / "cache"),
+             PATH=str(ready) + os.pathsep + os.environ.get("PATH", ""),
              PYTHONPATH=str(ROOT / "src") + os.pathsep + os.environ.get("PYTHONPATH", ""))
     e.pop("TICKETS_STOP_HOOK", None)
     if env:
@@ -470,3 +489,123 @@ def test_next_dispatch_skips_all_limited_front_ticket(tool, board):
     again = run(tool, board, "next", "--dispatch", agent="bob")
     assert again.returncode == 0, again.stderr + again.stdout
     assert "HOLD:" in again.stdout
+
+
+def _logged_out_env(board):
+    """PATH whose `claude` reports logged out; codex/agent stay ready."""
+    out = _fake_bin(board.parent.parent / "fake-bin-logged-out", LOGGED_OUT_TEXT,
+                    names=("claude",))
+    ready = board.parent.parent / "fake-bin-ready"
+    return dict(PATH=os.pathsep.join([str(out), str(ready), os.environ.get("PATH", "")]))
+
+
+def _seed_logged_out(tool, board, env, *seats):
+    """cli.py has no auth probe: it honours the auth_check tickets.py stores.
+    tickets.py itself is not seeded, so its route/dispatch preflight probes."""
+    if tool != TOOLS[1]:
+        return
+    for seat in seats:
+        run(TOOLS[0], board, "harness", "auth", seat, agent=seat, env=env)
+        rec = json.loads((board / "agents" / ("%s.json" % seat)).read_text())
+        assert rec["auth_check"]["state"] == "login_required", rec.get("auth_check")
+
+
+@pytest.mark.parametrize("verb", VERBS)
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_logged_out_seat_with_best_headroom_and_cost_never_picked(tool, verb, board):
+    """T-1043 x T-1041: a confirmed logged-out seat is never a candidate."""
+    assert run(tool, board, "join", "alice", "--roles", "docs",
+               "--cost", "low", "--harness", "claude", agent="alice").returncode == 0
+    assert run(tool, board, "join", "bob", "--roles", "docs",
+               "--cost", "high", "--harness", "codex", agent="bob").returncode == 0
+    _write_ledger(board, {
+        "claude": {"provider": "claude", "remaining": "95%"},
+        "codex": {"provider": "codex", "remaining": "5%"},
+    })
+    env = _logged_out_env(board)
+    _seed_logged_out(tool, board, env, "alice")
+    _stamp_seen(board, "alice")
+    _stamp_seen(board, "bob")
+    if verb == "route":
+        r = run(tool, board, "route", "--only", "alice", "bob", agent="bob", env=env)
+    else:
+        r = run(tool, board, "next", "--dispatch", agent="bob", env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "skipped alice: preflight: claude is logged out" in r.stdout
+    t = show(tool, board, "T-001", agent="bob")
+    picked = t.get("suggested") if verb == "route" else t.get("reserved_for")
+    assert picked == "bob"
+    assert "alice" not in " ".join(n.get("text", "") for n in t.get("notes") or [])
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_logged_out_limited_dormant_busy_board_parity(tool, board):
+    """Mixed board: limited, logged-out, dormant, busy and one open seat.
+
+    Only the open seat is picked; the logged-out seat (itself also limited) is
+    neither a candidate nor a limited/HOLD reason. When the open seat is gone,
+    a logged-out seat alone never turns the ticket into a HOLD.
+    """
+    seats = [("lo", "claude", "low"), ("lim", "codex", "low"),
+             ("dorm", "codex", "low"), ("busy", "codex", "low"),
+             ("open", "codex", "high")]
+    for name, harness, cost in seats:
+        assert run(tool, board, "join", name, "--roles", "docs", "--cost", cost,
+                   "--harness", harness, agent=name).returncode == 0
+    _write_ledger(board, {"claude": {"provider": "claude", "remaining": "99%"},
+                          "codex": {"provider": "codex", "remaining": "50%"}})
+    env = _logged_out_env(board)
+    _seed_logged_out(tool, board, env, "lo")
+    assert run(tool, board, "create", "Busy work", "--role", "docs",
+               agent="busy").returncode == 0
+    assert run(tool, board, "claim", "T-002", agent="busy", env=env).returncode == 0
+    for name in ("lo", "lim", "busy", "open"):
+        _stamp_seen(board, name)
+    _stamp_dormant(board, "dorm")
+    _limit(board, "lim", harness="codex")
+    _limit(board, "lo", harness="claude")
+    only = ("--only", "lo", "lim", "dorm", "busy", "open")
+
+    r = run(tool, board, "next", "--dispatch", agent="open", env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "skipped lo: preflight: claude is logged out" in r.stdout
+    assert "T-001 reserved for open" in r.stdout, r.stdout
+    t = show(tool, board, "T-001", agent="open")
+    assert t.get("reserved_for") == "open"
+    notes = " ".join(n.get("text", "") for n in t.get("notes") or [])
+    assert "skipped limited: lim" in notes
+    assert "lo (" not in notes
+
+    assert run(tool, board, "create", "More docs", "--role", "docs",
+               agent="open").returncode == 0
+    r = run(tool, board, "route", *only, agent="open", env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "skipped lo: preflight: claude is logged out" in r.stdout
+    t = show(tool, board, "T-003", agent="open")
+    assert t.get("suggested") == "open"
+    notes = " ".join(n.get("text", "") for n in t.get("notes") or [])
+    assert "skipped limited: lim" in notes
+    assert "lo (" not in notes
+
+    # Open seat gone: only the limited seat may name a HOLD, never the logged-out one.
+    _stamp_dormant(board, "open")
+    r = run(tool, board, "route", "--redo", *only, agent="open", env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    row = [ln for ln in r.stdout.splitlines() if ln.startswith("T-003")]
+    assert row and "(all limited)" in row[0] and "lim (" in row[0], r.stdout
+    assert "lo (" not in row[0]
+    r = run(tool, board, "next", "--dispatch", agent="open", env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    row = [ln for ln in r.stdout.splitlines() if ln.startswith("T-003")]
+    assert row and "HOLD:" in row[0] and "lim (" in row[0] and "lo (" not in row[0], r.stdout
+    assert not show(tool, board, "T-003", agent="open").get("reserved_for")
+
+    # Logged-out + dormant + busy only: nobody fits, never a HOLD.
+    r = run(tool, board, "route", "--redo", "--only", "lo", "dorm", "busy",
+            agent="open", env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    row = [ln for ln in r.stdout.splitlines() if ln.startswith("T-003")]
+    assert row and "(nobody fits)" in row[0], r.stdout
+    assert "HOLD" not in r.stdout
+    t = show(tool, board, "T-003", agent="open")
+    assert not t.get("hold") and not t.get("reserved_for")
