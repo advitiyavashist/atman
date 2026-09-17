@@ -354,3 +354,46 @@ def test_seat_limit_is_shared_and_expires_on_reset():
     assert rh.seat_limit(past, now=now) is None
     assert rh.seat_limit({"limit": {}}, now=now) is None
     assert rh.rank_key(False, None, 0, 10, load=0.5) > rh.rank_key(False, None, 2, 1, load=0)
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_route_skips_non_ready_lane_in_both_clis(tool, board):
+    _pair(tool, board)
+    path = board / "T-001.json"
+    rec = json.loads(path.read_text())
+    rec["lane"] = "capture"
+    path.write_text(json.dumps(rec, indent=2))
+    routed = run(tool, board, "route", "--only", "alice", "bob", agent="alice")
+    assert routed.returncode == 0, routed.stderr + routed.stdout
+    t = show(tool, board, "T-001", agent="alice")
+    assert not t.get("suggested")
+    assert not t.get("reserved_for")
+    assert "T-001" not in routed.stdout
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_busy_seat_plus_limited_dormant_seat_is_not_a_hold(tool, board):
+    """Regression: a limited seat excluded for other reasons must not HOLD."""
+    _pair(tool, board)
+    assert run(tool, board, "create", "Other docs", "--role", "docs",
+               agent="alice").returncode == 0
+    got = run(tool, board, "claim", "T-002", agent="alice")
+    assert got.returncode == 0, got.stderr + got.stdout
+    _stamp_seen(board, "alice")
+    _limit(board, "bob", harness="codex")
+    _stamp_dormant(board, "bob")
+    routed = run(tool, board, "route", "--only", "alice", "bob", agent="alice")
+    assert routed.returncode == 0, routed.stderr + routed.stdout
+    row = [ln for ln in routed.stdout.splitlines() if ln.startswith("T-001")]
+    assert row and "(nobody fits)" in row[0]
+    assert "HOLD" not in routed.stdout
+    t = show(tool, board, "T-001", agent="alice")
+    assert not t.get("hold")
+    assert not t.get("hold_reason")
+    assert not t.get("suggested")
+    r = run(tool, board, "next", "--dispatch", agent="alice")
+    assert r.returncode == 1, r.stderr + r.stdout
+    assert "(nobody fits)" in r.stdout
+    t = show(tool, board, "T-001", agent="alice")
+    assert not t.get("hold")
+    assert not t.get("reserved_for")

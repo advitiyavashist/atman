@@ -4883,6 +4883,10 @@ def _cmd_next_dispatch(a, board):
     names, _excluded = filter_eligible(
         raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=DEFAULT_ALIVE_WITHIN_MIN)
+    limited = _route_headroom().eligible_limited(
+        limited, agents, lambda ns, ag: filter_eligible(
+            ns, wf, roles, ag, load_, DEFAULT_ROLES,
+            alive_within_min=DEFAULT_ALIVE_WITHIN_MIN))
 
     def _deps_done(t):
         return all(d in done for d in t.get("deps", []))
@@ -4902,7 +4906,7 @@ def _cmd_next_dispatch(a, board):
         board, t, names, limited, wf, roles, load_, score_agent)
     best, why = _write_route_pick(board, t, rows, False)
     if not best:
-        print("%s %s" % (t["id"], why))
+        print("%s %s" % (t["id"], why or "(nobody fits)"))
         sys.exit(0 if t.get("hold") else 1)
     print("%s reserved for %s (%s)" % (t["id"], best, why))
 
@@ -4947,6 +4951,7 @@ def cmd_route(a, board):
             score_agent, traj_event, DEFAULT_ROLES)
     from ticket_board.scheduler import (
         DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, format_excluded, _candidate_names)
+    from ticket_board.sounding import ticket_lane
     tickets = load_all(board)
     wf = load_workforce(board)
     roles = load_roles(board)
@@ -4963,6 +4968,9 @@ def cmd_route(a, board):
     names, excluded = filter_eligible(
         raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=alive_within)
+    limited = _route_headroom().eligible_limited(
+        limited, agents, lambda ns, ag: filter_eligible(
+            ns, wf, roles, ag, load_, DEFAULT_ROLES, alive_within_min=alive_within))
     print(format_excluded(excluded))
     def _deps_done(t):
         return all(d in released for d in t.get("deps", []))
@@ -4973,6 +4981,8 @@ def cmd_route(a, board):
         if t["status"] != "open":
             return False
         if _ticket_on_hold(t):
+            return False
+        if ticket_lane(t) != "ready":
             return False
         if a.redo:
             return True

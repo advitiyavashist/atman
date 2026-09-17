@@ -121,6 +121,25 @@ def _ledger_reading(board, hid):
     return rec if isinstance(rec, dict) else None
 
 
+def eligible_limited(limited, agents, eligible_fn):
+    """Limited seats that would pass eligibility apart from the limit.
+
+    eligible_fn(names, agents) -> (eligible, counts), i.e. filter_eligible
+    with the caller's workforce, roles and load. A limited seat that is also
+    dormant, busy or unregistered is dropped, so it can never turn a ticket
+    nobody fits into a permanent HOLD.
+    """
+    if not limited:
+        return {}
+    bare = dict(agents or {})
+    for n in limited:
+        rec = dict(bare.get(n) or {})
+        rec.pop("limit", None)
+        bare[n] = rec
+    names, _counts = eligible_fn(sorted(limited), bare)
+    return dict((n, limited[n]) for n in names)
+
+
 def rank_key(limited, remaining, cost, score, load=0):
     """Lower is better. Limited last. Unknown sits between available and zero.
 
@@ -133,6 +152,8 @@ def rank_key(limited, remaining, cost, score, load=0):
         avail, headroom = 0, -remaining
     else:
         avail, headroom = 2, 0
+    # Fit is deliberately the last tiebreaker: headroom and cost decide before
+    # score, so a priority-1 ticket no longer leans to a high-cost seat.
     return (1 if limited else 0, avail, float(load or 0), headroom, cost, -float(score or 0))
 
 
@@ -177,7 +198,7 @@ def pick_seat(candidates):
     """
     rows = list(candidates)
     if not rows:
-        return None, "no candidates"
+        return None, ""
     open_seats = [r for r in rows if not r.get("limited")]
     if not open_seats:
         blocked = [(r["name"], r.get("limit_label") or "limited") for r in rows]

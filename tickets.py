@@ -4175,6 +4175,10 @@ def _cmd_next_dispatch(a, board):
     names, _excluded = filter_eligible(
         raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=DEFAULT_ALIVE_WITHIN_MIN)
+    limited = _route_headroom().eligible_limited(
+        limited, agents, lambda ns, ag: filter_eligible(
+            ns, wf, roles, ag, load_, DEFAULT_ROLES,
+            alive_within_min=DEFAULT_ALIVE_WITHIN_MIN))
 
     def _deps_done(t):
         return all(d in done for d in t.get("deps", []))
@@ -4194,7 +4198,7 @@ def _cmd_next_dispatch(a, board):
         board, t, names, limited, wf, roles, load_, score_agent)
     best, why = _write_route_pick(board, t, rows, False)
     if not best:
-        print("%s %s" % (t["id"], why))
+        print("%s %s" % (t["id"], why or "(nobody fits)"))
         sys.exit(0 if t.get("hold") else 1)
     print("%s reserved for %s (%s)" % (t["id"], best, why))
 
@@ -10744,6 +10748,9 @@ def cmd_route(a, board):
     names, excluded = filter_eligible(
         raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=alive_within)
+    limited = _route_headroom().eligible_limited(
+        limited, agents, lambda ns, ag: filter_eligible(
+            ns, wf, roles, ag, load_, DEFAULT_ROLES, alive_within_min=alive_within))
     print(format_excluded(excluded))
     def _deps_done(t):
         return all(d in released for d in t.get("deps", []))
