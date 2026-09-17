@@ -4832,60 +4832,17 @@ def _route_headroom():
         return m
 
 
-def _cli_active_limit(board, name):
-    rec = _agent_rec(board, name) or {}
-    lim = rec.get("limit")
-    if not isinstance(lim, dict):
-        return None
-    if not (lim.get("at") or lim.get("note") or lim.get("reset_at") or lim.get("until")):
-        return None
-    reset = (lim.get("reset_at") or "").strip()
-    if reset:
-        try:
-            dt = datetime.fromisoformat(reset.replace("Z", "+00:00"))
-            if dt.tzinfo is not None and dt <= datetime.now(timezone.utc):
-                return None
-        except (ValueError, TypeError):
-            pass
-    return lim
+def _route_seat_limit(board, name):
+    """Shared T-1041 limit check (route_headroom.seat_limit)."""
+    return _route_headroom().seat_limit(_agent_rec(board, name))
 
 
 def _refuse_limited_seat(board, seat, verb):
-    lim = _cli_active_limit(board, seat)
+    lim = _route_seat_limit(board, seat)
     if not lim:
         return
     sys.exit("%s: %s -- not dispatching" % (
         verb, _route_headroom().limit_label(lim)))
-
-
-def _seat_headroom(board, entry):
-    return _route_headroom().seat_headroom(board, entry)
-
-
-def _seat_route_row(board, name, entry, score):
-    rh = _route_headroom()
-    lim = _cli_active_limit(board, name)
-    return {
-        "name": name,
-        "limited": bool(lim),
-        "remaining": _seat_headroom(board, entry),
-        "cost": rh.cost_rank(entry),
-        "score": score,
-        "limit_label": rh.limit_label(lim) if lim else "",
-    }
-
-
-def _route_candidate_rows(board, ticket, eligible, wf, roles, load_, pool=None):
-    names = list(dict.fromkeys(list(eligible or []) + list(pool or [])))
-    rows = []
-    for n in names:
-        e = wf.get(n, {})
-        s = score_agent(board, n, e, roles, ticket)
-        if s is None:
-            continue
-        s -= 1.5 * load_.get(n, 0)
-        rows.append(_seat_route_row(board, n, e, s))
-    return rows
 
 
 def _write_route_pick(board, t, rows, deps_done):
@@ -4910,6 +4867,7 @@ def _write_route_pick(board, t, rows, deps_done):
 def _cmd_next_dispatch(a, board):
     from ticket_board.scheduler import (
         DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, _candidate_names)
+    from ticket_board.sounding import ticket_lane
     tickets = load_all(board)
     wf = load_workforce(board)
     roles = load_roles(board)
@@ -4920,6 +4878,8 @@ def _cmd_next_dispatch(a, board):
         if t["status"] == "claimed":
             load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
     raw_names = _candidate_names(wf, roles, only=getattr(a, "only", None))
+    limited, agents = _route_headroom().split_limited(
+        raw_names, agents, lambda n: _route_seat_limit(board, n))
     names, _excluded = filter_eligible(
         raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=DEFAULT_ALIVE_WITHIN_MIN)
@@ -4930,6 +4890,7 @@ def _cmd_next_dispatch(a, board):
     ready = [t for t in tickets
              if t["status"] == "open"
              and not _ticket_on_hold(t)
+             and ticket_lane(t) == "ready"
              and _deps_done(t)
              and not _reserved_agent(t)]
     ready.sort(key=lambda t: (t.get("priority", 2), t["id"]))
@@ -4937,7 +4898,8 @@ def _cmd_next_dispatch(a, board):
         print("next --dispatch: no ready ticket")
         sys.exit(1)
     t = ready[0]
-    rows = _route_candidate_rows(board, t, names, wf, roles, load_, pool=raw_names)
+    rows = _route_headroom().candidate_rows(
+        board, t, names, limited, wf, roles, load_, score_agent)
     best, why = _write_route_pick(board, t, rows, False)
     if not best:
         print("%s %s" % (t["id"], why))
@@ -4996,6 +4958,8 @@ def cmd_route(a, board):
         if t["status"] == "claimed":
             load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
     raw_names = _candidate_names(wf, roles, only=a.only)
+    limited, agents = _route_headroom().split_limited(
+        raw_names, agents, lambda n: _route_seat_limit(board, n))
     names, excluded = filter_eligible(
         raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=alive_within)
@@ -5022,7 +4986,8 @@ def cmd_route(a, board):
     print("%-6s %-3s %-44s %-14s %s" % ("ticket", "pri", "title", "suggested", "why"))
     changed = 0
     for t in ready_first:
-        rows = _route_candidate_rows(board, t, names, wf, roles, load_, pool=raw_names)
+        rows = _route_headroom().candidate_rows(
+            board, t, names, limited, wf, roles, load_, score_agent)
         best, why = _write_route_pick(board, t, rows, _deps_done(t))
         if best:
             changed += 1

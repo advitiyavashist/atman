@@ -281,3 +281,76 @@ def test_route_never_selects_limited_when_unknown_is_open(tool, board):
     assert t.get("suggested") != "bob"
     notes = " ".join(n.get("text", "") for n in t.get("notes") or [])
     assert "skipped limited: bob" in notes
+
+
+def _stamp_dormant(board, name):
+    path = board / "agents" / ("%s.json" % name)
+    rec = json.loads(path.read_text()) if path.exists() else {"owner": name}
+    rec["seen"] = "2020-01-01T00:00:00Z"
+    path.write_text(json.dumps(rec, indent=2))
+
+
+def _pick(tool, board, verb):
+    if verb == "route":
+        r = run(tool, board, "route", "--only", "alice", "bob", agent="alice")
+    else:
+        r = run(tool, board, "next", "--dispatch", agent="alice")
+    assert r.returncode == 0, r.stderr + r.stdout
+    t = show(tool, board, "T-001", agent="alice")
+    return r, t.get("suggested") if verb == "route" else t.get("reserved_for")
+
+
+VERBS = ["route", "next-dispatch"]
+
+
+@pytest.mark.parametrize("verb", VERBS)
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_dormant_seat_with_better_headroom_and_cost_never_picked(tool, verb, board):
+    """Regression: filter_eligible exclusions must not re-enter the ranking."""
+    _pair(tool, board)
+    _stamp_dormant(board, "bob")
+    _write_ledger(board, {"codex": {"provider": "codex", "remaining": "90%"}})
+    r, picked = _pick(tool, board, verb)
+    if verb == "route":
+        assert "dormant 1" in r.stdout
+    assert picked == "alice"
+
+
+@pytest.mark.parametrize("verb", VERBS)
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_busy_seat_with_better_headroom_and_cost_never_picked(tool, verb, board):
+    _pair(tool, board)
+    assert run(tool, board, "create", "Other docs", "--role", "docs",
+               agent="bob").returncode == 0
+    got = run(tool, board, "claim", "T-002", agent="bob")
+    assert got.returncode == 0, got.stderr + got.stdout
+    _stamp_seen(board, "bob")
+    _write_ledger(board, {"codex": {"provider": "codex", "remaining": "90%"}})
+    r, picked = _pick(tool, board, verb)
+    if verb == "route":
+        assert "busy 1" in r.stdout
+    assert picked == "alice"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_route_spreads_two_ready_tickets_over_two_equal_seats(tool, board):
+    for name in ("alice", "bob"):
+        assert run(tool, board, "join", name, "--roles", "docs", "--cost", "low",
+                   "--harness", "codex", agent=name).returncode == 0
+        _stamp_seen(board, name)
+    assert run(tool, board, "create", "More docs", "--role", "docs",
+               agent="alice").returncode == 0
+    routed = run(tool, board, "route", "--only", "alice", "bob", agent="alice")
+    assert routed.returncode == 0, routed.stderr + routed.stdout
+    picks = [show(tool, board, tid).get("suggested") for tid in ("T-001", "T-002")]
+    assert sorted(picks) == ["alice", "bob"]
+
+
+def test_seat_limit_is_shared_and_expires_on_reset():
+    now = datetime(2026, 9, 17, tzinfo=timezone.utc)
+    live = {"limit": {"at": "2026-09-16T02:00:00Z", "reset_at": RESET}}
+    past = {"limit": {"at": "2026-09-16T02:00:00Z", "reset_at": "2026-09-16T03:00:00Z"}}
+    assert rh.seat_limit(live, now=now) == live["limit"]
+    assert rh.seat_limit(past, now=now) is None
+    assert rh.seat_limit({"limit": {}}, now=now) is None
+    assert rh.rank_key(False, None, 0, 10, load=0.5) > rh.rank_key(False, None, 2, 1, load=0)
