@@ -19275,12 +19275,32 @@ def _feedback_redaction_ok(text, home="", run="", repo="", repo_name=""):
     return True
 
 
+def _feedback_seat_rec(rec):
+    """A copy of an agent record whose expired limit is already dropped.
+
+    agent_liveness() -> _active_seat_limit() clears an expired limit by
+    rewriting the agent file. `atm feedback` must not write, so it hands
+    liveness a record that has nothing left to expire.
+    """
+    rec = dict(rec)
+    lim = rec.get("limit") or {}
+    if lim.get("reset_at"):
+        try:
+            reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
+            if reset.tzinfo is not None and reset <= datetime.now(timezone.utc):
+                rec.pop("limit", None)
+        except (ValueError, TypeError):
+            pass
+    return rec
+
+
 def cmd_feedback(a, board):
     """Local-only, pasteable board summary for a GitHub issue. Prints to stdout; sends nothing anywhere.
 
-    Reads only existing board data (no new instrumentation) and must work on
-    a board where nothing has succeeded yet -- that is the most informative
-    case, not an error case.
+    Reads only existing board data plus a PATH lookup for harness binaries
+    (no new instrumentation, no harness is executed, nothing is written) and
+    must work on a board where nothing has succeeded yet -- that is the most
+    informative case, not an error case.
     """
     import platform as _platform
     g = _safe(lambda: git_state(), None)
@@ -19307,15 +19327,20 @@ def cmd_feedback(a, board):
     lines.append("board: %s" % (board or "(none)"))
     lines.append("")
 
-    rows, _note = probe_integration_catalog(home=home)
-    attach_catalog_usage(rows)
-    found = [r["name"] for r in rows if r.get("on_disk")]
-    missing = [r["name"] for r in rows if not r.get("on_disk")]
-    logged_in = [r["name"] for r in rows if r.get("on_disk") and r.get("usage") == "ok"]
-    lines.append("harnesses found on this machine: %s" % (", ".join(found) or "none"))
+    # PATH lookup only. probe_integration_catalog() may rewrite ~/.local/bin/codex
+    # and attach_catalog_usage() runs each harness binary; a read-only summary
+    # must do neither, so login state is deliberately not checked here.
+    search_path = os.environ.get("PATH", "")
+    local_bin = os.path.join(home, ".local", "bin")
+    if local_bin not in search_path.split(os.pathsep):
+        search_path = local_bin + os.pathsep + search_path
+    found, missing = [], []
+    for spec in INTEGRATION_CATALOG:
+        on_path = any(_which_on_path(b, search_path) for b in spec["binaries"])
+        (found if on_path else missing).append(spec["name"])
+    lines.append("harnesses found on PATH: %s" % (", ".join(found) or "none"))
     lines.append("harnesses not found: %s" % (", ".join(missing) or "none"))
-    lines.append("harnesses with a usable login: %s" % (
-        ", ".join(logged_in) or "none (unsupported/unknown usage is not the same as exhausted)"))
+    lines.append("harness logins: not checked")
     lines.append("")
 
     tickets = load_all(board)
@@ -19337,29 +19362,28 @@ def cmd_feedback(a, board):
     lines.append("reopens: %d" % reopens)
     lines.append("")
 
+    # Objective text and seat names are the user's own words; a pasteable
+    # summary carries only their shape (set / state / exit criteria, counts).
     obj = load_objective(board)
     if obj:
-        state = obj.get("state") or "active"
-        lines.append("objective closed: %s (state: %s) -- %s" % (
-            "no" if state == "active" else "yes", state, (obj.get("text") or "")[:160]))
+        lines.append("objective: set (state: %s, exit criteria: %s)" % (
+            objective_state(obj), "yes" if objective_exit_ok(obj) else "no"))
     else:
         lines.append("objective: not set")
     lines.append("")
 
-    agents = load_agents(board)
-    limited, stalled = [], []
-    for r in agents:
-        owner = r.get("owner") or ""
-        if not owner:
+    limited = stalled = 0
+    for r in load_agents(board):
+        if not r.get("owner"):
             continue
-        lv = _safe(lambda r=r: agent_liveness(board, r), {"state": "unknown"})
+        rec = _feedback_seat_rec(r)
+        lv = _safe(lambda rec=rec: agent_liveness(board, rec), {"state": "unknown"})
         if lv.get("state") == "limited":
-            limited.append(owner)
+            limited += 1
         elif lv.get("state") == "dead":
-            stalled.append(owner)
-    lines.append("seats LIMITED (hit a usage limit): %s" % (", ".join(sorted(limited)) or "none"))
-    lines.append("seats with no live response (closest tracked state to \"stalled\"): %s" % (
-        ", ".join(sorted(stalled)) or "none"))
+            stalled += 1
+    lines.append("seats LIMITED: %d" % limited)
+    lines.append("seats with no live response (closest tracked state to \"stalled\"): %d" % stalled)
     lines.append("")
 
     text = _feedback_redact("\n".join(lines), home=home, run=run, repo=repo, repo_name=repo_name)

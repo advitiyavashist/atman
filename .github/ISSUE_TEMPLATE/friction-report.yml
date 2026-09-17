@@ -32,10 +32,11 @@ body:
     attributes:
       label: atm feedback output (optional)
       description: >-
-        Paste the output of `atm feedback`. It only reads local board data,
-        prints to your terminal, and redacts your home directory and this
-        checkout's path before printing -- nothing is sent anywhere by
-        running it.
+        Paste the output of `atm feedback`. It reads local board data and
+        checks which harness commands are on your PATH (without running
+        them), prints counts rather than your objective text or seat names,
+        and redacts your home directory and this checkout's path before
+        printing -- nothing is sent anywhere by running it.
       render: text
     validations:
       required: false

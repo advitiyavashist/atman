@@ -56,8 +56,9 @@ def test_feedback_on_a_fresh_board_prints_zeros_not_errors(board):
     assert "release overrides:        0" in out
     assert "reopens: 0" in out
     assert "objective: not set" in out
-    assert "seats LIMITED (hit a usage limit): none" in out
-    assert 'seats with no live response (closest tracked state to "stalled"): none' in out
+    assert "seats LIMITED: 0" in out
+    assert 'seats with no live response (closest tracked state to "stalled"): 0' in out
+    assert "harness logins: not checked" in out
     assert "Nothing here is sent anywhere." in out
 
 
@@ -93,11 +94,94 @@ def test_feedback_counts_reopens(board):
     assert "reopens: 1" in out
 
 
-def test_feedback_lists_a_limited_seat(board):
+def test_feedback_counts_a_limited_seat_without_naming_it(board):
     r = run(board, "limit", "alice", "--note", "quota")
     assert r.returncode == 0, r.stderr
     out = run(board, "feedback").stdout
-    assert "seats LIMITED (hit a usage limit): alice" in out
+    assert "seats LIMITED: 1" in out
+    assert "alice" not in out
+
+
+def test_feedback_does_not_print_a_seat_named_after_the_user(board):
+    """Seat names are often the person's own login name: count, never name."""
+    user = "kavanauser"
+    r = run(board, "limit", user, "--note", "quota")
+    assert r.returncode == 0, r.stderr
+    out = run(board, "feedback").stdout
+    assert "seats LIMITED: 1" in out
+    assert user not in out
+
+
+def test_feedback_does_not_print_objective_text(board):
+    secret_path = "/Users/someone/private/clientA/roadmap.md"
+    token = "ghp_" + "Z9" * 18
+    r = run(board, "objective", "ship %s using %s" % (secret_path, token),
+            "--exit", "token %s works" % token)
+    assert r.returncode == 0, r.stderr
+    out = run(board, "feedback").stdout
+    assert "objective: set (state: active, exit criteria: yes)" in out
+    assert secret_path not in out
+    assert "clientA" not in out
+    assert token not in out
+    assert "ghp_" not in out
+
+
+def _snapshot(*roots):
+    snap = {}
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(str(root)):
+            for name in dirnames + filenames:
+                p = os.path.join(dirpath, name)
+                st = os.lstat(p)
+                data = b""
+                if os.path.isfile(p) and not os.path.islink(p):
+                    with open(p, "rb") as f:
+                        data = f.read()
+                snap[p] = (st.st_mtime_ns, st.st_size, os.path.islink(p) and os.readlink(p), data)
+    return snap
+
+
+def test_feedback_never_executes_harnesses_or_writes_files(board):
+    """Harness presence is a PATH lookup: stub binaries that would drop a
+    marker when run must never be run, and nothing on disk may change --
+    including the ~/.local/bin/codex retarget the catalog probe performs."""
+    home = board.parent.parent / "home"
+    home.mkdir(exist_ok=True)
+    stubs = board.parent.parent / "stubs"
+    stubs.mkdir()
+    marker = board.parent.parent / "executed.marker"
+    names = ("claude", "codex", "agent", "cursor-agent", "agy", "devin", "gemini")
+    for name in names:
+        stub = stubs / name
+        stub.write_text("#!/bin/sh\necho %s >> %s\n" % (name, marker))
+        stub.chmod(0o755)
+    # A chatgpt extension codex binary retarget_stale_local_codex would link.
+    ext = home / ".vscode" / "extensions" / "openai.chatgpt-9.9.9" / "bin" / "arm64" / "codex"
+    ext.parent.mkdir(parents=True)
+    ext.write_text("#!/bin/sh\necho ext >> %s\n" % marker)
+    ext.chmod(0o755)
+
+    # An expired provider limit: agent_liveness() would clear it on disk.
+    r = run(board, "limit", "alice", "--note", "quota")
+    assert r.returncode == 0, r.stderr
+    rec_path = board / "agents" / "alice.json"
+    rec = json.loads(rec_path.read_text())
+    rec["limit"] = dict(rec["limit"], source="provider", reset_at="2000-01-01T00:00:00Z")
+    rec_path.write_text(json.dumps(rec, indent=2) + "\n")
+    before = _snapshot(board, home, stubs)
+    e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="", HOME=str(home),
+             PATH=str(stubs) + os.pathsep + os.environ.get("PATH", ""))
+    for var in ("TICKETS_STOP_HOOK", "TICKET_SEAT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
+                "CURSOR_SESSION_ID", "TERM_SESSION_ID", "TICKET_SESSION_ID"):
+        e.pop(var, None)
+    out = subprocess.run([sys.executable, str(TOOL), "feedback"], capture_output=True,
+                         text=True, env=e, cwd=str(board.parent))
+    assert out.returncode == 0, out.stderr
+    assert not marker.exists(), marker.read_text()
+    assert not (home / ".local" / "bin" / "codex").exists()
+    assert _snapshot(board, home, stubs) == before
+    assert "Claude Code" in out.stdout.split("harnesses found on PATH:")[1].splitlines()[0]
+    assert "harness logins: not checked" in out.stdout
 
 
 def test_feedback_redacts_home_and_repo_path(board):
