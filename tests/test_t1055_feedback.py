@@ -57,7 +57,8 @@ def test_feedback_on_a_fresh_board_prints_zeros_not_errors(board):
     assert "reopens: 0" in out
     assert "objective: not set" in out
     assert "seats LIMITED: 0" in out
-    assert 'seats with no live response (closest tracked state to "stalled"): 0' in out
+    assert 'seats whose recorded watcher is gone (closest tracked state to "stalled"): 0' in out
+    assert "atm version: " in out
     assert "harness logins: not checked" in out
     assert "Nothing here is sent anywhere." in out
 
@@ -126,6 +127,52 @@ def test_feedback_does_not_print_objective_text(board):
     assert "ghp_" not in out
 
 
+def test_feedback_does_not_print_the_project_branch(board):
+    """The user's branch name can carry anything; only Atman's version prints."""
+    token = "ghp_" + "Q7" * 18
+    branch = "feat/" + token
+    subprocess.run(["git", "-C", str(board.parent), "checkout", "-q", "-b", branch], check=True)
+    out = run(board, "feedback").stdout
+    assert token not in out
+    assert "ghp_" not in out
+    assert branch not in out
+    assert "atm version: " in out
+    assert "inside a git worktree: yes" in out
+
+
+def test_feedback_runs_no_subprocess(board, monkeypatch, capsys):
+    """In-process: any process spawn during cmd_feedback is a failure."""
+    import argparse
+    import subprocess as sp
+    import tickets as tk
+
+    t = load_ticket(board, "T-001")
+    agents = board / "agents"
+    agents.mkdir(exist_ok=True)
+    (agents / "alice.json").write_text(json.dumps({"owner": "alice", "cwd": str(board.parent)}))
+    (agents / "alice.watch.pid").write_text("999999\n")
+    (agents / "bob.json").write_text(json.dumps({"owner": "bob", "limit": {"note": "quota"}}))
+    assert t["id"] == "T-001"
+
+    spawned = []
+
+    def refuse(*args, **kwargs):
+        spawned.append(args[:1])
+        raise AssertionError("atm feedback spawned a process: %r" % (args[:1],))
+
+    monkeypatch.setattr(sp.Popen, "__init__", refuse)
+    for name in ("system", "posix_spawn", "posix_spawnp", "fork", "execv", "execvp", "popen"):
+        if hasattr(os, name):
+            monkeypatch.setattr(os, name, refuse)
+    monkeypatch.chdir(board.parent)
+    tk.cmd_feedback(argparse.Namespace(), str(board))
+    out = capsys.readouterr().out
+    assert spawned == []
+    assert "seats LIMITED: 1" in out
+    assert 'seats whose recorded watcher is gone (closest tracked state to "stalled"): 1' in out
+    assert "alice" not in out and "bob" not in out
+
+
 def _snapshot(*roots):
     snap = {}
     for root in roots:
@@ -150,7 +197,8 @@ def test_feedback_never_executes_harnesses_or_writes_files(board):
     stubs = board.parent.parent / "stubs"
     stubs.mkdir()
     marker = board.parent.parent / "executed.marker"
-    names = ("claude", "codex", "agent", "cursor-agent", "agy", "devin", "gemini")
+    names = ("claude", "codex", "agent", "cursor-agent", "agy", "devin", "gemini",
+             "git", "ps", "lsof", "uname", "sysctl", "sw_vers")
     for name in names:
         stub = stubs / name
         stub.write_text("#!/bin/sh\necho %s >> %s\n" % (name, marker))
@@ -168,7 +216,9 @@ def test_feedback_never_executes_harnesses_or_writes_files(board):
     rec = json.loads(rec_path.read_text())
     rec["limit"] = dict(rec["limit"], source="provider", reset_at="2000-01-01T00:00:00Z")
     rec_path.write_text(json.dumps(rec, indent=2) + "\n")
-    before = _snapshot(board, home, stubs)
+    git_dir = board.parent / ".git"
+    assert git_dir.is_dir()
+    before = _snapshot(board, git_dir, home, stubs)
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="", HOME=str(home),
              PATH=str(stubs) + os.pathsep + os.environ.get("PATH", ""))
     for var in ("TICKETS_STOP_HOOK", "TICKET_SEAT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
@@ -179,9 +229,18 @@ def test_feedback_never_executes_harnesses_or_writes_files(board):
     assert out.returncode == 0, out.stderr
     assert not marker.exists(), marker.read_text()
     assert not (home / ".local" / "bin" / "codex").exists()
-    assert _snapshot(board, home, stubs) == before
+    assert _snapshot(board, git_dir, home, stubs) == before
     assert "Claude Code" in out.stdout.split("harnesses found on PATH:")[1].splitlines()[0]
     assert "harness logins: not checked" in out.stdout
+
+    # Board discovery without TICKETS_DIR must not shell out to git either.
+    e.pop("TICKETS_DIR")
+    out = subprocess.run([sys.executable, str(TOOL), "feedback"], capture_output=True,
+                         text=True, env=e, cwd=str(board.parent))
+    assert out.returncode == 0, out.stderr
+    assert "tickets created:          1" in out.stdout
+    assert not marker.exists(), marker.read_text()
+    assert _snapshot(board, git_dir, home, stubs) == before
 
 
 def test_feedback_redacts_home_and_repo_path(board):

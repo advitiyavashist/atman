@@ -357,6 +357,10 @@ def _fs_repo_link(start):
         d = parent
 
 
+# Set by main() for read-only commands that must not spawn git (`atm feedback`).
+_REPO_ROOT_FS_ONLY = False
+
+
 def _repo_root():
     """Root of the MAIN worktree, so every linked worktree shares one board.
 
@@ -373,6 +377,12 @@ def _repo_root():
     import subprocess
     here = os.getcwd()
     fs_root, fs_common = _fs_repo_link(here)
+    if _REPO_ROOT_FS_ONLY:
+        # `atm feedback` promises no subprocess. The filesystem answer is the
+        # one that wins on disagreement anyway.
+        if fs_common is None or os.path.basename(fs_common) != ".git":
+            return None
+        return os.path.dirname(fs_common)
     try:
         out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
                              capture_output=True, text=True, timeout=5,
@@ -19275,37 +19285,54 @@ def _feedback_redaction_ok(text, home="", run="", repo="", repo_name=""):
     return True
 
 
-def _feedback_seat_rec(rec):
-    """A copy of an agent record whose expired limit is already dropped.
+def _feedback_seat_counts(board):
+    """(limited, stalled) seat counts from board files alone.
 
-    agent_liveness() -> _active_seat_limit() clears an expired limit by
-    rewriting the agent file. `atm feedback` must not write, so it hands
-    liveness a record that has nothing left to expire.
+    agent_liveness() scans the process table (`ps`, sometimes `lsof`) and
+    clears expired limits by rewriting the agent file, so feedback cannot
+    use it. LIMITED is a recorded limit that has not reached its reset_at;
+    "stalled" is a seat whose recorded watcher pid (agents/<seat>.watch.pid)
+    is no longer running -- a signal-0 probe, not a process scan.
     """
-    rec = dict(rec)
-    lim = rec.get("limit") or {}
-    if lim.get("reset_at"):
+    limited = stalled = 0
+    now_utc = datetime.now(timezone.utc)
+    for rec in load_agents(board):
+        owner = rec.get("owner") or ""
+        if not owner:
+            continue
+        lim = rec.get("limit")
+        if lim:
+            active = True
+            if lim.get("reset_at"):
+                try:
+                    reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
+                    active = not (reset.tzinfo is not None and reset <= now_utc)
+                except (ValueError, TypeError):
+                    pass
+            if active:
+                limited += 1
+                continue
         try:
-            reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-            if reset.tzinfo is not None and reset <= datetime.now(timezone.utc):
-                rec.pop("limit", None)
-        except (ValueError, TypeError):
-            pass
-    return rec
+            with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
+                pid = int((f.read() or "0").strip() or 0)
+        except (IOError, OSError, ValueError):
+            pid = 0
+        if pid and not _pid_alive(pid):
+            stalled += 1
+    return limited, stalled
 
 
 def cmd_feedback(a, board):
     """Local-only, pasteable board summary for a GitHub issue. Prints to stdout; sends nothing anywhere.
 
-    Reads only existing board data plus a PATH lookup for harness binaries
-    (no new instrumentation, no harness is executed, nothing is written) and
-    must work on a board where nothing has succeeded yet -- that is the most
-    informative case, not an error case.
+    Reads only existing board files plus a PATH lookup for harness binaries.
+    It runs no subprocess -- no harness, no git, no ps/lsof -- and writes
+    nothing. The user's git branch, objective text and seat names are never
+    printed. Must work on a board where nothing has succeeded yet -- that is
+    the most informative case, not an error case.
     """
     import platform as _platform
-    g = _safe(lambda: git_state(), None)
-    # Redaction paths come from the process and the board, not git. Outside a
-    # worktree git_state() is None, and that must not disable the scrub.
+    # Redaction paths come from the process and the board, not git.
     home = os.path.expanduser("~")
     run = os.getcwd()
     repo = ""
@@ -19317,12 +19344,14 @@ def cmd_feedback(a, board):
     repo_name = os.path.basename((repo or run).rstrip(os.sep)) if (repo or run) else ""
 
     lines = ["Atman feedback summary -- paste into a GitHub issue. Nothing here is sent anywhere.", ""]
-    if g:
-        lines.append("version: %s@%s%s" % (
-            g["branch"], g["sha"], "  (%d uncommitted file(s))" % g["dirty"] if g["dirty"] else ""))
-    else:
-        lines.append("version: %s" % release_status())
-    lines.append("platform: %s" % _platform.platform())
+    # Atman's own version, never the user's project branch (it can carry
+    # anything, tokens included). git_state() is not called: `git status`
+    # takes the index lock and can rewrite .git/index.
+    lines.append("atm version: %s" % release_status())
+    lines.append("inside a git worktree: %s" % ("yes" if _fs_repo_link(run)[0] else "no"))
+    # platform.platform() can shell out (uname -p) for the processor field.
+    lines.append("platform: %s %s %s" % (
+        _platform.system(), _platform.release(), _platform.machine()))
     lines.append("python: %s" % _platform.python_version())
     lines.append("board: %s" % (board or "(none)"))
     lines.append("")
@@ -19372,18 +19401,9 @@ def cmd_feedback(a, board):
         lines.append("objective: not set")
     lines.append("")
 
-    limited = stalled = 0
-    for r in load_agents(board):
-        if not r.get("owner"):
-            continue
-        rec = _feedback_seat_rec(r)
-        lv = _safe(lambda rec=rec: agent_liveness(board, rec), {"state": "unknown"})
-        if lv.get("state") == "limited":
-            limited += 1
-        elif lv.get("state") == "dead":
-            stalled += 1
+    limited, stalled = _feedback_seat_counts(board)
     lines.append("seats LIMITED: %d" % limited)
-    lines.append("seats with no live response (closest tracked state to \"stalled\"): %d" % stalled)
+    lines.append("seats whose recorded watcher is gone (closest tracked state to \"stalled\"): %d" % stalled)
     lines.append("")
 
     text = _feedback_redact("\n".join(lines), home=home, run=run, repo=repo, repo_name=repo_name)
@@ -20248,6 +20268,9 @@ def main():
         # board_dir() or a shadow board is refused before we can report it.
         a.fn(a)
         return
+    if a.cmd == "feedback":
+        global _REPO_ROOT_FS_ONLY
+        _REPO_ROOT_FS_ONLY = True
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
     if a.cmd not in (

@@ -32,11 +32,13 @@ body:
     attributes:
       label: atm feedback output (optional)
       description: >-
-        Paste the output of `atm feedback`. It reads local board data and
-        checks which harness commands are on your PATH (without running
-        them), prints counts rather than your objective text or seat names,
-        and redacts your home directory and this checkout's path before
-        printing -- nothing is sent anywhere by running it.
+        Paste the output of `atm feedback`. It reads local board files and
+        checks which harness commands are on your PATH without running them
+        (it runs no git, harness or other subprocess and writes nothing). It
+        prints Atman's version rather than your git branch, counts rather
+        than your objective text or seat names, and redacts your home
+        directory and this checkout's path -- nothing is sent anywhere by
+        running it.
       render: text
     validations:
       required: false
