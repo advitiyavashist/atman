@@ -19213,21 +19213,66 @@ def cmd_self(a, board):
         print("invoked: %s" % sys.argv[0])
 
 
-def _feedback_redact(text, home="", run="", repo_name=""):
+_FEEDBACK_REDACT_CLAIM = (
+    "Redacted before printing: your home directory, this checkout's path, and its folder name."
+)
+
+
+def _feedback_path_forms(*paths):
+    """Absolute and realpath variants, longest first so prefixes lose.
+
+    git_state() is not consulted. macOS /var vs /private/var and a TICKETS_DIR
+    that was abspath'd rather than realpath'd must all be the same path.
+    """
+    forms = []
+    for p in paths:
+        if not p:
+            continue
+        for form in (p, os.path.abspath(p), os.path.realpath(p)):
+            form = form.rstrip(os.sep)
+            if form and form != os.sep and form not in forms:
+                forms.append(form)
+    forms.sort(key=len, reverse=True)
+    return forms
+
+
+def _feedback_redact(text, home="", run="", repo="", repo_name=""):
     """Scrub this machine's paths and repo folder name before printing.
 
     `atm feedback` is meant to be pasted into a public GitHub issue, and the
     promise is that the board stays on this machine -- so the text is
     scrubbed here rather than trusting every caller to do it.
+
+    Redaction must not depend on git resolving a worktree. Home, the
+    process cwd, and the board's checkout path are always replaced, even
+    when git_state() is None.
     """
     out = text
-    if run:
-        out = out.replace(run, "<RUN>")
-    if home:
-        out = out.replace(home, "<HOME>")
+    for path in _feedback_path_forms(run):
+        out = out.replace(path, "<RUN>")
+    for path in _feedback_path_forms(repo):
+        out = out.replace(path, "<REPO>")
+    for path in _feedback_path_forms(home):
+        out = out.replace(path, "<HOME>")
     if repo_name:
         out = re.sub(r'(?<![\w/.-])%s(?![\w/.-])' % re.escape(repo_name), "<REPO>", out)
     return out
+
+
+def _feedback_redaction_ok(text, home="", run="", repo="", repo_name=""):
+    """True only when every machine path we promised to scrub is gone.
+
+    An empty run/repo (the old git_state()-None path) is not success --
+    we never identified the checkout, so we must not claim it was redacted.
+    """
+    if not home or not (run or repo) or not repo_name:
+        return False
+    for path in _feedback_path_forms(home, run, repo):
+        if path in text:
+            return False
+    if re.search(r'(?<![\w/.-])%s(?![\w/.-])' % re.escape(repo_name), text):
+        return False
+    return True
 
 
 def cmd_feedback(a, board):
@@ -19239,9 +19284,17 @@ def cmd_feedback(a, board):
     """
     import platform as _platform
     g = _safe(lambda: git_state(), None)
+    # Redaction paths come from the process and the board, not git. Outside a
+    # worktree git_state() is None, and that must not disable the scrub.
     home = os.path.expanduser("~")
-    run = (g or {}).get("top") or ""
-    repo_name = os.path.basename(run.rstrip(os.sep)) if run else ""
+    run = os.getcwd()
+    repo = ""
+    if board:
+        board_abs = os.path.abspath(board)
+        repo = (os.path.dirname(board_abs)
+                if os.path.basename(board_abs.rstrip(os.sep)) == ".tickets"
+                else board_abs)
+    repo_name = os.path.basename((repo or run).rstrip(os.sep)) if (repo or run) else ""
 
     lines = ["Atman feedback summary -- paste into a GitHub issue. Nothing here is sent anywhere.", ""]
     if g:
@@ -19308,9 +19361,11 @@ def cmd_feedback(a, board):
     lines.append("seats with no live response (closest tracked state to \"stalled\"): %s" % (
         ", ".join(sorted(stalled)) or "none"))
     lines.append("")
-    lines.append("Redacted before printing: your home directory, this checkout's path, and its folder name.")
 
-    print(_feedback_redact("\n".join(lines), home=home, run=run, repo_name=repo_name))
+    text = _feedback_redact("\n".join(lines), home=home, run=run, repo=repo, repo_name=repo_name)
+    if _feedback_redaction_ok(text, home=home, run=run, repo=repo, repo_name=repo_name):
+        text += "\n" + _FEEDBACK_REDACT_CLAIM
+    print(text)
 
 
 def main():

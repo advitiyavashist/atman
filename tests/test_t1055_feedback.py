@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -106,3 +107,75 @@ def test_feedback_redacts_home_and_repo_path(board):
     assert home not in out
     assert repo not in out
     assert "<HOME>" in out or "<RUN>" in out
+
+
+def _feedback_env(home, board):
+    e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT="", HOME=str(home))
+    e.pop("TICKETS_STOP_HOOK", None)
+    e.pop("TICKET_SEAT", None)
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID", "TICKET_SESSION_ID"):
+        e.pop(var, None)
+    return e
+
+
+def test_feedback_redacts_outside_a_git_repo(tmp_path):
+    """git_state() is None outside a worktree; the checkout must still be scrubbed.
+
+    Old cmd_feedback took run/repo_name from git_state()["top"], so a non-git
+    cwd printed the full checkout (e.g. code/myrepo) and still claimed the
+    text was redacted. This fails on that code.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "code" / "myrepo"
+    board = repo / ".tickets"
+    home.mkdir()
+    repo.mkdir(parents=True)
+    assert not (repo / ".git").exists()
+
+    env = _feedback_env(home, board)
+    created = subprocess.run(
+        [sys.executable, str(TOOL), "create", "Throwaway ticket"],
+        capture_output=True, text=True, env=env, cwd=str(repo))
+    assert created.returncode == 0, created.stderr
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "feedback"],
+        capture_output=True, text=True, env=env, cwd=str(repo))
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+
+    home_s = str(home)
+    repo_s = str(repo)
+    for leaked in (
+        home_s, os.path.abspath(home_s), os.path.realpath(home_s),
+        repo_s, os.path.abspath(repo_s), os.path.realpath(repo_s),
+        str(tmp_path), os.path.realpath(tmp_path),
+    ):
+        assert leaked not in out, leaked
+    assert "myrepo" not in out
+    assert "code/myrepo" not in out
+    assert "board: /" not in out
+    assert not re.search(r"(?m)(^|[\s:=])/(?:Users|home|private|var|tmp|Volumes)/", out), out
+    claim = "Redacted before printing: your home directory, this checkout's path, and its folder name."
+    paths_remain = any(p in out for p in (home_s, repo_s, "myrepo"))
+    assert (claim in out) == (not paths_remain)
+    assert claim in out
+
+
+def test_feedback_redaction_claim_only_when_every_path_was_scrubbed():
+    """The printed claim is a promise: empty run (git_state None) is not success."""
+    import tickets as tk
+
+    leaked = "board: /Users/me/code/myrepo/.tickets"
+    half = tk._feedback_redact(leaked, home="/Users/me", run="", repo_name="")
+    assert "myrepo" in half
+    assert not tk._feedback_redaction_ok(half, home="/Users/me", run="", repo_name="")
+
+    clean = tk._feedback_redact(
+        leaked, home="/Users/me", run="/Users/me/code/myrepo",
+        repo="/Users/me/code/myrepo", repo_name="myrepo")
+    assert "/Users/me" not in clean
+    assert "myrepo" not in clean
+    assert tk._feedback_redaction_ok(
+        clean, home="/Users/me", run="/Users/me/code/myrepo",
+        repo="/Users/me/code/myrepo", repo_name="myrepo")
