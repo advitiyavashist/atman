@@ -44,7 +44,7 @@ import shlex
 import sys
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Immutable releases verify every shipped byte before dispatch.  Do not add
 # interpreter-generated files under the verified package tree after that
@@ -2198,6 +2198,99 @@ def _review_verdict():
             sys.path.insert(0, src)
         from ticket_board import review_verdict as m
         return m
+
+
+def _stall_watch():
+    try:
+        from ticket_board import stall_watch as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import stall_watch as m
+        return m
+
+
+def _record_watch_stall(board, owner, measured, pid, ticket=None):
+    sw = _stall_watch()
+    wall = datetime.now(timezone.utc)
+    last = wall - timedelta(seconds=float(measured or 0))
+    last_iso = last.strftime("%Y-%m-%dT%H:%M:%SZ")
+    rec = sw.stall_record(last_iso, wall, measured, pid)
+
+    def write(agent):
+        agent["stall"] = rec
+        agent.pop("stall_resolved", None)
+
+    _agent_update(board, owner, write)
+    text = sw.stall_note(owner, measured, last_iso)
+    if ticket:
+        t = load(board, ticket)
+        t.setdefault("notes", []).append({"by": owner, "at": now(), "text": text})
+        save(board, t)
+    return rec
+
+
+def _resolve_watch_stall(board, owner, ticket=None):
+    sw = _stall_watch()
+    stamped = now()
+
+    def write(agent):
+        if not agent.get("stall"):
+            return False
+        agent["stall_resolved"] = sw.resolved_record(stamped, datetime.now(timezone.utc))
+        agent.pop("stall", None)
+
+    if _agent_update(board, owner, write) is None:
+        return
+    text = sw.resolved_note(owner, stamped)
+    if ticket:
+        t = load(board, ticket)
+        t.setdefault("notes", []).append({"by": owner, "at": stamped, "text": text})
+        save(board, t)
+
+
+def _clear_watch_stall(board, owner):
+    """Drop a recorded stall when the stalled run itself terminates.
+
+    The next watch tick must re-evaluate fresh. Output resume uses
+    `_resolve_watch_stall` (and may note the ticket).
+    """
+    def write(agent):
+        if not agent.get("stall"):
+            return False
+        agent.pop("stall", None)
+
+    _agent_update(board, owner, write)
+
+
+def _live_watch_stall(board, owner, rec, run=None, clear=False):
+    """The recorded stall, only while the stalled run can still be running.
+
+    `_run_end` / `_finalize_active_watch_run` clear a stall from a finally
+    block, which a SIGKILL, OOM kill or reboot never reaches. A stall left
+    behind by a dead watcher must not block retrigger or render STALLED: if
+    the run is not active, or the watcher pid or stalled child pid is gone,
+    it is ignored (and dropped when `clear`) so a new watcher can start.
+    """
+    stall = (rec or {}).get("stall")
+    if not isinstance(stall, dict) or not stall.get("at"):
+        return None
+    run = _read_run(board, owner) if run is None else (run or {})
+
+    def alive(pid):
+        try:
+            return bool(pid) and _pid_alive(int(pid))
+        except (TypeError, ValueError):
+            return False
+
+    if (run.get("active") and alive(run.get("pid"))
+            and (not stall.get("pid") or alive(stall.get("pid")))):
+        return stall
+    if clear:
+        _safe(lambda: _clear_watch_stall(board, owner), None)
+    return None
 
 
 def _worktree_gc():
@@ -4700,7 +4793,7 @@ CLI_LIMIT_STRINGS = ("session limit", "usage limit", "hit your limit", "weekly l
 CLI_AUTH_STRINGS = ("authentication_error", "token has been revoked", "please run /login",
                     "invalid api key", "not logged in", "oauth token")
 
-STATE_WORDS = ("working", "idle", "limited", "dead", "unknown")
+STATE_WORDS = ("working", "idle", "limited", "stalled", "dead", "unknown")
 
 # A source saying "I looked and there was nothing here" is not the same as one
 # saying "I looked and could not make sense of what I found". The second is a
@@ -4954,6 +5047,9 @@ def _run_begin(board, owner, run_no, cwd, run_id="", ticket=""):
 
 def _run_end(board, owner, run_no, rc):
     _run_beat(board, owner, run=run_no, active=False, rc=rc, ended=now())
+    # Authoritative: a finished run must not leave agent["stall"] to block
+    # the next watch tick from retriggering (T-1042 follow-up).
+    _clear_watch_stall(board, owner)
 
 
 def _mark_run_interrupted(board, owner):
@@ -4977,6 +5073,7 @@ def _finalize_active_watch_run(board, owner, rc=143):
         exit=rc, interrupted=True, outcome="interrupted",
         started_at=rec.get("started") or None, ended_at=ended,
         worktree=rec.get("cwd") or None), None)
+    _safe(lambda: _clear_watch_stall(board, owner), None)
     return True
 
 
@@ -6142,6 +6239,15 @@ def agent_liveness(board, rec, peers=None):
     #    after it.
     if wstate == "limited":
         out.update(state="limited", source="watchlog", heuristic=True, detail=wdetail)
+        return out
+
+    stall = _live_watch_stall(board, owner, rec, run=run)
+    if stall:
+        measured = stall.get("measured_s")
+        out.update(state="stalled", source="watch", heuristic=False,
+                   detail="silent %ss (measured; last output %s)" % (
+                       measured if measured is not None else "?",
+                       stall.get("last_output_at") or "unknown"))
         return out
 
     tstate, tage, tdetail, cwd = _transcript_over_cwds(cwds)
@@ -11041,6 +11147,10 @@ def pending_work(board, owner):
     if lim:
         out["limited"] = lim.get("reset_at") or lim.get("until") or "reset unknown"
         return out
+    stall = _live_watch_stall(board, owner, rec, clear=True)
+    if stall:
+        out["stalled"] = stall.get("measured_s")
+        return out
     obj = _safe(lambda: load_objective(board), {})
     obj_state = objective_state(obj)
     msgs = _safe(lambda: unread(board, owner), [])
@@ -11199,7 +11309,7 @@ def pending_view(pending, force=False):
 
 def actionable(pending):
     """Only held/ready work, explicit task or stuck mail, force, or a valid drive."""
-    if not pending or pending.get("limited"):
+    if not pending or pending.get("limited") or pending.get("stalled"):
         return False
     return any(k in WAKE_KEYS for k in pending)
 
@@ -12953,7 +13063,9 @@ def utilization(board, tickets=None, hours=24, live=None):
         # stale liveness cache is precisely the bug this ticket exists to fix.
         lv = (live.get(n) if live is not None
               else (_safe(lambda: agent_liveness(board, r, list(agents.values())), {}) if r else {})) or {}
-        state = ("LIMITED" if lv.get("state") == "limited" else "DOWN" if lv.get("state") == "dead"
+        state = ("LIMITED" if lv.get("state") == "limited"
+                 else "STALLED" if lv.get("state") == "stalled"
+                 else "DOWN" if lv.get("state") == "dead"
                  else ("busy" if any(t["status"] == "claimed" for t in held) else "idle"))
         rows.append({
             "agent": n, "state": state, "done": len(recent), "done_total": len(done),
@@ -13206,7 +13318,8 @@ def reclaim_stale_watch_lock(board, owner):
 
 
 def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
-                      on_beat=None, beat_secs=None, should_stop=None):
+                      on_beat=None, beat_secs=None, should_stop=None,
+                      on_stall=None, on_stall_resolved=None, limited=False):
     """Run cmd with stdout+stderr teed into log_path, capped at cap_bytes for
     this run alone -- a single verbose run must not be able to blow past the
     log's rotation budget before the between-run rotation in cmd_watch's
@@ -13221,10 +13334,24 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
     """
     import subprocess
     import threading
+    import time as _time
 
     proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    state = {"written": 0, "capped": False}
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    state = {"written": 0, "capped": False, "last_output": _time.monotonic(),
+             "stalled": False}
+
+    def _kill_run():
+        _stall_watch().kill_process_group(proc.pid)
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
 
     def pump():
         def note_capped(lf):
@@ -13236,6 +13363,12 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
         try:
             with open(log_path, "a") as lf:
                 for chunk in iter(lambda: proc.stdout.read(65536), b""):
+                    if chunk:
+                        state["last_output"] = _time.monotonic()
+                        if state["stalled"]:
+                            state["stalled"] = False
+                            if on_stall_resolved:
+                                _safe(on_stall_resolved, None)
                     if state["written"] >= cap_bytes:
                         note_capped(lf)
                         continue
@@ -13275,15 +13408,25 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
             beat_thread = threading.Thread(target=beat, daemon=True)
             beat_thread.start()
 
-        import time as _time
         deadline = None if timeout_s is None else (_time.monotonic() + float(timeout_s))
         rc = None
+        sw = _stall_watch()
+        thresh = sw.threshold_s()
+        last_check = 0.0
         while True:
             if should_stop and should_stop():
                 raise InterruptedError()
-            remaining = None if deadline is None else (deadline - _time.monotonic())
+            now_m = _time.monotonic()
+            remaining = None if deadline is None else (deadline - now_m)
             if remaining is not None and remaining <= 0:
                 raise subprocess.TimeoutExpired(proc.args, timeout_s)
+            if on_stall and not state["stalled"] and (now_m - last_check) >= sw.check_s():
+                last_check = now_m
+                if sw.should_mark_stalled(state["last_output"], now_m, thresh,
+                                          limited=limited):
+                    state["stalled"] = True
+                    measured = sw.measured_stall_s(state["last_output"], now_m)
+                    _safe(lambda m=measured: on_stall(m, proc.pid), None)
             slice_s = WATCH_STOP_SLICE if remaining is None else min(WATCH_STOP_SLICE, remaining)
             try:
                 rc = proc.wait(timeout=slice_s)
@@ -13292,20 +13435,11 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
                 continue
         timed_out = False
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        _kill_run()
         rc = 124
         timed_out = True
     except InterruptedError:
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
-            try:
-                proc.kill()
-                proc.wait()
-            except Exception:
-                pass
+        _kill_run()
         raise
     finally:
         beat_stop.set()
@@ -13789,6 +13923,11 @@ def cmd_watch(a, board):
                                                       cwd=cwd, active=True),
                             beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
                             should_stop=_should_stop_watch,
+                            on_stall=lambda measured, pid, ht=held_ticket: _record_watch_stall(
+                                board, owner, measured, pid, ticket=ht),
+                            on_stall_resolved=lambda ht=held_ticket: _resolve_watch_stall(
+                                board, owner, ticket=ht),
+                            limited=bool(_active_seat_limit(board, owner)),
                         )
                     except InterruptedError:
                         _safe(lambda: _finalize_active_watch_run(board, owner), None)
