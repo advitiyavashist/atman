@@ -1,0 +1,44 @@
+name: Friction report
+description: Where Atman got in your way -- not a feature request.
+title: "[friction] "
+labels: ["friction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Three questions about what went wrong, not what you'd like added.
+        Feature requests can wait -- we want to know where people actually
+        get stuck first.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What were you trying to get two agents to do?
+    validations:
+      required: true
+  - type: textarea
+    id: stuck
+    attributes:
+      label: Where did you get stuck or give up?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: feedback
+    attributes:
+      label: atm feedback output (optional)
+      description: >-
+        Paste the output of `atm feedback`. It reads local board files and
+        checks which harness commands are on your PATH without running them
+        (it runs no git, harness or other subprocess and writes nothing). It
+        prints Atman's version rather than your git branch, counts rather
+        than your objective text or seat names, and redacts your home
+        directory and this checkout's path -- nothing is sent anywhere by
+        running it.
+      render: text
+    validations:
+      required: false

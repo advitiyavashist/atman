@@ -357,6 +357,52 @@ def _fs_repo_link(start):
         d = parent
 
 
+# Set by main() for `atm feedback`, which promises no subprocess at all. Every
+# git-using helper on the board-resolution path checks this and returns its
+# filesystem answer; _enter_no_spawn_mode() also installs an audit hook that
+# refuses any process spawn a helper might still attempt.
+_NO_SPAWN = False
+_NO_SPAWN_EVENTS = frozenset({
+    "subprocess.Popen", "os.system", "os.posix_spawn", "os.spawn", "os.exec",
+    "os.fork", "os.forkpty", "pty.spawn",
+})
+
+
+def _enter_no_spawn_mode():
+    """Structural no-subprocess scope for the rest of this process.
+
+    The flag makes resolution helpers skip their git cross-checks (the
+    filesystem answer already wins on disagreement). The audit hook is the
+    backstop: a spawn nobody taught about the flag fails as OSError -- which
+    those helpers already treat as "git unavailable" -- instead of running.
+    """
+    global _NO_SPAWN
+    if _NO_SPAWN:
+        return
+    _NO_SPAWN = True
+
+    def _refuse_spawn(event, args):
+        if event in _NO_SPAWN_EVENTS:
+            raise PermissionError("atm feedback runs no subprocess (%s refused)" % event)
+
+    sys.addaudithook(_refuse_spawn)
+
+
+class _RedactingStream(object):
+    """stderr wrapper for `atm feedback`: board-resolution notices and
+    refusals name absolute paths, and feedback output is meant to be pasted."""
+
+    def __init__(self, stream, home, run):
+        self._stream, self._home, self._run = stream, home, run
+
+    def write(self, text):
+        text = _feedback_redact(text, home=self._home, run=self._run)
+        return self._stream.write(re.sub(r"(?<![\w.<>/-])/[^\s'\"(),:;]+", "<PATH>", text))
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def _repo_root():
     """Root of the MAIN worktree, so every linked worktree shares one board.
 
@@ -373,6 +419,12 @@ def _repo_root():
     import subprocess
     here = os.getcwd()
     fs_root, fs_common = _fs_repo_link(here)
+    if _NO_SPAWN:
+        # `atm feedback` promises no subprocess. The filesystem answer is the
+        # one that wins on disagreement anyway.
+        if fs_common is None or os.path.basename(fs_common) != ".git":
+            return None
+        return os.path.dirname(fs_common)
     try:
         out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
                              capture_output=True, text=True, timeout=5,
@@ -427,6 +479,9 @@ def _init_cwd_worktree_root(start=None):
         if parent == d:
             break
         d = parent
+    if _NO_SPAWN:
+        # `atm feedback`: the filesystem walk is the answer; skip the git cross-check.
+        return fs_root
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     git_root = None
     try:
@@ -19505,6 +19560,197 @@ def cmd_self(a, board):
         print("invoked: %s" % sys.argv[0])
 
 
+_FEEDBACK_REDACT_CLAIM = (
+    "Redacted before printing: your home directory, this checkout's path, and its folder name."
+)
+
+
+def _feedback_path_forms(*paths):
+    """Absolute and realpath variants, longest first so prefixes lose.
+
+    git_state() is not consulted. macOS /var vs /private/var and a TICKETS_DIR
+    that was abspath'd rather than realpath'd must all be the same path.
+    """
+    forms = []
+    for p in paths:
+        if not p:
+            continue
+        for form in (p, os.path.abspath(p), os.path.realpath(p)):
+            form = form.rstrip(os.sep)
+            if form and form != os.sep and form not in forms:
+                forms.append(form)
+    forms.sort(key=len, reverse=True)
+    return forms
+
+
+def _feedback_redact(text, home="", run="", repo="", repo_name=""):
+    """Scrub this machine's paths and repo folder name before printing.
+
+    `atm feedback` is meant to be pasted into a public GitHub issue, and the
+    promise is that the board stays on this machine -- so the text is
+    scrubbed here rather than trusting every caller to do it.
+
+    Redaction must not depend on git resolving a worktree. Home, the
+    process cwd, and the board's checkout path are always replaced, even
+    when git_state() is None.
+    """
+    out = text
+    for path in _feedback_path_forms(run):
+        out = out.replace(path, "<RUN>")
+    for path in _feedback_path_forms(repo):
+        out = out.replace(path, "<REPO>")
+    for path in _feedback_path_forms(home):
+        out = out.replace(path, "<HOME>")
+    if repo_name:
+        out = re.sub(r'(?<![\w/.-])%s(?![\w/.-])' % re.escape(repo_name), "<REPO>", out)
+    return out
+
+
+def _feedback_redaction_ok(text, home="", run="", repo="", repo_name=""):
+    """True only when every machine path we promised to scrub is gone.
+
+    An empty run/repo (the old git_state()-None path) is not success --
+    we never identified the checkout, so we must not claim it was redacted.
+    """
+    if not home or not (run or repo) or not repo_name:
+        return False
+    for path in _feedback_path_forms(home, run, repo):
+        if path in text:
+            return False
+    if re.search(r'(?<![\w/.-])%s(?![\w/.-])' % re.escape(repo_name), text):
+        return False
+    return True
+
+
+def _feedback_seat_counts(board):
+    """(limited, stalled) seat counts from board files alone.
+
+    agent_liveness() scans the process table (`ps`, sometimes `lsof`) and
+    clears expired limits by rewriting the agent file, so feedback cannot
+    use it. LIMITED is a recorded limit that has not reached its reset_at;
+    "stalled" is a seat whose recorded watcher pid (agents/<seat>.watch.pid)
+    is no longer running -- a signal-0 probe, not a process scan.
+    """
+    limited = stalled = 0
+    now_utc = datetime.now(timezone.utc)
+    for rec in load_agents(board):
+        owner = rec.get("owner") or ""
+        if not owner:
+            continue
+        lim = rec.get("limit")
+        if lim:
+            active = True
+            if lim.get("reset_at"):
+                try:
+                    reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
+                    if reset.tzinfo is None:
+                        reset = reset.replace(tzinfo=timezone.utc)  # naive stamps are UTC
+                    active = reset > now_utc
+                except (ValueError, TypeError):
+                    pass
+            if active:
+                limited += 1
+                continue
+        try:
+            with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
+                pid = int((f.read() or "0").strip() or 0)
+        except (IOError, OSError, ValueError):
+            pid = 0
+        if pid and not _pid_alive(pid):
+            stalled += 1
+    return limited, stalled
+
+
+def cmd_feedback(a, board):
+    """Local-only, pasteable board summary for a GitHub issue. Prints to stdout; sends nothing anywhere.
+
+    Reads only existing board files plus a PATH lookup for harness binaries.
+    It runs no subprocess -- no harness, no git, no ps/lsof -- and writes
+    nothing. The user's git branch, objective text and seat names are never
+    printed. Must work on a board where nothing has succeeded yet -- that is
+    the most informative case, not an error case.
+    """
+    import platform as _platform
+    # Redaction paths come from the process and the board, not git.
+    home = os.path.expanduser("~")
+    run = os.getcwd()
+    repo = ""
+    if board:
+        board_abs = os.path.abspath(board)
+        repo = (os.path.dirname(board_abs)
+                if os.path.basename(board_abs.rstrip(os.sep)) == ".tickets"
+                else board_abs)
+    repo_name = os.path.basename((repo or run).rstrip(os.sep)) if (repo or run) else ""
+
+    lines = ["Atman feedback summary -- paste into a GitHub issue. Nothing here is sent anywhere.", ""]
+    # Atman's own version, never the user's project branch (it can carry
+    # anything, tokens included). git_state() is not called: `git status`
+    # takes the index lock and can rewrite .git/index.
+    lines.append("atm version: %s" % release_status())
+    lines.append("inside a git worktree: %s" % ("yes" if _fs_repo_link(run)[0] else "no"))
+    # platform.platform() can shell out (uname -p) for the processor field.
+    lines.append("platform: %s %s %s" % (
+        _platform.system(), _platform.release(), _platform.machine()))
+    lines.append("python: %s" % _platform.python_version())
+    lines.append("board: %s" % (board or "(none)"))
+    lines.append("")
+
+    # PATH lookup only. probe_integration_catalog() may rewrite ~/.local/bin/codex
+    # and attach_catalog_usage() runs each harness binary; a read-only summary
+    # must do neither, so login state is deliberately not checked here.
+    search_path = os.environ.get("PATH", "")
+    local_bin = os.path.join(home, ".local", "bin")
+    if local_bin not in search_path.split(os.pathsep):
+        search_path = local_bin + os.pathsep + search_path
+    found, missing = [], []
+    for spec in INTEGRATION_CATALOG:
+        on_path = any(_which_on_path(b, search_path) for b in spec["binaries"])
+        (found if on_path else missing).append(spec["name"])
+    lines.append("harnesses found on PATH: %s" % (", ".join(found) or "none"))
+    lines.append("harnesses not found: %s" % (", ".join(missing) or "none"))
+    lines.append("harness logins: not checked")
+    lines.append("")
+
+    tickets = load_all(board)
+    messages = load_messages(board)
+    wv = _work_view()
+    reviewed = sum(1 for t in tickets if wv.went_through_review(t))
+    accepted = sum(1 for t in tickets if wv.review_of(t, None)["verified"])
+    unverified_done = len(wv.unverified_done_ids(tickets, messages))
+    overrides = sum(1 for t in tickets if t.get("release_override"))
+    lines.append("tickets created:          %d" % len(tickets))
+    lines.append("tickets reviewed:         %d" % reviewed)
+    lines.append("tickets accepted:         %d" % accepted)
+    lines.append("tickets done, unverified: %d" % unverified_done)
+    lines.append("release overrides:        %d" % overrides)
+    lines.append("")
+
+    events = load_trajectories(board)
+    reopens = sum(1 for e in events if e.get("kind") == "reopen")
+    lines.append("reopens: %d" % reopens)
+    lines.append("")
+
+    # Objective text and seat names are the user's own words; a pasteable
+    # summary carries only their shape (set / state / exit criteria, counts).
+    obj = load_objective(board)
+    if obj:
+        lines.append("objective: set (state: %s, exit criteria: %s)" % (
+            objective_state(obj), "yes" if objective_exit_ok(obj) else "no"))
+    else:
+        lines.append("objective: not set")
+    lines.append("")
+
+    limited, stalled = _feedback_seat_counts(board)
+    lines.append("seats LIMITED: %d" % limited)
+    lines.append("seats whose recorded watcher is gone (closest tracked state to \"stalled\"): %d" % stalled)
+    lines.append("")
+
+    text = _feedback_redact("\n".join(lines), home=home, run=run, repo=repo, repo_name=repo_name)
+    if _feedback_redaction_ok(text, home=home, run=run, repo=repo, repo_name=repo_name):
+        text += "\n" + _FEEDBACK_REDACT_CLAIM
+    print(text)
+
+
 def main():
     status = release_status()
     p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
@@ -20293,6 +20539,12 @@ def main():
     c = sub.add_parser("where", help="print the board directory")
     c.set_defaults(fn=cmd_where)
 
+    c = sub.add_parser(
+        "feedback",
+        help="print a local-only, pasteable run summary for a GitHub issue (sends nothing anywhere)",
+    )
+    c.set_defaults(fn=cmd_feedback)
+
     c = sub.add_parser("context", help="print the shared briefing file")
     c.set_defaults(fn=cmd_context)
 
@@ -20370,6 +20622,10 @@ def main():
         # board_dir() or a shadow board is refused before we can report it.
         a.fn(a)
         return
+    if a.cmd == "feedback":
+        # Before board resolution: that path runs git and prints paths.
+        _enter_no_spawn_mode()
+        sys.stderr = _RedactingStream(sys.stderr, os.path.expanduser("~"), os.getcwd())
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
     if a.cmd not in (
