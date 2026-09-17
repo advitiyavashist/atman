@@ -122,6 +122,53 @@ def test_limited_run_is_not_marked_stalled(tmp_path):
     assert events == []
 
 
+def test_stalled_run_end_clears_stall_so_next_tick_is_fresh(tmp_path):
+    """Regression: stall written by on_stall must not survive run end.
+
+    Reproduces the silent-dead-seat follow-up: `_record_watch_stall` (as
+    on_stall does) then the run terminates. The next pending_work tick must
+    re-evaluate fresh instead of inheriting a permanent STALLED block.
+    """
+    board = tmp_path / ".tickets"
+    (board / "agents").mkdir(parents=True)
+    owner = "boss"
+    (board / "agents" / ("%s.json" % owner)).write_text(
+        json.dumps({"owner": owner}))
+    tool._record_watch_stall(str(board), owner, 640, pid=999)
+    rec = tool._agent_rec(str(board), owner)
+    assert rec.get("stall") and rec["stall"].get("measured_s") == 640
+    live = tool.agent_liveness(str(board), rec)
+    assert live["state"] == "stalled"
+    assert "640" in live["detail"]
+    pending = tool.pending_work(str(board), owner)
+    assert pending.get("stalled") == 640
+    assert tool.actionable(pending) is False
+
+    tool._run_end(str(board), owner, 1, 0)
+
+    rec = tool._agent_rec(str(board), owner)
+    assert not rec.get("stall")
+    pending = tool.pending_work(str(board), owner)
+    assert "stalled" not in pending
+    live = tool.agent_liveness(str(board), rec)
+    assert live["state"] != "stalled"
+
+
+def test_output_resume_clears_agent_stall_field(tmp_path):
+    board = tmp_path / ".tickets"
+    (board / "agents").mkdir(parents=True)
+    owner = "boss"
+    (board / "agents" / ("%s.json" % owner)).write_text(
+        json.dumps({"owner": owner}))
+    tool._record_watch_stall(str(board), owner, 400, pid=7)
+    assert tool.pending_work(str(board), owner).get("stalled") == 400
+    tool._resolve_watch_stall(str(board), owner)
+    rec = tool._agent_rec(str(board), owner)
+    assert not rec.get("stall")
+    assert rec.get("stall_resolved")
+    assert "stalled" not in tool.pending_work(str(board), owner)
+
+
 def test_timeout_kills_process_group(tmp_path):
     cmd = ("%s -c 'import time,os; print(os.getpid(), flush=True); time.sleep(30)'"
            % sys.executable)

@@ -2225,6 +2225,20 @@ def _resolve_watch_stall(board, owner, ticket=None):
         save(board, t)
 
 
+def _clear_watch_stall(board, owner):
+    """Drop a recorded stall when the stalled run itself terminates.
+
+    The next watch tick must re-evaluate fresh. Output resume uses
+    `_resolve_watch_stall` (and may note the ticket).
+    """
+    def write(agent):
+        if not agent.get("stall"):
+            return False
+        agent.pop("stall", None)
+
+    _agent_update(board, owner, write)
+
+
 def _worktree_gc():
     """T-946 automated worktree cleanup + atm gc sweep."""
     try:
@@ -4730,6 +4744,9 @@ def _run_begin(board, owner, run_no, cwd, run_id="", ticket=""):
 
 def _run_end(board, owner, run_no, rc):
     _run_beat(board, owner, run=run_no, active=False, rc=rc, ended=now())
+    # Authoritative: a finished run must not leave agent["stall"] to block
+    # the next watch tick from retriggering (T-1042 follow-up).
+    _clear_watch_stall(board, owner)
 
 
 def _mark_run_interrupted(board, owner):
@@ -4753,6 +4770,7 @@ def _finalize_active_watch_run(board, owner, rc=143):
         exit=rc, interrupted=True, outcome="interrupted",
         started_at=rec.get("started") or None, ended_at=ended,
         worktree=rec.get("cwd") or None), None)
+    _safe(lambda: _clear_watch_stall(board, owner), None)
     return True
 
 
