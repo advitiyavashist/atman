@@ -2329,6 +2329,19 @@ def _maybe_refresh_provider_usage(board):
     _safe(lambda: pu.refresh_http_providers(board, home=os.path.expanduser("~")), None)
 
 
+def _steer():
+    """T-1047 live steer helpers (receipt classification + framing)."""
+    try:
+        from ticket_board import steer as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import steer as m
+        return m
+
+
 def _gc_hooks():
     return _worktree_gc().CliHooks(_GCApi())
 
@@ -8190,6 +8203,146 @@ def cmd_who(a, board):
         print("")
         print("state is read from the session's own transcript, not from loop-seen.  "
               "! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- go read the log")
+
+
+def _steer_watch_log_ts(board, owner):
+    path = os.path.join(agents_dir(board), owner + ".watch.log")
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return ""
+    return datetime.fromtimestamp(mt, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _steer_transcript_ts(board, rec):
+    """ISO timestamp of the newest parseable transcript event, else ''."""
+    run = _read_run(board, rec.get("owner") or "")
+    cwds = _dedup([run.get("cwd") or "",
+                   rec.get("cwd") or "",
+                   rec.get("worktree") or ""])
+    tstate, tage, _tdetail, _cwd = _transcript_over_cwds(cwds)
+    if tstate == "unknown" or tage is None:
+        return ""
+    return _steer().iso_from_age(tage)
+
+
+def _steer_seat_row(board, rec, tickets, wf, sa, live):
+    st = _steer()
+    owner = rec.get("owner") or ""
+    tid = rec.get("ticket") or ""
+    t = tickets.get(tid) or {}
+    harness = ((wf.get(owner) or {}).get("harness")
+               or (wf.get(owner) or {}).get("tool") or "")
+    ep, _ = sa.live_endpoint(board, owner)
+    provider = (ep or {}).get("provider") or ""
+    last_at, last_src = st.last_output(
+        rec, transcript_ts=_steer_transcript_ts(board, rec),
+        watch_log_ts=_steer_watch_log_ts(board, owner))
+    refuse = st.harness_refuse_reason(harness, provider)
+    sock = (ep or {}).get("socket") or ""
+    steerable = (not refuse) and bool(sock and os.path.exists(sock))
+    doing = (t.get("title") or "").strip() or (live.get("detail") or "")
+    return {
+        "seat": owner,
+        "state": live.get("state") or "unknown",
+        "last_output_at": last_at,
+        "last_output_source": last_src,
+        "ticket": tid,
+        "doing": doing,
+        "steerable": steerable,
+        "reason": "" if steerable else (
+            refuse or "no live Claude messaging socket"),
+        "harness": harness or provider or "-",
+    }
+
+
+def cmd_steer(a, board):
+    """List running seats, or course-correct / ask one mid-run (T-1047)."""
+    st = _steer()
+    sa = _session_adapters()
+    agents = load_agents(board)
+    tickets = dict((t["id"], t) for t in load_all(board))
+    wf = load_workforce(board)
+    if getattr(a, "list", False) or not (getattr(a, "seat", "") or "").strip():
+        if not agents:
+            print("no seats have checked in")
+            return
+        print("%-16s %-8s %-22s %-10s %-10s %s" % (
+            "seat", "state", "last-output", "ticket", "steerable", "doing"))
+        for rec in sorted(agents, key=lambda r: r.get("owner") or ""):
+            live = _safe(lambda r=rec: agent_liveness(board, r, agents),
+                         {"state": "unknown", "detail": ""})
+            row = _steer_seat_row(board, rec, tickets, wf, sa, live)
+            print("%-16s %-8s %-22s %-10s %-10s %s" % (
+                (row["seat"] or "-")[:16],
+                (row["state"] or "-")[:8],
+                (row["last_output_at"] or "-")[:22],
+                (row["ticket"] or "-")[:10],
+                "yes" if row["steerable"] else "no",
+                (row["doing"] or row["reason"] or "-")[:48]))
+            if not row["steerable"] and row["reason"]:
+                print("%-16s %s" % ("", row["reason"][:90]))
+            if row["last_output_at"] and row["last_output_source"]:
+                print("%-16s last-output source=%s" % ("", row["last_output_source"]))
+        return
+
+    seat = (a.seat or "").strip()
+    raw_text = getattr(a, "text", "")
+    if isinstance(raw_text, (list, tuple)):
+        text = " ".join(str(x) for x in raw_text).strip()
+    else:
+        text = (raw_text or "").strip()
+    sender = session_seat(board, getattr(a, "owner", "") or "")
+    ask_text = (getattr(a, "ask", "") or "").strip()
+    if ask_text:
+        kind = "ask"
+        text = ask_text
+    else:
+        kind = "redirect"
+    if not text:
+        sys.exit("steer: course-correction or --ask text is required")
+    rec = _agent_rec(board, seat) or {}
+    if not rec and seat not in wf:
+        sys.exit("steer: no such seat %s" % seat)
+    rec = rec or {"owner": seat}
+    tid = (getattr(a, "ticket", "") or "").strip() or (rec.get("ticket") or "")
+    if not tid:
+        sys.exit("steer: %s holds no ticket; pass --ticket T-xxx to record the steer"
+                 % seat)
+    t = load(board, tid)
+    harness = _seat_harness(board, seat)
+    ep, _ = sa.live_endpoint(board, seat)
+    provider = (ep or {}).get("provider") or ""
+    steer_id = st.new_steer_id()
+    at = now()
+    reason = st.harness_refuse_reason(harness, provider)
+    label = ""
+    if reason:
+        label = "refused (%s)" % reason
+    else:
+        sock = (ep or {}).get("socket") or ""
+        if not sock or not os.path.exists(sock):
+            label = "refused (no live Claude messaging socket)"
+        else:
+            payload = st.frame_payload(kind, sender, text, tid, steer_id, at)
+            # Native Claude inject only. Persist-watch poke would start a new
+            # run; that is kill-and-replace, not a mid-run steer.
+            label = sa.wake_seat(board, seat, payload, harness=harness or "claude",
+                                 message_id=steer_id)
+    record = st.steer_record(kind, sender, seat, text, label, steer_id, tid, at)
+    note = st.ticket_note(kind, sender, seat, text, label, steer_id, at)
+    t.setdefault("steers", []).append(record)
+    t.setdefault("notes", []).append({"by": whoami(getattr(a, "owner", "") or ""),
+                                      "at": at, "kind": "steer", "text": note})
+    save(board, t)
+    shown = st.report_receipt(label)
+    print("steer: %s -> %s id=%s ticket=%s" % (seat, shown, steer_id, tid))
+    if kind == "ask":
+        print("  ask: answer on %s as STEER-REPLY %s: <answer> (do not end the run)"
+              % (tid, steer_id))
+    if not st.is_delivered(label):
+        print("  not delivered: %s" % shown)
+    print("  recorded on %s (scope unchanged)" % tid)
 
 
 # ---- trajectories: the team's own record of who did what, and at what cost --
@@ -19813,6 +19966,21 @@ def main():
     c.add_argument("--no-liveness", action="store_true",
                    help="skip the transcript reads and show locations only")
     c.set_defaults(fn=cmd_who)
+
+    c = sub.add_parser("steer",
+                       help="redirect or question a running seat without killing it")
+    c.add_argument("seat", nargs="?", default="",
+                   help="running seat to steer; omit with --list")
+    c.add_argument("text", nargs="*", default=[],
+                   help="course correction (ignored when --ask is set)")
+    c.add_argument("--ask", default="", metavar="QUESTION",
+                   help="ask QUESTION; the seat answers on the ticket and keeps running")
+    c.add_argument("--list", action="store_true",
+                   help="list seats, last output timestamp, and whether they can be steered")
+    c.add_argument("--ticket", "-t", default="",
+                   help="ticket to record the steer on (default: the seat's held ticket)")
+    c.add_argument("--owner", "-o")
+    c.set_defaults(fn=cmd_steer)
 
     c = sub.add_parser("msg", help="post to the board or a seat thread")
     c.add_argument("text")
