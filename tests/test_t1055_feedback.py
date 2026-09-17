@@ -322,3 +322,98 @@ def test_feedback_redaction_claim_only_when_every_path_was_scrubbed():
     assert tk._feedback_redaction_ok(
         clean, home="/Users/me", run="/Users/me/code/myrepo",
         repo="/Users/me/code/myrepo", repo_name="myrepo")
+
+
+_AUDIT_SITECUSTOMIZE = """
+import os, sys
+_marker = os.environ["FEEDBACK_SPAWN_MARKER"]
+_events = {"subprocess.Popen", "os.system", "os.posix_spawn", "os.exec", "os.fork",
+           "os.forkpty", "os.spawn", "pty.spawn"}
+def _hook(event, args):
+    if event in _events:
+        with open(_marker, "a") as f:
+            f.write("%s %r\\n" % (event, args[:2]))
+sys.addaudithook(_hook)
+"""
+
+
+def _no_spawn_env(tmp_path, home):
+    site = tmp_path / "audit-site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(_AUDIT_SITECUSTOMIZE)
+    stubs = tmp_path / "audit-stubs"
+    stubs.mkdir()
+    marker = tmp_path / "spawned.marker"
+    for name in ("git", "ps", "lsof", "uname", "sysctl"):
+        stub = stubs / name
+        stub.write_text("#!/bin/sh\necho stub-%s >> %s\n" % (name, marker))
+        stub.chmod(0o755)
+    e = _feedback_env(home, "")
+    e.pop("TICKETS_DIR", None)
+    e.pop("ATMAN_BOARD_CONFIG", None)
+    e["PYTHONPATH"] = str(site)
+    e["FEEDBACK_SPAWN_MARKER"] = str(marker)
+    e["PATH"] = str(stubs) + os.pathsep + os.environ.get("PATH", "")
+    # Control: the hook really does record a spawn in this environment.
+    subprocess.run([sys.executable, "-c", "import subprocess; subprocess.run(['true'])"],
+                   env=e, check=False)
+    assert marker.exists() and "subprocess.Popen" in marker.read_text()
+    marker.unlink()
+    return e, marker
+
+
+def _git_repo_with_board(path, home):
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    env = _feedback_env(home, path / ".tickets")
+    r = subprocess.run([sys.executable, str(TOOL), "create", "Throwaway ticket"],
+                       capture_output=True, text=True, env=env, cwd=str(path))
+    assert r.returncode == 0, r.stderr
+    return path / ".tickets"
+
+
+def _assert_no_paths(text, *paths):
+    for p in paths:
+        for form in (str(p), os.path.realpath(str(p))):
+            assert form not in text, (form, text)
+    assert not re.search(r"(?m)(^|[\s:=('\"])/(?:Users|home|private|var|tmp|Volumes)/", text), text
+
+
+def test_feedback_shared_board_config_from_a_separate_repo_spawns_nothing(tmp_path):
+    """TICKETS_DIR unset, ATMAN_BOARD_CONFIG maps this repo to another repo's
+    board: board_dir() goes through _refuse_unbound_live_board ->
+    _cwd_belongs_to_board -> _init_cwd_worktree_root, which ran git."""
+    home = tmp_path / "home"
+    home.mkdir()
+    shared = _git_repo_with_board(tmp_path / "shared", home)
+    here = tmp_path / "work"
+    here.mkdir()
+    subprocess.run(["git", "init", "-q", str(here)], check=True)
+    cfg = tmp_path / "board.json"
+    cfg.write_text(json.dumps({"boards": {str(here): str(shared)}}))
+
+    e, marker = _no_spawn_env(tmp_path, home)
+    e["ATMAN_BOARD_CONFIG"] = str(cfg)
+    r = subprocess.run([sys.executable, str(TOOL), "feedback"], capture_output=True,
+                       text=True, env=e, cwd=str(here))
+    assert r.returncode == 0, r.stderr
+    assert "tickets created:          1" in r.stdout
+    assert not marker.exists(), marker.read_text()
+    _assert_no_paths(r.stdout + r.stderr, tmp_path, home, here, shared)
+
+
+def test_feedback_from_a_parent_folder_refuses_without_spawning(tmp_path):
+    """The one-child-board case refuses (exit 1) -- and must not run git first."""
+    home = tmp_path / "home"
+    home.mkdir()
+    parent = tmp_path / "parent"
+    child_board = _git_repo_with_board(parent / "child", home)
+
+    e, marker = _no_spawn_env(tmp_path, home)
+    r = subprocess.run([sys.executable, str(TOOL), "feedback"], capture_output=True,
+                       text=True, env=e, cwd=str(parent))
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "REFUSING" in r.stderr
+    assert not marker.exists(), marker.read_text()
+    _assert_no_paths(r.stdout + r.stderr, tmp_path, home, parent, child_board)
+

@@ -357,8 +357,50 @@ def _fs_repo_link(start):
         d = parent
 
 
-# Set by main() for read-only commands that must not spawn git (`atm feedback`).
-_REPO_ROOT_FS_ONLY = False
+# Set by main() for `atm feedback`, which promises no subprocess at all. Every
+# git-using helper on the board-resolution path checks this and returns its
+# filesystem answer; _enter_no_spawn_mode() also installs an audit hook that
+# refuses any process spawn a helper might still attempt.
+_NO_SPAWN = False
+_NO_SPAWN_EVENTS = frozenset({
+    "subprocess.Popen", "os.system", "os.posix_spawn", "os.spawn", "os.exec",
+    "os.fork", "os.forkpty", "pty.spawn",
+})
+
+
+def _enter_no_spawn_mode():
+    """Structural no-subprocess scope for the rest of this process.
+
+    The flag makes resolution helpers skip their git cross-checks (the
+    filesystem answer already wins on disagreement). The audit hook is the
+    backstop: a spawn nobody taught about the flag fails as OSError -- which
+    those helpers already treat as "git unavailable" -- instead of running.
+    """
+    global _NO_SPAWN
+    if _NO_SPAWN:
+        return
+    _NO_SPAWN = True
+
+    def _refuse_spawn(event, args):
+        if event in _NO_SPAWN_EVENTS:
+            raise PermissionError("atm feedback runs no subprocess (%s refused)" % event)
+
+    sys.addaudithook(_refuse_spawn)
+
+
+class _RedactingStream(object):
+    """stderr wrapper for `atm feedback`: board-resolution notices and
+    refusals name absolute paths, and feedback output is meant to be pasted."""
+
+    def __init__(self, stream, home, run):
+        self._stream, self._home, self._run = stream, home, run
+
+    def write(self, text):
+        text = _feedback_redact(text, home=self._home, run=self._run)
+        return self._stream.write(re.sub(r"(?<![\w.<>/-])/[^\s'\"(),:;]+", "<PATH>", text))
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
 
 
 def _repo_root():
@@ -377,7 +419,7 @@ def _repo_root():
     import subprocess
     here = os.getcwd()
     fs_root, fs_common = _fs_repo_link(here)
-    if _REPO_ROOT_FS_ONLY:
+    if _NO_SPAWN:
         # `atm feedback` promises no subprocess. The filesystem answer is the
         # one that wins on disagreement anyway.
         if fs_common is None or os.path.basename(fs_common) != ".git":
@@ -437,6 +479,9 @@ def _init_cwd_worktree_root(start=None):
         if parent == d:
             break
         d = parent
+    if _NO_SPAWN:
+        # `atm feedback`: the filesystem walk is the answer; skip the git cross-check.
+        return fs_root
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     git_root = None
     try:
@@ -19306,7 +19351,9 @@ def _feedback_seat_counts(board):
             if lim.get("reset_at"):
                 try:
                     reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-                    active = not (reset.tzinfo is not None and reset <= now_utc)
+                    if reset.tzinfo is None:
+                        reset = reset.replace(tzinfo=timezone.utc)  # naive stamps are UTC
+                    active = reset > now_utc
                 except (ValueError, TypeError):
                     pass
             if active:
@@ -20269,8 +20316,9 @@ def main():
         a.fn(a)
         return
     if a.cmd == "feedback":
-        global _REPO_ROOT_FS_ONLY
-        _REPO_ROOT_FS_ONLY = True
+        # Before board resolution: that path runs git and prints paths.
+        _enter_no_spawn_mode()
+        sys.stderr = _RedactingStream(sys.stderr, os.path.expanduser("~"), os.getcwd())
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
     if a.cmd not in (
