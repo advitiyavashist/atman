@@ -4897,15 +4897,20 @@ def _cmd_next_dispatch(a, board):
     if not ready:
         print("next --dispatch: no ready ticket")
         sys.exit(1)
-    t = ready[0]
-    rows = _route_headroom().candidate_rows(
-        board, t, names, limited, wf, roles,
-        _route_headroom().seat_load(tickets, load_), score_agent)
-    best, why = _write_route_pick(board, t, rows, False)
-    if not best:
+    rank_load = _route_headroom().seat_load(tickets, load_)
+    held = False
+    for t in ready:
+        # An all-limited or nobody-fits ticket is reported, never stored, and
+        # must not block the tickets behind it.
+        rows = _route_headroom().candidate_rows(
+            board, t, names, limited, wf, roles, rank_load, score_agent)
+        best, why = _write_route_pick(board, t, rows, False)
+        if best:
+            print("%s reserved for %s (%s)" % (t["id"], best, why))
+            return
+        held = held or why.startswith("HOLD:")
         print("%s %s" % (t["id"], why or "(nobody fits)"))
-        sys.exit(0 if why.startswith("HOLD:") else 1)
-    print("%s reserved for %s (%s)" % (t["id"], best, why))
+    sys.exit(0 if held else 1)
 
 
 def score_agent(board, name, entry, roles, ticket):

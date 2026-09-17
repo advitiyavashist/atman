@@ -446,3 +446,27 @@ def test_rank_key_load_before_known_unknown_split_zero_last():
     unknown = rh.rank_key(False, None, 1, 10, load=0)
     zero = rh.rank_key(False, 0, 0, 10, load=0)
     assert unknown < known < zero
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_next_dispatch_skips_all_limited_front_ticket(tool, board):
+    assert run(tool, board, "join", "alice", "--roles", "docs",
+               "--harness", "claude", agent="alice").returncode == 0
+    assert run(tool, board, "join", "bob", "--roles", "code",
+               "--harness", "codex", agent="bob").returncode == 0
+    _stamp_seen(board, "bob")
+    _limit(board, "alice", harness="claude")
+    assert run(tool, board, "create", "Write code", "--role", "code",
+               agent="bob").returncode == 0
+    r = run(tool, board, "next", "--dispatch", agent="bob")
+    assert r.returncode == 0, r.stderr + r.stdout
+    lines = r.stdout.splitlines()
+    assert any(ln.startswith("T-001") and "HOLD:" in ln and RESET in ln for ln in lines), r.stdout
+    assert any(ln.startswith("T-002 reserved for bob") for ln in lines), r.stdout
+    assert show(tool, board, "T-002", agent="bob").get("reserved_for") == "bob"
+    t1 = show(tool, board, "T-001", agent="bob")
+    assert not t1.get("reserved_for")
+    assert not t1.get("hold")
+    again = run(tool, board, "next", "--dispatch", agent="bob")
+    assert again.returncode == 0, again.stderr + again.stdout
+    assert "HOLD:" in again.stdout
