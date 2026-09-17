@@ -2360,35 +2360,41 @@ def _preflight():
         return m
 
 
-def _preflight_seat(board, owner, harness="", mode="dispatch"):
-    """Probe binary+auth unless a positive check is still fresh.
+def _preflight_seat(board, owner, harness=""):
+    """Probe binary+auth unless a positive check for this harness is still fresh.
 
-    mode=dispatch/spawn: missing binary refuses.
-    mode=route: only confirmed logged-out accounts are skipped.
-    Usage/quota never blocks.
+    Decides on the probe that just ran on this host. The stored auth_check
+    may keep an older authoritative record when the execution context
+    changed (env fingerprint, binary); that record never passes preflight.
+    Usage/quota never blocks. Callers apply dispatch_refuse or route_skip.
     """
     pf = _preflight()
     rec = _agent_rec(board, owner) or {}
-    cached = pf.cached_positive(rec, now())
+    resolved, _ = harness_of(board, owner, harness, "")
+    want = harness or resolved
+    cached = pf.cached_positive(rec, now(), harness=want)
     if cached:
         return {"state": cached.get("state") or "ready",
-                "harness": cached.get("harness") or harness,
+                "harness": cached.get("harness") or want,
                 "cached": True, "at": cached.get("at")}
-    if not _auth_gates_spawn(harness):
-        resolved, _ = harness_of(board, owner, harness, "")
-        if not _auth_gates_spawn(resolved):
-            return {"state": "unsupported", "harness": resolved or harness, "cached": False}
+    if not _auth_gates_spawn(harness) and not _auth_gates_spawn(resolved):
+        return {"state": "unsupported", "harness": resolved or harness, "cached": False}
     incoming = harness_auth_probe(board, owner, harness)
     stored = _store_auth_check(board, owner, incoming)
-    result = stored if isinstance(stored, dict) else incoming
-    refuse = pf.dispatch_refuse(result, harness or result.get("harness"))
-    if not refuse:
+    if isinstance(stored, dict) and stored.get("at") and stored.get("at") == incoming.get("at"):
+        result = stored
+    else:
+        # The merge kept an older record; the fresh probe is what holds now.
+        result = incoming
+    fresh = pf.age_s(result.get("at"), now())
+    if (not pf.dispatch_refuse(result, want or result.get("harness"))
+            and fresh is not None and fresh <= pf.CACHE_SECS):
         _agent_set(board, owner, preflight=pf.snapshot(result, True))
     return result
 
 
 def _refuse_preflight(board, owner, harness, verb):
-    result = _preflight_seat(board, owner, harness, mode="dispatch")
+    result = _preflight_seat(board, owner, harness)
     reason = _preflight().dispatch_refuse(result, harness or result.get("harness"))
     if reason:
         sys.exit("%s: %s" % (verb, reason))
@@ -10661,7 +10667,7 @@ def cmd_route(a, board):
             e = wf.get(n, {})
             hid = (e.get("harness") or e.get("tool") or "").strip()
             if _auth_gates_spawn(hid):
-                auth = _preflight_seat(board, n, hid, mode="route")
+                auth = _preflight_seat(board, n, hid)
                 skip = _preflight().route_skip(auth, hid)
                 if skip:
                     continue
@@ -15053,7 +15059,7 @@ def cmd_spawn(a, board):
     # must be ready before a watcher starts. Keep this before cmd_join so a
     # failed relaunch cannot alter roles/harness/worktree. --exec skips it.
     if _auth_gates_spawn(resolved_harness) and not a.exec:
-        auth = _preflight_seat(board, owner, requested_harness or resolved_harness, mode="spawn")
+        auth = _preflight_seat(board, owner, requested_harness or resolved_harness)
         reason = _preflight().dispatch_refuse(auth, resolved_harness)
         if reason:
             _print_auth_result(owner, auth)

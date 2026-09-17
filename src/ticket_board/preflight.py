@@ -49,16 +49,23 @@ def age_s(ts, now=None):
     return max(0.0, (now - at).total_seconds())
 
 
-def cached_positive(rec, now=None, ttl=CACHE_SECS):
-    """Fresh successful preflight, or a still-fresh dispatchable auth_check."""
+def cached_positive(rec, now=None, ttl=CACHE_SECS, harness=""):
+    """Fresh successful preflight, or a still-fresh dispatchable auth_check.
+
+    Only for the harness being dispatched: a positive check for another
+    harness says nothing about this binary or login.
+    """
     rec = rec or {}
+    want = (harness or "").strip()
+    if not want:
+        return None
     blob = rec.get("preflight") if isinstance(rec.get("preflight"), dict) else {}
-    if blob.get("ok"):
+    if blob.get("ok") and (blob.get("harness") or "") == want:
         secs = age_s(blob.get("at"), now)
         if secs is not None and secs <= ttl:
             return blob
     auth = rec.get("auth_check") if isinstance(rec.get("auth_check"), dict) else {}
-    if auth.get("state") in DISPATCHABLE_STATES:
+    if auth.get("state") in DISPATCHABLE_STATES and (auth.get("harness") or "") == want:
         secs = age_s(auth.get("at"), now)
         if secs is not None and secs <= ttl:
             return {
@@ -82,6 +89,10 @@ def dispatch_refuse(result, harness=""):
     """Why dispatch/spawn must not hand work, or empty to allow.
 
     Usage (quota / unreadable remaining) never refuses: that is not account state.
+    Fails closed: only ready, quota, and unsupported pass. `unsupported` means
+    no zero-model auth probe is defined for the harness, so there is nothing
+    to check; callers only preflight harnesses that do define one. An empty
+    or unrecognised state refuses.
     """
     rec = result or {}
     hid = (rec.get("harness") or harness or "harness").strip() or "harness"
@@ -98,7 +109,8 @@ def dispatch_refuse(result, harness=""):
     if state == "network":
         return ("preflight: %s auth probe failed (network) -- retry when the "
                 "host can reach the provider" % hid)
-    return ""
+    return ("preflight: %s auth state unknown -- run `atm harness auth <seat>`"
+            % hid)
 
 
 def route_skip(result, harness=""):
