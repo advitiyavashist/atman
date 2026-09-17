@@ -141,10 +141,11 @@ def eligible_limited(limited, agents, eligible_fn):
 
 
 def rank_key(limited, remaining, cost, score, load=0):
-    """Lower is better. Limited last. Unknown sits between available and zero.
+    """Lower is better. Limited last, confirmed-zero headroom next to last.
 
-    Load (claims plus suggestions made earlier in the same pass) spreads work
-    across open seats before headroom percent and cost break ties.
+    Load (claims, reservations and suggestions made earlier in the same pass)
+    ranks ahead of the known/unknown headroom split, so work spreads across
+    seats with and without a reading. Unknown still beats confirmed zero.
     """
     if remaining is None:
         avail, headroom = 1, 0
@@ -154,7 +155,30 @@ def rank_key(limited, remaining, cost, score, load=0):
         avail, headroom = 2, 0
     # Fit is deliberately the last tiebreaker: headroom and cost decide before
     # score, so a priority-1 ticket no longer leans to a high-cost seat.
-    return (1 if limited else 0, avail, float(load or 0), headroom, cost, -float(score or 0))
+    return (1 if limited else 0, 1 if avail == 2 else 0, float(load or 0),
+            avail, headroom, cost, -float(score or 0))
+
+
+def seat_load(tickets, claims):
+    """Ranking load: claims plus open reservations (reserved_for), 1 each."""
+    load = dict(claims or {})
+    for t in tickets or []:
+        if t.get("status") != "open":
+            continue
+        who = (t.get("reserved_for") or "").strip()
+        if who:
+            load[who] = load.get(who, 0) + 1
+    return load
+
+
+def without_own_reservation(load, ticket):
+    """Load as seen when re-routing `ticket`: its own reservation is not load."""
+    own = ((ticket or {}).get("reserved_for") or "").strip()
+    if not own or not (load or {}).get(own):
+        return load
+    out = dict(load)
+    out[own] -= 1
+    return out
 
 
 def candidate_rows(board, ticket, eligible, limited, workforce, roles, load_, score_agent):

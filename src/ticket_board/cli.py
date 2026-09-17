@@ -4846,13 +4846,9 @@ def _refuse_limited_seat(board, seat, verb):
 
 
 def _write_route_pick(board, t, rows, deps_done):
+    """Apply pick_seat: suggest or reserve. All-limited is reported, never stored."""
     best, why = _route_headroom().pick_seat(rows)
     if not best:
-        if rows and all(r.get("limited") for r in rows):
-            t["hold"] = True
-            t["hold_reason"] = why
-            t.setdefault("notes", []).append({"by": whoami(), "at": now(), "text": why})
-            save(board, t)
         return None, why
     if deps_done:
         t["suggested"] = best
@@ -4903,11 +4899,12 @@ def _cmd_next_dispatch(a, board):
         sys.exit(1)
     t = ready[0]
     rows = _route_headroom().candidate_rows(
-        board, t, names, limited, wf, roles, load_, score_agent)
+        board, t, names, limited, wf, roles,
+        _route_headroom().seat_load(tickets, load_), score_agent)
     best, why = _write_route_pick(board, t, rows, False)
     if not best:
         print("%s %s" % (t["id"], why or "(nobody fits)"))
-        sys.exit(0 if t.get("hold") else 1)
+        sys.exit(0 if why.startswith("HOLD:") else 1)
     print("%s reserved for %s (%s)" % (t["id"], best, why))
 
 
@@ -4995,19 +4992,23 @@ def cmd_route(a, board):
         key=lambda t: (0 if _deps_done(t) else 1, t.get("priority", 2), t["id"]))
     print("%-6s %-3s %-44s %-14s %s" % ("ticket", "pri", "title", "suggested", "why"))
     changed = 0
+    rank_load = _route_headroom().seat_load(tickets, load_)
     for t in ready_first:
+        own_load = _route_headroom().without_own_reservation(rank_load, t)
         rows = _route_headroom().candidate_rows(
-            board, t, names, limited, wf, roles, load_, score_agent)
+            board, t, names, limited, wf, roles, own_load, score_agent)
         best, why = _write_route_pick(board, t, rows, _deps_done(t))
         if best:
             changed += 1
-            load_[best] = load_.get(best, 0) + 0.5  # soft-count suggestions too
+            if not _deps_done(t):
+                rank_load = dict(own_load)  # the new reservation replaces the old one
+            rank_load[best] = rank_load.get(best, 0) + 0.5  # soft-count suggestions too
             if a.claim and t["status"] == "open" and _deps_done(t):
                 got = try_claim(board, t["id"], best)
                 if got:
                     t = got
                     why += "  CLAIMED"
-        label = best or ("(held)" if t.get("hold") else "(nobody fits)")
+        label = best or ("(all limited)" if why.startswith("HOLD:") else "(nobody fits)")
         print("%-6s %-3s %-44s %-14s %s" % (t["id"], t.get("priority", 2), t["title"][:44],
                                           label, why))
     if changed:

@@ -14,7 +14,8 @@ from test_wakeup import board  # noqa: F401
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = [ROOT / "tickets.py", ROOT / "src" / "ticket_board" / "cli.py"]
 TOOL_IDS = ["tickets.py", "cli.py"]
-RESET = "2026-09-20T11:00:00Z"
+RESET = "2099-09-20T11:00:00Z"
+RESET2 = "2099-09-21T00:00:00Z"
 
 
 def run(tool, board, *args, agent="", env=None):
@@ -77,14 +78,14 @@ def _write_ledger(board, providers):
 def test_pick_seat_skips_limited_and_prefers_cheaper():
     limited, cheap, dear = (
         {"name": "lim", "limited": True, "remaining": 90, "cost": 0, "score": 99,
-         "limit_label": "claude limited until 2026-09-20T11:00:00Z"},
+         "limit_label": "claude limited until 2099-09-20T11:00:00Z"},
         {"name": "cheap", "limited": False, "remaining": None, "cost": 0, "score": 10},
         {"name": "dear", "limited": False, "remaining": None, "cost": 2, "score": 10},
     )
     name, why = rh.pick_seat([limited, cheap, dear])
     assert name == "cheap"
     assert "skipped limited: lim" in why
-    assert "claude limited until 2026-09-20T11:00:00Z" in why
+    assert "claude limited until 2099-09-20T11:00:00Z" in why
 
 
 def test_pick_seat_prefers_observed_headroom_then_cost():
@@ -119,7 +120,7 @@ def test_unknown_headroom_never_ranks_below_known_zero():
 
 def test_limited_never_selected_even_with_headroom():
     limited = {"name": "lim", "limited": True, "remaining": 100, "cost": 0, "score": 99,
-               "limit_label": "claude limited until 2026-09-20T11:00:00Z"}
+               "limit_label": "claude limited until 2099-09-20T11:00:00Z"}
     unknown = {"name": "unknown", "limited": False, "remaining": None, "cost": 2, "score": 1}
     zero = {"name": "zero", "limited": False, "remaining": 0, "cost": 0, "score": 1}
     name, why = rh.pick_seat([limited, zero, unknown])
@@ -134,15 +135,15 @@ def test_limited_never_selected_even_with_headroom():
 def test_pick_seat_all_limited_names_resets():
     rows = [
         {"name": "alice", "limited": True, "remaining": None, "cost": 0, "score": 10,
-         "limit_label": "claude limited until 2026-09-20T11:00:00Z"},
+         "limit_label": "claude limited until 2099-09-20T11:00:00Z"},
         {"name": "bob", "limited": True, "remaining": None, "cost": 1, "score": 10,
-         "limit_label": "codex limited until 2026-09-21T00:00:00Z"},
+         "limit_label": "codex limited until 2099-09-21T00:00:00Z"},
     ]
     name, why = rh.pick_seat(rows)
     assert name is None
     assert why.startswith("HOLD:")
-    assert "alice (claude limited until 2026-09-20T11:00:00Z)" in why
-    assert "bob (codex limited until 2026-09-21T00:00:00Z)" in why
+    assert "alice (claude limited until 2099-09-20T11:00:00Z)" in why
+    assert "bob (codex limited until 2099-09-21T00:00:00Z)" in why
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
@@ -171,28 +172,54 @@ def test_route_tie_goes_to_cheaper_tier(tool, board):
     assert "cost low" in notes
 
 
+PAST = "2026-01-01T00:00:00Z"
+
+
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
-def test_all_limited_holds_with_resets_and_no_retry(tool, board):
+def test_all_limited_reports_resets_without_storing_hold(tool, board):
     _pair(tool, board)
     _limit(board, "alice", harness="claude", reset=RESET)
-    _limit(board, "bob", harness="codex", reset="2026-09-21T00:00:00Z")
-    first = run(tool, board, "route", "--only", "alice", "bob", agent="bob")
-    assert first.returncode == 0, first.stderr + first.stdout
+    _limit(board, "bob", harness="codex", reset=RESET2)
+    for extra in ((), ("--redo",)):
+        routed = run(tool, board, "route", "--only", "alice", "bob", *extra, agent="bob")
+        assert routed.returncode == 0, routed.stderr + routed.stdout
+        row = [ln for ln in routed.stdout.splitlines() if ln.startswith("T-001")]
+        assert row and "(all limited)" in row[0]
+        assert "HOLD: every candidate provider is limited" in row[0]
+        assert RESET in row[0] and RESET2 in row[0]
+        t = show(tool, board, "T-001", agent="bob")
+        assert not t.get("hold")
+        assert not t.get("hold_reason")
+        assert not t.get("suggested")
+        assert not t.get("reserved_for")
+        assert not [n for n in t.get("notes") or [] if "HOLD:" in n.get("text", "")]
+    _limit(board, "alice", harness="claude", reset=PAST)
+    _limit(board, "bob", harness="codex", reset=PAST)
+    routed = run(tool, board, "route", "--only", "alice", "bob", agent="bob")
+    assert routed.returncode == 0, routed.stderr + routed.stdout
     t = show(tool, board, "T-001", agent="bob")
-    assert t.get("hold") is True
-    assert not t.get("suggested")
-    reason = t.get("hold_reason") or ""
-    assert "HOLD:" in reason
-    assert RESET in reason
-    assert "2026-09-21T00:00:00Z" in reason
-    hold_notes = [n for n in t.get("notes") or [] if "HOLD:" in n.get("text", "")]
-    assert len(hold_notes) == 1
-    second = run(tool, board, "route", "--only", "alice", "bob", "--redo", agent="bob")
-    assert second.returncode == 0, second.stderr + second.stdout
-    t2 = show(tool, board, "T-001", agent="bob")
-    hold_notes2 = [n for n in t2.get("notes") or [] if "HOLD:" in n.get("text", "")]
-    assert len(hold_notes2) == 1
-    assert t2.get("suggested") in (None, "")
+    assert t.get("suggested") in ("alice", "bob")
+    assert "HOLD:" not in routed.stdout
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_next_dispatch_all_limited_reports_then_routes_after_reset(tool, board):
+    _pair(tool, board)
+    _limit(board, "alice", harness="claude")
+    _limit(board, "bob", harness="codex", reset=RESET2)
+    r = run(tool, board, "next", "--dispatch", agent="bob")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "HOLD:" in r.stdout and RESET in r.stdout and RESET2 in r.stdout
+    t = show(tool, board, "T-001", agent="bob")
+    assert not t.get("hold")
+    assert t["status"] == "open"
+    assert not t.get("reserved_for")
+    _limit(board, "alice", harness="claude", reset=PAST)
+    _limit(board, "bob", harness="codex", reset=PAST)
+    r = run(tool, board, "next", "--dispatch", agent="bob")
+    assert r.returncode == 0, r.stderr + r.stdout
+    t = show(tool, board, "T-001", agent="bob")
+    assert t.get("reserved_for") in ("alice", "bob")
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
@@ -206,20 +233,6 @@ def test_next_refuses_limited_seat(tool, board):
     assert "not dispatching" in blob
     t = show(tool, board, "T-001", agent="bob")
     assert t["status"] == "open"
-
-
-@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
-def test_next_dispatch_holds_when_every_candidate_is_limited(tool, board):
-    _pair(tool, board)
-    _limit(board, "alice", harness="claude")
-    _limit(board, "bob", harness="codex", reset="2026-09-21T00:00:00Z")
-    r = run(tool, board, "next", "--dispatch", agent="bob")
-    assert r.returncode == 0, r.stderr + r.stdout
-    t = show(tool, board, "T-001", agent="bob")
-    assert t.get("hold") is True
-    assert RESET in (t.get("hold_reason") or "")
-    assert t["status"] == "open"
-    assert not t.get("reserved_for")
 
 
 def test_dispatch_refuses_limited_target(board):
@@ -397,3 +410,39 @@ def test_busy_seat_plus_limited_dormant_seat_is_not_a_hold(tool, board):
     t = show(tool, board, "T-001", agent="alice")
     assert not t.get("hold")
     assert not t.get("reserved_for")
+
+
+def _more_tickets(tool, board, n):
+    for i in range(n):
+        assert run(tool, board, "create", "More docs %d" % i, "--role", "docs",
+                   agent="alice").returncode == 0
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_route_spreads_between_known_and_unknown_headroom_in_one_pass(tool, board):
+    _pair(tool, board)
+    _write_ledger(board, {"claude": {"provider": "claude", "remaining": "50%"}})
+    _more_tickets(tool, board, 3)
+    routed = run(tool, board, "route", "--only", "alice", "bob", agent="alice")
+    assert routed.returncode == 0, routed.stderr + routed.stdout
+    picks = [show(tool, board, "T-00%d" % i).get("suggested") for i in range(1, 5)]
+    assert picks.count("alice") == 2, picks
+    assert picks.count("bob") == 2, picks
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_next_dispatch_counts_reservations_as_load(tool, board):
+    _pair(tool, board)
+    _more_tickets(tool, board, 1)
+    for _ in range(2):
+        r = run(tool, board, "next", "--dispatch", agent="alice")
+        assert r.returncode == 0, r.stderr + r.stdout
+    picks = [show(tool, board, tid).get("reserved_for") for tid in ("T-001", "T-002")]
+    assert sorted(picks) == ["alice", "bob"], picks
+
+
+def test_rank_key_load_before_known_unknown_split_zero_last():
+    known = rh.rank_key(False, 50, 1, 10, load=0.5)
+    unknown = rh.rank_key(False, None, 1, 10, load=0)
+    zero = rh.rank_key(False, 0, 0, 10, load=0)
+    assert unknown < known < zero
