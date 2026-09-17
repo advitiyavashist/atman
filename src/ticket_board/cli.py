@@ -4858,13 +4858,17 @@ def _refuse_limited_seat(board, seat, verb):
         verb, _route_headroom().limit_label(lim)))
 
 
+def _seat_headroom(board, entry):
+    return _route_headroom().seat_headroom(board, entry)
+
+
 def _seat_route_row(board, name, entry, score):
     rh = _route_headroom()
     lim = _cli_active_limit(board, name)
     return {
         "name": name,
         "limited": bool(lim),
-        "remaining": None,
+        "remaining": _seat_headroom(board, entry),
         "cost": rh.cost_rank(entry),
         "score": score,
         "limit_label": rh.limit_label(lim) if lim else "",

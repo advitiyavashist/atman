@@ -2414,15 +2414,7 @@ def _route_headroom():
 
 
 def _seat_headroom(board, entry):
-    hid = ((entry or {}).get("harness") or (entry or {}).get("tool") or "").strip().lower()
-    if not hid:
-        return None
-    try:
-        from ticket_board import provider_usage as pu
-    except ImportError:
-        return None
-    reading = pu.get_reading(board, hid)
-    return _route_headroom().remaining_percent((reading or {}).get("remaining"))
+    return _route_headroom().seat_headroom(board, entry)
 
 
 def _seat_route_row(board, name, entry, score):

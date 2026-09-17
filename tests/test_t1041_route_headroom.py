@@ -67,6 +67,13 @@ def _pair(tool, board):
     _stamp_seen(board, "bob")
 
 
+def _write_ledger(board, providers):
+    (board / "provider_usage.json").write_text(json.dumps({
+        "providers": providers,
+        "updated": "2026-09-16T12:00:00Z",
+    }, indent=2))
+
+
 def test_pick_seat_skips_limited_and_prefers_cheaper():
     limited, cheap, dear = (
         {"name": "lim", "limited": True, "remaining": 90, "cost": 0, "score": 99,
@@ -86,6 +93,42 @@ def test_pick_seat_prefers_observed_headroom_then_cost():
     name, why = rh.pick_seat([low_empty, mid_room])
     assert name == "mid"
     assert "headroom 40%" in why
+
+
+def test_seat_headroom_reads_ledger_unknown_stays_none(tmp_path):
+    board = tmp_path / "board"
+    board.mkdir()
+    _write_ledger(board, {"codex": {"remaining": "0%"}})
+    assert rh.seat_headroom(board, {"harness": "codex"}) == 0
+    assert rh.seat_headroom(board, {"harness": "claude"}) is None
+    assert rh.seat_headroom(board, {"harness": "codex", "tool": "ignored"}) == 0
+
+
+def test_unknown_headroom_never_ranks_below_known_zero():
+    """Regression: old rank_key treated remaining=None as -1, worse than 0."""
+    confirmed_zero = {"name": "confirmed_zero_pct", "limited": False,
+                      "remaining": 0, "cost": 1, "score": 10}
+    unknown = {"name": "unknown_headroom", "limited": False,
+               "remaining": None, "cost": 1, "score": 10}
+    name, why = rh.pick_seat([confirmed_zero, unknown])
+    assert name == "unknown_headroom"
+    assert "headroom unknown" in why
+    assert rh.rank_key(False, None, 1, 10) < rh.rank_key(False, 0, 1, 10)
+    assert rh.rank_key(False, 40, 1, 10) < rh.rank_key(False, None, 1, 10)
+
+
+def test_limited_never_selected_even_with_headroom():
+    limited = {"name": "lim", "limited": True, "remaining": 100, "cost": 0, "score": 99,
+               "limit_label": "claude limited until 2026-09-20T11:00:00Z"}
+    unknown = {"name": "unknown", "limited": False, "remaining": None, "cost": 2, "score": 1}
+    zero = {"name": "zero", "limited": False, "remaining": 0, "cost": 0, "score": 1}
+    name, why = rh.pick_seat([limited, zero, unknown])
+    assert name == "unknown"
+    assert name != "lim"
+    assert "skipped limited: lim" in why
+    only_limited, hold = rh.pick_seat([limited])
+    assert only_limited is None
+    assert hold.startswith("HOLD:")
 
 
 def test_pick_seat_all_limited_names_resets():
@@ -199,3 +242,42 @@ def test_spawn_refuses_limited_seat(board):
     r = run(tool, board, "spawn", "alice", agent="alice")
     assert r.returncode != 0
     assert "claude limited until %s" % RESET in (r.stdout + r.stderr)
+
+
+def test_both_entry_points_pick_same_seat_for_same_ledger(board):
+    """Unknown (no claude reading) must beat known-zero codex; both CLIs agree.
+
+    Old rank_key preferred remaining=0 over None. Old cli.py never read the
+    ledger, so both seats looked unknown and the cheaper zero-codex seat won.
+    """
+    _pair(TOOLS[0], board)
+    _write_ledger(board, {
+        "codex": {"provider": "codex", "remaining": "0%", "status": "exhausted"},
+    })
+    picks = []
+    for i, tool in enumerate(TOOLS):
+        extra = ("--redo",) if i else ()
+        routed = run(tool, board, "route", "--only", "alice", "bob", *extra, agent="bob")
+        assert routed.returncode == 0, routed.stderr + routed.stdout
+        t = show(tool, board, "T-001", agent="bob")
+        picks.append(t.get("suggested"))
+        notes = " ".join(n.get("text", "") for n in t.get("notes") or [])
+        assert "headroom unknown" in notes
+        assert t.get("suggested") != "bob"
+    assert picks[0] == picks[1] == "alice"
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
+def test_route_never_selects_limited_when_unknown_is_open(tool, board):
+    _pair(tool, board)
+    _limit(board, "bob", harness="codex")
+    _write_ledger(board, {
+        "codex": {"provider": "codex", "remaining": "90%", "status": "ok"},
+    })
+    routed = run(tool, board, "route", "--only", "alice", "bob", agent="alice")
+    assert routed.returncode == 0, routed.stderr + routed.stdout
+    t = show(tool, board, "T-001", agent="alice")
+    assert t.get("suggested") == "alice"
+    assert t.get("suggested") != "bob"
+    notes = " ".join(n.get("text", "") for n in t.get("notes") or [])
+    assert "skipped limited: bob" in notes
