@@ -87,15 +87,21 @@ def _seconds_between(a, b):
     return max(0.0, (db - da).total_seconds())
 
 
-def _stuck_count(messages, ticket):
-    n = 0
+def _stuck_counts(messages):
+    """ticket id -> number of `stuck` messages. One pass over the log."""
+    by = {}
     for m in messages or []:
-        if m.get("re") != ticket:
+        tid = m.get("re")
+        if not tid:
             continue
         text = str(m.get("text") or "").lstrip().lower()
         if text.startswith("stuck"):
-            n += 1
-    return n
+            by[tid] = by.get(tid, 0) + 1
+    return by
+
+
+def _stuck_count(messages, ticket):
+    return _stuck_counts(messages).get(ticket, 0)
 
 
 def _filter_events(events, ticket="", agent="", since="", until="",
@@ -369,6 +375,7 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
     sel = _filter_events(
         events, ticket=ticket, agent=agent, since=since, until=until,
         epic=epic, ticket_index=idx)
+    stuck_by = _stuck_counts(messages)
     rows = []
     for tid, evs in sorted(_group(sel).items()):
         t = idx.get(tid) or {}
@@ -386,7 +393,7 @@ def build_turns_report(events, tickets=None, workforce=None, messages=None,
             "turns": _measured_turns(evs),
             "wall_clock_s": _wall_clock_s(evs),
             "reopens": sum(1 for e in evs if e.get("kind") == "reopen"),
-            "stuck": _stuck_count(messages, tid),
+            "stuck": stuck_by.get(tid, 0),
             "outcome": _outcome(evs, t),
             "cost_usd": cost_usd,
             "cost_usd_est": cost_usd_est,
