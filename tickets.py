@@ -5433,6 +5433,25 @@ class _shared_watch_table:
         _WATCH_TABLE.cwds = self._prev_cwds
 
 
+class _read_only_liveness:
+    """agent_liveness for a reader that must not spawn or write (T-1072).
+
+    Binds an empty process table so no `ps` runs -- a watcher is then known
+    only by its pid file -- and stops _active_seat_limit from clearing an
+    expired limit on the agent record.
+    """
+
+    def __enter__(self):
+        self._prev = {k: getattr(_WATCH_TABLE, k, None)
+                      for k in ("bound", "rows", "available", "cwds", "read_only")}
+        _WATCH_TABLE.bound, _WATCH_TABLE.rows, _WATCH_TABLE.available = True, [], False
+        _WATCH_TABLE.cwds, _WATCH_TABLE.read_only = {}, True
+
+    def __exit__(self, *exc):
+        for k, v in self._prev.items():
+            setattr(_WATCH_TABLE, k, v)
+
+
 def _watch_table_rows():
     if getattr(_WATCH_TABLE, "bound", False):
         return _WATCH_TABLE.rows or []
@@ -10134,6 +10153,47 @@ def cmd_trace(a, board):
     return _trace_cmd()(a, board)
 
 
+def _agent_map_mod():
+    try:
+        from ticket_board import agent_map as m
+    except ImportError:
+        _ensure_src_path()
+        from ticket_board import agent_map as m
+    return m
+
+
+def agent_map_data(board, show_all=False, tickets=None, agent_list=None, live=None, events=None):
+    """T-1072: one row per seat run. Reads board files only; no ps, no writes."""
+    agent_list = load_agents(board) if agent_list is None else agent_list
+    receipts = {}
+    for p in sorted(glob.glob(os.path.join(agents_dir(board), "*.run"))):
+        seat = os.path.basename(p)[:-len(".run")]
+        receipts[seat] = _read_run(board, seat)
+    if live is None:
+        live = {}
+        with _read_only_liveness():
+            for rec in agent_list:
+                n = rec.get("owner") or ""
+                if n and receipts.get(n, {}).get("active"):
+                    live[n] = _safe(lambda rec=rec: agent_liveness(board, rec, agent_list), {}) or {}
+    pids = {n: r.get("pid") for n, r in receipts.items() if r.get("active") and r.get("pid")}
+    live = {n: dict(lv, pid_alive=_pid_alive(pids[n])) if n in pids else lv
+            for n, lv in live.items()}
+    return _agent_map_mod().build(
+        load_all(board) if tickets is None else tickets,
+        load_trajectories(board) if events is None else events,
+        receipts, live, workforce=load_workforce(board), show_all=show_all)
+
+
+def cmd_agents(a, board):
+    """T-1072: the agent map -- running seats and recent runs, grouped by ticket."""
+    data = agent_map_data(board, show_all=a.all)
+    if a.json:
+        print(json.dumps(data, indent=2))
+        return
+    print(_agent_map_mod().render_text(data))
+
+
 def _scheduler_cmd():
     try:
         from ticket_board.scheduler import cmd_route_shadow as impl
@@ -11662,6 +11722,8 @@ def _active_seat_limit(board, owner, rec=None):
         expired = False
     if not expired:
         return lim
+    if getattr(_WATCH_TABLE, "read_only", False):
+        return None
     def clear(current):
         if current.get("limit") != lim:
             return False
@@ -16088,6 +16150,8 @@ body[data-work-view=columns] #workJump{display:none}
 .promise-table{width:100%;border-collapse:collapse;font-size:13px}
 .promise-table th,.promise-table td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
 .promise-table .num{text-align:right;font-variant-numeric:tabular-nums}
+.am-wrap{overflow-x:auto}.am-group td{padding-top:10px;font-weight:600}.am-title{display:inline-block;max-width:40ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+.am-running{color:var(--ok)}.am-stalled{color:var(--warn)}.am-limited,.am-dead{color:var(--bad)}
 .usage-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
 .usage-card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px}
 .usage-card .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
@@ -16305,6 +16369,11 @@ body[data-work-view=columns] #workJump{display:none}
     <div class="usage-cards" id="usageCards"></div>
     <table class="promise-table" id="usageAgents"></table>
   </section>
+  <section class="promise-panel" id="agentMapPanel">
+    <h2>Agents <span class="chip" id="agentMapPill">0 agents running</span></h2>
+    <small class="mute">One row per seat run, grouped by ticket · running + last 24h (atm agents --all for history) · tokens are harness-reported or unknown</small>
+    <div class="am-wrap"><table class="promise-table" id="agentMap"></table></div>
+  </section>
   <div class="agents" id="agents"></div>
 </div>
 <div class="pane" id="pane-messages" role="tabpanel" aria-labelledby="tab-messages" tabindex="0">
@@ -16497,6 +16566,18 @@ function renderUsage(u){
   cards.innerHTML=cell('Cost',money(u.cost_usd))+cell('Tokens in',dash(u.tokens_in))+cell('Tokens out',dash(u.tokens_out))+cell('Runs with cost',String(u.n_runs_with_cost||0))+cell('Runs unmeasured',String(u.n_runs_unmeasured||0));
   const by=u.by_agent||[];
   tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
+}
+function renderAgentMap(m){
+  const tbl=document.getElementById('agentMap'),pill=document.getElementById('agentMapPill');
+  const dur=s=>s==null?'unknown':s<60?s+'s':s<3600?Math.floor(s/60)+'m':s<86400?Math.floor(s/3600)+'h'+String(Math.floor(s%3600/60)).padStart(2,'0')+'m':Math.floor(s/86400)+'d'+String(Math.floor(s%86400/3600)).padStart(2,'0')+'h';
+  const tok=n=>n==null?'unknown':Number(n).toLocaleString();
+  pill.textContent=((m&&m.running)||0)+' agents running';
+  const groups=(m&&m.groups)||[];
+  if(!groups.length){tbl.innerHTML='<tr><td>No seat runs recorded</td></tr>';return;}
+  tbl.innerHTML='<tr><th>seat</th><th>harness</th><th>role</th><th>state</th><th>verdict</th><th class="num">elapsed</th><th class="num">tokens</th></tr>'+groups.map(g=>
+    '<tr class="am-group"><td colspan="7">'+esc(g.ticket||'(no ticket)')+' <span class="am-title" title="'+esc(g.title).replace(/"/g,'&quot;')+'">'+esc(g.title)+'</span>'+(g.pr?' · PR '+esc(g.pr):'')+
+    ' <span class="mute">· '+g.runs+' runs · '+dur(g.elapsed_s)+' · tokens '+tok(g.tokens)+(g.tokens!=null&&g.tokens_unknown?' (+'+g.tokens_unknown+' unknown)':'')+'</span></td></tr>'+
+    g.rows.map(r=>'<tr><td>'+esc(r.seat)+'</td><td>'+esc(r.harness)+'</td><td>'+esc(r.role)+'</td><td class="am-'+esc(r.state)+'"'+(r.liveness?' title="'+esc(r.liveness.detail).replace(/"/g,'&quot;')+'"':'')+'>'+esc(r.state)+'</td><td class="mono">'+(r.verdict?esc(r.verdict.kind+' '+r.verdict.sha):'—')+'</td><td class="num">'+dur(r.elapsed_s)+'</td><td class="num">'+tok(r.tokens)+'</td></tr>').join('')).join('');
 }
 function seatChip(name,cover,kind,meta){
   meta=meta||{};
@@ -17000,6 +17081,7 @@ async function load(manual){
   renderObjective(d.objective);
   renderTurns(d.turns);
   renderUsage(d.usage);
+  renderAgentMap(d.agent_map);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
   defaultComposeTicket(d);
@@ -17512,7 +17594,7 @@ def _cached_turns_usage_promise(board, tickets):
     with _ANALYTICS_LOCK:
         hit = _ANALYTICS_CACHE.get(key)
         if hit and hit["stamp"] == stamp and now_m - hit["at"] < _ANALYTICS_TTL_S:
-            return hit["turns"], hit["usage"], hit["promise"]
+            return hit["turns"], hit["usage"], hit["promise"], hit["events"]
     turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
     events = _safe(lambda: _turns_mod()[1](board), [])
     usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
@@ -17520,8 +17602,9 @@ def _cached_turns_usage_promise(board, tickets):
     with _ANALYTICS_LOCK:
         _ANALYTICS_CACHE[key] = {
             "stamp": stamp, "at": now_m, "turns": turns, "usage": usage, "promise": promise,
+            "events": events,
         }
-    return turns, usage, promise
+    return turns, usage, promise, events
 
 
 def _snapshot_single_flight(board, messages=40):
@@ -17728,7 +17811,7 @@ def _board_snapshot_body(board, messages=40):
             "handoff": _last_handoff(t), "verdict": _ticket_verdict(t),
             "proof": (t.get("proof") or "").strip(),
         })
-    turns, usage, promise = _cached_turns_usage_promise(board, tickets)
+    turns, usage, promise, events = _cached_turns_usage_promise(board, tickets)
     all_msgs = load_messages(board)
     raw_msgs = []
     for x in all_msgs[-messages:]:
@@ -17801,6 +17884,9 @@ def _board_snapshot_body(board, messages=40):
         "empty_board": counts["total"] == 0,
         "turns": turns,
         "usage": usage,
+        # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
+        "agent_map": _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
+                                                  live=live, events=events), None),
         "promise": promise,
         "objective": {
             **objective_view,
@@ -19735,6 +19821,11 @@ def main():
     c.add_argument("--json", action="store_true", dest="json",
                    help="machine-readable event list")
     c.set_defaults(fn=cmd_trace)
+
+    c = sub.add_parser("agents", help="agent map: seat runs grouped by ticket (running + last 24h)")
+    c.add_argument("--all", action="store_true", help="every recorded run, not just running + last 24h")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_agents)
 
     c = sub.add_parser("review", help="submit finished work for the master to review + merge")
     c.add_argument("id")
