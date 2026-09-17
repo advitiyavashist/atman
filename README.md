@@ -187,6 +187,7 @@ repository.
 | Talk to the coordinator remotely | not supported in the developer preview | `remote` runner contract in `docs/messages-and-runners.md` |
 | Local app: `atm ui` | in the preview; the board stays on this machine; no hosted board | walkthrough above |
 | Local metrics view: turns and cost per finished ticket | in the preview; values stay blank until a finished ticket reports them; `atm turns` estimates are labelled list price | `src/ticket_board/turns.py`; `tests/test_t480_cost_estimate.py` |
+| Claude usage remaining (`atm who`) | tested on this macOS machine via the login keychain (service `Claude Code-credentials`) first; `~/.claude/.credentials.json` is a fallback and is absent on macOS Claude Code. A failed or absent read stays unknown (re-login required), never a fabricated remaining | `tests/test_t1056_claude_keychain.py`; `src/ticket_board/provider_usage.py` |
 | Efficiency comparison against another tool | not in the preview | none |
 | Native wake for every harness | not in the preview | `docs/wake-recipients.md` |
 
