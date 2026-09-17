@@ -2239,6 +2239,34 @@ def _clear_watch_stall(board, owner):
     _agent_update(board, owner, write)
 
 
+def _live_watch_stall(board, owner, rec, run=None, clear=False):
+    """The recorded stall, only while the stalled run can still be running.
+
+    `_run_end` / `_finalize_active_watch_run` clear a stall from a finally
+    block, which a SIGKILL, OOM kill or reboot never reaches. A stall left
+    behind by a dead watcher must not block retrigger or render STALLED: if
+    the run is not active, or the watcher pid or stalled child pid is gone,
+    it is ignored (and dropped when `clear`) so a new watcher can start.
+    """
+    stall = (rec or {}).get("stall")
+    if not isinstance(stall, dict) or not stall.get("at"):
+        return None
+    run = _read_run(board, owner) if run is None else (run or {})
+
+    def alive(pid):
+        try:
+            return bool(pid) and _pid_alive(int(pid))
+        except (TypeError, ValueError):
+            return False
+
+    if (run.get("active") and alive(run.get("pid"))
+            and (not stall.get("pid") or alive(stall.get("pid")))):
+        return stall
+    if clear:
+        _safe(lambda: _clear_watch_stall(board, owner), None)
+    return None
+
+
 def _worktree_gc():
     """T-946 automated worktree cleanup + atm gc sweep."""
     try:
@@ -5938,8 +5966,8 @@ def agent_liveness(board, rec, peers=None):
         out.update(state="limited", source="watchlog", heuristic=True, detail=wdetail)
         return out
 
-    stall = (rec or {}).get("stall") if isinstance((rec or {}).get("stall"), dict) else None
-    if stall and stall.get("at"):
+    stall = _live_watch_stall(board, owner, rec, run=run)
+    if stall:
         measured = stall.get("measured_s")
         out.update(state="stalled", source="watch", heuristic=False,
                    detail="silent %ss (measured; last output %s)" % (
@@ -10811,8 +10839,8 @@ def pending_work(board, owner):
     if lim:
         out["limited"] = lim.get("reset_at") or lim.get("until") or "reset unknown"
         return out
-    stall = rec.get("stall") if isinstance(rec.get("stall"), dict) else None
-    if stall and stall.get("at"):
+    stall = _live_watch_stall(board, owner, rec, clear=True)
+    if stall:
         out["stalled"] = stall.get("measured_s")
         return out
     obj = _safe(lambda: load_objective(board), {})

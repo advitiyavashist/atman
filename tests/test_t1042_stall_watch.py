@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,8 @@ def test_limited_liveness_is_not_relabelled_stalled(tmp_path):
         "owner": "boss",
         "limit": {"at": "2026-09-16T10:00:00Z", "until": "later",
                   "note": "You've hit your session limit", "source": "provider",
-                  "reset_at": "2026-09-16T18:00:00Z"},
+                  "reset_at": (datetime.now(timezone.utc) + timedelta(days=365))
+                  .strftime("%Y-%m-%dT%H:%M:%SZ")},
         "stall": {"at": "2026-09-16T10:05:00Z", "measured_s": 400,
                   "last_output_at": "2026-09-16T09:58:00Z", "source": "watch"},
     }
@@ -55,6 +57,7 @@ def test_stalled_liveness_and_blocks_retrigger(tmp_path):
     }
     (board / "agents").mkdir()
     (board / "agents" / "boss.json").write_text(json.dumps(rec))
+    tool._run_begin(str(board), "boss", 1, str(tmp_path))
     live = tool.agent_liveness(str(board), rec)
     assert live["state"] == "stalled"
     assert "640" in live["detail"]
@@ -134,7 +137,8 @@ def test_stalled_run_end_clears_stall_so_next_tick_is_fresh(tmp_path):
     owner = "boss"
     (board / "agents" / ("%s.json" % owner)).write_text(
         json.dumps({"owner": owner}))
-    tool._record_watch_stall(str(board), owner, 640, pid=999)
+    tool._run_begin(str(board), owner, 1, str(tmp_path))
+    tool._record_watch_stall(str(board), owner, 640, pid=os.getpid())
     rec = tool._agent_rec(str(board), owner)
     assert rec.get("stall") and rec["stall"].get("measured_s") == 640
     live = tool.agent_liveness(str(board), rec)
@@ -160,13 +164,51 @@ def test_output_resume_clears_agent_stall_field(tmp_path):
     owner = "boss"
     (board / "agents" / ("%s.json" % owner)).write_text(
         json.dumps({"owner": owner}))
-    tool._record_watch_stall(str(board), owner, 400, pid=7)
+    tool._run_begin(str(board), owner, 1, str(tmp_path))
+    tool._record_watch_stall(str(board), owner, 400, pid=os.getpid())
     assert tool.pending_work(str(board), owner).get("stalled") == 400
     tool._resolve_watch_stall(str(board), owner)
     rec = tool._agent_rec(str(board), owner)
     assert not rec.get("stall")
     assert rec.get("stall_resolved")
     assert "stalled" not in tool.pending_work(str(board), owner)
+
+
+def _dead_pid():
+    import subprocess
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+@pytest.mark.parametrize("scenario", ["no_run", "run_inactive", "dead_watcher", "dead_child"])
+def test_orphaned_stall_does_not_block_or_render_stalled(tmp_path, scenario):
+    """Regression: a watcher killed without its finally block (SIGKILL, OOM,
+    reboot) leaves agent["stall"] behind. It must not block retrigger forever
+    or show STALLED instead of the dead seat it is."""
+    board = tmp_path / ".tickets"
+    (board / "agents").mkdir(parents=True)
+    owner = "boss"
+    (board / "agents" / ("%s.json" % owner)).write_text(
+        json.dumps({"owner": owner}))
+    child = os.getpid()
+    if scenario != "no_run":
+        tool._run_begin(str(board), owner, 1, str(tmp_path))
+    if scenario == "run_inactive":
+        tool._run_beat(str(board), owner, active=False)
+    elif scenario == "dead_watcher":
+        tool._run_beat(str(board), owner, pid=_dead_pid())
+    elif scenario == "dead_child":
+        child = _dead_pid()
+    tool._record_watch_stall(str(board), owner, 640, pid=child)
+    rec = tool._agent_rec(str(board), owner)
+    assert rec.get("stall")
+
+    live = tool.agent_liveness(str(board), rec)
+    assert live["state"] != "stalled"
+    pending = tool.pending_work(str(board), owner)
+    assert "stalled" not in pending
+    assert not tool._agent_rec(str(board), owner).get("stall")
 
 
 def test_timeout_kills_process_group(tmp_path):
