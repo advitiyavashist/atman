@@ -2401,6 +2401,60 @@ def _refuse_preflight(board, owner, harness, verb):
     return result
 
 
+def _route_headroom():
+    try:
+        from ticket_board import route_headroom as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import route_headroom as m
+        return m
+
+
+def _route_seat_limit(board, name):
+    """Shared T-1041 limit check (route_headroom.seat_limit).
+
+    tickets.py also persists an expired reset so later reads see it cleared.
+    """
+    rec = _agent_rec(board, name) or {}
+    _active_seat_limit(board, name, rec)
+    return _route_headroom().seat_limit(rec)
+
+
+def _refuse_limited_seat(board, seat, verb):
+    lim = _route_seat_limit(board, seat)
+    if not lim:
+        return
+    sys.exit("%s: %s -- not dispatching" % (
+        verb, _route_headroom().limit_label(lim)))
+
+
+def _route_logged_out(board, wf, name):
+    """T-1043 route_skip for one seat: confirmed logged-out reason, or empty."""
+    e = wf.get(name, {}) or {}
+    hid = (e.get("harness") or e.get("tool") or "").strip()
+    if not _auth_gates_spawn(hid):
+        return ""
+    return _preflight().route_skip(_preflight_seat(board, name, hid), hid)
+
+
+def _write_route_pick(board, t, rows, deps_done):
+    """Apply pick_seat: suggest or reserve. All-limited is reported, never stored."""
+    best, why = _route_headroom().pick_seat(rows)
+    if not best:
+        return None, why
+    if deps_done:
+        t["suggested"] = best
+    else:
+        t["reserved_for"] = best
+        why = ("reserved  " + why).strip()
+    t.setdefault("notes", []).append({"by": whoami(), "at": now(), "text": why})
+    save(board, t)
+    return best, why
+
+
 def _worktree_gc():
     """T-946 automated worktree cleanup + atm gc sweep."""
     try:
@@ -3163,6 +3217,7 @@ def cmd_dispatch(a, board):
     _refuse_unreleased_deps(t, load_all(board))
     if _auth_gates_spawn(harness):
         _refuse_preflight(board, seat, harness, "dispatch")
+    _refuse_limited_seat(board, seat, "dispatch")
     rows, _note = probe_integration_catalog()
     attach_catalog_usage(rows)
     row = None
@@ -4098,8 +4153,75 @@ def _next_refusal_parts(ready_all, roles, owner, steal_id, board):
     return role_miss, reserved_miss
 
 
+def _cmd_next_dispatch(a, board):
+    """CoS `atm next --dispatch`: reserve one ready ticket; never pick LIMITED."""
+    try:
+        from ticket_board.scheduler import (
+            DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, _candidate_names)
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.scheduler import (
+            DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, _candidate_names)
+    tickets = load_all(board)
+    wf = load_workforce(board)
+    roles = load_roles(board)
+    agents = dict((r["owner"], r) for r in load_agents(board))
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    load_ = {}
+    for t in tickets:
+        if t["status"] == "claimed":
+            load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    raw_names = _candidate_names(wf, roles, only=getattr(a, "only", None))
+    limited, agents = _route_headroom().split_limited(
+        raw_names, agents, lambda n: _route_seat_limit(board, n))
+    names, _excluded = filter_eligible(
+        raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
+        alive_within_min=DEFAULT_ALIVE_WITHIN_MIN)
+    limited = _route_headroom().eligible_limited(
+        limited, agents, lambda ns, ag: filter_eligible(
+            ns, wf, roles, ag, load_, DEFAULT_ROLES,
+            alive_within_min=DEFAULT_ALIVE_WITHIN_MIN))
+    names, limited, logged_out = _route_headroom().drop_logged_out(
+        names, limited, lambda n: _route_logged_out(board, wf, n))
+    if logged_out:
+        print(_route_headroom().format_logged_out(logged_out))
+
+    def _deps_done(t):
+        return all(d in done for d in t.get("deps", []))
+
+    ready = [t for t in tickets
+             if t["status"] == "open"
+             and not _ticket_on_hold(t)
+             and _ticket_lane(t) == "ready"
+             and _deps_done(t)
+             and not _reserved_agent(t)]
+    ready.sort(key=lambda t: (t.get("priority", 2), t["id"]))
+    if not ready:
+        print("next --dispatch: no ready ticket")
+        sys.exit(1)
+    rank_load = _route_headroom().seat_load(tickets, load_)
+    held = False
+    for t in ready:
+        # An all-limited or nobody-fits ticket is reported, never stored, and
+        # must not block the tickets behind it.
+        rows = _route_headroom().candidate_rows(
+            board, t, names, limited, wf, roles, rank_load, score_agent)
+        best, why = _write_route_pick(board, t, rows, False)
+        if best:
+            print("%s reserved for %s (%s)" % (t["id"], best, why))
+            return
+        held = held or why.startswith("HOLD:")
+        print("%s %s" % (t["id"], why or "(nobody fits)"))
+    sys.exit(0 if held else 1)
+
+
 def cmd_next(a, board):
+    if getattr(a, "dispatch", False):
+        return _cmd_next_dispatch(a, board)
     owner = whoami(a.owner)
+    _refuse_limited_seat(board, owner, "next")
     roles = roles_for(board, owner, a.role)
     if roles == [] and not a.role:
         print(
@@ -10634,10 +10756,20 @@ def cmd_route(a, board):
     for t in tickets:
         if t["status"] == "claimed":
             load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    raw_names = _candidate_names(wf, roles, only=a.only)
+    limited, agents = _route_headroom().split_limited(
+        raw_names, agents, lambda n: _route_seat_limit(board, n))
     names, excluded = filter_eligible(
-        _candidate_names(wf, roles, only=a.only), wf, roles, agents, load_, DEFAULT_ROLES,
+        raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=alive_within)
+    limited = _route_headroom().eligible_limited(
+        limited, agents, lambda ns, ag: filter_eligible(
+            ns, wf, roles, ag, load_, DEFAULT_ROLES, alive_within_min=alive_within))
+    names, limited, logged_out = _route_headroom().drop_logged_out(
+        names, limited, lambda n: _route_logged_out(board, wf, n))
     print(format_excluded(excluded))
+    if logged_out:
+        print(_route_headroom().format_logged_out(logged_out))
     def _deps_done(t):
         return all(d in released for d in t.get("deps", []))
 
@@ -10661,39 +10793,25 @@ def cmd_route(a, board):
         key=lambda t: (0 if _deps_done(t) else 1, t.get("priority", 2), t["id"]))
     print("%-6s %-3s %-44s %-14s %s" % ("ticket", "pri", "title", "suggested", "why"))
     changed = 0
+    rank_load = _route_headroom().seat_load(tickets, load_)
     for t in ready_first:
-        best, best_s, why = None, None, ""
-        for n in names:
-            e = wf.get(n, {})
-            hid = (e.get("harness") or e.get("tool") or "").strip()
-            if _auth_gates_spawn(hid):
-                auth = _preflight_seat(board, n, hid)
-                skip = _preflight().route_skip(auth, hid)
-                if skip:
-                    continue
-            s = score_agent(board, n, e, roles, t)
-            if s is None:
-                continue
-            s -= 1.5 * load_.get(n, 0)  # spread work; agents already holding tickets rank lower
-            if best_s is None or s > best_s:
-                best, best_s = n, s
-                why = "%s %s" % (e.get("model") or e.get("tool") or "", e.get("cost", ""))
+        own_load = _route_headroom().without_own_reservation(rank_load, t)
+        rows = _route_headroom().candidate_rows(
+            board, t, names, limited, wf, roles, own_load, score_agent)
+        best, why = _write_route_pick(board, t, rows, _deps_done(t))
         if best:
-            if _deps_done(t):
-                t["suggested"] = best
-            else:
-                t["reserved_for"] = best
-                why = ("reserved  " + why).strip()
-            save(board, t)
             changed += 1
-            load_[best] = load_.get(best, 0) + 0.5  # soft-count suggestions too
+            if not _deps_done(t):
+                rank_load = dict(own_load)  # the new reservation replaces the old one
+            rank_load[best] = rank_load.get(best, 0) + 0.5  # soft-count suggestions too
             if a.claim and t["status"] == "open" and _deps_done(t):
                 got = try_claim(board, t["id"], best)
                 if got:
                     t = got
                     why += "  CLAIMED"
+        label = best or ("(all limited)" if why.startswith("HOLD:") else "(nobody fits)")
         print("%-6s %-3s %-44s %-14s %s" % (t["id"], t.get("priority", 2), t["title"][:44],
-                                          best or "(nobody fits)", why))
+                                          label, why))
     if changed:
         _master_log(board, "route: suggested owners for %d tickets%s" % (changed, " and claimed ready ones" if a.claim else ""))
     print("\nAgents pull with `atm next`; their suggested tickets come first. "
@@ -15018,6 +15136,8 @@ def cmd_spawn(a, board):
     if not a.name:
         sys.exit("spawn needs a name (or --list)")
     owner = a.name
+    if not a.stop:
+        _refuse_limited_seat(board, owner, "spawn")
     if a.stop:
         return _spawn_stop(board, owner, all_boards=bool(getattr(a, "all_boards", False)))
     requested_harness = getattr(a, "harness", "") or a.tool
@@ -20607,6 +20727,8 @@ def main():
     c.add_argument("--another", action="store_true", help="claim even though I already hold one")
     c.add_argument("--steal", default="", metavar="ID",
                    help="claim this ticket even if reserved_for someone else")
+    c.add_argument("--dispatch", action="store_true",
+                   help="CoS: reserve the next ready ticket for the best non-limited seat")
     c.set_defaults(fn=cmd_next)
 
     c = sub.add_parser("claim", help="atomically claim a specific ticket")
