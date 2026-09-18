@@ -412,6 +412,20 @@ def ui_reading(reading, now=None):
     return rec
 
 
+def brief_usage_line(reading, now=None):
+    """Seat-brief USAGE line, or '' when there is no real reading (T-1091).
+
+    `format_usage_line` still says 'unknown · UNKNOWN · no data' for dash;
+    the brief omits that placeholder entirely.
+    """
+    rec = public_reading(reading, now)
+    status = rec.get("status") or "unknown"
+    if status in ("unknown", "no_data") and rec.get("remaining") is None \
+            and rec.get("tokens_reported") is None and not rec.get("limit_message"):
+        return ""
+    return format_usage_line(reading, now).strip()
+
+
 def format_usage_line(reading, now=None):
     rec = public_reading(reading, now)
     hid = rec["provider"] or "?"

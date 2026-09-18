@@ -209,9 +209,8 @@ def test_first_prompt_states_the_gate_the_ticket_and_the_refusals(board, harness
     assert "Accepting your own work" in prompt
     assert "Editing .tickets/ JSON" in prompt
 
-    # one usage line, from the existing provider usage reader
-    assert "\nUSAGE     " in prompt
-    assert harness.split("+")[0] in prompt.split("\nUSAGE     ")[1].splitlines()[0]
+    # USAGE is omitted when the provider has no reading (T-1091).
+    # A placeholder 'unknown · UNKNOWN · no data' is not a reading.
 
 
 @pytest.mark.parametrize("harness,_binary", HARNESSES, ids=[h for h, _ in HARNESSES])
@@ -368,3 +367,15 @@ def test_a_seat_is_never_its_own_reviewer(board):
     text = tk.seat_brief_text(str(board), "alice")
     assert "Ask alice for the accept" not in text
     assert "Accepting your own work" in text
+
+
+def test_cos_seat_asks_the_master_owner(board):
+    """T-1091: CoS == this seat used to blank the reviewer; fall back to master."""
+    tk = _tickets()
+    assert run(board, "join", "alice", "--roles", "backend", agent="alice").returncode == 0
+    assert run(board, "join", "mira", "--roles", "backend", agent="mira").returncode == 0
+    assert run(board, "master", "take", "--owner", "mira", agent="mira").returncode == 0
+    assert run(board, "master", "cos", "alice", agent="mira").returncode == 0
+    text = tk.seat_brief_text(str(board), "alice")
+    assert "Ask mira for the accept" in text
+    assert "Ask alice for the accept" not in text
