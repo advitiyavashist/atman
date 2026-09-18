@@ -151,3 +151,65 @@ def test_inbox_rules_unchanged_outside_snapshot(board):
     assert pending.get("task_messages") or pending.get("messages_to_me")
     unread = tk.unread(str(board), "bob")
     assert any("task: ping" in (m.get("text") or "") for m in unread)
+
+
+def _pin_leak_agent(root: Path, *, limit):
+    board = root / ".tickets"
+    (board / "agents").mkdir(parents=True)
+    path = board / "agents" / "alice.json"
+    path.write_text(json.dumps({
+        "owner": "alice",
+        "inbox_seen": "2026-09-01T00:00:00Z",
+        "limit": limit,
+    }))
+    return board, path
+
+
+def test_write_during_pin_survives_agent_update(tmp_path):
+    """A concurrent writer mid-snapshot must not be rolled back by _agent_update.
+
+    board_snapshot pins agent records. If the in-lock read uses that pin, a
+    later expire/write restamps the snapshot-time pre-image and drops the
+    writer's watermark — the T-1074 reject.
+    """
+    tk = _load_tk()
+    expired = {"reset_at": "2020-01-01T00:00:00+00:00", "note": "expired"}
+    board, path = _pin_leak_agent(tmp_path, limit=expired)
+    with tk._reuse_board_reads(str(board)):
+        pinned = tk._agent_rec(str(board), "alice")
+        assert pinned["inbox_seen"] == "2026-09-01T00:00:00Z"
+        live = json.loads(path.read_text())
+        live["inbox_seen"] = "2099-01-01T00:00:00Z"
+        live["other"] = "from-writer"
+        path.write_text(json.dumps(live))
+        tk._active_seat_limit(str(board), "alice", pinned)
+
+        def stamp(rec):
+            rec["stamped"] = True
+
+        assert tk._agent_update(str(board), "alice", stamp) is not None
+    rec = json.loads(path.read_text())
+    assert rec["inbox_seen"] == "2099-01-01T00:00:00Z"
+    assert rec["other"] == "from-writer"
+    assert rec["stamped"] is True
+    assert "limit" not in rec
+    assert rec.get("limit_expired_at") == expired["reset_at"]
+
+
+def test_active_seat_limit_fallback_bypasses_pin(tmp_path):
+    """After an aborted expire write, the fallback limit must come from disk."""
+    tk = _load_tk()
+    expired = {"reset_at": "2020-01-01T00:00:00+00:00", "note": "expired"}
+    fresh = {"reset_at": "2099-01-01T00:00:00+00:00", "note": "new"}
+    board, path = _pin_leak_agent(tmp_path, limit=expired)
+    with tk._reuse_board_reads(str(board)):
+        pinned = tk._agent_rec(str(board), "alice")
+        live = json.loads(path.read_text())
+        live["inbox_seen"] = "2099-01-01T00:00:00Z"
+        live["limit"] = fresh
+        path.write_text(json.dumps(live))
+        got = tk._active_seat_limit(str(board), "alice", pinned)
+    assert got == fresh
+    rec = json.loads(path.read_text())
+    assert rec["inbox_seen"] == "2099-01-01T00:00:00Z"
+    assert rec["limit"] == fresh
