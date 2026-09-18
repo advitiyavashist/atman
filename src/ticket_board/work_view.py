@@ -442,6 +442,66 @@ def accepted_release_note(pred_id, sha, seat):
     return "%s accepted by %s -- unblocked" % (pred_id, seat)
 
 
+def _accepted_pin_branch(t):
+    """Worker branch already on the ticket; never prefer main/master."""
+    branch = (t.get("branch") or "").strip()
+    if branch and branch not in ("main", "master"):
+        return branch
+    pin = (t.get("commit") or "").strip()
+    if "@" in pin:
+        left = pin.split("@", 1)[0].strip()
+        if left and left not in ("main", "master", "?"):
+            return left
+    return ""
+
+
+def done_pin_state(t, g, honor_cwd=False):
+    """T-1082: default `atm done` pin to accepted_sha when set.
+
+    Landing and coordinator close run `done` from trunk without --artifact.
+    Recording cwd HEAD then writes main@<later> over the accepted commit and
+    the successor handoff shows that instead. When a current accept exists,
+    reuse that sha (and the ticket's worker branch). ``honor_cwd`` is True
+    only when the closer passed --artifact (explicit override).
+
+    Returns ``(g_for_pin, warning_or_None)``. ``g_for_pin`` is ``g`` when
+    there is nothing to rewrite.
+    """
+    if honor_cwd or not g or not t:
+        return g, None
+    sha = (accepted_release_sha(t) or "").strip()
+    if not sha:
+        ev = current_accept_event(t)
+        if ev:
+            sha = (ev.get("sha") or "").strip()
+    if not sha:
+        return g, None
+    cwd = (g.get("sha_full") or g.get("sha") or "").strip()
+    warn = None
+    if cwd and not _event_sha_match(cwd, sha):
+        warn = (
+            "WARNING: cwd is %s but accepted_sha is %s; "
+            "recording the accepted commit (pass --artifact to override)"
+            % (cwd[:12], sha[:12] if len(sha) >= 12 else sha)
+        )
+    if cwd and _event_sha_match(cwd, sha):
+        return g, None
+    out = dict(g)
+    existing = ""
+    pin = (t.get("commit") or "")
+    if "@" in pin:
+        existing = pin.rsplit("@", 1)[-1].strip()
+    if existing and _event_sha_match(existing, sha):
+        out["sha"] = existing
+    else:
+        out["sha"] = sha[:12] if len(sha) >= 12 else sha
+    out["sha_full"] = sha if len(sha) >= 40 else (g.get("sha_full") or sha)
+    branch = _accepted_pin_branch(t)
+    if branch:
+        out["branch"] = branch
+    return out, warn
+
+
 def is_live_unverified_gate_note(text, pred_id=None):
     """True when a note is still the 'accept it or reopen' instruction."""
     text = (text or "").strip()
