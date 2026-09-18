@@ -6925,9 +6925,8 @@ def cmd_done(a, board):
             "RULE: %d uncommitted files in %s. Commit before marking %s done "
             "(or --force to override)." % (g["dirty"], g["top"], a.id)
         )
-    # T-1082: accepted_sha wins over cwd HEAD when --artifact was omitted.
-    # Coordinator `done` from main after accept used to overwrite the pin
-    # with main@HEAD and hand that to the successor.
+    # T-1082: accepted_sha wins over the tree HEAD. --artifact names a
+    # location, not a verdict -- a moved HEAD still pins the accepted sha.
     pin_g, pin_warn = _work_view().done_pin_state(t, g, honor_cwd=bool(art))
     if pin_warn:
         print(pin_warn, file=sys.stderr)

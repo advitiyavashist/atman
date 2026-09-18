@@ -3132,6 +3132,7 @@ def cmd_done(a, board):
             "(or --force to override)." % (g["dirty"], g["top"], a.id)
         )
     # T-1082: accepted_sha wins over cwd HEAD (cli.py has no --artifact).
+    # honor_cwd never overrides the pin; --artifact is a location, not a verdict.
     pin_g, pin_warn = _work_view().done_pin_state(t, g, honor_cwd=False)
     if pin_warn:
         print(pin_warn, file=sys.stderr)
