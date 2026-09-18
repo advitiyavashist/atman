@@ -431,3 +431,29 @@ def test_t1008_quickstart_and_init_teach_atm_not_tickets(tmp_path):
     # and it points at the gate demo, which is the point of T-1077
     assert "atm quickstart --gate" in out
     assert "a DIFFERENT seat accepts the commit" in out
+
+
+def test_readme_gate_section_is_after_one_path():
+    """T-1093: install (`## One path`) comes before `atm quickstart --gate`."""
+    text = (ROOT / "README.md").read_text()
+    assert text.index("## One path") < text.index("## Feel it in five minutes")
+
+
+def test_gate_did_not_hold_stops_loudly(tmp_path, capsys):
+    """The #248 STOPPED branch: T-002 opened with no accept."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tickets_t1093", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    src = TOOL.read_text()
+    assert '_gate_fail(state, "the gate did NOT hold: T-002 opened with no accept on T-001"' in src
+    state = {"root": str(tmp_path / "scratch"), "done": []}
+    os.makedirs(state["root"], exist_ok=True)
+    with pytest.raises(SystemExit) as ei:
+        mod._gate_fail(state, "the gate did NOT hold: T-002 opened with no accept on T-001",
+                       "claimed T-002")
+    assert ei.value.code == 1
+    out = capsys.readouterr().out
+    assert "STOPPED:" in out
+    assert "T-002 opened with no accept on T-001" in out
+    assert "Nothing was accepted" in out
