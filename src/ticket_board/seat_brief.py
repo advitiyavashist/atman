@@ -25,6 +25,7 @@ BRIEF_HEAD = "SEAT BRIEF"
 GATE_HEAD = "ACCEPT GATE"
 REFUSE_HEAD = "REFUSE -- not yours to do, ever"
 COMMANDS_HEAD = "COMMANDS -- nothing else moves the board"
+RUNS_HEAD = "RUNS -- this run ends when you stop"
 SCOPE_LIMIT = 360
 
 # One line, carried by EVERY worker turn (not just the first), so the rule that
@@ -34,6 +35,11 @@ GATE_ONE_LINER = (
     "`atm accept <id> --sha <full 40-char review head> --notes \"...\"`; you cannot accept your own "
     "ticket, a commit after `atm review` moves the head and voids the accept, and no ticket that "
     "depends on yours opens until the accept lands."
+)
+# T-1097: persist seats lose a suite that was backgrounded when the run exits.
+RUN_ONE_LINER = (
+    "RUN: long commands stay in the FOREGROUND; this run ends when you stop -- "
+    "backgrounding a test suite loses the work."
 )
 
 
@@ -110,6 +116,11 @@ def compose(seat, roles="", harness="", worktree="", ticket_id="", ticket_title=
         "  blocked    atm block %s --reason \"...\"  and  atm msg \"stuck: what, tried, need\"%s --re %s"
         % (slot, (" --to " + reviewer) if reviewer else "", slot),
         "  note       atm note %s \"...\"   |   atm msg \"...\" --to <seat>" % slot,
+        "",
+        RUNS_HEAD,
+        "  Long commands (pytest, builds) stay in the FOREGROUND of this turn.",
+        "  Backgrounding a test suite loses it: the watcher treats the run as finished",
+        "  and the work never lands.",
         "",
         REFUSE_HEAD,
         "  1. Another seat's ticket, branch or worktree. You touch %s and your own worktree, nothing else."

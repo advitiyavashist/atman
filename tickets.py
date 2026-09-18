@@ -12444,6 +12444,7 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
 TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
 {gate}
+{run}
 Rules: one ticket at a time; own git worktree, never main; `atm sync` before `atm review`;
 `atm update <id> "..."` every 45 minutes; finish with `atm review <id> --notes "paths, tests, decisions"`;
 never edit .tickets/ by hand; never run `atm clear`. Board-only comms: `atm msg`.
@@ -12895,7 +12896,8 @@ def prompt_text(a, board):
         parts.append(a.extra)
     sb = _seat_brief()
     body = WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                                gate=sb.GATE_ONE_LINER, extra="\n\n".join(parts))
+                                gate=sb.GATE_ONE_LINER, run=sb.RUN_ONE_LINER,
+                                extra="\n\n".join(parts))
     run_no = getattr(a, "run_no", None)
     if run_no is None:
         run_no = os.environ.get("TICKETS_RUN_NO") or ""
@@ -15314,6 +15316,32 @@ def _stop_requested(board, owner):
         pass
 
 
+# T-1097: --run-timeout is minutes (T-988). 90s cannot finish this repo's
+# tests (test_t1041_route_headroom.py alone is ~180s). Default stays 90 min;
+# spawn warns when the cap is below the floor.
+DEFAULT_RUN_TIMEOUT_MIN = 90
+RUN_TIMEOUT_FLOOR_MIN = 10
+
+
+def run_timeout_floor_warning(minutes):
+    """Warn when a seat run cap is too short to finish this repo's tests.
+
+    0 means no cap. The floor is minutes, matching --run-timeout.
+    """
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        return ""
+    if minutes <= 0 or minutes >= RUN_TIMEOUT_FLOOR_MIN:
+        return ""
+    return (
+        "warning: --run-timeout %s min is below the %s min floor "
+        "(this repo's tests need a longer seat run; "
+        "backgrounding a suite still loses the work when the run ends)"
+        % (minutes, RUN_TIMEOUT_FLOOR_MIN)
+    )
+
+
 def cmd_spawn(a, board):
     """Bring up a persistent worker: register it, give it a worktree, and start a
     detached watcher that launches the tool (with the chosen model) whenever the
@@ -15347,6 +15375,9 @@ def cmd_spawn(a, board):
     if not a.name:
         sys.exit("spawn needs a name (or --list)")
     owner = a.name
+    warn = run_timeout_floor_warning(getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN))
+    if warn and not a.stop:
+        print(warn)
     if not a.stop:
         _refuse_limited_seat(board, owner, "spawn")
     if a.stop:
@@ -15524,9 +15555,10 @@ def cmd_spawn(a, board):
         sys.exit("failure: spawn did not install a live watcher for %s "
                  "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; seat=%s pinned; log %s" % (
+    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; run-timeout=%sm; seat=%s pinned; log %s" % (
         owner, pid, harness, model,
-        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, owner, log_path))
+        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs,
+        getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner, log_path))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
     # T-1076: what this seat's provider has left, from the recorded reading.
@@ -21013,7 +21045,9 @@ def main():
                    help="model runs this session then stop (default 1; 0 = loop until --stop)")
     c.add_argument("--persist", action="store_true", help="loop until spawn --stop / SIGTERM (sets --max-runs 0)")
     c.add_argument("--force", action="store_true", help="run once even if wake gates are empty")
-    c.add_argument("--run-timeout", type=int, default=90, help="minutes per run before it is killed (0 = none)")
+    c.add_argument("--run-timeout", type=int, default=DEFAULT_RUN_TIMEOUT_MIN,
+                   help="minutes per run before it is killed (default %s; 0 = none; "
+                        "warn below %s min)" % (DEFAULT_RUN_TIMEOUT_MIN, RUN_TIMEOUT_FLOOR_MIN))
     c.add_argument("--beat-every", type=int, default=0,
                    help="seconds between in-run heartbeats (0 = TICKETS_RUN_HEARTBEAT_SECS, default 30)")
     c.add_argument("--once", action="store_true", help="check once; exit 0 if work, 1 if not")
@@ -21051,7 +21085,7 @@ def main():
     c.add_argument("--every", type=int, default=60)
     c.add_argument("--exec", default="")
     c.add_argument("--cwd", default="")
-    c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--run-timeout", type=int, default=DEFAULT_RUN_TIMEOUT_MIN)
     c.add_argument("--safe", action="store_true",
                    help="watch confirms edits instead of running unattended (same as spawn --safe)")
     c.set_defaults(fn=cmd_boot)
@@ -21077,7 +21111,9 @@ def main():
                    help="target checkout path or origin slug for cross-repo spawn")
     c.add_argument("--base", default="", help="branch/ref to create the worktree from (default origin/main)")
     c.add_argument("--every", type=int, default=60)
-    c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--run-timeout", type=int, default=DEFAULT_RUN_TIMEOUT_MIN,
+                   help="minutes per run before it is killed (default %s; 0 = none; "
+                        "warn below %s min)" % (DEFAULT_RUN_TIMEOUT_MIN, RUN_TIMEOUT_FLOOR_MIN))
     c.add_argument("--heartbeat", type=int, default=0,
                    help="with --master: also wake every N minutes to drive the objective (0 = off)")
     c.add_argument("--persist", action="store_true",
