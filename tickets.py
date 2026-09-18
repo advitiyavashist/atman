@@ -1960,7 +1960,9 @@ def _agent_update(board, owner, mutate):
     """
     path = os.path.join(agents_dir(board), owner + ".json")
     with _AgentLock(board, owner):
-        rec = _agent_rec(board, owner) or {}
+        # Snapshot pins must not supply this pre-image (T-1074): a concurrent
+        # writer landing mid-board.json would otherwise be rolled back.
+        rec = _agent_rec_from_disk(board, owner) or {}
         if mutate(rec) is False:
             return None
         tmp = "%s.tmp.%d" % (path, os.getpid())
@@ -12554,7 +12556,7 @@ def _active_seat_limit(board, owner, rec=None):
         # A quota failure must not keep the same trigger exhausted after reset.
         current.pop("adapter_failure", None)
     current = _agent_update(board, owner, clear)
-    return (current if current is not None else (_agent_rec(board, owner) or {})).get("limit")
+    return (current if current is not None else (_agent_rec_from_disk(board, owner) or {})).get("limit")
 
 
 def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
