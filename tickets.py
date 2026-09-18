@@ -2491,6 +2491,83 @@ def _maybe_refresh_provider_usage(board):
     _safe(lambda: pu.refresh_http_providers(board, home=os.path.expanduser("~")), None)
 
 
+def _usage_header_seat_harnesses(board):
+    """Harness labels the board's seats registered. Reads workforce.json only."""
+    wf = _safe(lambda: load_workforce(board), {}) or {}
+    out = []
+    for entry in wf.values():
+        if isinstance(entry, dict):
+            label = (entry.get("harness") or entry.get("tool") or "").strip()
+            if label:
+                out.append(label)
+    return out
+
+
+def usage_header_lines(board):
+    """T-1076: per-provider usage for the surfaces users already look at.
+
+    READ PATH. The ledger file and workforce.json, nothing else: no network
+    call, no subprocess, no write -- `atm agents`, `atm next`, the bare `atm`
+    screen and board.json must stay as cheap and as side-effect-free as
+    T-1055/T-1072 made them. A fresh read only ever happens where the code
+    already refreshes (`atm harness usage` / `harness available`).
+    """
+    # TICKETS_USAGE_HEADER=0 silences the PRINTED header for a caller that
+    # parses stdout. board.json still carries the data: it is a data surface,
+    # and a UI that showed nothing would say less than the truth.
+    if os.environ.get("TICKETS_USAGE_HEADER") == "0":
+        return []
+    if not board or not os.path.isdir(board):
+        return []
+    pu = _provider_usage()
+    harnesses = _usage_header_seat_harnesses(board)
+    return _safe(lambda: pu.header_lines(board, harnesses=harnesses), []) or []
+
+
+def print_usage_header(board):
+    for line in usage_header_lines(board):
+        print(line)
+
+
+def print_seat_usage(board, harness):
+    """One line for the seat's own provider, after spawn/dispatch staffs it."""
+    if os.environ.get("TICKETS_USAGE_HEADER") == "0":
+        return
+    line = _safe(lambda: _provider_usage().seat_usage_line(board, harness), "")
+    if line:
+        print(line)
+
+
+def provider_usage_snapshot(board):
+    """T-1076: the usage header as data, for board.json and the UI header."""
+    pu = _provider_usage()
+    harnesses = _usage_header_seat_harnesses(board)
+    ids = _safe(lambda: pu.header_providers(board, harnesses), []) or []
+    return [pu.compact_reading(pu.get_reading(board, hid)) for hid in ids]
+
+
+def _usage_header_board():
+    """Board for the bare-`atm` header: TICKETS_DIR, or a .tickets walk up.
+
+    Filesystem only, deliberately not board_dir(): printing a usage line on
+    the default screen must not start a git process, resolve a shared-board
+    config, or refuse anything -- the help output is what the user asked for.
+    """
+    env = os.environ.get("TICKETS_DIR")
+    if env:
+        d = os.path.abspath(os.path.expanduser(env))
+        return d if os.path.isdir(d) else ""
+    d = os.getcwd()
+    while True:
+        cand = os.path.join(d, ".tickets")
+        if os.path.isdir(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            return ""
+        d = parent
+
+
 def _steer():
     """T-1047 live steer helpers (receipt classification + framing)."""
     try:
@@ -3246,6 +3323,8 @@ def cmd_dispatch(a, board):
     save(board, t)
     print("%s reserved for %s harness=%s (worker claims via atm next / watch)"
           % (t["id"], seat, harness))
+    # T-1076: the quota this seat will actually spend, one line, recorded read.
+    print_seat_usage(board, harness)
     skip_spawn = _dispatch_skip_product_spawn(harness)
     if skip_spawn:
         print("spawn skipped (%s)" % skip_spawn)
@@ -3262,6 +3341,7 @@ def cmd_dispatch(a, board):
         safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
         max_runs=getattr(a, "max_runs", None), replace=False,
         transfer=False, alias="",
+        usage_line=False,  # T-1076: dispatch already printed the seat's line
     )
     try:
         cmd_spawn(ns, board)
@@ -4218,6 +4298,8 @@ def _cmd_next_dispatch(a, board):
 
 
 def cmd_next(a, board):
+    # T-1076: the seat's quota, before the ticket it is about to take on.
+    print_usage_header(board)
     if getattr(a, "dispatch", False):
         return _cmd_next_dispatch(a, board)
     owner = whoami(a.owner)
@@ -10682,6 +10764,9 @@ def cmd_agents(a, board):
     if a.json:
         print(json.dumps(data, indent=2))
         return
+    # T-1076: header first -- who is running is only actionable next to what
+    # quota is left. Ledger read only; --json keeps the map's exact shape.
+    print_usage_header(board)
     print(_agent_map_mod().render_text(data))
 
 
@@ -15318,6 +15403,11 @@ def cmd_spawn(a, board):
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, owner, log_path))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
+    # T-1076: what this seat's provider has left, from the recorded reading.
+    # `dispatch` printed it next to its own reservation line, so it asks for
+    # this one to be left out rather than say the same thing twice.
+    if getattr(a, "usage_line", True):
+        print_seat_usage(board, harness)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
 
@@ -16615,6 +16705,12 @@ body[data-work-view=columns] #workJump{display:none}
 .m{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
 .m .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-bottom:4px}
 .tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;border:1px solid var(--line);color:var(--mute)}
+/* T-1076: provider quota in the Team header. One short line per provider; it
+   wraps rather than pushing the seats it belongs to off screen. */
+.usage-header{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;font-size:12px}
+.usage-header .u{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.usage-header .u.low,.usage-header .u.limited{border-color:color-mix(in srgb,var(--bad) 45%,var(--line));color:var(--bad)}
+.usage-header .u.unknown,.usage-header .u.no_data{border-style:dashed}
 #composer{position:sticky;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px;padding:10px}
 #composer textarea{width:100%;resize:vertical;min-height:56px;font:13px/1.4 inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
 #composer select,#composer button,#composer input{font:13px inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
@@ -16883,6 +16979,7 @@ body[data-work-view=columns] #workJump{display:none}
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
       <p class="seats-lede">Auth is the enrolled runner, not this tab. Recheck never asks for provider secrets. Reachable is not Ready.</p>
       <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">atm msg --to</span>. Runtime id is unique; role is coverage.</p>
+      <div class="usage-header mono" id="providerUsage" aria-label="Provider quota"></div>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -17095,6 +17192,15 @@ function renderUsage(u){
   cards.innerHTML=cell('Cost',money(u.cost_usd))+cell('Tokens in',dash(u.tokens_in))+cell('Tokens out',dash(u.tokens_out))+cell('Runs with cost',String(u.n_runs_with_cost||0))+cell('Runs unmeasured',String(u.n_runs_unmeasured||0));
   const by=u.by_agent||[];
   tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
+}
+function renderProviderUsage(rows){
+  // T-1076: per-provider quota, the same text the CLI header prints. The
+  // server already decided the words; the UI never recomputes a percentage,
+  // so it can never invent one the ledger did not have.
+  const el=document.getElementById('providerUsage');if(!el)return;
+  const list=rows||[];
+  if(!list.length){el.innerHTML='<span class="u unknown">no provider read yet — atm harness usage</span>';return;}
+  el.innerHTML=list.map(r=>'<span class="u '+esc(r.level||'unknown')+'">'+esc(r.text||'')+'</span>').join('');
 }
 function renderAgentMap(m){
   const tbl=document.getElementById('agentMap'),pill=document.getElementById('agentMapPill');
@@ -17610,6 +17716,7 @@ async function load(manual){
   renderObjective(d.objective);
   renderTurns(d.turns);
   renderUsage(d.usage);
+  renderProviderUsage(d.provider_usage);
   renderAgentMap(d.agent_map);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
@@ -18413,6 +18520,9 @@ def _board_snapshot_body(board, messages=40):
         "empty_board": counts["total"] == 0,
         "turns": turns,
         "usage": usage,
+        # T-1076: per-provider quota for the Team header. Same ledger reader as
+        # `atm agents`; still read-only, so board.json spawns nothing.
+        "provider_usage": _safe(lambda: provider_usage_snapshot(board), []) or [],
         # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
         "agent_map": _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
                                                   live=live, events=events), None),
@@ -20883,6 +20993,13 @@ def main():
     if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
         print("WARNING: %s -- see 'atm --version'" % status, file=sys.stderr)
     if not a.cmd:
+        # T-1076: the default screen leads with where the quota stands, so a
+        # user never has to know a command exists to find out.
+        header = _safe(lambda: usage_header_lines(_usage_header_board()), []) or []
+        for line in header:
+            print(line)
+        if header:
+            print("")
         p.print_help()
         return
     if a.cmd == "self":

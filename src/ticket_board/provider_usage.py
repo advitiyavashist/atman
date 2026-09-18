@@ -369,6 +369,10 @@ def get_reading(board, provider, now=None):
     rec = (load_ledger(board).get("providers") or {}).get(hid)
     if not rec:
         return empty_reading(hid, status="unknown", hint="no data")
+    if not isinstance(rec, dict):
+        # A hand-edited or truncated ledger entry is not a reading. Unknown is
+        # the honest answer; a surface must not crash or vanish over it.
+        return empty_reading(hid, status="unknown", hint="unreadable record")
     return expire_stale_resets(rec, now)
 
 
@@ -415,6 +419,227 @@ def format_usage_line(reading, now=None):
         label = rec["tokens_label"] or "harness report"
         bits.append("tokens %s (%s)" % (rec["tokens_reported"], label))
     return "  " + " · ".join(bits)
+
+
+# ---- T-1076: one short line per provider, for the surfaces users already read.
+# `format_usage_line` above is the ledger view (`atm harness usage`): every
+# field, one provider per line, no judgement. A header cannot carry that -- it
+# has to fit next to the output the user actually came for, and it has to say
+# *low* out loud, which the ledger view has no word for. So this is the same
+# reading, same reader, rendered short: provider, the provider's own remaining
+# %, its own reset, and the one word that changes what the user should do.
+# Nothing here reads a credential, a path, or the network.
+LOW_REMAINING_PCT = 20.0
+STALE_READING_SECS = 3600
+# Every part is capped so the worst case still fits an 80-column terminal
+# next to a surface prefix: 12 + 8 + 4 + 48 = 72.
+HINT_MAX = 48
+PROVIDER_MAX = 12
+RESET_MAX = 24
+COMPACT_MAX = 72
+# A never-read provider is not a failed read: it must not say "re-login".
+NEVER_READ_HINT = "not read yet (atm harness usage)"
+# Defensive scrub for the hint, the only free-ish text a header repeats. Real
+# hints are fixed internal strings ("re-login required", "HTTP 500", "reset
+# elapsed"); a path, an assignment or a long opaque blob is not one of them and
+# never reaches a user's screen from here. The provider's own limit_message is
+# not printed in a header at all.
+_HINT_UNSAFE = re.compile(r"[/\\=]|^~|^sk-|^Bearer$|^ey[A-Za-z0-9_-]{8,}", re.I)
+
+
+def remaining_percent(reading):
+    """The provider's own worst-window remaining %, or None. Never a guess.
+
+    None means "we do not know" and must print as unknown, not as 0.
+    """
+    rec = reading if isinstance(reading, dict) else {}
+    vals = []
+    for win in rec.get("windows") or []:
+        if not isinstance(win, dict):
+            continue
+        pct = win.get("remaining_percent")
+        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+            vals.append(float(pct))
+    if not vals:
+        pct = _as_float(rec.get("remaining"))
+        vals = [pct] if pct is not None else []
+    if not vals:
+        return None
+    worst = min(vals)
+    if worst != worst or worst < 0 or worst > 100:  # NaN or out of range
+        return None
+    return worst
+
+
+def pct_label(pct):
+    """Floor, so a header never overstates the headroom a provider reported."""
+    if pct is None:
+        return ""
+    if pct <= 0:
+        return "0%"
+    if pct < 1:
+        return "<1%"
+    return "%d%%" % int(pct)
+
+
+def reset_label(reset_at, now=None):
+    """The provider's reset, short. Non-ISO text is the provider's own words."""
+    text = " ".join((reset_at or "").split())
+    if not text:
+        return ""
+    when = parse_iso(text)
+    if when is None:
+        return _scrub(text)[:RESET_MAX]
+    now = now or utcnow()
+    if when.date() == now.date():
+        return when.strftime("%H:%M UTC")
+    return when.strftime("%b %d %H:%M UTC")
+
+
+def _scrub(text):
+    """Drop anything path-, token- or assignment-shaped before it is printed."""
+    out = []
+    for word in (text or "").split():
+        out.append("[redacted]" if len(word) >= 24 or _HINT_UNSAFE.search(word)
+                   else word)
+    return " ".join(out)
+
+
+def _short_hint(rec):
+    hint = " ".join((rec.get("hint") or "").split())
+    if not hint:
+        return ""
+    if hint == "no data" and not rec.get("checked_at"):
+        return NEVER_READ_HINT
+    hint = _scrub(hint)
+    if len(hint) > HINT_MAX:
+        # Cut on a word boundary: a header says less rather than ending in a
+        # half-word that could be read as part of a value.
+        hint = hint[:HINT_MAX].rsplit(" ", 1)[0]
+    return hint.strip()
+
+
+def compact_reading(reading, now=None):
+    """Header-sized view of one provider reading.
+
+    ``level`` is the state the copy is chosen from: ok / low / limited /
+    unknown / no_data. An expired limit arrives here already downgraded to
+    unknown by ``expire_stale_resets``, so it never reads as limited.
+    """
+    rec = public_reading(reading, now)
+    # A provider id is a short label, never a path: keep label characters only.
+    hid = re.sub(r"[^A-Za-z0-9_.+-]", "", rec["provider"] or "")[:PROVIDER_MAX] or "?"
+    status = rec["status"]
+    reset = reset_label(rec["reset_at"], now)
+    pct = remaining_percent(rec)
+    out = {"provider": hid, "level": "unknown", "remaining_pct": None,
+           "remaining": "", "reset": reset, "text": ""}
+    if status == "no_data":
+        out.update(level="no_data", reset="",
+                   text="%s no usage data (no source to read)" % hid)
+        return out
+    if status == "limited":
+        out.update(level="limited", remaining_pct=pct,
+                   remaining=pct_label(pct) if pct is not None else "",
+                   text="%s LIMITED, %s" % (
+                       hid, ("resets %s" % reset) if reset else "reset time unknown"))
+        return out
+    if status == "ok" and pct is not None:
+        low = pct < LOW_REMAINING_PCT
+        bits = "%s %s left" % (hid, pct_label(pct))
+        if reset:
+            bits += ", resets %s" % reset
+        if low:
+            bits += " -- low"
+        # A number read hours ago is still that provider's last real answer,
+        # but say how old it is -- and drop the age rather than let the line
+        # outgrow a narrow terminal.
+        age = rec["age"]
+        when = parse_iso(rec["checked_at"])
+        if age and when is not None and \
+                ((now or utcnow()) - when).total_seconds() >= STALE_READING_SECS \
+                and len(bits) + len(age) + 3 <= COMPACT_MAX:
+            bits += " (%s)" % age
+        out.update(level="low" if low else "ok", remaining_pct=pct,
+                   remaining=pct_label(pct), text=bits)
+        return out
+    # Unknown, and every shape that cannot produce an honest number: an ok
+    # status with no percent in it is still unknown, never 0 and never "fine".
+    hint = _short_hint(rec)
+    out.update(level="unknown",
+               text="%s unknown%s" % (hid, (" -- %s" % hint) if hint else ""))
+    return out
+
+
+def format_compact_line(reading, now=None):
+    """One short line for one provider: 'claude 12% left, resets 21:00 UTC -- low'."""
+    return compact_reading(reading, now)["text"]
+
+
+def canonical_provider(name):
+    hid = (name or "").strip().lower()
+    return "agy" if hid == "antigravity" else hid
+
+
+def header_providers(board, harnesses=(), now=None):
+    """Providers a header should name: every one read, plus HTTP seats not read yet.
+
+    Read-only: the ledger file and the names the caller passed in. Providers
+    with no usage source at all (cursor, agy) stay out of a header -- they can
+    never say anything but "no data", and a header has to stay short.
+    """
+    known = load_ledger(board).get("providers") or {}
+    seats = {canonical_provider(h) for h in harnesses or ()}
+    out = []
+    for hid in ("claude", "codex"):
+        if hid in known or hid in seats:
+            out.append(hid)
+    for hid in sorted(known):
+        if hid in out or hid in NO_DATA_PROVIDERS:
+            continue
+        rec = known.get(hid)
+        if isinstance(rec, dict) and rec.get("status") == "no_data":
+            continue
+        out.append(hid)
+    return out
+
+
+def header_lines(board, now=None, providers=None, harnesses=(), prefix="usage  "):
+    """The usage header: one short line per provider, or one honest line if none.
+
+    Reads the ledger only -- no network, no subprocess, no write. A board where
+    nothing has ever been read says so, and names the command that would read.
+    """
+    ids = list(providers) if providers is not None else header_providers(
+        board, harnesses, now)
+    if not ids:
+        return [prefix + "no provider read yet (atm harness usage)"]
+    return [prefix + format_compact_line(get_reading(board, hid, now), now)
+            for hid in ids]
+
+
+def usage_provider_for_harness(harness):
+    """The provider whose quota a seat on this harness spends, or "" if none.
+
+    A cursor+claude seat spends Claude's quota. remote/custom/a bare
+    executable is not a metered provider this program can read, and must not
+    be dressed up as one that simply has not been read yet.
+    """
+    hid = canonical_provider(harness)
+    if hid == "cursor+claude":
+        return "claude"
+    if hid in HTTP_PROVIDERS or hid in NO_DATA_PROVIDERS:
+        return hid
+    return ""
+
+
+def seat_usage_line(board, harness, now=None, prefix="usage  "):
+    """The one line a spawned/dispatched seat's provider gets. Read-only."""
+    hid = usage_provider_for_harness(harness)
+    if not hid:
+        label = canonical_provider(harness) or "harness"
+        return prefix + "%s no usage data (no source to read)" % label
+    return prefix + format_compact_line(get_reading(board, hid, now), now)
 
 
 def format_ledger_lines(board, now=None, providers=("claude", "codex", "cursor", "agy")):
