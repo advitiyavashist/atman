@@ -1884,7 +1884,7 @@ def cmd_board(a, board):
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
             "`atm review <id> --notes \"...\"` submits it. A dependent opens only when a "
             "DIFFERENT seat runs `atm accept <id> --sha <sha>` -- `atm done` alone releases "
-            "nothing (atm quickstart --gate shows it)."
+            "nothing (checkout `atm quickstart --gate` shows it; this packaged copy has no quickstart)."
         )
 
 
@@ -3526,6 +3526,18 @@ CEO_ONBOARDING_STARTUP = """**You are onboarding as Atman CEO.**
 Connecting here is joining **Atman**, not Claude, Cursor, Codex, or any
 other provider. Board identity is `atman-<seat>` (example: `atman-ceo`).
 """
+
+
+def board_is_atman_operator(board):
+    """True only for the Atman team's own board (T-1007 / T-1093)."""
+    if (os.environ.get("ATMAN_OPERATOR_BOARD") or "").strip() == "1":
+        return True
+    if not board or not os.path.isdir(board):
+        return False
+    names = list((load_workforce(board) or {}).keys())
+    names += [(r or {}).get("owner") or "" for r in (load_agents(board) or [])]
+    names += list((load_aliases(board) or {}).keys())
+    return any(str(n).strip().lower().startswith("atman-") for n in names)
 
 
 def board_is_living(board):
@@ -5388,7 +5400,7 @@ def cmd_connect(a, board):
     worker = bool(getattr(a, "worker", False))
     ceo = bool(getattr(a, "ceo", False))
     seat = (getattr(a, "seat", None) or "ceo").strip() or "ceo"
-    if ceo or (board_is_living(board) and not worker):
+    if ceo or (board_is_atman_operator(board) and not worker):
         name = atman_seat_name(seat)
         sys.stdout.write(CEO_ONBOARDING_STARTUP)
         if not CEO_ONBOARDING_STARTUP.endswith("\n"):
@@ -5592,7 +5604,7 @@ reference a `key` from the same plan or an existing `T-` id:
 Tickets whose dependencies are unfinished stay invisible to `atm next`, and a
 finished dependency stays withheld until a DIFFERENT seat accepts its exact sha
 (`atm accept <id> --sha <sha>`), so nobody -- human or agent -- can release
-their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
+their own work. Checkout `atm quickstart --gate` demonstrates that (this packaged copy has no quickstart).
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
