@@ -52,7 +52,13 @@ def interleave(mod, board_dir, owner, writer):
     """
     b_read = threading.Event()
     writer_done = threading.Event()
-    real_rec = mod._agent_rec
+    # T-836: checkin is a shim into ticket_board.agent_checkin; gating
+    # tickets._agent_rec never fires. Hook the packaged read instead.
+    src = str(TOOL.parent / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from ticket_board import agent_checkin as ac
+    real_rec = ac._agent_rec
 
     def gated_rec(bd, own):
         rec = real_rec(bd, own)
@@ -64,7 +70,7 @@ def interleave(mod, board_dir, owner, writer):
             writer_done.wait(1.5)
         return rec
 
-    mod._agent_rec = gated_rec
+    ac._agent_rec = gated_rec
     try:
         t = threading.Thread(target=lambda: mod.checkin(board_dir, owner), name="heartbeat")
         t.start()
@@ -74,7 +80,7 @@ def interleave(mod, board_dir, owner, writer):
         t.join(10)
         assert not t.is_alive(), "heartbeat thread hung"
     finally:
-        mod._agent_rec = real_rec
+        ac._agent_rec = real_rec
 
 
 def _rec(board_dir, owner):
