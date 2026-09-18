@@ -63,6 +63,18 @@ whatever file the symlink points at — including a dirty working tree. `atm
 self` prints the resolved target, which is the only answer that settles it
 when several checkouts are on one machine.
 
+`--version` also prints `source:` (the file that is running) and, for a git
+checkout, `source-sha:`. If that sha is behind `origin/main` it warns and
+prints the refresh command. An operator worktree such as
+`atman-runtime-current` that is not updated after merge will omit new
+commands from `atm --help` (T-1080). Refresh it with the printed line, or:
+
+```sh
+git -C <runtime-worktree> fetch origin
+git -C <runtime-worktree> merge --ff-only origin/main
+atm --version    # source-sha should match origin/main
+```
+
 `atm init` and `atm quickstart` belong in the project you are coordinating,
 never inside the `atm` clone.
 

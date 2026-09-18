@@ -19859,6 +19859,43 @@ def release_status():
 release_version = release_status
 
 
+def _source_behind_lines(root, head, remote):
+    """Warn when this checkout's HEAD is a strict ancestor of origin/main."""
+    if not (root and head and remote and head != remote):
+        return []
+    if git("merge-base", "--is-ancestor", head, remote, cwd=root) is None:
+        return []
+    return [
+        "WARNING: running source %s is behind origin/main %s"
+        % (head[:12], remote[:12]),
+        "refresh: git -C %s fetch origin && git -C %s merge --ff-only origin/main"
+        % (root, root),
+    ]
+
+
+def runtime_version_report():
+    """What `atm --version` prints: provenance, the file that is running, and
+    a behind warning when this checkout is older than origin/main.
+
+    First line stays `release_status()` so pinned-release smoke tests keep
+    matching. Extra lines are T-1080: an operator worktree must not silently
+    pin last week's CLI (`atm steer` missing from `--help`).
+    """
+    status = release_status()
+    script = os.path.realpath(__file__)
+    lines = [status, "source: %s" % script]
+    root = _git_root_from(script)
+    head = (git("rev-parse", "HEAD", cwd=root) if root else None) or ""
+    if head:
+        lines.append("source-sha: %s" % head)
+        remote = (
+            git("rev-parse", "-q", "--verify", "origin/main", cwd=root)
+            or git("rev-parse", "-q", "--verify", "origin/master", cwd=root)
+            or "")
+        lines.extend(_source_behind_lines(root, head, remote))
+    return "\n".join(lines)
+
+
 def cmd_self(a, board):
     """Print which tickets.py is executing and how it was installed."""
     import shutil
@@ -20112,11 +20149,25 @@ def cmd_feedback(a, board):
     print(text)
 
 
+class _RawVersion(argparse.Action):
+    """Print runtime_version_report() without HelpFormatter wrapping (T-1080)."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help=None):
+        argparse.Action.__init__(
+            self, option_strings=option_strings, dest=dest, default=default,
+            nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        sys.stdout.write(runtime_version_report() + "\n")
+        parser.exit()
+
+
 def main():
     status = release_status()
     p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
                            epilog=status)
-    p.add_argument("--version", action="version", version=status)
+    p.add_argument("--version", action=_RawVersion, help="show program's version number and exit")
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
