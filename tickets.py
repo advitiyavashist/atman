@@ -11547,7 +11547,7 @@ def cmd_connect(a, board):
     worker = bool(getattr(a, "worker", False))
     ceo = bool(getattr(a, "ceo", False))
     seat = (getattr(a, "seat", None) or "ceo").strip() or "ceo"
-    living = board_is_living(board)
+    living = board_is_atman_operator(board)
     if ceo or (living and not worker):
         print_ceo_connect(board, seat=seat)
         _apply_connect_roles(board, a)
