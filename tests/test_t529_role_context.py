@@ -59,7 +59,12 @@ def test_prompt_missing_role_file_is_not_fatal(board):
     assert r.returncode == 0, r.stderr
     assert "shared-memory" in r.stdout
     assert "Role context" in r.stdout
-    assert "nosuchlane" not in r.stdout
+    # Nothing was INJECTED for the missing lane: one role-context block (the
+    # shared baseline) and no roles/nosuchlane.md path. The seat's own brief
+    # still names the lane it was joined with (T-1078); that is identity, not
+    # an inject, so the assertion is on the inject source, not the word.
+    assert r.stdout.count("Role context (") == 1
+    assert str(board / "briefs" / "roles" / "nosuchlane.md") not in r.stdout
 
 
 def test_repo_root_roles_are_not_read(board):

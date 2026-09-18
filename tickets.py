@@ -2255,6 +2255,19 @@ def _review_verdict():
         return m
 
 
+def _seat_brief():
+    """T-1078 seat brief: the gate, the ticket and the refusals, composed."""
+    try:
+        from ticket_board import seat_brief as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import seat_brief as m
+        return m
+
+
 def _stall_watch():
     try:
         from ticket_board import stall_watch as m
@@ -11995,8 +12008,11 @@ def _remote_claim_once(board, owner, lease_id, fence, prompt_kind=""):
                        "fence": claim["fence"], "wake": pending_view(pending)})
         kind = prompt_kind or ("cos" if owner == (current_master(board) or {}).get("cos")
                                else ("master" if owner == (current_master(board) or {}).get("owner") else ""))
+        # run_no is the remote seat's own turn counter: its first claim carries
+        # the seat brief, later wakes do not re-brief it (T-1078).
         result["prompt"] = prompt_text(argparse.Namespace(
-            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+            agent=owner, master=kind == "master", cos=kind == "cos", extra="",
+            run_no=claim.get("run_no")), board)
     return result
 
 
@@ -12309,6 +12325,7 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
 TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
+{gate}
 Rules: one ticket at a time; own git worktree, never main; `atm sync` before `atm review`;
 `atm update <id> "..."` every 45 minutes; finish with `atm review <id> --notes "paths, tests, decisions"`;
 never edit .tickets/ by hand; never run `atm clear`. Board-only comms: `atm msg`.
@@ -12321,7 +12338,8 @@ Do now, in order:
 1. `atm inbox` -- read and, if anything is addressed to you, answer with `atm msg --to <who>`.
 2. `atm mine` -- if you hold a ticket, continue it from where the notes left off.
 3. Otherwise `atm next` -- if it hands you a ticket, read the printed briefing files, then work it.
-4. When the ticket is finished and tests pass: commit, `atm sync`, `atm review <id> --notes ...`, then go to 3.
+4. When the ticket is finished and tests pass: commit, `atm sync`, `atm review <id> --notes ...`, then ask a
+   different seat for the accept on that exact SHA (the gate above) and go to 3.
 5. If `atm next` says nothing is ready and you hold nothing: post one line with `atm msg "idle: <what you checked>"` and stop.
 {extra}"""
 
@@ -12644,6 +12662,52 @@ def _task_dominant_extra(board, owner):
     )
 
 
+def _seat_ticket(board, owner):
+    """The one ticket this seat owns right now: claimed first, else in review.
+
+    Only the seat's own work. Nothing about another seat's ticket may reach
+    this brief -- a seat that can read another seat's scope is a seat that
+    will help itself to it.
+    """
+    mine = [t for t in _safe(lambda: load_all(board), []) or []
+            if (t.get("owner") or "") == owner and t.get("status") in ("claimed", "review")]
+    mine.sort(key=lambda t: (t.get("status") != "claimed", t.get("id") or ""))
+    return mine[0] if mine else None
+
+
+def seat_brief_text(board, owner):
+    """Compose this seat's first-turn brief from board facts (T-1078).
+
+    Usage comes from the existing provider usage reader and its existing
+    formatter (`format_usage_line`, the same line `atm dash` prints) -- a
+    second usage formatter is a second thing to keep honest.
+    """
+    sb = _seat_brief()
+    harness, _ = _safe(lambda: harness_of(board, owner), ("claude", "")) or ("claude", "")
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    roles = _safe(lambda: roles_for(board, owner), None) or []
+    m = _safe(lambda: current_master(board), None) or {}
+    reviewer = (m.get("cos") or m.get("owner") or "")
+    if reviewer == owner:
+        reviewer = ""  # a seat is never its own reviewer, whatever the board says
+    usage = _safe(lambda: _provider_usage().format_usage_line(
+        _provider_usage().get_reading(board, harness)).strip(), "") or ""
+    t = _seat_ticket(board, owner) or {}
+    return sb.compose(
+        owner,
+        roles=",".join(roles),
+        harness=harness,
+        worktree=(rec.get("worktree") or "").replace(os.path.expanduser("~"), "~"),
+        ticket_id=t.get("id") or "",
+        ticket_title=(t.get("title") or "")[:80],
+        ticket_status=LABEL.get(t.get("status") or "", ""),
+        review_head=(t.get("review_head") or "") if t.get("status") == "review" else "",
+        scope=t.get("body") or "",
+        reviewer=reviewer,
+        usage_line=usage,
+    )
+
+
 def cmd_prompt(a, board):
     print(prompt_text(a, board))
 
@@ -12654,6 +12718,13 @@ def prompt_text(a, board):
     Split out of cmd_prompt so the watcher can write it to a {prompt_file} for
     a BYOA harness without shelling back out to `atm prompt` -- one
     renderer, so a custom harness and the built-in ones cannot drift.
+
+    T-1078: a worker seat's FIRST turn opens with the seat brief (who it is,
+    what it owns, the accept gate, the exact commands, the refusals, one usage
+    line). Later turns of the same seat get the steady-state prompt they
+    already had -- `run_no` (the watcher's per-run counter, also passed as
+    TICKETS_RUN_NO to the harness that shells back to `atm prompt`) is what
+    tells the two apart, so a wake never re-briefs a running seat.
     """
     owner = whoami(a.agent)
     m = current_master(board)
@@ -12704,8 +12775,16 @@ def prompt_text(a, board):
         parts.append("Context attached to your ticket(s):\n" + tctx)
     if a.extra:
         parts.append(a.extra)
-    return WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                                extra="\n\n".join(parts))
+    sb = _seat_brief()
+    body = WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
+                                gate=sb.GATE_ONE_LINER, extra="\n\n".join(parts))
+    run_no = getattr(a, "run_no", None)
+    if run_no is None:
+        run_no = os.environ.get("TICKETS_RUN_NO") or ""
+    if not sb.is_first_turn(run_no):
+        return body
+    head = _safe(lambda: seat_brief_text(board, owner), "") or ""
+    return (head + "\n\n" + body) if head else body
 
 
 def cmd_brief(a, board):
@@ -14310,7 +14389,8 @@ def cmd_watch(a, board):
                     pf = ""
                     if "{prompt_file}" in cmd:
                         try:
-                            pf, cleanup = _render_prompt_file(board, owner, getattr(a, "prompt_kind", "") or "")
+                            pf, cleanup = _render_prompt_file(board, owner, getattr(a, "prompt_kind", "") or "",
+                                                              run_no=runs)
                         except OSError as e:
                             log("%s run %d could not write the prompt file: %s" % (now(), runs, e))
                             print("  run %d skipped: could not write the prompt file (%s)" % (runs, e))
@@ -14808,7 +14888,7 @@ def _expand_harness_cmd(template, agent="", cwd="", prompt_file=""):
     return out
 
 
-def _render_prompt_file(board, owner, kind="", text=""):
+def _render_prompt_file(board, owner, kind="", text="", run_no=None):
     """Write this agent's prompt to a fresh temp file; return (path, cleanup).
 
     A file, not an argv string: a worker prompt is thousands of characters of
@@ -14816,11 +14896,19 @@ def _render_prompt_file(board, owner, kind="", text=""):
     meet ARG_MAX on a long board. The file is mode 0600 and removed by the
     cleanup callable, which never raises -- a harness run must not fail because
     the prompt file was already gone.
+
+    `run_no` is the watcher's run counter for this launch. A built-in harness
+    shells back to `atm prompt` and reads it from TICKETS_RUN_NO in the child
+    env; a BYOA prompt file is rendered in this process, which has no such
+    variable, so it is passed explicitly. Both paths must agree about whether
+    this is the seat's first turn (T-1078), or a custom harness would be
+    re-briefed on every wake while a built-in one is briefed once.
     """
     import tempfile
 
     if not text:
-        ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="")
+        ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="",
+                                run_no=run_no)
         text = _safe(lambda: prompt_text(ns, board), "") or ""
     fd, path = tempfile.mkstemp(prefix="tickets-prompt-%s-" % re.sub(r"[^A-Za-z0-9_.-]", "_", owner)[:32],
                                 suffix=".txt")
