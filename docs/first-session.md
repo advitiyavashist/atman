@@ -23,7 +23,7 @@ wrote: ~/demo/.cursor/rules/tickets.mdc
 wrote: ~/demo/AGENTS.md
 wrote: ~/demo/.gitignore
 wrote: ~/demo/.tickets/MASTER.md
-bound: `tickets` run from ~/demo resolves to this board.
+bound: `atm` run from ~/demo resolves to this board (`tickets` is a compatibility alias).
 
 Claude Code picks this up after `atm hooks claude --agent alice` installs
 the worktree-scoped SessionStart hook.
@@ -41,13 +41,16 @@ The three commands that matter:
   TICKET_AGENT=alice atm update <id> "..."         say where you are, at least every 45 min
   TICKET_AGENT=alice atm review <id> --notes "..." hand it back with evidence
 
+Feel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket
+               stays shut until a DIFFERENT seat accepts the commit)
+
 See it: atm ui             ->  the local URL it prints (read-only, auto-refresh)
 Learn it: atm guide   |   docs/first-session.md   |   README.md
 ```
 
 Two things worth noticing before moving on.
 
-**`bound:`** is the tool confirming that `tickets` run from this directory
+**`bound:`** is the tool confirming that `atm` run from this directory
 resolves to the board it just wrote. It is a real check, not a pleasantry — an
 `init` that writes a board somewhere your later commands will not find is the
 failure this line exists to rule out. If they had disagreed, quickstart would

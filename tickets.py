@@ -3616,7 +3616,9 @@ def cmd_board(a, board):
     if not a.quiet:
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
-            "`atm done <id> --notes \"...\"` hands off to dependents."
+            "`atm review <id> --notes \"...\"` submits it. A dependent opens only when a "
+            "DIFFERENT seat runs `atm accept <id> --sha <sha>` -- `atm done` alone releases "
+            "nothing (atm quickstart --gate shows it)."
         )
     owner = whoami()
     if not owner.startswith("agent-"):
@@ -7394,7 +7396,7 @@ INTEGRATION_CATALOG = (
     {"id": "grok", "name": "Grok (Cursor persist / grokbots)",
      "binaries": ("agent", "cursor-agent"),
      "if_yes": "atm spawn <seat> --harness grok --persist",
-     "policy": "Cursor Grok seats and grok-worker; same persist wake as cursor",
+     "policy": "Grok through the Cursor CLI; same persist wake as cursor",
      "usage_args": ("about", "--format", "json"),
      "quota": "unsupported"},
 )
@@ -7425,6 +7427,27 @@ Product flow (this order):
 5. Ask the operator for feedback
 6. Show tasks you can actually run (`atm graph` / `atm map`)
 """
+
+
+def board_is_atman_operator(board):
+    """True only for the Atman team's own board: a seat named `atman-<role>`.
+
+    T-1007: `atm harness available` printed Atman's operator policy -- the
+    `atman-<seat>` identity, "CoS staffs", "CEO does not claim worker tickets" --
+    on ANY board that already had a ticket, which is every brand-new external
+    project one minute after `atm quickstart`. Board-specific policy belongs to
+    the board that declares it, so the probe is an actual Atman seat here, not
+    "this board has work". ATMAN_OPERATOR_BOARD=1 forces it for that team's own
+    automation.
+    """
+    if (os.environ.get("ATMAN_OPERATOR_BOARD") or "").strip() == "1":
+        return True
+    if not board or not os.path.isdir(board):
+        return False
+    names = list((_safe(lambda: load_workforce(board), {}) or {}).keys())
+    names += [(r or {}).get("owner") or "" for r in (_safe(lambda: load_agents(board), []) or [])]
+    names += list((_safe(lambda: load_aliases(board), {}) or {}).keys())
+    return any(str(n).strip().lower().startswith("atman-") for n in names)
 
 
 def board_is_living(board):
@@ -7495,8 +7518,8 @@ def print_recorded_usage(board):
     pu = _provider_usage()
     for line in pu.format_ledger_lines(board):
         print(line)
-    print("Ask: which of these still have usage, and which should CoS start?")
-    print("Installed + no usage = stay on the catalog; CoS does not spawn them.")
+    print("Ask: which of these still have usage, and which do you want started?")
+    print("Installed + no usage = stay on the catalog; nothing here is spawned for you.")
     print("Unknown remaining is UNKNOWN, never available. Cursor/agy stay no data.")
 
 
@@ -16380,10 +16403,15 @@ def cmd_harness_available(a, board):
     print("USAGE: unsupported or missing remaining/reset is unknown, not exhausted. Do not spawn a FAIL or exhausted seat.")
     print("Ask: Which of these do you want to use?")
     _print_role_discovery(rows)
-    if board_is_living(board):
+    if board_is_atman_operator(board):
         print("This is a living board. Do not invent a new team.")
         print("Announce the Atman role as atman-<seat>. CoS (%s) staffs." % _cos_label(board))
         print("CEO does not claim worker tickets.")
+    elif board_is_living(board):
+        # Someone else's board with work on it: say that, and nothing about how
+        # THIS project staffs itself.
+        print("This board already has work and seats on it. Ask the team which")
+        print("harnesses to integrate before joining seats or spawning anything.")
     else:
         print("Then ask the board/team name, then:")
         print('  atm msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
@@ -18833,6 +18861,10 @@ def _quickstart_harness():
 
 def cmd_quickstart(a, board):
     """Zero to a first ticket claimed by a real agent. Non-interactive, idempotent."""
+    if getattr(a, "gate", False) or getattr(a, "dry_run", False):
+        # T-1077: the felt version. Runs entirely in a temp dir, so it never
+        # reaches the caller's board and never needs one to exist.
+        return cmd_quickstart_gate(a)
     if a.remove:
         state = _quickstart_state(board)
         alive = _quickstart_alive(board, state)
@@ -18965,8 +18997,460 @@ def _quickstart_next_steps(board, agent):
     print("  %satm review <id> --notes \"...\" hand it back with an exact artifact" % ident)
     print("  (`tickets` is a compatibility alias for the same CLI.)")
     print("")
+    print("Feel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket")
+    print("               stays shut until a DIFFERENT seat accepts the commit)")
+    print("")
     print("See it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
     print("Learn it: atm guide   |   docs/first-session.md   |   README.md")
+
+
+# ---- T-1077: `atm quickstart --gate` -- feel the accept gate in five minutes
+
+
+GATE_SEAT_AUTHOR = "alice"
+GATE_SEAT_REVIEWER = "bob"
+GATE_STEPS = 8
+GATE_DEMO_PROMPT = (
+    "Append one line reading 'atman demo' to demo.txt in this repository, "
+    "then commit just that file with the message "
+    "'T-001: add a line to demo.txt'. Change nothing else and run no other command.")
+# Only harnesses with a zero-model auth probe (_auth_gates_spawn) can be
+# preflighted, which is the whole point of the honest no-auth path.
+GATE_HARNESS_PROBE = (("claude", "claude"), ("codex", "codex"),
+                      ("cursor-agent", "cursor"), ("agent", "cursor"))
+
+
+def _gate_harness(requested=""):
+    """(harness id, binary) for the demo: the requested one, or the first installed."""
+    import shutil
+    want = (requested or "").strip().lower()
+    if want:
+        for binary, hid in GATE_HARNESS_PROBE:
+            if want in (hid, binary):
+                return hid, binary
+        return want, want
+    for binary, hid in GATE_HARNESS_PROBE:
+        if shutil.which(binary):
+            return hid, binary
+    return "", ""
+
+
+def _gate_env(root, board, seat=""):
+    """Child env for every step: this board, this seat, no background spawn.
+
+    Everything Atman would otherwise write under the operator's HOME (cache,
+    dispatch watchers, stop hooks) is redirected into the scratch dir or turned
+    off, so the demo's whole write footprint is the temp dir it printed.
+    """
+    e = dict(os.environ)
+    e["TICKETS_DIR"] = board
+    e["TICKETS_CACHE_DIR"] = os.path.join(root, "cache")
+    e["TICKETS_DISPATCH_NO_SPAWN"] = "1"  # the demo runs the harness in the foreground
+    e["TICKETS_GC_OPEN_PRS"] = "none"
+    for var in ("TICKET_SEAT", "TICKETS_STOP_HOOK", "CLAUDE_CODE_SESSION_ID",
+                "CODEX_SESSION_ID", "CURSOR_SESSION_ID", "TERM_SESSION_ID",
+                "TICKET_SESSION_ID"):
+        e.pop(var, None)
+    if seat:
+        # A recorded per-seat session is what makes alice and bob two different
+        # identities to the board -- without it both calls would be the same
+        # ambient agent and the accept would be a self-accept.
+        e["TICKET_AGENT"] = seat
+        e["TICKET_SESSION_ID"] = "atm-quickstart-gate-" + seat
+    return e
+
+
+def _gate_atm(state, seat, *args, **kw):
+    """Run the real CLI as `seat` against the scratch board."""
+    import subprocess
+    return subprocess.run(
+        [sys.executable, os.path.realpath(__file__)] + [str(x) for x in args],
+        cwd=state["repo"], env=_gate_env(state["root"], state["board"], seat),
+        capture_output=True, text=True, timeout=kw.get("timeout", 180))
+
+
+def _gate_git(state, *args):
+    """git in the scratch repo, with the operator's global config neutralised.
+
+    A global `commit.gpgsign=true` or a `core.hooksPath` pre-commit hook would
+    otherwise fail (or hang) the demo's commits for reasons that have nothing
+    to do with the gate being shown.
+    """
+    import subprocess
+    return subprocess.run(
+        ["git", "-c", "user.email=quickstart@atman.local",
+         "-c", "user.name=atm quickstart", "-c", "commit.gpgsign=false",
+         "-c", "tag.gpgsign=false",
+         "-c", "core.hooksPath=%s" % os.path.join(state["root"], "no-hooks"),
+         *[str(x) for x in args]],
+        cwd=state["repo"], capture_output=True, text=True)
+
+
+def _gate_say(state, step, label, text):
+    line = "%d/%d %-9s %s" % (step, GATE_STEPS, label, text)
+    print(line)
+    sys.stdout.flush()
+    state["done"].append(line)
+
+
+def _gate_evidence(text):
+    """Print the CLI's own words under a narration line, so nothing is paraphrased."""
+    for raw in (text or "").splitlines():
+        if raw.strip():
+            print("          | %s" % raw.strip())
+    sys.stdout.flush()
+
+
+def _gate_fail(state, why, detail=""):
+    print("")
+    print("STOPPED: %s" % why)
+    if detail:
+        _gate_evidence(detail)
+    print("Nothing was accepted and no sha was released. Scratch dir: %s" % state["root"])
+    sys.exit(1)
+
+
+def _gate_ticket(state, tid):
+    path = os.path.join(state["board"], tid + ".json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return {}
+
+
+def _gate_accept_event(ticket):
+    """The last recorded accept on a ticket, from the board record itself."""
+    for ev in reversed(list(ticket.get("review_events") or [])):
+        if isinstance(ev, dict) and ev.get("kind") == "accept":
+            return ev
+    return {}
+
+
+def _gate_usage_line(state, hid):
+    """T-1040/T-1076 reader, not a second formatter: what this run cost/has left."""
+    pu = _provider_usage()
+    # The shared refresh gate, not a second copy of it: it honours
+    # TICKETS_USAGE_REFRESH and never reaches a provider from a test run.
+    _maybe_refresh_provider_usage(state["board"])
+    reading = _safe(lambda: pu.get_reading(state["board"], hid), None)
+    line = _safe(lambda: pu.format_usage_line(reading), None)
+    print("usage:  %s" % (line or "  %s unknown" % hid).strip())
+
+
+def _gate_walkthrough(hid, reason="", login="", scratch=""):
+    """Narrate the run without doing it. Invents no sha, records no accept.
+
+    ``scratch`` is passed when a real run already made a throwaway board before
+    stopping: the header then says what exists instead of claiming nothing does.
+    """
+    wv = _work_view()
+    print("")
+    if scratch:
+        print("WALKTHROUGH ONLY from here -- the steps below did NOT run. The throwaway")
+        print("board at %s has no commit," % scratch)
+        print("no accept record and no released sha.")
+    else:
+        print("WALKTHROUGH ONLY -- nothing below ran. No repo, no board, no commit,")
+        print("no accept record, and no sha (a sha can only come from a real commit).")
+    if reason:
+        print("why: %s" % reason)
+    if login:
+        print("log in first: %s" % login)
+    steps = [
+        ("preflight", "check that %s has a live login (atm's own dispatch preflight)" % (hid or "a coding CLI")),
+        ("scratch", "make a throwaway git repo + board in a temp dir (never your repo, never your board)"),
+        ("board", "atm init there, then commit the scaffolding"),
+        ("seats", "atm join %s (author) and %s (reviewer) -- two different seats" % (
+            GATE_SEAT_AUTHOR, GATE_SEAT_REVIEWER)),
+        ("tickets", "atm create T-001, then T-002 --deps T-001"),
+        ("dispatch", "atm dispatch T-001 --to %s, then %s runs and commits a one-line change" % (
+            GATE_SEAT_AUTHOR, hid or "the harness")),
+        ("gate", "atm done T-001 would print: blocked: T-002 -- %s" % wv.unverified_block_reason("T-001")),
+        ("accept", "atm accept T-001 --sha <the sha %s actually committed> as %s would release T-002" % (
+            GATE_SEAT_AUTHOR, GATE_SEAT_REVIEWER)),
+    ]
+    for i, (label, text) in enumerate(steps, 1):
+        print("  would %d/%d %-9s %s" % (i, GATE_STEPS, label, text))
+    print("")
+    print("That was a WALKTHROUGH, not a run: nothing above happened and no accept exists.")
+    if login:
+        print("Run it for real once logged in:  atm quickstart --gate")
+    else:
+        print("Run it for real:  atm quickstart --gate")
+
+
+def _gate_ending(root, short="", author="", evaluator=""):
+    print("")
+    print("what happened: %s committed %s and closed T-001; T-002 stayed shut until %s --"
+          % (author or GATE_SEAT_AUTHOR, short or "the change", evaluator or GATE_SEAT_REVIEWER))
+    print("               a different seat -- accepted that exact sha. No seat releases its own work.")
+    print("in your repo:  cd <your repo> && atm quickstart --agent <you>   "
+          "(then: atm next, atm review, atm accept)")
+    print("where to look: atm agents   (seats, harness, usage)   |   atm ui  ->  "
+          "http://127.0.0.1:8765")
+    print("scratch kept:  %s   (rm -rf it whenever; nothing of yours was touched)" % root)
+
+
+def cmd_quickstart_gate(a):
+    """The accept gate, felt once, in a throwaway dir. Never the caller's board."""
+    import shutil
+    import tempfile
+
+    hid, binary = _gate_harness(getattr(a, "harness", "") or "")
+    dry = bool(getattr(a, "dry_run", False))
+    print("atm quickstart --gate: one ticket, two seats, and the gate between them.")
+    if dry:
+        _gate_walkthrough(hid or "a coding CLI")
+        return
+    if not hid:
+        print("")
+        print("no coding CLI found on PATH (looked for: %s)."
+              % ", ".join(b for b, _ in GATE_HARNESS_PROBE))
+        print("install one (Claude Code, Codex, or the Cursor CLI), then: atm quickstart --gate")
+        _gate_walkthrough("a coding CLI")
+        return
+    if not shutil.which(binary):
+        print("")
+        print("%s is not on PATH, so nothing can be dispatched." % binary)
+        _gate_walkthrough(hid, reason="%s binary missing" % hid)
+        return
+
+    # 1. Auth before anything is created: the #224 preflight, same call dispatch
+    #    makes. A logged-out CLI gets the walkthrough, never a faked run.
+    # Probed against a path that does not exist: the auth probe is read-only and
+    # must not touch (or invent) a board before the user has seen the refusal.
+    noboard = os.path.join(tempfile.gettempdir(), "atm-quickstart-gate-no-board")
+    probe = _safe(lambda: harness_auth_probe(noboard, GATE_SEAT_AUTHOR, hid), None) or {
+        "state": "", "harness": hid}
+    refusal = _preflight().dispatch_refuse(probe, hid)
+    if refusal:
+        print("")
+        print(refusal)
+        login = (probe.get("login_cmd") or _preflight().LOGIN_HINT.get(hid, "")).strip()
+        if login:
+            print("log in with:  %s" % login)
+            print("then verify:  atm harness auth <seat>")
+        _gate_walkthrough(hid, reason=refusal, login=login)
+        return
+
+    root = tempfile.mkdtemp(prefix="atm-quickstart-gate-")
+    state = {"root": root, "repo": os.path.join(root, "repo"),
+             "board": os.path.join(root, "repo", ".tickets"), "done": []}
+    print("scratch: %s" % root)
+    print("         (your repo and your board are not touched -- this all happens in there)")
+    sys.stdout.flush()
+    try:
+        _gate_run(state, a, hid, probe)
+    except KeyboardInterrupt:
+        _gate_interrupted(state)
+        sys.exit(130)
+
+
+def _gate_interrupted(state):
+    """SIGINT: say exactly what got done, and prove no accept was recorded."""
+    print("")
+    print("interrupted after %d/%d step(s)." % (len(state["done"]), GATE_STEPS))
+    for line in state["done"]:
+        print("  did: %s" % line)
+    t1 = _gate_ticket(state, "T-001")
+    if t1:
+        ev = _gate_accept_event(t1)  # read from the board file, never assumed
+        print("  T-001 is %s; accept record: %s"
+              % (t1.get("status") or "?", ("by %s" % ev.get("by")) if ev else "none"))
+    t2 = _gate_ticket(state, "T-002")
+    if t2:
+        # The real gate answers this, so the interrupt report cannot overstate it.
+        waits = _work_view().unreleased_dep_id(t2, [t1, t2] if t1 else [t2])
+        print("  T-002 is %s and %s" % (
+            t2.get("status") or "?",
+            ("still withheld: no released accept on %s" % waits) if waits
+            else "no longer waiting on a dep"))
+    print("  no accept was written and no sha was released.")
+    print("  scratch dir left for you to look at: %s  (rm -rf it)" % state["root"])
+
+
+def _gate_run(state, a, hid, probe):
+    root, repo, board = state["root"], state["repo"], state["board"]
+    _gate_say(state, 1, "preflight", "%s login is live (%s) -- same check `atm dispatch` makes"
+              % (hid, probe.get("state") or "ready"))
+
+    # 2. a throwaway git repo
+    os.makedirs(repo)
+    r = _gate_git(state, "init", "-q", "-b", "main", ".")
+    if r.returncode != 0:
+        _gate_fail(state, "git init failed in the scratch dir", r.stderr)
+    with open(os.path.join(repo, "README.md"), "w") as f:
+        f.write("scratch repo made by `atm quickstart --gate`\n")
+    _gate_git(state, "add", "-A")
+    r = _gate_git(state, "commit", "-qm", "scratch repo")
+    if r.returncode != 0:
+        _gate_fail(state, "the scratch repo could not take a first commit",
+                   r.stderr + r.stdout)
+    _gate_say(state, 2, "repo", "git init + first commit on main (<scratch>/repo)")
+
+    # 3. a throwaway board
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "init")
+    if r.returncode != 0:
+        _gate_fail(state, "atm init failed in the scratch repo", r.stderr + r.stdout)
+    _gate_git(state, "add", "-A")
+    _gate_git(state, "commit", "-qm", "atm init scaffolding")
+    _gate_say(state, 3, "board", "atm init -> <scratch>/repo/.tickets (a board of its own)")
+
+    # 4. two seats. One is the author, the other is the only one who can release.
+    for seat in (GATE_SEAT_AUTHOR, GATE_SEAT_REVIEWER):
+        r = _gate_atm(state, seat, "join", seat, "--roles", "backend", "--harness", hid)
+        if r.returncode != 0:
+            _gate_fail(state, "atm join %s failed" % seat, r.stderr + r.stdout)
+    _gate_say(state, 4, "seats", "%s (author) and %s (reviewer) joined, harness=%s"
+              % (GATE_SEAT_AUTHOR, GATE_SEAT_REVIEWER, hid))
+
+    # 5. the two tickets: the work, and the work that waits on it
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "create", "add a line to demo.txt",
+                  "--role", "backend")
+    if r.returncode != 0:
+        _gate_fail(state, "atm create failed", r.stderr + r.stdout)
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "create", "build on that line",
+                  "--role", "backend", "--deps", "T-001")
+    if r.returncode != 0:
+        _gate_fail(state, "atm create --deps failed", r.stderr + r.stdout)
+    _gate_say(state, 5, "tickets", "T-001 (the work) and T-002 (waits for T-001)")
+
+    # 6. dispatch seat A, then run the harness in the foreground so it can be watched
+    r = _gate_atm(state, GATE_SEAT_REVIEWER, "dispatch", "T-001",
+                  "--to", GATE_SEAT_AUTHOR, "--harness", hid)
+    if r.returncode != 0:
+        blob = (r.stdout + r.stderr).strip()
+        print("")
+        print("dispatch refused:")
+        _gate_evidence(blob)
+        login = (probe.get("login_cmd") or _preflight().LOGIN_HINT.get(hid, "")).strip()
+        if login:
+            print("log in with:  %s" % login)
+        _gate_walkthrough(hid, reason=blob.splitlines()[0] if blob else "dispatch refused",
+                          login=login, scratch=state["root"])
+        return
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "next")
+    if r.returncode != 0:
+        _gate_fail(state, "%s could not claim the dispatched ticket" % GATE_SEAT_AUTHOR,
+                   r.stderr + r.stdout)
+    _gate_git(state, "checkout", "-q", "-b", "%s/t-001" % GATE_SEAT_AUTHOR)
+    _gate_say(state, 6, "dispatch", "T-001 reserved for %s and claimed; running %s now..."
+              % (GATE_SEAT_AUTHOR, hid))
+    sha, short, note = _gate_make_commit(state, a, hid)
+    if not sha:
+        _gate_fail(state, "no commit was produced, so there is nothing to accept", note)
+    if note:
+        _gate_evidence(note)
+    _gate_evidence("%s committed %s" % (GATE_SEAT_AUTHOR, short))
+
+    # 7. the gate. Submit, close without an accept, and watch T-002 refuse to open.
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "review", "T-001",
+                  "--notes", "demo.txt +1 line")
+    if r.returncode != 0:
+        _gate_fail(state, "atm review failed", r.stderr + r.stdout)
+    closed = _gate_atm(state, GATE_SEAT_AUTHOR, "done", "T-001",
+                       "--notes", "one line in demo.txt")
+    if closed.returncode != 0:
+        _gate_fail(state, "atm done failed", closed.stderr + closed.stdout)
+    gate_lines = [ln for ln in closed.stdout.splitlines() if ln.startswith("blocked:")]
+    tried = _gate_atm(state, GATE_SEAT_REVIEWER, "claim", "T-002")
+    t2 = _gate_ticket(state, "T-002")
+    if tried.returncode == 0 or t2.get("status") == "claimed":
+        _gate_fail(state, "the gate did NOT hold: T-002 opened with no accept on T-001",
+                   tried.stdout + tried.stderr)
+    _gate_say(state, 7, "gate", "T-002 blocked: T-001 has no accept from another seat")
+    for line in gate_lines:
+        _gate_evidence(line)
+    _gate_evidence("atm claim T-002 (as %s) refused: %s"
+                   % (GATE_SEAT_REVIEWER, (tried.stdout + tried.stderr).strip().splitlines()[0]
+                      if (tried.stdout + tried.stderr).strip() else "exit %d" % tried.returncode))
+
+    # 8. the release moment. A DIFFERENT seat accepts that exact sha.
+    acc = _gate_atm(state, GATE_SEAT_REVIEWER, "accept", "T-001", "--sha", sha,
+                    "--notes", "read demo.txt at %s" % short)
+    if acc.returncode != 0:
+        _gate_fail(state, "%s could not accept T-001" % GATE_SEAT_REVIEWER,
+                   acc.stderr + acc.stdout)
+    t1, t2 = _gate_ticket(state, "T-001"), _gate_ticket(state, "T-002")
+    ev = _gate_accept_event(t1)
+    author = (t1.get("owner") or "").strip()
+    evaluator = (ev.get("by") or "").strip()
+    if not ev or ev.get("sha") != sha:
+        _gate_fail(state, "no accept record bound to %s was written" % short, json.dumps(ev))
+    if not evaluator or evaluator == author:
+        _gate_fail(state, "the accept was a self-accept (author %s, evaluator %s)"
+                   % (author or "?", evaluator or "?"))
+    if t2.get("status") not in ("open", "claimed"):
+        _gate_fail(state, "T-002 is still %s after the accept" % (t2.get("status") or "?"),
+                   acc.stdout + acc.stderr)
+    _gate_say(state, 8, "released", "T-002 released by %s accepting %s" % (evaluator, short))
+    _gate_evidence("author %s != evaluator %s  (the board record, not a claim)"
+                   % (author, evaluator))
+    for line in acc.stdout.splitlines():
+        if line.startswith(("T-001 accepted", "unblocked:", "started:")):
+            _gate_evidence(line)
+    _gate_usage_line(state, hid)
+    _gate_ending(root, short=short, author=author, evaluator=evaluator)
+
+
+def _gate_make_commit(state, a, hid):
+    """Run the harness the way `atm watch` runs it. Returns (sha, short, note).
+
+    The harness gets the prompt and the scratch worktree and nothing else. If
+    it comes back without a commit (it chatted, it hit a usage limit, it was
+    killed), that is said out loud and the demo makes the one-line commit
+    itself as the author seat -- the gate being demonstrated is about WHO
+    accepts, and a commit is never invented.
+    """
+    import subprocess
+
+    board, repo = state["board"], state["repo"]
+    before = (_gate_git(state, "rev-parse", "HEAD").stdout or "").strip()
+    cmd = _safe(lambda: _worker_cmd(board, GATE_SEAT_AUTHOR, tool=hid,
+                                    prompt_expr=shlex.quote(GATE_DEMO_PROMPT)), "")
+    note = ""
+    if cmd:
+        try:
+            r = subprocess.run(cmd, shell=True, cwd=repo,
+                               env=_gate_env(state["root"], board, GATE_SEAT_AUTHOR),
+                               capture_output=True, text=True,
+                               timeout=int(getattr(a, "timeout", 240) or 240))
+            out, rc = ((r.stdout or "") + (r.stderr or "")), r.returncode
+        except subprocess.TimeoutExpired:
+            out, rc = "harness timed out after %ss" % getattr(a, "timeout", 240), 124
+        except OSError as exc:
+            out, rc = "could not start %s: %s" % (hid, exc), 127
+        # Usage limits are read with the existing reader, which also records the
+        # provider reading the usage line below prints.
+        _safe(lambda: _watch_note_limit_from_log(board, GATE_SEAT_AUTHOR, out,
+                                                 rc=rc, harness=hid), None)
+        after = (_gate_git(state, "rev-parse", "HEAD").stdout or "").strip()
+        if after and after != before:
+            note = "%s made the commit" % hid
+        else:
+            first = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
+            note = ("%s produced no commit (exit %d)%s -- the demo commits the one-line "
+                    "change itself, as %s" % (hid, rc, (": " + first[:120]) if first else "",
+                                              GATE_SEAT_AUTHOR))
+            with open(os.path.join(repo, "demo.txt"), "a") as f:
+                f.write("atman demo\n")
+            _gate_git(state, "add", "demo.txt")
+            r = _gate_git(state, "commit", "-m", "T-001: add a line to demo.txt")
+            if r.returncode != 0:
+                return "", "", (note + "\n" + (r.stderr or "")).strip()
+    else:
+        note = "no harness command could be built for %s" % hid
+    # The worker's rule holds for the demo too: nothing uncommitted when the
+    # ticket goes to review, so `atm review`/`atm done` need no --force.
+    if (_gate_git(state, "status", "--porcelain").stdout or "").strip():
+        _gate_git(state, "add", "-A")
+        _gate_git(state, "commit", "-m", "T-001: commit the rest of the run")
+    sha = (_gate_git(state, "rev-parse", "HEAD").stdout or "").strip()
+    short = (_gate_git(state, "rev-parse", "--short", "HEAD").stdout or "").strip()
+    if not sha or sha == before:
+        return "", "", note
+    return sha, short, note
 
 
 def cmd_guide(a, board):
@@ -19555,7 +20039,8 @@ def cmd_init(a, board):
     # bind is exactly the failure this ticket exists to stop.
     bound = board_dir(discover_children=True)
     if _same_board(bound, board):
-        print("bound: `tickets` run from %s resolves to this board." % os.getcwd())
+        print("bound: `atm` run from %s resolves to this board "
+              "(`tickets` is a compatibility alias)." % os.getcwd())
     elif explicit:
         print("\nNOT BOUND: you asked for --board %s, but `tickets` run from %s "
               "still resolves to %s.\n  To use the board you just wrote:  "
@@ -19604,8 +20089,9 @@ dependency tree with each node's status and owner.
    reopened for someone else.
 6. When finished, submit -- do not close: `atm review <id> --notes "paths
    touched, tests run, decisions dependents must match"` (branch@sha is added
-   automatically; `--pr N` if you opened one). The MASTER reviews, merges to
-   main and closes it with `atm done`. Claim your next ticket right away.
+   automatically; `--pr N` if you opened one). Another seat then reviews it and
+   records `atm accept <id> --sha <exact sha>`; that accept -- not `atm done` --
+   is what releases the dependents. Claim your next ticket right away.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.
@@ -19634,7 +20120,8 @@ ever hold a ticket.
 give progress bars; `atm sprint close S-01 --carry S-02`
 rolls unfinished work forward.
 
-The `--notes` text on `done` is shown to whoever picks up a dependent ticket.
+The `--notes` text on `review`/`accept`/`done` is shown to whoever picks up a
+dependent ticket, together with the accepted sha.
 Write what the next agent needs -- file paths, names, decisions they must match
 -- not a summary of your effort.
 
@@ -19646,8 +20133,10 @@ reference a `key` from the same plan or an existing `T-` id:
      {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
     EOF
 
-Tickets whose dependencies are unfinished stay invisible to `atm next`
-until those dependencies are marked done, so workers cannot start too early.
+Tickets whose dependencies are unfinished stay invisible to `atm next`, and a
+finished dependency stays withheld until a DIFFERENT seat accepts its exact sha
+(`atm accept <id> --sha <sha>`), so nobody -- human or agent -- can release
+their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
@@ -20425,6 +20914,14 @@ def main():
     c.add_argument("--with-agent", metavar="NAME", help="also print how to put a real worker on the board")
     c.add_argument("--board", help="initialise this board directory explicitly")
     c.add_argument("--remove", action="store_true", help="delete the sample tickets this created")
+    c.add_argument("--gate", action="store_true",
+                   help="feel the accept gate end to end in a throwaway dir (touches nothing of yours)")
+    c.add_argument("--dry-run", action="store_true",
+                   help="with --gate: narrate the walkthrough without running or writing anything")
+    c.add_argument("--harness", default="",
+                   help="with --gate: which coding CLI to dispatch (default: the first installed one)")
+    c.add_argument("--timeout", type=int, default=240,
+                   help="with --gate: seconds the harness gets to make the change (default: 240)")
     c.set_defaults(fn=cmd_quickstart)
 
     c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
