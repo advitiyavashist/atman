@@ -75,6 +75,16 @@ def expired_limit_reading(provider="claude"):
                                     iso(-4), iso(-1))
 
 
+def stale_limit_reading(provider="claude", observed_h=-24 * 6, reset_h=None,
+                        reset_at=""):
+    """The real watch-rejection shape (tickets.py cmd_watch): an observed limit
+    with NO provider reset, so nothing can ever expire it. Six days old.
+    """
+    when = reset_at or (iso(reset_h) if reset_h is not None else "")
+    return pu.record_observed_limit(provider, "5-hour limit reached",
+                                    iso(observed_h), when)
+
+
 def seed_ledger(board, **by_provider):
     led = {"updated": iso(), "providers": {}}
     for hid, rec in by_provider.items():
@@ -98,6 +108,11 @@ def tk_module(monkeypatch, home):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _mk(path):
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def tree_hash(root):
@@ -138,14 +153,105 @@ def test_limited_says_so_with_its_reset_time():
     assert "UTC" in line
     # No provider reset given: say the reset is unknown rather than invent one.
     assert pu.format_compact_line(pu.record_observed_limit(
-        "codex", "cap", iso(-0.2))) == "codex LIMITED, reset time unknown"
+        "codex", "cap", iso(-0.2))) == "codex LIMITED, reset unknown"
 
 
 def test_expired_limit_does_not_read_as_limited():
     rec = pu.compact_reading(expired_limit_reading())
     assert rec["level"] == "unknown"
     assert "limit" not in rec["text"].lower()
-    assert rec["text"] == "claude unknown -- reset elapsed"
+    assert rec["text"].startswith("claude unknown -- reset elapsed")
+    # 4h since the limit was observed: the age rides along (blocker 1).
+    assert rec["text"] == "claude unknown -- reset elapsed (read 4h ago)"
+
+
+def test_a_stale_reading_never_reads_as_current(board, monkeypatch, capsys):
+    """REVIEW blocker 1: a reset-less observed limit can never expire, so
+    LIMITED -- the word that stops a dispatch -- has to carry its own age.
+    Every state does, once the reading is older than STALE_READING_SECS.
+    """
+    six_days = stale_limit_reading()
+    assert six_days["reset_at"] is None  # nothing for expire_stale_resets to do
+    assert pu.expire_stale_resets(six_days)["status"] == "limited"
+    line = pu.format_compact_line(six_days)
+    assert line == "claude LIMITED, reset unknown (read 6d ago)"
+    # The ledger view's own staleness wording is still there to agree with.
+    assert "last read 6d ago" in pu.format_usage_line(six_days)
+
+    aged = {
+        "limited + reset": (stale_limit_reading(reset_h=2), "read 6d ago"),
+        "ok": (http_reading("claude", 88, checked_h=-9), "read 9h ago"),
+        "low": (http_reading("claude", 12, checked_h=-3), "read 3h ago"),
+        "unknown": (reading("claude", "unknown", checked_at=iso(-50),
+                            hint="re-login required"), "read 2d ago"),
+    }
+    for name, (rec, age) in aged.items():
+        assert age in pu.format_compact_line(rec), name
+    # A fresh reading is not annotated: the age is a warning, not decoration.
+    for rec in (limited_reading(), http_reading("claude", 88),
+                signed_out_reading("claude")):
+        assert "read " not in pu.format_compact_line(rec).replace("re-login", "")
+    # A provider with no usage source at all has no age to report.
+    assert "old" not in pu.format_compact_line(pu.empty_reading("cursor"))
+
+    # All four surfaces, not just the formatter.
+    tk = tk_module(monkeypatch, board.parent.parent / "home")
+    seed_ledger(board, claude=six_days)
+    run(board, "join", "alice", "--roles", "docs", "--harness", "claude", agent="alice")
+    for args in ((), ("agents",), ("next", "--owner", "alice")):
+        head = usage_lines(run(board, *args, agent="alice").stdout)
+        assert head[0] == "usage  claude LIMITED, reset unknown (read 6d ago)", args
+    (row,) = [r for r in tk.provider_usage_snapshot(str(board))
+              if r["provider"] == "claude"]
+    assert row["text"].endswith("(read 6d ago)") and row["level"] == "limited"
+    tk.print_seat_usage(str(board), "claude")
+    assert capsys.readouterr().out.strip() == \
+        "usage  claude LIMITED, reset unknown (read 6d ago)"
+
+
+def test_the_age_outlives_the_reset_when_the_line_is_tight(board):
+    """REVIEW blocker 2: the reset is shed, never the staleness marker."""
+    wordy = "next Tuesday at midnight when the weekly window rolls over"
+    rec = reading("claude", "ok", remaining="100%", checked_at=iso(-9),
+                  reset_at=wordy,
+                  windows=[{"name": "weekly", "used_percent": 0.0,
+                            "remaining_percent": 100.0, "reset_at": wordy}])
+    line = pu.format_compact_line(rec)
+    assert line == "claude 100% left (read 9h ago)"
+    assert "next Tuesday" not in line  # shed whole: half a phrase is not a time
+
+    # When both fit, both are shown; when only one can, the age wins and the
+    # reset is never half-printed (no bare "09:00" without its UTC).
+    tight = stale_limit_reading(reset_at="next Tuesday at midnight")
+    assert pu.format_compact_line(tight) == \
+        "claude LIMITED, resets next Tuesday at midnight (6d old)"
+    far = http_reading("claude", 74, reset_h=20, checked_h=-14)
+    far_line = pu.format_compact_line(far)
+    assert "read 14h ago" in far_line and far_line.count("UTC") == 1
+    for rec in (rec, tight, far):
+        shown = pu.format_compact_line(rec)
+        assert ("UTC" in shown) == ("UTC" in (pu.reset_label(rec["reset_at"]) or "")
+                                    and "resets" in shown)
+
+    # Through a surface, with the age intact.
+    seed_ledger(board, claude=reading("claude", "ok", remaining="3%", checked_at=iso(-9),
+                                      reset_at=wordy,
+                                      windows=[{"name": "w", "used_percent": 97.0,
+                                                "remaining_percent": 3.0,
+                                                "reset_at": wordy}]))
+    head = usage_lines(run(board, "agents").stdout)
+    assert head == ["usage  claude 3% left -- low (read 9h ago)"]
+
+
+def test_an_elapsed_reset_is_not_printed_as_if_it_were_ahead():
+    """A window that has already rolled over is not a promise about the future."""
+    rec = http_reading("claude", 74, reset_h=-3, checked_h=-0.05)
+    line = pu.format_compact_line(rec)
+    assert "resets" not in line
+    # The number is from a rolled-over window: say when it was read, even
+    # though the ledger itself was refreshed minutes ago.
+    assert line.startswith("claude 74% left (read ") and line.endswith(" ago)")
+    assert pu.compact_reading(rec)["reset"] == ""
 
 
 def test_a_provider_with_no_usage_source_says_so():
@@ -248,7 +354,7 @@ def test_agents_header_shows_each_state(board):
 
     seed_ledger(board, claude=expired_limit_reading())
     expired = run(board, "agents").stdout.splitlines()[0]
-    assert expired == "usage  claude unknown -- reset elapsed"
+    assert expired == "usage  claude unknown -- reset elapsed (read 4h ago)"
     assert "limited" not in expired.lower()
 
 
@@ -328,7 +434,7 @@ def test_seat_line_after_spawn_and_dispatch(board, monkeypatch, capsys):
     assert capsys.readouterr().out.strip() == "usage  claude unknown -- re-login required"
     tk.print_seat_usage(str(board), "codex")
     seat = capsys.readouterr().out.strip()
-    assert seat == "usage  codex unknown -- reset elapsed"
+    assert seat == "usage  codex unknown -- reset elapsed (read 4h ago)"
     assert "limit" not in seat.lower()
 
     # One line, for the seat's provider only.
@@ -514,9 +620,90 @@ def test_no_fresh_read_is_triggered_by_a_read_path(board, monkeypatch):
         body = src[src.index(fn):src.index("\n\n\n", src.index(fn))]
         code = "".join(body.split('"""')[::2])  # drop the docstring, keep the code
         for banned in ("refresh_http_providers", "_maybe_refresh_provider_usage(",
-                       "fetch_provider_usage", "subprocess.", "put_reading",
-                       "board_dir("):
+                       "fetch_provider_usage", "subprocess.", "put_reading"):
             assert banned not in code, (fn, banned)
+    # The bare-`atm` board comes from board_dir itself, so the header can
+    # never name a board the next command refuses -- run with the no-spawn
+    # flag set, which makes its helpers take the filesystem answer instead of
+    # shelling out to git.
+    resolver = src[src.index("def _usage_header_board("):
+                   src.index("\n\n\n", src.index("def _usage_header_board("))]
+    assert "board_dir(discover_children=True)" in resolver
+    assert "_NO_SPAWN = True" in resolver and "_NO_SPAWN = was_no_spawn" in resolver
+
+
+def test_bare_atm_reads_the_same_board_every_command_resolves(tmp_path):
+    """REVIEW blocker 3: the header must not name a board `atm agents` refuses.
+
+    T-959 shape: a configured shared board plus a non-empty, unmarked local
+    .tickets. Every other command refuses that repo outright, so the default
+    screen prints nothing rather than the local board's number.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".tickets" / "agents").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    shared = tmp_path / "shared" / ".tickets"
+    shared.mkdir(parents=True)
+    # local board: non-empty (a real agent registration) and 3% left
+    (repo / ".tickets" / "agents" / "alice.json").write_text(
+        json.dumps({"owner": "alice", "seen": iso()}))
+    seed_ledger(repo / ".tickets", claude=http_reading("claude", 3))
+    seed_ledger(shared, claude=http_reading("claude", 91))
+    cfg = tmp_path / "board.json"
+    cfg.write_text(json.dumps({"boards": {str(repo): str(shared)}}))
+
+    def atm(*args, cwd):
+        env = dict(os.environ, HOME=str(tmp_path / "home"),
+                   ATMAN_BOARD_CONFIG=str(cfg),
+                   PYTHONPATH=str(ROOT / "src"))
+        env.pop("TICKETS_DIR", None)
+        env.pop("TICKET_AGENT", None)
+        return subprocess.run([sys.executable, str(TOOL), *args], cwd=str(cwd),
+                              capture_output=True, text=True, env=env)
+
+    refused = atm("agents", cwd=repo)
+    assert refused.returncode != 0 and "REFUSING BOARD" in refused.stderr
+    bare = atm(cwd=repo)
+    assert bare.returncode == 0 and "usage:" in bare.stdout  # help still prints
+    assert usage_lines(bare.stdout) == []
+    assert "3%" not in bare.stdout and "91%" not in bare.stdout
+    assert "REFUSING" not in bare.stdout  # and the refusal is not shown either
+    assert bare.stderr == ""
+
+    # A .tickets under a directory that is not a git repo is not this repo's
+    # board: board_dir walks past it, and so does the header.
+    plain = tmp_path / "plain"
+    (plain / "sub").mkdir(parents=True)
+    seed_ledger(_mk(plain / ".tickets"), claude=http_reading("claude", 3))
+    assert usage_lines(atm(cwd=plain / "sub").stdout) == []
+
+    # And the ordinary case still works: a git repo with its own board.
+    ok_repo = tmp_path / "ok"
+    (ok_repo / ".tickets").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(ok_repo)], check=True)
+    seed_ledger(ok_repo / ".tickets", claude=http_reading("claude", 12))
+    head = usage_lines(atm(cwd=ok_repo).stdout)
+    assert len(head) == 1 and head[0].startswith("usage  claude 12% left")
+    assert usage_lines(atm(cwd=ok_repo / ".tickets").stdout) == head
+
+
+def test_bare_atm_resolves_its_board_without_spawning(board, monkeypatch, audit):
+    """No TICKETS_DIR: the resolver that would run git must not, on this path."""
+    seed_ledger(board, claude=http_reading("claude", 12))
+    monkeypatch.delenv("TICKETS_DIR", raising=False)
+    monkeypatch.chdir(board.parent)
+    tk = tk_module(monkeypatch, board.parent.parent / "home")
+    before = tree_hash(board)
+
+    def bare():
+        assert tk._usage_header_board() == str(board)
+        monkeypatch.setattr(sys, "argv", ["atm"])
+        tk.main()
+
+    assert audit.record(bare) == []
+    assert tree_hash(board) == before
+    # The flag is restored, so a later command still cross-checks with git.
+    assert tk._NO_SPAWN is False
 
 
 # ---- narrow terminal ----------------------------------------------------
@@ -536,12 +723,17 @@ def test_narrow_terminal_is_not_mangled(board):
     longhint = reading("a-very-long-provider-name", "unknown", checked_at=iso(-1),
                        hint="usage request failed " + "x" * 200)
     for rec in (stale, weird, longhint, limited_reading(), expired_limit_reading(),
-                signed_out_reading(), pu.empty_reading("cursor")):
+                signed_out_reading(), pu.empty_reading("cursor"),
+                stale_limit_reading(), stale_limit_reading(reset_h=2),
+                stale_limit_reading(reset_at="next Tuesday at midnight")):
         line = "usage  " + pu.format_compact_line(rec)
         assert len(line) <= NARROW, line
         assert "\n" not in line
+        # The realistic budget is tighter than the hard cap: a header sits
+        # next to output the user came for, and 80 is the wrap point.
+        assert len(line) <= 64, line
     # A stale but real number keeps its age; the same line stays inside 80.
-    assert "last read" in pu.format_compact_line(stale)
+    assert "read 14h ago" in pu.format_compact_line(stale)
 
 
 # ---- never a credential -------------------------------------------------

@@ -37,6 +37,7 @@ import argparse
 import errno
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -2547,25 +2548,32 @@ def provider_usage_snapshot(board):
 
 
 def _usage_header_board():
-    """Board for the bare-`atm` header: TICKETS_DIR, or a .tickets walk up.
+    """Board for the bare-`atm` header: whatever board_dir() would resolve.
 
-    Filesystem only, deliberately not board_dir(): printing a usage line on
-    the default screen must not start a git process, resolve a shared-board
-    config, or refuse anything -- the help output is what the user asked for.
+    The SAME resolver every other command uses -- TICKETS_DIR, this repo's
+    configured shared board, the T-959 shadow refusal, the .git requirement
+    -- because a header that names a different board's quota than
+    `atm agents` and `atm next` work on is worse than no header. It runs in
+    _NO_SPAWN mode, which makes the resolution helpers take their filesystem
+    answer (the one that wins on disagreement anyway), so the default screen
+    still starts no git process.
+
+    A board that board_dir() would refuse, or any failure at all, prints
+    nothing: stderr is held aside so the help screen the user asked for is
+    not replaced by a resolution complaint they did not.
     """
-    env = os.environ.get("TICKETS_DIR")
-    if env:
-        d = os.path.abspath(os.path.expanduser(env))
-        return d if os.path.isdir(d) else ""
-    d = os.getcwd()
-    while True:
-        cand = os.path.join(d, ".tickets")
-        if os.path.isdir(cand):
-            return cand
-        parent = os.path.dirname(d)
-        if parent == d:
-            return ""
-        d = parent
+    global _NO_SPAWN
+    was_no_spawn, held = _NO_SPAWN, sys.stderr
+    _NO_SPAWN = True
+    sys.stderr = io.StringIO()
+    try:
+        board = board_dir(discover_children=True)
+    except BaseException:  # SystemExit from a refusal included
+        return ""
+    finally:
+        _NO_SPAWN = was_no_spawn
+        sys.stderr = held
+    return board if board and os.path.isdir(board) else ""
 
 
 def _steer():

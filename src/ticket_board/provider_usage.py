@@ -430,21 +430,32 @@ def format_usage_line(reading, now=None):
 # %, its own reset, and the one word that changes what the user should do.
 # Nothing here reads a credential, a path, or the network.
 LOW_REMAINING_PCT = 20.0
+# Older than this and the line says how old it is -- in EVERY state. A number,
+# and just as much a LIMITED, is only as good as when it was read.
 STALE_READING_SECS = 3600
-# Every part is capped so the worst case still fits an 80-column terminal
-# next to a surface prefix: 12 + 8 + 4 + 48 = 72.
+# Budget for the text (a surface adds a 7-character prefix), so a realistic
+# line lands around 60 columns and the worst case still clears 80. The parts
+# are shed in priority order: the state and the age are never shed, the reset
+# is (see _fit) -- staleness is the honesty-bearing part, a reset is detail.
 HINT_MAX = 48
 PROVIDER_MAX = 12
 RESET_MAX = 24
-COMPACT_MAX = 72
+COMPACT_MAX = 56
 # A never-read provider is not a failed read: it must not say "re-login".
 NEVER_READ_HINT = "not read yet (atm harness usage)"
 # Defensive scrub for the hint, the only free-ish text a header repeats. Real
 # hints are fixed internal strings ("re-login required", "HTTP 500", "reset
-# elapsed"); a path, an assignment or a long opaque blob is not one of them and
-# never reaches a user's screen from here. The provider's own limit_message is
-# not printed in a header at all.
-_HINT_UNSAFE = re.compile(r"[/\\=]|^~|^sk-|^Bearer$|^ey[A-Za-z0-9_-]{8,}", re.I)
+# elapsed"); a path, an assignment or a token is not one of them and never
+# reaches a user's screen from here. The provider's own limit_message is not
+# printed in a header at all.
+_HINT_UNSAFE = re.compile(
+    r"[/\\=]|^~"
+    # Known credential shapes, including the short ones: OpenAI/Anthropic
+    # sk-, Slack xox?-, GitHub gh?_, AWS AKIA/ASIA, Google AIza, JWTs.
+    r"|^(?:sk|xox[abprs]?|ghp|gho|ghu|ghs|ghr|github_pat|glpat|shpat|pk|rk)[-_]"
+    r"|^(?:AKIA|ASIA|AIza|ya29|eyJ)"
+    r"|^Bearer$|^token$",
+    re.I)
 
 
 def remaining_percent(reading):
@@ -519,55 +530,114 @@ def _short_hint(rec):
     return hint.strip()
 
 
+def age_amount(checked_at, now=None):
+    """Just the magnitude of a reading's age: '6d', '14h', '3m', '45s'."""
+    age = age_label(checked_at, now)
+    if not age.startswith("last read ") or not age.endswith(" ago"):
+        return ""
+    return age[len("last read "):-len(" ago")]
+
+
+def _stale_age(rec, now=None, force=False):
+    """Both age suffixes for a reading too old to present as current -- in
+    every state, LIMITED included.
+
+    A LIMITED with no provider reset can never expire on its own
+    (``expire_stale_resets`` has nothing to compare it against), and LIMITED
+    is the word that stops a dispatch, so it is exactly the state that must
+    not look freshly observed. Two forms because the age is never shed: the
+    terse one buys room for a reset that would otherwise not fit.
+    """
+    when = parse_iso(rec.get("checked_at"))
+    if when is None:
+        return "", ""
+    old = ((now or utcnow()) - when).total_seconds() >= STALE_READING_SECS
+    amount = age_amount(rec.get("checked_at"), now)
+    if not (old or force) or not amount:
+        return "", ""
+    return " (read %s ago)" % amount, " (%s old)" % amount
+
+
+MID_MIN = 12
+
+
+def _fit(head, mid, tail, age, terse_age="", truncatable=True):
+    """Assemble within COMPACT_MAX, shedding the reset/hint before the age.
+
+    ``head`` (who and what state), ``tail`` (the "-- low" call-out) and the
+    age are never shed: they are what the user has to act on, and a number
+    without its staleness is the lie this formatter exists to avoid. ``mid``
+    is the reset or the hint -- detail. So the order of sacrifice is: the
+    full age suffix shortens to its terse form, then ``mid`` is truncated on
+    a word boundary, then ``mid`` goes.
+
+    ``truncatable=False`` for a reset: half of "Sep 19 09:00 UTC" is not a
+    shorter truth but an ambiguous one, and half of a provider's own phrase
+    ("resets next Tuesday at") is not a time at all -- so a reset is kept or
+    dropped whole, and only a hint is ever shortened.
+    """
+    forms = [age] + ([terse_age] if terse_age and terse_age != age else [])
+    for shown in forms:
+        if not mid or len(mid) <= COMPACT_MAX - len(head + tail + shown):
+            return head + mid + tail + shown
+    room = COMPACT_MAX - len(head + tail + age)
+    cut = mid[:max(0, room)].rstrip() if truncatable else ""
+    cut = cut.rsplit(" ", 1)[0] if " " in cut else ""
+    return head + (cut if len(cut) >= MID_MIN else "") + tail + age
+
+
 def compact_reading(reading, now=None):
     """Header-sized view of one provider reading.
 
     ``level`` is the state the copy is chosen from: ok / low / limited /
     unknown / no_data. An expired limit arrives here already downgraded to
-    unknown by ``expire_stale_resets``, so it never reads as limited.
+    unknown by ``expire_stale_resets``, so it never reads as limited; a limit
+    with no reset to expire against carries its age instead.
     """
     rec = public_reading(reading, now)
     # A provider id is a short label, never a path: keep label characters only.
     hid = re.sub(r"[^A-Za-z0-9_.+-]", "", rec["provider"] or "")[:PROVIDER_MAX] or "?"
     status = rec["status"]
     reset = reset_label(rec["reset_at"], now)
+    when_reset = parse_iso(rec["reset_at"])
     pct = remaining_percent(rec)
     out = {"provider": hid, "level": "unknown", "remaining_pct": None,
            "remaining": "", "reset": reset, "text": ""}
     if status == "no_data":
+        # Nothing was ever read and nothing ever will be: an age would be noise.
         out.update(level="no_data", reset="",
                    text="%s no usage data (no source to read)" % hid)
         return out
+    age, terse = _stale_age(rec, now)
     if status == "limited":
+        mid = (", resets %s" % reset) if reset else ", reset unknown"
         out.update(level="limited", remaining_pct=pct,
                    remaining=pct_label(pct) if pct is not None else "",
-                   text="%s LIMITED, %s" % (
-                       hid, ("resets %s" % reset) if reset else "reset time unknown"))
+                   text=_fit("%s LIMITED" % hid, mid, "", age, terse,
+                             truncatable=not reset))
         return out
     if status == "ok" and pct is not None:
+        # A reset that has already passed describes a window that has since
+        # rolled over: do not print it as though it were still ahead, and say
+        # how old the number is even if the ledger was read minutes ago.
+        if when_reset is not None and when_reset <= (now or utcnow()):
+            reset = ""
+            out["reset"] = ""
+            age, terse = _stale_age(rec, now, force=True)
         low = pct < LOW_REMAINING_PCT
-        bits = "%s %s left" % (hid, pct_label(pct))
-        if reset:
-            bits += ", resets %s" % reset
-        if low:
-            bits += " -- low"
-        # A number read hours ago is still that provider's last real answer,
-        # but say how old it is -- and drop the age rather than let the line
-        # outgrow a narrow terminal.
-        age = rec["age"]
-        when = parse_iso(rec["checked_at"])
-        if age and when is not None and \
-                ((now or utcnow()) - when).total_seconds() >= STALE_READING_SECS \
-                and len(bits) + len(age) + 3 <= COMPACT_MAX:
-            bits += " (%s)" % age
         out.update(level="low" if low else "ok", remaining_pct=pct,
-                   remaining=pct_label(pct), text=bits)
+                   remaining=pct_label(pct),
+                   text=_fit("%s %s left" % (hid, pct_label(pct)),
+                             (", resets %s" % reset) if reset else "",
+                             " -- low" if low else "", age, terse,
+                             truncatable=False))
         return out
     # Unknown, and every shape that cannot produce an honest number: an ok
     # status with no percent in it is still unknown, never 0 and never "fine".
     hint = _short_hint(rec)
     out.update(level="unknown",
-               text="%s unknown%s" % (hid, (" -- %s" % hint) if hint else ""))
+               text=_fit("%s unknown" % hid, (" -- %s" % hint) if hint else "",
+                         "", age, terse))
     return out
 
 
