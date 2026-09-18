@@ -1882,7 +1882,9 @@ def cmd_board(a, board):
     if not a.quiet:
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
-            "`atm done <id> --notes \"...\"` hands off to dependents."
+            "`atm review <id> --notes \"...\"` submits it. A dependent opens only when a "
+            "DIFFERENT seat runs `atm accept <id> --sha <sha>` -- `atm done` alone releases "
+            "nothing (atm quickstart --gate shows it)."
         )
 
 
@@ -5496,7 +5498,8 @@ def cmd_init(a, board):
     # bind is exactly the failure this ticket exists to stop.
     bound = board_dir(discover_children=True)
     if _same_board(bound, board):
-        print("bound: `tickets` run from %s resolves to this board." % os.getcwd())
+        print("bound: `atm` run from %s resolves to this board "
+              "(`tickets` is a compatibility alias)." % os.getcwd())
     elif explicit:
         print("\nNOT BOUND: you asked for --board %s, but `tickets` run from %s "
               "still resolves to %s.\n  To use the board you just wrote:  "
@@ -5545,8 +5548,9 @@ dependency tree with each node's status and owner.
    reopened for someone else.
 6. When finished, submit -- do not close: `atm review <id> --notes "paths
    touched, tests run, decisions dependents must match"` (branch@sha is added
-   automatically; `--pr N` if you opened one). The MASTER reviews, merges to
-   main and closes it with `atm done`. Claim your next ticket right away.
+   automatically; `--pr N` if you opened one). Another seat then reviews it and
+   records `atm accept <id> --sha <exact sha>`; that accept -- not `atm done` --
+   is what releases the dependents. Claim your next ticket right away.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.
@@ -5572,7 +5576,8 @@ ever hold a ticket.
 give progress bars; `atm sprint close S-01 --carry S-02`
 rolls unfinished work forward.
 
-The `--notes` text on `done` is shown to whoever picks up a dependent ticket.
+The `--notes` text on `review`/`accept`/`done` is shown to whoever picks up a
+dependent ticket, together with the accepted sha.
 Write what the next agent needs -- file paths, names, decisions they must match
 -- not a summary of your effort.
 
@@ -5584,8 +5589,10 @@ reference a `key` from the same plan or an existing `T-` id:
      {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
     EOF
 
-Tickets whose dependencies are unfinished stay invisible to `atm next`
-until those dependencies are marked done, so workers cannot start too early.
+Tickets whose dependencies are unfinished stay invisible to `atm next`, and a
+finished dependency stays withheld until a DIFFERENT seat accepts its exact sha
+(`atm accept <id> --sha <sha>`), so nobody -- human or agent -- can release
+their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
