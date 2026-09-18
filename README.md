@@ -54,6 +54,64 @@ talking to their own providers.
 
 <p align="center"><i>A checked-in capture of the local app. There is no hosted board to log into.</i></p>
 
+## Feel it in five minutes
+
+```sh
+atm quickstart --gate
+```
+
+One command, nothing of yours touched: it makes a throwaway git repo and board
+in a temp dir, dispatches one seat to make a one-line commit, and then lets you
+watch a dependent ticket refuse to open until a **different** seat accepts that
+exact commit. Real output from a run:
+
+```
+atm quickstart --gate: one ticket, two seats, and the gate between them.
+scratch: /tmp/atm-quickstart-gate-5mvvgob2
+         (your repo and your board are not touched -- this all happens in there)
+1/8 preflight claude login is live (ready) -- same check `atm dispatch` makes
+2/8 repo      git init + first commit on main (<scratch>/repo)
+3/8 board     atm init -> <scratch>/repo/.tickets (a board of its own)
+4/8 seats     alice (author) and bob (reviewer) joined, harness=claude
+5/8 tickets   T-001 (the work) and T-002 (waits for T-001)
+6/8 dispatch  T-001 reserved for alice and claimed; running claude now...
+          | claude made the commit
+          | alice committed bcda9a0
+7/8 gate      T-002 blocked: T-001 has no accept from another seat
+          | blocked: T-002 -- T-001 marked done without verification; accept it or reopen
+          | atm claim T-002 (as bob) refused: T-002: T-001 marked done without verification; accept it or reopen
+8/8 released  T-002 released by bob accepting bcda9a0
+          | author alice != evaluator bob  (the board record, not a claim)
+          | T-001 accepted bcda9a086e3de3ca390e55fa51dc6703c4c6353d by bob
+          | unblocked: T-002
+          | started: T-002
+usage:  claude unknown · UNKNOWN · last read 0s ago · re-login required
+
+what happened: alice committed bcda9a0 and closed T-001; T-002 stayed shut until bob --
+               a different seat -- accepted that exact sha. No seat releases its own work.
+in your repo:  cd <your repo> && atm quickstart --agent <you>   (then: atm next, atm review, atm accept)
+where to look: atm agents   (seats, harness, usage)   |   atm ui  ->  http://127.0.0.1:8765
+scratch kept:  /tmp/atm-quickstart-gate-5mvvgob2   (rm -rf it whenever; nothing of yours was touched)
+```
+
+The lines under `7/8` and `8/8` are the CLI's own: `atm done` refuses to release
+T-002, `atm claim T-002` is refused for the same reason, and the release only
+happens once `bob` records an accept bound to `bcda9a0`. The demo verifies the
+accept it printed against the board record (author != evaluator) and stops
+loudly if the gate ever fails to hold, so the moment cannot be a print
+statement. In this capture the dispatched CLI was a one-line stub that makes the
+commit, so the paste is reproducible; with a real Claude/Codex/Cursor login the
+same run dispatches that CLI instead.
+
+If no coding CLI is logged in, the same command says so, prints the login
+command, and narrates a `WALKTHROUGH ONLY` version that writes no board, records
+no accept and invents no sha (`atm quickstart --dry-run` asks for that on
+purpose). Then, in your own repo:
+
+```sh
+cd <your repo> && atm quickstart --agent <you>   # board + sample work + you, registered
+```
+
 ## One path
 
 Python 3.9+ and Git. Tested on one macOS machine:
@@ -71,6 +129,10 @@ atm self                     # which file you are actually running
 `./install.sh --prefix DIR` places the symlinks in `DIR`; they still run
 `tickets.py` from this checkout. `--force` replaces the existing one on
 purpose. `atm` is the command; `tickets` is a compatibility alias.
+
+Tell us where you got stuck: `atm feedback` prints a local-only, pasteable
+run summary (nothing leaves this machine) for a
+[friction report](https://github.com/advitiyavashist/atman/issues/new?template=friction-report.yml).
 
 In an existing git repo. `atm quickstart --remove` first if sample tickets
 are still T-001 through T-003 — otherwise the commands below hit the wrong

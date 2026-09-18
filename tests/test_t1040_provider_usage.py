@@ -47,8 +47,9 @@ def test_record_limit_with_and_without_reset(tmp_path):
         "2026-09-16T02:00:00Z",
         reset_at="2026-09-16T17:40:00Z",
     )
-    pu.put_reading(str(board), with_reset)
-    got = pu.get_reading(str(board), "claude", now=utc("2026-09-16T03:00:00Z"))
+    now = utc("2026-09-16T03:00:00Z")
+    pu.put_reading(str(board), with_reset, now=now)
+    got = pu.get_reading(str(board), "claude", now=now)
     assert got["status"] == "limited"
     assert got["reset_at"] == "2026-09-16T17:40:00Z"
     assert "You've hit your session limit" in got["limit_message"]

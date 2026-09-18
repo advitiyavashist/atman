@@ -22,7 +22,17 @@ def clean_env(tmp_path, **overrides):
         "TICKETS_DISPATCH_NO_SPAWN": "1",
     }
     (tmp_path / "fake-home").mkdir(exist_ok=True)
-    (tmp_path / "bin").mkdir(exist_ok=True)
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for name, line in (
+        ("agent", "Logged in as fixture@example.test"),
+        ("claude", "Logged in as fixture@example.test"),
+        ("codex", "logged in"),
+    ):
+        script = bindir / name
+        if not script.exists():
+            script.write_text("#!/bin/sh\necho '%s'\nexit 0\n" % line)
+            script.chmod(stat.S_IRWXU)
     e.update(overrides)
     return e
 

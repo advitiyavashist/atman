@@ -37,6 +37,7 @@ import argparse
 import errno
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -44,7 +45,7 @@ import shlex
 import sys
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Immutable releases verify every shipped byte before dispatch.  Do not add
 # interpreter-generated files under the verified package tree after that
@@ -357,6 +358,52 @@ def _fs_repo_link(start):
         d = parent
 
 
+# Set by main() for `atm feedback`, which promises no subprocess at all. Every
+# git-using helper on the board-resolution path checks this and returns its
+# filesystem answer; _enter_no_spawn_mode() also installs an audit hook that
+# refuses any process spawn a helper might still attempt.
+_NO_SPAWN = False
+_NO_SPAWN_EVENTS = frozenset({
+    "subprocess.Popen", "os.system", "os.posix_spawn", "os.spawn", "os.exec",
+    "os.fork", "os.forkpty", "pty.spawn",
+})
+
+
+def _enter_no_spawn_mode():
+    """Structural no-subprocess scope for the rest of this process.
+
+    The flag makes resolution helpers skip their git cross-checks (the
+    filesystem answer already wins on disagreement). The audit hook is the
+    backstop: a spawn nobody taught about the flag fails as OSError -- which
+    those helpers already treat as "git unavailable" -- instead of running.
+    """
+    global _NO_SPAWN
+    if _NO_SPAWN:
+        return
+    _NO_SPAWN = True
+
+    def _refuse_spawn(event, args):
+        if event in _NO_SPAWN_EVENTS:
+            raise PermissionError("atm feedback runs no subprocess (%s refused)" % event)
+
+    sys.addaudithook(_refuse_spawn)
+
+
+class _RedactingStream(object):
+    """stderr wrapper for `atm feedback`: board-resolution notices and
+    refusals name absolute paths, and feedback output is meant to be pasted."""
+
+    def __init__(self, stream, home, run):
+        self._stream, self._home, self._run = stream, home, run
+
+    def write(self, text):
+        text = _feedback_redact(text, home=self._home, run=self._run)
+        return self._stream.write(re.sub(r"(?<![\w.<>/-])/[^\s'\"(),:;]+", "<PATH>", text))
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def _repo_root():
     """Root of the MAIN worktree, so every linked worktree shares one board.
 
@@ -373,6 +420,12 @@ def _repo_root():
     import subprocess
     here = os.getcwd()
     fs_root, fs_common = _fs_repo_link(here)
+    if _NO_SPAWN:
+        # `atm feedback` promises no subprocess. The filesystem answer is the
+        # one that wins on disagreement anyway.
+        if fs_common is None or os.path.basename(fs_common) != ".git":
+            return None
+        return os.path.dirname(fs_common)
     try:
         out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
                              capture_output=True, text=True, timeout=5,
@@ -427,6 +480,9 @@ def _init_cwd_worktree_root(start=None):
         if parent == d:
             break
         d = parent
+    if _NO_SPAWN:
+        # `atm feedback`: the filesystem walk is the answer; skip the git cross-check.
+        return fs_root
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     git_root = None
     try:
@@ -2283,6 +2339,219 @@ def _review_verdict():
         return m
 
 
+def _seat_brief():
+    """T-1078 seat brief: the gate, the ticket and the refusals, composed."""
+    try:
+        from ticket_board import seat_brief as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import seat_brief as m
+        return m
+
+
+def _stall_watch():
+    try:
+        from ticket_board import stall_watch as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import stall_watch as m
+        return m
+
+
+def _record_watch_stall(board, owner, measured, pid, ticket=None):
+    sw = _stall_watch()
+    wall = datetime.now(timezone.utc)
+    last = wall - timedelta(seconds=float(measured or 0))
+    last_iso = last.strftime("%Y-%m-%dT%H:%M:%SZ")
+    rec = sw.stall_record(last_iso, wall, measured, pid)
+
+    def write(agent):
+        agent["stall"] = rec
+        agent.pop("stall_resolved", None)
+
+    _agent_update(board, owner, write)
+    text = sw.stall_note(owner, measured, last_iso)
+    if ticket:
+        t = load(board, ticket)
+        t.setdefault("notes", []).append({"by": owner, "at": now(), "text": text})
+        save(board, t)
+    return rec
+
+
+def _resolve_watch_stall(board, owner, ticket=None):
+    sw = _stall_watch()
+    stamped = now()
+
+    def write(agent):
+        if not agent.get("stall"):
+            return False
+        agent["stall_resolved"] = sw.resolved_record(stamped, datetime.now(timezone.utc))
+        agent.pop("stall", None)
+
+    if _agent_update(board, owner, write) is None:
+        return
+    text = sw.resolved_note(owner, stamped)
+    if ticket:
+        t = load(board, ticket)
+        t.setdefault("notes", []).append({"by": owner, "at": stamped, "text": text})
+        save(board, t)
+
+
+def _clear_watch_stall(board, owner):
+    """Drop a recorded stall when the stalled run itself terminates.
+
+    The next watch tick must re-evaluate fresh. Output resume uses
+    `_resolve_watch_stall` (and may note the ticket).
+    """
+    def write(agent):
+        if not agent.get("stall"):
+            return False
+        agent.pop("stall", None)
+
+    _agent_update(board, owner, write)
+
+
+def _live_watch_stall(board, owner, rec, run=None, clear=False):
+    """The recorded stall, only while the stalled run can still be running.
+
+    `_run_end` / `_finalize_active_watch_run` clear a stall from a finally
+    block, which a SIGKILL, OOM kill or reboot never reaches. A stall left
+    behind by a dead watcher must not block retrigger or render STALLED: if
+    the run is not active, or the watcher pid or stalled child pid is gone,
+    it is ignored (and dropped when `clear`) so a new watcher can start.
+    """
+    stall = (rec or {}).get("stall")
+    if not isinstance(stall, dict) or not stall.get("at"):
+        return None
+    run = _read_run(board, owner) if run is None else (run or {})
+
+    def alive(pid):
+        try:
+            return bool(pid) and _pid_alive(int(pid))
+        except (TypeError, ValueError):
+            return False
+
+    if (run.get("active") and alive(run.get("pid"))
+            and (not stall.get("pid") or alive(stall.get("pid")))):
+        return stall
+    if clear:
+        _safe(lambda: _clear_watch_stall(board, owner), None)
+    return None
+
+
+def _preflight():
+    try:
+        from ticket_board import preflight as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import preflight as m
+        return m
+
+
+def _preflight_seat(board, owner, harness=""):
+    """Probe binary+auth unless a positive check for this harness is still fresh.
+
+    Decides on the probe that just ran on this host. The stored auth_check
+    may keep an older authoritative record when the execution context
+    changed (env fingerprint, binary); that record never passes preflight.
+    Usage/quota never blocks. Callers apply dispatch_refuse or route_skip.
+    """
+    pf = _preflight()
+    rec = _agent_rec(board, owner) or {}
+    resolved, _ = harness_of(board, owner, harness, "")
+    want = harness or resolved
+    cached = pf.cached_positive(rec, now(), harness=want)
+    if cached:
+        return {"state": cached.get("state") or "ready",
+                "harness": cached.get("harness") or want,
+                "cached": True, "at": cached.get("at")}
+    if not _auth_gates_spawn(harness) and not _auth_gates_spawn(resolved):
+        return {"state": "unsupported", "harness": resolved or harness, "cached": False}
+    incoming = harness_auth_probe(board, owner, harness)
+    stored = _store_auth_check(board, owner, incoming)
+    if isinstance(stored, dict) and stored.get("at") and stored.get("at") == incoming.get("at"):
+        result = stored
+    else:
+        # The merge kept an older record; the fresh probe is what holds now.
+        result = incoming
+    fresh = pf.age_s(result.get("at"), now())
+    if (not pf.dispatch_refuse(result, want or result.get("harness"))
+            and fresh is not None and fresh <= pf.CACHE_SECS):
+        _agent_set(board, owner, preflight=pf.snapshot(result, True))
+    return result
+
+
+def _refuse_preflight(board, owner, harness, verb):
+    result = _preflight_seat(board, owner, harness)
+    reason = _preflight().dispatch_refuse(result, harness or result.get("harness"))
+    if reason:
+        sys.exit("%s: %s" % (verb, reason))
+    return result
+
+
+def _route_headroom():
+    try:
+        from ticket_board import route_headroom as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import route_headroom as m
+        return m
+
+
+def _route_seat_limit(board, name):
+    """Shared T-1041 limit check (route_headroom.seat_limit).
+
+    tickets.py also persists an expired reset so later reads see it cleared.
+    """
+    rec = _agent_rec(board, name) or {}
+    _active_seat_limit(board, name, rec)
+    return _route_headroom().seat_limit(rec)
+
+
+def _refuse_limited_seat(board, seat, verb):
+    lim = _route_seat_limit(board, seat)
+    if not lim:
+        return
+    sys.exit("%s: %s -- not dispatching" % (
+        verb, _route_headroom().limit_label(lim)))
+
+
+def _route_logged_out(board, wf, name):
+    """T-1043 route_skip for one seat: confirmed logged-out reason, or empty."""
+    e = wf.get(name, {}) or {}
+    hid = (e.get("harness") or e.get("tool") or "").strip()
+    if not _auth_gates_spawn(hid):
+        return ""
+    return _preflight().route_skip(_preflight_seat(board, name, hid), hid)
+
+
+def _write_route_pick(board, t, rows, deps_done):
+    """Apply pick_seat: suggest or reserve. All-limited is reported, never stored."""
+    best, why = _route_headroom().pick_seat(rows)
+    if not best:
+        return None, why
+    if deps_done:
+        t["suggested"] = best
+    else:
+        t["reserved_for"] = best
+        why = ("reserved  " + why).strip()
+    t.setdefault("notes", []).append({"by": whoami(), "at": now(), "text": why})
+    save(board, t)
+    return best, why
+
+
 def _worktree_gc():
     """T-946 automated worktree cleanup + atm gc sweep."""
     try:
@@ -2317,6 +2586,105 @@ def _maybe_refresh_provider_usage(board):
         return
     pu = _provider_usage()
     _safe(lambda: pu.refresh_http_providers(board, home=os.path.expanduser("~")), None)
+
+
+def _usage_header_seat_harnesses(board):
+    """Harness labels the board's seats registered. Reads workforce.json only."""
+    wf = _safe(lambda: load_workforce(board), {}) or {}
+    out = []
+    for entry in wf.values():
+        if isinstance(entry, dict):
+            label = (entry.get("harness") or entry.get("tool") or "").strip()
+            if label:
+                out.append(label)
+    return out
+
+
+def usage_header_lines(board):
+    """T-1076: per-provider usage for the surfaces users already look at.
+
+    READ PATH. The ledger file and workforce.json, nothing else: no network
+    call, no subprocess, no write -- `atm agents`, `atm next`, the bare `atm`
+    screen and board.json must stay as cheap and as side-effect-free as
+    T-1055/T-1072 made them. A fresh read only ever happens where the code
+    already refreshes (`atm harness usage` / `harness available`).
+    """
+    # TICKETS_USAGE_HEADER=0 silences the PRINTED header for a caller that
+    # parses stdout. board.json still carries the data: it is a data surface,
+    # and a UI that showed nothing would say less than the truth.
+    if os.environ.get("TICKETS_USAGE_HEADER") == "0":
+        return []
+    if not board or not os.path.isdir(board):
+        return []
+    pu = _provider_usage()
+    harnesses = _usage_header_seat_harnesses(board)
+    return _safe(lambda: pu.header_lines(board, harnesses=harnesses), []) or []
+
+
+def print_usage_header(board):
+    for line in usage_header_lines(board):
+        print(line)
+
+
+def print_seat_usage(board, harness):
+    """One line for the seat's own provider, after spawn/dispatch staffs it."""
+    if os.environ.get("TICKETS_USAGE_HEADER") == "0":
+        return
+    line = _safe(lambda: _provider_usage().seat_usage_line(board, harness), "")
+    if line:
+        print(line)
+
+
+def provider_usage_snapshot(board):
+    """T-1076: the usage header as data, for board.json and the UI header."""
+    pu = _provider_usage()
+    harnesses = _usage_header_seat_harnesses(board)
+    ids = _safe(lambda: pu.header_providers(board, harnesses), []) or []
+    return [pu.compact_reading(pu.get_reading(board, hid)) for hid in ids]
+
+
+def _usage_header_board():
+    """Board for the bare-`atm` header: whatever board_dir() would resolve.
+
+    The SAME resolver every other command uses -- TICKETS_DIR, this repo's
+    configured shared board, the T-959 shadow refusal, the .git requirement
+    -- because a header that names a different board's quota than
+    `atm agents` and `atm next` work on is worse than no header. It runs in
+    _NO_SPAWN mode, which makes the resolution helpers take their filesystem
+    answer (the one that wins on disagreement anyway), so the default screen
+    still starts no git process.
+
+    A board that board_dir() would refuse, or any failure at all, prints
+    nothing: stderr is held aside so the help screen the user asked for is
+    not replaced by a resolution complaint they did not.
+    """
+    global _NO_SPAWN
+    was_no_spawn, held = _NO_SPAWN, sys.stderr
+    _NO_SPAWN = True
+    sys.stderr = io.StringIO()
+    try:
+        board = board_dir(discover_children=True)
+    except (Exception, SystemExit):
+        # SystemExit is how a refusal arrives. KeyboardInterrupt is not
+        # caught: a Ctrl-C belongs to the user, not to a usage header.
+        return ""
+    finally:
+        _NO_SPAWN = was_no_spawn
+        sys.stderr = held
+    return board if board and os.path.isdir(board) else ""
+
+
+def _steer():
+    """T-1047 live steer helpers (receipt classification + framing)."""
+    try:
+        from ticket_board import steer as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import steer as m
+        return m
 
 
 def _gc_hooks():
@@ -3030,6 +3398,9 @@ def cmd_dispatch(a, board):
         sys.exit("dispatch: %s has a same-second-as-reopen task with no event order; "
                  "post a new explicit --task" % t["id"])
     _refuse_unreleased_deps(t, load_all(board))
+    if _auth_gates_spawn(harness):
+        _refuse_preflight(board, seat, harness, "dispatch")
+    _refuse_limited_seat(board, seat, "dispatch")
     rows, _note = probe_integration_catalog()
     attach_catalog_usage(rows)
     row = None
@@ -3058,6 +3429,8 @@ def cmd_dispatch(a, board):
     save(board, t)
     print("%s reserved for %s harness=%s (worker claims via atm next / watch)"
           % (t["id"], seat, harness))
+    # T-1076: the quota this seat will actually spend, one line, recorded read.
+    print_seat_usage(board, harness)
     skip_spawn = _dispatch_skip_product_spawn(harness)
     if skip_spawn:
         print("spawn skipped (%s)" % skip_spawn)
@@ -3074,6 +3447,7 @@ def cmd_dispatch(a, board):
         safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
         max_runs=getattr(a, "max_runs", None), replace=False,
         transfer=False, alias="",
+        usage_line=False,  # T-1076: dispatch already printed the seat's line
     )
     try:
         cmd_spawn(ns, board)
@@ -3428,7 +3802,9 @@ def cmd_board(a, board):
     if not a.quiet:
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
-            "`atm done <id> --notes \"...\"` hands off to dependents."
+            "`atm review <id> --notes \"...\"` submits it. A dependent opens only when a "
+            "DIFFERENT seat runs `atm accept <id> --sha <sha>` -- `atm done` alone releases "
+            "nothing (atm quickstart --gate shows it)."
         )
     owner = whoami()
     if not owner.startswith("agent-"):
@@ -3965,8 +4341,77 @@ def _next_refusal_parts(ready_all, roles, owner, steal_id, board):
     return role_miss, reserved_miss
 
 
+def _cmd_next_dispatch(a, board):
+    """CoS `atm next --dispatch`: reserve one ready ticket; never pick LIMITED."""
+    try:
+        from ticket_board.scheduler import (
+            DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, _candidate_names)
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board.scheduler import (
+            DEFAULT_ALIVE_WITHIN_MIN, filter_eligible, _candidate_names)
+    tickets = load_all(board)
+    wf = load_workforce(board)
+    roles = load_roles(board)
+    agents = dict((r["owner"], r) for r in load_agents(board))
+    done = set(t["id"] for t in tickets if t["status"] == "done")
+    load_ = {}
+    for t in tickets:
+        if t["status"] == "claimed":
+            load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    raw_names = _candidate_names(wf, roles, only=getattr(a, "only", None))
+    limited, agents = _route_headroom().split_limited(
+        raw_names, agents, lambda n: _route_seat_limit(board, n))
+    names, _excluded = filter_eligible(
+        raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
+        alive_within_min=DEFAULT_ALIVE_WITHIN_MIN)
+    limited = _route_headroom().eligible_limited(
+        limited, agents, lambda ns, ag: filter_eligible(
+            ns, wf, roles, ag, load_, DEFAULT_ROLES,
+            alive_within_min=DEFAULT_ALIVE_WITHIN_MIN))
+    names, limited, logged_out = _route_headroom().drop_logged_out(
+        names, limited, lambda n: _route_logged_out(board, wf, n))
+    if logged_out:
+        print(_route_headroom().format_logged_out(logged_out))
+
+    def _deps_done(t):
+        return all(d in done for d in t.get("deps", []))
+
+    ready = [t for t in tickets
+             if t["status"] == "open"
+             and not _ticket_on_hold(t)
+             and _ticket_lane(t) == "ready"
+             and _deps_done(t)
+             and not _reserved_agent(t)]
+    ready.sort(key=lambda t: (t.get("priority", 2), t["id"]))
+    if not ready:
+        print("next --dispatch: no ready ticket")
+        sys.exit(1)
+    rank_load = _route_headroom().seat_load(tickets, load_)
+    held = False
+    for t in ready:
+        # An all-limited or nobody-fits ticket is reported, never stored, and
+        # must not block the tickets behind it.
+        rows = _route_headroom().candidate_rows(
+            board, t, names, limited, wf, roles, rank_load, score_agent)
+        best, why = _write_route_pick(board, t, rows, False)
+        if best:
+            print("%s reserved for %s (%s)" % (t["id"], best, why))
+            return
+        held = held or why.startswith("HOLD:")
+        print("%s %s" % (t["id"], why or "(nobody fits)"))
+    sys.exit(0 if held else 1)
+
+
 def cmd_next(a, board):
+    # T-1076: the seat's quota, before the ticket it is about to take on.
+    print_usage_header(board)
+    if getattr(a, "dispatch", False):
+        return _cmd_next_dispatch(a, board)
     owner = whoami(a.owner)
+    _refuse_limited_seat(board, owner, "next")
     roles = roles_for(board, owner, a.role)
     if roles == [] and not a.role:
         print(
@@ -4783,7 +5228,7 @@ CLI_LIMIT_STRINGS = ("session limit", "usage limit", "hit your limit", "weekly l
 CLI_AUTH_STRINGS = ("authentication_error", "token has been revoked", "please run /login",
                     "invalid api key", "not logged in", "oauth token")
 
-STATE_WORDS = ("working", "idle", "limited", "dead", "unknown")
+STATE_WORDS = ("working", "idle", "limited", "stalled", "dead", "unknown")
 
 # A source saying "I looked and there was nothing here" is not the same as one
 # saying "I looked and could not make sense of what I found". The second is a
@@ -5037,6 +5482,9 @@ def _run_begin(board, owner, run_no, cwd, run_id="", ticket=""):
 
 def _run_end(board, owner, run_no, rc):
     _run_beat(board, owner, run=run_no, active=False, rc=rc, ended=now())
+    # Authoritative: a finished run must not leave agent["stall"] to block
+    # the next watch tick from retriggering (T-1042 follow-up).
+    _clear_watch_stall(board, owner)
 
 
 def _mark_run_interrupted(board, owner):
@@ -5060,6 +5508,7 @@ def _finalize_active_watch_run(board, owner, rc=143):
         exit=rc, interrupted=True, outcome="interrupted",
         started_at=rec.get("started") or None, ended_at=ended,
         worktree=rec.get("cwd") or None), None)
+    _safe(lambda: _clear_watch_stall(board, owner), None)
     return True
 
 
@@ -5514,6 +5963,30 @@ class _shared_watch_table:
         _WATCH_TABLE.rows = self._prev_rows
         _WATCH_TABLE.available = self._prev_ok
         _WATCH_TABLE.cwds = self._prev_cwds
+
+
+class _read_only_liveness:
+    """agent_liveness for a reader that must not spawn or write (T-1072).
+
+    Binds an empty process table so no `ps` runs -- a watcher is then known
+    only by its pid file -- and stops _active_seat_limit from clearing an
+    expired limit on the agent record.
+    """
+
+    def __enter__(self):
+        self._had = {}
+        for k in ("bound", "rows", "available", "cwds", "read_only"):
+            if hasattr(_WATCH_TABLE, k):
+                self._had[k] = getattr(_WATCH_TABLE, k)
+        _WATCH_TABLE.bound, _WATCH_TABLE.rows, _WATCH_TABLE.available = True, [], False
+        _WATCH_TABLE.cwds, _WATCH_TABLE.read_only = {}, True
+
+    def __exit__(self, *exc):
+        for k in ("bound", "rows", "available", "cwds", "read_only"):
+            if k in self._had:
+                setattr(_WATCH_TABLE, k, self._had[k])
+            elif hasattr(_WATCH_TABLE, k):
+                delattr(_WATCH_TABLE, k)
 
 
 def _watch_table_rows():
@@ -6225,6 +6698,15 @@ def agent_liveness(board, rec, peers=None):
     #    after it.
     if wstate == "limited":
         out.update(state="limited", source="watchlog", heuristic=True, detail=wdetail)
+        return out
+
+    stall = _live_watch_stall(board, owner, rec, run=run)
+    if stall:
+        measured = stall.get("measured_s")
+        out.update(state="stalled", source="watch", heuristic=False,
+                   detail="silent %ss (measured; last output %s)" % (
+                       measured if measured is not None else "?",
+                       stall.get("last_output_at") or "unknown"))
         return out
 
     tstate, tage, tdetail, cwd = _transcript_over_cwds(cwds)
@@ -7102,7 +7584,7 @@ INTEGRATION_CATALOG = (
     {"id": "grok", "name": "Grok (Cursor persist / grokbots)",
      "binaries": ("agent", "cursor-agent"),
      "if_yes": "atm spawn <seat> --harness grok --persist",
-     "policy": "Cursor Grok seats and grok-worker; same persist wake as cursor",
+     "policy": "Grok through the Cursor CLI; same persist wake as cursor",
      "usage_args": ("about", "--format", "json"),
      "quota": "unsupported"},
 )
@@ -7133,6 +7615,27 @@ Product flow (this order):
 5. Ask the operator for feedback
 6. Show tasks you can actually run (`atm graph` / `atm map`)
 """
+
+
+def board_is_atman_operator(board):
+    """True only for the Atman team's own board: a seat named `atman-<role>`.
+
+    T-1007: `atm harness available` printed Atman's operator policy -- the
+    `atman-<seat>` identity, "CoS staffs", "CEO does not claim worker tickets" --
+    on ANY board that already had a ticket, which is every brand-new external
+    project one minute after `atm quickstart`. Board-specific policy belongs to
+    the board that declares it, so the probe is an actual Atman seat here, not
+    "this board has work". ATMAN_OPERATOR_BOARD=1 forces it for that team's own
+    automation.
+    """
+    if (os.environ.get("ATMAN_OPERATOR_BOARD") or "").strip() == "1":
+        return True
+    if not board or not os.path.isdir(board):
+        return False
+    names = list((_safe(lambda: load_workforce(board), {}) or {}).keys())
+    names += [(r or {}).get("owner") or "" for r in (_safe(lambda: load_agents(board), []) or [])]
+    names += list((_safe(lambda: load_aliases(board), {}) or {}).keys())
+    return any(str(n).strip().lower().startswith("atman-") for n in names)
 
 
 def board_is_living(board):
@@ -7203,8 +7706,8 @@ def print_recorded_usage(board):
     pu = _provider_usage()
     for line in pu.format_ledger_lines(board):
         print(line)
-    print("Ask: which of these still have usage, and which should CoS start?")
-    print("Installed + no usage = stay on the catalog; CoS does not spawn them.")
+    print("Ask: which of these still have usage, and which do you want started?")
+    print("Installed + no usage = stay on the catalog; nothing here is spawned for you.")
     print("Unknown remaining is UNKNOWN, never available. Cursor/agy stay no data.")
 
 
@@ -8167,6 +8670,146 @@ def cmd_who(a, board):
         print("")
         print("state is read from the session's own transcript, not from loop-seen.  "
               "! asserted by a human   ~ heuristic (run cadence only)   ? unknown -- go read the log")
+
+
+def _steer_watch_log_ts(board, owner):
+    path = os.path.join(agents_dir(board), owner + ".watch.log")
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return ""
+    return datetime.fromtimestamp(mt, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _steer_transcript_ts(board, rec):
+    """ISO timestamp of the newest parseable transcript event, else ''."""
+    run = _read_run(board, rec.get("owner") or "")
+    cwds = _dedup([run.get("cwd") or "",
+                   rec.get("cwd") or "",
+                   rec.get("worktree") or ""])
+    tstate, tage, _tdetail, _cwd = _transcript_over_cwds(cwds)
+    if tstate == "unknown" or tage is None:
+        return ""
+    return _steer().iso_from_age(tage)
+
+
+def _steer_seat_row(board, rec, tickets, wf, sa, live):
+    st = _steer()
+    owner = rec.get("owner") or ""
+    tid = rec.get("ticket") or ""
+    t = tickets.get(tid) or {}
+    harness = ((wf.get(owner) or {}).get("harness")
+               or (wf.get(owner) or {}).get("tool") or "")
+    ep, _ = sa.live_endpoint(board, owner)
+    provider = (ep or {}).get("provider") or ""
+    last_at, last_src = st.last_output(
+        rec, transcript_ts=_steer_transcript_ts(board, rec),
+        watch_log_ts=_steer_watch_log_ts(board, owner))
+    refuse = st.harness_refuse_reason(harness, provider)
+    sock = (ep or {}).get("socket") or ""
+    steerable = (not refuse) and bool(sock and os.path.exists(sock))
+    doing = (t.get("title") or "").strip() or (live.get("detail") or "")
+    return {
+        "seat": owner,
+        "state": live.get("state") or "unknown",
+        "last_output_at": last_at,
+        "last_output_source": last_src,
+        "ticket": tid,
+        "doing": doing,
+        "steerable": steerable,
+        "reason": "" if steerable else (
+            refuse or "no live Claude messaging socket"),
+        "harness": harness or provider or "-",
+    }
+
+
+def cmd_steer(a, board):
+    """List running seats, or course-correct / ask one mid-run (T-1047)."""
+    st = _steer()
+    sa = _session_adapters()
+    agents = load_agents(board)
+    tickets = dict((t["id"], t) for t in load_all(board))
+    wf = load_workforce(board)
+    if getattr(a, "list", False) or not (getattr(a, "seat", "") or "").strip():
+        if not agents:
+            print("no seats have checked in")
+            return
+        print("%-16s %-8s %-22s %-10s %-10s %s" % (
+            "seat", "state", "last-output", "ticket", "steerable", "doing"))
+        for rec in sorted(agents, key=lambda r: r.get("owner") or ""):
+            live = _safe(lambda r=rec: agent_liveness(board, r, agents),
+                         {"state": "unknown", "detail": ""})
+            row = _steer_seat_row(board, rec, tickets, wf, sa, live)
+            print("%-16s %-8s %-22s %-10s %-10s %s" % (
+                (row["seat"] or "-")[:16],
+                (row["state"] or "-")[:8],
+                (row["last_output_at"] or "-")[:22],
+                (row["ticket"] or "-")[:10],
+                "yes" if row["steerable"] else "no",
+                (row["doing"] or row["reason"] or "-")[:48]))
+            if not row["steerable"] and row["reason"]:
+                print("%-16s %s" % ("", row["reason"][:90]))
+            if row["last_output_at"] and row["last_output_source"]:
+                print("%-16s last-output source=%s" % ("", row["last_output_source"]))
+        return
+
+    seat = (a.seat or "").strip()
+    raw_text = getattr(a, "text", "")
+    if isinstance(raw_text, (list, tuple)):
+        text = " ".join(str(x) for x in raw_text).strip()
+    else:
+        text = (raw_text or "").strip()
+    sender = session_seat(board, getattr(a, "owner", "") or "")
+    ask_text = (getattr(a, "ask", "") or "").strip()
+    if ask_text:
+        kind = "ask"
+        text = ask_text
+    else:
+        kind = "redirect"
+    if not text:
+        sys.exit("steer: course-correction or --ask text is required")
+    rec = _agent_rec(board, seat) or {}
+    if not rec and seat not in wf:
+        sys.exit("steer: no such seat %s" % seat)
+    rec = rec or {"owner": seat}
+    tid = (getattr(a, "ticket", "") or "").strip() or (rec.get("ticket") or "")
+    if not tid:
+        sys.exit("steer: %s holds no ticket; pass --ticket T-xxx to record the steer"
+                 % seat)
+    t = load(board, tid)
+    harness = _seat_harness(board, seat)
+    ep, _ = sa.live_endpoint(board, seat)
+    provider = (ep or {}).get("provider") or ""
+    steer_id = st.new_steer_id()
+    at = now()
+    reason = st.harness_refuse_reason(harness, provider)
+    label = ""
+    if reason:
+        label = "refused (%s)" % reason
+    else:
+        sock = (ep or {}).get("socket") or ""
+        if not sock or not os.path.exists(sock):
+            label = "refused (no live Claude messaging socket)"
+        else:
+            payload = st.frame_payload(kind, sender, text, tid, steer_id, at)
+            # Native Claude inject only. Persist-watch poke would start a new
+            # run; that is kill-and-replace, not a mid-run steer.
+            label = sa.wake_seat(board, seat, payload, harness=harness or "claude",
+                                 message_id=steer_id)
+    record = st.steer_record(kind, sender, seat, text, label, steer_id, tid, at)
+    note = st.ticket_note(kind, sender, seat, text, label, steer_id, at)
+    t.setdefault("steers", []).append(record)
+    t.setdefault("notes", []).append({"by": whoami(getattr(a, "owner", "") or ""),
+                                      "at": at, "kind": "steer", "text": note})
+    save(board, t)
+    shown = st.report_receipt(label)
+    print("steer: %s -> %s id=%s ticket=%s" % (seat, shown, steer_id, tid))
+    if kind == "ask":
+        print("  ask: answer on %s as STEER-REPLY %s: <answer> (do not end the run)"
+              % (tid, steer_id))
+    if not st.is_delivered(label):
+        print("  not delivered: %s" % shown)
+    print("  recorded on %s (scope unchanged)" % tid)
 
 
 # ---- trajectories: the team's own record of who did what, and at what cost --
@@ -10299,6 +10942,50 @@ def cmd_trace(a, board):
     return _trace_cmd()(a, board)
 
 
+def _agent_map_mod():
+    try:
+        from ticket_board import agent_map as m
+    except ImportError:
+        _ensure_src_path()
+        from ticket_board import agent_map as m
+    return m
+
+
+def agent_map_data(board, show_all=False, tickets=None, agent_list=None, live=None, events=None):
+    """T-1072: one row per seat run. Reads board files only; no ps, no writes."""
+    agent_list = load_agents(board) if agent_list is None else agent_list
+    receipts = {}
+    for p in sorted(glob.glob(os.path.join(agents_dir(board), "*.run"))):
+        seat = os.path.basename(p)[:-len(".run")]
+        receipts[seat] = _read_run(board, seat)
+    if live is None:
+        live = {}
+        with _read_only_liveness():
+            for rec in agent_list:
+                n = rec.get("owner") or ""
+                if n and receipts.get(n, {}).get("active"):
+                    live[n] = _safe(lambda rec=rec: agent_liveness(board, rec, agent_list), {}) or {}
+    pids = {n: r.get("pid") for n, r in receipts.items() if r.get("active") and r.get("pid")}
+    live = {n: dict(lv, pid_alive=_pid_alive(pids[n])) if n in pids else lv
+            for n, lv in live.items()}
+    return _agent_map_mod().build(
+        load_all(board) if tickets is None else tickets,
+        load_trajectories(board) if events is None else events,
+        receipts, live, workforce=load_workforce(board), show_all=show_all)
+
+
+def cmd_agents(a, board):
+    """T-1072: the agent map -- running seats and recent runs, grouped by ticket."""
+    data = agent_map_data(board, show_all=a.all)
+    if a.json:
+        print(json.dumps(data, indent=2))
+        return
+    # T-1076: header first -- who is running is only actionable next to what
+    # quota is left. Ledger read only; --json keeps the map's exact shape.
+    print_usage_header(board)
+    print(_agent_map_mod().render_text(data))
+
+
 def _scheduler_cmd():
     try:
         from ticket_board.scheduler import cmd_route_shadow as impl
@@ -10370,10 +11057,20 @@ def cmd_route(a, board):
     for t in tickets:
         if t["status"] == "claimed":
             load_[t.get("owner")] = load_.get(t.get("owner"), 0) + 1
+    raw_names = _candidate_names(wf, roles, only=a.only)
+    limited, agents = _route_headroom().split_limited(
+        raw_names, agents, lambda n: _route_seat_limit(board, n))
     names, excluded = filter_eligible(
-        _candidate_names(wf, roles, only=a.only), wf, roles, agents, load_, DEFAULT_ROLES,
+        raw_names, wf, roles, agents, load_, DEFAULT_ROLES,
         alive_within_min=alive_within)
+    limited = _route_headroom().eligible_limited(
+        limited, agents, lambda ns, ag: filter_eligible(
+            ns, wf, roles, ag, load_, DEFAULT_ROLES, alive_within_min=alive_within))
+    names, limited, logged_out = _route_headroom().drop_logged_out(
+        names, limited, lambda n: _route_logged_out(board, wf, n))
     print(format_excluded(excluded))
+    if logged_out:
+        print(_route_headroom().format_logged_out(logged_out))
     def _deps_done(t):
         return all(d in released for d in t.get("deps", []))
 
@@ -10397,33 +11094,25 @@ def cmd_route(a, board):
         key=lambda t: (0 if _deps_done(t) else 1, t.get("priority", 2), t["id"]))
     print("%-6s %-3s %-44s %-14s %s" % ("ticket", "pri", "title", "suggested", "why"))
     changed = 0
+    rank_load = _route_headroom().seat_load(tickets, load_)
     for t in ready_first:
-        best, best_s, why = None, None, ""
-        for n in names:
-            e = wf.get(n, {})
-            s = score_agent(board, n, e, roles, t)
-            if s is None:
-                continue
-            s -= 1.5 * load_.get(n, 0)  # spread work; agents already holding tickets rank lower
-            if best_s is None or s > best_s:
-                best, best_s = n, s
-                why = "%s %s" % (e.get("model") or e.get("tool") or "", e.get("cost", ""))
+        own_load = _route_headroom().without_own_reservation(rank_load, t)
+        rows = _route_headroom().candidate_rows(
+            board, t, names, limited, wf, roles, own_load, score_agent)
+        best, why = _write_route_pick(board, t, rows, _deps_done(t))
         if best:
-            if _deps_done(t):
-                t["suggested"] = best
-            else:
-                t["reserved_for"] = best
-                why = ("reserved  " + why).strip()
-            save(board, t)
             changed += 1
-            load_[best] = load_.get(best, 0) + 0.5  # soft-count suggestions too
+            if not _deps_done(t):
+                rank_load = dict(own_load)  # the new reservation replaces the old one
+            rank_load[best] = rank_load.get(best, 0) + 0.5  # soft-count suggestions too
             if a.claim and t["status"] == "open" and _deps_done(t):
                 got = try_claim(board, t["id"], best)
                 if got:
                     t = got
                     why += "  CLAIMED"
+        label = best or ("(all limited)" if why.startswith("HOLD:") else "(nobody fits)")
         print("%-6s %-3s %-44s %-14s %s" % (t["id"], t.get("priority", 2), t["title"][:44],
-                                          best or "(nobody fits)", why))
+                                          label, why))
     if changed:
         _master_log(board, "route: suggested owners for %d tickets%s" % (changed, " and claimed ready ones" if a.claim else ""))
     print("\nAgents pull with `atm next`; their suggested tickets come first. "
@@ -11206,6 +11895,10 @@ def pending_work(board, owner):
     if lim:
         out["limited"] = lim.get("reset_at") or lim.get("until") or "reset unknown"
         return out
+    stall = _live_watch_stall(board, owner, rec, clear=True)
+    if stall:
+        out["stalled"] = stall.get("measured_s")
+        return out
     obj = _safe(lambda: load_objective(board), {})
     obj_state = objective_state(obj)
     msgs = _safe(lambda: unread(board, owner), [])
@@ -11370,7 +12063,7 @@ def pending_view(pending, force=False):
 
 def actionable(pending):
     """Only held/ready work, explicit task or stuck mail, force, or a valid drive."""
-    if not pending or pending.get("limited"):
+    if not pending or pending.get("limited") or pending.get("stalled"):
         return False
     return any(k in WAKE_KEYS for k in pending)
 
@@ -11604,8 +12297,11 @@ def _remote_claim_once(board, owner, lease_id, fence, prompt_kind=""):
                        "fence": claim["fence"], "wake": pending_view(pending)})
         kind = prompt_kind or ("cos" if owner == (current_master(board) or {}).get("cos")
                                else ("master" if owner == (current_master(board) or {}).get("owner") else ""))
+        # run_no is the remote seat's own turn counter: its first claim carries
+        # the seat brief, later wakes do not re-brief it (T-1078).
         result["prompt"] = prompt_text(argparse.Namespace(
-            agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+            agent=owner, master=kind == "master", cos=kind == "cos", extra="",
+            run_no=claim.get("run_no")), board)
     return result
 
 
@@ -11833,6 +12529,8 @@ def _active_seat_limit(board, owner, rec=None):
         expired = False
     if not expired:
         return lim
+    if getattr(_WATCH_TABLE, "read_only", False):
+        return None
     def clear(current):
         if current.get("limit") != lim:
             return False
@@ -11916,6 +12614,7 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
 
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
 TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
+{gate}
 Rules: one ticket at a time; own git worktree, never main; `atm sync` before `atm review`;
 `atm update <id> "..."` every 45 minutes; finish with `atm review <id> --notes "paths, tests, decisions"`;
 never edit .tickets/ by hand; never run `atm clear`. Board-only comms: `atm msg`.
@@ -11928,7 +12627,8 @@ Do now, in order:
 1. `atm inbox` -- read and, if anything is addressed to you, answer with `atm msg --to <who>`.
 2. `atm mine` -- if you hold a ticket, continue it from where the notes left off.
 3. Otherwise `atm next` -- if it hands you a ticket, read the printed briefing files, then work it.
-4. When the ticket is finished and tests pass: commit, `atm sync`, `atm review <id> --notes ...`, then go to 3.
+4. When the ticket is finished and tests pass: commit, `atm sync`, `atm review <id> --notes ...`, then ask a
+   different seat for the accept on that exact SHA (the gate above) and go to 3.
 5. If `atm next` says nothing is ready and you hold nothing: post one line with `atm msg "idle: <what you checked>"` and stop.
 {extra}"""
 
@@ -12251,6 +12951,52 @@ def _task_dominant_extra(board, owner):
     )
 
 
+def _seat_ticket(board, owner):
+    """The one ticket this seat owns right now: claimed first, else in review.
+
+    Only the seat's own work. Nothing about another seat's ticket may reach
+    this brief -- a seat that can read another seat's scope is a seat that
+    will help itself to it.
+    """
+    mine = [t for t in _safe(lambda: load_all(board), []) or []
+            if (t.get("owner") or "") == owner and t.get("status") in ("claimed", "review")]
+    mine.sort(key=lambda t: (t.get("status") != "claimed", t.get("id") or ""))
+    return mine[0] if mine else None
+
+
+def seat_brief_text(board, owner):
+    """Compose this seat's first-turn brief from board facts (T-1078).
+
+    Usage comes from the existing provider usage reader and its existing
+    formatter (`format_usage_line`, the same line `atm dash` prints) -- a
+    second usage formatter is a second thing to keep honest.
+    """
+    sb = _seat_brief()
+    harness, _ = _safe(lambda: harness_of(board, owner), ("claude", "")) or ("claude", "")
+    rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
+    roles = _safe(lambda: roles_for(board, owner), None) or []
+    m = _safe(lambda: current_master(board), None) or {}
+    reviewer = (m.get("cos") or m.get("owner") or "")
+    if reviewer == owner:
+        reviewer = ""  # a seat is never its own reviewer, whatever the board says
+    usage = _safe(lambda: _provider_usage().format_usage_line(
+        _provider_usage().get_reading(board, harness)).strip(), "") or ""
+    t = _seat_ticket(board, owner) or {}
+    return sb.compose(
+        owner,
+        roles=",".join(roles),
+        harness=harness,
+        worktree=(rec.get("worktree") or "").replace(os.path.expanduser("~"), "~"),
+        ticket_id=t.get("id") or "",
+        ticket_title=(t.get("title") or "")[:80],
+        ticket_status=LABEL.get(t.get("status") or "", ""),
+        review_head=(t.get("review_head") or "") if t.get("status") == "review" else "",
+        scope=t.get("body") or "",
+        reviewer=reviewer,
+        usage_line=usage,
+    )
+
+
 def cmd_prompt(a, board):
     print(prompt_text(a, board))
 
@@ -12261,6 +13007,13 @@ def prompt_text(a, board):
     Split out of cmd_prompt so the watcher can write it to a {prompt_file} for
     a BYOA harness without shelling back out to `atm prompt` -- one
     renderer, so a custom harness and the built-in ones cannot drift.
+
+    T-1078: a worker seat's FIRST turn opens with the seat brief (who it is,
+    what it owns, the accept gate, the exact commands, the refusals, one usage
+    line). Later turns of the same seat get the steady-state prompt they
+    already had -- `run_no` (the watcher's per-run counter, also passed as
+    TICKETS_RUN_NO to the harness that shells back to `atm prompt`) is what
+    tells the two apart, so a wake never re-briefs a running seat.
     """
     owner = whoami(a.agent)
     m = current_master(board)
@@ -12311,8 +13064,16 @@ def prompt_text(a, board):
         parts.append("Context attached to your ticket(s):\n" + tctx)
     if a.extra:
         parts.append(a.extra)
-    return WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                                extra="\n\n".join(parts))
+    sb = _seat_brief()
+    body = WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
+                                gate=sb.GATE_ONE_LINER, extra="\n\n".join(parts))
+    run_no = getattr(a, "run_no", None)
+    if run_no is None:
+        run_no = os.environ.get("TICKETS_RUN_NO") or ""
+    if not sb.is_first_turn(run_no):
+        return body
+    head = _safe(lambda: seat_brief_text(board, owner), "") or ""
+    return (head + "\n\n" + body) if head else body
 
 
 def cmd_brief(a, board):
@@ -13124,7 +13885,9 @@ def utilization(board, tickets=None, hours=24, live=None):
         # stale liveness cache is precisely the bug this ticket exists to fix.
         lv = (live.get(n) if live is not None
               else (_safe(lambda: agent_liveness(board, r, list(agents.values())), {}) if r else {})) or {}
-        state = ("LIMITED" if lv.get("state") == "limited" else "DOWN" if lv.get("state") == "dead"
+        state = ("LIMITED" if lv.get("state") == "limited"
+                 else "STALLED" if lv.get("state") == "stalled"
+                 else "DOWN" if lv.get("state") == "dead"
                  else ("busy" if any(t["status"] == "claimed" for t in held) else "idle"))
         rows.append({
             "agent": n, "state": state, "done": len(recent), "done_total": len(done),
@@ -13377,7 +14140,8 @@ def reclaim_stale_watch_lock(board, owner):
 
 
 def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
-                      on_beat=None, beat_secs=None, should_stop=None):
+                      on_beat=None, beat_secs=None, should_stop=None,
+                      on_stall=None, on_stall_resolved=None, limited=False):
     """Run cmd with stdout+stderr teed into log_path, capped at cap_bytes for
     this run alone -- a single verbose run must not be able to blow past the
     log's rotation budget before the between-run rotation in cmd_watch's
@@ -13392,10 +14156,24 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
     """
     import subprocess
     import threading
+    import time as _time
 
     proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    state = {"written": 0, "capped": False}
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    state = {"written": 0, "capped": False, "last_output": _time.monotonic(),
+             "stalled": False}
+
+    def _kill_run():
+        _stall_watch().kill_process_group(proc.pid)
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
 
     def pump():
         def note_capped(lf):
@@ -13407,6 +14185,12 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
         try:
             with open(log_path, "a") as lf:
                 for chunk in iter(lambda: proc.stdout.read(65536), b""):
+                    if chunk:
+                        state["last_output"] = _time.monotonic()
+                        if state["stalled"]:
+                            state["stalled"] = False
+                            if on_stall_resolved:
+                                _safe(on_stall_resolved, None)
                     if state["written"] >= cap_bytes:
                         note_capped(lf)
                         continue
@@ -13446,15 +14230,25 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
             beat_thread = threading.Thread(target=beat, daemon=True)
             beat_thread.start()
 
-        import time as _time
         deadline = None if timeout_s is None else (_time.monotonic() + float(timeout_s))
         rc = None
+        sw = _stall_watch()
+        thresh = sw.threshold_s()
+        last_check = 0.0
         while True:
             if should_stop and should_stop():
                 raise InterruptedError()
-            remaining = None if deadline is None else (deadline - _time.monotonic())
+            now_m = _time.monotonic()
+            remaining = None if deadline is None else (deadline - now_m)
             if remaining is not None and remaining <= 0:
                 raise subprocess.TimeoutExpired(proc.args, timeout_s)
+            if on_stall and not state["stalled"] and (now_m - last_check) >= sw.check_s():
+                last_check = now_m
+                if sw.should_mark_stalled(state["last_output"], now_m, thresh,
+                                          limited=limited):
+                    state["stalled"] = True
+                    measured = sw.measured_stall_s(state["last_output"], now_m)
+                    _safe(lambda m=measured: on_stall(m, proc.pid), None)
             slice_s = WATCH_STOP_SLICE if remaining is None else min(WATCH_STOP_SLICE, remaining)
             try:
                 rc = proc.wait(timeout=slice_s)
@@ -13463,20 +14257,11 @@ def _watch_run_capped(cmd, cwd, env, log_path, timeout_s, cap_bytes,
                 continue
         timed_out = False
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        _kill_run()
         rc = 124
         timed_out = True
     except InterruptedError:
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
-            try:
-                proc.kill()
-                proc.wait()
-            except Exception:
-                pass
+        _kill_run()
         raise
     finally:
         beat_stop.set()
@@ -13893,7 +14678,8 @@ def cmd_watch(a, board):
                     pf = ""
                     if "{prompt_file}" in cmd:
                         try:
-                            pf, cleanup = _render_prompt_file(board, owner, getattr(a, "prompt_kind", "") or "")
+                            pf, cleanup = _render_prompt_file(board, owner, getattr(a, "prompt_kind", "") or "",
+                                                              run_no=runs)
                         except OSError as e:
                             log("%s run %d could not write the prompt file: %s" % (now(), runs, e))
                             print("  run %d skipped: could not write the prompt file (%s)" % (runs, e))
@@ -13960,6 +14746,11 @@ def cmd_watch(a, board):
                                                       cwd=cwd, active=True),
                             beat_secs=int(getattr(a, "beat_every", 0) or RUN_HEARTBEAT_SECS),
                             should_stop=_should_stop_watch,
+                            on_stall=lambda measured, pid, ht=held_ticket: _record_watch_stall(
+                                board, owner, measured, pid, ticket=ht),
+                            on_stall_resolved=lambda ht=held_ticket: _resolve_watch_stall(
+                                board, owner, ticket=ht),
+                            limited=bool(_active_seat_limit(board, owner)),
                         )
                     except InterruptedError:
                         _safe(lambda: _finalize_active_watch_run(board, owner), None)
@@ -14386,7 +15177,7 @@ def _expand_harness_cmd(template, agent="", cwd="", prompt_file=""):
     return out
 
 
-def _render_prompt_file(board, owner, kind="", text=""):
+def _render_prompt_file(board, owner, kind="", text="", run_no=None):
     """Write this agent's prompt to a fresh temp file; return (path, cleanup).
 
     A file, not an argv string: a worker prompt is thousands of characters of
@@ -14394,11 +15185,19 @@ def _render_prompt_file(board, owner, kind="", text=""):
     meet ARG_MAX on a long board. The file is mode 0600 and removed by the
     cleanup callable, which never raises -- a harness run must not fail because
     the prompt file was already gone.
+
+    `run_no` is the watcher's run counter for this launch. A built-in harness
+    shells back to `atm prompt` and reads it from TICKETS_RUN_NO in the child
+    env; a BYOA prompt file is rendered in this process, which has no such
+    variable, so it is passed explicitly. Both paths must agree about whether
+    this is the seat's first turn (T-1078), or a custom harness would be
+    re-briefed on every wake while a built-in one is briefed once.
     """
     import tempfile
 
     if not text:
-        ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="")
+        ns = argparse.Namespace(agent=owner, master=(kind == "master"), cos=(kind == "cos"), extra="",
+                                run_no=run_no)
         text = _safe(lambda: prompt_text(ns, board), "") or ""
     fd, path = tempfile.mkstemp(prefix="tickets-prompt-%s-" % re.sub(r"[^A-Za-z0-9_.-]", "_", owner)[:32],
                                 suffix=".txt")
@@ -14719,6 +15518,8 @@ def cmd_spawn(a, board):
     if not a.name:
         sys.exit("spawn needs a name (or --list)")
     owner = a.name
+    if not a.stop:
+        _refuse_limited_seat(board, owner, "spawn")
     if a.stop:
         return _spawn_stop(board, owner, all_boards=bool(getattr(a, "all_boards", False)))
     requested_harness = getattr(a, "harness", "") or a.tool
@@ -14760,10 +15561,11 @@ def cmd_spawn(a, board):
     # must be ready before a watcher starts. Keep this before cmd_join so a
     # failed relaunch cannot alter roles/harness/worktree. --exec skips it.
     if _auth_gates_spawn(resolved_harness) and not a.exec:
-        auth = _refresh_auth_check(board, owner, requested_harness)
-        if auth.get("state") != "ready":
+        auth = _preflight_seat(board, owner, requested_harness or resolved_harness)
+        reason = _preflight().dispatch_refuse(auth, resolved_harness)
+        if reason:
             _print_auth_result(owner, auth)
-            sys.exit("watcher not started; fix the state above, then rerun `atm spawn %s`" % owner)
+            sys.exit("watcher not started; %s" % reason)
     if not os.path.isdir(wt):
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
                            capture_output=True, text=True)
@@ -14898,6 +15700,11 @@ def cmd_spawn(a, board):
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, owner, log_path))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
+    # T-1076: what this seat's provider has left, from the recorded reading.
+    # `dispatch` printed it next to its own reservation line, so it asks for
+    # this one to be left out rather than say the same thing twice.
+    if getattr(a, "usage_line", True):
+        print_seat_usage(board, harness)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
 
@@ -15955,10 +16762,15 @@ def cmd_harness_available(a, board):
     print("USAGE: unsupported or missing remaining/reset is unknown, not exhausted. Do not spawn a FAIL or exhausted seat.")
     print("Ask: Which of these do you want to use?")
     _print_role_discovery(rows)
-    if board_is_living(board):
+    if board_is_atman_operator(board):
         print("This is a living board. Do not invent a new team.")
         print("Announce the Atman role as atman-<seat>. CoS (%s) staffs." % _cos_label(board))
         print("CEO does not claim worker tickets.")
+    elif board_is_living(board):
+        # Someone else's board with work on it: say that, and nothing about how
+        # THIS project staffs itself.
+        print("This board already has work and seats on it. Ask the team which")
+        print("harnesses to integrate before joining seats or spawning anything.")
     else:
         print("Then ask the board/team name, then:")
         print('  atm msg --to everyone "<name> is onboarding. Integrating: <list>. Objective and tasks next. @everyone"')
@@ -16195,6 +17007,12 @@ body[data-work-view=columns] #workJump{display:none}
 .m{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
 .m .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-bottom:4px}
 .tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;border:1px solid var(--line);color:var(--mute)}
+/* T-1076: provider quota in the Team header. One short line per provider; it
+   wraps rather than pushing the seats it belongs to off screen. */
+.usage-header{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;font-size:12px}
+.usage-header .u{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.usage-header .u.low,.usage-header .u.limited{border-color:color-mix(in srgb,var(--bad) 45%,var(--line));color:var(--bad)}
+.usage-header .u.unknown,.usage-header .u.no_data{border-style:dashed}
 #composer{position:sticky;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px;padding:10px}
 #composer textarea{width:100%;resize:vertical;min-height:56px;font:13px/1.4 inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
 #composer select,#composer button,#composer input{font:13px inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
@@ -16259,6 +17077,8 @@ body[data-work-view=columns] #workJump{display:none}
 .promise-table{width:100%;border-collapse:collapse;font-size:13px}
 .promise-table th,.promise-table td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
 .promise-table .num{text-align:right;font-variant-numeric:tabular-nums}
+.am-wrap{overflow-x:auto}.am-group td{padding-top:10px;font-weight:600}.am-title{display:inline-block;max-width:40ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+.am-running{color:var(--ok)}.am-stalled{color:var(--warn)}.am-limited,.am-dead{color:var(--bad)}
 .usage-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
 .usage-card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px}
 .usage-card .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
@@ -16461,6 +17281,7 @@ body[data-work-view=columns] #workJump{display:none}
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
       <p class="seats-lede">Auth is the enrolled runner, not this tab. Recheck never asks for provider secrets. Reachable is not Ready.</p>
       <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">atm msg --to</span>. Runtime id is unique; role is coverage.</p>
+      <div class="usage-header mono" id="providerUsage" aria-label="Provider quota"></div>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -16475,6 +17296,11 @@ body[data-work-view=columns] #workJump{display:none}
     <small id="usageHonesty" class="mute">Harness-reported only. Not reported by harness stays — never a made-up $0.</small>
     <div class="usage-cards" id="usageCards"></div>
     <table class="promise-table" id="usageAgents"></table>
+  </section>
+  <section class="promise-panel" id="agentMapPanel">
+    <h2>Agents <span class="chip" id="agentMapPill">0 agents running</span></h2>
+    <small class="mute">One row per seat run, grouped by ticket · running + last 24h (atm agents --all for history) · tokens are harness-reported or unknown</small>
+    <div class="am-wrap"><table class="promise-table" id="agentMap"></table></div>
   </section>
   <div class="agents" id="agents"></div>
 </div>
@@ -16668,6 +17494,27 @@ function renderUsage(u){
   cards.innerHTML=cell('Cost',money(u.cost_usd))+cell('Tokens in',dash(u.tokens_in))+cell('Tokens out',dash(u.tokens_out))+cell('Runs with cost',String(u.n_runs_with_cost||0))+cell('Runs unmeasured',String(u.n_runs_unmeasured||0));
   const by=u.by_agent||[];
   tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
+}
+function renderProviderUsage(rows){
+  // T-1076: per-provider quota, the same text the CLI header prints. The
+  // server already decided the words; the UI never recomputes a percentage,
+  // so it can never invent one the ledger did not have.
+  const el=document.getElementById('providerUsage');if(!el)return;
+  const list=rows||[];
+  if(!list.length){el.innerHTML='<span class="u unknown">no provider read yet — atm harness usage</span>';return;}
+  el.innerHTML=list.map(r=>'<span class="u '+esc(r.level||'unknown')+'">'+esc(r.text||'')+'</span>').join('');
+}
+function renderAgentMap(m){
+  const tbl=document.getElementById('agentMap'),pill=document.getElementById('agentMapPill');
+  const dur=s=>s==null?'unknown':s<60?s+'s':s<3600?Math.floor(s/60)+'m':s<86400?Math.floor(s/3600)+'h'+String(Math.floor(s%3600/60)).padStart(2,'0')+'m':Math.floor(s/86400)+'d'+String(Math.floor(s%86400/3600)).padStart(2,'0')+'h';
+  const tok=n=>n==null?'unknown':Number(n).toLocaleString();
+  pill.textContent=((m&&m.running)||0)+' agents running';
+  const groups=(m&&m.groups)||[];
+  if(!groups.length){tbl.innerHTML='<tr><td>No seat runs recorded</td></tr>';return;}
+  tbl.innerHTML='<tr><th>seat</th><th>harness</th><th>role</th><th>state</th><th>verdict</th><th class="num">elapsed</th><th class="num">tokens</th></tr>'+groups.map(g=>
+    '<tr class="am-group"><td colspan="7">'+esc(g.ticket||'(no ticket)')+' <span class="am-title" title="'+esc(g.title).replace(/"/g,'&quot;')+'">'+esc(g.title)+'</span>'+(g.pr?' · PR '+esc(g.pr):'')+
+    ' <span class="mute">· '+g.runs+' runs · '+dur(g.elapsed_s)+' · tokens '+tok(g.tokens)+(g.tokens!=null&&g.tokens_unknown?' (+'+g.tokens_unknown+' unknown)':'')+'</span></td></tr>'+
+    g.rows.map(r=>'<tr><td>'+esc(r.seat)+'</td><td>'+esc(r.harness)+'</td><td>'+esc(r.role)+'</td><td class="am-'+esc(r.state)+'"'+(r.liveness?' title="'+esc(r.liveness.detail).replace(/"/g,'&quot;')+'"':'')+'>'+esc(r.state)+'</td><td class="mono">'+(r.verdict?esc(r.verdict.kind+' '+r.verdict.sha):'—')+'</td><td class="num">'+dur(r.elapsed_s)+'</td><td class="num">'+tok(r.tokens)+'</td></tr>').join('')).join('');
 }
 function seatChip(name,cover,kind,meta){
   meta=meta||{};
@@ -17171,6 +18018,8 @@ async function load(manual){
   renderObjective(d.objective);
   renderTurns(d.turns);
   renderUsage(d.usage);
+  renderProviderUsage(d.provider_usage);
+  renderAgentMap(d.agent_map);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
   defaultComposeTicket(d);
@@ -17683,7 +18532,7 @@ def _cached_turns_usage_promise(board, tickets):
     with _ANALYTICS_LOCK:
         hit = _ANALYTICS_CACHE.get(key)
         if hit and hit["stamp"] == stamp and now_m - hit["at"] < _ANALYTICS_TTL_S:
-            return hit["turns"], hit["usage"], hit["promise"]
+            return hit["turns"], hit["usage"], hit["promise"], hit["events"]
     turns = _safe(lambda: _turns_snapshot(board, tickets), _empty_turns_snapshot())
     events = _safe(lambda: _turns_mod()[1](board), [])
     usage = _safe(lambda: _usage_snapshot(events), _empty_usage_snapshot())
@@ -17691,8 +18540,9 @@ def _cached_turns_usage_promise(board, tickets):
     with _ANALYTICS_LOCK:
         _ANALYTICS_CACHE[key] = {
             "stamp": stamp, "at": now_m, "turns": turns, "usage": usage, "promise": promise,
+            "events": events,
         }
-    return turns, usage, promise
+    return turns, usage, promise, events
 
 
 def _snapshot_single_flight(board, messages=40):
@@ -17900,7 +18750,7 @@ def _board_snapshot_body(board, messages=40):
             "handoff": _last_handoff(t), "verdict": _ticket_verdict(t),
             "proof": (t.get("proof") or "").strip(),
         })
-    turns, usage, promise = _cached_turns_usage_promise(board, tickets)
+    turns, usage, promise, events = _cached_turns_usage_promise(board, tickets)
     all_msgs = load_messages(board)
     raw_msgs = []
     for x in all_msgs[-messages:]:
@@ -17973,6 +18823,12 @@ def _board_snapshot_body(board, messages=40):
         "empty_board": counts["total"] == 0,
         "turns": turns,
         "usage": usage,
+        # T-1076: per-provider quota for the Team header. Same ledger reader as
+        # `atm agents`; still read-only, so board.json spawns nothing.
+        "provider_usage": _safe(lambda: provider_usage_snapshot(board), []) or [],
+        # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
+        "agent_map": _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
+                                                  live=live, events=events), None),
         "promise": promise,
         "objective": {
             **objective_view,
@@ -18385,6 +19241,10 @@ def _quickstart_harness():
 
 def cmd_quickstart(a, board):
     """Zero to a first ticket claimed by a real agent. Non-interactive, idempotent."""
+    if getattr(a, "gate", False) or getattr(a, "dry_run", False):
+        # T-1077: the felt version. Runs entirely in a temp dir, so it never
+        # reaches the caller's board and never needs one to exist.
+        return cmd_quickstart_gate(a)
     if a.remove:
         state = _quickstart_state(board)
         alive = _quickstart_alive(board, state)
@@ -18517,8 +19377,460 @@ def _quickstart_next_steps(board, agent):
     print("  %satm review <id> --notes \"...\" hand it back with an exact artifact" % ident)
     print("  (`tickets` is a compatibility alias for the same CLI.)")
     print("")
+    print("Feel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket")
+    print("               stays shut until a DIFFERENT seat accepts the commit)")
+    print("")
     print("See it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)")
     print("Learn it: atm guide   |   docs/first-session.md   |   README.md")
+
+
+# ---- T-1077: `atm quickstart --gate` -- feel the accept gate in five minutes
+
+
+GATE_SEAT_AUTHOR = "alice"
+GATE_SEAT_REVIEWER = "bob"
+GATE_STEPS = 8
+GATE_DEMO_PROMPT = (
+    "Append one line reading 'atman demo' to demo.txt in this repository, "
+    "then commit just that file with the message "
+    "'T-001: add a line to demo.txt'. Change nothing else and run no other command.")
+# Only harnesses with a zero-model auth probe (_auth_gates_spawn) can be
+# preflighted, which is the whole point of the honest no-auth path.
+GATE_HARNESS_PROBE = (("claude", "claude"), ("codex", "codex"),
+                      ("cursor-agent", "cursor"), ("agent", "cursor"))
+
+
+def _gate_harness(requested=""):
+    """(harness id, binary) for the demo: the requested one, or the first installed."""
+    import shutil
+    want = (requested or "").strip().lower()
+    if want:
+        for binary, hid in GATE_HARNESS_PROBE:
+            if want in (hid, binary):
+                return hid, binary
+        return want, want
+    for binary, hid in GATE_HARNESS_PROBE:
+        if shutil.which(binary):
+            return hid, binary
+    return "", ""
+
+
+def _gate_env(root, board, seat=""):
+    """Child env for every step: this board, this seat, no background spawn.
+
+    Everything Atman would otherwise write under the operator's HOME (cache,
+    dispatch watchers, stop hooks) is redirected into the scratch dir or turned
+    off, so the demo's whole write footprint is the temp dir it printed.
+    """
+    e = dict(os.environ)
+    e["TICKETS_DIR"] = board
+    e["TICKETS_CACHE_DIR"] = os.path.join(root, "cache")
+    e["TICKETS_DISPATCH_NO_SPAWN"] = "1"  # the demo runs the harness in the foreground
+    e["TICKETS_GC_OPEN_PRS"] = "none"
+    for var in ("TICKET_SEAT", "TICKETS_STOP_HOOK", "CLAUDE_CODE_SESSION_ID",
+                "CODEX_SESSION_ID", "CURSOR_SESSION_ID", "TERM_SESSION_ID",
+                "TICKET_SESSION_ID"):
+        e.pop(var, None)
+    if seat:
+        # A recorded per-seat session is what makes alice and bob two different
+        # identities to the board -- without it both calls would be the same
+        # ambient agent and the accept would be a self-accept.
+        e["TICKET_AGENT"] = seat
+        e["TICKET_SESSION_ID"] = "atm-quickstart-gate-" + seat
+    return e
+
+
+def _gate_atm(state, seat, *args, **kw):
+    """Run the real CLI as `seat` against the scratch board."""
+    import subprocess
+    return subprocess.run(
+        [sys.executable, os.path.realpath(__file__)] + [str(x) for x in args],
+        cwd=state["repo"], env=_gate_env(state["root"], state["board"], seat),
+        capture_output=True, text=True, timeout=kw.get("timeout", 180))
+
+
+def _gate_git(state, *args):
+    """git in the scratch repo, with the operator's global config neutralised.
+
+    A global `commit.gpgsign=true` or a `core.hooksPath` pre-commit hook would
+    otherwise fail (or hang) the demo's commits for reasons that have nothing
+    to do with the gate being shown.
+    """
+    import subprocess
+    return subprocess.run(
+        ["git", "-c", "user.email=quickstart@atman.local",
+         "-c", "user.name=atm quickstart", "-c", "commit.gpgsign=false",
+         "-c", "tag.gpgsign=false",
+         "-c", "core.hooksPath=%s" % os.path.join(state["root"], "no-hooks"),
+         *[str(x) for x in args]],
+        cwd=state["repo"], capture_output=True, text=True)
+
+
+def _gate_say(state, step, label, text):
+    line = "%d/%d %-9s %s" % (step, GATE_STEPS, label, text)
+    print(line)
+    sys.stdout.flush()
+    state["done"].append(line)
+
+
+def _gate_evidence(text):
+    """Print the CLI's own words under a narration line, so nothing is paraphrased."""
+    for raw in (text or "").splitlines():
+        if raw.strip():
+            print("          | %s" % raw.strip())
+    sys.stdout.flush()
+
+
+def _gate_fail(state, why, detail=""):
+    print("")
+    print("STOPPED: %s" % why)
+    if detail:
+        _gate_evidence(detail)
+    print("Nothing was accepted and no sha was released. Scratch dir: %s" % state["root"])
+    sys.exit(1)
+
+
+def _gate_ticket(state, tid):
+    path = os.path.join(state["board"], tid + ".json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return {}
+
+
+def _gate_accept_event(ticket):
+    """The last recorded accept on a ticket, from the board record itself."""
+    for ev in reversed(list(ticket.get("review_events") or [])):
+        if isinstance(ev, dict) and ev.get("kind") == "accept":
+            return ev
+    return {}
+
+
+def _gate_usage_line(state, hid):
+    """T-1040/T-1076 reader, not a second formatter: what this run cost/has left."""
+    pu = _provider_usage()
+    # The shared refresh gate, not a second copy of it: it honours
+    # TICKETS_USAGE_REFRESH and never reaches a provider from a test run.
+    _maybe_refresh_provider_usage(state["board"])
+    reading = _safe(lambda: pu.get_reading(state["board"], hid), None)
+    line = _safe(lambda: pu.format_usage_line(reading), None)
+    print("usage:  %s" % (line or "  %s unknown" % hid).strip())
+
+
+def _gate_walkthrough(hid, reason="", login="", scratch=""):
+    """Narrate the run without doing it. Invents no sha, records no accept.
+
+    ``scratch`` is passed when a real run already made a throwaway board before
+    stopping: the header then says what exists instead of claiming nothing does.
+    """
+    wv = _work_view()
+    print("")
+    if scratch:
+        print("WALKTHROUGH ONLY from here -- the steps below did NOT run. The throwaway")
+        print("board at %s has no commit," % scratch)
+        print("no accept record and no released sha.")
+    else:
+        print("WALKTHROUGH ONLY -- nothing below ran. No repo, no board, no commit,")
+        print("no accept record, and no sha (a sha can only come from a real commit).")
+    if reason:
+        print("why: %s" % reason)
+    if login:
+        print("log in first: %s" % login)
+    steps = [
+        ("preflight", "check that %s has a live login (atm's own dispatch preflight)" % (hid or "a coding CLI")),
+        ("scratch", "make a throwaway git repo + board in a temp dir (never your repo, never your board)"),
+        ("board", "atm init there, then commit the scaffolding"),
+        ("seats", "atm join %s (author) and %s (reviewer) -- two different seats" % (
+            GATE_SEAT_AUTHOR, GATE_SEAT_REVIEWER)),
+        ("tickets", "atm create T-001, then T-002 --deps T-001"),
+        ("dispatch", "atm dispatch T-001 --to %s, then %s runs and commits a one-line change" % (
+            GATE_SEAT_AUTHOR, hid or "the harness")),
+        ("gate", "atm done T-001 would print: blocked: T-002 -- %s" % wv.unverified_block_reason("T-001")),
+        ("accept", "atm accept T-001 --sha <the sha %s actually committed> as %s would release T-002" % (
+            GATE_SEAT_AUTHOR, GATE_SEAT_REVIEWER)),
+    ]
+    for i, (label, text) in enumerate(steps, 1):
+        print("  would %d/%d %-9s %s" % (i, GATE_STEPS, label, text))
+    print("")
+    print("That was a WALKTHROUGH, not a run: nothing above happened and no accept exists.")
+    if login:
+        print("Run it for real once logged in:  atm quickstart --gate")
+    else:
+        print("Run it for real:  atm quickstart --gate")
+
+
+def _gate_ending(root, short="", author="", evaluator=""):
+    print("")
+    print("what happened: %s committed %s and closed T-001; T-002 stayed shut until %s --"
+          % (author or GATE_SEAT_AUTHOR, short or "the change", evaluator or GATE_SEAT_REVIEWER))
+    print("               a different seat -- accepted that exact sha. No seat releases its own work.")
+    print("in your repo:  cd <your repo> && atm quickstart --agent <you>   "
+          "(then: atm next, atm review, atm accept)")
+    print("where to look: atm agents   (seats, harness, usage)   |   atm ui  ->  "
+          "http://127.0.0.1:8765")
+    print("scratch kept:  %s   (rm -rf it whenever; nothing of yours was touched)" % root)
+
+
+def cmd_quickstart_gate(a):
+    """The accept gate, felt once, in a throwaway dir. Never the caller's board."""
+    import shutil
+    import tempfile
+
+    hid, binary = _gate_harness(getattr(a, "harness", "") or "")
+    dry = bool(getattr(a, "dry_run", False))
+    print("atm quickstart --gate: one ticket, two seats, and the gate between them.")
+    if dry:
+        _gate_walkthrough(hid or "a coding CLI")
+        return
+    if not hid:
+        print("")
+        print("no coding CLI found on PATH (looked for: %s)."
+              % ", ".join(b for b, _ in GATE_HARNESS_PROBE))
+        print("install one (Claude Code, Codex, or the Cursor CLI), then: atm quickstart --gate")
+        _gate_walkthrough("a coding CLI")
+        return
+    if not shutil.which(binary):
+        print("")
+        print("%s is not on PATH, so nothing can be dispatched." % binary)
+        _gate_walkthrough(hid, reason="%s binary missing" % hid)
+        return
+
+    # 1. Auth before anything is created: the #224 preflight, same call dispatch
+    #    makes. A logged-out CLI gets the walkthrough, never a faked run.
+    # Probed against a path that does not exist: the auth probe is read-only and
+    # must not touch (or invent) a board before the user has seen the refusal.
+    noboard = os.path.join(tempfile.gettempdir(), "atm-quickstart-gate-no-board")
+    probe = _safe(lambda: harness_auth_probe(noboard, GATE_SEAT_AUTHOR, hid), None) or {
+        "state": "", "harness": hid}
+    refusal = _preflight().dispatch_refuse(probe, hid)
+    if refusal:
+        print("")
+        print(refusal)
+        login = (probe.get("login_cmd") or _preflight().LOGIN_HINT.get(hid, "")).strip()
+        if login:
+            print("log in with:  %s" % login)
+            print("then verify:  atm harness auth <seat>")
+        _gate_walkthrough(hid, reason=refusal, login=login)
+        return
+
+    root = tempfile.mkdtemp(prefix="atm-quickstart-gate-")
+    state = {"root": root, "repo": os.path.join(root, "repo"),
+             "board": os.path.join(root, "repo", ".tickets"), "done": []}
+    print("scratch: %s" % root)
+    print("         (your repo and your board are not touched -- this all happens in there)")
+    sys.stdout.flush()
+    try:
+        _gate_run(state, a, hid, probe)
+    except KeyboardInterrupt:
+        _gate_interrupted(state)
+        sys.exit(130)
+
+
+def _gate_interrupted(state):
+    """SIGINT: say exactly what got done, and prove no accept was recorded."""
+    print("")
+    print("interrupted after %d/%d step(s)." % (len(state["done"]), GATE_STEPS))
+    for line in state["done"]:
+        print("  did: %s" % line)
+    t1 = _gate_ticket(state, "T-001")
+    if t1:
+        ev = _gate_accept_event(t1)  # read from the board file, never assumed
+        print("  T-001 is %s; accept record: %s"
+              % (t1.get("status") or "?", ("by %s" % ev.get("by")) if ev else "none"))
+    t2 = _gate_ticket(state, "T-002")
+    if t2:
+        # The real gate answers this, so the interrupt report cannot overstate it.
+        waits = _work_view().unreleased_dep_id(t2, [t1, t2] if t1 else [t2])
+        print("  T-002 is %s and %s" % (
+            t2.get("status") or "?",
+            ("still withheld: no released accept on %s" % waits) if waits
+            else "no longer waiting on a dep"))
+    print("  no accept was written and no sha was released.")
+    print("  scratch dir left for you to look at: %s  (rm -rf it)" % state["root"])
+
+
+def _gate_run(state, a, hid, probe):
+    root, repo, board = state["root"], state["repo"], state["board"]
+    _gate_say(state, 1, "preflight", "%s login is live (%s) -- same check `atm dispatch` makes"
+              % (hid, probe.get("state") or "ready"))
+
+    # 2. a throwaway git repo
+    os.makedirs(repo)
+    r = _gate_git(state, "init", "-q", "-b", "main", ".")
+    if r.returncode != 0:
+        _gate_fail(state, "git init failed in the scratch dir", r.stderr)
+    with open(os.path.join(repo, "README.md"), "w") as f:
+        f.write("scratch repo made by `atm quickstart --gate`\n")
+    _gate_git(state, "add", "-A")
+    r = _gate_git(state, "commit", "-qm", "scratch repo")
+    if r.returncode != 0:
+        _gate_fail(state, "the scratch repo could not take a first commit",
+                   r.stderr + r.stdout)
+    _gate_say(state, 2, "repo", "git init + first commit on main (<scratch>/repo)")
+
+    # 3. a throwaway board
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "init")
+    if r.returncode != 0:
+        _gate_fail(state, "atm init failed in the scratch repo", r.stderr + r.stdout)
+    _gate_git(state, "add", "-A")
+    _gate_git(state, "commit", "-qm", "atm init scaffolding")
+    _gate_say(state, 3, "board", "atm init -> <scratch>/repo/.tickets (a board of its own)")
+
+    # 4. two seats. One is the author, the other is the only one who can release.
+    for seat in (GATE_SEAT_AUTHOR, GATE_SEAT_REVIEWER):
+        r = _gate_atm(state, seat, "join", seat, "--roles", "backend", "--harness", hid)
+        if r.returncode != 0:
+            _gate_fail(state, "atm join %s failed" % seat, r.stderr + r.stdout)
+    _gate_say(state, 4, "seats", "%s (author) and %s (reviewer) joined, harness=%s"
+              % (GATE_SEAT_AUTHOR, GATE_SEAT_REVIEWER, hid))
+
+    # 5. the two tickets: the work, and the work that waits on it
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "create", "add a line to demo.txt",
+                  "--role", "backend")
+    if r.returncode != 0:
+        _gate_fail(state, "atm create failed", r.stderr + r.stdout)
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "create", "build on that line",
+                  "--role", "backend", "--deps", "T-001")
+    if r.returncode != 0:
+        _gate_fail(state, "atm create --deps failed", r.stderr + r.stdout)
+    _gate_say(state, 5, "tickets", "T-001 (the work) and T-002 (waits for T-001)")
+
+    # 6. dispatch seat A, then run the harness in the foreground so it can be watched
+    r = _gate_atm(state, GATE_SEAT_REVIEWER, "dispatch", "T-001",
+                  "--to", GATE_SEAT_AUTHOR, "--harness", hid)
+    if r.returncode != 0:
+        blob = (r.stdout + r.stderr).strip()
+        print("")
+        print("dispatch refused:")
+        _gate_evidence(blob)
+        login = (probe.get("login_cmd") or _preflight().LOGIN_HINT.get(hid, "")).strip()
+        if login:
+            print("log in with:  %s" % login)
+        _gate_walkthrough(hid, reason=blob.splitlines()[0] if blob else "dispatch refused",
+                          login=login, scratch=state["root"])
+        return
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "next")
+    if r.returncode != 0:
+        _gate_fail(state, "%s could not claim the dispatched ticket" % GATE_SEAT_AUTHOR,
+                   r.stderr + r.stdout)
+    _gate_git(state, "checkout", "-q", "-b", "%s/t-001" % GATE_SEAT_AUTHOR)
+    _gate_say(state, 6, "dispatch", "T-001 reserved for %s and claimed; running %s now..."
+              % (GATE_SEAT_AUTHOR, hid))
+    sha, short, note = _gate_make_commit(state, a, hid)
+    if not sha:
+        _gate_fail(state, "no commit was produced, so there is nothing to accept", note)
+    if note:
+        _gate_evidence(note)
+    _gate_evidence("%s committed %s" % (GATE_SEAT_AUTHOR, short))
+
+    # 7. the gate. Submit, close without an accept, and watch T-002 refuse to open.
+    r = _gate_atm(state, GATE_SEAT_AUTHOR, "review", "T-001",
+                  "--notes", "demo.txt +1 line")
+    if r.returncode != 0:
+        _gate_fail(state, "atm review failed", r.stderr + r.stdout)
+    closed = _gate_atm(state, GATE_SEAT_AUTHOR, "done", "T-001",
+                       "--notes", "one line in demo.txt")
+    if closed.returncode != 0:
+        _gate_fail(state, "atm done failed", closed.stderr + closed.stdout)
+    gate_lines = [ln for ln in closed.stdout.splitlines() if ln.startswith("blocked:")]
+    tried = _gate_atm(state, GATE_SEAT_REVIEWER, "claim", "T-002")
+    t2 = _gate_ticket(state, "T-002")
+    if tried.returncode == 0 or t2.get("status") == "claimed":
+        _gate_fail(state, "the gate did NOT hold: T-002 opened with no accept on T-001",
+                   tried.stdout + tried.stderr)
+    _gate_say(state, 7, "gate", "T-002 blocked: T-001 has no accept from another seat")
+    for line in gate_lines:
+        _gate_evidence(line)
+    _gate_evidence("atm claim T-002 (as %s) refused: %s"
+                   % (GATE_SEAT_REVIEWER, (tried.stdout + tried.stderr).strip().splitlines()[0]
+                      if (tried.stdout + tried.stderr).strip() else "exit %d" % tried.returncode))
+
+    # 8. the release moment. A DIFFERENT seat accepts that exact sha.
+    acc = _gate_atm(state, GATE_SEAT_REVIEWER, "accept", "T-001", "--sha", sha,
+                    "--notes", "read demo.txt at %s" % short)
+    if acc.returncode != 0:
+        _gate_fail(state, "%s could not accept T-001" % GATE_SEAT_REVIEWER,
+                   acc.stderr + acc.stdout)
+    t1, t2 = _gate_ticket(state, "T-001"), _gate_ticket(state, "T-002")
+    ev = _gate_accept_event(t1)
+    author = (t1.get("owner") or "").strip()
+    evaluator = (ev.get("by") or "").strip()
+    if not ev or ev.get("sha") != sha:
+        _gate_fail(state, "no accept record bound to %s was written" % short, json.dumps(ev))
+    if not evaluator or evaluator == author:
+        _gate_fail(state, "the accept was a self-accept (author %s, evaluator %s)"
+                   % (author or "?", evaluator or "?"))
+    if t2.get("status") not in ("open", "claimed"):
+        _gate_fail(state, "T-002 is still %s after the accept" % (t2.get("status") or "?"),
+                   acc.stdout + acc.stderr)
+    _gate_say(state, 8, "released", "T-002 released by %s accepting %s" % (evaluator, short))
+    _gate_evidence("author %s != evaluator %s  (the board record, not a claim)"
+                   % (author, evaluator))
+    for line in acc.stdout.splitlines():
+        if line.startswith(("T-001 accepted", "unblocked:", "started:")):
+            _gate_evidence(line)
+    _gate_usage_line(state, hid)
+    _gate_ending(root, short=short, author=author, evaluator=evaluator)
+
+
+def _gate_make_commit(state, a, hid):
+    """Run the harness the way `atm watch` runs it. Returns (sha, short, note).
+
+    The harness gets the prompt and the scratch worktree and nothing else. If
+    it comes back without a commit (it chatted, it hit a usage limit, it was
+    killed), that is said out loud and the demo makes the one-line commit
+    itself as the author seat -- the gate being demonstrated is about WHO
+    accepts, and a commit is never invented.
+    """
+    import subprocess
+
+    board, repo = state["board"], state["repo"]
+    before = (_gate_git(state, "rev-parse", "HEAD").stdout or "").strip()
+    cmd = _safe(lambda: _worker_cmd(board, GATE_SEAT_AUTHOR, tool=hid,
+                                    prompt_expr=shlex.quote(GATE_DEMO_PROMPT)), "")
+    note = ""
+    if cmd:
+        try:
+            r = subprocess.run(cmd, shell=True, cwd=repo,
+                               env=_gate_env(state["root"], board, GATE_SEAT_AUTHOR),
+                               capture_output=True, text=True,
+                               timeout=int(getattr(a, "timeout", 240) or 240))
+            out, rc = ((r.stdout or "") + (r.stderr or "")), r.returncode
+        except subprocess.TimeoutExpired:
+            out, rc = "harness timed out after %ss" % getattr(a, "timeout", 240), 124
+        except OSError as exc:
+            out, rc = "could not start %s: %s" % (hid, exc), 127
+        # Usage limits are read with the existing reader, which also records the
+        # provider reading the usage line below prints.
+        _safe(lambda: _watch_note_limit_from_log(board, GATE_SEAT_AUTHOR, out,
+                                                 rc=rc, harness=hid), None)
+        after = (_gate_git(state, "rev-parse", "HEAD").stdout or "").strip()
+        if after and after != before:
+            note = "%s made the commit" % hid
+        else:
+            first = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
+            note = ("%s produced no commit (exit %d)%s -- the demo commits the one-line "
+                    "change itself, as %s" % (hid, rc, (": " + first[:120]) if first else "",
+                                              GATE_SEAT_AUTHOR))
+            with open(os.path.join(repo, "demo.txt"), "a") as f:
+                f.write("atman demo\n")
+            _gate_git(state, "add", "demo.txt")
+            r = _gate_git(state, "commit", "-m", "T-001: add a line to demo.txt")
+            if r.returncode != 0:
+                return "", "", (note + "\n" + (r.stderr or "")).strip()
+    else:
+        note = "no harness command could be built for %s" % hid
+    # The worker's rule holds for the demo too: nothing uncommitted when the
+    # ticket goes to review, so `atm review`/`atm done` need no --force.
+    if (_gate_git(state, "status", "--porcelain").stdout or "").strip():
+        _gate_git(state, "add", "-A")
+        _gate_git(state, "commit", "-m", "T-001: commit the rest of the run")
+    sha = (_gate_git(state, "rev-parse", "HEAD").stdout or "").strip()
+    short = (_gate_git(state, "rev-parse", "--short", "HEAD").stdout or "").strip()
+    if not sha or sha == before:
+        return "", "", note
+    return sha, short, note
 
 
 def cmd_guide(a, board):
@@ -19107,7 +20419,8 @@ def cmd_init(a, board):
     # bind is exactly the failure this ticket exists to stop.
     bound = board_dir(discover_children=True)
     if _same_board(bound, board):
-        print("bound: `tickets` run from %s resolves to this board." % os.getcwd())
+        print("bound: `atm` run from %s resolves to this board "
+              "(`tickets` is a compatibility alias)." % os.getcwd())
     elif explicit:
         print("\nNOT BOUND: you asked for --board %s, but `tickets` run from %s "
               "still resolves to %s.\n  To use the board you just wrote:  "
@@ -19156,8 +20469,9 @@ dependency tree with each node's status and owner.
    reopened for someone else.
 6. When finished, submit -- do not close: `atm review <id> --notes "paths
    touched, tests run, decisions dependents must match"` (branch@sha is added
-   automatically; `--pr N` if you opened one). The MASTER reviews, merges to
-   main and closes it with `atm done`. Claim your next ticket right away.
+   automatically; `--pr N` if you opened one). Another seat then reviews it and
+   records `atm accept <id> --sha <exact sha>`; that accept -- not `atm done` --
+   is what releases the dependents. Claim your next ticket right away.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.
@@ -19186,7 +20500,8 @@ ever hold a ticket.
 give progress bars; `atm sprint close S-01 --carry S-02`
 rolls unfinished work forward.
 
-The `--notes` text on `done` is shown to whoever picks up a dependent ticket.
+The `--notes` text on `review`/`accept`/`done` is shown to whoever picks up a
+dependent ticket, together with the accepted sha.
 Write what the next agent needs -- file paths, names, decisions they must match
 -- not a summary of your effort.
 
@@ -19198,8 +20513,10 @@ reference a `key` from the same plan or an existing `T-` id:
      {"key":"ui","title":"Build login UI","role":"frontend","deps":["api"]}]
     EOF
 
-Tickets whose dependencies are unfinished stay invisible to `atm next`
-until those dependencies are marked done, so workers cannot start too early.
+Tickets whose dependencies are unfinished stay invisible to `atm next`, and a
+finished dependency stays withheld until a DIFFERENT seat accepts its exact sha
+(`atm accept <id> --sha <sha>`), so nobody -- human or agent -- can release
+their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
@@ -19383,6 +20700,197 @@ def cmd_self(a, board):
     invoked = os.path.realpath(sys.argv[0])
     if invoked != script and (not on_path or invoked != os.path.realpath(on_path)):
         print("invoked: %s" % sys.argv[0])
+
+
+_FEEDBACK_REDACT_CLAIM = (
+    "Redacted before printing: your home directory, this checkout's path, and its folder name."
+)
+
+
+def _feedback_path_forms(*paths):
+    """Absolute and realpath variants, longest first so prefixes lose.
+
+    git_state() is not consulted. macOS /var vs /private/var and a TICKETS_DIR
+    that was abspath'd rather than realpath'd must all be the same path.
+    """
+    forms = []
+    for p in paths:
+        if not p:
+            continue
+        for form in (p, os.path.abspath(p), os.path.realpath(p)):
+            form = form.rstrip(os.sep)
+            if form and form != os.sep and form not in forms:
+                forms.append(form)
+    forms.sort(key=len, reverse=True)
+    return forms
+
+
+def _feedback_redact(text, home="", run="", repo="", repo_name=""):
+    """Scrub this machine's paths and repo folder name before printing.
+
+    `atm feedback` is meant to be pasted into a public GitHub issue, and the
+    promise is that the board stays on this machine -- so the text is
+    scrubbed here rather than trusting every caller to do it.
+
+    Redaction must not depend on git resolving a worktree. Home, the
+    process cwd, and the board's checkout path are always replaced, even
+    when git_state() is None.
+    """
+    out = text
+    for path in _feedback_path_forms(run):
+        out = out.replace(path, "<RUN>")
+    for path in _feedback_path_forms(repo):
+        out = out.replace(path, "<REPO>")
+    for path in _feedback_path_forms(home):
+        out = out.replace(path, "<HOME>")
+    if repo_name:
+        out = re.sub(r'(?<![\w/.-])%s(?![\w/.-])' % re.escape(repo_name), "<REPO>", out)
+    return out
+
+
+def _feedback_redaction_ok(text, home="", run="", repo="", repo_name=""):
+    """True only when every machine path we promised to scrub is gone.
+
+    An empty run/repo (the old git_state()-None path) is not success --
+    we never identified the checkout, so we must not claim it was redacted.
+    """
+    if not home or not (run or repo) or not repo_name:
+        return False
+    for path in _feedback_path_forms(home, run, repo):
+        if path in text:
+            return False
+    if re.search(r'(?<![\w/.-])%s(?![\w/.-])' % re.escape(repo_name), text):
+        return False
+    return True
+
+
+def _feedback_seat_counts(board):
+    """(limited, stalled) seat counts from board files alone.
+
+    agent_liveness() scans the process table (`ps`, sometimes `lsof`) and
+    clears expired limits by rewriting the agent file, so feedback cannot
+    use it. LIMITED is a recorded limit that has not reached its reset_at;
+    "stalled" is a seat whose recorded watcher pid (agents/<seat>.watch.pid)
+    is no longer running -- a signal-0 probe, not a process scan.
+    """
+    limited = stalled = 0
+    now_utc = datetime.now(timezone.utc)
+    for rec in load_agents(board):
+        owner = rec.get("owner") or ""
+        if not owner:
+            continue
+        lim = rec.get("limit")
+        if lim:
+            active = True
+            if lim.get("reset_at"):
+                try:
+                    reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
+                    if reset.tzinfo is None:
+                        reset = reset.replace(tzinfo=timezone.utc)  # naive stamps are UTC
+                    active = reset > now_utc
+                except (ValueError, TypeError):
+                    pass
+            if active:
+                limited += 1
+                continue
+        try:
+            with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
+                pid = int((f.read() or "0").strip() or 0)
+        except (IOError, OSError, ValueError):
+            pid = 0
+        if pid and not _pid_alive(pid):
+            stalled += 1
+    return limited, stalled
+
+
+def cmd_feedback(a, board):
+    """Local-only, pasteable board summary for a GitHub issue. Prints to stdout; sends nothing anywhere.
+
+    Reads only existing board files plus a PATH lookup for harness binaries.
+    It runs no subprocess -- no harness, no git, no ps/lsof -- and writes
+    nothing. The user's git branch, objective text and seat names are never
+    printed. Must work on a board where nothing has succeeded yet -- that is
+    the most informative case, not an error case.
+    """
+    import platform as _platform
+    # Redaction paths come from the process and the board, not git.
+    home = os.path.expanduser("~")
+    run = os.getcwd()
+    repo = ""
+    if board:
+        board_abs = os.path.abspath(board)
+        repo = (os.path.dirname(board_abs)
+                if os.path.basename(board_abs.rstrip(os.sep)) == ".tickets"
+                else board_abs)
+    repo_name = os.path.basename((repo or run).rstrip(os.sep)) if (repo or run) else ""
+
+    lines = ["Atman feedback summary -- paste into a GitHub issue. Nothing here is sent anywhere.", ""]
+    # Atman's own version, never the user's project branch (it can carry
+    # anything, tokens included). git_state() is not called: `git status`
+    # takes the index lock and can rewrite .git/index.
+    lines.append("atm version: %s" % release_status())
+    lines.append("inside a git worktree: %s" % ("yes" if _fs_repo_link(run)[0] else "no"))
+    # platform.platform() can shell out (uname -p) for the processor field.
+    lines.append("platform: %s %s %s" % (
+        _platform.system(), _platform.release(), _platform.machine()))
+    lines.append("python: %s" % _platform.python_version())
+    lines.append("board: %s" % (board or "(none)"))
+    lines.append("")
+
+    # PATH lookup only. probe_integration_catalog() may rewrite ~/.local/bin/codex
+    # and attach_catalog_usage() runs each harness binary; a read-only summary
+    # must do neither, so login state is deliberately not checked here.
+    search_path = os.environ.get("PATH", "")
+    local_bin = os.path.join(home, ".local", "bin")
+    if local_bin not in search_path.split(os.pathsep):
+        search_path = local_bin + os.pathsep + search_path
+    found, missing = [], []
+    for spec in INTEGRATION_CATALOG:
+        on_path = any(_which_on_path(b, search_path) for b in spec["binaries"])
+        (found if on_path else missing).append(spec["name"])
+    lines.append("harnesses found on PATH: %s" % (", ".join(found) or "none"))
+    lines.append("harnesses not found: %s" % (", ".join(missing) or "none"))
+    lines.append("harness logins: not checked")
+    lines.append("")
+
+    tickets = load_all(board)
+    messages = load_messages(board)
+    wv = _work_view()
+    reviewed = sum(1 for t in tickets if wv.went_through_review(t))
+    accepted = sum(1 for t in tickets if wv.review_of(t, None)["verified"])
+    unverified_done = len(wv.unverified_done_ids(tickets, messages))
+    overrides = sum(1 for t in tickets if t.get("release_override"))
+    lines.append("tickets created:          %d" % len(tickets))
+    lines.append("tickets reviewed:         %d" % reviewed)
+    lines.append("tickets accepted:         %d" % accepted)
+    lines.append("tickets done, unverified: %d" % unverified_done)
+    lines.append("release overrides:        %d" % overrides)
+    lines.append("")
+
+    events = load_trajectories(board)
+    reopens = sum(1 for e in events if e.get("kind") == "reopen")
+    lines.append("reopens: %d" % reopens)
+    lines.append("")
+
+    # Objective text and seat names are the user's own words; a pasteable
+    # summary carries only their shape (set / state / exit criteria, counts).
+    obj = load_objective(board)
+    if obj:
+        lines.append("objective: set (state: %s, exit criteria: %s)" % (
+            objective_state(obj), "yes" if objective_exit_ok(obj) else "no"))
+    else:
+        lines.append("objective: not set")
+    lines.append("")
+
+    limited, stalled = _feedback_seat_counts(board)
+    lines.append("seats LIMITED: %d" % limited)
+    lines.append("seats whose recorded watcher is gone (closest tracked state to \"stalled\"): %d" % stalled)
+    lines.append("")
+
+    text = _feedback_redact("\n".join(lines), home=home, run=run, repo=repo, repo_name=repo_name)
+    if _feedback_redaction_ok(text, home=home, run=run, repo=repo, repo_name=repo_name):
+        text += "\n" + _FEEDBACK_REDACT_CLAIM
+    print(text)
 
 
 def main():
@@ -19786,6 +21294,14 @@ def main():
     c.add_argument("--with-agent", metavar="NAME", help="also print how to put a real worker on the board")
     c.add_argument("--board", help="initialise this board directory explicitly")
     c.add_argument("--remove", action="store_true", help="delete the sample tickets this created")
+    c.add_argument("--gate", action="store_true",
+                   help="feel the accept gate end to end in a throwaway dir (touches nothing of yours)")
+    c.add_argument("--dry-run", action="store_true",
+                   help="with --gate: narrate the walkthrough without running or writing anything")
+    c.add_argument("--harness", default="",
+                   help="with --gate: which coding CLI to dispatch (default: the first installed one)")
+    c.add_argument("--timeout", type=int, default=240,
+                   help="with --gate: seconds the harness gets to make the change (default: 240)")
     c.set_defaults(fn=cmd_quickstart)
 
     c = sub.add_parser("guide", help="print the startup guide for claude / codex / cursor")
@@ -19847,6 +21363,21 @@ def main():
                    help="skip the transcript reads and show locations only")
     c.set_defaults(fn=cmd_who)
 
+    c = sub.add_parser("steer",
+                       help="redirect or question a running seat without killing it")
+    c.add_argument("seat", nargs="?", default="",
+                   help="running seat to steer; omit with --list")
+    c.add_argument("text", nargs="*", default=[],
+                   help="course correction (ignored when --ask is set)")
+    c.add_argument("--ask", default="", metavar="QUESTION",
+                   help="ask QUESTION; the seat answers on the ticket and keeps running")
+    c.add_argument("--list", action="store_true",
+                   help="list seats, last output timestamp, and whether they can be steered")
+    c.add_argument("--ticket", "-t", default="",
+                   help="ticket to record the steer on (default: the seat's held ticket)")
+    c.add_argument("--owner", "-o")
+    c.set_defaults(fn=cmd_steer)
+
     c = sub.add_parser("msg", help="post to the board or a seat thread")
     c.add_argument("text")
     c.add_argument("--to", default="", help="seat / agent name, or omit for everyone")
@@ -19907,6 +21438,11 @@ def main():
     c.add_argument("--json", action="store_true", dest="json",
                    help="machine-readable event list")
     c.set_defaults(fn=cmd_trace)
+
+    c = sub.add_parser("agents", help="agent map: seat runs grouped by ticket (running + last 24h)")
+    c.add_argument("--all", action="store_true", help="every recorded run, not just running + last 24h")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_agents)
 
     c = sub.add_parser("review", help="submit finished work for the master to review + merge")
     c.add_argument("id")
@@ -20073,6 +21609,8 @@ def main():
     c.add_argument("--another", action="store_true", help="claim even though I already hold one")
     c.add_argument("--steal", default="", metavar="ID",
                    help="claim this ticket even if reserved_for someone else")
+    c.add_argument("--dispatch", action="store_true",
+                   help="CoS: reserve the next ready ticket for the best non-limited seat")
     c.set_defaults(fn=cmd_next)
 
     c = sub.add_parser("claim", help="atomically claim a specific ticket")
@@ -20158,6 +21696,12 @@ def main():
     c = sub.add_parser("where", help="print the board directory")
     c.set_defaults(fn=cmd_where)
 
+    c = sub.add_parser(
+        "feedback",
+        help="print a local-only, pasteable run summary for a GitHub issue (sends nothing anywhere)",
+    )
+    c.set_defaults(fn=cmd_feedback)
+
     c = sub.add_parser("context", help="print the shared briefing file")
     c.set_defaults(fn=cmd_context)
 
@@ -20221,6 +21765,13 @@ def main():
     if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
         print("WARNING: %s -- see 'atm --version'" % status, file=sys.stderr)
     if not a.cmd:
+        # T-1076: the default screen leads with where the quota stands, so a
+        # user never has to know a command exists to find out.
+        header = _safe(lambda: usage_header_lines(_usage_header_board()), []) or []
+        for line in header:
+            print(line)
+        if header:
+            print("")
         p.print_help()
         return
     if a.cmd == "self":
@@ -20235,6 +21786,10 @@ def main():
         # board_dir() or a shadow board is refused before we can report it.
         a.fn(a)
         return
+    if a.cmd == "feedback":
+        # Before board resolution: that path runs git and prints paths.
+        _enter_no_spawn_mode()
+        sys.stderr = _RedactingStream(sys.stderr, os.path.expanduser("~"), os.getcwd())
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
     if a.cmd not in (
