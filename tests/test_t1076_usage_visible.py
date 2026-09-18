@@ -242,6 +242,40 @@ def test_the_age_outlives_the_reset_when_the_line_is_tight(board):
     head = usage_lines(run(board, "agents").stdout)
     assert head == ["usage  claude 3% left -- low (read 9h ago)"]
 
+    # REVIEW blocker 4: `_reset_of` copies the provider's own resets_at
+    # verbatim, so these are live shapes -- and a reset clipped mid-string is
+    # a WRONG time that still looks complete: "2026-09-19 09:00:00" without
+    # its zone reads as UTC and is 7h out; "...09:00:0" has simply lost a
+    # digit. Whole phrase, or no reset at all, in every state.
+    live = ["2026-09-19 09:00:00 America/Los_Angeles",
+            "Fri, 19 Sep 2026 09:00:00 GMT",
+            "09:00 America/Los_Angeles",
+            wordy,
+            "2026-09-19T09:00:00-07:00"]
+    for text in live:
+        phrase = pu.reset_label(text)
+        for rec in (pu.record_observed_limit("claude", "cap", iso(-0.2), text),
+                    stale_limit_reading(reset_at=text),
+                    reading("claude", "ok", remaining="88%", checked_at=iso(-0.05),
+                            reset_at=text,
+                            windows=[{"name": "w", "used_percent": 12.0,
+                                      "remaining_percent": 88.0, "reset_at": text}])):
+            shown = pu.format_compact_line(rec)
+            assert (phrase and phrase in shown) or "resets" not in shown, (text, shown)
+            assert "09:00:0 " not in shown and not shown.endswith("09:00:0")
+            assert len("usage  " + shown) <= NARROW, shown
+    # The zone is part of the time: kept when the phrase is, never trimmed off.
+    assert pu.reset_label("09:00 America/Los_Angeles") == "09:00 America/Los_Angeles"
+    assert pu.reset_label("2026-09-19 09:00:00 America/Los_Angeles") == \
+        "2026-09-19 09:00:00 America/Los_Angeles"
+    assert pu.reset_label(wordy) == ""  # too long to print whole -> not printed
+    # A raw epoch is a number, not a reset a user can read.
+    assert pu.reset_label("1789145400") == "" and pu.reset_label("1789145400000") == ""
+    assert "1789145400" not in pu.format_compact_line(
+        pu.record_observed_limit("claude", "cap", iso(-0.2), "1789145400"))
+    # And a credentials path in the field is still never printed.
+    assert pu.reset_label("reset=/Users/nobody/.claude/.credentials.json") == ""
+
 
 def test_an_elapsed_reset_is_not_printed_as_if_it_were_ahead():
     """A window that has already rolled over is not a promise about the future."""
@@ -704,6 +738,16 @@ def test_bare_atm_resolves_its_board_without_spawning(board, monkeypatch, audit)
     assert tree_hash(board) == before
     # The flag is restored, so a later command still cross-checks with git.
     assert tk._NO_SPAWN is False
+
+    # A Ctrl-C during resolution belongs to the user, not to a usage header.
+    def interrupted(*_a, **_kw):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(tk, "board_dir", interrupted)
+    held = sys.stderr
+    with pytest.raises(KeyboardInterrupt):
+        tk._usage_header_board()
+    # ...and it still hands stderr and the no-spawn flag back on the way out.
+    assert tk._NO_SPAWN is False and sys.stderr is held
 
 
 # ---- narrow terminal ----------------------------------------------------

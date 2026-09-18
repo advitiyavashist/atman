@@ -439,8 +439,17 @@ STALE_READING_SECS = 3600
 # is (see _fit) -- staleness is the honesty-bearing part, a reset is detail.
 HINT_MAX = 48
 PROVIDER_MAX = 12
-RESET_MAX = 24
+# The longest provider reset phrase carried at all. NOT a clip: a phrase over
+# this is dropped whole (see reset_label), because a trimmed time is a wrong
+# time, not a short one. What actually prints is decided by COMPACT_MAX/_fit.
+RESET_MAX = 48
 COMPACT_MAX = 56
+# A raw epoch is a number, not a reset a user can read.
+_EPOCHISH = re.compile(r"^\d{9,13}$")
+# "America/Los_Angeles", "Etc/GMT+3", "America/Argentina/Buenos_Aires": in a
+# reset phrase a slash is a timezone. Bare letters only -- no dots, no digits
+# in a segment -- so a real path cannot pass as one.
+_TZ_TOKEN = re.compile(r"^[A-Za-z]{3,}(?:/[A-Za-z_+-]{2,}){1,2}$")
 # A never-read provider is not a failed read: it must not say "re-login".
 NEVER_READ_HINT = "not read yet (atm harness usage)"
 # Defensive scrub for the hint, the only free-ish text a header repeats. Real
@@ -494,13 +503,32 @@ def pct_label(pct):
 
 
 def reset_label(reset_at, now=None):
-    """The provider's reset, short. Non-ISO text is the provider's own words."""
+    """The provider's reset, short. Non-ISO text is the provider's own words.
+
+    A reset is a TIME, so it is whole or it is nothing. `_reset_of` copies
+    whatever the provider sent verbatim, and clipping that mid-string is how
+    "2026-09-19 09:00:00 America/Los_Angeles" becomes "2026-09-19 09:00:00"
+    (seven hours wrong, read as UTC) and "Fri, 19 Sep 2026 09:00:00 GMT"
+    becomes "Fri, 19 Sep 2026 09:00:0" (a digit gone, still looking
+    complete). Neither is a shorter truth. So an unparseable phrase is kept
+    entire or dropped, never trimmed -- including at a word boundary, because
+    the word at the end is exactly the timezone that makes it unambiguous.
+    _fit then drops it whole again if the assembled line has no room.
+    """
     text = " ".join((reset_at or "").split())
     if not text:
         return ""
     when = parse_iso(text)
     if when is None:
-        return _scrub(text)[:RESET_MAX]
+        # A raw epoch is a number, not something to show a user.
+        if _EPOCHISH.match(text):
+            return ""
+        phrase = _scrub_reset(text)
+        # Scrubbed something out, or too long to ever print: say nothing
+        # rather than something that reads like a time and is not one.
+        if "[redacted]" in phrase or len(phrase) > RESET_MAX:
+            return ""
+        return phrase
     now = now or utcnow()
     if when.date() == now.date():
         return when.strftime("%H:%M UTC")
@@ -514,6 +542,16 @@ def _scrub(text):
         out.append("[redacted]" if len(word) >= 24 or _HINT_UNSAFE.search(word)
                    else word)
     return " ".join(out)
+
+
+def _scrub_reset(text):
+    """_scrub for a reset phrase, where a "/" is a timezone, not a path.
+
+    Narrow on purpose: only an IANA-shaped zone token (letters and
+    underscores, two or three segments) is exempt, and only inside a reset --
+    a hint never gets this exemption.
+    """
+    return " ".join(w if _TZ_TOKEN.match(w) else _scrub(w) for w in text.split())
 
 
 def _short_hint(rec):

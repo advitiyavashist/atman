@@ -2568,7 +2568,9 @@ def _usage_header_board():
     sys.stderr = io.StringIO()
     try:
         board = board_dir(discover_children=True)
-    except BaseException:  # SystemExit from a refusal included
+    except (Exception, SystemExit):
+        # SystemExit is how a refusal arrives. KeyboardInterrupt is not
+        # caught: a Ctrl-C belongs to the user, not to a usage header.
         return ""
     finally:
         _NO_SPAWN = was_no_spawn
