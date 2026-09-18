@@ -1,6 +1,6 @@
 """T-1050: harness topic is a sibling; facade still exposes the same callables.
 
-Proven red on origin/main@de557a2: tickets_harness.py does not exist, so
+Proven red on origin/main@8db72b1: tickets_harness.py does not exist, so
 importing it fails. After the extract the facade aliases must point at
 the sibling, and ok must stay an exit-status fact (not replied).
 """

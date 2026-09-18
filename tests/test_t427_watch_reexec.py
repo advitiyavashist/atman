@@ -19,7 +19,7 @@ import pytest
 from test_wakeup import board  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ("tickets.py", "session_adapters.py")
+FILES = ("tickets.py", "session_adapters.py", "tickets_harness.py")
 PACKAGE = ROOT / "src" / "ticket_board"
 START = "# --- T-427: watch idle-boundary self-execv"
 END = "# --- end T-427 ---"

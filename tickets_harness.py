@@ -54,7 +54,7 @@ NEED = [
     "hours_since", "load_agents", "load_workforce", "now",
     "parse_cursor_admin", "parse_provider_quota", "print_integration_catalog",
     "print_recorded_usage", "reclaim_stale_watch_lock", "retarget_stale_local_codex",
-    "whoami",
+    "whoami", "_provider_usage", "_maybe_refresh_provider_usage",
 ]
 
 
@@ -447,6 +447,9 @@ def cmd_harness_usage(a, board):
     print("")
     print("Unsupported or missing remaining/reset is unknown, not exhausted. Codex stays cataloged.")
     print("Spawn only harnesses the operator chooses.")
+    _maybe_refresh_provider_usage(board)
+    for line in _provider_usage().format_ledger_lines(board):
+        print(line)
 
 def cmd_harness_available(a, board):
     """Probe the integration catalog and auto-check usage. Print every row. Do not spawn."""
@@ -455,6 +458,7 @@ def cmd_harness_available(a, board):
     attach_catalog_usage(rows)
     print_integration_catalog(rows, note)
     print("")
+    _maybe_refresh_provider_usage(board)
     print_recorded_usage(board)
     print("")
     print("USAGE: unsupported or missing remaining/reset is unknown, not exhausted. Do not spawn a FAIL or exhausted seat.")

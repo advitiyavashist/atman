@@ -15952,6 +15952,9 @@ _USAGE_RESET_KEYS = frozenset({
 
 
 # T-1050: harness topic lives in tickets_harness.py; names stay on the facade.
+_here = os.path.dirname(os.path.realpath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
 try:
     import tickets_harness as _tickets_harness
 except ImportError:
