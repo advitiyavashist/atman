@@ -396,15 +396,28 @@ def test_entry_points_call_shared_dep_released():
         "cmd_done": ("_reopen_unverified_successors", "_maybe_record_release_override"),
         "_reopen_unverified_successors": ("dep_released", "_retire_stale_gated_start"),
     }
+    siblings = list(ROOT.glob("tickets_*.py"))
     for path in TOOLS:
         src = path.read_text()
         for fn, needles in fns.items():
             start = src.find("def %s(" % fn)
+            body_path = path
+            if start == -1 and path.name == "tickets.py":
+                for sib in siblings:
+                    sib_src = sib.read_text()
+                    start = sib_src.find("def %s(" % fn)
+                    if start != -1:
+                        src_fn, body_path = sib_src, sib
+                        break
+                else:
+                    src_fn = src
+            else:
+                src_fn = src
             assert start != -1, "%s missing %s" % (path.name, fn)
-            nxt = src.find("\ndef ", start + 4)
-            body = src[start:nxt if nxt != -1 else None]
+            nxt = src_fn.find("\ndef ", start + 4)
+            body = src_fn[start:nxt if nxt != -1 else None]
             assert any(n in body for n in needles), (
-                "%s %s does not call shared gate %s" % (path.name, fn, needles))
+                "%s %s does not call shared gate %s" % (body_path.name, fn, needles))
         if path.name == "tickets.py":
             start = src.find("def cmd_dispatch(")
             assert start != -1
