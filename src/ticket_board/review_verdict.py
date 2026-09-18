@@ -61,6 +61,15 @@ def submitted_sha(t):
     return commit if PIN_SHA_RE.fullmatch(commit) else ""
 
 
+def displayed_review_head(t):
+    """Full 40-char review head for CLI output, or '' if it was never recorded."""
+    head = normalize_sha(t.get("review_head"))
+    if FULL_SHA_RE.fullmatch(head):
+        return head
+    head = submitted_sha(t)
+    return head if FULL_SHA_RE.fullmatch(head) else ""
+
+
 def sha_match(a, b):
     a, b = (a or "").lower(), (b or "").lower()
     if not a or not b:
@@ -99,6 +108,10 @@ def refuse(t, reviewer, sha, kind, require_full=False, notes="", reason=""):
             tid, author, kind)
     sha = normalize_sha(sha)
     if require_full and not FULL_SHA_RE.fullmatch(sha):
+        head = displayed_review_head(t)
+        if head:
+            return ("%s: --sha must be the full 40-character submitted review head (%s)"
+                    % (tid, head))
         return "%s: --sha must be the full 40-character submitted review head" % tid
     if not SHA_RE.fullmatch(sha):
         return "%s: --sha must be a git object name (7-40 hex chars)" % tid

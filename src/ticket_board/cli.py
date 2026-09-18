@@ -1667,6 +1667,9 @@ def detail(board, t, tickets):
         if t["status"] == "claimed" and tm["since_update"] is not None:
             stamp += ", last update %s ago" % fmt_hours(tm["since_update"])
         out.append("Time: " + stamp)
+    head = _rv.displayed_review_head(t)
+    if head:
+        out.append("review_head: %s" % head)
     if t.get("body"):
         out.append("")
         out.append(t["body"])
@@ -2539,6 +2542,11 @@ def cmd_review(a, board):
     tm = timing(t)
     print("%s -> IN REVIEW after %s of work; master%s notified. Claim your next ticket." % (
         t["id"], fmt_hours(tm["active"]), (" (%s)" % m["owner"]) if m else ""))
+    if t.get("commit"):
+        print("pinned %s" % t["commit"])
+    head = t.get("review_head") or ""
+    if head:
+        print("review_head: %s" % head)
 
 
 def cmd_accept(a, board):

@@ -2941,6 +2941,9 @@ def detail(board, t, tickets):
         out.append("Open questions: %s" % (", ".join(qs) if isinstance(qs, list) else qs))
     if t.get("pr"):
         out.append("PR: %s" % t["pr"])
+    head = _review_verdict().displayed_review_head(t)
+    if head:
+        out.append("review_head: %s" % head)
     if t.get("discarded_reason"):
         out.append("discarded: %s" % t["discarded_reason"])
     if t.get("body"):
@@ -4555,6 +4558,9 @@ def cmd_review(a, board):
             t["commit"], t.get("repo") or "?",
             "artifact tree %s" % t["artifact_dir"] if t.get("repo_source") == "artifact"
             else "this checkout -- pass --artifact <dir> if the deliverable is in another repo"))
+    head = t.get("review_head") or ""
+    if head:
+        print("review_head: %s" % head)
     if cos_name:
         who = "CoS (%s) tasked" % cos_name
         if master_name and master_name != cos_name:
