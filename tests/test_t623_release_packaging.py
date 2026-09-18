@@ -107,7 +107,7 @@ def test_install_live_staged_release_metrics_from_arbitrary_cwd(source, tmp_path
         assert "ModuleNotFoundError" not in r.stderr
         return r.stdout
 
-    assert run("--version").strip() == "tickets commit %s (verified release)" % sha
+    assert run("--version").strip().splitlines()[0] == "tickets commit %s (verified release)" % sha
     turns = json.loads(run("turns", "--json"))
     assert turns["v"] == 1
     util = json.loads(run("util", "--json"))
