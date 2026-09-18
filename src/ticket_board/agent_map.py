@@ -55,11 +55,24 @@ def clip(text, n=TITLE_MAX):
 
 
 def _runs(events, receipts):
-    """Pair run_start/run_end by run_id (agent#run_no when absent)."""
-    runs, order = {}, []
+    """Pair run_start/run_end by run_id; legacy rows pair in order, not by run_no.
 
-    def slot(seat, run_id, run_no):
-        key = run_id or "%s#%s" % (seat, run_no)
+    Run numbers restart. A key of ``seat#run_no`` folded 112 of 572 historical
+    rows into later ones. Starts without a run_id therefore open a new slot;
+    an end closes the most recent open start for that seat+run_no.
+
+    A dry_run end still consumes a matching unflagged start so the start
+    cannot linger as a phantom STALLED row.
+    """
+    runs, order = {}, []
+    legacy_seq = [0]
+
+    def _new(seat, run_id, run_no):
+        if run_id:
+            key = run_id
+        else:
+            legacy_seq[0] += 1
+            key = "legacy:%s#%s#%d" % (seat, run_no, legacy_seq[0])
         if key not in runs:
             runs[key] = {"seat": seat, "run_id": run_id or "", "run_no": run_no,
                          "ticket": "", "harness": "", "started": "", "ended": "",
@@ -67,11 +80,46 @@ def _runs(events, receipts):
             order.append(key)
         return runs[key]
 
+    def _open_legacy(seat, run_no):
+        for key in reversed(order):
+            r = runs[key]
+            if r["seat"] == seat and r["run_no"] == run_no and r["open"] and not r["run_id"]:
+                return r
+        return None
+
+    def _drop(key):
+        runs.pop(key, None)
+        if key in order:
+            order.remove(key)
+
+    def slot(seat, run_id, run_no, kind="run_start"):
+        run_id = run_id or ""
+        if run_id:
+            return _new(seat, run_id, run_no)
+        if kind == "run_end":
+            hit = _open_legacy(seat, run_no)
+            if hit:
+                return hit
+        return _new(seat, "", run_no)
+
     for e in events:
         kind = e.get("kind")
-        if kind not in ("run_start", "run_end") or e.get("dry_run") or not e.get("agent"):
+        if kind not in ("run_start", "run_end") or not e.get("agent"):
             continue
-        r = slot(e["agent"], e.get("run_id"), e.get("run_no"))
+        seat, run_id, run_no = e["agent"], e.get("run_id") or "", e.get("run_no")
+        if e.get("dry_run"):
+            if kind == "run_end":
+                if run_id and run_id in runs and runs[run_id]["open"]:
+                    _drop(run_id)
+                elif not run_id:
+                    hit = _open_legacy(seat, run_no)
+                    if hit:
+                        _drop(next(k for k in order if runs[k] is hit))
+            continue
+        r = slot(seat, run_id, run_no, kind)
+        r["seat"] = r["seat"] or seat
+        if r["run_no"] is None:
+            r["run_no"] = run_no
         r["ticket"] = r["ticket"] or e.get("ticket") or ""
         r["harness"] = r["harness"] or e.get("harness") or ""
         r["trigger"] = r["trigger"] or list(e.get("trigger") or [])

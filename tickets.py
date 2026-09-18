@@ -5227,14 +5227,19 @@ class _read_only_liveness:
     """
 
     def __enter__(self):
-        self._prev = {k: getattr(_WATCH_TABLE, k, None)
-                      for k in ("bound", "rows", "available", "cwds", "read_only")}
+        self._had = {}
+        for k in ("bound", "rows", "available", "cwds", "read_only"):
+            if hasattr(_WATCH_TABLE, k):
+                self._had[k] = getattr(_WATCH_TABLE, k)
         _WATCH_TABLE.bound, _WATCH_TABLE.rows, _WATCH_TABLE.available = True, [], False
         _WATCH_TABLE.cwds, _WATCH_TABLE.read_only = {}, True
 
     def __exit__(self, *exc):
-        for k, v in self._prev.items():
-            setattr(_WATCH_TABLE, k, v)
+        for k in ("bound", "rows", "available", "cwds", "read_only"):
+            if k in self._had:
+                setattr(_WATCH_TABLE, k, self._had[k])
+            elif hasattr(_WATCH_TABLE, k):
+                delattr(_WATCH_TABLE, k)
 
 
 def _watch_table_rows():
