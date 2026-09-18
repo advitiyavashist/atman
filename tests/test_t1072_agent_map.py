@@ -155,7 +155,10 @@ def test_text_output_truncates_long_titles_and_says_unknown(board):
     r = cli(board, "agents")
     assert r.returncode == 0, r.stderr
     out = r.stdout
-    assert out.splitlines()[0].startswith("1 agents running")
+    # T-1076 put a per-provider usage header above the map; the map itself is
+    # still the first thing after it.
+    body = [ln for ln in out.splitlines() if not ln.startswith("usage  ")]
+    assert body[0].startswith("1 agents running")
     assert LONG not in out and LONG.strip()[:30] in out and "..." in out
     assert max(len(ln) for ln in out.splitlines()) < 120
     assert "REJECT aaaaaaa" in out and "ACCEPT bbbbbbb" in out
@@ -189,7 +192,12 @@ def test_remote_token_names_and_old_receipt_do_not_split_a_run():
 
 def test_empty_board_prints_zero(board):
     r = cli(board, "agents")
-    assert r.returncode == 0 and r.stdout.startswith("0 agents running")
+    assert r.returncode == 0
+    # T-1076 usage header first, then the map. A board with nothing read says
+    # so; it never prints a number it does not have.
+    lines = r.stdout.splitlines()
+    assert lines[0] == "usage  no provider read yet (atm harness usage)"
+    assert lines[1].startswith("0 agents running")
     assert "no seat runs recorded" in r.stdout
 
 
