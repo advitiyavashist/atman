@@ -439,9 +439,13 @@ def test_generic_cursor_child_claiming_named_seat_fails_preflight():
 
 def test_t686_wires_auth_v2_into_tickets():
     """T-686 implements probes/spawn/pause using the frozen T-685 contract."""
+    import importlib.util
     text = (ROOT / "tickets.py").read_text()
     assert "auth_v2_contract" in text
-    assert "def harness_auth_probe" in text
+    spec = importlib.util.spec_from_file_location("tickets_t685_facade", ROOT / "tickets.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    assert callable(tool.harness_auth_probe)
 
 
 def test_incomplete_or_missing_context_fails_preflight_and_is_not_authoritative():
