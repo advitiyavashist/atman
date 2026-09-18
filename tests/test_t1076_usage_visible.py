@@ -274,7 +274,7 @@ def test_the_age_outlives_the_reset_when_the_line_is_tight(board):
     assert "1789145400" not in pu.format_compact_line(
         pu.record_observed_limit("claude", "cap", iso(-0.2), "1789145400"))
     # And a credentials path in the field is still never printed.
-    assert pu.reset_label("reset=/Users/nobody/.claude/.credentials.json") == ""
+    assert pu.reset_label("reset=/Users/operator/.claude/.credentials.json") == ""
 
 
 def test_an_elapsed_reset_is_not_printed_as_if_it_were_ahead():
@@ -784,7 +784,7 @@ def test_narrow_terminal_is_not_mangled(board):
 
 def test_no_credential_value_or_path_reaches_a_surface(board):
     secret = "sk-ant-oat01-NOTAREALTOKEN00000000"
-    credpath = "/Users/nobody/.claude/.credentials.json"
+    credpath = "/Users/operator/.claude/.credentials.json"
     seed_ledger(
         board,
         claude=limited_reading(message="limit hit; token %s from %s" % (secret, credpath)),

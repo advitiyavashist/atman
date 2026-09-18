@@ -1,13 +1,33 @@
 """Publication checks for the repaired PR #211 demo provenance."""
 
+from __future__ import annotations
+
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 
-from PIL import Image
+import pytest
+
+# Pillow is in the contracts extra (CI installs `.[contracts]`). A bare
+# checkout can skip; CI sets TICKET_BOARD_CONTRACTS_REQUIRED=1 so a missing
+# extra is a failure, not a silent skip -- otherwise demo provenance would
+# stop being checked. A bare importorskip is not acceptable.
+_REQUIRED = os.environ.get("TICKET_BOARD_CONTRACTS_REQUIRED") == "1"
+_HINT = "install the contract toolchain: pip install -e '.[contracts]'"
+
+try:
+    from PIL import Image
+except ImportError as exc:  # pragma: no cover - environment-dependent
+    if _REQUIRED:
+        raise RuntimeError(
+            f"TICKET_BOARD_CONTRACTS_REQUIRED=1 but Pillow is missing "
+            f"({exc}). {_HINT}"
+        ) from exc
+    pytest.skip(_HINT, allow_module_level=True)
 
 
 ROOT = Path(__file__).resolve().parents[1]
