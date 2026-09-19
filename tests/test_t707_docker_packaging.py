@@ -26,7 +26,8 @@ def test_dockerfile_is_versioned_and_pins_python():
     assert "org.opencontainers.image.revision" in text
     assert "pip install --no-cache-dir --constraint packaging/constraints.txt ." in text
     assert "ENTRYPOINT [\"tickets\"]" in text
-    assert _pyproject_version() == "0.2.0"
+    # The image version must track the package version, whatever release it is.
+    assert "ARG ATMAN_VERSION=%s" % _pyproject_version() in text
 
 
 def test_constraints_file_exists_for_reproducible_pip():
