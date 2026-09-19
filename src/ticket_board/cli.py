@@ -1956,6 +1956,8 @@ def cmd_graph(a, board):
         print("broken references:")
         for tid, miss in ghosts.items():
             print("  %s -> %s (no such ticket)" % (tid, ", ".join(miss)))
+            print("    repair: atm dep %s --drop %s   (re-point: add --after <id>)"
+                  % (tid, ",".join(miss)))
 
 
 def cmd_map(a, board):
