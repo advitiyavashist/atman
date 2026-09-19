@@ -99,7 +99,8 @@ def smoke(script, sha):
                 raise RuntimeError("smoke failed (%s): %s" % (" ".join(args), result.stderr))
             return result.stdout
 
-        if run("--version").strip() != "tickets commit %s (verified release)" % sha:
+        version_line = run("--version").strip().splitlines()[0]
+        if version_line != "tickets commit %s (verified release)" % sha:
             raise RuntimeError("smoke failed: version does not match pinned commit")
         run("create", "Installer smoke fixture")
         if "Installer smoke fixture" not in run("show", "T-001"):

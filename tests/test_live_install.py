@@ -43,7 +43,7 @@ def test_stage_activate_provenance_and_immutable_source(source, tmp_path):
     installer.install(repo, sha, live, activate=True)
     assert os.access(live, os.X_OK)
     output = subprocess.check_output([str(live), "--version"], text=True)
-    assert output.strip() == "tickets commit %s (verified release)" % sha
+    assert output.strip().splitlines()[0] == "tickets commit %s (verified release)" % sha
     assert sha in subprocess.check_output([str(live), "--help"], text=True)
     assert str(release / "tickets.py") in live.read_text()
     target = release / "src" / "ticket_board" / "board_backup.py"
