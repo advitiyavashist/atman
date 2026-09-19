@@ -59,7 +59,9 @@ def run(board, *args, agent="", stdin="", env=None, cwd=None):
     # one continuous harness session would give for real; different actors,
     # or no actor at all, get different (or no-record) ids and so cannot
     # inherit each other's recorded identity.
-    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID", "TERM_SESSION_ID"):
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID", "CURSOR_CONVERSATION_ID", "CODEX_THREAD_ID",
+                "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"):
         e.pop(var, None)
     if args and args[0] == "join" and len(args) > 1 and args[1]:
         actor = args[1]
