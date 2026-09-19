@@ -8571,7 +8571,7 @@ def cmd_who(a, board):
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
         entry = wf.get(r["owner"], {}) or {}
-        harness_name = entry.get("harness") or entry.get("tool") or "claude"
+        harness_name = _seat_harness(board, r["owner"])
         ep, _ = sa.live_endpoint(board, r["owner"])
         life = lifecycle_of(board, r["owner"], workforce=wf)
         native = sa.native_wake_online(board, r["owner"])
@@ -8582,7 +8582,7 @@ def cmd_who(a, board):
         reachable = sa.is_reachable(native_online=native, watcher_online=watcher_on,
                                     remote_online=remote_on)
         print("%-14s lifecycle=%s provider=%s session=%s reachable=%s" % (
-            "", life, (ep or {}).get("provider") or harness_name,
+            "", life, (ep or {}).get("provider") or harness_name or "unknown",
             (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
             "yes" if reachable else "no"))
         usage = _provider_usage().get_reading(board, harness_name)
@@ -8728,7 +8728,7 @@ def cmd_steer(a, board):
             payload = st.frame_payload(kind, sender, text, tid, steer_id, at)
             # Native Claude inject only. Persist-watch poke would start a new
             # run; that is kill-and-replace, not a mid-run steer.
-            label = sa.wake_seat(board, seat, payload, harness=harness or "claude",
+            label = sa.wake_seat(board, seat, payload, harness=harness or provider,
                                  message_id=steer_id)
     record = st.steer_record(kind, sender, seat, text, label, steer_id, tid, at)
     note = st.ticket_note(kind, sender, seat, text, label, steer_id, at)
@@ -10344,6 +10344,21 @@ def _seat_harness(board, seat):
     return (entry.get("harness") or entry.get("tool") or "").strip()
 
 
+def _display_harness(board, seat):
+    """Who/list/self/brief: unknown, never an invented claude badge."""
+    return _seat_harness(board, seat) or "unknown"
+
+
+def _launch_harness_label(board, owner, explicit="", resolved=""):
+    """Spawn/check print: recorded name, or 'claude (default)' when invented."""
+    if (explicit or "").strip():
+        return (resolved or explicit).strip()
+    recorded = _seat_harness(board, owner)
+    if recorded:
+        return recorded
+    return "%s (default)" % ((resolved or "claude").strip() or "claude")
+
+
 def _should_poke_persist(label):
     """Native inject missed or only queued in the host UI; persist-watch remains.
 
@@ -11487,7 +11502,11 @@ def cmd_join(a, board):
     save_workforce(board, wf)
     if getattr(a, "persistent", False):
         sa = _session_adapters()
-        reg = sa.register_persistent(board, owner, harness or entry.get("harness") or "claude", now())
+        persist_harness = (harness or entry.get("harness") or "").strip()
+        persist_defaulted = not persist_harness
+        if persist_defaulted:
+            persist_harness = "claude"
+        reg = sa.register_persistent(board, owner, persist_harness, now())
         if reg.get("ok"):
             pid = (reg.get("record") or {}).get("pid")
             mode = reg.get("mode") or (reg.get("record") or {}).get("mode") or "native"
@@ -11496,10 +11515,15 @@ def cmd_join(a, board):
             lease = reg.get("lease_id") or (reg.get("record") or {}).get("lease_id") or ""
             if lease:
                 extra += "; lease %s" % lease
-            print("persistent: %s %s endpoint registered for %s (%s)" % (
-                mode, reg.get("provider"), owner, extra))
+            print("persistent: %s %s endpoint registered for %s (%s)%s" % (
+                mode, reg.get("provider"), owner, extra,
+                " [claude (default); pass --harness to pick a provider]"
+                if persist_defaulted else ""))
         else:
-            print("persistent: %s" % reg.get("reason", "registration failed"))
+            print("persistent: %s%s" % (
+                reg.get("reason", "registration failed"),
+                " [claude (default); pass --harness to pick a provider]"
+                if persist_defaulted else ""))
     join_cwd = os.path.abspath(getattr(a, "worktree", "") or "") or None
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""),
                   cwd=join_cwd)
@@ -12825,7 +12849,7 @@ def seat_brief_text(board, owner):
     second usage formatter is a second thing to keep honest.
     """
     sb = _seat_brief()
-    harness, _ = _safe(lambda: harness_of(board, owner), ("claude", "")) or ("claude", "")
+    harness = _safe(lambda: _seat_harness(board, owner), "") or ""
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     roles = _safe(lambda: roles_for(board, owner), None) or []
     m = _safe(lambda: current_master(board), None) or {}
@@ -15406,7 +15430,7 @@ def cmd_spawn(a, board):
             entry = wf.get(r["owner"], {})
             print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
                 r["owner"][:14], wlabel,
-                (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                _display_harness(board, r["owner"])[:9],
                 wake_mode_of(board, r["owner"], workforce=wf)[:10],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
@@ -15597,7 +15621,8 @@ def cmd_spawn(a, board):
                  "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
     print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; run-timeout=%sm; seat=%s pinned; log %s" % (
-        owner, pid, harness, model,
+        owner, pid, _launch_harness_label(
+            board, owner, getattr(a, "harness", "") or a.tool, harness), model,
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs,
         getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner, log_path))
     print("cmd: %s" % cmd)
@@ -16707,7 +16732,7 @@ def cmd_harness(a, board):
             e = wf.get(n, {}) or {}
             rec = _agent_rec(board, n) or {}
             print("%-16s %-12s %-14s %s" % (
-                n[:16], (e.get("harness") or e.get("tool") or "claude")[:12],
+                n[:16], _display_harness(board, n)[:12],
                 _harness_check_label(rec.get("harness_check")),
                 e.get("cmd") or "(built-in)"))
         return
@@ -16715,7 +16740,9 @@ def cmd_harness(a, board):
     if owner.startswith("agent-"):
         sys.exit("harness check needs an agent name: atm harness check <name>")
     harness, cmd_template = harness_of(board, owner, a.harness, a.cmd_template)
-    print("checking %s: harness=%s%s" % (owner, harness, (" cmd=%s" % cmd_template) if cmd_template else ""))
+    print("checking %s: harness=%s%s" % (
+        owner, _launch_harness_label(board, owner, a.harness, harness),
+        (" cmd=%s" % cmd_template) if cmd_template else ""))
     res = harness_probe(board, owner, a.harness, a.cmd_template, a.model, a.cwd, a.timeout)
     _safe(lambda: _agent_set(board, owner, harness_check=res), None)
     print("  cmd:      %s" % res["cmd"])
@@ -20619,7 +20646,7 @@ def cmd_self(a, board):
     print("why:    %s" % why)
     print("whoami: %s" % whoami())
     if board and seat and not seat.startswith("agent-"):
-        harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+        harness = _seat_harness(board, seat)
         sa = _session_adapters()
         ep, was_stale = sa.live_endpoint(board, seat)
         stored = sa.read_endpoint(board, seat)
@@ -20633,6 +20660,9 @@ def cmd_self(a, board):
         elif was_stale:
             print("persistent: no -- seat %s had a native endpoint but it went stale "
                   "(re-register with `atm join %s --persistent`)" % (seat, seat))
+        elif not harness:
+            print("persistent: no -- seat %s has no harness recorded (unknown); "
+                  "will not probe claude" % seat)
         else:
             probe = sa.probe_provider(sa.provider_for_harness(harness) or harness)
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
