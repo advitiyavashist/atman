@@ -37,10 +37,12 @@ import argparse
 import errno
 import glob
 import hashlib
+import hmac
 import io
 import json
 import os
 import re
+import secrets
 import shlex
 import sys
 import threading
@@ -17219,6 +17221,8 @@ body[data-work-view=columns] #workJump{display:none}
 </div>
 </main>
 <script>
+const UI_TOKEN="";
+function writeHeaders(){const h={'Content-Type':'application/json'};if(UI_TOKEN)h['X-Atman-Token']=UI_TOKEN;return h}
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
 // Server sends timestamps as raw ISO-8601 UTC. Render in whatever timezone
@@ -17263,7 +17267,7 @@ function authReadiness(a){
 }
 async function reconnectAuth(name){
   try{
-    const r=await fetch('/auth-reconnect',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/auth-reconnect',{method:'POST',headers:writeHeaders(),
       body:JSON.stringify({agent:name})});
     const out=await r.json();
     const sel=(window.CSS&&CSS.escape)?CSS.escape(name):name;
@@ -17807,7 +17811,7 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   localStorage.setItem('tickets-ui-from',from);
   btn.disabled=true;msg.className='';msg.textContent='posting…';
   try{
-    const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/msg',{method:'POST',headers:writeHeaders(),
       body:JSON.stringify({from,text,to,re,kind})});
     const out=await r.json();
     if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
@@ -18924,12 +18928,46 @@ def _ui_auth_reconnect(board, payload):
     }
 
 
+def _ui_loopback_name(name):
+    name = (name or "").strip().lower()
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    return name in ("127.0.0.1", "localhost", "::1")
+
+
+def _ui_bind_host_ok(host):
+    """--host may only bind loopback. localhost-only is enforced, not a default."""
+    return _ui_loopback_name(host)
+
+
+def _ui_host_header_is_loopback(host_header):
+    """Host must be a loopback name (closes DNS rebinding; T-1105 / T-1103 §5)."""
+    raw = (host_header or "").strip()
+    if not raw:
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse("//" + raw)
+    return _ui_loopback_name(parsed.hostname or "")
+
+
+def _ui_new_launch_token():
+    return secrets.token_urlsafe(32)
+
+
+def _ui_token_ok(headers, token):
+    got = (headers.get("X-Atman-Token") or "").strip()
+    if not token or not got or len(got) != len(token):
+        return False
+    return hmac.compare_digest(got, token)
+
+
 def _ui_msg_origin_ok(headers):
     """Browser writes send Origin; it must match Host (same-origin).
 
     Local API clients (curl, urllib, tickets tests) omit Origin — that is
-    allowed once Content-Type is JSON and `from` is a registered agent.
+    allowed once Content-Type is JSON and the launch token is present.
     A present Origin that is missing, `null`, or a different host is rejected.
+    Host loopback is a separate check (_ui_host_header_is_loopback).
     """
     origin = (headers.get("Origin") or "").strip()
     if not origin:
@@ -18944,31 +18982,58 @@ def _ui_msg_origin_ok(headers):
     return parsed.netloc.lower() == host.lower()
 
 
-def _ui_page():
+def _ui_page(token=""):
     """T-889 hook: UI_HTML with the Work view module spliced in at its three
     named placeholders. Missing module -> the shell's own fallback graph."""
     mod = _safe(_work_view, None)
     css = getattr(mod, "WORK_CSS", "") if mod else ""
     html = getattr(mod, "WORK_HTML", "") if mod else ""
     js = getattr(mod, "WORK_JS", "") if mod else ""
-    return (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
+    page = (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
             .replace("<!--WORK_VIEW:html-->", html)
             .replace("<!--WORK_VIEW:js-->", js))
+    return page.replace('const UI_TOKEN="";',
+                        "const UI_TOKEN=%s;" % json.dumps(token or ""))
 
 
 def cmd_ui(a, board):
     """Local status UI: serves an auto-refreshing page, /board.json, and a
     composer POST at /msg that posts through post_message() -- same board,
     same messages.jsonl, no second store. /board.json?seat=<name> filters
-    messages to that agent-scoped thread (Advitiya PRIORITY agent chats)."""
+    messages to that agent-scoped thread (Advitiya PRIORITY agent chats).
+    Writes require a per-launch token; Host must be loopback (T-1105)."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     if a.json:
         print(json.dumps(board_snapshot(board), indent=2))
         return
+    if not _ui_bind_host_ok(a.host):
+        sys.exit("atm ui: --host must be loopback (127.0.0.1, localhost, ::1); got %s"
+                 % (a.host or ""))
+    token = _ui_new_launch_token()
 
     class H(BaseHTTPRequestHandler):
+        def _send_json(self, status, out):
+            body = json.dumps(out).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _gate(self, write=False):
+            if not _ui_host_header_is_loopback(self.headers.get("Host") or ""):
+                self._send_json(400, {"ok": False, "error": "host must be loopback"})
+                return False
+            if write and not _ui_token_ok(self.headers, token):
+                self._send_json(400, {"ok": False, "error": "launch token required"})
+                return False
+            return True
+
         def do_GET(self):
+            if not self._gate(write=False):
+                return
             if self.path.startswith("/board.json"):
                 from urllib.parse import parse_qs, urlparse
                 seat = (parse_qs(urlparse(self.path).query).get("seat") or [""])[0]
@@ -18981,7 +19046,7 @@ def cmd_ui(a, board):
                 })).encode()
                 ctype = "application/json"
             else:
-                body = _ui_page().encode()
+                body = _ui_page(token).encode()
                 ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
@@ -18991,18 +19056,15 @@ def cmd_ui(a, board):
             self.wfile.write(body)
 
         def do_POST(self):
+            if not self._gate(write=True):
+                return
             if self.path.startswith("/auth-reconnect"):
                 try:
                     payload = _ui_read_json_body(self)
                     status, out = _ui_auth_reconnect(board, payload)
                 except Exception as e:  # noqa: BLE001 - always answer, never hang
                     status, out = 400, {"ok": False, "executed": False, "ran": False, "error": str(e)}
-                body = json.dumps(out).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(status, out)
                 return
             if not self.path.startswith("/msg"):
                 self.send_response(404)
@@ -19025,12 +19087,7 @@ def cmd_ui(a, board):
                 status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
             except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
                 status, out = 400, {"ok": False, "error": str(e)}
-            body = json.dumps(out).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(status, out)
 
         def log_message(self, *args):
             pass
