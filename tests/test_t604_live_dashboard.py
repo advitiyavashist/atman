@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from ui_server_harness import isolated_ui_env, page_token  # noqa: E402
 from test_wakeup import board, run  # noqa: F401
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
@@ -35,10 +36,13 @@ def _wait_up(port, timeout=20):
 class _Server:
     def __init__(self, board, port):
         self.port = port
-        env = dict(os.environ, TICKETS_DIR=str(board))
+        # T-1103: isolated env (no outer harness session), operator = boss,
+        # and every write carries the per-launch token from the page.
+        env = isolated_ui_env(board)
+        self._token = ""
         self.proc = subprocess.Popen(
             [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1",
-             "--parent-pid", str(os.getpid())],
+             "--parent-pid", str(os.getpid()), "--operator", "boss"],
             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -54,7 +58,8 @@ class _Server:
         req = urllib.request.Request(
             "http://127.0.0.1:%d%s" % (self.port, path),
             data=json.dumps(payload).encode(), method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     "X-Atman-Token": self._token or page_token(self.port)},
         )
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read())

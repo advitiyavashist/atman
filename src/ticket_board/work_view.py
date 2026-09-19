@@ -421,6 +421,72 @@ def make_release_override(kind, by, at, reason=""):
     return {"kind": kind, "by": by, "at": at, "reason": reason or ""}
 
 
+# --- T-1103 typed blocker chips ------------------------------------------------
+
+SEAT_OFFLINE_ADAPTER = ("offline", "queued-offline", "failed")
+AUTH_BLOCKING = ("login_required", "expired")
+_STATUS_WORD = {"open": "open", "claimed": "in flight", "review": "in review",
+                "blocked": "blocked", "done": "done"}
+
+
+def blockers_of(node, by_id, seats=None):
+    """Why this plan node cannot move, as typed chips. Pure; records only.
+
+    ``by_id`` maps ticket id -> ticket record; ``seats`` maps seat name ->
+    {limited, limit_until, adapter_state, state, auth_state, auth_label,
+    auth_cmd}. Kinds: dep_unaccepted (dep done, no structured accept),
+    dep_open (dep not done), seat_limited, seat_offline, auth, hold, capture,
+    blocked, and unaccepted (this node is done without an accept).
+    """
+    seats = seats or {}
+    out = []
+    tid = node.get("id") or ""
+    phase = node.get("phase") or ""
+    if phase == "done":
+        if node.get("unverified"):
+            out.append({"kind": "unaccepted", "on": tid, "text": "done, not accepted",
+                        "cmd": "atm accept %s --sha <review head> --notes \"...\"" % tid})
+        return out
+    for d in node.get("deps") or []:
+        dep = by_id.get(d)
+        if dep is None:
+            out.append({"kind": "dep_open", "on": d, "text": "dep %s is not on this board" % d,
+                        "cmd": "atm show %s" % d})
+        elif dep_released(dep):
+            continue
+        elif dep.get("status") == "done":
+            out.append({"kind": "dep_unaccepted", "on": d, "text": "dep %s done, not accepted" % d,
+                        "cmd": "atm accept %s --sha <review head> --notes \"...\"" % d})
+        else:
+            out.append({"kind": "dep_open", "on": d,
+                        "text": "dep %s still %s" % (d, _STATUS_WORD.get(dep.get("status"), dep.get("status") or "open")),
+                        "cmd": "atm show %s" % d})
+    wait = node.get("wait") or {}
+    if wait.get("kind") in ("hold", "capture", "blocked"):
+        out.append({"kind": wait["kind"], "on": tid, "text": wait.get("text") or wait["kind"],
+                    "cmd": wait.get("cmd") or ""})
+    seat = (node.get("owner") or node.get("reserved_for")
+            or ((node.get("dispatch") or {}).get("to") or "")).strip()
+    s = seats.get(seat) if seat else None
+    if s:
+        if s.get("limited"):
+            out.append({"kind": "seat_limited", "on": seat,
+                        "text": "seat %s limited until %s" % (seat, s.get("limit_until") or "reset unknown"),
+                        "cmd": "atm harness usage"})
+        waiting_for_seat = phase in ("posted", "reserved", "ready")
+        if (waiting_for_seat and s.get("adapter_state") in SEAT_OFFLINE_ADAPTER) or \
+                (phase in ("working", "review") and s.get("state") == "DOWN"):
+            out.append({"kind": "seat_offline", "on": seat,
+                        "text": "seat %s offline" % seat + (
+                            " (%s)" % s["adapter_state"] if s.get("adapter_state") in SEAT_OFFLINE_ADAPTER else ""),
+                        "cmd": "atm spawn %s --persist" % seat})
+        if s.get("auth_state") in AUTH_BLOCKING:
+            out.append({"kind": "auth", "on": seat,
+                        "text": "seat %s %s" % (seat, (s.get("auth_label") or "logged out").lower()),
+                        "cmd": s.get("auth_cmd") or ""})
+    return out
+
+
 def refuse_unreleased_reason(t, tickets, only_done=False):
     """Exit text when t's deps are not released, or ''."""
     pred = unreleased_dep_id(t, tickets, only_done=only_done)
@@ -1302,6 +1368,14 @@ body[data-theme=light] .wv{--wv-acc:#6b4f14;--wv-focus:#6b4f14}
 .wv-empty .lead{font-size:16px;font-weight:650;margin:0 0 4px}
 .wv-empty p{margin:0 0 8px;color:var(--mute);font-size:13px}
 .wv-empty .wv-cmd{white-space:pre-wrap}
+.wv-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.wv-chip{font-size:10.5px;line-height:1.3;border:1px solid var(--line);border-radius:999px;padding:1px 6px;color:var(--mute);background:var(--chip)}
+.wv-chip.k-dep_unaccepted,.wv-chip.k-unaccepted{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+.wv-chip.k-seat_limited,.wv-chip.k-seat_offline,.wv-chip.k-auth,.wv-chip.k-blocked{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+.wv-chip.k-hold,.wv-chip.k-capture{color:var(--warn)}
+.wv-run{font-size:11px;color:var(--flight);font-weight:650}
+.wv-run::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--flight);margin-right:5px;animation:wvpulse 1.6s ease-in-out infinite}
+@keyframes wvpulse{0%,100%{opacity:1}50%{opacity:.25}}
 .wv-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 @media(prefers-reduced-motion:reduce){.wv *{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 """
@@ -1378,11 +1452,14 @@ window.AtmanWork=(function(){
     const auto=n.kind==='automated'&&!n.escalated;
     const phLab=auto?'automated':(n.escalated?'escalated':(unv?'Done · unverified':(PH[n.phase]||n.phase)));
     const ariaPh=auto?'automated':(n.escalated?'escalated':(unv?'Done, unverified':(PH[n.phase]||n.phase)));
-    const cls='wv-node ph-'+esc(n.phase)+(auto?' kind-auto':'')+(n.escalated?' kind-esc':'')+(unv?' unverified':'');
+    const cls='wv-node ph-'+esc(n.phase)+(auto?' kind-auto':'')+(n.escalated?' kind-esc':'')+(unv?' unverified':'')+(n.running?' running':'');
+    // T-1103: typed blocker chips and a running pulse, both computed server-side from records
+    const chips=(n.blockers||[]).length?'<span class="wv-chips">'+n.blockers.map(b=>'<span class="wv-chip k-'+esc(b.kind)+'" title="'+esc(b.cmd||'')+'">'+esc(b.text)+'</span>').join('')+'</span>':'';
+    const run=n.running?'<span class="wv-run" title="a seat run is working this ticket now">running'+(n.running.seat?' · '+esc(n.running.seat):'')+'</span>':'';
     return '<button type="button" class="'+cls+'" data-id="'+esc(n.id)+'" aria-pressed="'+(SEL===n.id?'true':'false')+'" aria-label="'+esc(n.id+' '+n.title+', '+ariaPh+(wh?', '+wh:'')+(n.wait&&n.wait.text?', '+n.wait.text:''))+'">'+
       '<span class="top"><span class="id">'+esc(n.id)+'</span><span class="ph">'+esc(phLab)+'</span></span>'+
       '<span class="t">'+esc(n.title)+'</span>'+
-      (wh?'<span class="who">'+esc(wh)+stale+'</span>':(stale?'<span class="who">'+stale+'</span>':''))+w+'</button>';
+      (wh?'<span class="who">'+esc(wh)+stale+'</span>':(stale?'<span class="who">'+stale+'</span>':''))+w+run+chips+'</button>';
   }
   function graphHtml(w){
     const by={};w.nodes.forEach(n=>{by[n.id]=n});
@@ -1587,6 +1664,6 @@ window.AtmanWork=(function(){
     e.preventDefault();move(n,map[e.key][0],map[e.key][1]);
   });
   window.addEventListener('resize',drawEdges);
-  return {render,select,setMode,drawEdges};
+  return {render,select,setMode,drawEdges,detailHtml:id=>{const n=nodeOf(id);return n?detailHtml(n):''},node:nodeOf,selected:()=>SEL};
 })();
 """

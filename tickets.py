@@ -1492,6 +1492,14 @@ def master_state_path(board):
     return os.path.join(board, "master.json")
 
 
+def _keep_lead(state, prev):
+    """A master/CoS change never drops the user's lead choice (T-1103)."""
+    lead = ((prev or {}).get("lead") or "").strip()
+    if lead:
+        state["lead"] = lead
+    return state
+
+
 def current_master(board):
     try:
         with open(master_state_path(board)) as f:
@@ -1558,7 +1566,8 @@ def wake_mode_of(board, owner, master_state=None, workforce=None):
     if configured in WAKE_MODES:
         return configured
     state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
-    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos"),
+                           (state or {}).get("lead")):
         return "continuous"
     return "task-only"
 
@@ -1575,7 +1584,8 @@ def lifecycle_of(board, owner, master_state=None, workforce=None):
     if configured in LIFECYCLES:
         return configured
     state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
-    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos"),
+                           (state or {}).get("lead")):
         return "persistent"
     return "ephemeral"
 
@@ -6413,6 +6423,9 @@ def _finish_followup(board, tid, event):
 
 
 def _watcher_count(owner, board=None):
+    if board and getattr(_WATCH_TABLE, "read_only", False):
+        # T-1103: a read route runs no `ps`; the board pid file is the evidence.
+        return 1 if _watcher_pid(board, owner) else 0
     return len(_live_watch_pids(owner, board=board))
 
 
@@ -7912,7 +7925,7 @@ def cmd_master(a, board):
         owner = whoami(a.owner)
         prev = current_master(board)
         with open(master_state_path(board), "w") as f:
-            json.dump({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, f)
+            json.dump(_keep_lead({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, prev), f)
         _master_log(board, "%s took over as master%s" % (
             owner, (" from %s" % prev["owner"]) if prev and prev.get("owner") != owner else ""))
         print("%s is master now. Run `atm master` for the briefing." % owner)
@@ -9686,7 +9699,7 @@ def resolve_to_and_mentions(text, to="", registered=None, master_owner=""):
 
 
 def post_message(board, sender, text, to="", re="", kind="", task=False, source="",
-                 explicit=None):
+                 explicit=None, provenance=None):
     _rotate_messages_if_big(board)
     holder = ((current_master(board) or {}) or {}).get("owner") or ""
     to, mentions, unknown, explicit_unknown, dropped = resolve_to_and_mentions(
@@ -9703,13 +9716,23 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
                                 if t.lower() != retired_name.lower()]
     rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
            "to": to, "re": re, "text": text}
-    prov = _message_provenance(board, sender, explicit=explicit)
-    rec["session"] = prov["session"]
-    rec["via"] = prov["via"]
-    rec["endpoint_pid"] = prov["endpoint_pid"]
-    rec["unverified"] = prov["unverified"]
-    if prov["leadership_flag"]:
-        rec["leadership_flag"] = prov["leadership_flag"]
+    if provenance:
+        # T-1106: an app post names the app launch, not the environment of the
+        # shell that happened to start `atm ui`.
+        rec["session"] = str(provenance.get("session") or "")
+        rec["via"] = str(provenance.get("via") or "")
+        rec["endpoint_pid"] = ""
+        rec["unverified"] = False
+        if provenance.get("sender_kind"):
+            rec["sender_kind"] = str(provenance["sender_kind"])
+    else:
+        prov = _message_provenance(board, sender, explicit=explicit)
+        rec["session"] = prov["session"]
+        rec["via"] = prov["via"]
+        rec["endpoint_pid"] = prov["endpoint_pid"]
+        rec["unverified"] = prov["unverified"]
+        if prov["leadership_flag"]:
+            rec["leadership_flag"] = prov["leadership_flag"]
     if forwarded:
         rec["forwarded_from"] = forwarded["from"]
         rec["forward_role"] = forwarded["role"]
@@ -10295,43 +10318,11 @@ def cmd_msg(a, board):
         print("forward: %s -> %s [%s] receipt=%s" % (
             forwarded.get("from"), forwarded.get("to"),
             forwarded.get("role") or "-", forwarded.get("state") or "forwarded"))
-    sa = None
-    mid = _msg_id(m)
-    for to in _split_to_tokens(m.get("to") or ""):
-        if to.lower() in _MENTION_BROADCAST:
-            continue
-        if not _message_wakes_seat(board, to, m):
-            continue
-        if _already_autonomous_wake(board, to, mid):
-            print("wake: %s -> deduped" % to)
-            continue
-        limit = _active_seat_limit(board, to)
-        if limit:
-            print("wake: %s -> limited (reset %s)" % (
-                to, limit.get("reset_at") or limit.get("until") or "unknown"))
-            continue
-        harness = _seat_harness(board, to)
-        if sa is None:
-            sa = _session_adapters()
-        label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
-                             message_id=mid)
-        poked = False
-        if _should_poke_persist(label):
-            poked = _poke_persist_watch(board, to)
-            if poked:
-                label = "watch-poked"
-        if label == "queued-offline":
-            print("wake: %s -> %s (%s)" % (
-                to, label, "run the thread in terminal Codex to enable native wake"))
-        else:
-            print("wake: %s -> %s" % (to, label))
-        if label == "held":
-            print("  recovery: %s" % getattr(
-                sa, "CLAUDE_HELD_RECOVERY",
-                "approve in the recipient session or set crossSessionInbound accept"))
-        _note_wake_delivery(board, to, label, mid, poked=poked)
-        _safe(lambda to=to, label=label: _note_native_wake_result(
-            board, to, label, mid), None)
+    # T-1103: the wake half is shared with the app's POST /msg.
+    for w in deliver_wakes(board, m):
+        print(w["line"])
+        if w.get("recovery"):
+            print("  recovery: %s" % w["recovery"])
 
 
 def _seat_harness(board, seat):
@@ -11638,7 +11629,7 @@ def _apply_connect_roles(board, a):
     prev = current_master(board) or {}
     os.makedirs(board, exist_ok=True)
     if master:
-        rec = {"owner": master, "since": now(), "cos": cos or (prev.get("cos") or "")}
+        rec = _keep_lead({"owner": master, "since": now(), "cos": cos or (prev.get("cos") or "")}, prev)
         with open(master_state_path(board), "w") as f:
             json.dump(rec, f)
         print("applied master=%s CoS=%s" % (master, rec["cos"] or "no CoS yet"))
@@ -15508,7 +15499,7 @@ def cmd_spawn(a, board):
     if a.master:
         prev = current_master(board) or {}
         with open(master_state_path(board), "w") as f:
-            json.dump({"owner": owner, "since": now(), "cos": prev.get("cos", "")}, f)
+            json.dump(_keep_lead({"owner": owner, "since": now(), "cos": prev.get("cos", "")}, prev), f)
         _master_log(board, "%s spawned as persistent master (planner)" % owner, by=whoami())
     if a.cos:
         prev = current_master(board) or {}
@@ -16727,6 +16718,7 @@ def cmd_harness(a, board):
 
 UI_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>atman</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!--APP:meta-->
 <style>
 :root{color-scheme:dark;--bg:#0c0e12;--fg:#ece8e1;--mute:#9a958c;--line:#2a2d34;--card:#161820;--surface:#12141a;--chip:#1c2028;--acc:#c4b49a;--on-acc:#14120e;--ok:#6f9e96;--warn:#e0a53d;--bad:#e85d4c;--blocked:#e85d4c;--ready:#9a958c;--flight:#e0a53d;--review:#a99be8;--progress:#6f8c8f}
 body[data-theme=light]{color-scheme:light;--bg:#f4f1eb;--fg:#14120e;--mute:#6e6a63;--line:#d8d3ca;--card:#fcfaf6;--surface:#eeeae3;--chip:#e8e3d9;--acc:#6b5344;--on-acc:#fcfaf6;--ok:#3d6e68;--warn:#93610a;--bad:#b43a31;--blocked:#b43a31;--ready:#6e6a63;--flight:#93610a;--review:#6954a5;--progress:#789396}
@@ -17041,9 +17033,174 @@ body[data-work-view=columns] #workJump{display:none}
   .epic{min-width:100%;flex-basis:100%}
   .portfolio-menu{position:fixed;left:12px;right:12px;top:auto;width:auto}
 }
+
+/* ===== T-1103 app v2 shell: sidebar | lead chat | live plan | drill-down ===== */
+body.v2{display:block;height:100%;overflow:hidden}
+.app{display:grid;grid-template-columns:196px minmax(300px,380px) minmax(0,1fr);height:100vh;height:100dvh;min-width:0}
+body.v2.drill-open .app{grid-template-columns:196px minmax(290px,350px) minmax(0,1fr) minmax(300px,380px)}
+.app-side{display:flex;flex-direction:column;gap:12px;padding:12px;border-right:1px solid var(--line);background:var(--card);overflow:auto;min-width:0}
+.side-brand{display:flex;align-items:center;gap:9px}
+.side-brand .mark{width:20px;height:20px;flex:none}
+.side-proj{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--mute);letter-spacing:.06em;text-transform:uppercase;font-weight:650}
+.side-proj select{appearance:auto;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:5px 6px;font-size:13px;line-height:1.3;font-family:inherit;text-transform:none;letter-spacing:0;max-width:100%}
+.side-proj-meta{margin:-4px 0 0;font-size:11.5px;line-height:1.35;overflow-wrap:anywhere}
+.side-nav{display:flex;flex-direction:column;gap:2px}
+.side-nav button{appearance:none;display:flex;justify-content:space-between;align-items:center;gap:8px;background:transparent;border:0;border-left:2px solid transparent;color:var(--fg);text-align:left;padding:7px 9px;font-size:13px;line-height:1.2;font-family:inherit;border-radius:0 7px 7px 0;cursor:pointer;white-space:nowrap}
+.side-nav button:hover{background:var(--surface)}
+.side-nav button.on{border-left-color:var(--acc);background:var(--surface);font-weight:650}
+.side-nav .n{color:var(--mute);font-size:11.5px;font-variant-numeric:tabular-nums}
+.side-nav .n.hot{color:var(--warn);font-weight:700}
+.side-nav button:focus-visible,.lead-pane button:focus-visible,.drill button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.side-clock{margin-top:auto;font:12px/1.3 ui-monospace,Menlo,monospace;color:var(--mute)}
+.lead-pane{display:flex;flex-direction:column;min-width:0;min-height:0;border-right:1px solid var(--line);background:var(--surface)}
+.lead-head{padding:10px 12px 8px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:6px;background:var(--card)}
+.lead-title{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-weight:650;font-size:14px}
+.lead-title .cap{font-weight:500;font-size:11.5px;color:var(--mute)}
+.lead-title .role{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border:1px solid var(--line);border-radius:999px;padding:1px 7px;color:var(--mute)}
+.lead-strip{display:flex;flex-wrap:wrap;gap:3px 10px;font-size:11.5px;color:var(--mute)}
+.lead-strip .sb{white-space:nowrap}
+.lead-strip .lv{font-weight:700;color:var(--fg)}
+.lead-strip .lv::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--mute);margin-right:5px;vertical-align:1px}
+.lead-strip .lv-working::before{background:var(--ok)}.lead-strip .lv-idle::before{background:var(--progress)}
+.lead-strip .lv-limited::before,.lead-strip .lv-dead::before,.lead-strip .lv-stalled::before{background:var(--bad)}
+.lead-strip .bad{color:var(--bad)}
+.lead-notice{font-size:12.5px;line-height:1.4;padding:7px 9px;border:1px solid color-mix(in srgb,var(--warn) 55%,var(--line));border-radius:8px;color:var(--fg);background:color-mix(in srgb,var(--warn) 9%,var(--card))}
+.lead-notice code,.drill code,.lead-picker code{font:11.5px/1.4 ui-monospace,Menlo,monospace;background:var(--chip);border:1px solid var(--line);border-radius:5px;padding:1px 5px;overflow-wrap:anywhere}
+.lead-picker{padding:12px;display:flex;flex-direction:column;gap:8px;overflow:auto}
+.lead-picker h2{margin:0;font-size:15px}
+.lead-picker p{margin:0;color:var(--mute);font-size:12.5px}
+.lead-picker button.pick{appearance:none;display:grid;grid-template-columns:1fr auto;gap:2px 8px;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:var(--fg);font-size:13px;line-height:1.3;font-family:inherit;cursor:pointer}
+.lead-picker button.pick:hover{border-color:var(--acc)}
+.lead-picker button.pick small{grid-column:1/-1;color:var(--mute)}
+.lead-picker button.pick:disabled{opacity:.6;cursor:not-allowed}
+.lead-thread{flex:1;min-height:0;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px}
+.lead-thread .older{align-self:center;appearance:none;background:transparent;border:1px solid var(--line);color:var(--mute);border-radius:999px;padding:3px 10px;font-size:12px;line-height:1.2;font-family:inherit;cursor:pointer}
+.post{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card);max-width:100%}
+.post.op{border-color:color-mix(in srgb,var(--acc) 45%,var(--line))}
+.post .ph{display:flex;flex-wrap:wrap;align-items:center;gap:4px 7px;font-size:12px}
+.post .au{font-weight:650;font-size:12.5px;overflow-wrap:anywhere}
+.post time{color:var(--mute);font-size:11.5px}
+.post .copy{margin-left:auto;appearance:none;background:transparent;border:1px solid var(--line);color:var(--mute);border-radius:6px;padding:1px 7px;font-size:11px;line-height:1.3;font-family:inherit;cursor:pointer}
+.post .pt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13.5px;line-height:1.45}
+.post .rc{display:flex;flex-wrap:wrap;gap:4px}
+.rcpt{font-size:11px;color:var(--mute);border:1px dashed var(--line);border-radius:999px;padding:0 7px}
+.tlink{color:var(--acc);text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+.hb{display:inline-block;font:600 10.5px/1.5 ui-monospace,Menlo,monospace;padding:0 6px;border-radius:999px;border:1px solid var(--line);color:var(--fg);background:var(--chip)}
+.hb.dotted{border-style:dotted}
+.hb-claude{border-color:#c9825a;color:#e0a07a}.hb-codex{border-color:#6f9e96;color:#8fc0b7}.hb-cursor{border-color:#8a8ad0;color:#a9a9ec}
+.hb-gemini{border-color:#6f8fd0;color:#94b0ea}.hb-grok{border-color:#b0b0b0}.hb-remote{border-color:#a99be8;color:#c2b8f0}.hb-custom{border-color:#c4b49a}
+.hb-unknown{color:var(--mute);border-style:dashed}.hb-operator{border-color:var(--acc);color:var(--acc)}
+body[data-theme=light] .hb-claude{color:#8a4a24}body[data-theme=light] .hb-codex{color:#2f5f58}body[data-theme=light] .hb-cursor{color:#4a4a9a}body[data-theme=light] .hb-gemini{color:#2f4f8a}body[data-theme=light] .hb-remote{color:#5a4a9a}
+.needs{border-top:1px solid var(--line);background:var(--card);padding:6px 12px;max-height:38%;overflow:auto}
+.needs summary{cursor:pointer;font-size:12.5px;font-weight:650;list-style:none}
+.needs summary::-webkit-details-marker{display:none}
+.needs summary small{font-weight:500;color:var(--mute)}
+.needs .item{border-left:2px solid var(--warn);padding:4px 8px;margin:6px 0;font-size:12.5px}
+.needs .item .meta{color:var(--mute);font-size:11.5px}
+.needs .item .st{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--warn)}
+.lead-compose{border-top:1px solid var(--line);padding:8px 12px 10px;background:var(--card);display:flex;flex-direction:column;gap:6px}
+.lead-compose textarea{width:100%;min-height:58px;max-height:180px;resize:vertical;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:13.5px;line-height:1.4;font-family:inherit}
+.lead-compose .row{display:flex;gap:8px;align-items:center}
+.lead-compose input{width:92px;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:5px 7px;font:12.5px/1.2 ui-monospace,Menlo,monospace}
+.lead-compose button{margin-left:auto;appearance:none;background:var(--acc);color:var(--on-acc);border:0;border-radius:7px;padding:6px 14px;font-weight:650;font-size:13px;line-height:1.2;font-family:inherit;cursor:pointer}
+.lead-compose button:disabled{opacity:.5;cursor:not-allowed}
+.lead-compose small{font-size:11.5px;color:var(--mute);overflow-wrap:anywhere}
+.lead-compose small.bad{color:var(--bad)}.lead-compose small.ok{color:var(--ok)}
+.app-center{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:auto}
+body.v2 .app-center main{overflow:visible;flex:none}
+body.v2 header.cmd .brand{display:none}
+body.v2 #workflowGraph .wv-detail{display:none!important}
+body.v2 #workflowGraph .wv-body.has-detail{grid-template-columns:minmax(0,1fr)}
+.drill{min-width:0;overflow:auto;border-left:1px solid var(--line);background:var(--card);padding:12px 14px;font-size:13px}
+.drill[hidden]{display:none}
+.drill .dh{display:flex;align-items:flex-start;gap:8px}
+.drill .dh h2{margin:0;font-size:15px;line-height:1.3;flex:1;overflow-wrap:anywhere}
+.drill .dh .id{font:600 12px/1.3 ui-monospace,Menlo,monospace;color:var(--mute)}
+.drill .x,.drill .back{appearance:none;background:transparent;border:1px solid var(--line);color:var(--mute);border-radius:6px;padding:2px 9px;font-size:12px;line-height:1.3;font-family:inherit;cursor:pointer}
+.drill .pill{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;border:1px solid var(--line);border-radius:999px;padding:1px 7px;color:var(--mute)}
+.drill .pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+.drill .pill.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 55%,var(--line))}
+.drill section{border-top:1px solid var(--line);padding:9px 0 4px;margin-top:9px}
+.drill section>h3{margin:0 0 6px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.drill .row{display:flex;flex-wrap:wrap;gap:3px 8px;align-items:baseline;margin:3px 0}
+.drill .mono{font:12px/1.4 ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
+.drill .mute{color:var(--mute)}
+.drill .wv-detail-inline dl{margin:0;display:grid;grid-template-columns:86px minmax(0,1fr);gap:5px 9px}
+.drill .wv-detail-inline dt{color:var(--mute);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;font-weight:650;padding-top:2px}
+.drill .wv-detail-inline dd{margin:0;overflow-wrap:anywhere}
+.drill .wv-detail-inline .close,.drill .wv-detail-inline .back,.drill .wv-detail-inline .hd,.drill .wv-detail-inline h3{display:none}
+.drill .cp{appearance:none;background:transparent;border:1px solid var(--line);color:var(--mute);border-radius:6px;padding:0 7px;font-size:11px;line-height:1.5;font-family:inherit;cursor:pointer}
+.drill .mini{border-left:2px solid var(--line);padding:3px 8px;margin:5px 0}
+.drill .mini .pt{white-space:pre-wrap;overflow-wrap:anywhere}
+.pane-hub .hub-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.pane-hub dl{margin:0;display:grid;grid-template-columns:110px minmax(0,1fr);gap:5px 10px;font-size:13px}
+.pane-hub dt{color:var(--mute)}.pane-hub dd{margin:0;overflow-wrap:anywhere}
+.pane-hub code{font:12px/1.45 ui-monospace,Menlo,monospace;background:var(--chip);border:1px solid var(--line);border-radius:5px;padding:1px 5px;overflow-wrap:anywhere}
+body[data-tab=hub] #pane-hub{display:flex;flex-direction:column;gap:12px}
+@media(max-width:1280px){
+  body.v2.drill-open .app{grid-template-columns:196px minmax(290px,350px) minmax(0,1fr)}
+  body.v2.drill-open .drill{position:fixed;top:0;right:0;bottom:0;width:min(420px,100vw);z-index:20;box-shadow:-14px 0 36px color-mix(in srgb,var(--bg) 70%,transparent)}
+}
+@media(max-width:900px){
+  body.v2 .app,body.v2.drill-open .app{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}
+  .app-side{flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px 10px;border-right:0;border-bottom:1px solid var(--line);padding:8px 12px;overflow:visible}
+  .side-proj{flex-direction:row;align-items:center;flex:1 1 auto;min-width:0}
+  .side-proj select{min-width:0;flex:1 1 auto}
+  .side-proj-meta,.side-clock{display:none}
+  .side-nav{flex-direction:row;flex-wrap:nowrap;overflow-x:auto;width:100%;-webkit-overflow-scrolling:touch;gap:4px}
+  .side-nav button{border-left:0;border-bottom:2px solid transparent;border-radius:6px 6px 0 0;padding:6px 9px}
+  .side-nav button.on{border-bottom-color:var(--acc)}
+  body.v2[data-view=lead] .app-center{display:none}
+  body.v2[data-view=plan] .lead-pane{display:none}
+  .lead-pane{border-right:0}
+  body.v2.drill-open .drill{position:fixed;inset:0;width:auto;z-index:20;padding:14px 16px calc(14px + env(safe-area-inset-bottom));box-shadow:none}
+}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
 <!--WORK_VIEW:css-->
-</style></head><body data-tab="board" data-work-view="graph">
+</style></head><body class="v2" data-tab="board" data-work-view="graph" data-view="lead">
+<div class="app" id="app">
+<aside class="app-side" id="appSide" aria-label="Workspace">
+  <div class="side-brand">
+    <svg class="mark" viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
+      <circle cx="10" cy="7.8" r="3.35" fill="currentColor"/><circle cx="22.4" cy="8.8" r="3.35" fill="currentColor"/>
+      <circle cx="6.6" cy="17.6" r="3.35" fill="currentColor"/><circle cx="25.4" cy="18.2" r="3.35" fill="currentColor"/>
+      <circle cx="16" cy="24.6" r="3.35" fill="currentColor"/>
+    </svg><span class="wordmark">atman</span>
+  </div>
+  <label class="side-proj"><span>Project</span><select id="projectSel" aria-label="Project"></select></label>
+  <p class="side-proj-meta mute" id="projectMeta"></p>
+  <label class="side-proj" id="repoLensBox" hidden><span>Repo lens</span><select id="repoLens" aria-label="Show plan nodes from one repo (read-only lens until the board is split)"></select></label>
+  <nav class="side-nav" id="sideNav" aria-label="Sections">
+    <button type="button" data-side="lead" class="on" aria-current="true">Lead <span class="n" id="leadN"></span></button>
+    <button type="button" data-side="plan">Plan <span class="n" id="planN"></span></button>
+    <button type="button" data-side="needs">Needs you <span class="n" id="needsN">0</span></button>
+    <button type="button" data-side="fleet">Fleet <span class="n" id="fleetN"></span></button>
+    <button type="button" data-side="runs">Runs <span class="n" id="runsN"></span></button>
+    <button type="button" data-side="hub">Hub</button>
+  </nav>
+  <div class="side-clock" id="sideClock" aria-label="Local time"></div>
+</aside>
+<section class="lead-pane" id="leadPane" aria-label="Conversation with the project lead">
+  <div class="lead-head">
+    <div class="lead-title" id="leadTitle">Lead</div>
+    <div class="lead-strip" id="leadStrip" aria-live="polite"></div>
+    <div class="lead-notice" id="leadNotice" role="status" hidden></div>
+  </div>
+  <div class="lead-picker" id="leadPicker" hidden></div>
+  <div class="lead-thread" id="leadThread" role="log" aria-label="Operator and lead thread">
+    <button type="button" class="older" id="leadOlder" hidden>Load older messages</button>
+    <div id="leadPosts" style="display:flex;flex-direction:column;gap:10px"></div>
+  </div>
+  <details class="needs" id="needsBox"><summary>Needs you <span id="needsCount">0</span> <small>· unstructured, asked only · ruling comes in a later phase</small></summary><div id="needsList"></div></details>
+  <form class="lead-compose" id="leadCompose" autocomplete="off">
+    <textarea id="lText" aria-label="Message to the lead" placeholder="Tell the lead…"></textarea>
+    <div class="row"><input id="lRe" aria-label="About ticket" placeholder="re T-…"><button type="submit" id="lSend">Send</button></div>
+    <small id="lAs"></small>
+    <small id="lNote"></small>
+    <small id="lMsg" aria-live="polite"></small>
+  </form>
+</section>
+<div class="app-center" id="appCenter">
 <header class="cmd">
   <div class="brand">
     <svg class="mark" viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="atman">
@@ -17223,9 +17380,30 @@ body[data-work-view=columns] #workJump{display:none}
     </div>
   </div>
 </div>
+<div class="pane pane-hub" id="pane-hub" role="tabpanel" aria-label="Hub" tabindex="0">
+  <section class="promise-panel">
+    <h2>Hub</h2>
+    <p class="empty-honesty">Read-only. Services, registration and config change from the CLI; the app shows the commands.</p>
+    <div class="hub-grid">
+      <div><h3 class="subh">This app</h3><dl id="hubConfig"></dl></div>
+      <div><h3 class="subh">Register a seat</h3><p><code>atm join &lt;name&gt; --roles … --harness …</code></p><p><code>atm spawn &lt;seat&gt; --persist</code></p></div>
+      <div><h3 class="subh">The lead</h3><p><code>atm lead set &lt;seat&gt;</code></p><p><code>atm ui --operator &lt;name&gt;</code></p></div>
+    </div>
+  </section>
+</div>
 </main>
+</div>
+<aside class="drill" id="drill" hidden aria-label="Ticket drill-down"><div id="drillBody"></div></aside>
+</div>
 <script>
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const escA=s=>esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+// T-1103: per-launch write token, operator and project come from <meta>; never from the page's choice
+const META=n=>{const m=document.querySelector('meta[name="'+n+'"]');return m?m.content:''};
+const TOKEN=META('atman-token'),OPERATOR=META('atman-operator'),OPERATOR_NOTE=META('atman-operator-note');
+let PROJECT=META('atman-project')||'';
+try{const q=new URLSearchParams(location.search).get('project');if(q)PROJECT=q}catch(e){}
+function pq(extra){return 'project='+encodeURIComponent(PROJECT)+(extra?'&'+extra:'')}
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
 // Server sends timestamps as raw ISO-8601 UTC. Render in whatever timezone
 // this browser is actually in — no explicit timeZone option, so Intl uses
@@ -17269,8 +17447,8 @@ function authReadiness(a){
 }
 async function reconnectAuth(name){
   try{
-    const r=await fetch('/auth-reconnect',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({agent:name})});
+    const r=await fetch('/auth-reconnect',{method:'POST',headers:{'Content-Type':'application/json','X-Atman-Token':TOKEN},
+      body:JSON.stringify({agent:name,project:PROJECT})});
     const out=await r.json();
     const sel=(window.CSS&&CSS.escape)?CSS.escape(name):name;
     const box=document.querySelector('[data-testid="auth-'+sel+'"]');
@@ -17453,7 +17631,7 @@ function renderSeats(d){
   put('lane-idle',idle.join(''),'no idle seats');
 }
 function setTab(name){
-  const allowed=new Set(['objective','agents','board','messages']);
+  const allowed=new Set(['objective','agents','board','messages','hub']);
   if(!allowed.has(name))name='board';
   document.body.dataset.tab=name;
   try{localStorage.setItem('tickets-ui-tab',name)}catch(e){}
@@ -17488,6 +17666,7 @@ function renderGraph(g,d){
   if(window.AtmanWork&&d&&d.work){
     const gd=document.getElementById('graphDetail');
     if(gd){gd.hidden=true;gd.innerHTML=''}
+    if(typeof REPO_LENS!=='undefined'&&REPO_LENS)d=Object.assign({},d,{work:lensWork(d.work)});
     window.AtmanWork.render(d,host);return
   }
   const by={};(g&&g.nodes||[]).forEach(n=>{by[n.id]=n});
@@ -17617,9 +17796,10 @@ function loadAgentPickers(){
   const from=document.getElementById('cFrom'),to=document.getElementById('cTo');
   const savedFrom=localStorage.getItem('tickets-ui-from')||'';
   const prevFrom=from.value||savedFrom, prevTo=to.value;
-  from.innerHTML='<option value="">(pick agent)</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  // T-1104: the app posts as the operator only; a seat is never a "from" choice here
+  from.innerHTML=OPERATOR?'<option value="'+escA(OPERATOR)+'">'+esc(OPERATOR)+' (operator)</option>':'<option value="">read-only: no operator</option>';
+  from.disabled=true;
   to.innerHTML='<option value="">everyone</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
-  if(AGENTS.includes(prevFrom))from.value=prevFrom;
   if(THREAD_SEAT){ensureToOption(THREAD_SEAT);to.value=THREAD_SEAT;to.disabled=true}
   else{to.disabled=false;if(AGENTS.includes(prevTo))to.value=prevTo}
 }
@@ -17808,13 +17988,13 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   const re=document.getElementById('cRe').value.trim();
   const kind=document.getElementById('cKind').value.trim()||'message';
   const btn=document.getElementById('cSend'),msg=document.getElementById('composerMsg');
-  if(!from){msg.className='bad';msg.textContent='pick who you are posting as';return}
+  if(!from){msg.className='bad';msg.textContent=OPERATOR_NOTE||'set an operator: atm ui --operator <name>';return}
   if(!text){msg.className='bad';msg.textContent='message is empty';return}
   localStorage.setItem('tickets-ui-from',from);
   btn.disabled=true;msg.className='';msg.textContent='posting…';
   try{
-    const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({from,text,to,re,kind})});
+    const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json','X-Atman-Token':TOKEN},
+      body:JSON.stringify({text,to,re,kind,project:PROJECT})});
     const out=await r.json();
     if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
       document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';
@@ -17839,7 +18019,7 @@ async function load(manual){
   _loadCtl=ctl;
   let d;
   try{
-    const r=await fetch('/board.json?'+Date.now(),{signal:ctl.signal});
+    const r=await fetch('/board.json?'+pq('_='+Date.now()),{signal:ctl.signal});
     if(!r.ok)throw new Error('HTTP '+r.status);
     d=await r.json();
   }catch(e){
@@ -17948,6 +18128,7 @@ async function load(manual){
     :emptyCraft('Intervene','<b>No messages yet.</b> Post when a seat should see something.','Receipts show delivery — never implied progress on tickets.','atm msg "text" [--to agent] [--re T-001]');
   document.getElementById('msgs').innerHTML=thread.map(m=>'<div class="m"><div class="hd">'+who(m.from)+(m.to?' → '+who(m.to):'')+(m.re?' <span class="tag">'+esc(m.re)+'</span>':'')+deliveryTags(m)+'<span class="mute">'+esc(fmtWhen(m.at))+'</span></div>'+mentionText(m.text)+'</div>').join('')
     ||msgEmpty;
+  if(window.appAfterLoad)appAfterLoad(d);
 }
 function renderOnboarding(ob){
   // Labels/cmds aligned with T-322 quickstart + README (opus-console/t322-quickstart).
@@ -18071,6 +18252,342 @@ document.getElementById('refreshBtn').addEventListener('click',()=>load(true));
   sync();
   if(mq.addEventListener)mq.addEventListener('change',sync);else if(mq.addListener)mq.addListener(sync);
 })();
+// ===== T-1103 app v2: lead chat beside the live plan =====
+let SNAP=null;
+const APP={lead:'',status:null,newest:[],older:[],hasMore:false,oldestId:'',postsBy:{},needs:[],drillId:'',drillOpen:false,picker:null,stickBottom:true};
+async function fetchJSON(url,opt,ms){
+  const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),ms||12000);
+  try{
+    const r=await fetch(url,Object.assign({signal:ctl.signal},opt||{}));
+    let j;try{j=await r.json()}catch(e){j={error:'HTTP '+r.status}}
+    return {ok:r.ok,status:r.status,data:j};
+  }catch(e){return {ok:false,status:0,data:{error:(e&&e.name==='AbortError')?'no answer from the app server in '+Math.round((ms||12000)/1000)+'s':String(e)}}}
+  finally{clearTimeout(t)}
+}
+function postJSON(path,body,ms){
+  return fetchJSON(path,{method:'POST',headers:{'Content-Type':'application/json','X-Atman-Token':TOKEN},body:JSON.stringify(Object.assign({project:PROJECT},body))},ms);
+}
+function secs(s){if(s==null)return 'unknown';s=Math.max(0,Math.round(s));if(s<60)return s+'s';const m=Math.round(s/60);if(m<60)return m+'m';const hh=s/3600;return hh<48?hh.toFixed(1)+'h':Math.round(hh/24)+'d'}
+function fmtChat(iso){
+  const d=new Date(parseUtc(iso));if(!iso||isNaN(d))return iso||'';
+  const t=d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  const today=new Date(),y=new Date(Date.now()-864e5);
+  if(d.toDateString()===today.toDateString())return 'Today at '+t;
+  if(d.toDateString()===y.toDateString())return 'Yesterday at '+t;
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' at '+t;
+}
+function hbadge(h){
+  const v=String((h&&h.value)||'unknown');
+  return '<span class="hb hb-'+escA(v.replace(/[^A-Za-z0-9+-]/g,''))+(h&&h.recorded===false?' dotted':'')+'" title="'+escA((h&&h.note)||'')+'">'+esc(v)+'</span>';
+}
+function knownTickets(){return new Set(((SNAP&&SNAP.work&&SNAP.work.nodes)||[]).map(n=>n.id))}
+function linkTickets(html){
+  const known=knownTickets();
+  return html.replace(/\bT-\d+\b/g,id=>known.has(id)?'<a href="#" class="tlink" data-open-ticket="'+id+'">'+id+'</a>':id);
+}
+function receiptsHtml(rs){return (rs||[]).map(r=>'<span class="rcpt">'+(r.agent?esc(r.agent)+': ':'')+esc((r.words||[]).join(' · '))+'</span>').join('')}
+function postHtml(m){
+  APP.postsBy[m.id]=m;
+  return '<article class="post'+(m.operator?' op':'')+'" data-id="'+escA(m.id)+'">'+
+    '<div class="ph"><span class="au">'+esc(m.author)+'</span>'+hbadge(m.harness)+
+    (m.kind==='task'?'<span class="tag task">task</span>':'')+
+    (m.re?'<span class="tag">re '+linkTickets(esc(m.re))+'</span>':'')+
+    '<time datetime="'+escA(m.at)+'" title="'+escA(fmtLocal(m.at))+'">'+esc(fmtChat(m.at))+'</time>'+
+    '<button type="button" class="copy" data-copy-post="'+escA(m.id)+'" aria-label="Copy message text">Copy</button></div>'+
+    '<div class="pt">'+linkTickets(mentionText(m.text))+'</div>'+
+    '<div class="rc">'+receiptsHtml(m.receipts)+'</div></article>';
+}
+async function copyText(t,btn){
+  let ok=false;
+  try{await navigator.clipboard.writeText(t);ok=true}catch(e){
+    const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();
+    try{ok=document.execCommand('copy')}catch(_){}ta.remove();
+  }
+  if(btn){const o=btn.textContent;btn.textContent=ok?'Copied':'Copy failed';setTimeout(()=>{btn.textContent=o},1200)}
+}
+function setView(v){
+  document.body.dataset.view=v;
+}
+function markSide(name){
+  document.querySelectorAll('#sideNav [data-side]').forEach(b=>{const on=b.dataset.side===name;b.classList.toggle('on',on);if(on)b.setAttribute('aria-current','true');else b.removeAttribute('aria-current')});
+}
+function sideGo(name){
+  markSide(name);
+  if(name==='lead'){setView('lead');const t=document.getElementById('lText');if(t&&!t.disabled)t.focus();return}
+  if(name==='needs'){setView('lead');const b=document.getElementById('needsBox');if(b){b.open=true;b.scrollIntoView({block:'nearest'})}return}
+  setView('plan');
+  if(name==='plan'){setTab('board');return}
+  if(name==='fleet'){setTab('agents');return}
+  if(name==='runs'){setTab('agents');const p=document.getElementById('agentMapPanel');if(p)p.scrollIntoView({block:'start'});return}
+  if(name==='hub'){setTab('hub');renderHub();return}
+}
+function renderHub(){
+  const el=document.getElementById('hubConfig');if(!el)return;
+  const a=(SNAP&&SNAP.app)||{};
+  const rows=[['Project',PROJECT||a.project||'—'],['Served at',location.host+' (loopback only)'],['Operator',OPERATOR||('none — '+(OPERATOR_NOTE||'atm ui --operator <name>'))],['Lead',APP.lead||'not picked'],['Master',(SNAP&&SNAP.master)||'—'],['CoS',(SNAP&&SNAP.cos)||'—']];
+  el.innerHTML=rows.map(r=>'<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>').join('');
+}
+async function loadProjects(){
+  const r=await fetchJSON('/projects.json?'+pq());
+  const sel=document.getElementById('projectSel');if(!sel||!r.ok)return;
+  const rows=r.data.projects||[];
+  if(!PROJECT&&r.data.current)PROJECT=r.data.current;
+  sel.innerHTML=rows.map(p=>{const c=p.counts||{};const open=(c.open||0)+(c.claimed||0)+(c.review||0)+(c.blocked||0);return '<option value="'+escA(p.slug)+'"'+(p.slug===PROJECT?' selected':'')+'>'+esc(p.slug)+' · '+open+' open'+(c.blocked?' · '+c.blocked+' blocked':'')+'</option>'}).join('');
+  const cur=rows.find(p=>p.slug===PROJECT)||rows[0];
+  const meta=document.getElementById('projectMeta');
+  if(meta&&cur)meta.textContent=(cur.repos&&cur.repos.length?cur.repos.length+' repo'+(cur.repos.length>1?'s':'')+' · ':'')+'lead '+(cur.lead||'not picked');
+}
+document.getElementById('projectSel').addEventListener('change',e=>{
+  const slug=e.target.value;
+  try{const u=new URL(location.href);u.searchParams.set('project',slug);location.href=u.toString()}catch(err){location.search='?project='+encodeURIComponent(slug)}
+});
+function renderLeadTitle(){
+  const el=document.getElementById('leadTitle');if(!el)return;
+  const proj=PROJECT||(SNAP&&SNAP.app&&SNAP.app.project)||'';
+  if(!APP.lead){el.innerHTML='Lead · <span class="mute">not picked</span>';return}
+  const st=APP.status||{};
+  const roles=[];
+  if(SNAP&&SNAP.master===APP.lead)roles.push('master');
+  if(SNAP&&SNAP.cos===APP.lead)roles.push('CoS');
+  el.innerHTML='Lead · '+esc(APP.lead)+'@'+esc(proj)+' <span class="role">lead</span>'+roles.map(r=>'<span class="role">'+esc(r)+'</span>').join('')+
+    hbadge({value:st.harness||'unknown',recorded:true,note:'current workforce harness'})+
+    '<span class="cap">'+esc((st.capability&&st.capability.line)||'')+'</span>';
+}
+function renderLeadStrip(){
+  const el=document.getElementById('leadStrip'),notice=document.getElementById('leadNotice');
+  const st=APP.status;
+  if(!APP.lead||!st){el.innerHTML=APP.lead?'<span class="sb">status unknown</span>':'';notice.hidden=true;return}
+  const u=st.usage||{};
+  const bits=[
+    '<span class="lv lv-'+escA(st.state)+'">'+esc(st.state||'unknown')+'</span>',
+    st.running?('run '+esc(secs(st.running.elapsed_s))+(st.running.ticket?' on '+esc(st.running.ticket):'')):'no run now',
+    'last output '+(st.last_output_at?esc(fmtRel(st.last_output_at)):'unknown'),
+    st.limit?'<span class="bad">limited until '+esc(st.limit_until||'unknown')+'</span>':'not limited',
+    'auth '+esc((st.auth&&st.auth.label)||'Not checked'),
+    'usage '+esc(u.text||'unknown')+' · '+esc(u.age||'age unknown')
+  ];
+  el.innerHTML=bits.map(b=>'<span class="sb">'+b+'</span>').join('');
+  const ca=st.cannot_answer;
+  if(ca){
+    notice.hidden=false;
+    notice.innerHTML=esc(ca.text)+(ca.cmd?' <button type="button" class="cp" data-copy-text="'+escA(ca.cmd)+'" title="'+escA(ca.cmd)+'">Copy command</button>':'')+
+      (ca.kind==='logged_out'?' <button type="button" class="cp" data-auth-reconnect="'+escA(APP.lead)+'">Recheck auth</button>':'');
+  }else notice.hidden=true;
+}
+function renderPicker(data){
+  const box=document.getElementById('leadPicker');
+  const picks=data.picker||[];
+  const canPick=!!OPERATOR;
+  box.hidden=false;
+  box.innerHTML='<h2>Pick who you talk to on this project</h2>'+
+    '<p>'+esc((data.lead_note||'No lead is set').replace(/\.?$/,'.'))+' The app never picks one for you. You can change it later with <code>atm lead set &lt;seat&gt;</code>.</p>'+
+    (canPick?'':'<p class="bad">Only the operator picks the lead. '+esc(OPERATOR_NOTE)+'</p>')+
+    (picks.length?picks.map(p=>'<button type="button" class="pick" data-pick-lead="'+escA(p.seat)+'"'+(canPick?'':' disabled')+'><span>'+esc(p.seat)+'@'+esc(PROJECT)+'</span>'+hbadge({value:p.harness,recorded:true})+'<small>'+esc(p.capability)+'</small></button>').join(''):'<p>No registered seats on this board yet: <code>atm join &lt;name&gt; --harness …</code></p>')+
+    '<small id="pickMsg" class="mute" aria-live="polite"></small>';
+}
+function renderComposer(){
+  const t=document.getElementById('lText'),send=document.getElementById('lSend'),as=document.getElementById('lAs'),note=document.getElementById('lNote'),re=document.getElementById('lRe');
+  const ok=!!OPERATOR&&!!APP.lead;
+  t.disabled=!ok;send.disabled=!ok;re.disabled=!ok;
+  as.textContent=OPERATOR?('as '+OPERATOR+'@'+PROJECT+' (operator) · posts with atm msg, then the same wake'):(OPERATOR_NOTE||'set an operator: atm ui --operator <name>');
+  as.className=OPERATOR?'mute':'bad';
+  t.placeholder=!OPERATOR?'Read-only: no operator configured':(!APP.lead?'Pick a lead first':'Tell the lead…');
+  const cap=APP.status&&APP.status.capability;
+  note.textContent=(APP.lead&&cap&&!cap.midrun)?(APP.lead+' answers on its next turn; it cannot be interrupted mid-run.'):'';
+}
+function renderPosts(){
+  const box=document.getElementById('leadPosts'),th=document.getElementById('leadThread');
+  const all=APP.older.concat(APP.newest);
+  const seen=new Set();const rows=[];
+  all.forEach(m=>{if(!seen.has(m.id)){seen.add(m.id);rows.push(m)}});
+  const atBottom=th.scrollHeight-th.scrollTop-th.clientHeight<40;
+  box.innerHTML=rows.map(postHtml).join('')||(APP.lead?'<p class="empty-honesty">No messages between you and '+esc(APP.lead)+' yet. Receipts show delivery, never an agent reply.</p>':'');
+  const older=document.getElementById('leadOlder');older.hidden=!APP.hasMore;
+  if(atBottom||APP.stickBottom){th.scrollTop=th.scrollHeight;APP.stickBottom=false}
+}
+async function loadLead(){
+  const r=await fetchJSON('/thread.json?'+pq());
+  const d=r.data||{};
+  document.getElementById('leadN').textContent=d.lead?'':'pick';
+  if(d.needs_lead){
+    APP.lead='';APP.status=null;APP.newest=[];APP.older=[];
+    renderPicker(d);document.getElementById('leadThread').hidden=true;
+    renderLeadTitle();renderLeadStrip();renderComposer();return;
+  }
+  document.getElementById('leadPicker').hidden=true;document.getElementById('leadThread').hidden=false;
+  if(!r.ok){
+    document.getElementById('leadStrip').innerHTML='<span class="sb bad">'+esc(d.error||'thread unavailable')+'</span>';
+    return;
+  }
+  if(APP.lead!==d.lead){APP.older=[];APP.stickBottom=true}
+  APP.lead=d.lead||d.with||'';APP.status=d.status||null;
+  APP.newest=d.messages||[];
+  if(!APP.older.length){APP.hasMore=!!d.has_more;APP.oldestId=d.oldest_id||''}
+  renderLeadTitle();renderLeadStrip();renderComposer();renderPosts();
+}
+document.getElementById('leadOlder').addEventListener('click',async()=>{
+  const btn=document.getElementById('leadOlder');btn.disabled=true;
+  const r=await fetchJSON('/thread.json?'+pq('before='+encodeURIComponent(APP.oldestId)+'&limit=100'));
+  btn.disabled=false;
+  if(r.ok){APP.older=(r.data.messages||[]).concat(APP.older);APP.hasMore=!!r.data.has_more;APP.oldestId=r.data.oldest_id||APP.oldestId;renderPosts()}
+});
+document.getElementById('leadCompose').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const t=document.getElementById('lText'),re=document.getElementById('lRe'),msg=document.getElementById('lMsg'),send=document.getElementById('lSend');
+  const text=t.value.trim();
+  if(!text){msg.className='bad';msg.textContent='message is empty';return}
+  send.disabled=true;msg.className='';msg.textContent='posting…';
+  const r=await postJSON('/msg',{text,to:APP.lead,re:re.value.trim(),kind:'message'},15000);
+  send.disabled=false;
+  if(r.ok&&r.data.ok){
+    t.value='';re.value='';
+    const wakes=(r.data.wakes||[]).map(w=>'wake: '+w.label).join(' · ')||'no wake (the lead is not woken by a DM; it reads on its next turn)';
+    const ca=APP.status&&APP.status.cannot_answer;
+    msg.className='ok';msg.textContent='posted · '+wakes+(ca?' · '+ca.text:'');
+    APP.stickBottom=true;loadLead();loadNeeds();
+  }else{
+    msg.className='bad';msg.textContent='not posted: '+((r.data&&r.data.error)||('HTTP '+r.status));
+  }
+});
+document.getElementById('lText').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();document.getElementById('leadCompose').requestSubmit()}});
+async function loadNeeds(){
+  const r=await fetchJSON('/needs-you.json?'+pq());if(!r.ok)return;
+  const d=r.data||{};APP.needs=d.items||[];
+  const n=document.getElementById('needsN');n.textContent=String(d.count||0);n.classList.toggle('hot',!!d.count);
+  document.getElementById('needsCount').textContent=String(d.count||0);
+  document.getElementById('needsList').innerHTML=(d.note?'<p class="mute">'+esc(d.note)+'</p>':'')+(APP.needs.map(it=>
+    '<div class="item"><span class="st">'+esc(it.label)+'</span> <span class="meta">'+esc(it.author||it.id)+' · '+esc(fmtChat(it.at))+' · '+esc(it.why)+'</span>'+
+    '<div>'+linkTickets(mentionText(it.text))+'</div>'+
+    (it.re?'<button type="button" class="cp" data-answer-re="'+escA(it.re)+'">Answer in chat about '+esc(it.re)+'</button>':'')+'</div>').join('')||'<p class="mute">Nothing addressed to you is waiting.</p>');
+}
+// ---- drill-down ----
+function fmtTokens(r){return r.tokens==null?'tokens unknown':(r.tokens_label||r.tokens)+' tokens'}
+// the plan step keeps its story (status, who, why now, acceptance); review, handoff and
+// artifact have their own fuller sections below, so they are not repeated here
+function planStepHtml(html){
+  const tpl=document.createElement('template');tpl.innerHTML=html;
+  const drop=new Set(['Artifact','Review','Handoff','Last note']);
+  tpl.content.querySelectorAll('dt').forEach(dt=>{if(drop.has(dt.textContent.trim())){const dd=dt.nextElementSibling;if(dd&&dd.tagName==='DD')dd.remove();dt.remove()}});
+  return tpl.innerHTML;
+}
+function drillHtml(t){
+  const node=(window.AtmanWork&&window.AtmanWork.node)?window.AtmanWork.node(t.id):null;
+  const pillCls=t.status_label==='done, not accepted'?'warn':(t.accepted?'ok':'');
+  const inline=(node&&window.AtmanWork.detailHtml)?'<div class="wv-detail-inline">'+planStepHtml(window.AtmanWork.detailHtml(t.id))+'</div>':'';
+  const chips=node&&(node.blockers||[]).length?'<div class="wv-chips">'+node.blockers.map(b=>'<span class="wv-chip k-'+escA(b.kind)+'" title="'+escA(b.cmd||'')+'">'+esc(b.text)+'</span>').join('')+'</div>':'<span class="mute">no blocker recorded</span>';
+  const rv=t.review||{};
+  const verdicts=(rv.verdicts||[]).map(v=>'<div class="row"><b>'+esc(v.kind.toUpperCase())+'</b> by @'+esc(v.by||'?')+' <span class="mono">@'+esc(v.sha||'?')+'</span>'+(v.superseded?' <span class="mute">(superseded)</span>':(v.applies?'':' <span class="mute">(other head)</span>'))+' <span class="mute">'+esc(fmtChat(v.at))+'</span>'+(v.notes?'<div class="mute">'+esc(v.notes)+'</div>':'')+'</div>').join('');
+  const runs=(t.runs||[]).map(r=>'<div class="mini"><div class="row"><b>'+esc(r.author)+'</b>'+hbadge({value:r.harness,recorded:true})+'<span>'+esc(r.role||'run')+'</span><span class="mute">'+esc(r.state)+'</span></div><div class="row mute">'+(r.elapsed_s!=null?esc(secs(r.elapsed_s)):'elapsed unknown')+' · '+esc(fmtTokens(r))+(r.verdict?' · '+esc(r.verdict):'')+'</div></div>').join('')||'<span class="mute">no seat runs recorded for this ticket</span>';
+  const usage=(t.usage||[]).map(u=>'<div class="row"><span>'+esc(u.text||(u.provider+' '+u.status))+'</span><span class="mute">'+esc(u.age||'age unknown')+'</span></div>').join('')||'<span class="mute">no harness recorded for these runs · usage unknown</span>';
+  const hand=(t.handoff||[]).map(h=>'<div class="mini"><div class="row"><b class="mono">'+esc(h.from)+'</b><span class="mute">'+esc(h.by||'?')+' · '+esc(fmtChat(h.at))+'</span></div><div class="pt">'+esc(h.text)+'</div></div>').join('')||'<span class="mute">no handoff notes</span>';
+  const msgs=(t.messages||[]).map(m=>'<div class="mini"><div class="row"><b>'+esc(m.author)+'</b>'+hbadge(m.harness)+'<span class="mute">'+esc(fmtChat(m.at))+'</span></div><div class="pt">'+linkTickets(mentionText(m.text))+'</div><div class="row">'+receiptsHtml(m.receipts)+'</div></div>').join('')||'<span class="mute">no messages with re '+esc(t.id)+'</span>';
+  const steers=(t.steers||[]).map(s=>'<div class="mini"><div class="row"><b>'+esc(s.kind||'steer')+'</b> <span class="mute">'+esc(s.from||'?')+' → '+esc(s.seat||s.to||'?')+' · '+esc(fmtChat(s.at))+' · '+esc(s.receipt||'no receipt')+'</span></div><div class="pt">'+esc(s.text||'')+'</div></div>').join('')||'<span class="mute">no steers</span>';
+  const a=t.artifact||{};
+  const pr=a.pr?(/^https?:\/\//.test(a.pr)?'<a href="'+escA(a.pr)+'" target="_blank" rel="noopener noreferrer">'+esc(a.pr)+'</a>':'PR '+esc(a.pr)):'<span class="mute">no PR recorded</span>';
+  return '<div class="dh"><div style="flex:1;min-width:0"><div class="id">'+esc(t.id)+' · '+esc(t.owner_at_project||'unowned')+'</div><h2>'+esc(t.title)+'</h2><span class="pill '+pillCls+'">'+esc(t.status_label)+'</span></div>'+
+    '<button type="button" class="x" data-drill-close aria-label="Close drill-down and clear selection">×</button></div>'+
+    '<section><h3>Blocked by</h3>'+chips+'</section>'+
+    (inline?'<section><h3>Plan step</h3>'+inline+'</section>':'')+
+    '<section><h3>Runs</h3>'+runs+'</section>'+
+    '<section><h3>Review</h3><div class="row"><span>head</span> '+(rv.head?'<span class="mono">'+esc(rv.head)+'</span> <button type="button" class="cp" data-copy-text="'+escA(rv.head)+'">Copy</button>':'<span class="mute">no full review head recorded</span>')+'</div>'+
+      '<div class="row">'+esc(rv.label||'no verdict recorded')+'</div>'+(verdicts||'<div class="mute">no structured verdicts</div>')+
+      (t.status==='done'&&!t.accepted?'<div class="row"><span class="pill warn">done, not accepted</span></div>':'')+'</section>'+
+    '<section><h3>Handoff</h3>'+hand+'</section>'+
+    '<section><h3>Messages about '+esc(t.id)+' ('+esc(t.messages_total||0)+')</h3>'+msgs+'</section>'+
+    '<section><h3>Steers</h3>'+steers+'</section>'+
+    '<section><h3>Commit</h3><div class="row"><span class="mono">'+esc(a.branch||'no branch')+'</span><span class="mono">'+esc(a.sha||a.commit||'no commit')+'</span></div><div class="row">'+pr+'</div>'+
+      (t.diff_cmd?'<div class="row"><code>$ '+esc(t.diff_cmd)+'</code> <button type="button" class="cp" data-copy-text="'+escA(t.diff_cmd)+'">Copy</button></div><div class="mute">'+esc(t.diff_note||'')+'</div>':'<div class="mute">no commit to diff yet</div>')+'</section>'+
+    '<section><h3>Usage</h3>'+usage+'</section>'+
+    '<button type="button" class="back" data-drill-back>← Back to plan</button>';
+}
+async function openDrill(id){
+  if(!id){closeDrill(false);return}
+  APP.drillId=id;APP.drillOpen=true;
+  const el=document.getElementById('drill'),body=document.getElementById('drillBody');
+  el.hidden=false;document.body.classList.add('drill-open');
+  if(!body.dataset.id||body.dataset.id!==id)body.innerHTML='<p class="mute">Loading '+esc(id)+'…</p>';
+  const same=body.dataset.id===id,top=el.scrollTop;
+  body.dataset.id=id;
+  const r=await fetchJSON('/ticket/'+encodeURIComponent(id)+'.json?'+pq());
+  if(APP.drillId!==id)return;
+  if(same)requestAnimationFrame(()=>{el.scrollTop=top});
+  body.innerHTML=r.ok?drillHtml(r.data):'<div class="dh"><h2>'+esc(id)+'</h2><button type="button" class="x" data-drill-close>×</button></div><p class="bad">'+esc((r.data&&r.data.error)||'not available')+'</p>';
+}
+function closeDrill(clearSel){
+  const id=APP.drillId;
+  APP.drillOpen=false;
+  document.getElementById('drill').hidden=true;document.body.classList.remove('drill-open');
+  if(clearSel&&window.AtmanWork){APP.drillId='';window.AtmanWork.select('')}
+  const b=id&&document.querySelector('#workflowGraph button[data-id="'+id+'"]');if(b)b.focus();
+  if(window.AtmanWork&&window.AtmanWork.drawEdges)window.AtmanWork.drawEdges();
+}
+document.addEventListener('atman:work-select',e=>{
+  const det=e.detail||{};
+  if(det.initial)return;
+  if(det.id)openDrill(det.id);else closeDrill(false);
+});
+document.addEventListener('click',()=>{APP.wasOpen=APP.drillOpen},true);
+document.addEventListener('click',e=>{
+  const wn=e.target.closest('#workflowGraph button[data-id]');
+  if(wn&&!APP.wasOpen&&!APP.drillOpen&&wn.dataset.id===APP.drillId&&window.AtmanWork){window.AtmanWork.select(wn.dataset.id,{noScroll:true});openDrill(wn.dataset.id);return}
+  const side=e.target.closest('[data-side]');if(side){sideGo(side.dataset.side);return}
+  const cp=e.target.closest('[data-copy-post]');if(cp){const m=APP.postsBy[cp.dataset.copyPost];if(m)copyText(m.text,cp);return}
+  const ct=e.target.closest('[data-copy-text]');if(ct){copyText(ct.dataset.copyText,ct);return}
+  const ot=e.target.closest('[data-open-ticket]');
+  if(ot){e.preventDefault();const id=ot.dataset.openTicket;if(window.AtmanWork)window.AtmanWork.select(id,{noScroll:true});openDrill(id);return}
+  if(e.target.closest('[data-drill-back]')){closeDrill(false);return}
+  if(e.target.closest('[data-drill-close]')){closeDrill(true);return}
+  const pick=e.target.closest('[data-pick-lead]');
+  if(pick){
+    const seat=pick.dataset.pickLead;const m=document.getElementById('pickMsg');
+    pick.disabled=true;if(m)m.textContent='setting lead…';
+    postJSON('/lead',{seat}).then(r=>{pick.disabled=false;if(r.ok&&r.data.ok){APP.stickBottom=true;loadLead();loadProjects()}else if(m){m.className='bad';m.textContent='not set: '+((r.data&&r.data.error)||r.status)}});
+    return;
+  }
+  const ans=e.target.closest('[data-answer-re]');
+  if(ans){const re=document.getElementById('lRe');if(re&&!re.disabled)re.value=ans.dataset.answerRe;const t=document.getElementById('lText');if(t&&!t.disabled)t.focus();return}
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&APP.drillOpen&&!e.target.closest('#workflowGraph')){e.preventDefault();closeDrill(false)}});
+function appAfterLoad(d){
+  SNAP=d;
+  document.getElementById('fleetN').textContent=String((d.agents||[]).length||'');
+  const running=(d.agent_map&&d.agent_map.running)||0;
+  const rn=document.getElementById('runsN');rn.textContent=running?running+' live':'';
+  const nodes=(d.work&&d.work.nodes)||[];
+  document.getElementById('planN').textContent=nodes.length?String(nodes.length):'';
+  renderLeadTitle();renderRepoLens(d);
+  if(document.body.dataset.tab==='hub')renderHub();
+}
+// Read-only repo lens for a shared board (until the split): filters plan nodes by ticket.repo.
+let REPO_LENS='';
+try{REPO_LENS=localStorage.getItem('atman-repo-lens:'+PROJECT)||''}catch(e){}
+const repoName=r=>{const s=String(r||'').replace(/\.git$/,'').replace(/\/+$/,'');return s?s.split(/[\/:]/).pop():'no repo recorded'};
+function lensWork(w){
+  if(!REPO_LENS||!w||!w.nodes)return w;
+  const want=REPO_LENS==='(none)'?'':REPO_LENS;
+  const keep=new Set(w.nodes.filter(n=>(n.repo||'')===want).map(n=>n.id));
+  return Object.assign({},w,{nodes:w.nodes.filter(n=>keep.has(n.id)),edges:(w.edges||[]).filter(e=>keep.has(e.from)&&keep.has(e.to)),
+    layers:(w.layers||[]).map(l=>l.filter(id=>keep.has(id))).filter(l=>l.length),order:(w.order||[]).filter(id=>keep.has(id))});
+}
+function renderRepoLens(d){
+  const box=document.getElementById('repoLensBox'),sel=document.getElementById('repoLens');if(!box||!sel)return;
+  const repos=[...new Set(((d.work&&d.work.nodes)||[]).map(n=>n.repo||''))];
+  if(repos.length<2){box.hidden=true;if(REPO_LENS){REPO_LENS='';}return}
+  box.hidden=false;
+  const opts=[['','all repos']].concat(repos.map(r=>[r||'(none)',repoName(r)]));
+  const html=opts.map(o=>'<option value="'+escA(o[0])+'"'+(o[0]===REPO_LENS?' selected':'')+'>'+esc(o[1])+'</option>').join('');
+  if(sel.dataset.sig!==html){sel.innerHTML=html;sel.dataset.sig=html}
+}
+document.getElementById('repoLens').addEventListener('change',e=>{
+  REPO_LENS=e.target.value;try{localStorage.setItem('atman-repo-lens:'+PROJECT,REPO_LENS)}catch(_){}
+  if(SNAP)renderGraph(SNAP.graph,SNAP);
+});
+function tickSideClock(){const c=document.getElementById('sideClock');if(c)c.textContent=new Date().toLocaleTimeString()}
+try{if(window.matchMedia&&!window.matchMedia('(max-width:900px)').matches)document.body.dataset.view='lead'}catch(e){}
+loadProjects();loadLead();loadNeeds();tickSideClock();
+setInterval(loadLead,5000);setInterval(loadNeeds,15000);setInterval(tickSideClock,1000);
+setInterval(()=>{if(APP.drillOpen&&APP.drillId)openDrill(APP.drillId)},15000);
+
 load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
 
@@ -18508,7 +19025,13 @@ def _board_snapshot_body(board, messages=40):
     for r in rows:
         rec = agents.get(r["agent"], {})
         agent_wf = wf.get(r["agent"], {}) or {}
-        harness_name = agent_wf.get("harness") or agent_wf.get("tool") or "claude"
+        # T-1106: empty means unknown -- never invent claude (same rule as _seat_harness).
+        harness_name = (agent_wf.get("harness") or agent_wf.get("tool") or "").strip()
+        if not harness_name:
+            # A registered native endpoint is recorded evidence of the harness;
+            # with neither, the seat's harness is unknown.
+            harness_name = ((_session_adapters().read_endpoint(board, r["agent"]) or {})
+                            .get("provider") or "").strip()
         lim = _active_seat_limit(board, r["agent"], rec)
         wc = _watcher_count(r["agent"], board)
         wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
@@ -18565,7 +19088,7 @@ def _board_snapshot_body(board, messages=40):
         if life == "ephemeral" and not reachable and adapter_state == "offline":
             adapter_extra["adapter_delivery"] = "exited"
         out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
-                           "harness": harness_name,
+                           "harness": harness_name or "unknown",
                            "agent_id": agent_wf.get("agent_id") or r["agent"],
                            "lifecycle": life,
                            "reachable": reachable,
@@ -18697,6 +19220,12 @@ def _board_snapshot_body(board, messages=40):
             # 9f50606 work_payload has no agents=; revised T-889 does.
             return fn(tickets, graph, all_msgs, **kwargs)
     work = _safe(_work_payload, None)
+    # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
+    amap = _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
+                                        live=live, events=events), None)
+    # T-1103: typed blocker chips and the running pulse, joined onto plan nodes
+    # from records the snapshot already holds (no new reads, no writes).
+    _safe(lambda: _annotate_plan(work, tickets, out_agents, amap), None)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -18723,9 +19252,7 @@ def _board_snapshot_body(board, messages=40):
         # T-1076: per-provider quota for the Team header. Same ledger reader as
         # `atm agents`; still read-only, so board.json spawns nothing.
         "provider_usage": _safe(lambda: provider_usage_snapshot(board), []) or [],
-        # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
-        "agent_map": _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
-                                                  live=live, events=events), None),
+        "agent_map": amap,
         "promise": promise,
         "objective": {
             **objective_view,
@@ -18738,6 +19265,32 @@ def _board_snapshot_body(board, messages=40):
         "work": work,
         "first_screen": _first_screen(work),
     }
+
+
+def _annotate_plan(work, tickets, out_agents, amap):
+    if not work:
+        return
+    wv = _work_view()
+    by_id = dict((t["id"], t) for t in tickets)
+    seats = {}
+    for a in out_agents or []:
+        surf = a.get("auth_surface") or {}
+        seats[a["name"]] = {
+            "limited": bool(a.get("limit")), "limit_until": a.get("limit_until") or "",
+            "adapter_state": a.get("adapter_state") or "", "state": a.get("state") or "",
+            "auth_state": surf.get("state") or "", "auth_label": surf.get("label") or "",
+            "auth_cmd": (surf.get("recovery") or {}).get("cmd") or "",
+        }
+    running = {}
+    for g in (amap or {}).get("groups") or []:
+        for r in g.get("rows") or []:
+            if r.get("state") == "running" and g.get("ticket"):
+                running.setdefault(g["ticket"], {"seat": r.get("seat") or "", "elapsed_s": r.get("elapsed_s")})
+    for n in work.get("nodes") or []:
+        n["blockers"] = wv.blockers_of(n, by_id, seats)
+        n["running"] = running.get(n.get("id"))
+        # the shared-board repo lens (until the split) filters on this
+        n["repo"] = ((by_id.get(n.get("id")) or {}).get("repo") or "").strip()
 
 
 def _first_screen(work):
@@ -18947,106 +19500,1004 @@ def _ui_msg_origin_ok(headers):
     parsed = urlparse(origin)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return False
-    return parsed.netloc.lower() == host.lower()
+    if parsed.netloc.lower() != host.lower():
+        return False
+    # T-1105: same-origin is not enough under DNS rebinding -- both name the
+    # attacker's host. The origin must itself be loopback.
+    return _ui_is_loopback_name(_ui_split_hostport(parsed.netloc)[0])
 
 
-def _ui_page():
+# --- T-1103 app v2 phase 1: projects, the lead, the operator, read routes ----
+#
+# Every function in this block that serves a GET is a pure read: no
+# subprocess, no write-mode open, no watermark move. The write routes
+# (POST /msg, POST /lead, POST /auth-reconnect) are guarded by
+# _ui_write_guard: loopback Host, same-origin, JSON, per-launch token.
+
+_UI_TOKEN_HEADER = "X-Atman-Token"
+_UI_THREAD_LIMIT_MAX = 200
+_UI_TICKET_ID_RE = re.compile(r"^T-\d{1,7}$")
+_UI_SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_UI_OFFLINE_ADAPTER = ("offline", "queued-offline", "failed")
+_UI_AUTH_BLOCKING = ("login_required", "expired")
+
+
+def _ui_is_loopback_name(name):
+    name = (name or "").strip().lower()
+    if name == "localhost":
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def _ui_split_hostport(value):
+    """'127.0.0.1:8765' -> ('127.0.0.1', '8765'); '[::1]:80' -> ('::1', '80')."""
+    v = (value or "").strip().lower()
+    if v.startswith("["):
+        end = v.find("]")
+        if end < 0:
+            return "", ""
+        rest = v[end + 1:]
+        return v[1:end], (rest[1:] if rest.startswith(":") else "")
+    if v.count(":") == 1:
+        name, port = v.split(":", 1)
+        return name, port
+    if ":" in v:  # bare IPv6 without brackets is not a valid Host header
+        return "", ""
+    return v, ""
+
+
+def _ui_host_ok(headers, port=None):
+    """T-1105: refuse any request whose Host is not loopback (DNS rebinding).
+
+    A rebinding page resolves its own name to 127.0.0.1, so the socket is
+    local but the Host header still names the attacker's domain. Only
+    127.0.0.0/8, ::1 and `localhost` are accepted, on this server's port.
+    """
+    raw = (headers.get("Host") or "").strip()
+    if not raw:
+        return False
+    name, p = _ui_split_hostport(raw)
+    if not _ui_is_loopback_name(name):
+        return False
+    if port:
+        if p:
+            return p == str(port)
+        return int(port) == 80
+    return True
+
+
+def _ui_token_ok(headers, token):
+    import hmac
+    got = (headers.get(_UI_TOKEN_HEADER) or "").strip()
+    return bool(token) and bool(got) and hmac.compare_digest(got, token)
+
+
+def _ui_host_arg_ok(host):
+    """`atm ui --host` accepts loopback only (T-1105): localhost-only is enforced."""
+    return _ui_is_loopback_name((host or "").strip().strip("[]"))
+
+
+def _ui_registry():
+    """The machine registry (~/.config/atman/board.json or ATMAN_BOARD_CONFIG).
+
+    Missing or unparsable -> {}. Never raises, never exits.
+    """
+    try:
+        with open(_atman_config_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _ui_slug(text):
+    s = _UI_SLUG_RE.sub("-", str(text or "")).strip("-.")[:40]
+    return s or "board"
+
+
+def ui_projects(started_board, registry=None):
+    """[{slug, board, repos, source}] -- the board `atm ui` started on first.
+
+    A project is a board (T-1103 decision 1). `projects` in the registry
+    names boards; every distinct `boards` value is listed too, under
+    basename(dirname(board)). Boards that are not directories are skipped.
+    Never calls board_dir(), which can exit on a shadow board.
+    """
+    reg = _ui_registry() if registry is None else (registry if isinstance(registry, dict) else {})
+    projects = reg.get("projects") if isinstance(reg.get("projects"), dict) else {}
+    boards = reg.get("boards") if isinstance(reg.get("boards"), dict) else {}
+    out, by_real, slugs = [], {}, set()
+
+    def _real(path):
+        try:
+            return os.path.realpath(os.path.expanduser(str(path)))
+        except (TypeError, ValueError, OSError):
+            return ""
+
+    def add(slug, board, repos, source):
+        real = _real(board) if board else ""
+        if not real or not os.path.isdir(real):
+            return
+        repos = [str(r) for r in (repos or []) if isinstance(r, str) and r]
+        if real in by_real:
+            row = by_real[real]
+            row["repos"] = row["repos"] + [r for r in repos if r not in row["repos"]]
+            return
+        base = _ui_slug(slug or os.path.basename(os.path.dirname(real)))
+        slug, n = base, 2
+        while slug in slugs:
+            slug, n = "%s-%d" % (base, n), n + 1
+        slugs.add(slug)
+        row = {"slug": slug, "board": real, "repos": repos, "source": source}
+        by_real[real] = row
+        out.append(row)
+
+    started_real = _real(started_board)
+    started_slug = ""
+    for s, p in projects.items():
+        if isinstance(p, dict) and _real(p.get("board") or "") == started_real:
+            started_slug = s
+            break
+    add(started_slug, started_board, [], "started")
+    for s, p in projects.items():
+        if isinstance(p, dict):
+            add(s, p.get("board"), p.get("repos") if isinstance(p.get("repos"), list) else [], "registry")
+    for repo, b in boards.items():
+        if isinstance(b, str):
+            add("", b, [repo], "boards")
+    return out
+
+
+def _ui_project_counts(board):
+    """Cheap per-board counts: ticket statuses plus the chosen lead. No liveness."""
+    counts = {"open": 0, "blocked": 0, "claimed": 0, "review": 0, "done": 0}
+    for t in load_all(board):
+        st = t.get("status") or ""
+        if st in counts:
+            counts[st] += 1
+    m = current_master(board) or {}
+    return counts, (m.get("lead") or "").strip()
+
+
+def _ui_registered(board, name):
+    name = (name or "").strip()
+    if not name or "/" in name or name.startswith("."):
+        return False
+    return bool(_agent_rec(board, name)) or name in load_workforce(board)
+
+
+def ui_lead(board, master_state=None):
+    """(lead, note). The lead is master.json.lead, a per-project user choice.
+
+    There is no default: unset means '' and the app asks. A lead that is no
+    longer registered is reported, never silently replaced by master or CoS.
+    """
+    m = master_state if master_state is not None else (current_master(board) or {})
+    lead = ((m or {}).get("lead") or "").strip()
+    if not lead:
+        return "", "no lead picked for this project"
+    if not _ui_registered(board, lead):
+        return "", "lead %s is not registered on this board; pick again" % lead
+    return lead, ""
+
+
+def ui_operator(board, configured):
+    """(operator, why_not). The operator posts from the app; seats never do.
+
+    The name must have agents/<name>.json on this board and must not be a
+    harness-run seat (a workforce entry with a harness is woken; the operator
+    is not). `atm join <name>` with no --harness is how a person registers.
+    """
+    name = (configured or "").strip()
+    if not name:
+        return "", "set an operator: atm ui --operator <name>"
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", name):
+        return "", "operator name %r is not a valid seat name" % name
+    if not _agent_rec(board, name):
+        return "", "operator %s has no agents/%s.json on this board: atm join %s" % (name, name, name)
+    entry = load_workforce(board).get(name) or {}
+    harness = (entry.get("harness") or entry.get("tool") or "").strip()
+    if harness:
+        return "", ("operator %s is a %s seat in workforce.json; the app posts as a person, "
+                    "never as a harness-run seat" % (name, harness))
+    return name, ""
+
+
+def _ui_receipt_words(seen, wake):
+    """Receipts only. Never an agent acknowledgement (T-1103 invariant)."""
+    words = ["posted"]
+    if seen is True:
+        words.append("inbox read")
+    elif seen is False:
+        words.append("not read")
+    if wake and wake.get("confirmed"):
+        words.append("wake confirmed")
+    elif wake and wake.get("label"):
+        label = str(wake.get("label"))
+        if "ack" in label.lower():
+            label = "receipt recorded"
+        words.append("wake: " + label)
+    return words
+
+
+def _ui_harness_badge(m, operator, wf):
+    frm = (m.get("from") or "").strip()
+    if (operator and frm.lower() == operator.lower()) or m.get("sender_kind") == "operator":
+        return {"value": "operator", "recorded": True, "note": "operator"}
+    stamped = (m.get("harness") or "").strip()
+    if stamped:
+        return {"value": stamped, "recorded": True, "note": "recorded at post time"}
+    entry = wf.get(frm) or {}
+    cur = (entry.get("harness") or entry.get("tool") or "").strip()
+    if cur:
+        return {"value": cur, "recorded": False, "note": "current harness; not recorded at post time"}
+    return {"value": "unknown", "recorded": False, "note": "harness not recorded"}
+
+
+def _ui_post_row(board, m, project, operator, wf, agents_by):
+    delivery = _message_delivery(board, m, agents_by=agents_by)
+    if delivery.get("status") == "broadcast":
+        receipts = [{"agent": "", "words": ["posted", "broadcast"]}]
+    else:
+        receipts = [{"agent": r["agent"], "words": _ui_receipt_words(r.get("seen"), r.get("wake"))}
+                    for r in delivery.get("receipts") or []]
+    frm = m.get("from") or ""
+    return {
+        "id": _msg_id(m), "at": m.get("at", ""), "from": frm,
+        "author": "%s@%s" % (frm or "?", project),
+        "to": m.get("to", ""), "re": m.get("re", ""), "text": m.get("text", ""),
+        "mentions": m.get("mentions") or [], "kind": m.get("kind") or "message",
+        "harness": _ui_harness_badge(m, operator, wf),
+        "operator": bool(operator and frm.lower() == operator.lower()),
+        "broadcast": is_board_broadcast(m),
+        "receipts": receipts,
+    }
+
+
+def _ui_in_thread(m, operator, seat):
+    frm = (m.get("from") or "").strip().lower()
+    op, s = (operator or "").lower(), (seat or "").lower()
+    if not s:
+        return False
+    if op:
+        if frm == op:
+            return message_involves_seat(m, seat)
+        if frm == s:
+            return message_involves_seat(m, operator) or is_board_broadcast(m)
+        return False
+    return message_involves_seat(m, seat) or (frm == s and is_board_broadcast(m))
+
+
+def _ui_reachable(board, seat):
+    """Read-only: a watcher pid file with a live pid, or a native endpoint whose
+    transport still exists. Never live_endpoint() (it prunes), never ps."""
+    try:
+        with open(os.path.join(agents_dir(board), seat + ".watch.pid")) as f:
+            pid = int((f.read() or "0").strip() or 0)
+        if pid and _pid_alive(pid):
+            return True
+    except (OSError, ValueError):
+        pass
+    ep = _session_adapters().read_endpoint(board, seat) or {}
+    sock = ep.get("socket") or ""
+    if sock and os.path.exists(sock):
+        return True
+    return False
+
+
+def ui_capability(board, seat, harness):
+    """'takes mid-run messages' only for a steerable harness with a live socket.
+
+    Same table as `atm steer` (steer.harness_refuse_reason), so it cannot drift.
+    """
+    st = _steer()
+    ep = _session_adapters().read_endpoint(board, seat) or {}
+    refuse = st.harness_refuse_reason(harness, ep.get("provider") or "")
+    sock = ep.get("socket") or ""
+    if not refuse and sock and os.path.exists(sock):
+        return {"midrun": True, "line": "takes mid-run messages", "reason": ""}
+    return {"midrun": False, "line": "answers on its next turn",
+            "reason": refuse or "no live messaging socket right now"}
+
+
+def _ui_usage_view(board, harness):
+    pu = _provider_usage()
+    reading = pu.get_reading(board, harness)
+    ui = pu.ui_reading(reading)
+    compact = pu.compact_reading(reading)
+    age = ui.get("age") or ""
+    return {"provider": ui.get("provider") or (harness or "unknown"),
+            "status": ui.get("status") or "unknown",
+            "level": compact.get("level") or "unknown",
+            "text": compact.get("text") or "",
+            "remaining_pct": compact.get("remaining_pct"),
+            "reset": compact.get("reset") or "",
+            "checked_at": ui.get("checked_at") or "",
+            "age": age or "age unknown"}
+
+
+def ui_lead_status(board, lead, agent_map=None):
+    """The lead status strip: liveness, run, last output, limit, auth, usage.
+
+    Also says plainly when the lead cannot answer (limited, logged out, no
+    live session, quota), so the chat never hangs on a promise.
+    """
+    agent_list = load_agents(board)
+    rec = next((r for r in agent_list if (r.get("owner") or "") == lead), {}) or {}
+    wf = load_workforce(board)
+    entry = wf.get(lead) or {}
+    harness = (entry.get("harness") or entry.get("tool") or "").strip()
+    with _read_only_liveness():
+        live = (_safe(lambda: agent_liveness(board, rec, agent_list), {}) or {}) if rec else {}
+        lim = _active_seat_limit(board, lead, rec) if rec else None
+        if agent_map is None:
+            agent_map = _safe(lambda: agent_map_data(board, agent_list=agent_list,
+                                                     live={lead: live} if rec else {}), None)
+    running = None
+    for g in (agent_map or {}).get("groups") or []:
+        for row in g.get("rows") or []:
+            if row.get("seat") == lead and row.get("state") == "running":
+                running = {"ticket": g.get("ticket") or "", "elapsed_s": row.get("elapsed_s"),
+                           "tokens": row.get("tokens")}
+    last_at, last_src = _steer().last_output(rec, watch_log_ts=_steer_watch_log_ts(board, lead))
+    auth = _agent_auth_surface(board, rec, lead, harness) if rec else {}
+    usage = _ui_usage_view(board, harness)
+    reachable = _ui_reachable(board, lead)
+    cap = ui_capability(board, lead, harness)
+    state = live.get("state") or "unknown"
+    blocked = None
+    rec_cmd = ((auth or {}).get("recovery") or {}).get("cmd") or ""
+    if (auth or {}).get("state") in _UI_AUTH_BLOCKING:
+        blocked = {"kind": "logged_out",
+                   "text": "Lead's harness is logged out. Recovery (run on the enrolled host): %s"
+                           % (rec_cmd or "atm harness auth %s" % lead),
+                   "cmd": rec_cmd}
+    elif lim:
+        until = lim.get("until") or lim.get("reset_at") or "unknown"
+        blocked = {"kind": "limited",
+                   "text": "Lead is limited until %s (usage %s). Your message is queued."
+                           % (until, usage["age"]),
+                   "cmd": "atm harness usage"}
+    elif usage["level"] == "limited":
+        blocked = {"kind": "quota",
+                   "text": "Provider quota exhausted (%s). %s" % (
+                       usage["age"], ("Resets %s." % usage["reset"]) if usage["reset"] else "Reset unknown."),
+                   "cmd": "atm harness usage"}
+    elif state in ("dead", "stalled") or not reachable:
+        blocked = {"kind": "offline",
+                   "text": "No live session for the lead. Message queued; it runs when a watcher is up: "
+                           "atm spawn %s --persist" % lead,
+                   "cmd": "atm spawn %s --persist" % lead}
+    return {
+        "seat": lead, "harness": harness or "unknown",
+        "state": state, "detail": live.get("detail") or "",
+        "running": running,
+        "last_output_at": last_at, "last_output_source": last_src,
+        "limit": lim or None,
+        "limit_until": (lim or {}).get("until") or (lim or {}).get("reset_at") or "" if lim else "",
+        "auth": {"state": (auth or {}).get("state") or "", "label": (auth or {}).get("label") or "Not checked",
+                 "cmd": rec_cmd},
+        "usage": usage,
+        "reachable": reachable,
+        "capability": cap,
+        "wake_mode": wake_mode_of(board, lead),
+        "cannot_answer": blocked,
+    }
+
+
+def ui_thread(board, operator, seat, project, before="", limit=100, include_archives=False):
+    """Operator <-> seat thread, paged back through the whole live log (and
+    the archives on request) -- not the 40-message snapshot window."""
+    try:
+        limit = max(1, min(int(limit or 100), _UI_THREAD_LIMIT_MAX))
+    except (TypeError, ValueError):
+        limit = 100
+    msgs = load_messages(board, include_archives=include_archives)
+    rows = [m for m in msgs if _ui_in_thread(m, operator, seat)]
+    if before:
+        idx = next((i for i, m in enumerate(rows) if _msg_id(m) == before), None)
+        if idx is None:
+            return {"messages": [], "has_more": False, "error": "unknown cursor %s" % before}
+        rows = rows[:idx]
+    page = rows[-limit:]
+    wf = load_workforce(board)
+    agents_by = dict((r.get("owner"), r) for r in load_agents(board) if r.get("owner"))
+    return {
+        "messages": [_ui_post_row(board, m, project, operator, wf, agents_by) for m in page],
+        "has_more": len(rows) > len(page),
+        "oldest_id": _msg_id(page[0]) if page else "",
+        "total_in_window": len(rows),
+        "archives": bool(include_archives),
+    }
+
+
+def ui_needs_you(board, operator, project, tickets=None, now_dt=None):
+    """Read-only 'Needs you' queue. Unstructured asks only: state is always
+    'asked'. Prose is never a ruling (T-944), so nothing here says 'ruled'."""
+    now_dt = now_dt or datetime.now(timezone.utc)
+    msgs = load_messages(board)
+    op = (operator or "").lower()
+    items, seen_ids = [], set()
+    registered = _registered_handles(board)
+
+    def _age_h(at):
+        try:
+            d = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            return (now_dt - d).total_seconds() / 3600.0
+        except (TypeError, ValueError):
+            return None
+
+    def _push(m, why):
+        mid = _msg_id(m)
+        if mid in seen_ids:
+            return
+        seen_ids.add(mid)
+        frm = m.get("from") or ""
+        items.append({"kind": "message", "why": why, "id": mid, "at": m.get("at", ""),
+                      "from": frm, "author": "%s@%s" % (frm or "?", project),
+                      "re": m.get("re", ""), "text": (m.get("text") or "")[:400],
+                      "state": "asked", "label": "asked (unstructured)"})
+
+    for i, m in enumerate(msgs):
+        frm = (m.get("from") or "").strip()
+        if op and frm.lower() == op:
+            continue
+        text = (m.get("text") or "").strip()
+        low = text.lower()
+        directed = bool(op) and not is_board_broadcast(m) and _addressed_to(m, operator, registered)
+        if directed:
+            answered = any((x.get("from") or "").lower() == op and message_involves_seat(x, frm)
+                           for x in msgs[i + 1:])
+            if not answered:
+                _push(m, "addressed to you, no reply from you since")
+                continue
+        if text.upper().startswith("DECIDE") or "@owner" in low or (op and ("@" + op) in low):
+            _push(m, "decision asked in prose")
+            continue
+        if low.startswith("stuck:"):
+            age = _age_h(m.get("at"))
+            if age is not None and age > 1.0:
+                _push(m, "stuck for over an hour")
+    for t in (tickets if tickets is not None else load_all(board)):
+        auto = t.get("automated") or {}
+        if (t.get("kind") == "automated" and auto.get("escalated")
+                and t.get("status") not in ("done",)):
+            items.append({"kind": "escalated", "why": "escalated automated node: keep or remove",
+                          "id": t["id"], "at": auto.get("escalated_at") or t.get("created") or "",
+                          "from": "", "author": "", "re": t["id"],
+                          "text": (auto.get("escalate_reason") or t.get("title") or "")[:400],
+                          "state": "asked", "label": "asked (unstructured)"})
+    items.sort(key=lambda x: x.get("at") or "")
+    return {"items": items[:100], "count": len(items),
+            "operator": operator or "",
+            "note": "" if operator else "no operator configured; showing prose asks only"}
+
+
+def _ui_dep_state(dep):
+    if dep is None:
+        return "missing"
+    wv = _work_view()
+    if wv.dep_released(dep):
+        return "accepted"
+    if dep.get("status") == "done":
+        return "done, not accepted"
+    return dep.get("status") or "open"
+
+
+def ui_ticket(board, tid, operator, project, include_archives=False):
+    """GET /ticket/<id>.json: the drill-down. Board files only; no git.
+
+    The diff is a copyable command, never run on a read.
+    """
+    try:
+        with open(ticket_path(board, tid)) as f:
+            t = json.load(f)
+    except (OSError, ValueError):
+        return None
+    wv = _work_view()
+    rv = _review_verdict()
+    tickets = load_all(board)
+    by_id = dict((x["id"], x) for x in tickets)
+    msgs = load_messages(board, include_archives=include_archives)
+    about = [m for m in msgs if (m.get("re") or "") == tid]
+    review = wv.review_of(t, about)
+    accepted = bool(wv.dep_released(t)) if t.get("status") == "done" else False
+    verified = bool(review.get("verified"))
+    status = t.get("status") or ""
+    # The accept gate (dep_released: structured accept / merge / override) is
+    # the only thing that makes done "accepted" here; prose never does.
+    if status == "done" and not accepted:
+        status_label = "done, not accepted"
+    elif status == "done":
+        status_label = "done, accepted"
+    else:
+        status_label = LABEL.get(status, status)
+    head = rv.displayed_review_head(t)
+    verdicts = []
+    for ev in rv.iter_structured(t):
+        verdicts.append({"kind": (ev.get("kind") or "").lower(), "by": ev.get("by") or "",
+                         "at": ev.get("at") or "", "sha": ev.get("sha") or "",
+                         "superseded": bool(ev.get("superseded")),
+                         "applies": bool(head and rv.sha_match(ev.get("sha"), head)),
+                         "notes": (ev.get("notes") or ev.get("reason") or "")[:600]})
+    agent_list = load_agents(board)
+    with _read_only_liveness():
+        amap = _safe(lambda: agent_map_data(board, show_all=True, tickets=tickets,
+                                            agent_list=agent_list), None)
+    runs = []
+    for g in (amap or {}).get("groups") or []:
+        if g.get("ticket") != tid:
+            continue
+        for r in g.get("rows") or []:
+            v = r.get("verdict")
+            verdict = ("%s @%s" % (v.get("kind") or "", v.get("sha") or "?")) if isinstance(v, dict) else (v or "")
+            runs.append({"seat": r.get("seat") or "", "author": "%s@%s" % (r.get("seat") or "?", project),
+                         "harness": r.get("harness") or "unknown", "role": r.get("role") or "",
+                         "state": r.get("state") or "", "verdict": verdict,
+                         "started": r.get("started") or "", "ended": r.get("ended") or "",
+                         "elapsed_s": r.get("elapsed_s"),
+                         "tokens": r.get("tokens"), "tokens_in": r.get("tokens_in"),
+                         "tokens_out": r.get("tokens_out"),
+                         "tokens_label": ("unknown" if r.get("tokens") is None
+                                          else "{:,}".format(int(r.get("tokens"))))})
+    wf = load_workforce(board)
+    harnesses = []
+    for seat in [x["seat"] for x in runs] + [(t.get("owner") or "").strip()]:
+        entry = wf.get(seat) or {}
+        h = (entry.get("harness") or entry.get("tool") or "").strip()
+        if seat and h and h not in harnesses:
+            harnesses.append(h)
+    usage = [_ui_usage_view(board, h) for h in harnesses]
+    handoff = []
+    for d in t.get("deps") or []:
+        dep = by_id.get(d)
+        if dep and dep.get("status") == "done":
+            for n in wv.handoff_notes(dep)[-1:]:
+                handoff.append({"from": d, "by": n.get("by") or "", "at": n.get("at") or "",
+                                "text": (n.get("text") or "")[:1200]})
+    own_handoff = [{"from": tid, "by": n.get("by") or "", "at": n.get("at") or "",
+                    "text": (n.get("text") or "")[:1200]} for n in wv.handoff_notes(t)[-3:]]
+    agents_by = dict((r.get("owner"), r) for r in agent_list if r.get("owner"))
+    msg_rows = [_ui_post_row(board, m, project, operator, wf, agents_by) for m in about[-50:]][::-1]
+    sha = head or rv.submitted_sha(t) or ""
+    branch = (t.get("branch") or "").strip()
+    commit = (t.get("commit") or "").strip()
+    if not branch and "@" in commit:
+        branch = commit.rsplit("@", 1)[0]
+    target = sha or branch
+    deps = [{"id": d, "state": _ui_dep_state(by_id.get(d)),
+             "title": (by_id.get(d) or {}).get("title") or ""} for d in t.get("deps") or []]
+    return {
+        "id": tid, "project": project, "title": t.get("title") or "",
+        "status": status, "status_label": status_label,
+        "accepted": bool(accepted),
+        "owner": (t.get("owner") or "").strip(),
+        "owner_at_project": ("%s@%s" % (t.get("owner"), project)) if t.get("owner") else "",
+        "deps": deps,
+        "acceptance": {"proof": (t.get("proof") or "").strip()},
+        "review": {"head": head, "head_len": len(head), "label": review.get("label") or "",
+                   "verified": verified, "verdicts": verdicts},
+        "runs": runs,
+        "usage": usage,
+        "handoff": handoff + own_handoff,
+        "messages": msg_rows,
+        "messages_total": len(about),
+        "steers": [dict((k, s.get(k)) for k in ("id", "kind", "from", "to", "seat", "text", "at",
+                                               "receipt", "reply") if k in s)
+                   for s in (t.get("steers") or []) if isinstance(s, dict)],
+        "artifact": {"commit": commit, "branch": branch, "pr": str(t.get("pr") or ""), "sha": sha},
+        "diff_cmd": ("git diff main...%s" % target) if target else "",
+        "diff_note": "copy and run it in the repo; the app never runs git on a read",
+    }
+
+
+def deliver_wakes(board, m):
+    """The wake half of `atm msg`, shared by the CLI and the app (T-1103).
+
+    Returns [{"to", "label", "line", "recovery"?}]; `line` is exactly what
+    `atm msg` prints. The board post already happened; this only wakes.
+    """
+    out = []
+    sa = None
+    mid = _msg_id(m)
+    for to in _split_to_tokens(m.get("to") or ""):
+        if to.lower() in _MENTION_BROADCAST:
+            continue
+        if not _message_wakes_seat(board, to, m):
+            continue
+        if _already_autonomous_wake(board, to, mid):
+            out.append({"to": to, "label": "deduped", "line": "wake: %s -> deduped" % to})
+            continue
+        limit = _active_seat_limit(board, to)
+        if limit:
+            out.append({"to": to, "label": "limited",
+                        "line": "wake: %s -> limited (reset %s)" % (
+                            to, limit.get("reset_at") or limit.get("until") or "unknown")})
+            continue
+        harness = _seat_harness(board, to)
+        if sa is None:
+            sa = _session_adapters()
+        label = sa.wake_seat(board, to, sa.wake_payload(fmt_msg, m), harness=harness,
+                             message_id=mid)
+        poked = False
+        if _should_poke_persist(label):
+            poked = _poke_persist_watch(board, to)
+            if poked:
+                label = "watch-poked"
+        if label == "queued-offline":
+            line = "wake: %s -> %s (%s)" % (
+                to, label, "run the thread in terminal Codex to enable native wake")
+        else:
+            line = "wake: %s -> %s" % (to, label)
+        row = {"to": to, "label": label, "line": line}
+        if label == "held":
+            row["recovery"] = getattr(
+                sa, "CLAUDE_HELD_RECOVERY",
+                "approve in the recipient session or set crossSessionInbound accept")
+        out.append(row)
+        _note_wake_delivery(board, to, label, mid, poked=poked)
+        _safe(lambda to=to, label=label: _note_native_wake_result(
+            board, to, label, mid), None)
+    return out
+
+
+def _write_master_state(board, state):
+    os.makedirs(board, exist_ok=True)
+    path = master_state_path(board)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def set_lead(board, seat, by):
+    """master.json.lead = seat (T-1103 decision 2), plus a master log line."""
+    seat = (seat or "").strip()
+    prev = dict(current_master(board) or {})
+    if not seat:
+        old = prev.pop("lead", "")
+        _write_master_state(board, prev)
+        _master_log(board, "lead cleared (was %s)" % (old or "unset"), by=by)
+        return ""
+    if not _ui_registered(board, seat):
+        raise ValueError("%s is not a registered seat on this board" % seat)
+    prev["lead"] = seat
+    _write_master_state(board, prev)
+    _master_log(board, "lead set to %s (the seat the operator talks to on this project)" % seat, by=by)
+    return seat
+
+
+def cmd_lead(a, board):
+    """`atm lead` / `atm lead set <seat>` / `atm lead clear` (T-1103)."""
+    action = (getattr(a, "action", "") or "show").strip()
+    if action == "show":
+        lead, note = ui_lead(board)
+        print("lead: %s" % (lead or "(none) -- %s; pick one: atm lead set <seat>" % note))
+        return
+    if action == "clear":
+        set_lead(board, "", by=whoami(getattr(a, "owner", None)))
+        print("lead cleared; the app will ask who to talk to")
+        return
+    if action == "set":
+        seat = (getattr(a, "seat", "") or "").strip()
+        if not seat:
+            sys.exit("atm lead set <seat>")
+        try:
+            set_lead(board, seat, by=whoami(getattr(a, "owner", None)))
+        except ValueError as e:
+            sys.exit("lead: %s" % e)
+        harness = _seat_harness(board, seat)
+        cap = ui_capability(board, seat, harness)
+        print("lead: %s (%s; %s)" % (seat, harness or "harness unknown", cap["line"]))
+        return
+    sys.exit("atm lead [show|set <seat>|clear]")
+
+
+class UiContext:
+    """Per-launch state for `atm ui`: started board, port, operator, token."""
+
+    def __init__(self, board, port=0, operator="", token=None):
+        import secrets
+        self.board = os.path.abspath(board)
+        self.port = int(port or 0)
+        self.operator_flag = (operator or "").strip()
+        self.token = token or secrets.token_urlsafe(32)
+        self.session = "ui:" + hashlib.sha256(self.token.encode()).hexdigest()[:16]
+        # Import lazily-loaded modules now, so a read route never writes a
+        # bytecode cache file on its first request.
+        for load_mod in (_work_view, _steer, _review_verdict, _provider_usage,
+                         _agent_map_mod, _session_adapters):
+            _safe(load_mod, None)
+        _safe(lambda: __import__("auth_v2_contract"), None)
+
+    def projects(self):
+        return ui_projects(self.board)
+
+    def resolve(self, slug):
+        """(board, slug) for ?project=; (None, slug) for an unknown slug."""
+        rows = self.projects()
+        slug = (slug or "").strip()
+        if not slug:
+            return rows[0]["board"] if rows else self.board, (rows[0]["slug"] if rows else "board")
+        for row in rows:
+            if row["slug"] == slug:
+                return row["board"], slug
+        return None, slug
+
+    def operator(self, board):
+        configured = self.operator_flag or str(_ui_registry().get("operator") or "")
+        return ui_operator(board, configured)
+
+
+def _ui_query(path):
+    from urllib.parse import parse_qs, urlparse
+    u = urlparse(path)
+    q = parse_qs(u.query)
+    return u.path, (lambda k, d="": (q.get(k) or [d])[0])
+
+
+def ui_get(ctx, path):
+    """Route one GET. Returns (status, content_type, body_bytes). Read-only."""
+    route, q = _ui_query(path)
+    board, slug = ctx.resolve(q("project"))
+    if board is None:
+        return 404, "application/json", json.dumps({"error": "unknown project %s" % slug}).encode()
+    if route == "/board.json":
+        seat = q("seat")
+        with _read_only_liveness():
+            snap = _safe(lambda: board_snapshot_for_request(board, seat=seat), {
+                "error": "snapshot failed",
+                "counts": {"total": 0, "done": 0},
+                "next_step": {"kind": "unreachable", "label": "Snapshot failed",
+                              "message": "Could not read the board — check TICKETS_DIR and board files.",
+                              "cmd": "atm ui --json"},
+            })
+        snap = dict(snap)
+        op, why = ctx.operator(board)
+        lead, lead_note = ui_lead(board)
+        snap["app"] = {"project": slug, "operator": op, "operator_note": why,
+                       "lead": lead, "lead_note": lead_note}
+        return 200, "application/json", json.dumps(snap).encode()
+    if route == "/projects.json":
+        rows = []
+        for row in ctx.projects():
+            counts, lead = _safe(lambda b=row["board"]: _ui_project_counts(b), ({}, ""))
+            rows.append(dict(row, counts=counts, lead=lead, current=row["slug"] == slug))
+        return 200, "application/json", json.dumps({"projects": rows, "current": slug}).encode()
+    if route == "/thread.json":
+        op, why = ctx.operator(board)
+        seat = q("with")
+        lead, lead_note = ui_lead(board)
+        if not seat:
+            seat = lead
+        out = {"project": slug, "operator": op, "operator_note": why,
+               "lead": lead, "lead_note": lead_note, "with": seat}
+        if not seat:
+            wf = load_workforce(board)
+            names = sorted(set([r.get("owner") for r in load_agents(board) if r.get("owner")]) | set(wf))
+            picks = []
+            for n in names:
+                if n == op or n.startswith("agent-"):
+                    continue
+                entry = wf.get(n) or {}
+                h = (entry.get("harness") or entry.get("tool") or "").strip()
+                picks.append({"seat": n, "harness": h or "unknown",
+                              "capability": ui_capability(board, n, h)["line"]})
+            out.update(needs_lead=True, picker=picks, messages=[], has_more=False)
+            return 200, "application/json", json.dumps(out).encode()
+        if not _ui_registered(board, seat):
+            out.update(error="%s is not registered on this board" % seat, messages=[])
+            return 404, "application/json", json.dumps(out).encode()
+        page = ui_thread(board, op, seat, slug, before=q("before"), limit=q("limit", "100"),
+                         include_archives=q("all") == "1")
+        out.update(page)
+        out["status"] = _safe(lambda: ui_lead_status(board, seat), None)
+        return 200, "application/json", json.dumps(out).encode()
+    if route == "/needs-you.json":
+        op, _why = ctx.operator(board)
+        return 200, "application/json", json.dumps(ui_needs_you(board, op, slug)).encode()
+    m = re.match(r"^/ticket/([^/]+)\.json$", route)
+    if m:
+        tid = m.group(1)
+        if not _UI_TICKET_ID_RE.match(tid):
+            return 400, "application/json", json.dumps({"error": "bad ticket id"}).encode()
+        op, _why = ctx.operator(board)
+        data = ui_ticket(board, tid, op, slug, include_archives=q("all") == "1")
+        if data is None:
+            return 404, "application/json", json.dumps({"error": "no such ticket %s" % tid}).encode()
+        return 200, "application/json", json.dumps(data).encode()
+    if route in ("/", "/index.html"):
+        op, why = ctx.operator(board)
+        return 200, "text/html; charset=utf-8", _ui_page(ctx.token, op, why, slug).encode()
+    return 404, "application/json", json.dumps({"error": "not found"}).encode()
+
+
+def ui_post_msg(ctx, board, payload):
+    """POST /msg: posts AS THE OPERATOR ONLY, then the same wake path as atm msg."""
+    extra = set(payload) - {"text", "to", "re", "kind", "from", "project"}
+    if extra:
+        return 400, {"ok": False, "error": "unexpected fields: %s" % ", ".join(sorted(extra))}
+    op, why = ctx.operator(board)
+    frm = str(payload.get("from") or "").strip()
+    if not op:
+        return 400, {"ok": False, "error": "composer is read-only: %s (from is never taken from the page)" % why}
+    if frm and frm != op:
+        return 400, {"ok": False, "error": "the app posts as the operator (%s) only; from=%s refused" % (op, frm)}
+    text = str(payload.get("text") or "").strip()
+    to = str(payload.get("to") or "").strip()
+    re_ = str(payload.get("re") or "").strip()
+    kind = str(payload.get("kind") or "message").strip() or "message"
+    if not text:
+        return 400, {"ok": False, "error": "text is required"}
+    if kind not in _UI_MSG_KINDS:
+        return 400, {"ok": False, "error": "kind must be message or task"}
+    tokens = [x.strip() for x in to.split(",") if x.strip()]
+    if any(x.lower() == op.lower() for x in tokens):
+        return 400, {"ok": False, "error": "that is you; address a seat"}
+    bad = [x for x in tokens if x.lower() not in _MENTION_BROADCAST and not _ui_registered(board, x)]
+    if bad:
+        return 400, {"ok": False, "error": "not a registered seat on this board: %s" % ", ".join(bad)}
+    if re_ and (not _UI_TICKET_ID_RE.match(re_) or not os.path.isfile(ticket_path(board, re_))):
+        return 400, {"ok": False, "error": "no such ticket: %s" % re_}
+    rec = post_message(board, op, text, to, re_, kind=kind,
+                       provenance={"via": "ui-operator", "session": ctx.session,
+                                   "sender_kind": "operator"})
+    warnings = []
+    for key in ("_unregistered_implicit", "_unregistered_explicit", "_unregistered_dropped"):
+        val = rec.pop(key, None)
+        if val:
+            warnings.append("%s: %s" % (key.strip("_").replace("_", " "),
+                                        ", ".join(val) if isinstance(val, list) else val))
+    rec.pop("_forwarded", None)
+    wakes = deliver_wakes(board, rec)
+    return 200, {"ok": True, "posted": fmt_msg(rec), "id": rec["id"], "from": op,
+                 "via": rec.get("via"), "wakes": [dict((k, w[k]) for k in ("to", "label") if k in w)
+                                                  for w in wakes],
+                 "warnings": warnings}
+
+
+def ui_post_lead(ctx, board, payload):
+    extra = set(payload) - {"seat", "project"}
+    if extra:
+        return 400, {"ok": False, "error": "lead accepts only seat"}
+    op, why = ctx.operator(board)
+    if not op:
+        return 400, {"ok": False, "error": "only the operator picks the lead: " + why}
+    seat = str(payload.get("seat") or "").strip()
+    if not seat:
+        return 400, {"ok": False, "error": "seat is required"}
+    if seat == op:
+        return 400, {"ok": False, "error": "the lead is a seat, not you"}
+    try:
+        set_lead(board, seat, by=op)
+    except ValueError as e:
+        return 400, {"ok": False, "error": str(e)}
+    harness = _seat_harness(board, seat)
+    return 200, {"ok": True, "lead": seat, "harness": harness or "unknown",
+                 "capability": ui_capability(board, seat, harness)["line"]}
+
+
+def make_ui_handler(ctx):
+    from http.server import BaseHTTPRequestHandler
+
+    class H(BaseHTTPRequestHandler):
+        def _send(self, status, ctype, body):
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            # a framing page could trick the operator into clicking Send
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _json(self, status, obj):
+            self._send(status, "application/json", json.dumps(obj).encode())
+
+        def do_GET(self):
+            if not _ui_host_ok(self.headers, ctx.port):
+                self._json(403, {"error": "host is not loopback; atm ui is localhost-only"})
+                return
+            try:
+                status, ctype, body = ui_get(ctx, self.path)
+            except Exception as e:  # noqa: BLE001 - a read must answer, never hang
+                status, ctype, body = 500, "application/json", json.dumps({"error": str(e)}).encode()
+            self._send(status, ctype, body)
+
+        def do_POST(self):
+            route, q = _ui_query(self.path)
+            if route not in ("/msg", "/lead", "/auth-reconnect"):
+                self._json(404, {"ok": False, "error": "not found"})
+                return
+            # Order: loopback Host (403), then JSON + same-origin + size + no
+            # secrets (400, as before), then the per-launch token (403).
+            if not _ui_host_ok(self.headers, ctx.port):
+                self._json(403, {"ok": False, "executed": False, "ran": False,
+                                 "error": "host is not loopback; atm ui is localhost-only"})
+                return
+            try:
+                payload = _ui_read_json_body(self)
+            except Exception as e:  # noqa: BLE001 - always answer, never hang
+                self._json(400, {"ok": False, "executed": False, "ran": False, "error": str(e)})
+                return
+            if not _ui_token_ok(self.headers, ctx.token):
+                self._json(403, {"ok": False, "executed": False, "ran": False,
+                                 "error": "missing or wrong %s; reload the page" % _UI_TOKEN_HEADER})
+                return
+            board, slug = ctx.resolve(str(payload.get("project") or q("project") or ""))
+            if board is None:
+                self._json(404, {"ok": False, "error": "unknown project %s" % slug})
+                return
+            try:
+                if route == "/auth-reconnect":
+                    payload.pop("project", None)
+                    status, out = _ui_auth_reconnect(board, payload)
+                elif route == "/lead":
+                    status, out = ui_post_lead(ctx, board, payload)
+                else:
+                    status, out = ui_post_msg(ctx, board, payload)
+            except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
+                status, out = 400, {"ok": False, "error": str(e)}
+            self._json(status, out)
+
+        def log_message(self, *args):
+            pass
+
+    return H
+
+
+def _ui_page(token="", operator="", operator_note="", project=""):
     """T-889 hook: UI_HTML with the Work view module spliced in at its three
-    named placeholders. Missing module -> the shell's own fallback graph."""
+    named placeholders. Missing module -> the shell's own fallback graph.
+
+    T-1103: the per-launch write token, the operator and the project are
+    stamped into <meta> tags. Only a loopback-Host request ever gets here."""
+    import html as _html
     mod = _safe(_work_view, None)
     css = getattr(mod, "WORK_CSS", "") if mod else ""
     html = getattr(mod, "WORK_HTML", "") if mod else ""
     js = getattr(mod, "WORK_JS", "") if mod else ""
-    return (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
+    meta = ('<meta name="atman-token" content="%s"><meta name="atman-operator" content="%s">'
+            '<meta name="atman-operator-note" content="%s"><meta name="atman-project" content="%s">' % (
+                _html.escape(token or "", quote=True), _html.escape(operator or "", quote=True),
+                _html.escape(operator_note or "", quote=True), _html.escape(project or "", quote=True)))
+    return (UI_HTML.replace("<!--APP:meta-->", meta)
+            .replace("<!--WORK_VIEW:css-->", css)
             .replace("<!--WORK_VIEW:html-->", html)
             .replace("<!--WORK_VIEW:js-->", js))
 
 
 def cmd_ui(a, board):
-    """Local status UI: serves an auto-refreshing page, /board.json, and a
-    composer POST at /msg that posts through post_message() -- same board,
-    same messages.jsonl, no second store. /board.json?seat=<name> filters
-    messages to that agent-scoped thread (Advitiya PRIORITY agent chats)."""
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    """Local status UI: serves the app page, read-only JSON routes, and the
+    operator-only write routes (T-1103). Same board, same messages.jsonl, no
+    second store. Localhost only: --host must be loopback, every request's
+    Host must be loopback, and every write carries the per-launch token."""
+    from http.server import ThreadingHTTPServer
 
     if a.json:
         print(json.dumps(board_snapshot(board), indent=2))
         return
-
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path.startswith("/board.json"):
-                from urllib.parse import parse_qs, urlparse
-                seat = (parse_qs(urlparse(self.path).query).get("seat") or [""])[0]
-                body = json.dumps(_safe(lambda: board_snapshot_for_request(board, seat=seat), {
-                    "error": "snapshot failed",
-                    "counts": {"total": 0, "done": 0},
-                    "next_step": {"kind": "unreachable", "label": "Snapshot failed",
-                                  "message": "Could not read the board — check TICKETS_DIR and board files.",
-                                  "cmd": "atm ui --json"},
-                })).encode()
-                ctype = "application/json"
-            else:
-                body = _ui_page().encode()
-                ctype = "text/html; charset=utf-8"
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_POST(self):
-            if self.path.startswith("/auth-reconnect"):
-                try:
-                    payload = _ui_read_json_body(self)
-                    status, out = _ui_auth_reconnect(board, payload)
-                except Exception as e:  # noqa: BLE001 - always answer, never hang
-                    status, out = 400, {"ok": False, "executed": False, "ran": False, "error": str(e)}
-                body = json.dumps(out).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if not self.path.startswith("/msg"):
-                self.send_response(404)
-                self.end_headers()
-                return
-            try:
-                payload = _ui_read_json_body(self)
-                sender = str(payload.get("from") or "").strip()
-                text = str(payload.get("text") or "").strip()
-                to = str(payload.get("to") or "").strip()
-                re_ = str(payload.get("re") or "").strip()
-                kind = str(payload.get("kind") or "message").strip() or "message"
-                if not sender or not text:
-                    raise ValueError("from and text are required")
-                if kind not in _UI_MSG_KINDS:
-                    raise ValueError("kind must be message or task")
-                if not _agent_rec(board, sender):
-                    raise ValueError("from must be a registered agent")
-                rec = post_message(board, sender, text, to, re_, kind=kind)
-                status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
-            except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
-                status, out = 400, {"ok": False, "error": str(e)}
-            body = json.dumps(out).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    srv = ThreadingHTTPServer((a.host, a.port), H)
+    if not _ui_host_arg_ok(a.host):
+        sys.exit("atm ui: --host %s is not a loopback address; the app is localhost-only "
+                 "(use 127.0.0.1 or localhost)" % a.host)
+    ctx = UiContext(board, port=a.port, operator=getattr(a, "operator", "") or "")
+    srv = ThreadingHTTPServer((a.host, a.port), make_ui_handler(ctx))
+    ctx.port = srv.server_address[1]
     srv.daemon_threads = True
-    print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via atm msg)" % (a.host, a.port))
+    print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts as the operator via atm msg)"
+          % (a.host, ctx.port))
     if a.open:
         import subprocess
-        subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
+        subprocess.Popen(["open", "http://%s:%d" % (a.host, ctx.port)])
     parent_pid = int(getattr(a, "parent_pid", 0) or 0)
     board_dir = os.path.abspath(board) if board else ""
     import threading
@@ -21192,7 +22643,16 @@ def main():
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
     c.add_argument("--parent-pid", type=int, default=0,
                    help="exit when this pid disappears (test/supervisor watchdog)")
+    c.add_argument("--operator", default="",
+                   help="the person posting from the app (needs agents/<name>.json; never a workforce seat). "
+                        "Default: \"operator\" in ~/.config/atman/board.json")
     c.set_defaults(fn=cmd_ui)
+
+    c = sub.add_parser("lead", help="who the operator talks to on this project: atm lead set <seat>")
+    c.add_argument("action", nargs="?", default="show", choices=("show", "set", "clear"))
+    c.add_argument("seat", nargs="?", default="")
+    c.add_argument("--owner", default=None, help="who is recording this (default: $TICKET_AGENT)")
+    c.set_defaults(fn=cmd_lead)
 
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
     c.add_argument("--agent", help="register under this name (default: $TICKET_AGENT)")
