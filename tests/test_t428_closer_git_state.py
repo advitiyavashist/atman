@@ -40,6 +40,9 @@ def run_tool(tool, board, *args, agent="", cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    e.pop("TICKET_SEAT", None)
+    e.pop("TICKET_SESSION_ID", None)
+    e.pop("CLAUDE_CODE_SESSION_ID", None)
     where = cwd or (board.parent if board.parent.is_dir() else Path("/"))
     return subprocess.run([sys.executable, str(tool), *args], capture_output=True,
                           text=True, env=e, cwd=where)
@@ -99,7 +102,11 @@ def test_done_by_non_owner_preserves_owner_git_state(tool, trees):
 
     r = run_tool(tool, board, "done", "T-001", "--notes", "closed by bob",
                  agent="bob", cwd=wb)
-    assert r.returncode == 0, r.stderr
+    # Generation/ownership: a non-owner cannot done. The git-location
+    # guard for a successful closer is test_review_by_non_owner_*.
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "owned by alice" in (r.stdout + r.stderr)
+    assert "bob cannot done" in (r.stdout + r.stderr)
 
     alice = _agent(board, "alice")
     bob = _agent(board, "bob")
@@ -107,14 +114,13 @@ def test_done_by_non_owner_preserves_owner_git_state(tool, trees):
     assert alice["branch"] == before["branch"] == "alice/work"
     assert alice["sha"] == before["sha"] == trees["alice_sha"]
     assert alice["worktree"] == before["worktree"] == str(wa)
-    assert alice.get("ticket") in ("", None)
-    assert "finished T-001" in (alice.get("note") or "")
-    assert "bob" in (alice.get("note") or "")
+    assert alice.get("ticket") == "T-001"
 
-    assert bob["cwd"] == str(wb)
-    assert bob["branch"] == "bob/work"
-    assert bob["sha"] == trees["bob_sha"]
-    assert bob["worktree"] == str(wb)
+    assert bob.get("cwd") in (None, "", str(wb))
+    if bob.get("branch"):
+        assert bob["branch"] == "bob/work"
+        assert bob["sha"] == trees["bob_sha"]
+        assert bob["worktree"] == str(wb)
 
 
 @pytest.mark.parametrize("tool", [ROOT_TOOL, PKG_TOOL], ids=["tickets.py", "cli.py"])

@@ -47,8 +47,10 @@ def test_ui_server_isolates_inherited_session(board, monkeypatch):
 
 
 def _pgrep_ui() -> list[tuple[int, str]]:
+    # Wide ps: default COLUMNS=80 on GitHub Actions truncates before
+    # `tickets.py ui`, so pgrep -fl misses the live server.
     proc = subprocess.run(
-        ["pgrep", "-fl", "tickets.py ui"],
+        ["ps", "-axww", "-o", "pid=,command="],
         capture_output=True,
         text=True,
     )
@@ -61,9 +63,11 @@ def _pgrep_ui() -> list[tuple[int, str]]:
             continue
         pid_s, _sep, rest = line.partition(" ")
         try:
-            rows.append((int(pid_s), rest))
+            pid = int(pid_s)
         except ValueError:
             continue
+        if "tickets.py" in rest and " ui " in rest:
+            rows.append((pid, rest))
     return rows
 
 

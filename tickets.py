@@ -5855,7 +5855,7 @@ def _desk_pytest_pids(extra_pids=()):
             continue
     out = [p for p in extra if _pid_alive(p)]
     try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
+        r = subprocess.run(["ps", "-axww", "-o", "pid=,command="],
                            capture_output=True, text=True)
     except OSError:
         return sorted(set(out))
@@ -5934,7 +5934,7 @@ def _parse_watch_table():
 
     out = []
     try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
+        r = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True)
     except OSError:
         return out, False
     if r.returncode != 0:
@@ -15688,8 +15688,6 @@ def cmd_spawn(a, board):
     warn = run_timeout_floor_warning(getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN))
     if warn and not a.stop:
         print(warn)
-    if not a.stop:
-        _refuse_limited_seat(board, owner, "spawn")
     if a.stop:
         return _spawn_stop(board, owner, all_boards=bool(getattr(a, "all_boards", False)))
     requested_harness = getattr(a, "harness", "") or a.tool
@@ -15701,6 +15699,9 @@ def cmd_spawn(a, board):
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
+    # Reuse/transfer first: a leftover limit is identity-bound state, not a
+    # live dispatch block on a name we are about to refuse or strip.
+    _refuse_limited_seat(board, owner, "spawn")
     git_root, wt, expected_origin, base, origin_err = _resolve_spawn_target(
         board, owner,
         worktree_arg=getattr(a, "worktree", "") or "",

@@ -38,6 +38,7 @@ Then the part that makes it a team instead of a queue:
 2. **A different agent** — never the author — checks that commit and accepts it.
 3. Only then does B open, and B's agent is handed A's accepted commit.
 
+The next ticket opens only after someone else accepts that commit.
 So the next task starts from work someone verified, and a "done" nobody checked
 stops the chain instead of quietly feeding the next agent.
 

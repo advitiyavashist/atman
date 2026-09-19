@@ -250,6 +250,16 @@ def live_cwds(path, lsof_fn=None):
                 # their cwd unknown and must not authorize removal.
                 if exc.errno in (errno.ENOENT, errno.ESRCH):
                     continue
+                if exc.errno in (errno.EACCES, errno.EPERM):
+                    # Other-uid processes (pid 1 on GitHub Actions) are not
+                    # readable; skip them. Fail closed only if *our* pid
+                    # cannot be inspected -- that scan is incomplete.
+                    try:
+                        st = os.stat(os.path.join(proc, name))
+                    except OSError:
+                        continue
+                    if st.st_uid != os.getuid():
+                        continue
                 return [{"pid": int(name), "cmd": "proc cwd failed: %s" % exc,
                          "unknown": True}]
             if cwd == real or cwd.startswith(real + os.sep):
