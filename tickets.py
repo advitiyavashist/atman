@@ -12495,6 +12495,9 @@ Your three jobs, every wake-up:
    (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
    keep one ticket per agent, spawn or brief workers when lanes are empty (`atm spawn <name> --model ...`).
    Log every non-obvious call: `atm master log "..."`. Post a short status pulse with `atm msg`.
+Optimization is fine; ENDLESS OVER-OPTIMIZATION is the bane. A check earns its place only if it could
+change what ships -- one that can only re-confirm something already confirmed is waste, however cheap.
+Verify a load-bearing claim once, properly; the third pass is the vice. Hand the rest to CI or the reviewer.
 Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
 {extra}"""
 
@@ -12518,6 +12521,9 @@ Your three jobs, every wake-up:
    (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
    keep one ticket per agent, spawn or brief workers when lanes are empty (`atm spawn <name> --model ...`).
    Log every non-obvious call: `atm master log "..."`. Post a short status pulse with `atm msg`.
+Optimization is fine; ENDLESS OVER-OPTIMIZATION is the bane. A check earns its place only if it could
+change what ships -- one that can only re-confirm something already confirmed is waste, however cheap.
+Verify a load-bearing claim once, properly; the third pass is the vice. Hand the rest to CI or the reviewer.
 Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
 {extra}"""
 
