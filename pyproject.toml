@@ -12,9 +12,10 @@ license = { text = "MIT" }
 authors = [{ name = "Atman contributors" }]
 
 [project.optional-dependencies]
-# Needed only to run tests/test_contracts.py, which validates the T-178
-# fixture pack against docs/contracts/openapi.yaml.
-contracts = ["pytest>=7", "jsonschema>=4.18", "pyyaml>=6"]
+# Needed to run tests/test_contracts.py (T-178 fixture pack vs
+# docs/contracts/openapi.yaml) and tests/test_t1034_demo_provenance.py
+# (Pillow decodes the published gif/poster). CI installs this extra.
+contracts = ["pytest>=7", "jsonschema>=4.18", "pyyaml>=6", "pillow"]
 
 [project.scripts]
 atm = "ticket_board.cli:main"

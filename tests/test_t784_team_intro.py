@@ -117,7 +117,9 @@ def test_ui_and_master_template_name_persist_to_review():
 
 def test_landing_pins_the_accept_gate_promise():
     landing = LANDING.read_text(encoding="utf-8")
-    hero = landing[landing.index("<h1>") : landing.index("</h1>")]
+    # The accept-gate sentence lives in the hero promise, title, and meta --
+    # not the <h1> (rewritten to the team line). Pin the hero block.
+    hero = landing[landing.index('id="promise"') : landing.index('id="path"')]
     assert "the next ticket opens only after someone else accepts that commit" in hero.lower()
     assert "fewest turns" not in hero.lower()
     assert "coordinates the agents you already run" not in hero.lower()

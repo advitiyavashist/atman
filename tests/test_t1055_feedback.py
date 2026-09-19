@@ -309,19 +309,19 @@ def test_feedback_redaction_claim_only_when_every_path_was_scrubbed():
     """The printed claim is a promise: empty run (git_state None) is not success."""
     import tickets as tk
 
-    leaked = "board: /Users/me/code/myrepo/.tickets"
-    half = tk._feedback_redact(leaked, home="/Users/me", run="", repo_name="")
+    leaked = "board: /Users/operator/code/myrepo/.tickets"
+    half = tk._feedback_redact(leaked, home="/Users/operator", run="", repo_name="")
     assert "myrepo" in half
-    assert not tk._feedback_redaction_ok(half, home="/Users/me", run="", repo_name="")
+    assert not tk._feedback_redaction_ok(half, home="/Users/operator", run="", repo_name="")
 
     clean = tk._feedback_redact(
-        leaked, home="/Users/me", run="/Users/me/code/myrepo",
-        repo="/Users/me/code/myrepo", repo_name="myrepo")
-    assert "/Users/me" not in clean
+        leaked, home="/Users/operator", run="/Users/operator/code/myrepo",
+        repo="/Users/operator/code/myrepo", repo_name="myrepo")
+    assert "/Users/operator" not in clean
     assert "myrepo" not in clean
     assert tk._feedback_redaction_ok(
-        clean, home="/Users/me", run="/Users/me/code/myrepo",
-        repo="/Users/me/code/myrepo", repo_name="myrepo")
+        clean, home="/Users/operator", run="/Users/operator/code/myrepo",
+        repo="/Users/operator/code/myrepo", repo_name="myrepo")
 
 
 _AUDIT_SITECUSTOMIZE = """

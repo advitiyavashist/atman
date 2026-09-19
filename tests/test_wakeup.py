@@ -23,6 +23,7 @@ TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 def run(board, *args, agent="", stdin="", env=None, cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "", HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    e.pop("TICKET_SEAT", None)
     # Strip every session-id var the harness running THIS test might itself
     # be sitting in (e.g. CLAUDE_CODE_SESSION_ID from an outer coding-agent
     # session) -- left in place, every subprocess this file launches would

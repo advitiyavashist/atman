@@ -78,16 +78,12 @@ def test_pre_t623_release_shape_fails_ticket_board_imports(tmp_path):
     _seed_board(board)
     arbitrary = tmp_path / "elsewhere"
     arbitrary.mkdir()
-    for cmd in (("turns", "--json"), ("route",)):
+    for cmd in (("turns", "--json"), ("route",), ("ui", "--json")):
         r = _run_release(release, board, arbitrary, *cmd)
         assert r.returncode != 0, cmd
         assert "ModuleNotFoundError" in r.stderr, cmd
-    # ui --json falls back to an empty turns snapshot when ticket_board is missing.
-    ui = _run_release(release, board, arbitrary, "ui", "--json")
-    assert ui.returncode == 0, ui.stderr
-    snap = json.loads(ui.stdout)
-    assert snap["turns"]["aggregates"]["n"] == 0
-    assert _run_release(release, board, arbitrary, "turns", "--json").returncode != 0
+    # health()/unblocked now import work_view, so ui --json no longer has a
+    # silent empty-turns fallback on a pre-T-623 export.
 
 
 def test_install_live_staged_release_metrics_from_arbitrary_cwd(source, tmp_path):
