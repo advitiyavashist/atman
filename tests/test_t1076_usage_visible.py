@@ -270,7 +270,9 @@ def test_the_age_outlives_the_reset_when_the_line_is_tight(board):
         "2026-09-19 09:00:00 America/Los_Angeles"
     assert pu.reset_label(wordy) == ""  # too long to print whole -> not printed
     # A raw epoch is a number, not a reset a user can read.
+    # 9–13 was the old cap; 14+ (microseconds and up) must also stay silent.
     assert pu.reset_label("1789145400") == "" and pu.reset_label("1789145400000") == ""
+    assert pu.reset_label("1789145400000000") == ""
     assert "1789145400" not in pu.format_compact_line(
         pu.record_observed_limit("claude", "cap", iso(-0.2), "1789145400"))
     # And a credentials path in the field is still never printed.
