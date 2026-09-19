@@ -14,7 +14,7 @@ from ui_server_harness import make_ui_server_fixture
 
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
-ui_server = make_ui_server_fixture("t609-launch")
+ui_server = make_ui_server_fixture("t609-launch", operator="boss")
 
 
 def _same_origin_task(server, payload):
@@ -23,7 +23,8 @@ def _same_origin_task(server, payload):
         origin + "/msg",
         data=json.dumps(payload).encode(),
         method="POST",
-        headers={"Content-Type": "application/json", "Origin": origin},
+        headers={"Content-Type": "application/json", "Origin": origin,
+                 "X-Atman-Token": server.token},
     )
     with urllib.request.urlopen(req, timeout=5) as response:
         return response.status, json.loads(response.read())

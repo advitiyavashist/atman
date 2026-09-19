@@ -145,15 +145,48 @@ def reap_stale_ui_servers() -> None:
     _PID_FILE.unlink(missing_ok=True)
 
 
+_SESSION_ENV_PREFIXES = ("CLAUDE", "CODEX_", "CURSOR_", "TICKET_SESSION", "TERM_SESSION")
+
+
+def isolated_ui_env(board, **extra):
+    """T-1103: the ui child never inherits the outer harness session.
+
+    Same HOME as test_wakeup.run (so endpoints and caches match the CLI calls
+    of the test), no Claude/Codex/Cursor session vars (a wake from a test
+    board must never reach a real session), and a registry path that does
+    not exist (the real ~/.config/atman/board.json is never read).
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith(_SESSION_ENV_PREFIXES)}
+    for k in ("TICKET_SEAT", "TICKET_AGENT", "TICKETS_STOP_HOOK"):
+        env.pop(k, None)
+    home = Path(board).parent.parent / "home"
+    env.update(TICKETS_DIR=str(board), HOME=str(home),
+               ATMAN_BOARD_CONFIG=str(Path(board).parent.parent / "atman-board-config.json"))
+    env.update(extra)
+    return env
+
+
+def page_token(port: int) -> str:
+    """The per-launch write token the page carries in <meta name="atman-token">."""
+    import re as _re
+    with urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=5) as r:
+        html = r.read().decode()
+    m = _re.search(r'<meta name="atman-token" content="([^"]+)"', html)
+    return m.group(1) if m else ""
+
+
 class UiServer:
-    def __init__(self, board, probe_prefix: str = "ui-probe"):
+    def __init__(self, board, probe_prefix: str = "ui-probe", operator: str | None = None):
         self.board = board
         self._stopped = False
+        self._token = ""
         self.marker = _board_marker(board, probe_prefix)
         self.port = _free_port()
-        env = dict(os.environ, TICKETS_DIR=str(board))
+        env = isolated_ui_env(board)
         ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
                   "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]
+        if operator:
+            ui_cmd += ["--operator", operator]
         self.proc = subprocess.Popen(
             [sys.executable, str(_SUPERVISOR), str(os.getpid())] + ui_cmd,
             env=env,
@@ -175,12 +208,22 @@ class UiServer:
             body = r.read()
             return body if raw else json.loads(body)
 
-    def post(self, path, payload):
+    @property
+    def token(self) -> str:
+        if not self._token:
+            self._token = page_token(self.port)
+        return self._token
+
+    def post(self, path, payload, token=True, headers=None):
+        head = {"Content-Type": "application/json"}
+        if token:
+            head["X-Atman-Token"] = self.token
+        head.update(headers or {})
         req = urllib.request.Request(
             "http://127.0.0.1:%d%s" % (self.port, path),
             data=json.dumps(payload).encode(),
             method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=head,
         )
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
@@ -238,10 +281,10 @@ def port_is_dead(port: int, timeout: float = 3) -> bool:
     return False
 
 
-def make_ui_server_fixture(probe_prefix: str):
+def make_ui_server_fixture(probe_prefix: str, operator: str | None = None):
     @pytest.fixture
     def ui_server(board):
-        srv = UiServer(board, probe_prefix=probe_prefix)
+        srv = UiServer(board, probe_prefix=probe_prefix, operator=operator)
         try:
             yield srv
         finally:
