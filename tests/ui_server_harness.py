@@ -157,10 +157,12 @@ def isolated_ui_env(board, **extra):
     not exist (the real ~/.config/atman/board.json is never read).
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith(_SESSION_ENV_PREFIXES)}
-    for k in ("TICKET_SEAT", "TICKET_AGENT", "TICKETS_STOP_HOOK"):
+    for k in ("TICKET_SEAT", "TICKET_AGENT", "TICKET_SESSION_ID", "TICKETS_STOP_HOOK"):
         env.pop(k, None)
     home = Path(board).parent.parent / "home"
+    cache = home / "cache"
     env.update(TICKETS_DIR=str(board), HOME=str(home),
+               TICKETS_CACHE_DIR=str(cache),
                ATMAN_BOARD_CONFIG=str(Path(board).parent.parent / "atman-board-config.json"))
     env.update(extra)
     return env

@@ -32,6 +32,9 @@ OP = "ada"
 HEAD = "9c1e5a0b7d3f2e1a4b6c8d0e2f4a6b8c0d1e3f50"
 ACC = "24fb8c0aa1b2c3d4e5f60718293a4b5c6d7e8f90"
 SESSION_PREFIXES = ("CLAUDE", "CODEX_", "CURSOR_", "TICKET_", "TERM_SESSION", "ATMAN_")
+# Import machinery bytecode is not a board write. First GET can otherwise
+# fail this file's audit on a cold checkout (ticket_board.turns pyc).
+sys.dont_write_bytecode = True
 
 
 def stamp(mins_ago):
@@ -224,6 +227,9 @@ class Audit:
                      "os.spawn", "pty.spawn"):
             self.seen.append((event, str(args)[:160]))
         elif event == "open" and len(args) > 2:
+            path = str(args[0])
+            if "__pycache__" in path.replace("\\", "/") or path.endswith((".pyc", ".pyo")):
+                return
             mode, flags = args[1], args[2] or 0
             if (isinstance(mode, str) and any(c in mode for c in "wax+")) or \
                     flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
@@ -716,6 +722,10 @@ def test_done_without_accept_is_never_accepted_in_v2_shell(env):
     # prose is not an accept
     msg(env.alpha, id="m9", **{"from": "rev"}, re="T-2", text="ACCEPT, looks good")
     assert srv.get("/ticket/T-2.json")[1]["accepted"] is False
+    snap = srv.get("/board.json")[1]
+    nodes = {n["id"]: n for n in snap["work"]["nodes"]}
+    assert nodes["T-2"]["unverified"] is True
+    assert snap["counts"]["accepted"] == 1 and snap["counts"]["done_unverified"] == 1
     page = srv.get("/", raw=True)[1]
     assert "done, not accepted" in page
 
