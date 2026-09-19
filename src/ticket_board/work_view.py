@@ -22,8 +22,10 @@ Review evidence is separate from ticket status: ``review_of`` reports the
 latest *structured* verdict (``review_events`` from ``atm accept`` /
 ``atm reject``) with reviewer and artifact SHA, marks verdicts on an older
 SHA as superseded, and never turns a done flag or a prose note into
-"accepted". Legacy text that looks like accept/approved is an unstructured
-note.
+"accepted" or ``review.verified``. Legacy text that looks like
+accept/approved/merged is an unstructured note. ``verified`` is true only
+for a structured accept (or ``atm merge`` record) bound to the current
+review head.
 """
 from __future__ import annotations
 
@@ -223,12 +225,27 @@ def _verdict_entries(t, msgs_re):
     return entries
 
 
+def _review_verified(t, latest):
+    """True only for a structured accept/merge bound to the current head.
+
+    A prose ``merged`` / ``ACCEPT`` note is never evidence (T-1111). Short-SHA
+    ``review_events`` accepts still count when they apply to the recorded
+    artifact, matching ``atm accept`` before a full 40-char ``review_head``.
+    """
+    if structured_accept(t) or structured_merge(t):
+        return True
+    return bool(latest and latest.get("source") == "event"
+                and latest["kind"] == "ACCEPT" and latest["applies"] == "exact")
+
+
 def review_of(t, msgs_re=None):
     """Ticket status stays separate from review evidence.
 
     ``label`` is what the UI shows next to the artifact; ``latest`` the newest
     verdict that applies to the recorded artifact (or the newest of unknown
     applicability); ``history`` everything else, newest first.
+    ``verified`` is a structured accept (or merge record) at the current head,
+    never a free-text note.
     """
     st = t.get("status")
     art = artifact_sha(t)
@@ -272,7 +289,7 @@ def review_of(t, msgs_re=None):
         if sup:
             label = "earlier %s by @%s on %s (before resubmission)" % (sup[0]["kind"], sup[0]["by"] or "?", sup[0]["sha"][:7] or "?")
     return {"artifact": art, "label": label, "latest": latest, "history": history,
-            "verified": bool(merged) or bool(latest and latest["kind"] == "ACCEPT" and latest["applies"] == "exact")}
+            "verified": _review_verified(t, latest)}
 
 
 def verdict_of(t, msgs_re=None):
@@ -419,6 +436,39 @@ def accepted_release_sha(t, msgs=None):
 
 def make_release_override(kind, by, at, reason=""):
     return {"kind": kind, "by": by, "at": at, "reason": reason or ""}
+
+
+def blockers_of(node, by_id, seats=None):
+    """Why this node cannot move. Records only; prose is never evidence.
+
+    ``by_id`` maps ticket id -> ticket record. Kinds on this tree:
+    ``unaccepted`` (this node is done without a structured accept at the
+    current head), ``dep_unaccepted`` (a predecessor is done but unreleased),
+    and ``dep_open``. Seat/auth chips stay with the app API.
+    """
+    del seats
+    out = []
+    tid = node.get("id") or ""
+    if (node.get("phase") or "") == "done":
+        if node.get("unverified"):
+            out.append({"kind": "unaccepted", "on": tid, "text": "done, not accepted",
+                        "cmd": "atm accept %s --sha <review head> --notes \"...\"" % tid})
+        return out
+    for d in node.get("deps") or []:
+        dep = by_id.get(d)
+        if dep is None:
+            out.append({"kind": "dep_open", "on": d, "text": "dep %s is not on this board" % d,
+                        "cmd": "atm show %s" % d})
+        elif dep_released(dep):
+            continue
+        elif dep.get("status") == "done":
+            out.append({"kind": "dep_unaccepted", "on": d, "text": "dep %s done, not accepted" % d,
+                        "cmd": "atm accept %s --sha <review head> --notes \"...\"" % d})
+        else:
+            out.append({"kind": "dep_open", "on": d,
+                        "text": "dep %s still %s" % (d, dep.get("status") or "open"),
+                        "cmd": "atm show %s" % d})
+    return out
 
 
 def refuse_unreleased_reason(t, tickets, only_done=False):
@@ -1149,6 +1199,10 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
             node["evidence"] = "Escalated automated node · needs keep/remove · " + (
                 auto.get("escalate_reason") or "judgment")
         nodes.append(node)
+
+    ticket_by = dict((x["id"], x) for x in tickets)
+    for node in nodes:
+        node["blockers"] = blockers_of(node, ticket_by)
 
     node_by = dict((n["id"], n) for n in nodes)
     edges = [e for e in (graph.get("edges") or []) if e.get("from") in node_by and e.get("to") in node_by]
