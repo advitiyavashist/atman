@@ -20243,7 +20243,7 @@ class UiApi:
         # Import lazily-loaded modules now, so a read route never writes a
         # bytecode cache file on its first request.
         for load_mod in (_work_view, _steer, _review_verdict, _provider_usage,
-                         _agent_map_mod, _session_adapters):
+                         _agent_map_mod, _session_adapters, _turns_mod):
             _safe(load_mod, None)
         _safe(lambda: __import__("auth_v2_contract"), None)
 
@@ -20521,7 +20521,7 @@ def _ui_api_send(handler, api, status, ctype, body, extra=None):
     handler.send_header("Content-Security-Policy", "frame-ancestors 'none'")
     handler.send_header("Referrer-Policy", "no-referrer")
     origin = (handler.headers.get("Origin") or "").strip()
-    if origin and api.origin_allowed(origin):
+    if origin and api.origin_allowed(origin) and _ui_api_route(handler.path) == "api":
         # CORS only for the app's own origin or a --dev-origin
         handler.send_header("Access-Control-Allow-Origin", _ui_origin_of(origin))
         handler.send_header("Vary", "Origin")
