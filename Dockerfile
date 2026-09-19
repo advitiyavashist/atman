@@ -2,7 +2,7 @@
 # ships the current installable `tickets` package with a version label.
 FROM python:3.11.13-slim-bookworm
 
-ARG ATMAN_VERSION=0.2.0
+ARG ATMAN_VERSION=0.3.0
 ARG ATMAN_REVISION=unknown
 
 LABEL org.opencontainers.image.title="atman-tickets" \
