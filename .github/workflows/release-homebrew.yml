@@ -64,6 +64,26 @@ jobs:
         with:
           files: ${{ steps.build.outputs.tarball }}
           fail_on_unmatched_files: true
+      # T-1108 / v0.3.0: the local tarball hashed 410cf802... (662,834 bytes)
+      # while the asset GitHub served hashed c125cb6f... (662,938 bytes).
+      # Contents matched; only the gzip wrapper differed. Homebrew must pin
+      # the bytes `brew` downloads, not the file we just built.
+      - name: Hash the published GitHub Release asset
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: atman-${{ steps.build.outputs.version }}.tar.gz
+        run: |
+          mkdir -p /tmp/published
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ASSET" \
+            --dir /tmp/published
+          python3 -c "
+          import hashlib, os, pathlib
+          path = pathlib.Path('/tmp/published') / os.environ['ASSET']
+          print('sha256=%s' % hashlib.sha256(path.read_bytes()).hexdigest())
+          " >> "$GITHUB_OUTPUT"
       - name: Bump the tap formula
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         env:
@@ -75,7 +95,7 @@ jobs:
           git checkout -b "$BRANCH"
           sed -i.bak \
             -e "s|^  url \".*atman-.*\.tar\.gz\"|  url \"https://github.com/advitiyavashist/atman/releases/download/${GITHUB_REF_NAME}/atman-${{ steps.build.outputs.version }}.tar.gz\"|" \
-            -e "s|^  sha256 \".*\"|  sha256 \"${{ steps.build.outputs.sha256 }}\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"${{ steps.published.outputs.sha256 }}\"|" \
             Formula/atman.rb
           rm -f Formula/atman.rb.bak
           git -c user.name="atman-release-bot" -c user.email="release@atman.dev" \
@@ -84,6 +104,6 @@ jobs:
           git push origin "$BRANCH"
           gh pr create --repo advitiyavashist/homebrew-tap \
             --title "atman ${{ steps.build.outputs.version }}" \
-            --body "Automated bump from advitiyavashist/atman@${GITHUB_REF_NAME}. Tarball sha256 ${{ steps.build.outputs.sha256 }}." \
+            --body "Automated bump from advitiyavashist/atman@${GITHUB_REF_NAME}. Published-asset sha256 ${{ steps.published.outputs.sha256 }}." \
             --head "$BRANCH" --base main
         shell: bash

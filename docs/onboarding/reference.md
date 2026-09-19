@@ -45,7 +45,7 @@ until you install a new ref.
 
 | Path | Status as of 2026-09-15 |
 |---|---|
-| Homebrew (`brew install advitiyavashist/homebrew-tap/atman`) | **Planned.** The formula exists at `packaging/homebrew/atman.rb`, but the tap repository does not exist, no release has been tagged, and the formula's `sha256` is still a `REPLACE_BEFORE_RELEASE_…` placeholder. `packaging/homebrew/README.md` lists what an operator has to provision first. |
+| Homebrew (`brew install advitiyavashist/homebrew-tap/atman`) | **Published** at v0.3.0. Pin `sha256` to the downloaded GitHub Release asset, not a local build (`packaging/homebrew/README.md`). The in-repo `packaging/homebrew/atman.rb` is a copy of the tap formula. |
 | Linux packages | **Planned.** Tested on macOS only. |
 | pipx / PyPI | **Planned.** Nothing is published. |
 
