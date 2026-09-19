@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/board.json",
+  "title": "GET /api/v1/board",
+  "description": "The board snapshot for one project (the same data the embedded page renders, read without ps and without writes) plus an 'app' block. Only the fields below are contract; other snapshot fields may change.",
+  "type": "object",
+  "required": ["project", "generated", "master", "cos", "counts", "agents", "messages", "provider_usage",
+               "agent_map", "objective", "work", "app"],
+  "properties": {
+    "project": {"type": "string"},
+    "generated": {"type": "string"},
+    "master": {"type": "string"},
+    "cos": {"type": "string"},
+    "seat": {"type": "string"},
+    "counts": {
+      "type": "object",
+      "required": ["total", "done", "done_unverified", "accepted"],
+      "properties": {
+        "total": {"type": "integer"}, "done": {"type": "integer"},
+        "done_unverified": {"type": "integer"}, "accepted": {"type": "integer"}
+      }
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "state", "harness", "lifecycle", "reachable", "adapter_state", "wake_mode",
+                     "limit", "limit_until", "auth_surface"],
+        "properties": {
+          "name": {"$ref": "common.json#/$defs/seat"},
+          "state": {"type": "string"},
+          "harness": {"$ref": "common.json#/$defs/harness_value"},
+          "lifecycle": {"type": "string"},
+          "reachable": {"type": "boolean"},
+          "adapter_state": {"type": "string"},
+          "wake_mode": {"type": "string"},
+          "limit": {"type": ["object", "null"]},
+          "limit_until": {"type": "string"},
+          "auth_surface": {"type": "object", "required": ["state", "label"]}
+        }
+      }
+    },
+    "messages": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {"type": "object", "required": ["id", "at", "from", "to", "re", "text"]}
+    },
+    "provider_usage": {"type": "array", "items": {"type": "object", "required": ["provider", "level", "remaining_pct", "text"]}},
+    "agent_map": {"type": ["object", "null"], "required": ["groups"]},
+    "objective": {"type": "object"},
+    "work": {
+      "type": ["object", "null"],
+      "required": ["nodes"],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "phase", "status", "deps", "unverified", "blockers", "running"],
+            "properties": {
+              "blockers": {"type": "array", "items": {"$ref": "common.json#/$defs/blocker"}},
+              "unverified": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "operator", "operator_note", "lead", "lead_note"],
+      "properties": {
+        "project": {"$ref": "common.json#/$defs/slug"},
+        "operator": {"type": "string"},
+        "operator_note": {"type": "string"},
+        "lead": {"type": "string"},
+        "lead_note": {"type": "string"}
+      }
+    }
+  }
+}

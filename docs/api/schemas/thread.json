@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/thread.json",
+  "title": "GET /api/v1/thread",
+  "description": "The operator <-> seat thread (default: the lead), paged back through the whole live message log with before=<id>; archives with all=1. No lead and no with= gives needs_lead: true and no messages; the app then asks (GET /api/v1/lead has the picker).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "operator", "operator_note", "lead", "lead_note", "with", "needs_lead", "messages",
+               "has_more", "oldest_id", "total_in_window", "archives"],
+  "properties": {
+    "project": {"$ref": "common.json#/$defs/slug"},
+    "operator": {"type": "string"},
+    "operator_note": {"type": "string"},
+    "lead": {"type": "string"},
+    "lead_note": {"type": "string"},
+    "with": {"type": "string"},
+    "needs_lead": {"type": "boolean"},
+    "messages": {"type": "array", "maxItems": 200, "items": {"$ref": "common.json#/$defs/post"}, "description": "Oldest first."},
+    "has_more": {"type": "boolean"},
+    "oldest_id": {"type": "string", "description": "Pass as before= for the previous page."},
+    "total_in_window": {"type": "integer", "minimum": 0},
+    "archives": {"type": "boolean"},
+    "error": {"type": "string"}
+  }
+}

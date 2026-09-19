@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/session.json",
+  "title": "GET /api/v1/session",
+  "description": "The per-launch write token for the app. Requires the X-Atman-Client request header, so a cross-origin page needs a preflight that only the app's own origin or a --dev-origin passes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "token",
+    "token_header",
+    "project",
+    "operator",
+    "operator_note",
+    "lead",
+    "lead_note"
+  ],
+  "properties": {
+    "api_version": {
+      "const": 1
+    },
+    "token": {
+      "type": "string",
+      "minLength": 32
+    },
+    "token_header": {
+      "const": "X-Atman-Token"
+    },
+    "project": {
+      "$ref": "common.json#/$defs/slug"
+    },
+    "operator": {
+      "type": "string",
+      "description": "'' when no operator is configured: the app is read-only."
+    },
+    "operator_note": {
+      "type": "string"
+    },
+    "lead": {
+      "type": "string"
+    },
+    "lead_note": {
+      "type": "string"
+    }
+  }
+}
