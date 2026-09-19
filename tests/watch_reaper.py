@@ -164,7 +164,7 @@ def watch_pids_under(root: Path):
     found = set()
     try:
         out = subprocess.run(
-            ["ps", "-ax", "-o", "pid=,command="],
+            ["ps", "-axww", "-o", "pid=,command="],
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):

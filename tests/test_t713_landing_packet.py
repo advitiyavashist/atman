@@ -5,7 +5,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LANDING = (ROOT / "landing" / "index.html").read_text(encoding="utf-8")
 CSS = (ROOT / "landing" / "styles.css").read_text(encoding="utf-8")
-HERO = LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
 
 BANNED = (
     "Total Football",
@@ -37,7 +36,9 @@ def _start_terminal():
 
 
 def test_hero_is_the_accept_gate_not_turns_or_cost():
-    lowered = HERO.lower()
+    # Promise lives in the hero block (title / .promise / lede), not <h1>.
+    hero = LANDING[LANDING.index('id="promise"') : LANDING.index('id="path"')]
+    lowered = hero.lower()
     assert PROMISE in lowered
     assert "fewest turns" not in lowered
     assert "measured cost" not in lowered

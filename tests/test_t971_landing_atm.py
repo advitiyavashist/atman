@@ -84,7 +84,8 @@ def test_status_links_the_readme_table_instead_of_duplicating_it():
     block = LANDING[LANDING.index('id="status"') : LANDING.index('id="start"')]
     assert "README.md#preview-status-and-limitations" in block
     assert "<table" not in block
-    assert "brew install" not in LANDING
+    # Homebrew is the published macOS path (T-1108); status must not
+    # invent a second table of versions beside the README.
 
 
 def test_no_invented_numbers_or_dead_local_references():
@@ -95,8 +96,9 @@ def test_no_invented_numbers_or_dead_local_references():
         if Path(ref).as_posix().startswith("assets/demo/"):
             continue
         assert (LANDING_DIR / ref).is_file(), ref
-    for banned in ("<dd>0</dd>", "<dd>$0", "roster of", "v1.0", "1.0.0", "brew install"):
+    for banned in ("<dd>0</dd>", "<dd>$0", "roster of", "v1.0", "1.0.0"):
         assert banned not in LANDING, banned
+    assert "brew install atman" in LANDING
     for doc in ("docs/first-session.md", "docs/byoa.md"):
         assert doc in LANDING and (ROOT / doc).is_file(), doc
 

@@ -61,7 +61,7 @@ echo "no session"; exit 1
 """
 HARNESS_LIMITED = """#!/bin/sh
 if [ "$1" = "auth" ]; then echo "Login: demo@example.com (Pro)"; exit 0; fi
-echo "You've hit your weekly limit. Your limit resets at 2026-09-19T00:00:00Z"
+echo "You've hit your weekly limit. Your limit resets at 2099-01-01T00:00:00Z"
 exit 1
 """
 
@@ -274,7 +274,7 @@ def test_usage_limit_is_reported_and_reaches_the_usage_ledger(tmp_path):
     # the T-1040 ledger got the reading, and the shared formatter printed it
     usage = [ln for ln in out.splitlines() if ln.startswith("usage:")]
     assert usage and "limited" in usage[0], usage
-    assert "resets 2026-09-19T00:00:00Z" in usage[0], usage
+    assert "resets 2099-01-01T00:00:00Z" in usage[0], usage
     ledger = json.loads((scratch / "repo" / ".tickets" / "provider_usage.json").read_text())
     assert ledger["providers"]["claude"]["status"] == "limited"
     # a usage limit is not an auth failure: the gate is still demonstrated,

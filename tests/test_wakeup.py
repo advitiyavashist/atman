@@ -90,7 +90,7 @@ def board(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (tmp_path / "home").mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "init"], check=True,
                    env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
                             GIT_COMMITTER_EMAIL="t@t"))
