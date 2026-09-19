@@ -677,11 +677,12 @@ def test_review_verdicts_fix_accept_none_superseded_and_marked_done():
     _, by = _pure([_rev("done", "br@def5678", [sub2])])
     assert by["T-001"]["review"]["label"] == "Marked done; verification not recorded"
     assert by["T-001"]["review"]["verified"] is False
-    # atm merge's own note is main evidence for that pin
+    # a prose merge note may still label the node; it is not verification (T-1111)
     merged = ("planner", "2026-09-13T03:00:00Z", "merged into main as 9999999 (atm merge; pinned def5678)")
     _, by = _pure([_rev("done", "br@def5678", [sub2, acc, merged])])
     assert by["T-001"]["review"]["label"] == "Merged into main as def5678"
-    assert by["T-001"]["review"]["verified"] is True
+    assert by["T-001"]["review"]["verified"] is False
+    assert by["T-001"]["unverified"] is True
     # prose mentioning acceptance criteria is not a verdict
     prose = ("alice", "2026-09-13T01:05:00Z", "acceptance criteria updated; not accepted yet by anyone")
     _, by = _pure([_rev("claimed", "", [prose])])
