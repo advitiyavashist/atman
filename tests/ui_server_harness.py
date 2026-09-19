@@ -154,6 +154,8 @@ def extract_ui_launch_token(html):
 
 
 # Same isolation run() builds: temp HOME/cache, no live seat or session.
+# T-1104 scrubs the runner's seat identity, T-1107 its transport: the ui child
+# can neither post as the runner nor wake the runner's own live session.
 _SESSION_ENV = (
     "TICKET_SEAT", "TICKET_AGENT", "TICKET_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
@@ -174,9 +176,6 @@ class UiServer:
         home.mkdir(exist_ok=True)
         launch_env = dict(os.environ, TICKETS_DIR=str(board),
                           HOME=str(home), TICKETS_CACHE_DIR=str(cache))
-        # _SESSION_ENV carries both halves: T-1106 isolates the ui child from
-        # the suite runner's seat identity, T-1107 from its transport, so the
-        # child can neither post as the runner nor wake the runner's session.
         for var in _SESSION_ENV:
             launch_env.pop(var, None)
         if env:

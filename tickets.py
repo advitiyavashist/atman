@@ -9797,13 +9797,22 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
                                 if t.lower() != retired_name.lower()]
     rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
            "to": to, "re": re, "text": text}
-    prov = _message_provenance(board, sender, explicit=explicit)
-    rec["session"] = prov["session"]
-    rec["via"] = via or prov["via"]
-    rec["endpoint_pid"] = prov["endpoint_pid"]
-    rec["unverified"] = False if via else prov["unverified"]
-    if prov["leadership_flag"]:
-        rec["leadership_flag"] = prov["leadership_flag"]
+    if sender_kind == "operator":
+        # T-1104: UI-operator posts must not inherit the atm ui process's
+        # session, endpoint_pid, or leadership_flag (those belong to the
+        # server shell, not the person who clicked Post).
+        rec["session"] = "ui-operator"
+        rec["via"] = via or "ui-operator"
+        rec["endpoint_pid"] = "ui-operator"
+        rec["unverified"] = False
+    else:
+        prov = _message_provenance(board, sender, explicit=explicit)
+        rec["session"] = prov["session"]
+        rec["via"] = via or prov["via"]
+        rec["endpoint_pid"] = prov["endpoint_pid"]
+        rec["unverified"] = False if via else prov["unverified"]
+        if prov["leadership_flag"]:
+            rec["leadership_flag"] = prov["leadership_flag"]
     if sender_kind:
         rec["sender_kind"] = sender_kind
     if forwarded:
@@ -19234,6 +19243,43 @@ def _ui_operator_name(args):
     return (getattr(args, "operator", None) or "").strip()
 
 
+def ui_operator(board, configured):
+    """(operator, why_not). The operator posts from the app; seats never do.
+
+    The name must have agents/<name>.json on this board and must not be a
+    harness-run seat (a workforce entry with a harness is woken; the operator
+    is not). `atm join <name>` with no --harness is how a person registers.
+    """
+    name = (configured or "").strip()
+    if not name:
+        return "", "set an operator: atm ui --operator <name>"
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", name):
+        return "", "operator name %r is not a valid seat name" % name
+    if not _agent_rec(board, name):
+        return "", "operator %s has no agents/%s.json on this board: atm join %s" % (
+            name, name, name)
+    entry = load_workforce(board).get(name) or {}
+    harness = (entry.get("harness") or entry.get("tool") or "").strip()
+    if harness:
+        return "", ("operator %s is a %s seat in workforce.json; the app posts as a person, "
+                    "never as a harness-run seat" % (name, harness))
+    ep = _safe(lambda: _session_adapters().read_endpoint(board, name), None) or {}
+    if ep.get("provider") or ep.get("socket"):
+        return "", ("operator %s has a registered harness session on this board; the app posts "
+                    "as a person, never as a harness-run seat" % name)
+    return name, ""
+
+
+def _ui_refuse_harness_operator(board, configured):
+    """Exit when --operator names a harness-run seat. Unregistered stays a POST error."""
+    name = (configured or "").strip()
+    if not name:
+        return
+    _resolved, why = ui_operator(board, name)
+    if why and ("harness-run seat" in why):
+        sys.exit(why)
+
+
 def _ui_attach_operator(snapshot, operator):
     if not isinstance(snapshot, dict):
         return snapshot
@@ -19245,14 +19291,12 @@ def _ui_attach_operator(snapshot, operator):
 def _ui_post_as_operator(board, payload, operator):
     """POST /msg always posts as the configured operator (T-1104 / T-1103 §5).
 
-    A payload `from` that names anyone else is refused. Provenance is
-    `via: ui-operator` so the record names the app, not the server's shell.
+    A payload `from` that names anyone else is refused. Provenance is the
+    explicit ui-operator marker, never the atm ui process session.
     """
-    operator = (operator or "").strip()
+    operator, why = ui_operator(board, operator)
     if not operator:
-        raise ValueError("set an operator: atm ui --operator <name>")
-    if not _agent_rec(board, operator):
-        raise ValueError("operator must be a registered agent (atm join %s)" % operator)
+        raise ValueError(why)
     claimed = str((payload or {}).get("from") or "").strip()
     if claimed and claimed != operator:
         raise ValueError("from must be the operator (%s), not a seat" % operator)
@@ -19280,6 +19324,7 @@ def cmd_ui(a, board):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     operator = _ui_operator_name(a)
+    _ui_refuse_harness_operator(board, operator)
     if a.json:
         print(json.dumps(_ui_attach_operator(board_snapshot(board), operator), indent=2))
         return
