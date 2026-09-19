@@ -14,7 +14,7 @@ from test_wakeup import board, run  # noqa: F401
 from ui_server_harness import UiServer, _free_port, make_ui_server_fixture, port_is_dead
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
-ui_server = make_ui_server_fixture("t276-probe")
+ui_server = make_ui_server_fixture("t276-probe", operator="alice")
 
 SNAPSHOT_KEYS = (
     "project", "generated", "master", "cos", "counts", "sprint", "burn",
@@ -58,7 +58,8 @@ def test_composer_post_lands_in_the_same_board_and_reaches_mentioned_agent(board
 
 
 def test_composer_rejects_missing_fields_without_touching_the_board(board, ui_server):
-    status, out = ui_server.post("/msg", {"from": "", "text": "no sender"})
+    run(board, "join", "alice", agent="alice")
+    status, out = ui_server.post("/msg", {"text": ""})
     assert status == 400 and not out["ok"]
     status, out = ui_server.post("/msg", {"from": "alice", "text": ""})
     assert status == 400 and not out["ok"]
