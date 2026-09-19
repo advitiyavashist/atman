@@ -264,8 +264,9 @@ Known first-run defects, each with the workaround that was tested:
 - `atm accept` requires a reviewer other than the ticket's author; it does
   not require the master seat. `atm done` on a ticket still in progress
   requires its current owner; once the ticket is in review any seat can close
-  it. It records the commit of the artifact checkout, so use `--artifact` to
-  point it at the accepted worktree when closing elsewhere.
+  it. With an accept present, `atm done` records that accepted commit, not
+  the closer's HEAD; use `--artifact` to point it at the accepted worktree
+  when closing elsewhere.
 - `atm reserve` requires taking master first.
 
 ## Read next
