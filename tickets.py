@@ -19243,31 +19243,100 @@ def _ui_operator_name(args):
     return (getattr(args, "operator", None) or "").strip()
 
 
+def _casefold_map_key(mapping, name):
+    """The unique mapping key whose casefold equals name, else empty."""
+    want = (name or "").casefold()
+    if not want or not isinstance(mapping, dict):
+        return ""
+    hits = [k for k in mapping if str(k).casefold() == want]
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _agent_canonical_owner(board, configured):
+    """agents/<owner>.json stem matching configured by casefold (not the FS)."""
+    want = (configured or "").casefold()
+    if not want:
+        return ""
+    hits = []
+    try:
+        for fn in os.listdir(agents_dir(board)):
+            if fn.endswith(".json") and fn[:-5].casefold() == want:
+                hits.append(fn[:-5])
+    except OSError:
+        return ""
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _endpoint_casefold(board, name):
+    """Session endpoint for name, matching the seat file by casefold."""
+    sa = _session_adapters()
+    ep = _safe(lambda: sa.read_endpoint(board, name), None)
+    if ep:
+        return ep
+    want = (name or "").casefold()
+    if not want:
+        return {}
+    try:
+        for fn in os.listdir(sa.endpoint_dir(board)):
+            if fn.endswith(".json") and fn[:-5].casefold() == want:
+                found = _safe(lambda stem=fn[:-5]: sa.read_endpoint(board, stem), None)
+                if found:
+                    return found
+    except OSError:
+        pass
+    return {}
+
+
+def _harness_run_mark(*records):
+    """First non-empty harness, tool, or provider across workforce / agent recs."""
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for key in ("harness", "tool", "provider"):
+            val = rec.get(key)
+            if isinstance(val, str):
+                val = val.strip()
+            if val:
+                return val if isinstance(val, str) else key
+    return ""
+
+
 def ui_operator(board, configured):
     """(operator, why_not). The operator posts from the app; seats never do.
 
     The name must have agents/<name>.json on this board and must not be a
-    harness-run seat (a workforce entry with a harness is woken; the operator
-    is not). `atm join <name>` with no --harness is how a person registers.
+    harness-run seat. Match workforce keys, the session endpoint, and the
+    agent record's owner by casefold, then rewrite to the canonical owner
+    (or refuse). A seat with harness, tool, or provider in workforce.json
+    or agents/<name>.json is harness-run. `atm join <name>` with no
+    --harness is how a person registers.
     """
     name = (configured or "").strip()
     if not name:
         return "", "set an operator: atm ui --operator <name>"
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", name):
         return "", "operator name %r is not a valid seat name" % name
-    if not _agent_rec(board, name):
+    owner = _agent_canonical_owner(board, name)
+    rec = _agent_rec(board, owner) if owner else {}
+    if not rec:
         return "", "operator %s has no agents/%s.json on this board: atm join %s" % (
             name, name, name)
-    entry = load_workforce(board).get(name) or {}
-    harness = (entry.get("harness") or entry.get("tool") or "").strip()
-    if harness:
-        return "", ("operator %s is a %s seat in workforce.json; the app posts as a person, "
-                    "never as a harness-run seat" % (name, harness))
-    ep = _safe(lambda: _session_adapters().read_endpoint(board, name), None) or {}
+    canonical = (rec.get("owner") or owner or "").strip()
+    if not canonical or canonical.casefold() != name.casefold():
+        return "", ("operator %s does not match the registered owner %s"
+                    % (name, canonical or owner or "?"))
+    wf = load_workforce(board)
+    wf_key = _casefold_map_key(wf, canonical)
+    entry = (wf.get(wf_key) if wf_key else {}) or {}
+    mark = _harness_run_mark(entry, rec)
+    if mark:
+        return "", ("operator %s is a %s seat; the app posts as a person, "
+                    "never as a harness-run seat" % (canonical, mark))
+    ep = _endpoint_casefold(board, canonical)
     if ep.get("provider") or ep.get("socket"):
         return "", ("operator %s has a registered harness session on this board; the app posts "
-                    "as a person, never as a harness-run seat" % name)
-    return name, ""
+                    "as a person, never as a harness-run seat" % canonical)
+    return canonical, ""
 
 
 def _ui_refuse_harness_operator(board, configured):
@@ -19298,7 +19367,7 @@ def _ui_post_as_operator(board, payload, operator):
     if not operator:
         raise ValueError(why)
     claimed = str((payload or {}).get("from") or "").strip()
-    if claimed and claimed != operator:
+    if claimed and claimed.casefold() != operator.casefold():
         raise ValueError("from must be the operator (%s), not a seat" % operator)
     text = str((payload or {}).get("text") or "").strip()
     if not text:
@@ -19323,8 +19392,10 @@ def cmd_ui(a, board):
     Writes require a per-launch token; Host must be loopback (T-1105)."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    operator = _ui_operator_name(a)
-    _ui_refuse_harness_operator(board, operator)
+    configured = _ui_operator_name(a)
+    _ui_refuse_harness_operator(board, configured)
+    resolved, _why = ui_operator(board, configured) if configured else ("", "")
+    operator = resolved or configured
     if a.json:
         print(json.dumps(_ui_attach_operator(board_snapshot(board), operator), indent=2))
         return

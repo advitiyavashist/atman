@@ -159,6 +159,77 @@ def test_session_endpoint_seat_refused_as_operator(board):
     assert "harness-run seat" in (proc.stderr or proc.stdout or "").lower()
 
 
+def _ui_json_operator(board, operator):
+    home = board.parent.parent / "home"
+    cache = board.parent / "cache"
+    cache.mkdir(exist_ok=True)
+    home.mkdir(exist_ok=True)
+    env = dict(os.environ, TICKETS_DIR=str(board), HOME=str(home),
+               TICKETS_CACHE_DIR=str(cache))
+    for var in ("TICKET_SEAT", "TICKET_AGENT", "TICKET_SESSION_ID",
+                "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID"):
+        env.pop(var, None)
+    return subprocess.run(
+        [sys.executable, str(TOOL), "ui", "--json", "--operator", operator],
+        env=env, capture_output=True, text=True, cwd=board.parent,
+    )
+
+
+def test_operator_case_variant_of_harness_seat_refused(board):
+    """--operator HJOIN / Hjoin / WFH must not slip past a lowercase harness seat."""
+    r = run(board, "join", "hjoin", "--harness", "claude", agent="hjoin")
+    assert r.returncode == 0, r.stderr
+    r = run(board, "join", "wfh", "--harness", "cursor", agent="wfh")
+    assert r.returncode == 0, r.stderr
+    for variant in ("HJOIN", "Hjoin", "WFH"):
+        proc = _ui_json_operator(board, variant)
+        assert proc.returncode != 0, (variant, proc.stdout, proc.stderr)
+        err = (proc.stderr or proc.stdout or "").lower()
+        assert "harness-run seat" in err, (variant, err)
+
+
+def test_agent_record_harness_refused_as_operator(board):
+    """harness only on agents/<name>.json is still a harness-run seat."""
+    _join_person(board, "onlyrec")
+    rec_path = board / "agents" / "onlyrec.json"
+    rec = json.loads(rec_path.read_text())
+    rec["harness"] = "claude"
+    rec_path.write_text(json.dumps(rec))
+    proc = _ui_json_operator(board, "onlyrec")
+    assert proc.returncode != 0, proc.stdout
+    assert "harness-run seat" in (proc.stderr or proc.stdout or "").lower()
+
+
+def test_workforce_provider_only_refused_as_operator(board):
+    """A workforce entry with only provider is harness-run."""
+    _join_person(board, "provonly")
+    wf_path = board / "workforce.json"
+    wf = json.loads(wf_path.read_text()) if wf_path.exists() else {}
+    wf["provonly"] = {"provider": "claude"}
+    wf_path.write_text(json.dumps(wf))
+    proc = _ui_json_operator(board, "provonly")
+    assert proc.returncode != 0, proc.stdout
+    assert "harness-run seat" in (proc.stderr or proc.stdout or "").lower()
+
+
+def test_person_operator_case_rewritten_to_canonical(board):
+    """--operator Pat posts as the registered owner pat, not the typed case."""
+    _join_person(board, "pat")
+    srv = UiServer(board, probe_prefix="t1104-case-ok", operator="Pat")
+    try:
+        status, out = srv.post("/msg", {"text": "typed as Pat", "to": ""})
+        assert status == 200 and out["ok"], out
+        rec = _last_rec(board)
+        assert rec["from"] == "pat"
+        assert rec["via"] == "ui-operator"
+        assert rec.get("unverified") is False
+        snap = srv.get("/board.json")
+        assert snap.get("operator") == "pat"
+    finally:
+        srv.stop()
+
+
 def test_ui_process_session_id_does_not_reach_record(board):
     """CLAUDE_CODE_SESSION_ID in the atm ui process must not stamp the message."""
     _join_person(board, "pat")
