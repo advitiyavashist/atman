@@ -68,7 +68,7 @@ def compose(seat, roles="", harness="", worktree="", ticket_id="", ticket_title=
     who = [seat]
     if roles:
         who.append("roles " + roles)
-    who.append("harness " + ((harness or "").strip() or "claude"))
+    who.append("harness " + ((harness or "").strip() or "unknown"))
     if worktree:
         who.append("worktree " + worktree)
 
