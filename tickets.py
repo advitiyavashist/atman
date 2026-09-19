@@ -1228,11 +1228,14 @@ def _board_reads_get(board, key, loader):
     data = getattr(_BOARD_READS, "data", None)
     if data is None:
         return loader()
+    # Realpath must run before the cache hit. Keys are per-pin, not per-path;
+    # a pin on board A would otherwise serve A's tickets/workforce/messages
+    # to load_*(B).
+    if os.path.realpath(board) != getattr(_BOARD_READS, "board", None):
+        return loader()
     hit = data.get(key, _BOARD_READS_MISS)
     if hit is not _BOARD_READS_MISS:
         return hit
-    if os.path.realpath(board) != getattr(_BOARD_READS, "board", None):
-        return loader()
     data[key] = loader()
     return data[key]
 
@@ -10125,7 +10128,9 @@ def _message_address_index(board, msgs):
     """One (recipients, mentions, broadcast, msg_id) row per message.
 
     Built once per pinned snapshot so `_inbox_scan` does not rebuild mention
-    sets for every seat.
+    sets for every seat. `mentions` is registered-filtered for addressing
+    (T-490). `broadcast` is exactly `is_board_broadcast` (unfiltered mentions)
+    so pending_work's pin shortcut cannot hide a queued wake.
     """
     def _build():
         registered = _registered_handles(board)
@@ -10134,11 +10139,7 @@ def _message_address_index(board, msgs):
             recipients = _to_recipient_set(m.get("to") or "")
             mentions = {h.lower() for h in (m.get("mentions") or [])}
             mentions = {h for h in mentions if h in registered}
-            broadcast = bool(
-                (not recipients and not mentions)
-                or (recipients & _MENTION_BROADCAST)
-                or (mentions & _MENTION_BROADCAST)
-            )
+            broadcast = is_board_broadcast(m)
             out.append((m, recipients, mentions, broadcast, _msg_id(m)))
         return out
     if not getattr(_BOARD_READS, "bound", False):
@@ -10150,10 +10151,20 @@ def _visible_addressed(board, msgs, owner, joined, registered=None):
     """Same filter as `_addressed` + `_visible_after_join`, using a pinned index."""
     target = (owner or "").lower()
     visible = []
-    for m, recipients, mentions, broadcast, _mid in _message_address_index(board, msgs):
+    for m, recipients, mentions, _channel_broadcast, _mid in _message_address_index(board, msgs):
         if m.get("from") == owner:
             continue
-        if not (broadcast or target in recipients or target in mentions):
+        # Addressing uses the registered-filtered mention set, not the
+        # channel-broadcast flag. Empty --to plus only an unknown @mention
+        # is visible to every seat (T-490) even though is_board_broadcast
+        # is false (the mention is unfiltered there).
+        if not (
+            (not recipients and not mentions)
+            or (recipients & _MENTION_BROADCAST)
+            or (mentions & _MENTION_BROADCAST)
+            or target in recipients
+            or target in mentions
+        ):
             continue
         if joined and target not in recipients and m.get("at", "") < joined:
             continue
