@@ -159,6 +159,10 @@ class UiServer:
         self.marker = _board_marker(board, probe_prefix)
         self.port = _free_port()
         env = dict(os.environ, TICKETS_DIR=str(board))
+        for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                    "TERM_SESSION_ID", "CURSOR_CONVERSATION_ID", "CODEX_THREAD_ID",
+                    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"):
+            env.pop(var, None)
         ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
                   "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]
         self.proc = subprocess.Popen(

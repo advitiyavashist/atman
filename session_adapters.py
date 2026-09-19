@@ -177,6 +177,11 @@ def commit_endpoint(board, seat, record, presented_lease=""):
     two seats cannot both scan-then-write the same provider identity.
     """
     key = session_key(record)
+    foreign = other_board_for_session(board, record)
+    if foreign:
+        return {"ok": False, "reason": (
+            "session already bound to another board (%s); refuse cross-board wake"
+            % foreign)}
     fp_fd = acquire_fingerprint_lock(board, key) if key else None
     fd = acquire_seat_lock(board, seat)
     try:
@@ -209,6 +214,8 @@ def _commit_endpoint_locked(board, seat, record, presented_lease=""):
     record["lease_id"] = uuid.uuid4().hex[:16]
     record["heartbeat_epoch"] = time.time()
     record.setdefault("heartbeat_at", record.get("at") or "")
+    record.setdefault("board", os.path.abspath(board))
+    record.setdefault("at", _iso_now())
     write_endpoint(board, seat, record)
     return {"ok": True, "fence": record["fence"], "lease_id": record["lease_id"],
             "record": redact_endpoint(record)}
@@ -311,6 +318,61 @@ def other_seat_for_session(board, seat, record):
             continue
         if session_key(ep) == key:
             return other
+    return None
+
+
+def _iter_foreign_endpoints(board):
+    mine = board_hash(board)
+    sessions = os.path.join(cache_root(), "sessions")
+    try:
+        names = os.listdir(sessions)
+    except OSError:
+        return
+    for h in names:
+        if h == mine:
+            continue
+        d = os.path.join(sessions, h)
+        if not os.path.isdir(d):
+            continue
+        try:
+            files = os.listdir(d)
+        except OSError:
+            continue
+        for fn in files:
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(d, fn)) as f:
+                    ep = json.load(f)
+            except (IOError, ValueError):
+                continue
+            yield h, ep
+
+
+def other_board_for_session(board, record, *, owner_only=False):
+    """Another board hash already owns this session fingerprint (T-1107).
+
+    Endpoints are per-board-hash, but the transport (Claude socket, Codex
+    thread, Cursor session) is process-global. A scratch board that inherits
+    the parent harness env must not claim or poke that transport.
+
+    When owner_only is True (wake path), only an earlier-or-equal `at`
+    on the other board counts as the owner, so a later stolen copy cannot
+    silence the board that registered first.
+    """
+    key = session_key(record)
+    if not key:
+        return None
+    my_at = (record or {}).get("at") or ""
+    for h, ep in _iter_foreign_endpoints(board):
+        if session_key(ep) != key:
+            continue
+        if owner_only:
+            other_at = (ep or {}).get("at") or ""
+            if other_at and (not my_at or other_at <= my_at):
+                return h
+            continue
+        return h
     return None
 
 
@@ -777,7 +839,8 @@ def register_persistent(board, seat, harness, at_iso):
     caps = probe.get("capabilities") or {}
     record = {"seat": seat, "agent_id": seat, "provider": provider,
               "mode": "native" if caps.get("native_inject") else "supervised",
-              "pid": session_pid(), "at": at_iso, "capabilities": caps}
+              "pid": session_pid(), "at": at_iso, "capabilities": caps,
+              "board": os.path.abspath(board)}
     if provider == "claude":
         sock = (os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or "").strip()
         token = (os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN") or "").strip()
@@ -1697,6 +1760,12 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     mid = str(message_id or "")
     provider = ep.get("provider") or ""
     lease, fence = _endpoint_lease_fence(ep)
+    bound = (ep.get("board") or "").strip()
+    if bound and os.path.abspath(bound) != os.path.abspath(board):
+        return "refused (session bound to another board)"
+    foreign = other_board_for_session(board, ep, owner_only=True)
+    if foreign:
+        return "refused (session bound to another board)"
     if expected and provider and expected != provider:
         remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
         return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
