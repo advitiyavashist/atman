@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/error.json",
+  "title": "Any non-2xx response",
+  "$ref": "common.json#/$defs/error"
+}
