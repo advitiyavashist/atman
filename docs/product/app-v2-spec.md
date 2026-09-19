@@ -10,7 +10,7 @@ The operator wants one screen where three things are visible at once:
 2. **The execution plan.** This is the centrepiece. It shows the objective broken into tickets, their dependency order, who owns each, what is running now, and what is blocked and why: a dependency that is not accepted, a seat that is limited, or a DECIDE that is waiting on the owner.
 3. **Live status with drill-down.** Click a plan step to see its ticket, the runs working it (elapsed time, tokens, usage), the review head and accept/reject verdicts, the handoff, the messages about it, and the commit. Then back out to the plan.
 
-Projects are first-class. A seat is shown as `seat@project`, there is a project switcher, and each project has its own plan, its own coordinator and its own fleet. For optimization work, datasets and evals are first-class objects alongside tickets and seats. Named rooms are an optional late phase. They are not the organising idea.
+Projects are first-class. A seat is shown as `seat@project`, there is a project switcher, and each project has its own plan, its own coordinator and its own fleet. For optimization work, datasets and evals are first-class objects alongside tickets and seats. Named rooms are an optional late phase. They are not the organising idea. The user's answers to the open questions are recorded as decisions in §9, and the spec below already reflects them.
 
 ### Invariants that must survive (already enforced; v2 may not weaken them)
 
@@ -64,7 +64,7 @@ Legend for **R/W**: R is read-only. W is a write route. W-existing is `POST /msg
 | Element | What it shows | Real data that backs it TODAY (file:function) | Gap | R/W |
 |---|---|---|---|---|
 | Report an issue | Opens the public issue tracker with a prefilled, redacted diagnostic (board path hash, version, snapshot `error`) | none | No issue URL in app config. The diagnostic must be built client-side from `/board.json` (no `atm doctor`, which spawns git). | R (navigation only) |
-| Voice on/off | Toggle for read-aloud of the lead's replies and dictation into the composer | none | Browser speech recognition can be cloud-backed, which conflicts with localhost-only. Deferred (Q5). | R |
+| Voice on/off | (not built) | none | **Out of scope** (decision 5). Browser speech recognition can also be cloud-backed, which would conflict with localhost-only. No control is rendered. | — |
 | Project switcher | Registered projects, current one highlighted, each with an open/blocked count | `_atman_config_path` + `_configured_shared_board` (tickets.py) read `~/.config/atman/board.json {"boards": {repo: board}}`; `_board_snapshot_body` returns `project` = basename of the board's parent dir | No project registry with names. No per-project cheap counts. `/board.json` serves one board only. See §4.1. | R |
 | New project | Create a project: board and registry entry | `cmd_init`, `_init_resolve_board` (tickets.py) | No route and no registry write. Phase 3. | W |
 | Lead (conversation) | The operator ↔ coordinator thread | `board_snapshot_for_request(seat=)`, `message_involves_seat`, `filter_messages_for_scope`; JS `openSeatChat`, `visibleMessages` | Thread is cut from the newest 40 messages of the whole board (`messages=40`). On a 9,647-message board that is only a few minutes of history. Needs a per-thread read route (§3.3). | R |
@@ -87,7 +87,7 @@ Legend for **R/W**: R is read-only. W is a write route. W-existing is `POST /msg
 
 | Element | What it shows | Real data TODAY | Gap | R/W |
 |---|---|---|---|---|
-| Title pill | `Lead · <coordinator>@<project>` and its authority (master / CoS) | `current_master(board)` → `owner`, `cos`; `aliases.json` (`ceo`, `cos`) | No explicit "lead" designation. Phase 1 uses master; see Q2. | R |
+| Title pill | `Lead · <seat>@<project>`, its harness, and whether it takes mid-run messages or answers on its next turn | `current_master(board)` (for display of master / CoS roles); `steer.STEERABLE_PROVIDERS` / `steer.UNSTEERABLE` via `_seat_harness` | No lead setting exists. The lead is a per-project setting the user picks (decision 2): `master.json.lead`. **Unset means the app asks the user to pick; it never guesses.** | R (display), W (`POST /lead`) |
 | Coordinator status strip | working / idle / limited / stalled / dead / unknown; run elapsed; last output age; limit reset; auth; harness usage with age | `agent_liveness` (`STATE_WORDS`); `agent_map` running row (`elapsed_s`, `tokens`); `_steer_seat_row` (`last_output_at`); `_active_seat_limit`; `_agent_auth_surface`; `provider_usage_snapshot` | None for the fields. They need joining into one strip. | R |
 | Post author `seat@project` | e.g. `planner@steer` | `from` on the message; project slug (§4.2) | Display-only composition. | R |
 | Harness badge (coloured by provider) | `claude` / `codex` / `cursor` / `unknown` | Workforce `harness` / `tool` (`_seat_harness`); trajectories stamp `harness` on events (`trajectories.build` → `agent_harness`) | Messages carry no harness. The workforce value is *current*, not at-post-time. §4.4. | R |
@@ -103,7 +103,7 @@ Legend for **R/W**: R is read-only. W is a write route. W-existing is `POST /msg
 | Composer "Tell the lead…" | Posts as the operator to the lead (DM). Optional `re` ticket. | `POST /msg` → `post_message`; JS `cSend` handler; mention bar | `from` must be fixed server-side to the operator (§5). | W-existing (hardened) |
 | Attach | Attach a file reference | none | Out of scope. v2 posts text only (`_UI_MSG_MAX_BYTES` 64 KiB, `_ui_payload_has_secrets`). Attach is a path reference, never an upload, in a later phase. | — |
 | Pin | Pin a message or ticket to the top of the conversation | none | §4.6. Phase 3. | W |
-| Mic | Dictation | none | Q5. | — |
+| Mic | (not built) | none | Out of scope (decision 5). | — |
 | Send | Post | `POST /msg` | Hardened. | W-existing |
 | Header identity switcher | Who you are (operator, fixed) plus a read-only *view as seat* lens | `THREAD_SEAT` (`openSeatChat`) | The lens is read-only. Posting identity never switches (§5). | R |
 
@@ -219,7 +219,9 @@ A namespace inside one board would force a project filter into every one of thos
 
 `boards` keeps its current meaning and resolution order (T-959). `projects` is only the app's list. A `boards` entry with no `projects` entry is listed under the slug `basename(dirname(board))`, which is the same value `board_snapshot` already returns as `project`.
 
-**Migration for existing boards.** None is required. Every existing board is a project the moment the registry lists it. The app auto-lists the board it was started on, plus every distinct value in `boards`. `atm board-mark-primary` and `.primary` keep deciding which local board wins; the registry never overrides that. One real consequence: today's working board is `steer/.tickets`, which holds tickets for four repos (`repo` field: atman 406, steer 281, a research repo 34, the tickets repo 8, blank 292). Phase 1 shows it as one project with an optional read-only **repo lens** that filters nodes by `ticket.repo`. Whether to split it into separate project boards is a real fork (Q1). The split tool would be `atm project split --repo <url> --to <new board>`. It copies tickets, leaves originals as stubs with a `moved_to`, and refuses on cross-repo deps. It is not in phases 1–3.
+**Migration for existing boards.** A single-project board needs none. It is a project the moment the registry lists it. The app auto-lists the board it was started on, plus every distinct value in `boards`. `atm board-mark-primary` and `.primary` keep deciding which local board wins; the registry never overrides that.
+
+The shared board is different. Today's working board `steer/.tickets` holds tickets for four repos. **Decision 1: split it into one board per project.** The migration is specified in §4.11. Until the split runs, phase 1 lists the shared board as one project with a read-only **repo lens** that filters nodes by `ticket.repo`. The lens doubles as a preview of the split.
 
 **Create from the app (phase 3).** `POST /projects {slug, repo_root}` is equivalent to `cd <repo_root> && atm init` followed by `atm project add <slug> --board <repo_root>/.tickets`. It refuses:
 
@@ -253,21 +255,30 @@ A namespace inside one board would force a project filter into every one of thos
 ```json
 {"id":"D-0007","ev":"ask","at":"…","by":"pm","ticket":"T-1110","question":"Which rule should participants follow?",
  "options":["A: …","B: …"],"blocks":true,"msg_id":"msg_…"}
-{"id":"D-0007","ev":"rule","at":"…","by":"pm","authority":"delegate","choice":"B","notes":"…"}
+{"id":"D-0007","ev":"rule","at":"…","by":"lead-seat","authority":"lead","choice":"B","notes":"…"}
+{"id":"D-0007","ev":"seen","at":"…","by":"Advitiya"}
 {"id":"D-0007","ev":"rule","at":"…","by":"Advitiya","authority":"owner","choice":"A","notes":"override: …"}
 ```
 
 **States:**
 
 - `open`: asked, no ruling.
-- `ruled`: a delegate ruled. The UI shows "owner can override".
+- `ruled`: the lead ruled. The ticket is **unblocked immediately** (decision 3). Until the owner has marked it seen, "Needs you" shows it as **ruled by lead · not yet seen by you**, with Override and Seen buttons.
 - `decided`: the owner ruled first.
-- `overridden`: the owner ruled after a delegate.
+- `overridden`: the owner ruled after the lead, with a different choice. **An override reopens the affected ticket** (§4.5, "Override").
 - `withdrawn`: the asker withdrew it.
 
-**Who can rule.** The owner (the operator identity) can always rule. A **delegate** is a seat named in `master.json` as `owner` / `cos`, or holding role `pm` in `roles.json`. A delegate can rule unless the ask was made with `--owner-only`. The asker can never rule their own DECIDE. This mirrors the accept gate's author ≠ reviewer rule (`review_verdict.refuse`). Whether a delegate ruling unblocks immediately is Q3.
+**Who can rule.** The owner (the operator identity) can always rule. The project's **lead** (the seat in `master.json.lead`, decision 2) can also rule, unless the ask was made with `--owner-only`. No other seat can rule. The asker can never rule their own DECIDE, so when the lead asked, only the owner can rule. This mirrors the accept gate's author ≠ reviewer rule (`review_verdict.refuse`).
 
-**Link to a ticket.** `ticket` is required. A DECIDE always blocks or informs some work. With `blocks: true` the ticket gets the typed blocker `decide_open` (§3.2) while the state is `open`. Dispatch refuses it (`cmd_dispatch` gains the check) the same way it refuses HOLD. Each event also posts a normal message (`kind: "decide"`, `re: <ticket>`, `to: <owner or delegate>`) so delivery, receipts and wake work unchanged.
+**Lead rulings unblock immediately (decision 3).** A `rule` event by the lead removes the `decide_open` blocker at once. "Needs you" keeps the item as *ruled by lead · not yet seen by you* until the owner appends a `seen` event (the **Seen** button, `POST /decide/seen`). Opening the page never marks it seen, because a GET never writes.
+
+**Override.** An owner `rule` event after a lead ruling, with a different choice, sets the state to `overridden` and **reopens the affected ticket**. This is the same write as `atm reopen <ticket>`, with a note `reopened: owner overrode D-0007 (<lead choice> → <owner choice>)`:
+- a ticket in `claimed` or `review` goes back to `open`, with its owner kept as `reserved_for` so the same seat picks it up;
+- a `done` ticket reopens, and any accept on it is superseded by the reopen (the existing reopen semantics, not a new rule).
+
+Successors that already started on the strength of the lead's ruling are not reopened automatically. They get a `decide_overridden` chip naming D-0007, and the lead decides what to redo. An owner ruling that agrees with the lead is recorded as `seen`, not `overridden`.
+
+**Link to a ticket.** `ticket` is required. A DECIDE always blocks or informs some work. With `blocks: true` the ticket gets the typed blocker `decide_open` (§3.2) while the state is `open`. Dispatch refuses it (`cmd_dispatch` gains the check) the same way it refuses HOLD. Each event also posts a normal message (`kind: "decide"`, `re: <ticket>`, `to: <owner or lead>`) so delivery, receipts and wake work unchanged.
 
 **CLI:**
 
@@ -330,7 +341,7 @@ These are product requirements learned from the team's own evaluation runs (the 
 |---|---|
 | `datasets/DS-*.json`: id, `role` (`dev` / `holdout`), provenance {how built, by whom, from what, `derived_from_holdout: false` asserted and checked}, slices [{name, n}], labels {who, blind, agreement_rate, adjudicated}, `version`, `content_sha256`, `custody_ref` {path, digest}. No case ids, no text, no labels. | Case files; gold labels for holdouts; the **generator and seed** of a synthetic set (a committed generator once leaked a holdout's answers through git history) |
 | `evals/EV-*.json`: pre-registration {metrics, thresholds, adoption rule text, required n per slice, `frozen_commit`, `config_sha256`, dev and holdout dataset ids, blind-request allow-list version} | Raw per-case predictions |
-| `eval_runs.jsonl`: {run id, eval, step `predict` / `score`, dataset id + role, `config_sha256`, started, ended, by, `run_log_digest`, `custody_receipt_digest`, `guard`: {allow_list_version, accepted_fields, refused: n}} | Run logs; custody receipts |
+| `eval_runs.jsonl`: {run id, eval, step `predict` / `score`, dataset id + role, `config_sha256`, `frozen_commit`, `reviewed_by` (accepting seat), started, ended, `started_by`, `authority` (`owner` / `lead`), executed_by, `run_log_digest`, `custody_receipt_digest`, `guard`: {allow_list_version, accepted_fields, refused: n}} | Run logs; custody receipts |
 | `eval_results.jsonl`: {run id, metric, value, ci_low, ci_high, ci_method, n, `status` DIRECTIONAL / DEFINITIVE, dataset role, tokens_per_case / p95_ms / cost (or `null`), `rule_applied` `as_written` / `adapted`, `departures[]`} | nothing extra |
 
 The board **references** custody by path plus digest only. The app never opens a custody path. It shows *custody receipt present / missing*. A run whose `custody_receipt_digest` is empty shows **missing custody receipt: blindness rests on code path only**, which is what one real run had to admit in prose.
@@ -343,8 +354,8 @@ The board **references** custody by path plus digest only. The app never opens a
    - refuses to open custody outside its own output dir.
 
    Only `atm eval score` reads gold. Both steps append to `eval_runs.jsonl` with the run-log digest and the custody receipt digest. A missing receipt is recorded as missing.
-3. **Pre-registration is frozen before the scored run.** `atm eval freeze EV-x` records `frozen_commit` and `config_sha256`. `score` refuses an eval that is not frozen, or whose current config hash differs. Each result records `rule_applied` and every departure. The app shows **as written** or **adapted: N departures** with the list. It never shows "pre-registered" beside an adapted rule.
-4. **No tuning on the holdout.** Tuning runs are refused on `role: holdout`. A holdout is scored **once per frozen config**: a second `score` on the same holdout dataset version with the same `config_sha256` is refused. A new config needs a new freeze at a new commit. The app shows *holdout exposures: k* per dataset, so re-reading the same holdout is visible. The **dev-vs-holdout gap per metric** is a first-class column. A real run moved from 0 blocks on dev to 22 on the holdout, from degenerate threshold bands (low == high) fitted on a 219-case dev set. The app also flags configs whose thresholds contain `low == high`.
+3. **Pre-registration is frozen and reviewed before the scored run.** `atm eval freeze EV-x` records `frozen_commit` and `config_sha256`. A frozen config counts as **reviewed** only when the eval's ticket carries a structured `review_events` accept whose SHA equals `frozen_commit`. The accept must come from a seat other than the author, which is the existing gate, reused. Decision 4 allows scoring only from a frozen, reviewed config. `score` refuses an eval that is not frozen, or whose current config hash differs. Each result records `rule_applied` and every departure. The app shows **as written** or **adapted: N departures** with the list. It never shows "pre-registered" beside an adapted rule.
+4. **No tuning on the holdout.** Tuning runs are refused on `role: holdout`. **Who may start a scored run** (decision 4): the operator or the project's lead, never any other seat. Each scored run records `started_by` and `authority`, and the app shows them on the run. A holdout is scored **once per frozen config**: a second `score` on the same holdout dataset version with the same `config_sha256` is refused. A new config needs a new freeze at a new commit. The app shows *holdout exposures: k* per dataset, so re-reading the same holdout is visible. The **dev-vs-holdout gap per metric** is a first-class column. A real run moved from 0 blocks on dev to 22 on the holdout, from degenerate threshold bands (low == high) fitted on a 219-case dev set. The app also flags configs whose thresholds contain `low == high`.
 5. **Directional vs definitive.** `status` is DEFINITIVE only when each slice's n ≥ the pre-registered required n. Otherwise it is DIRECTIONAL, and the badge sits on every figure. Every figure shows its CI and the n it rests on. A result without a CI renders "CI not reported" and is forced DIRECTIONAL. The board and the app carry aggregates only; a result row containing a case id is rejected at write.
 6. **Cost and latency are metrics.** Tokens per case (on the subset actually asked) and p95 latency are result rows. Cost `null` renders **unknown**, never a number. A missing price sheet means the cost condition of the rule counts as not holding.
 7. **Optimization task.** A ticket with `eval_gate: {eval, config_sha256, holdout_dataset}` gets a second gate. `atm accept` refuses unless a scored holdout result exists at exactly that config and the adoption rule holds as written. An adapted rule needs an operator ruling (a DECIDE) that names the departures. This is in addition to the normal SHA-bound accept by a different seat. The code accept alone never releases successors of an optimization task.
@@ -357,14 +368,105 @@ The board **references** custody by path plus digest only. The app never opens a
 
 **Phase placement.** Phase 2B. A read-only view of *existing* eval artifacts does not fit phase 1. The existing artifacts are prose reports and scripts in another repo, and turning prose into rows would fabricate structure (the same reason prose is never a verdict). Phase 2B ships `atm eval import` so those runs can be entered by hand as records, with `rule_applied: adapted` and their stated departures.
 
+### 4.11 Splitting the shared board (decision 1)
+
+**What is on the real board today.** Measured read-only on `steer/.tickets`, 2026-09-19. The board is live, so the counts move.
+
+- **Tickets: 1,025.**
+  - By `repo`: atman 407, steer 281, the research repo 34, the tickets repo 8, and 1 whose `repo` is the board's own `.git`.
+  - 294 have no `repo`: 171 done, 82 open, 22 blocked, 19 claimed. For 184 of them, `branch`, `artifact_dir` and title give no hint of a repo.
+- **Dependency edges that cross projects: 264** (unattributed tickets counted as their own bucket).
+  - 164 have a child that is not done.
+  - Only **15** join two attributed repos with a live child. All 15 are steer ↔ atman, and in all 15 the parent is done. Examples: T-809 ← T-807 and T-829; T-536 ← T-481 and T-500.
+  - The other 149 involve an unattributed ticket, so the real number is only known after attribution. The dry-run reports it.
+- **Epics span repos:** E-010 and E-011 (the two largest), and E-012 through E-018.
+- **Messages (live and archive):**
+  - by `re`: atman 6,113, steer 3,078, unattributed 1,820, research 417, tickets 110, unknown id 201;
+  - 6,973 have no `re`.
+- **Trajectory events:** atman 11,033, steer 5,506, unattributed 3,198, research 846, no ticket 6,134.
+- **Structured accepts:** `review_events` on 14 tickets, all atman.
+- **Seats:** 325 agent records and 250 workforce entries. 184 seats own attributed tickets, and **38 of them work in more than one project**.
+
+**Principles.**
+
+- **Copy, never move.** The shared board is not edited, except for one marker file. Nothing is deleted.
+- **Ticket ids are kept.** There is no renumbering, so `re` fields, notes, commit subjects (`T-809: …`) and PR titles stay valid. Each new board's id allocator (`_alloc`) is seeded above the shared board's highest id, so new ids never collide across projects. A reference into another project is written `project:T-id`.
+- **Records are copied byte for byte.** That covers the ticket JSON, including `review_events`, `review_head`, `steers`, notes and `owner_lease`. It also covers message lines with their `id`. A legacy record without an id keeps its content-derived `_msg_id`, because its content is identical. Receipts keyed by message id therefore stay valid.
+- **Append-only logs are partitioned, never rewritten.** Each line lands in one or more target files unchanged. The manifest records where each line went.
+
+**The tool: `atm project split`.** It has four steps.
+
+1. **Propose.** `atm project split --propose > split-plan.json` is read-only.
+   - A ticket goes to the project named by its `repo`.
+   - A ticket with no `repo` is listed as `unassigned`. Its branch, artifact dir and epic majority are shown as **hints only**; nothing is auto-attributed.
+   - The plan also proposes seat homes and each project's master/CoS/objective (§ below), and lists every cross-project edge.
+2. **Edit.** The operator edits the plan.
+   - Every non-done unassigned ticket must be given a project.
+   - A done unassigned ticket may be given one, or left in `archive`. `archive` means it stays readable in the frozen shared board, which the registry keeps as a read-only project `shared-archive`.
+3. **Dry-run.** `atm project split --plan split-plan.json --dry-run` writes nothing (audit-hook tested). It prints:
+   - per-project counts of tickets, messages, trajectory events and agent records;
+   - cross-project edges by kind (below);
+   - every refusal;
+   - the exact manifest it would write.
+4. **Apply.** `atm project split --plan split-plan.json --apply`.
+   - It refuses while any `agents/*.run` receipt is active, a watcher is alive, or `merge.lock` is held. The operator stops seats first with `atm spawn --stop`.
+   - It builds each new board in a temp dir and verifies line counts and sha256 digests against the dry-run.
+   - It then renames each board into place, writes `split-manifest.json` into every new board, and writes the `.split` marker into the shared board.
+   - Last, it updates `~/.config/atman/board.json`: each repo now maps to its project board, and the new `projects` entries are added. The previous values are kept in the manifest.
+
+**What goes where.**
+
+| Shared-board file | Where it goes | Why nothing is lost |
+|---|---|---|
+| `T-*.json` | The ticket's project | Unchanged file, so `review_events` (accepts), `review_head`, `steers`, `owner_lease` and notes travel with it. |
+| `epics/`, `sprints/` | Every project that has a member ticket. Each copy counts only its local members and carries `split_from`. | Epic progress stays true per project. |
+| `messages.jsonl`, `messages.<date>.jsonl` | A message with `re` goes to that ticket's project. A directed message with no `re` goes to every project where its sender or a recipient is homed. A broadcast with no `re` goes to the sender's home projects. A message whose sender is homed nowhere goes to the archive only. Dated archive names are kept. | A message copied to two projects has the same id in both, so receipts cannot fork. |
+| `trajectories.jsonl` | An event with a ticket goes to that ticket's project. A ticketless event goes to the agent's home projects, or to the archive if the agent has none. | Turns and cost metrics are per ticket, so a copied ticketless event never double-counts a ticket. |
+| `agents/<seat>.json` | Every home project of the seat, unchanged (`inbox_seen`, seen ids, `wake_delivery`, limit, `auth_check`) | No message is redelivered, and no receipt changes its label. |
+| `agents/*.run` | Not copied. There are no active runs, by precondition. | Run history is in trajectories. |
+| `workforce.json`, `roles.json` | Entries for the seats homed in the project | — |
+| `master.json`, `objective.json`, `MASTER.md` | As the plan names per project. `lead` is left **unset** (decision 2: the user picks). `MASTER.md` gets a first line "forked from the shared board at <time>". | The decision log is preserved in every project that continues it. |
+| `briefs/`, `CONTEXT.md`, `aliases.json`, `provider_usage.json` | Copied to every project. An alias whose holder is not homed there is dropped. | Usage readings keep their `checked_at`, so their age stays honest. |
+| `coordination/`, `merge.json`, `retired.json` | Copied where their references resolve. Retired-seat forwards are kept. | — |
+| `.identities/` | Not copied. A session re-binds with `atm join` on its new board. | Prevents a session silently answering as a seat on the wrong board. |
+
+**Re-homing seats.**
+
+- **Home rule.** A seat's home set is every project where it:
+  - owns, or is `reserved_for`, a non-done ticket;
+  - is named master or CoS in the plan;
+  - owned a ticket in the last 30 days.
+
+  A seat with no activity in 30 days stays in the archive only. The plan can override any of this.
+- **Seats in several projects.** The 38 multi-project seats get one record per project: same name, separate inbox, shown as `seat@atman` and `seat@steer`.
+- **Restarting sessions.** After apply, the tool prints the exact restart line for each home (`TICKETS_DIR=<board> atm spawn <seat> --persist …`). A session still pointed at the shared board is **refused on write** by the `.split` marker, with a message naming the seat's new board(s). This is the T-959 refusal pattern (`_shadow_board_refusal`), reused.
+- **The existing local `atman/.tickets`.** It has 3 tickets and 15 messages. The dry-run reports it as a shadow. The operator archives it with the existing `atm board-archive-shadow` before the atman project board is created there.
+
+**Cross-project dependencies.** The dry-run counts them after attribution. Today there are 15 attributed edges with a live child, and every parent is done. Handling depends on the parent's state at split time:
+
+- **Parent released** (structured accept or recorded override, per `dep_released`). The child keeps the dependency as a snapshot, `external_deps: [{"project":"steer","id":"T-807","released":{"kind":"accept","sha":"…","at":"…"}}]`, and the id leaves `deps`. The child's gate reads the snapshot, never the other board, so boards stay independent.
+- **Parent done but not accepted.** The snapshot is recorded as `released:false, reason:"done-unaccepted"`. The child keeps a `dep_unaccepted` chip naming `steer:T-807`. When the parent is accepted on its own board, `atm project refresh-external <child>` updates the snapshot. That command is an explicit write that reads the other board once. **The migration never turns unaccepted into accepted.**
+- **Parent not done.** Refused by default: the plan must put both tickets in the same project. `--allow-pending-external` instead records a `released:false` snapshot, handled the same way.
+
+**Reversible.**
+
+- The shared board is untouched apart from the `.split` marker.
+- Every new board carries `split-manifest.json`: the plan digest, the line count and sha256 of each copied file, and the registry before and after.
+- `atm project split --undo <manifest> [--dry-run|--apply]` has two cases:
+  - **No new board has records beyond its manifest:** undo removes `.split`, restores the registry, and moves the new boards aside to `.tickets.split-undone-<ts>` (never deletes them).
+  - **Post-split writes exist:** `--undo --merge-back` appends the new boards' appended lines (messages, trajectories, decisions) back into the shared board, deduplicated by id, and copies back tickets whose `updated` is newer. The dry-run lists every conflict and refuses on any. A conflict should be impossible while the shared board is frozen, but it is checked.
+
 ---
 
 ## 5. The persistent coordinator (the conversation)
 
 ### 5.1 Which agent, how it persists, where memory lives
 
-- **Who.** The project's **lead** is `master.json.owner` (the planner) by default. `master.json` gains an optional `lead` key if the operator wants to talk to a different seat (for example the CoS). On the real board the master is a `codex` seat, which has no mid-run inject path (`steer.UNSTEERABLE`). That is why Q2 exists.
-- **How it persists.** Through re-woken turns, not one immortal run. The master and CoS already default to `lifecycle: persistent`, `wake_mode: continuous` (`lifecycle_of`, `wake_mode_of`). They run under `atm spawn --persist` (`spawn_watch_max_runs(persist=True)` loops). The master prompt deliberately bounds each run to "ONE concrete outcome, then stop". v2 keeps that. A long-lived model session is neither assumed nor required.
+- **Who (decision 2: the user's choice).** The lead is a **per-project setting the user picks**: `master.json.lead = "<seat>"`. It can be any registered seat on that project's board. There is no hard-coded default role. If `lead` is unset, the conversation pane shows a picker ("Pick who you talk to on this project") instead of a thread, and the app never falls back to master or CoS on its own.
+  - The picker lists each registered seat with its harness and a capability line from `steer.STEERABLE_PROVIDERS` / `steer.UNSTEERABLE`: **takes mid-run messages** (today: `claude` with a live messaging socket) or **answers on its next turn** (every other harness, for example `codex`, `cursor`). The line comes from the same table `atm steer` uses, so it cannot drift.
+  - Once chosen, the title pill repeats that line. If the lead only answers on its next turn, the composer says so under the Send button: *"<seat> answers on its next turn; it cannot be interrupted mid-run."*
+  - Set with `atm lead set <seat>` or `POST /lead {seat}` (operator only). Changing the lead is recorded with `atm master log`.
+- **How it persists.** Through re-woken turns, not one immortal run. The master and CoS already default to `lifecycle: persistent`, `wake_mode: continuous` (`lifecycle_of`, `wake_mode_of`). A user-picked lead gets the same defaults (`lifecycle_of` / `wake_mode_of` treat `master.json.lead` like `owner` and `cos`), unless `workforce.json` sets them explicitly. They run under `atm spawn --persist` (`spawn_watch_max_runs(persist=True)` loops). The master prompt deliberately bounds each run to "ONE concrete outcome, then stop". v2 keeps that. A long-lived model session is neither assumed nor required.
 - **Where memory lives** (board only, no new store):
   - `objective.json`;
   - `MASTER.md` (the decision log written by `atm master log`);
@@ -402,13 +504,13 @@ The strip and the composer say it plainly and never hang. The post still lands o
 
 ### 5.4 Multiple projects
 
-Each project has its own lead (its own `master.json`). The project switcher switches the conversation, the plan and the fleet together. Posting always targets the selected project's board. Unread badges per project come from phase 3.
+Each project has its own lead (its own `master.json.lead`, possibly unset). The project switcher switches the conversation, the plan and the fleet together. Posting always targets the selected project's board. Unread badges per project come from phase 3.
 
 ### 5.5 Safety of the lead's authority
 
 - The lead acts only through `atm` commands. The app has no route that performs a lead action on its behalf.
 - It cannot self-accept (`review_verdict.refuse`: author ≠ reviewer). It cannot bypass the gate: successors release only on a structured accept (`dep_released`), and `atm done` without accept stays *done, not accepted*.
-- The lead's authority is shown in the title pill (`master` / `CoS` / `lead`) with what that role may do. The words come from the existing master and CoS prompts (route, dispatch, brief, spawn, merge for CoS). Every lead action shows as a record-backed card (§4.7).
+- The lead's authority is shown in the title pill: *lead* plus any board role it also holds (`master` / `CoS`), and what those roles may do. The words come from the existing master and CoS prompts (route, dispatch, brief, spawn, merge for CoS). Being lead adds exactly two powers: ruling a DECIDE and starting a scored eval run (§4.10). Every lead action shows as a record-backed card (§4.7).
 
 ---
 
@@ -430,9 +532,11 @@ Each project has its own lead (its own `master.json`). The project switcher swit
 | `POST /msg {text, to?, re?, kind: message\|task}` (hardened) | `atm msg --owner <operator> "text" [--to] [--re] [--task]` | 1 | `from` = operator, server-side. The payload `from` is rejected if present and different. A message is never a verdict (T-944). |
 | `POST /auth-reconnect {agent}` (existing) | recheck only; never login, never a model | — | Unchanged. |
 | `POST /steer {seat, text, ask: bool, ticket?}` | `atm steer <seat> [--ask] "text" --ticket` as operator | 2A | Records on the ticket (or objective) as a steer by the operator. Scope unchanged. `steer.harness_refuse_reason` still refuses non-steerable harnesses. |
-| `POST /decide/rule {id, choice, notes}` | `atm decide rule` as operator | 2A | Rules a decision only. It never writes `review_events`, never changes ticket status, and never releases successors except by removing the `decide_open` blocker. The asker ≠ ruler rule is checked. |
+| `POST /decide/rule {id, choice, notes}` | `atm decide rule` as operator | 2A | Rules a decision only. It never writes `review_events` and never releases successors except by removing the `decide_open` blocker. The asker ≠ ruler rule is checked. The one status change is the one decision 3 requires: an owner override of a lead ruling reopens the affected ticket, through the same code as `atm reopen`. |
+| `POST /decide/seen {id}` | `atm decide seen D-x` as operator | 2A | Appends a `seen` event only. It changes no ticket. |
+| `POST /lead {seat}` | `atm lead set <seat>` | 1 | Operator only. The seat must be registered on this board. It writes `master.json.lead` and a `master log` line. It grants DECIDE ruling and scored-run start, nothing else. |
 | `POST /decide/ask {ticket, question, options[]}` | `atm decide ask` as operator | 2A | Same record as the CLI. |
-| `POST /eval/score-request {eval, dataset}` | posts a `task` to the eval's owner seat to run `atm eval score` | 2B | The server never runs the scorer. The request is refused if the eval is not frozen, the config hash drifted, or this holdout version was already scored at this config. `atm eval score` re-checks everything. Only the operator (or master, Q4) may request. |
+| `POST /eval/score-request {eval, dataset}` | posts a `task` to the eval's owner seat to run `atm eval score --requested-by <operator>` | 2B | The server never runs the scorer. Decision 4: only the **operator** or the project's **lead** may start a scored run (from the app, the operator; from the CLI, `atm eval score` checks the caller is the operator or `master.json.lead`). The request is refused if the eval is not frozen, the frozen config is not reviewed (no structured accept at `frozen_commit`), the config hash drifted, or this holdout version was already scored at this config. `atm eval score` re-checks everything and records `started_by` and `authority` (`owner` / `lead`) on the run. |
 | `POST /inbox/seen {through}` | `atm inbox --owner <operator>` (marks read) | 3 | Moves only the operator's own watermark. |
 | `POST /pins`, `POST /pins/remove` | `atm pin` / `atm unpin` | 3 | Presentation only. |
 | `POST /projects {slug, repo_root}` | `atm init` in repo_root + `atm project add` | 3 | Creates an empty board. The T-959 refusals apply. Creating a board creates no seats. |
@@ -450,7 +554,8 @@ Every phase ships alone. Every phase keeps the audit-hook read-path test green f
 Scope:
 
 1. **New shell.** Sidebar (project switcher, Lead, Plan, Needs you, Fleet, Runs, Hub stub, clock). Conversation pane left, execution plan centre, drill-down right (a bottom sheet under 900px, full-screen at 390px). The `Objective · Team · Work · Intervene` content moves into this shell. No surface is deleted.
-2. **Project switcher (read-only)** over the registry and `boards` values. `/projects.json`. `/board.json?project=`. Shared-board repo lens.
+2. **Project switcher (read-only)** over the registry and `boards` values. `/projects.json`. `/board.json?project=`. The shared-board repo lens stays until the split (Phase 1S) runs.
+2b. **Lead picker.** `POST /lead`. When no lead is set, the picker lists seats with their "takes mid-run messages / answers on its next turn" line. No default is ever chosen.
 3. **Lead conversation** over existing messages. `/thread.json` pages back beyond 40. Each post shows `seat@project`, a harness badge (current workforce harness or `unknown`, dotted "not recorded at post time"), a local timestamp, text with ticket links, delivery receipts and copy. The lead status strip covers liveness, run elapsed, last output, limit, auth and usage with age. The composer posts **as the operator only** and runs the same wake path as `atm msg` (`deliver_wakes`).
 4. **Live execution plan and drill-down.** The existing Work payload and layouts, plus client-side blocker chips (`dep_unaccepted` vs `dep_open` from `work.nodes[].review.verified`, `seat_limited` / `seat_offline` / `auth` from `agents[]`). A running pulse from the agent map. `/ticket/<id>.json` provides runs (elapsed, tokens or unknown, role, verdict), usage with age, review head and structured verdicts, handoff, messages `re=<id>`, steers, and commit / branch / PR plus a copyable diff command. Back returns to the plan with selection kept.
 5. **Needs-you queue (read-only, unstructured)** per §4.5, with *asked* as the only state. Plus two hardening fixes: harness default `claude` → unknown, and loopback Host check + launch token + non-loopback `--host` refusal.
@@ -460,6 +565,8 @@ Acceptance tests (fixture boards via `ATMAN_BOARD_CONFIG` and `TICKETS_DIR`; nev
 - `test_app_v2_read_routes_no_subprocess_no_writes`: `/board.json?project=`, `/projects.json`, `/thread.json`, `/ticket/<id>.json` under the audit hook.
 - `test_project_switch_reads_the_registered_board`: two fixture boards. Switching changes the objective, plan nodes, fleet and lead. A post lands only in the selected board's `messages.jsonl`.
 - `test_registry_missing_or_bad_lists_only_the_started_board`: bad JSON gives one project, never a crash, never `board_dir()` exit.
+- `test_no_lead_means_picker_not_guess`: a board with no `master.json.lead` renders the picker. `/thread.json` returns no thread. No master or CoS fallback happens.
+- `test_lead_capability_line_matches_steer_table`: a `claude` seat with a socket shows "takes mid-run messages". A `codex` seat shows "answers on its next turn", and the composer shows the matching note.
 - `test_composer_posts_as_operator_only`: payload `from: <seat>` returns 400. The record's `from` is the operator and `via` is `ui-operator`. With no operator configured the composer is disabled and `POST /msg` returns 400.
 - `test_ui_post_wakes_like_cli`: a UI post to a `continuous` lead records the same `wake_delivery` label as `atm msg`.
 - `test_host_header_must_be_loopback` and `test_write_requires_launch_token`: a DNS-rebinding-shaped request (`Host: evil.test:8765`, matching Origin) is refused. `atm ui --host 0.0.0.0` exits non-zero.
@@ -472,6 +579,28 @@ Acceptance tests (fixture boards via `ATMAN_BOARD_CONFIG` and `TICKETS_DIR`; nev
 - `test_needs_you_is_asked_only`: prose "DECIDE: … ruling: A" still shows *asked (unstructured)*, never *ruled*.
 - `test_seat_at_project_is_not_a_mention`: posting `coder@retc` creates no `mentions` entry.
 - Browser check at 1440px and 390px: the plan, the conversation and the drill-down open and close. No horizontal body scroll.
+
+### Phase 1S: split the shared board (decision 1)
+
+Scope:
+- `atm project split --propose | --dry-run | --apply | --undo [--merge-back]`
+- `atm project refresh-external`
+- `atm project add | list`
+- The `.split` write refusal
+- `external_deps` in the release gate
+
+Phase 1 works before and after the split: before it, through the repo lens; after it, as one board per project. It ships right after phase 1. The split runs only when the operator applies it.
+
+Acceptance tests (fixture boards built to mirror the real shapes: multi-repo tickets, unattributed tickets, cross-repo edges, multi-project seats, archives, accepts):
+- `test_split_dry_run_writes_nothing`: audit hook. The manifest printed by the dry-run equals the one apply writes.
+- `test_split_preserves_every_record`: every ticket file is byte-identical in its project. Each message and trajectory line appears in at least one target or the archive. The union of targets plus the archive equals the source, with no line lost.
+- `test_split_keeps_accepts_and_receipts`: `review_events` are unchanged. `_message_delivery` labels for a sample message are identical before and after, in every project that holds it.
+- `test_split_refuses_unassigned_live_ticket` and `test_split_refuses_with_active_run`.
+- `test_cross_project_dep_snapshot`: a released parent unblocks the child. A done-unaccepted parent keeps `dep_unaccepted`. An open parent is refused without the flag. `refresh-external` flips the snapshot only after a real accept.
+- `test_multi_project_seat_gets_one_record_per_home`, with `inbox_seen` carried so nothing is redelivered.
+- `test_frozen_shared_board_refuses_writes_with_new_board_named`.
+- `test_undo_restores_registry_and_sets_new_boards_aside`, and `test_undo_merge_back_dedups_by_id`.
+- `test_new_ids_do_not_collide_across_projects`.
 
 ### Phase 2A: plan plumbing, DECIDE, lead continuity
 
@@ -489,7 +618,9 @@ Scope:
 Acceptance tests:
 
 - `test_card_only_from_record`: the lead says "created T-9" with no ticket, so no card and no link. `atm create` by the lead produces a `create` card attributed to the lead.
-- `test_decide_states`: ask gives open. Delegate rule gives ruled (owner can override). Owner rule gives overridden. The asker ruling is refused. An `--owner-only` DECIDE refuses a delegate.
+- `test_decide_states`: ask gives open. A lead ruling gives ruled and **removes `decide_open` at once**. The asker ruling is refused. An `--owner-only` DECIDE refuses the lead. A non-lead seat is refused.
+- `test_lead_ruling_shows_unseen_until_seen`: "Needs you" shows *ruled by lead · not yet seen by you*. GET routes never append `seen`. `POST /decide/seen` clears it.
+- `test_owner_override_reopens_ticket`: override with a different choice gives `overridden`. A ticket in review goes back to `open`, reserved for its owner, with the reopen note. A started successor gets a `decide_overridden` chip and is not reopened. An owner ruling that agrees with the lead is recorded as `seen`, not `overridden`.
 - `test_decide_blocks_dispatch_until_ruled`: the chip shows `decide_open`, `atm dispatch` refuses, and a ruling removes the chip.
 - `test_ruling_never_touches_review_events`: `review_events` and ticket status are unchanged after `/decide/rule`.
 - `test_diffstat_recorded_at_review_and_marked_stale_after_head_moves`.
@@ -511,7 +642,8 @@ Scope:
 Acceptance tests:
 
 - `test_predict_guard_is_allow_list`: a request carrying a synonym field for a label (not on the allow-list) is refused. Opening custody outside the run's output dir raises.
-- `test_score_refuses_unfrozen_or_drifted_config`.
+- `test_score_refuses_unfrozen_or_drifted_config`, and `test_score_refuses_unreviewed_freeze` (no structured accept at `frozen_commit`).
+- `test_scored_run_only_operator_or_lead`: any other seat is refused. The run records `started_by` and `authority`.
 - `test_second_holdout_score_same_config_refused`, and the same holdout under a new freeze is allowed with exposures = 2 shown.
 - `test_tuning_on_holdout_refused`.
 - `test_dev_holdout_gap_rendered_per_metric`, plus the degenerate-band flag for `low == high`.
@@ -554,9 +686,9 @@ Acceptance tests:
 - `test_hub_config_is_read_only_and_redacts_paths_to_hash_on_export`.
 - `test_side_by_side_threads_use_message_involves_seat`.
 
-### Phase 5 (optional): named rooms, voice
+### Phase 5 (optional): named rooms
 
-Scope: §4.9 rooms as view filters. Voice only if Q5 resolves in favour.
+Scope: §4.9 rooms as view filters. Voice is out of scope (decision 5).
 
 Acceptance tests:
 
@@ -568,7 +700,7 @@ Acceptance tests:
 
 ```
 +----------------------+----------------------------------------+---------------------------------------------+-------------------------------+
-| atman                | Lead · planner@steer   [master]  ⌕  ≡  | OBJECTIVE  Cut an honest developer preview…  | T-1110  Build plan view    [x]|
+| atman                | Lead · planner@steer  next-turn only ⌕≡| OBJECTIVE  Cut an honest developer preview…  | T-1110  Build plan view    [x]|
 | [steer        v]     | ● working · run 14m · last output 40s  | Done when: fresh clone follows README…       | phase  WORKING  coder@steer   |
 |   steer   12 open    |   codex · quota 62% left (checked 3m)  +---------------------------------------------+ blocked-by  —                 |
 |   retc     4 open    +----------------------------------------+ Finishing  T-1110 coder@steer · 14m          |-------------------------------|
@@ -596,10 +728,14 @@ At 390px: sidebar → top bar with project switcher; conversation and plan becom
 
 ---
 
-## 9. Open questions for the user (real forks only)
+## 9. Decisions (the user's answers, 2026-09-19)
 
-1. **Split the shared board?** `steer/.tickets` holds atman (406), steer (281) and two smaller repos' tickets together, under one master and one objective. Phase 1 shows it as one project with a repo lens. Do you want separate projects, each with its own lead and objective (a one-time `atm project split`, refused where deps cross repos)? Or should it stay one project?
-2. **Who is "the lead" you talk to?** The default is the master (today a `codex` seat, which cannot take mid-run *Ask*; messages wake it at its next turn instead). The alternatives are the CoS, or a dedicated lead seat on a steerable harness.
-3. **Delegate rulings.** May a PM / master / CoS rule a DECIDE with "owner can override"? If yes, does their ruling unblock the ticket immediately, or only after you have seen it?
-4. **Who may request a scored holdout run:** only you, or also the master?
-5. **Voice.** Browser dictation may send audio off the machine, which conflicts with localhost-only. Keep voice out, or allow it behind an explicit "may leave this machine" switch?
+These replace the open questions. They are binding on the sections cited.
+
+1. **Projects: split the shared board, one board per project.** The migration is specified in §4.11. It is copy-based, dry-runnable and reversible, and loses no history, receipts, trajectories or accept records. Applied in §4.1, §4.11 and Phase 1S.
+2. **Lead: the user's choice.** The lead is a per-project setting (`master.json.lead`) that the user picks from any registered seat. There is no hard-coded default. When it is unset, the app asks the user to pick and never guesses. The app shows each seat's harness and says plainly when the chosen lead can only answer on its next turn. Applied in §2.2, §5.1, §5.5, §6 and the phase 1 tests.
+3. **Decisions: a lead's ruling unblocks immediately.** The owner can override, and an override reopens the affected ticket. "Needs you" shows the ruling as *ruled by lead · not yet seen by you* until the owner marks it seen. Applied in §4.5, §6 and the phase 2A tests.
+4. **Scored holdout runs: the user or the lead may start one.** It must be from a frozen, reviewed config (a structured accept at the frozen commit), never a second time on the same holdout without a new frozen config, and the run records who started it. Applied in §4.10, §6 and the phase 2B tests.
+5. **Voice: out of scope for now.** No voice or mic controls are rendered. Applied in §2.1, §2.2 and phase 5.
+
+No open questions remain for phase 1.
