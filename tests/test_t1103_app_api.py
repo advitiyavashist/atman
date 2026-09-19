@@ -601,9 +601,11 @@ def test_cors_allows_only_the_apps_own_origins(env):
     assert st == 403 and (env.demo / "master.json").read_text() == before
     st, out = srv.post("/api/v1/lead", {"seat": "coder", "project": "demo"}, headers={"Origin": DEV})
     assert st == 200 and srv.last_headers["Access-Control-Allow-Origin"] == DEV
-    # the embedded page's own routes get no CORS at all
-    srv.get("/board.json", headers={"Origin": DEV})
-    assert "Access-Control-Allow-Origin" not in srv.last_headers
+    # CORS is for /api/v1 only: never the embedded page, /app/, or a refused preflight
+    for method, path in (("GET", "/board.json"), ("GET", "/app/"), ("GET", "/app/x.js"),
+                         ("OPTIONS", "/board.json"), ("OPTIONS", "/app/"), ("OPTIONS", "/msg")):
+        srv.req(method, path, headers={"Origin": DEV, "Access-Control-Request-Method": "POST"})
+        assert "Access-Control-Allow-Origin" not in srv.last_headers, (method, path)
     # without --dev-origin the dev server is just another origin
     plain = env.serve()
     assert plain.get("/api/v1/projects", headers={"Origin": DEV})[0] == 403

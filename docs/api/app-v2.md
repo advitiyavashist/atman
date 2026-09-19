@@ -9,12 +9,12 @@ The embedded `atm ui` page (`/`, `/board.json`, `POST /msg`, `POST /auth-reconne
 ## Running it
 
 ```sh
-atm ui --operator <name>                              # http://127.0.0.1:8765, bundle at /app/
-atm ui --operator <name> --dev-origin http://localhost:5173   # also allow the app's dev server
+atm ui                                                # http://127.0.0.1:8765, bundle at /app/
+atm ui --dev-origin http://localhost:5173             # also allow the app's dev server
 atm ui --app-dir path/to/dist                         # serve a bundle from somewhere else
 ```
 
-- `--operator` names the person using the app. It comes from T-1104 (#265). Without it the API is read-only: `operator` is `""` and `operator_note` says how to set one.
+- **`atm ui --operator <name>` does not exist yet.** T-1104 (#265) adds the flag, and #265 has not merged. Until it does, no operator is configured: `operator` is `""`, `operator_note` says how to set one, the API is read-only, and `POST /api/v1/lead` answers 400 ("set an operator"). The API already reads the flag, so it works as soon as #265 lands.
 - `--dev-origin` may be repeated. Each value must be a loopback `http(s)://host:port` origin. Anything else makes `atm ui` exit.
 - `--app-dir` defaults to `ui/dist` next to `tickets.py`. The bundle is served at `/app/`.
 
@@ -29,7 +29,7 @@ The API sits behind the same gate as the embedded page. That gate comes from T-1
 | Every write carries `X-Atman-Token: <launch token>` | `_gate(write=True)` (#266) | 400 |
 | A request with an `Origin` must come from an allowed origin: the app's own (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`) or a `--dev-origin` | `_ui_api_refuse_foreign` | 403, with no CORS headers |
 | A request with no `Origin` that the browser marks `Sec-Fetch-Site: cross-site` or `same-site` is refused. This blocks a no-cors embed. | `_ui_api_refuse_foreign` | 403 |
-| CORS headers go only to an allowed origin, and only on `/api/v1/*` | `_ui_api_send` | — |
+| CORS headers go only to an allowed origin, and only on `/api/v1/*` (never on `/app/` or the embedded page's routes) | `_ui_api_send` | — |
 | A CORS preflight is answered only for an allowed origin | `ui_api_options` | 403 |
 | Write bodies are `application/json`, at most 64 KiB, and carry no secret-named keys | `_ui_read_json_body` | 400 |
 
@@ -58,7 +58,7 @@ Every `GET` is read-only. It starts no subprocess (no `ps`, no `git`), opens not
 | `GET /api/v1/ticket/{id}?project=&all=1` | `ticket.json` | The drill-down: runs with tokens or `unknown`, usage with age, the full review head, structured verdicts, handoff, messages `re=<id>` (newest 50, with `messages_total`), steers, commit / branch / PR, and a copyable `diff_cmd`. No git runs. `{id}` must match `T-<digits>` (400 otherwise). A missing ticket is 404. |
 | `GET /api/v1/lead?project=` | `lead.json` | Who the operator talks to. With no lead there is a `picker`: every registered seat with its harness and its capability line from the steer table. It never falls back to master or CoS. With a lead there is a `status`: liveness, running ticket and elapsed time, last output, limit, auth, usage with age, reachability, capability, and `cannot_answer`. |
 | `GET /api/v1/needs-you?project=` | `needs-you.json` | Asks waiting on the operator: direct messages with no reply since, prose DECIDEs, `@owner` / `@<operator>` mentions, `stuck:` posts older than an hour, and escalated automated nodes. Every item is `state: "asked"` and `label: "asked (unstructured)"`. Prose is never a ruling. |
-| `POST /api/v1/lead` | request `lead-request.json`, response `lead-response.json` | `{seat, project?}`. Needs the operator, the token and an allowed or absent Origin. The seat must be registered on that board and must not be the operator. The route writes `master.json.lead` and a `MASTER.md` line. It is the same as `atm lead set <seat>` (spec §9, decision 2). |
+| `POST /api/v1/lead` | request `lead-request.json`, response `lead-response.json` | `{seat, project?}`. Needs the operator, the token and an allowed or absent Origin. The seat must be registered on that board and must not be the operator. The route writes `master.json.lead` and a `MASTER.md` line. It is the same as `atm lead set <seat>` (spec §9, decision 2). **Picking a lead also changes how that seat runs:** unless `workforce.json` sets `lifecycle` or `wake_mode` for it, the lead becomes `persistent` and `continuous`, as the master and CoS are (`lifecycle_of` / `wake_mode_of`). A master or CoS change keeps the lead. Until #265 adds `--operator`, this route answers 400. |
 | `OPTIONS /api/v1/*` | — | The CORS preflight: 204 for an allowed origin, 403 otherwise. Allowed headers are `Content-Type`, `X-Atman-Token` and `X-Atman-Client`. |
 | `GET /app/`, `GET /app/<path>` | the bundle | Static files from `--app-dir`. `index.html` gets the token meta tag. A client-side route (a path without an extension) gets `index.html`. Paths cannot leave the bundle directory. With no bundle, the route returns 404 JSON with a hint. |
 
