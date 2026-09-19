@@ -57,8 +57,7 @@ talking to their own providers.
 ## One path
 
 Python 3.9+ and Git. Tested on one macOS machine:
-`git clone` plus `./install.sh`. This path tracks `main`, which is what every
-command below documents.
+`git clone` plus `./install.sh`.
 
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
@@ -73,16 +72,15 @@ atm self                     # which file you are actually running
 `tickets.py` from this checkout. `--force` replaces the existing one on
 purpose. `atm` is the command; `tickets` is a compatibility alias.
 
-Homebrew on macOS installs the tagged release instead of a checkout:
+Or Homebrew on macOS, which installs the current tagged release instead of a
+checkout:
 
 ```sh
 brew tap advitiyavashist/tap
 brew install atman
-atm --version                # tickets commit dc08c541688a4d121a1335ecd9debc487506866e (verified release)
+atm --version                # tickets commit b34d423cac00266a2cc6fc23b94759ee04894f71 (verified release)
 ```
 
-The formula installs release `v0.2.0`, which is older than `main`: it has no
-`atm quickstart --gate`, so use the clone path above for the five-minute demo.
 The formula `depends_on "python@3.13"`, so Homebrew installs and uses its own
 Python 3.13 even if you already have the Python 3.9+ the clone path needs.
 
@@ -183,8 +181,10 @@ atm graph                    # T-002 (backend; waiting on T-001)
 ```
 
 If `atm graph` ever lists `broken references` (a dependency on a ticket that
-no longer exists, such as a removed sample), it prints the repair on the next
-line: `atm dep <id> --drop <missing>`, plus `--after <id>` to re-point it.
+no longer exists, such as a removed sample), the repair is
+`atm dep <id> --drop <missing>`, plus `--after <id>` to re-point it. A
+checkout of `main` prints that line under each broken reference; the v0.3.0
+release does not yet.
 
 Dependencies are real `--after` edges (`atm create --deps` or `atm plan`).
 `atm review` pins a reviewable SHA. Human review is `atm accept --sha`
@@ -222,7 +222,7 @@ harness row.
    ```sh
    export TICKET_AGENT=worker
    atm next
-   # [>] IN PROGRESS T-002  CLI command that calls summarize()  (after T-001)
+   # [>] IN PROGRESS T-002  CLI command that calls summarize()  (role=backend; owner=worker; after T-001)
    # Handoff from dependencies (all notes):
    #   T-001 (CSV summary function): worker@76279da -- summarize(path) -> dict in csv_summary.py
    #   T-001 (CSV summary function): ran the test: passes
@@ -260,7 +260,7 @@ repository.
 | Claim | Status on 2026-09-15 | Evidence |
 | --- | --- | --- |
 | Install: `git clone` + `./install.sh` | tested, one macOS machine | `tests/test_live_install.py`; walkthrough above |
-| Install: Homebrew on macOS (`brew tap advitiyavashist/tap && brew install atman`) | published: installs release `v0.2.0` (older than `main`, no `quickstart --gate`) and brings its own Python 3.13 via `depends_on "python@3.13"` | tap `advitiyavashist/homebrew-tap`, `Formula/atman.rb`; release `v0.2.0` tarball sha256 matches the formula; `packaging/homebrew/atman.rb` |
+| Install: Homebrew on macOS (`brew tap advitiyavashist/tap && brew install atman`) | published: installs the current release, `v0.3.0`, and brings its own Python 3.13 via `depends_on "python@3.13"` | tap `advitiyavashist/homebrew-tap`, `Formula/atman.rb`; release `v0.3.0` tarball sha256 matches the formula; `packaging/homebrew/atman.rb` |
 | Install: PyPI | none: there is no PyPI package, and `pip install atm` installs an unrelated project | no upload from this repository |
 | Install: Linux packages, pipx | planned | no artifact in this repository yet |
 | Install: `pip install -e .` console scripts | not a supported preview path: the packaged `atm`/`tickets` is the smaller core-board CLI without `watch`, `spawn`, `hooks`, `ui` or `remote` | `pyproject.toml`; `src/ticket_board/cli.py` |
