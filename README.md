@@ -257,7 +257,7 @@ Code, Codex and Cursor. This table records what is tested, partial, and
 planned for this preview. Its evidence links point to files and tests in this
 repository.
 
-| Claim | Status on 2026-09-15 | Evidence |
+| Claim | Status on 2026-09-19 | Evidence |
 | --- | --- | --- |
 | Install: `git clone` + `./install.sh` | tested, one macOS machine | `tests/test_live_install.py`; walkthrough above |
 | Install: Homebrew on macOS (`brew tap advitiyavashist/tap && brew install atman`) | published: installs the current release, `v0.3.0`, and brings its own Python 3.13 via `depends_on "python@3.13"` | tap `advitiyavashist/homebrew-tap`, `Formula/atman.rb`; release `v0.3.0` tarball sha256 matches the formula; `packaging/homebrew/atman.rb` |

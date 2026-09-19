@@ -41,11 +41,21 @@ This writes a launcher that `exec`s a frozen snapshot under
 `tickets-releases/<sha>/`. Editing the clone does **not** change that binary
 until you install a new ref.
 
+**C. Homebrew (published at v0.3.0)**
+
+```sh
+brew tap advitiyavashist/tap
+brew install atman
+```
+
+Pin `sha256` to the downloaded GitHub Release asset, not a local build
+(`packaging/homebrew/README.md`). The in-repo `packaging/homebrew/atman.rb`
+is a copy of the tap formula.
+
 **Not available yet.** Do not plan around these:
 
-| Path | Status as of 2026-09-15 |
+| Path | Status as of 2026-09-19 |
 |---|---|
-| Homebrew (`brew install advitiyavashist/homebrew-tap/atman`) | **Published** at v0.3.0. Pin `sha256` to the downloaded GitHub Release asset, not a local build (`packaging/homebrew/README.md`). The in-repo `packaging/homebrew/atman.rb` is a copy of the tap formula. |
 | Linux packages | **Planned.** Tested on macOS only. |
 | pipx / PyPI | **Planned.** Nothing is published. |
 

@@ -119,3 +119,20 @@ def test_in_repo_formula_matches_published_v030_tap():
     assert 'sha256 "%s"' % PUBLISHED_V030_SHA256 in formula
     assert "REPLACE_BEFORE_RELEASE" not in formula
     assert "v0.2.0" not in formula
+
+
+def test_readme_status_table_cites_synced_formula():
+    """#270 leftover: README cited packaging/homebrew/atman.rb while that
+    copy still pointed at v0.2.0 / a placeholder sha, and the table header
+    stayed 'Status on 2026-09-15' after the Homebrew row changed.
+    """
+    readme = (ROOT / "README.md").read_text()
+    formula = (ROOT / "packaging/homebrew/atman.rb").read_text()
+    assert "| Claim | Status on 2026-09-19 |" in readme
+    assert "Status on 2026-09-15" not in readme
+    assert "`packaging/homebrew/atman.rb`" in readme
+    assert "`v0.3.0`" in readme
+    assert PUBLISHED_V030_URL in formula
+    assert 'sha256 "%s"' % PUBLISHED_V030_SHA256 in formula
+    assert "REPLACE_BEFORE_RELEASE" not in formula
+    assert "v0.2.0" not in formula
