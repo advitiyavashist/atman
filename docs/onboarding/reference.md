@@ -73,9 +73,13 @@ whatever file the symlink points at — including a dirty working tree. `atm
 self` prints the resolved target, which is the only answer that settles it
 when several checkouts are on one machine.
 
-`--version` also prints `source:` (the file that is running) and, for a git
-checkout, `source-sha:`. If that sha is behind `origin/main` it warns and
-prints the refresh command. An operator worktree such as
+`--version` also prints `source:` (the file that is running). A git
+checkout prints `source-sha:`; if that sha is behind `origin/main` it
+warns and prints the refresh command. A pinned `release.json` is the
+running source: an enclosing repo (for example `~/.claude` inside
+dotfiles) is not probed unless its HEAD equals that release commit.
+Otherwise `--version` prints the brew/tarball upgrade path
+(`brew upgrade atman`). An operator worktree such as
 `atman-runtime-current` that is not updated after merge will omit new
 commands from `atm --help` (T-1080). Refresh it with the printed line, or:
 
