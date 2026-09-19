@@ -37,6 +37,7 @@ import argparse
 import errno
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -2504,6 +2505,92 @@ def _maybe_refresh_provider_usage(board):
     _safe(lambda: pu.refresh_http_providers(board, home=os.path.expanduser("~")), None)
 
 
+def _usage_header_seat_harnesses(board):
+    """Harness labels the board's seats registered. Reads workforce.json only."""
+    wf = _safe(lambda: load_workforce(board), {}) or {}
+    out = []
+    for entry in wf.values():
+        if isinstance(entry, dict):
+            label = (entry.get("harness") or entry.get("tool") or "").strip()
+            if label:
+                out.append(label)
+    return out
+
+
+def usage_header_lines(board):
+    """T-1076: per-provider usage for the surfaces users already look at.
+
+    READ PATH. The ledger file and workforce.json, nothing else: no network
+    call, no subprocess, no write -- `atm agents`, `atm next`, the bare `atm`
+    screen and board.json must stay as cheap and as side-effect-free as
+    T-1055/T-1072 made them. A fresh read only ever happens where the code
+    already refreshes (`atm harness usage` / `harness available`).
+    """
+    # TICKETS_USAGE_HEADER=0 silences the PRINTED header for a caller that
+    # parses stdout. board.json still carries the data: it is a data surface,
+    # and a UI that showed nothing would say less than the truth.
+    if os.environ.get("TICKETS_USAGE_HEADER") == "0":
+        return []
+    if not board or not os.path.isdir(board):
+        return []
+    pu = _provider_usage()
+    harnesses = _usage_header_seat_harnesses(board)
+    return _safe(lambda: pu.header_lines(board, harnesses=harnesses), []) or []
+
+
+def print_usage_header(board):
+    for line in usage_header_lines(board):
+        print(line)
+
+
+def print_seat_usage(board, harness):
+    """One line for the seat's own provider, after spawn/dispatch staffs it."""
+    if os.environ.get("TICKETS_USAGE_HEADER") == "0":
+        return
+    line = _safe(lambda: _provider_usage().seat_usage_line(board, harness), "")
+    if line:
+        print(line)
+
+
+def provider_usage_snapshot(board):
+    """T-1076: the usage header as data, for board.json and the UI header."""
+    pu = _provider_usage()
+    harnesses = _usage_header_seat_harnesses(board)
+    ids = _safe(lambda: pu.header_providers(board, harnesses), []) or []
+    return [pu.compact_reading(pu.get_reading(board, hid)) for hid in ids]
+
+
+def _usage_header_board():
+    """Board for the bare-`atm` header: whatever board_dir() would resolve.
+
+    The SAME resolver every other command uses -- TICKETS_DIR, this repo's
+    configured shared board, the T-959 shadow refusal, the .git requirement
+    -- because a header that names a different board's quota than
+    `atm agents` and `atm next` work on is worse than no header. It runs in
+    _NO_SPAWN mode, which makes the resolution helpers take their filesystem
+    answer (the one that wins on disagreement anyway), so the default screen
+    still starts no git process.
+
+    A board that board_dir() would refuse, or any failure at all, prints
+    nothing: stderr is held aside so the help screen the user asked for is
+    not replaced by a resolution complaint they did not.
+    """
+    global _NO_SPAWN
+    was_no_spawn, held = _NO_SPAWN, sys.stderr
+    _NO_SPAWN = True
+    sys.stderr = io.StringIO()
+    try:
+        board = board_dir(discover_children=True)
+    except (Exception, SystemExit):
+        # SystemExit is how a refusal arrives. KeyboardInterrupt is not
+        # caught: a Ctrl-C belongs to the user, not to a usage header.
+        return ""
+    finally:
+        _NO_SPAWN = was_no_spawn
+        sys.stderr = held
+    return board if board and os.path.isdir(board) else ""
+
+
 def _steer():
     """T-1047 live steer helpers (receipt classification + framing)."""
     try:
@@ -2854,6 +2941,9 @@ def detail(board, t, tickets):
         out.append("Open questions: %s" % (", ".join(qs) if isinstance(qs, list) else qs))
     if t.get("pr"):
         out.append("PR: %s" % t["pr"])
+    head = _review_verdict().displayed_review_head(t)
+    if head:
+        out.append("review_head: %s" % head)
     if t.get("discarded_reason"):
         out.append("discarded: %s" % t["discarded_reason"])
     if t.get("body"):
@@ -3259,6 +3349,8 @@ def cmd_dispatch(a, board):
     save(board, t)
     print("%s reserved for %s harness=%s (worker claims via atm next / watch)"
           % (t["id"], seat, harness))
+    # T-1076: the quota this seat will actually spend, one line, recorded read.
+    print_seat_usage(board, harness)
     skip_spawn = _dispatch_skip_product_spawn(harness)
     if skip_spawn:
         print("spawn skipped (%s)" % skip_spawn)
@@ -3275,6 +3367,7 @@ def cmd_dispatch(a, board):
         safe=False, every=60, run_timeout=90, heartbeat=0, persist=True,
         max_runs=getattr(a, "max_runs", None), replace=False,
         transfer=False, alias="",
+        usage_line=False,  # T-1076: dispatch already printed the seat's line
     )
     try:
         cmd_spawn(ns, board)
@@ -4233,6 +4326,8 @@ def _cmd_next_dispatch(a, board):
 
 
 def cmd_next(a, board):
+    # T-1076: the seat's quota, before the ticket it is about to take on.
+    print_usage_header(board)
     if getattr(a, "dispatch", False):
         return _cmd_next_dispatch(a, board)
     owner = whoami(a.owner)
@@ -4463,6 +4558,9 @@ def cmd_review(a, board):
             t["commit"], t.get("repo") or "?",
             "artifact tree %s" % t["artifact_dir"] if t.get("repo_source") == "artifact"
             else "this checkout -- pass --artifact <dir> if the deliverable is in another repo"))
+    head = t.get("review_head") or ""
+    if head:
+        print("review_head: %s" % head)
     if cos_name:
         who = "CoS (%s) tasked" % cos_name
         if master_name and master_name != cos_name:
@@ -6925,6 +7023,12 @@ def cmd_done(a, board):
             "RULE: %d uncommitted files in %s. Commit before marking %s done "
             "(or --force to override)." % (g["dirty"], g["top"], a.id)
         )
+    # T-1082: accepted_sha wins over the tree HEAD. --artifact names a
+    # location, not a verdict -- a moved HEAD still pins the accepted sha.
+    pin_g, pin_warn = _work_view().done_pin_state(t, g, honor_cwd=bool(art))
+    if pin_warn:
+        print(pin_warn, file=sys.stderr)
+    g = pin_g
     t["status"] = "done"
     t["done_at"] = now()
     if not t.get("claimed_at"):
@@ -10723,6 +10827,9 @@ def cmd_agents(a, board):
     if a.json:
         print(json.dumps(data, indent=2))
         return
+    # T-1076: header first -- who is running is only actionable next to what
+    # quota is left. Ledger read only; --json keeps the map's exact shape.
+    print_usage_header(board)
     print(_agent_map_mod().render_text(data))
 
 
@@ -11547,7 +11654,7 @@ def cmd_connect(a, board):
     worker = bool(getattr(a, "worker", False))
     ceo = bool(getattr(a, "ceo", False))
     seat = (getattr(a, "seat", None) or "ceo").strip() or "ceo"
-    living = board_is_living(board)
+    living = board_is_atman_operator(board)
     if ceo or (living and not worker):
         print_ceo_connect(board, seat=seat)
         _apply_connect_roles(board, a)
@@ -12710,11 +12817,14 @@ def seat_brief_text(board, owner):
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     roles = _safe(lambda: roles_for(board, owner), None) or []
     m = _safe(lambda: current_master(board), None) or {}
-    reviewer = (m.get("cos") or m.get("owner") or "")
+    # T-1091: when this seat is CoS, ask the master owner -- not nobody.
+    reviewer = (m.get("cos") or "").strip()
+    if not reviewer or reviewer == owner:
+        reviewer = (m.get("owner") or "").strip()
     if reviewer == owner:
-        reviewer = ""  # a seat is never its own reviewer, whatever the board says
-    usage = _safe(lambda: _provider_usage().format_usage_line(
-        _provider_usage().get_reading(board, harness)).strip(), "") or ""
+        reviewer = ""  # a seat is never its own reviewer
+    usage = _safe(lambda: _provider_usage().brief_usage_line(
+        _provider_usage().get_reading(board, harness)), "") or ""
     t = _seat_ticket(board, owner) or {}
     return sb.compose(
         owner,
@@ -12729,6 +12839,20 @@ def seat_brief_text(board, owner):
         reviewer=reviewer,
         usage_line=usage,
     )
+
+
+def _task_wake_run_no(board, owner):
+    """Increment the per-seat hook-run task-wake counter (T-1091).
+
+    First fire is 1 (brief). Later fires are 2+ (steady-state prompt).
+    """
+    rec = _agent_rec(board, owner) or {}
+    try:
+        n = int(rec.get("task_wake_run_no") or 0) + 1
+    except (TypeError, ValueError):
+        n = 1
+    _agent_set(board, owner, task_wake_run_no=n)
+    return n
 
 
 def cmd_prompt(a, board):
@@ -15434,6 +15558,11 @@ def cmd_spawn(a, board):
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, owner, log_path))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
+    # T-1076: what this seat's provider has left, from the recorded reading.
+    # `dispatch` printed it next to its own reservation line, so it asks for
+    # this one to be left out rather than say the same thing twice.
+    if getattr(a, "usage_line", True):
+        print_seat_usage(board, harness)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
 
@@ -16736,6 +16865,12 @@ body[data-work-view=columns] #workJump{display:none}
 .m{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
 .m .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-bottom:4px}
 .tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;border:1px solid var(--line);color:var(--mute)}
+/* T-1076: provider quota in the Team header. One short line per provider; it
+   wraps rather than pushing the seats it belongs to off screen. */
+.usage-header{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;font-size:12px}
+.usage-header .u{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.usage-header .u.low,.usage-header .u.limited{border-color:color-mix(in srgb,var(--bad) 45%,var(--line));color:var(--bad)}
+.usage-header .u.unknown,.usage-header .u.no_data{border-style:dashed}
 #composer{position:sticky;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px;padding:10px}
 #composer textarea{width:100%;resize:vertical;min-height:56px;font:13px/1.4 inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
 #composer select,#composer button,#composer input{font:13px inherit;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
@@ -17004,6 +17139,7 @@ body[data-work-view=columns] #workJump{display:none}
       <p class="seats-lede" id="coverageLede"><b>Who’s present. What’s uncovered.</b> Coverage by work, not fixed role.</p>
       <p class="seats-lede">Auth is the enrolled runner, not this tab. Recheck never asks for provider secrets. Reachable is not Ready.</p>
       <p class="seats-lede">Intervene · <b>Msg</b> opens that seat’s thread — <span class="mono">atm msg --to</span>. Runtime id is unique; role is coverage.</p>
+      <div class="usage-header mono" id="providerUsage" aria-label="Provider quota"></div>
     </div>
   </div>
   <div class="seats" id="seats">
@@ -17216,6 +17352,15 @@ function renderUsage(u){
   cards.innerHTML=cell('Cost',money(u.cost_usd))+cell('Tokens in',dash(u.tokens_in))+cell('Tokens out',dash(u.tokens_out))+cell('Runs with cost',String(u.n_runs_with_cost||0))+cell('Runs unmeasured',String(u.n_runs_unmeasured||0));
   const by=u.by_agent||[];
   tbl.innerHTML='<tr><th>agent</th><th class="num">cost</th><th class="num">tokens in</th><th class="num">with cost</th><th class="num">unmeasured</th></tr>'+(by.length?by.map(r=>'<tr><td>'+esc(r.agent)+'</td><td class="num">'+money(r.cost_usd)+'</td><td class="num">'+dash(r.tokens_in)+'</td><td class="num">'+esc(r.n_runs_with_cost)+'</td><td class="num">'+esc(r.n_runs_unmeasured)+'</td></tr>').join(''):'<tr><td colspan="5">Not reported by harness</td></tr>');
+}
+function renderProviderUsage(rows){
+  // T-1076: per-provider quota, the same text the CLI header prints. The
+  // server already decided the words; the UI never recomputes a percentage,
+  // so it can never invent one the ledger did not have.
+  const el=document.getElementById('providerUsage');if(!el)return;
+  const list=rows||[];
+  if(!list.length){el.innerHTML='<span class="u unknown">no provider read yet — atm harness usage</span>';return;}
+  el.innerHTML=list.map(r=>'<span class="u '+esc(r.level||'unknown')+'">'+esc(r.text||'')+'</span>').join('');
 }
 function renderAgentMap(m){
   const tbl=document.getElementById('agentMap'),pill=document.getElementById('agentMapPill');
@@ -17731,6 +17876,7 @@ async function load(manual){
   renderObjective(d.objective);
   renderTurns(d.turns);
   renderUsage(d.usage);
+  renderProviderUsage(d.provider_usage);
   renderAgentMap(d.agent_map);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
@@ -17742,7 +17888,7 @@ async function load(manual){
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
     const lim=a.limit?'<span class="tag limit">reset '+esc(a.limit_until||'unknown')+'</span>':'';
     const pu=a.provider_usage||{};
-    const usageTag=pu.status?'<span class="tag" title="'+esc((pu.hint||pu.limit_message||pu.age||'')+'')+'">'+esc(pu.provider||a.harness||'?')+' '+esc(pu.status==='no_data'?'no data':pu.status)+'</span>':'';
+    const usageTag=pu.status?'<span class="tag" title="'+esc((pu.hint||pu.age||'')+'')+'">'+esc(pu.provider||a.harness||'?')+' '+esc(pu.status==='no_data'?'no data':pu.status)+'</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
@@ -18412,7 +18558,7 @@ def _board_snapshot_body(board, messages=40):
                                board, rec, r["agent"], harness_name, local_host),
                            "limit": lim,
                            "limit_until": (lim or {}).get("until", "") if lim else "",
-                           "provider_usage": _provider_usage().public_reading(
+                           "provider_usage": _provider_usage().ui_reading(
                                _provider_usage().get_reading(board, harness_name))})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
@@ -18534,6 +18680,9 @@ def _board_snapshot_body(board, messages=40):
         "empty_board": counts["total"] == 0,
         "turns": turns,
         "usage": usage,
+        # T-1076: per-provider quota for the Team header. Same ledger reader as
+        # `atm agents`; still read-only, so board.json spawns nothing.
+        "provider_usage": _safe(lambda: provider_usage_snapshot(board), []) or [],
         # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
         "agent_map": _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
                                                   live=live, events=events), None),
@@ -19737,7 +19886,12 @@ def cmd_hook_run(a, board):
         return
     if a.event == "task-wake":
         kind = getattr(a, "prompt_kind", "") or ""
-        cmd_prompt(argparse.Namespace(agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+        # T-1091: the no-arg remote wrapper cannot pass TICKETS_RUN_NO.
+        # Stamp a per-seat counter so the first fire briefs and later
+        # fires do not (the brief's own "no second briefing" line).
+        cmd_prompt(argparse.Namespace(
+            agent=owner, master=kind == "master", cos=kind == "cos", extra="",
+            run_no=_task_wake_run_no(board, owner)), board)
         return
     sys.exit("unsupported hook event %s" % a.event)
 
@@ -21551,6 +21705,13 @@ def main():
     if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
         print("WARNING: %s -- see 'atm --version'" % status, file=sys.stderr)
     if not a.cmd:
+        # T-1076: the default screen leads with where the quota stands, so a
+        # user never has to know a command exists to find out.
+        header = _safe(lambda: usage_header_lines(_usage_header_board()), []) or []
+        for line in header:
+            print(line)
+        if header:
+            print("")
         p.print_help()
         return
     if a.cmd == "self":

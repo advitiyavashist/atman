@@ -54,6 +54,24 @@ talking to their own providers.
 
 <p align="center"><i>A checked-in capture of the local app. There is no hosted board to log into.</i></p>
 
+## One path
+
+Python 3.9+ and Git. Tested on one macOS machine:
+`git clone` plus `./install.sh`. Homebrew, Linux packages and pipx are planned.
+
+```sh
+git clone https://github.com/advitiyavashist/atman.git
+cd atman
+./install.sh                 # links atm and tickets into ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
+atm self                     # which file you are actually running
+```
+
+`install.sh` refuses to overwrite an `atm` or `tickets` it does not own.
+`./install.sh --prefix DIR` places the symlinks in `DIR`; they still run
+`tickets.py` from this checkout. `--force` replaces the existing one on
+purpose. `atm` is the command; `tickets` is a compatibility alias.
+
 ## Feel it in five minutes
 
 ```sh
@@ -111,24 +129,6 @@ purpose). Then, in your own repo:
 ```sh
 cd <your repo> && atm quickstart --agent <you>   # board + sample work + you, registered
 ```
-
-## One path
-
-Python 3.9+ and Git. Tested on one macOS machine:
-`git clone` plus `./install.sh`. Homebrew, Linux packages and pipx are planned.
-
-```sh
-git clone https://github.com/advitiyavashist/atman.git
-cd atman
-./install.sh                 # links atm and tickets into ~/.local/bin
-export PATH="$HOME/.local/bin:$PATH"
-atm self                     # which file you are actually running
-```
-
-`install.sh` refuses to overwrite an `atm` or `tickets` it does not own.
-`./install.sh --prefix DIR` places the symlinks in `DIR`; they still run
-`tickets.py` from this checkout. `--force` replaces the existing one on
-purpose. `atm` is the command; `tickets` is a compatibility alias.
 
 Tell us where you got stuck: `atm feedback` prints a local-only, pasteable
 run summary (nothing leaves this machine) for a

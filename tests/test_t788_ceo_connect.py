@@ -89,8 +89,23 @@ def test_fresh_connect_keeps_new_board_script(tmp_path):
     assert "Connecting an agent" in c.stdout
 
 
+def test_plain_living_connect_is_not_operator_policy(tmp_path):
+    """T-1093: a board with tickets is not Atman's board. No CEO policy."""
+    repo, env = living_board(tmp_path)
+    c = run(repo, "connect", env=env, tmp_path=tmp_path)
+    assert c.returncode == 0, c.stderr
+    out = c.stdout
+    assert first_nonempty(out).startswith("**You are onboarding.**")
+    assert "Join as atman-ceo" not in out
+    assert "CEO does not claim worker tickets" not in out
+    assert "Do not invent a new team" not in out
+    assert "atm next" in out
+
+
 def test_living_connect_is_atman_ceo_product_flow(tmp_path):
     repo, env = living_board(tmp_path)
+    assert run(repo, "join", "atman-ceo", "--roles", "master",
+               env=env, tmp_path=tmp_path).returncode == 0
     c = run(repo, "connect", env=env, tmp_path=tmp_path)
     assert c.returncode == 0, c.stderr
     out = c.stdout

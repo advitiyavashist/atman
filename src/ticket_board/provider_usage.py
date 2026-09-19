@@ -369,11 +369,20 @@ def get_reading(board, provider, now=None):
     rec = (load_ledger(board).get("providers") or {}).get(hid)
     if not rec:
         return empty_reading(hid, status="unknown", hint="no data")
+    if not isinstance(rec, dict):
+        # A hand-edited or truncated ledger entry is not a reading. Unknown is
+        # the honest answer; a surface must not crash or vanish over it.
+        return empty_reading(hid, status="unknown", hint="unreadable record")
     return expire_stale_resets(rec, now)
 
 
 def public_reading(reading, now=None):
-    """Board/UI snapshot. Never includes credentials or raw HTTP bodies."""
+    """Ledger snapshot. Never includes credentials or raw HTTP bodies.
+
+    ``limit_message`` stays here for ``format_usage_line`` (the ledger
+    view). A user-facing surface -- compact header, Team tooltip -- must
+    use ``ui_reading`` instead, which drops that field.
+    """
     rec = expire_stale_resets(dict(reading or {}), now)
     return {
         "provider": rec.get("provider") or "",
@@ -390,6 +399,31 @@ def public_reading(reading, now=None):
         "hint": rec.get("hint") or "",
         "windows": list(rec.get("windows") or []),
     }
+
+
+def ui_reading(reading, now=None):
+    """What board.json may show a user. No provider ``limit_message``.
+
+    The compact header never prints the provider's own sentence, and a
+    Team-card tooltip must not either -- it is unsanitized free text.
+    """
+    rec = public_reading(reading, now)
+    rec.pop("limit_message", None)
+    return rec
+
+
+def brief_usage_line(reading, now=None):
+    """Seat-brief USAGE line, or '' when there is no real reading (T-1091).
+
+    `format_usage_line` still says 'unknown · UNKNOWN · no data' for dash;
+    the brief omits that placeholder entirely.
+    """
+    rec = public_reading(reading, now)
+    status = rec.get("status") or "unknown"
+    if status in ("unknown", "no_data") and rec.get("remaining") is None \
+            and rec.get("tokens_reported") is None and not rec.get("limit_message"):
+        return ""
+    return format_usage_line(reading, now).strip()
 
 
 def format_usage_line(reading, now=None):
@@ -415,6 +449,360 @@ def format_usage_line(reading, now=None):
         label = rec["tokens_label"] or "harness report"
         bits.append("tokens %s (%s)" % (rec["tokens_reported"], label))
     return "  " + " · ".join(bits)
+
+
+# ---- T-1076: one short line per provider, for the surfaces users already read.
+# `format_usage_line` above is the ledger view (`atm harness usage`): every
+# field, one provider per line, no judgement. A header cannot carry that -- it
+# has to fit next to the output the user actually came for, and it has to say
+# *low* out loud, which the ledger view has no word for. So this is the same
+# reading, same reader, rendered short: provider, the provider's own remaining
+# %, its own reset, and the one word that changes what the user should do.
+# Nothing here reads a credential, a path, or the network.
+LOW_REMAINING_PCT = 20.0
+# Older than this and the line says how old it is -- in EVERY state. A number,
+# and just as much a LIMITED, is only as good as when it was read.
+STALE_READING_SECS = 3600
+# Budget for the text (a surface adds a 7-character prefix), so a realistic
+# line lands around 60 columns and the worst case still clears 80. The parts
+# are shed in priority order: the state and the age are never shed, the reset
+# is (see _fit) -- staleness is the honesty-bearing part, a reset is detail.
+HINT_MAX = 48
+PROVIDER_MAX = 12
+# The longest provider reset phrase carried at all. NOT a clip: a phrase over
+# this is dropped whole (see reset_label), because a trimmed time is a wrong
+# time, not a short one. What actually prints is decided by COMPACT_MAX/_fit.
+RESET_MAX = 48
+COMPACT_MAX = 56
+# A raw epoch is a number, not a reset a user can read. 9+ digits covers
+# seconds, milliseconds, microseconds and anything longer; 14+ used to
+# slip past the old 9–13 cap and print as a reset.
+_EPOCHISH = re.compile(r"^\d{9,}$")
+# IANA area names only. A slash in a reset is a timezone, but only when
+# the first segment is a real area -- otherwise Users/kavana/secrets and
+# ghp/AAAAAAAAAAAA would skip _scrub's slash rule and 24-char cap.
+# Later segments are letters/underscore only (no dots, no digits), so
+# Etc/GMT is exempt and Etc/GMT+3 is not: a digit in a segment fails.
+# Exempt tokens still respect the 24-character cap.
+_TZ_AREAS = (
+    "Africa", "America", "Antarctica", "Arctic", "Asia", "Atlantic",
+    "Australia", "Europe", "Indian", "Pacific", "Etc", "UTC", "GMT",
+)
+_TZ_TOKEN = re.compile(
+    r"^(?:%s)(?:/[A-Za-z_+-]{2,}){1,2}$" % "|".join(_TZ_AREAS)
+)
+_TZ_EXEMPT_MAX = 24
+# A never-read provider is not a failed read: it must not say "re-login".
+NEVER_READ_HINT = "not read yet (atm harness usage)"
+# Defensive scrub for the hint, the only free-ish text a header repeats. Real
+# hints are fixed internal strings ("re-login required", "HTTP 500", "reset
+# elapsed"); a path, an assignment or a token is not one of them and never
+# reaches a user's screen from here. The provider's own limit_message is not
+# printed in a header at all.
+_HINT_UNSAFE = re.compile(
+    r"[/\\=]|^~"
+    # Known credential shapes, including the short ones: OpenAI/Anthropic
+    # sk-, Slack xox?-, GitHub gh?_, AWS AKIA/ASIA, Google AIza, JWTs.
+    r"|^(?:sk|xox[abprs]?|ghp|gho|ghu|ghs|ghr|github_pat|glpat|shpat|pk|rk)[-_]"
+    r"|^(?:AKIA|ASIA|AIza|ya29|eyJ)"
+    r"|^Bearer$|^token$",
+    re.I)
+
+
+def remaining_percent(reading):
+    """The provider's own worst-window remaining %, or None. Never a guess.
+
+    None means "we do not know" and must print as unknown, not as 0.
+    """
+    rec = reading if isinstance(reading, dict) else {}
+    vals = []
+    for win in rec.get("windows") or []:
+        if not isinstance(win, dict):
+            continue
+        pct = win.get("remaining_percent")
+        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+            vals.append(float(pct))
+    if not vals:
+        pct = _as_float(rec.get("remaining"))
+        vals = [pct] if pct is not None else []
+    if not vals:
+        return None
+    worst = min(vals)
+    if worst != worst or worst < 0 or worst > 100:  # NaN or out of range
+        return None
+    return worst
+
+
+def pct_label(pct):
+    """Floor, so a header never overstates the headroom a provider reported."""
+    if pct is None:
+        return ""
+    if pct <= 0:
+        return "0%"
+    if pct < 1:
+        return "<1%"
+    return "%d%%" % int(pct)
+
+
+def reset_label(reset_at, now=None):
+    """The provider's reset, short. Non-ISO text is the provider's own words.
+
+    A reset is a TIME, so it is whole or it is nothing. `_reset_of` copies
+    whatever the provider sent verbatim, and clipping that mid-string is how
+    "2026-09-19 09:00:00 America/Los_Angeles" becomes "2026-09-19 09:00:00"
+    (seven hours wrong, read as UTC) and "Fri, 19 Sep 2026 09:00:00 GMT"
+    becomes "Fri, 19 Sep 2026 09:00:0" (a digit gone, still looking
+    complete). Neither is a shorter truth. So an unparseable phrase is kept
+    entire or dropped, never trimmed -- including at a word boundary, because
+    the word at the end is exactly the timezone that makes it unambiguous.
+    _fit then drops it whole again if the assembled line has no room.
+    """
+    text = " ".join((reset_at or "").split())
+    if not text:
+        return ""
+    when = parse_iso(text)
+    if when is None:
+        # A raw epoch is a number, not something to show a user.
+        if _EPOCHISH.match(text):
+            return ""
+        phrase = _scrub_reset(text)
+        # Scrubbed something out, or too long to ever print: say nothing
+        # rather than something that reads like a time and is not one.
+        if "[redacted]" in phrase or len(phrase) > RESET_MAX:
+            return ""
+        return phrase
+    now = now or utcnow()
+    if when.date() == now.date():
+        return when.strftime("%H:%M UTC")
+    return when.strftime("%b %d %H:%M UTC")
+
+
+def _scrub(text):
+    """Drop anything path-, token- or assignment-shaped before it is printed."""
+    out = []
+    for word in (text or "").split():
+        out.append("[redacted]" if len(word) >= 24 or _HINT_UNSAFE.search(word)
+                   else word)
+    return " ".join(out)
+
+
+def _is_tz_token(word):
+    """True only for a short, IANA-area-anchored zone token."""
+    return bool(word) and len(word) < _TZ_EXEMPT_MAX and bool(_TZ_TOKEN.match(word))
+
+
+def _scrub_reset(text):
+    """_scrub for a reset phrase, where a "/" may be a timezone, not a path.
+
+    Narrow on purpose: only an IANA-area-anchored zone token under the
+    24-character cap is exempt, and only inside a reset -- a hint never
+    gets this exemption. An all-digit epoch word is dropped the same way.
+    """
+    out = []
+    for w in (text or "").split():
+        if _is_tz_token(w):
+            out.append(w)
+        elif _EPOCHISH.match(w):
+            out.append("[redacted]")
+        else:
+            out.append(_scrub(w))
+    return " ".join(out)
+
+
+def _short_hint(rec):
+    hint = " ".join((rec.get("hint") or "").split())
+    if not hint:
+        return ""
+    if hint == "no data" and not rec.get("checked_at"):
+        return NEVER_READ_HINT
+    hint = _scrub(hint)
+    if len(hint) > HINT_MAX:
+        # Cut on a word boundary: a header says less rather than ending in a
+        # half-word that could be read as part of a value.
+        hint = hint[:HINT_MAX].rsplit(" ", 1)[0]
+    return hint.strip()
+
+
+def age_amount(checked_at, now=None):
+    """Just the magnitude of a reading's age: '6d', '14h', '3m', '45s'."""
+    age = age_label(checked_at, now)
+    if not age.startswith("last read ") or not age.endswith(" ago"):
+        return ""
+    return age[len("last read "):-len(" ago")]
+
+
+def _stale_age(rec, now=None, force=False):
+    """Both age suffixes for a reading too old to present as current -- in
+    every state, LIMITED included.
+
+    A LIMITED with no provider reset can never expire on its own
+    (``expire_stale_resets`` has nothing to compare it against), and LIMITED
+    is the word that stops a dispatch, so it is exactly the state that must
+    not look freshly observed. Two forms because the age is never shed: the
+    terse one buys room for a reset that would otherwise not fit.
+    """
+    when = parse_iso(rec.get("checked_at"))
+    if when is None:
+        return "", ""
+    old = ((now or utcnow()) - when).total_seconds() >= STALE_READING_SECS
+    amount = age_amount(rec.get("checked_at"), now)
+    if not (old or force) or not amount:
+        return "", ""
+    return " (read %s ago)" % amount, " (%s old)" % amount
+
+
+MID_MIN = 12
+
+
+def _fit(head, mid, tail, age, terse_age="", truncatable=True):
+    """Assemble within COMPACT_MAX, shedding the reset/hint before the age.
+
+    ``head`` (who and what state), ``tail`` (the "-- low" call-out) and the
+    age are never shed: they are what the user has to act on, and a number
+    without its staleness is the lie this formatter exists to avoid. ``mid``
+    is the reset or the hint -- detail. So the order of sacrifice is: the
+    full age suffix shortens to its terse form, then ``mid`` is truncated on
+    a word boundary, then ``mid`` goes.
+
+    ``truncatable=False`` for a reset: half of "Sep 19 09:00 UTC" is not a
+    shorter truth but an ambiguous one, and half of a provider's own phrase
+    ("resets next Tuesday at") is not a time at all -- so a reset is kept or
+    dropped whole, and only a hint is ever shortened.
+    """
+    forms = [age] + ([terse_age] if terse_age and terse_age != age else [])
+    for shown in forms:
+        if not mid or len(mid) <= COMPACT_MAX - len(head + tail + shown):
+            return head + mid + tail + shown
+    room = COMPACT_MAX - len(head + tail + age)
+    cut = mid[:max(0, room)].rstrip() if truncatable else ""
+    cut = cut.rsplit(" ", 1)[0] if " " in cut else ""
+    return head + (cut if len(cut) >= MID_MIN else "") + tail + age
+
+
+def compact_reading(reading, now=None):
+    """Header-sized view of one provider reading.
+
+    ``level`` is the state the copy is chosen from: ok / low / limited /
+    unknown / no_data. An expired limit arrives here already downgraded to
+    unknown by ``expire_stale_resets``, so it never reads as limited; a limit
+    with no reset to expire against carries its age instead.
+    """
+    rec = public_reading(reading, now)
+    # A provider id is a short label, never a path: keep label characters only.
+    hid = re.sub(r"[^A-Za-z0-9_.+-]", "", rec["provider"] or "")[:PROVIDER_MAX] or "?"
+    status = rec["status"]
+    reset = reset_label(rec["reset_at"], now)
+    when_reset = parse_iso(rec["reset_at"])
+    pct = remaining_percent(rec)
+    out = {"provider": hid, "level": "unknown", "remaining_pct": None,
+           "remaining": "", "reset": reset, "text": ""}
+    if status == "no_data":
+        # Nothing was ever read and nothing ever will be: an age would be noise.
+        out.update(level="no_data", reset="",
+                   text="%s no usage data (no source to read)" % hid)
+        return out
+    age, terse = _stale_age(rec, now)
+    if status == "limited":
+        mid = (", resets %s" % reset) if reset else ", reset unknown"
+        out.update(level="limited", remaining_pct=pct,
+                   remaining=pct_label(pct) if pct is not None else "",
+                   text=_fit("%s LIMITED" % hid, mid, "", age, terse,
+                             truncatable=not reset))
+        return out
+    if status == "ok" and pct is not None:
+        # A reset that has already passed describes a window that has since
+        # rolled over: do not print it as though it were still ahead, and say
+        # how old the number is even if the ledger was read minutes ago.
+        if when_reset is not None and when_reset <= (now or utcnow()):
+            reset = ""
+            out["reset"] = ""
+            age, terse = _stale_age(rec, now, force=True)
+        low = pct < LOW_REMAINING_PCT
+        out.update(level="low" if low else "ok", remaining_pct=pct,
+                   remaining=pct_label(pct),
+                   text=_fit("%s %s left" % (hid, pct_label(pct)),
+                             (", resets %s" % reset) if reset else "",
+                             " -- low" if low else "", age, terse,
+                             truncatable=False))
+        return out
+    # Unknown, and every shape that cannot produce an honest number: an ok
+    # status with no percent in it is still unknown, never 0 and never "fine".
+    hint = _short_hint(rec)
+    out.update(level="unknown",
+               text=_fit("%s unknown" % hid, (" -- %s" % hint) if hint else "",
+                         "", age, terse))
+    return out
+
+
+def format_compact_line(reading, now=None):
+    """One short line for one provider: 'claude 12% left, resets 21:00 UTC -- low'."""
+    return compact_reading(reading, now)["text"]
+
+
+def canonical_provider(name):
+    hid = (name or "").strip().lower()
+    return "agy" if hid == "antigravity" else hid
+
+
+def header_providers(board, harnesses=(), now=None):
+    """Providers a header should name: every one read, plus HTTP seats not read yet.
+
+    Read-only: the ledger file and the names the caller passed in. Providers
+    with no usage source at all (cursor, agy) stay out of a header -- they can
+    never say anything but "no data", and a header has to stay short.
+    """
+    known = load_ledger(board).get("providers") or {}
+    seats = {canonical_provider(h) for h in harnesses or ()}
+    out = []
+    for hid in ("claude", "codex"):
+        if hid in known or hid in seats:
+            out.append(hid)
+    for hid in sorted(known):
+        if hid in out or hid in NO_DATA_PROVIDERS:
+            continue
+        rec = known.get(hid)
+        if isinstance(rec, dict) and rec.get("status") == "no_data":
+            continue
+        out.append(hid)
+    return out
+
+
+def header_lines(board, now=None, providers=None, harnesses=(), prefix="usage  "):
+    """The usage header: one short line per provider, or one honest line if none.
+
+    Reads the ledger only -- no network, no subprocess, no write. A board where
+    nothing has ever been read says so, and names the command that would read.
+    """
+    ids = list(providers) if providers is not None else header_providers(
+        board, harnesses, now)
+    if not ids:
+        return [prefix + "no provider read yet (atm harness usage)"]
+    return [prefix + format_compact_line(get_reading(board, hid, now), now)
+            for hid in ids]
+
+
+def usage_provider_for_harness(harness):
+    """The provider whose quota a seat on this harness spends, or "" if none.
+
+    A cursor+claude seat spends Claude's quota. remote/custom/a bare
+    executable is not a metered provider this program can read, and must not
+    be dressed up as one that simply has not been read yet.
+    """
+    hid = canonical_provider(harness)
+    if hid == "cursor+claude":
+        return "claude"
+    if hid in HTTP_PROVIDERS or hid in NO_DATA_PROVIDERS:
+        return hid
+    return ""
+
+
+def seat_usage_line(board, harness, now=None, prefix="usage  "):
+    """The one line a spawned/dispatched seat's provider gets. Read-only."""
+    hid = usage_provider_for_harness(harness)
+    if not hid:
+        label = canonical_provider(harness) or "harness"
+        return prefix + "%s no usage data (no source to read)" % label
+    return prefix + format_compact_line(get_reading(board, hid, now), now)
 
 
 def format_ledger_lines(board, now=None, providers=("claude", "codex", "cursor", "agy")):
