@@ -80,11 +80,19 @@ def test_og_image_stays_the_checked_in_capture_and_hero_has_no_demo_img():
     assert path.is_file() and path.stat().st_size > 10_000, path
 
 
+def _status_block():
+    return LANDING[LANDING.index('id="status"') : LANDING.index('id="start"')]
+
+
 def test_status_links_the_readme_table_instead_of_duplicating_it():
-    block = LANDING[LANDING.index('id="status"') : LANDING.index('id="start"')]
+    """Status points at the README table; it never restates a table or an
+    install recipe. Install commands live only in the install terminals."""
+    block = _status_block()
     assert "README.md#preview-status-and-limitations" in block
     assert "<table" not in block
-    assert "brew install" not in LANDING
+    assert "<pre" not in block
+    for recipe in ("brew tap", "brew install", "install.sh", "git clone", "pipx install", "uv tool install"):
+        assert recipe not in block, recipe
 
 
 def test_no_invented_numbers_or_dead_local_references():
@@ -95,10 +103,60 @@ def test_no_invented_numbers_or_dead_local_references():
         if Path(ref).as_posix().startswith("assets/demo/"):
             continue
         assert (LANDING_DIR / ref).is_file(), ref
-    for banned in ("<dd>0</dd>", "<dd>$0", "roster of", "v1.0", "1.0.0", "brew install"):
+    for banned in ("<dd>0</dd>", "<dd>$0", "roster of", "v1.0", "1.0.0"):
         assert banned not in LANDING, banned
     for doc in ("docs/first-session.md", "docs/byoa.md"):
         assert doc in LANDING and (ROOT / doc).is_file(), doc
+
+
+_INSTALL_CMD = re.compile(
+    r"\b(?:brew install|brew tap|pipx install|pip3? install|uv tool install|npm install|"
+    r"apt(?:-get)? install|cargo install|go install)\s+[A-Za-z0-9@/_.-]*[A-Za-z0-9]"
+)
+_NEGATED = ("unrelated project", "no pypi package")
+
+
+def _formula_release():
+    """The committed mirror of the tap's Formula/atman.rb. Returns the release
+    version it installs, or None if it does not name a published release
+    (placeholder sha256, non-release URL, or a version this checkout is not)."""
+    formula = (ROOT / "packaging/homebrew/atman.rb").read_text(encoding="utf-8")
+    url = re.search(
+        r'url "https://github\.com/advitiyavashist/atman/releases/download/v(\d+\.\d+\.\d+)/atman-(\d+\.\d+\.\d+)\.tar\.gz"',
+        formula,
+    )
+    sha = re.search(r'sha256 "([0-9a-f]{64})"', formula)
+    version = re.search(r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    if not (url and sha and version) or url.group(1) != url.group(2) or url.group(1) != version.group(1):
+        return None
+    return url.group(1)
+
+
+def _homebrew_claim_is_real():
+    release = _formula_release()
+    if release is None:
+        return False
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    row = next((line for line in readme.splitlines() if line.startswith("| Install: Homebrew")), "")
+    return "published" in row and "`v%s`" % release in row and "advitiyavashist/homebrew-tap" in row
+
+
+def test_every_install_claim_is_a_path_that_works():
+    """No install command on the page unless it is backed by evidence in this
+    checkout: brew only while the committed tap formula pins a real sha256 for
+    this package version's release and the README row says it is published;
+    a pip command only as the stated warning that it is not ours; nothing else."""
+    text = re.sub(r"<[^>]+>", "", LANDING)
+    claims = [(m.group(0), m.start()) for m in _INSTALL_CMD.finditer(text)]
+    for claim, at in claims:
+        if claim in ("brew tap advitiyavashist/tap", "brew install atman"):
+            assert _homebrew_claim_is_real(), "%s claimed but the tap formula names no published release" % claim
+            continue
+        if claim == "pip install atm":
+            sentence = text[max(0, at - 120) : at + 120].lower()
+            assert any(n in sentence for n in _NEGATED), claim
+            continue
+        raise AssertionError("install claim with no working path behind it: %s" % claim)
 
 
 def test_landing_readme_records_the_atm_lock_and_capture_provenance():
