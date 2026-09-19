@@ -632,7 +632,7 @@ class BoardStore(MessagingMixin):
         ]
 
     def _unmet_dependencies(self, conn, project_id, deps):
-        """Use the shared release gate for the SQL representation too."""
+        """Shared CLI release gate, plus storage's direct done-without-review."""
         from ..work_view import dep_released
         unmet = []
         for dep in deps:
@@ -658,14 +658,23 @@ class BoardStore(MessagingMixin):
             if review and review["state"] == "accepted":
                 accepted = json.loads(review["evidence"]) if review["evidence"] else {}
                 sha = accepted.get("sha") or ""
-                if sha and not any(
-                    isinstance(ev, dict) and (ev.get("kind") or "").lower() == "accept"
-                    and (ev.get("sha") or "") == sha and not ev.get("superseded")
-                    for ev in ticket["review_events"]
-                ):
-                    ticket["review_events"].append({"kind": "accept", "sha": sha})
-            if not dep_released(ticket):
-                unmet.append(dep)
+                if sha:
+                    if not ticket["review_head"]:
+                        ticket["review_head"] = sha
+                    if not any(
+                        isinstance(ev, dict) and (ev.get("kind") or "").lower() == "accept"
+                        and (ev.get("sha") or "") == sha and not ev.get("superseded")
+                        for ev in ticket["review_events"]
+                    ):
+                        ticket["review_events"].append({"kind": "accept", "sha": sha})
+            if dep_released(ticket):
+                continue
+            # Storage still allows open/claimed -> done with no review.
+            # That close is the release; CLI dep_released applies when a
+            # review was pinned.
+            if row["state"] == "done" and not review:
+                continue
+            unmet.append(dep)
         return unmet
 
     def _require_released_dependencies(self, conn, project_id, ticket_id):

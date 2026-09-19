@@ -108,7 +108,7 @@ usage:  claude unknown · UNKNOWN · last read 0s ago · re-login required
 what happened: alice committed bcda9a0 and closed T-001; T-002 stayed shut until bob --
                a different seat -- accepted that exact sha. No seat releases its own work.
 in your repo:  cd <your repo> && atm quickstart --agent <you>   (then: atm next, atm review, atm accept)
-where to look: atm agents   (seats, harness, usage)   |   atm ui  ->  http://127.0.0.1:8765
+where to look: atm agents   (seats, harness, usage)   |   atm ui
 scratch kept:  /tmp/atm-quickstart-gate-5mvvgob2   (rm -rf it whenever; nothing of yours was touched)
 ```
 
