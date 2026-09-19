@@ -12817,11 +12817,14 @@ def seat_brief_text(board, owner):
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     roles = _safe(lambda: roles_for(board, owner), None) or []
     m = _safe(lambda: current_master(board), None) or {}
-    reviewer = (m.get("cos") or m.get("owner") or "")
+    # T-1091: when this seat is CoS, ask the master owner -- not nobody.
+    reviewer = (m.get("cos") or "").strip()
+    if not reviewer or reviewer == owner:
+        reviewer = (m.get("owner") or "").strip()
     if reviewer == owner:
-        reviewer = ""  # a seat is never its own reviewer, whatever the board says
-    usage = _safe(lambda: _provider_usage().format_usage_line(
-        _provider_usage().get_reading(board, harness)).strip(), "") or ""
+        reviewer = ""  # a seat is never its own reviewer
+    usage = _safe(lambda: _provider_usage().brief_usage_line(
+        _provider_usage().get_reading(board, harness)), "") or ""
     t = _seat_ticket(board, owner) or {}
     return sb.compose(
         owner,
@@ -12836,6 +12839,20 @@ def seat_brief_text(board, owner):
         reviewer=reviewer,
         usage_line=usage,
     )
+
+
+def _task_wake_run_no(board, owner):
+    """Increment the per-seat hook-run task-wake counter (T-1091).
+
+    First fire is 1 (brief). Later fires are 2+ (steady-state prompt).
+    """
+    rec = _agent_rec(board, owner) or {}
+    try:
+        n = int(rec.get("task_wake_run_no") or 0) + 1
+    except (TypeError, ValueError):
+        n = 1
+    _agent_set(board, owner, task_wake_run_no=n)
+    return n
 
 
 def cmd_prompt(a, board):
@@ -19869,7 +19886,12 @@ def cmd_hook_run(a, board):
         return
     if a.event == "task-wake":
         kind = getattr(a, "prompt_kind", "") or ""
-        cmd_prompt(argparse.Namespace(agent=owner, master=kind == "master", cos=kind == "cos", extra=""), board)
+        # T-1091: the no-arg remote wrapper cannot pass TICKETS_RUN_NO.
+        # Stamp a per-seat counter so the first fire briefs and later
+        # fires do not (the brief's own "no second briefing" line).
+        cmd_prompt(argparse.Namespace(
+            agent=owner, master=kind == "master", cos=kind == "cos", extra="",
+            run_no=_task_wake_run_no(board, owner)), board)
         return
     sys.exit("unsupported hook event %s" % a.event)
 
