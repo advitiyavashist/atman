@@ -377,7 +377,12 @@ def get_reading(board, provider, now=None):
 
 
 def public_reading(reading, now=None):
-    """Board/UI snapshot. Never includes credentials or raw HTTP bodies."""
+    """Ledger snapshot. Never includes credentials or raw HTTP bodies.
+
+    ``limit_message`` stays here for ``format_usage_line`` (the ledger
+    view). A user-facing surface -- compact header, Team tooltip -- must
+    use ``ui_reading`` instead, which drops that field.
+    """
     rec = expire_stale_resets(dict(reading or {}), now)
     return {
         "provider": rec.get("provider") or "",
@@ -394,6 +399,17 @@ def public_reading(reading, now=None):
         "hint": rec.get("hint") or "",
         "windows": list(rec.get("windows") or []),
     }
+
+
+def ui_reading(reading, now=None):
+    """What board.json may show a user. No provider ``limit_message``.
+
+    The compact header never prints the provider's own sentence, and a
+    Team-card tooltip must not either -- it is unsanitized free text.
+    """
+    rec = public_reading(reading, now)
+    rec.pop("limit_message", None)
+    return rec
 
 
 def format_usage_line(reading, now=None):
@@ -444,12 +460,24 @@ PROVIDER_MAX = 12
 # time, not a short one. What actually prints is decided by COMPACT_MAX/_fit.
 RESET_MAX = 48
 COMPACT_MAX = 56
-# A raw epoch is a number, not a reset a user can read.
-_EPOCHISH = re.compile(r"^\d{9,13}$")
-# "America/Los_Angeles", "Etc/GMT+3", "America/Argentina/Buenos_Aires": in a
-# reset phrase a slash is a timezone. Bare letters only -- no dots, no digits
-# in a segment -- so a real path cannot pass as one.
-_TZ_TOKEN = re.compile(r"^[A-Za-z]{3,}(?:/[A-Za-z_+-]{2,}){1,2}$")
+# A raw epoch is a number, not a reset a user can read. 9+ digits covers
+# seconds, milliseconds, microseconds and anything longer; 14+ used to
+# slip past the old 9–13 cap and print as a reset.
+_EPOCHISH = re.compile(r"^\d{9,}$")
+# IANA area names only. A slash in a reset is a timezone, but only when
+# the first segment is a real area -- otherwise Users/kavana/secrets and
+# ghp/AAAAAAAAAAAA would skip _scrub's slash rule and 24-char cap.
+# Later segments are letters/underscore only (no dots, no digits), so
+# Etc/GMT is exempt and Etc/GMT+3 is not: a digit in a segment fails.
+# Exempt tokens still respect the 24-character cap.
+_TZ_AREAS = (
+    "Africa", "America", "Antarctica", "Arctic", "Asia", "Atlantic",
+    "Australia", "Europe", "Indian", "Pacific", "Etc", "UTC", "GMT",
+)
+_TZ_TOKEN = re.compile(
+    r"^(?:%s)(?:/[A-Za-z_+-]{2,}){1,2}$" % "|".join(_TZ_AREAS)
+)
+_TZ_EXEMPT_MAX = 24
 # A never-read provider is not a failed read: it must not say "re-login".
 NEVER_READ_HINT = "not read yet (atm harness usage)"
 # Defensive scrub for the hint, the only free-ish text a header repeats. Real
@@ -544,14 +572,27 @@ def _scrub(text):
     return " ".join(out)
 
 
-def _scrub_reset(text):
-    """_scrub for a reset phrase, where a "/" is a timezone, not a path.
+def _is_tz_token(word):
+    """True only for a short, IANA-area-anchored zone token."""
+    return bool(word) and len(word) < _TZ_EXEMPT_MAX and bool(_TZ_TOKEN.match(word))
 
-    Narrow on purpose: only an IANA-shaped zone token (letters and
-    underscores, two or three segments) is exempt, and only inside a reset --
-    a hint never gets this exemption.
+
+def _scrub_reset(text):
+    """_scrub for a reset phrase, where a "/" may be a timezone, not a path.
+
+    Narrow on purpose: only an IANA-area-anchored zone token under the
+    24-character cap is exempt, and only inside a reset -- a hint never
+    gets this exemption. An all-digit epoch word is dropped the same way.
     """
-    return " ".join(w if _TZ_TOKEN.match(w) else _scrub(w) for w in text.split())
+    out = []
+    for w in (text or "").split():
+        if _is_tz_token(w):
+            out.append(w)
+        elif _EPOCHISH.match(w):
+            out.append("[redacted]")
+        else:
+            out.append(_scrub(w))
+    return " ".join(out)
 
 
 def _short_hint(rec):

@@ -3027,6 +3027,9 @@ def detail(board, t, tickets):
         out.append("Open questions: %s" % (", ".join(qs) if isinstance(qs, list) else qs))
     if t.get("pr"):
         out.append("PR: %s" % t["pr"])
+    head = _review_verdict().displayed_review_head(t)
+    if head:
+        out.append("review_head: %s" % head)
     if t.get("discarded_reason"):
         out.append("discarded: %s" % t["discarded_reason"])
     if t.get("body"):
@@ -4641,6 +4644,9 @@ def cmd_review(a, board):
             t["commit"], t.get("repo") or "?",
             "artifact tree %s" % t["artifact_dir"] if t.get("repo_source") == "artifact"
             else "this checkout -- pass --artifact <dir> if the deliverable is in another repo"))
+    head = t.get("review_head") or ""
+    if head:
+        print("review_head: %s" % head)
     if cos_name:
         who = "CoS (%s) tasked" % cos_name
         if master_name and master_name != cos_name:
@@ -7103,6 +7109,12 @@ def cmd_done(a, board):
             "RULE: %d uncommitted files in %s. Commit before marking %s done "
             "(or --force to override)." % (g["dirty"], g["top"], a.id)
         )
+    # T-1082: accepted_sha wins over the tree HEAD. --artifact names a
+    # location, not a verdict -- a moved HEAD still pins the accepted sha.
+    pin_g, pin_warn = _work_view().done_pin_state(t, g, honor_cwd=bool(art))
+    if pin_warn:
+        print(pin_warn, file=sys.stderr)
+    g = pin_g
     t["status"] = "done"
     t["done_at"] = now()
     if not t.get("claimed_at"):
@@ -11818,7 +11830,7 @@ def cmd_connect(a, board):
     worker = bool(getattr(a, "worker", False))
     ceo = bool(getattr(a, "ceo", False))
     seat = (getattr(a, "seat", None) or "ceo").strip() or "ceo"
-    living = board_is_living(board)
+    living = board_is_atman_operator(board)
     if ceo or (living and not worker):
         print_ceo_connect(board, seat=seat)
         _apply_connect_roles(board, a)
@@ -18041,7 +18053,7 @@ async function load(manual){
     const st=a.state==='DOWN'?'bad':a.state==='busy'?'ok':'mute';
     const lim=a.limit?'<span class="tag limit">reset '+esc(a.limit_until||'unknown')+'</span>':'';
     const pu=a.provider_usage||{};
-    const usageTag=pu.status?'<span class="tag" title="'+esc((pu.hint||pu.limit_message||pu.age||'')+'')+'">'+esc(pu.provider||a.harness||'?')+' '+esc(pu.status==='no_data'?'no data':pu.status)+'</span>':'';
+    const usageTag=pu.status?'<span class="tag" title="'+esc((pu.hint||pu.age||'')+'')+'">'+esc(pu.provider||a.harness||'?')+' '+esc(pu.status==='no_data'?'no data':pu.status)+'</span>':'';
     const wake=a.adapter_state==='conflict'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">adapter conflict</span>':(a.adapter_state==='failed'?'<span class="tag limit" title="'+esc(a.adapter_reason||'')+'">dispatch failed</span>':(a.adapter_state==='retrying'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">retrying</span>':(a.adapter_state==='running'||a.adapter_state==='claimed'||a.adapter_state==='recovery-required'?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+esc(a.adapter_state)+'</span>':(a.wake_pending?'<span class="tag pending" title="'+esc(a.adapter_reason||'')+'">'+(a.adapter_online?'wake queued':'queued · offline')+'</span>':''))));
     const seen=a.seen_h!=null?'<span class="mute"> · seen '+h(a.seen_h)+'</span>':'';
     const life='<span class="tag" title="lifecycle is separate from wake_mode">'+esc(a.lifecycle||'ephemeral')+'</span>';
@@ -18712,7 +18724,7 @@ def _board_snapshot_body(board, messages=40):
                                board, rec, r["agent"], harness_name, local_host),
                            "limit": lim,
                            "limit_until": (lim or {}).get("until", "") if lim else "",
-                           "provider_usage": _provider_usage().public_reading(
+                           "provider_usage": _provider_usage().ui_reading(
                                _provider_usage().get_reading(board, harness_name))})
     out_agents.sort(key=lambda a: (a["state"] == "DOWN", a["state"] != "busy", a["name"]))
     goals = ""
