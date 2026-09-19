@@ -213,3 +213,103 @@ def test_active_seat_limit_fallback_bypasses_pin(tmp_path):
     rec = json.loads(path.read_text())
     assert rec["inbox_seen"] == "2099-01-01T00:00:00Z"
     assert rec["limit"] == fresh
+
+
+def _tiny_named_board(root: Path, *, name: str, title: str, text: str) -> Path:
+    board = root / name / ".tickets"
+    (board / "agents").mkdir(parents=True)
+    (board / "T-001.json").write_text(json.dumps({
+        "id": "T-001",
+        "title": title,
+        "body": "",
+        "role": "backend",
+        "status": "open",
+        "deps": [],
+        "priority": 2,
+        "epic": "",
+        "sprint": "",
+        "needs": [],
+        "owner": "",
+        "created": "2026-09-01T00:00:00Z",
+        "updated": "2026-09-01T00:00:00Z",
+        "notes": [],
+    }))
+    (board / "workforce.json").write_text(json.dumps({
+        name: {"harness": "cursor", "can": [], "cost": "low"},
+    }))
+    (board / "agents" / ("%s.json" % name)).write_text(json.dumps({
+        "owner": name,
+        "joined_at": "2026-09-01T00:00:00Z",
+        "inbox_seen": "2026-09-01T00:00:00Z",
+    }))
+    (board / "messages.jsonl").write_text(json.dumps({
+        "id": "m-%s" % name,
+        "at": "2026-09-16T12:00:00Z",
+        "from": name,
+        "to": "",
+        "text": text,
+        "kind": "message",
+        "mentions": [],
+    }) + "\n")
+    return board
+
+
+def test_pin_on_a_does_not_serve_reads_from_b(tmp_path):
+    """realpath is checked before the cache hit, so a pin on A cannot leak into B."""
+    tk = _load_tk()
+    a = _tiny_named_board(tmp_path, name="alice", title="board A ticket", text="mail on A")
+    b = _tiny_named_board(tmp_path, name="bob", title="board B ticket", text="mail on B")
+    with tk._reuse_board_reads(str(a)):
+        a_tickets = tk.load_all(str(a))
+        a_wf = tk.load_workforce(str(a))
+        a_msgs = tk.load_messages(str(a))
+        b_tickets = tk.load_all(str(b))
+        b_wf = tk.load_workforce(str(b))
+        b_msgs = tk.load_messages(str(b))
+    assert [t["title"] for t in a_tickets] == ["board A ticket"]
+    assert [t["title"] for t in b_tickets] == ["board B ticket"]
+    assert "alice" in a_wf and "bob" not in a_wf
+    assert "bob" in b_wf and "alice" not in b_wf
+    assert [m["text"] for m in a_msgs] == ["mail on A"]
+    assert [m["text"] for m in b_msgs] == ["mail on B"]
+
+
+def test_pinned_pending_work_matches_unpinned_unknown_mention(tmp_path):
+    """empty --to + unregistered @mention: pin and disk pending_work must agree.
+
+    is_board_broadcast does not filter mentions through registered handles.
+    If the address-index broadcast flag does, board.json hides a wake that
+    atm inbox still delivers.
+    """
+    tk = _load_tk()
+    board = tmp_path / ".tickets"
+    (board / "agents").mkdir(parents=True)
+    for name in ("alice", "bob"):
+        (board / "agents" / ("%s.json" % name)).write_text(json.dumps({
+            "owner": name,
+            "joined_at": "2026-09-01T00:00:00Z",
+            "inbox_seen": "2026-09-01T00:00:00Z",
+        }))
+    (board / "workforce.json").write_text(json.dumps({
+        "alice": {"harness": "cursor", "can": [], "cost": "low", "wake_mode": "task-only"},
+        "bob": {"harness": "cursor", "can": [], "cost": "low", "wake_mode": "task-only"},
+    }))
+    (board / "messages.jsonl").write_text(json.dumps({
+        "id": "m-unknown-mention",
+        "at": "2026-09-16T12:00:00Z",
+        "from": "alice",
+        "to": "",
+        "text": "task: look at @not-a-seat please",
+        "kind": "task",
+        "mentions": ["not-a-seat"],
+    }) + "\n")
+    unpinned = tk.pending_work(str(board), "bob")
+    with tk._reuse_board_reads(str(board)):
+        pinned = tk.pending_work(str(board), "bob")
+    assert pinned == unpinned, (pinned, unpinned)
+    assert pinned.get("task_messages") or pinned.get("messages_to_me"), pinned
+    assert "broadcasts" not in pinned
+    unpinned_view = tk.pending_view(unpinned)
+    pinned_view = tk.pending_view(pinned)
+    assert pinned_view["wake_reason"] == unpinned_view["wake_reason"] == "task_messages"
+    assert tk.actionable(pinned_view) is True
