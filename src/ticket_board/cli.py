@@ -3844,7 +3844,8 @@ def cmd_master(a, board):
               "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
-                t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
+                t["id"], t.get("owner", "?"), t["title"][:46],
+                _rv.review_queue_pin(t),
                 fmt_hours(hours_since(t.get("review_at", t["updated"]))),
                 ("  PR " + t["pr"]) if t.get("pr") else ""))
     print("")

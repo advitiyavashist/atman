@@ -80,7 +80,7 @@ def compose(seat, roles="", harness="", worktree="", ticket_id="", ticket_title=
         out.append("  exit    tests pass, then `atm review %s` -- and an accept from another seat (below)." % tid)
         if review_head:
             out.append("  in review at %s: it needs another seat's accept on exactly that SHA. "
-                       "Commit on top of it and the accept is void." % review_head[:12])
+                       "Commit on top of it and the accept is void." % review_head)
     else:
         out.append("TICKET    none held yet -- `atm next` hands you one and prints its scope and briefing "
                    "files. Work only what it hands you.")

@@ -8010,7 +8010,8 @@ def cmd_master(a, board):
               "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
-                t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
+                t["id"], t.get("owner", "?"), t["title"][:46],
+                _review_verdict().review_queue_pin(t),
                 fmt_hours(hours_since(t.get("review_at", t["updated"]))),
                 ("  PR " + t["pr"]) if t.get("pr") else ""))
     print("")
@@ -12834,7 +12835,8 @@ def seat_brief_text(board, owner):
         ticket_id=t.get("id") or "",
         ticket_title=(t.get("title") or "")[:80],
         ticket_status=LABEL.get(t.get("status") or "", ""),
-        review_head=(t.get("review_head") or "") if t.get("status") == "review" else "",
+        review_head=(_review_verdict().displayed_review_head(t)
+                     if t.get("status") == "review" else ""),
         scope=t.get("body") or "",
         reviewer=reviewer,
         usage_line=usage,
