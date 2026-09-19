@@ -6,7 +6,9 @@ that are executing, and must say so when origin/main is ahead.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -70,3 +72,78 @@ def test_behind_origin_main_warns_and_prints_refresh(tmp_path):
         "refresh: git -C %s fetch origin && git -C %s merge --ff-only origin/main"
         % (repo, repo))
     assert tool._source_behind_lines(str(repo), new, new) == []
+
+
+def _stage_release(dest: Path, commit: str) -> Path:
+    """install_live --live layout: dest/tickets.py + dest/release.json."""
+    dest.mkdir(parents=True)
+    src = ROOT / "tickets.py"
+    data = src.read_bytes()
+    (dest / "tickets.py").write_bytes(data)
+    (dest / "release.json").write_text(json.dumps({
+        "commit": commit,
+        "files": {
+            "tickets.py": {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            },
+        },
+    }) + "\n")
+    return dest / "tickets.py"
+
+
+def test_release_inside_foreign_git_repo_does_not_probe_enclosing_head(tmp_path):
+    """release.json commit is the running source, not the dotfiles repo HEAD.
+
+    install_live --live ~/.claude/tools inside a git-tracked ~/.claude must
+    not claim that repo is 'behind' or suggest ff-only merge of it.
+    """
+    repo = tmp_path / "dotfiles"
+    repo.mkdir()
+    _git(tmp_path, "init", str(repo))
+    _git(repo, "checkout", "-b", "main")
+    (repo / "readme").write_text("old\n")
+    _git(repo, "add", "readme")
+    _git(repo, "commit", "-m", "old")
+    old = _git(repo, "rev-parse", "HEAD")
+    (repo / "readme").write_text("new\n")
+    _git(repo, "add", "readme")
+    _git(repo, "commit", "-m", "new")
+    new = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/main", new)
+    _git(repo, "checkout", "-q", old)
+
+    pinned = "a" * 40
+    tickets_py = _stage_release(repo / "tools", pinned)
+    r = subprocess.run(
+        [sys.executable, str(tickets_py), "--version"],
+        capture_output=True, text=True, cwd=str(repo))
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    lines = out.strip().splitlines()
+    assert lines[0] == "tickets commit %s (verified release)" % pinned
+    assert any(ln.startswith("source: ") and str(tickets_py.resolve()) in ln
+               for ln in lines)
+    assert not any(ln.startswith("source-sha:") for ln in lines)
+    assert old not in out and old[:12] not in out
+    assert "WARNING:" not in out
+    assert "behind origin/main" not in out
+    assert "merge --ff-only" not in out
+    assert "brew upgrade atman" in out
+    assert "pinned release %s" % pinned[:12] in out
+
+
+def test_pinned_release_without_git_prints_brew_upgrade(tmp_path):
+    pinned = "b" * 40
+    tickets_py = _stage_release(tmp_path / "prefix", pinned)
+    r = subprocess.run(
+        [sys.executable, str(tickets_py), "--version"],
+        capture_output=True, text=True, cwd=str(tmp_path))
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    lines = out.strip().splitlines()
+    assert lines[0] == "tickets commit %s (verified release)" % pinned
+    assert not any(ln.startswith("source-sha:") for ln in lines)
+    assert "WARNING:" not in out
+    assert "pinned release %s; newer releases can't be checked from here: " \
+           "brew upgrade atman (or re-run install_live)" % pinned[:12] in out

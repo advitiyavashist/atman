@@ -20362,6 +20362,25 @@ def _source_behind_lines(root, head, remote):
     ]
 
 
+def _same_commit(left, right):
+    a = (left or "").strip()
+    b = (right or "").strip()
+    if not a or not b:
+        return False
+    n = min(len(a), len(b), 40)
+    if n < 7:
+        return False
+    return a[:n] == b[:n]
+
+
+def _pinned_release_upgrade_line(pinned):
+    short = pinned[:12] if len(pinned or "") >= 12 else (pinned or "")
+    return (
+        "pinned release %s; newer releases can't be checked from here: "
+        "brew upgrade atman (or re-run install_live)" % short
+    )
+
+
 def runtime_version_report():
     """What `atm --version` prints: provenance, the file that is running, and
     a behind warning when this checkout is older than origin/main.
@@ -20369,12 +20388,20 @@ def runtime_version_report():
     First line stays `release_status()` so pinned-release smoke tests keep
     matching. Extra lines are T-1080: an operator worktree must not silently
     pin last week's CLI (`atm steer` missing from `--help`).
+
+    When release.json names a commit, that commit is the running source.
+    An enclosing git repo (dotfiles / ~/.claude) is probed only when its
+    HEAD equals that commit. Otherwise print the brew/tarball upgrade path.
     """
     status = release_status()
     script = os.path.realpath(__file__)
     lines = [status, "source: %s" % script]
+    pinned = _release_commit()
     root = _git_root_from(script)
     head = (git("rev-parse", "HEAD", cwd=root) if root else None) or ""
+    if pinned and not (head and _same_commit(head, pinned)):
+        lines.append(_pinned_release_upgrade_line(pinned))
+        return "\n".join(lines)
     if head:
         lines.append("source-sha: %s" % head)
         remote = (
