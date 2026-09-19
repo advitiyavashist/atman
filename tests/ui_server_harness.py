@@ -152,20 +152,37 @@ def extract_ui_launch_token(html):
     return m.group(1) if m else ""
 
 
+_SESSION_ENV = (
+    "TICKET_SEAT", "TICKET_AGENT", "TICKET_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+    "TERM_SESSION_ID",
+)
+
+
 class UiServer:
-    def __init__(self, board, probe_prefix: str = "ui-probe", operator: str = ""):
+    def __init__(self, board, probe_prefix: str = "ui-probe", operator: str = "",
+                 env: dict | None = None):
         self.board = board
         self._stopped = False
         self.marker = _board_marker(board, probe_prefix)
         self.port = _free_port()
-        env = dict(os.environ, TICKETS_DIR=str(board))
+        home = board.parent.parent / "home"
+        cache = board.parent / "cache"
+        cache.mkdir(exist_ok=True)
+        home.mkdir(exist_ok=True)
+        launch_env = dict(os.environ, TICKETS_DIR=str(board),
+                          HOME=str(home), TICKETS_CACHE_DIR=str(cache))
+        for var in _SESSION_ENV:
+            launch_env.pop(var, None)
+        if env:
+            launch_env.update(env)
         ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
                   "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]
         if operator:
             ui_cmd += ["--operator", operator]
         self.proc = subprocess.Popen(
             [sys.executable, str(_SUPERVISOR), str(os.getpid())] + ui_cmd,
-            env=env,
+            env=launch_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
