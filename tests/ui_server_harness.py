@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -145,6 +146,12 @@ def reap_stale_ui_servers() -> None:
     _PID_FILE.unlink(missing_ok=True)
 
 
+def extract_ui_launch_token(html):
+    """Read the per-launch write token the page embeds (T-1105)."""
+    m = re.search(r'const UI_TOKEN="([^"]*)"', html or "")
+    return m.group(1) if m else ""
+
+
 class UiServer:
     def __init__(self, board, probe_prefix: str = "ui-probe"):
         self.board = board
@@ -175,12 +182,27 @@ class UiServer:
             body = r.read()
             return body if raw else json.loads(body)
 
-    def post(self, path, payload):
+    def launch_token(self):
+        if getattr(self, "_launch_token", None) is None:
+            self._launch_token = extract_ui_launch_token(
+                self.get("/", raw=True).decode())
+        return self._launch_token
+
+    def post(self, path, payload, headers=None, token=True):
+        head = {"Content-Type": "application/json"}
+        if token is True:
+            t = self.launch_token()
+            if t:
+                head["X-Atman-Token"] = t
+        elif token:
+            head["X-Atman-Token"] = token
+        if headers:
+            head.update(headers)
         req = urllib.request.Request(
             "http://127.0.0.1:%d%s" % (self.port, path),
             data=json.dumps(payload).encode(),
             method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=head,
         )
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
