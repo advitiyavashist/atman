@@ -213,7 +213,7 @@ A namespace inside one board would force a project filter into every one of thos
 ```json
 {"boards":   {"/path/to/repo": "/path/to/.tickets"},
  "projects": {"steer": {"board": "/Users/…/steer/.tickets", "repos": ["/Users/…/steer", "/Users/…/atman"]},
-              "retc":  {"board": "/Users/…/retc/.tickets", "repos": ["/Users/…/retc"]}},
+              "demo":  {"board": "/Users/…/demo/.tickets", "repos": ["/Users/…/demo"]}},
  "operator": "Advitiya"}
 ```
 
@@ -233,7 +233,7 @@ The shared board is different. Today's working board `steer/.tickets` holds tick
 
 - A **seat name stays board-local and unchanged** (`agents/<seat>.json`, `workforce.json` keys). `seat@project` is a display and addressing composition: `<seat>` + `@` + registry slug. No record is renamed.
 - The same seat name on two boards is two seats. Each has its own inbox, limit record and runs. A harness session is bound to one board by `TICKETS_DIR` / the session identity (`_identity_path`), exactly as today.
-- **Mentions are unaffected.** `_MENTION_RE` has the look-behind `(?<![A-Za-z0-9_@])`, so `coder@retc` in text never parses as a mention of `retc`. Cross-project addressing is not supported. A post goes to the selected project's board only.
+- **Mentions are unaffected.** `_MENTION_RE` has the look-behind `(?<![A-Za-z0-9_@])`, so `coder@demo` in text never parses as a mention of `demo`. Cross-project addressing is not supported. A post goes to the selected project's board only.
 - The operator shows as `<operator>@<project>` with an **operator** badge instead of a harness badge.
 
 ### 4.3 Operator identity (needed by chat, mail, DECIDE, pins)
@@ -577,7 +577,7 @@ Acceptance tests (fixture boards via `ATMAN_BOARD_CONFIG` and `TICKETS_DIR`; nev
 - `test_done_without_accept_is_never_accepted_in_v2_shell`: node, card and drill-down all say *done, not accepted*.
 - `test_receipts_never_say_ack`: no rendered string in the conversation contains "acknowledged" / "ACK" for a receipt.
 - `test_needs_you_is_asked_only`: prose "DECIDE: … ruling: A" still shows *asked (unstructured)*, never *ruled*.
-- `test_seat_at_project_is_not_a_mention`: posting `coder@retc` creates no `mentions` entry.
+- `test_seat_at_project_is_not_a_mention`: posting `coder@demo` creates no `mentions` entry.
 - Browser check at 1440px and 390px: the plan, the conversation and the drill-down open and close. No horizontal body scroll.
 
 ### Phase 1S: split the shared board (decision 1)
@@ -703,7 +703,7 @@ Acceptance tests:
 | atman                | Lead · planner@steer  next-turn only ⌕≡| OBJECTIVE  Cut an honest developer preview…  | T-1110  Build plan view    [x]|
 | [steer        v]     | ● working · run 14m · last output 40s  | Done when: fresh clone follows README…       | phase  WORKING  coder@steer   |
 |   steer   12 open    |   codex · quota 62% left (checked 3m)  +---------------------------------------------+ blocked-by  —                 |
-|   retc     4 open    +----------------------------------------+ Finishing  T-1110 coder@steer · 14m          |-------------------------------|
+|   demo     4 open    +----------------------------------------+ Finishing  T-1110 coder@steer · 14m          |-------------------------------|
 |   repo lens: all v   | Advitiya@steer  [operator]  Today 5:31 | Blocked    T-1112 dep T-1110 not accepted    | RUNS                          |
 |                      |  What is blocking the preview cut?     | Next       T-1113 ready · atm next claims it |  coder@steer [codex] author   |
 | > Lead               |  posted · inbox read · wake confirmed  |                  [graph] list  columns      |    running 14m · tokens unknown|
