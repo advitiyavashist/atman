@@ -19891,7 +19891,7 @@ def cmd_hook_run(a, board):
         # fires do not (the brief's own "no second briefing" line).
         cmd_prompt(argparse.Namespace(
             agent=owner, master=kind == "master", cos=kind == "cos", extra="",
-            run_no=_task_wake_run_no(board, owner)), board)
+            run_no=_safe(lambda: _task_wake_run_no(board, owner), "")), board)
         return
     sys.exit("unsupported hook event %s" % a.event)
 

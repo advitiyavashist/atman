@@ -56,3 +56,24 @@ def test_env_run_no_still_skips_the_brief(board):
         cwd=str(board.parent))
     assert r.returncode == 0, r.stderr + r.stdout
     assert seat_brief.BRIEF_HEAD not in r.stdout
+
+
+def test_task_wake_prints_prompt_when_agents_dir_unwritable(board):
+    """T-1101: a missing run_no still briefs; an unwritable agents dir must
+    not turn hook-run task-wake into exit 1 with no prompt."""
+    assert run(ROOT / "tickets.py", board, "join", "alice", "--roles", "backend",
+               agent="alice").returncode == 0
+    agents = board / "agents"
+    saved = [(p, p.stat().st_mode) for p in [agents, *agents.iterdir()]]
+    try:
+        for path, _mode in saved:
+            path.chmod(0o555)
+        r = run(ROOT / "tickets.py", board, "hook-run", "--agent", "alice",
+                "--event", "task-wake", agent="alice")
+    finally:
+        for path, mode in reversed(saved):
+            path.chmod(mode)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert r.stdout.strip(), r.stderr
+    assert "Traceback" not in (r.stderr + r.stdout)
+    assert seat_brief.BRIEF_HEAD in r.stdout or "You are alice" in r.stdout
