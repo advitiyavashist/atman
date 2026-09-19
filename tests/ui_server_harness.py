@@ -163,7 +163,7 @@ _SESSION_ENV = (
 
 class UiServer:
     def __init__(self, board, probe_prefix: str = "ui-probe",
-                 env: dict | None = None):
+                 env: dict | None = None, operator: str = ""):
         self.board = board
         self._stopped = False
         self.marker = _board_marker(board, probe_prefix)
@@ -183,6 +183,8 @@ class UiServer:
             launch_env.update(env)
         ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
                   "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]
+        if operator:
+            ui_cmd += ["--operator", operator]
         self.proc = subprocess.Popen(
             [sys.executable, str(_SUPERVISOR), str(os.getpid())] + ui_cmd,
             env=launch_env,
@@ -282,10 +284,10 @@ def port_is_dead(port: int, timeout: float = 3) -> bool:
     return False
 
 
-def make_ui_server_fixture(probe_prefix: str):
+def make_ui_server_fixture(probe_prefix: str, operator: str = ""):
     @pytest.fixture
     def ui_server(board):
-        srv = UiServer(board, probe_prefix=probe_prefix)
+        srv = UiServer(board, probe_prefix=probe_prefix, operator=operator)
         try:
             yield srv
         finally:
