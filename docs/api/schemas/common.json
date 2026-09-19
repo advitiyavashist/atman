@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/common.json",
+  "title": "Shared definitions for the app-v2 local API",
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,48}$"},
+    "seat": {"type": "string", "description": "A board-local seat name. Shown as seat@project."},
+    "iso_or_empty": {"type": "string", "description": "ISO-8601 UTC timestamp, or '' when not recorded."},
+    "ticket_id": {"type": "string", "pattern": "^T-[0-9]{1,7}$"},
+    "error": {
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {"type": "string", "minLength": 1},
+        "ok": {"const": false}
+      }
+    },
+    "harness_value": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A harness name (claude, codex, cursor, gemini, grok, remote, custom, ...), 'operator' for an operator post, or 'unknown'. Never defaulted to claude."
+    },
+    "harness_badge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "recorded", "note"],
+      "properties": {
+        "value": {"$ref": "#/$defs/harness_value"},
+        "recorded": {"type": "boolean", "description": "true only when stamped on the post at post time (or an operator post)."},
+        "note": {"type": "string"}
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "words"],
+      "properties": {
+        "agent": {"type": "string"},
+        "words": {
+          "type": "array",
+          "description": "Delivery receipts only: posted / inbox read / not read / wake confirmed / wake: <label> / broadcast. Never an agent acknowledgement.",
+          "items": {"type": "string", "not": {"pattern": "[Aa]cknowledg|\\b(ACK|[Aa]ck)\\b|[Uu]nderstood|\\b[Oo]n it\\b"}}
+        }
+      }
+    },
+    "post": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "at", "from", "author", "to", "re", "text", "mentions", "kind", "harness",
+                   "operator", "broadcast", "receipts"],
+      "properties": {
+        "id": {"type": "string"},
+        "at": {"$ref": "#/$defs/iso_or_empty"},
+        "from": {"type": "string"},
+        "author": {"type": "string", "pattern": "@", "description": "from@project"},
+        "to": {"type": "string", "description": "Comma-separated seats, '' for everyone."},
+        "re": {"type": "string"},
+        "text": {"type": "string"},
+        "mentions": {"type": "array", "items": {"type": "string"}},
+        "kind": {"type": "string"},
+        "harness": {"$ref": "#/$defs/harness_badge"},
+        "operator": {"type": "boolean"},
+        "broadcast": {"type": "boolean"},
+        "receipts": {"type": "array", "items": {"$ref": "#/$defs/receipt"}}
+      }
+    },
+    "usage_view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "status", "level", "text", "remaining_pct", "reset", "checked_at", "age"],
+      "description": "Provider quota as last read. A figure that was never read is null / 'unknown', never 0. 'age' is always present ('age unknown' when checked_at is empty).",
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "status": {"type": "string"},
+        "level": {"type": "string"},
+        "text": {"type": "string"},
+        "remaining_pct": {"type": ["number", "null"]},
+        "reset": {"type": "string"},
+        "checked_at": {"$ref": "#/$defs/iso_or_empty"},
+        "age": {"type": "string", "minLength": 1}
+      },
+      "if": {"properties": {"checked_at": {"const": ""}}},
+      "then": {"properties": {"age": {"const": "age unknown"}, "remaining_pct": {"type": "null"}}}
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "on", "text", "cmd"],
+      "properties": {
+        "kind": {"enum": ["dep_unaccepted", "dep_open", "seat_limited", "seat_offline", "auth",
+                          "hold", "capture", "blocked", "unaccepted"]},
+        "on": {"type": "string", "description": "The dep ticket id, the seat, or this ticket."},
+        "text": {"type": "string", "minLength": 1},
+        "cmd": {"type": "string", "description": "A copyable atm command, or ''."}
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["midrun", "line", "reason"],
+      "properties": {
+        "midrun": {"type": "boolean"},
+        "line": {"enum": ["takes mid-run messages", "answers on its next turn"]},
+        "reason": {"type": "string"}
+      }
+    },
+    "picker_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seat", "harness", "capability"],
+      "properties": {
+        "seat": {"$ref": "#/$defs/seat"},
+        "harness": {"$ref": "#/$defs/harness_value"},
+        "capability": {"enum": ["takes mid-run messages", "answers on its next turn"]}
+      }
+    },
+    "lead_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seat", "harness", "state", "detail", "running", "last_output_at", "last_output_source",
+                   "limit", "limit_until", "auth", "usage", "reachable", "capability", "wake_mode", "cannot_answer"],
+      "properties": {
+        "seat": {"$ref": "#/$defs/seat"},
+        "harness": {"$ref": "#/$defs/harness_value"},
+        "state": {"type": "string", "description": "Liveness word from agent_liveness, or 'unknown'."},
+        "detail": {"type": "string"},
+        "running": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["ticket", "elapsed_s", "tokens"],
+          "properties": {
+            "ticket": {"type": "string"},
+            "elapsed_s": {"type": ["number", "null"]},
+            "tokens": {"type": ["integer", "null"], "description": "null means unknown, never 0."}
+          }
+        },
+        "last_output_at": {"$ref": "#/$defs/iso_or_empty"},
+        "last_output_source": {"type": "string"},
+        "limit": {"type": ["object", "null"], "description": "The active seat limit record, or null."},
+        "limit_until": {"type": "string"},
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "label", "cmd"],
+          "properties": {"state": {"type": "string"}, "label": {"type": "string"}, "cmd": {"type": "string"}}
+        },
+        "usage": {"$ref": "#/$defs/usage_view"},
+        "reachable": {"type": "boolean"},
+        "capability": {"$ref": "#/$defs/capability"},
+        "wake_mode": {"type": "string"},
+        "cannot_answer": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["kind", "text", "cmd"],
+          "properties": {
+            "kind": {"enum": ["logged_out", "limited", "quota", "offline"]},
+            "text": {"type": "string"},
+            "cmd": {"type": "string"}
+          }
+        }
+      }
+    }
+  }
+}

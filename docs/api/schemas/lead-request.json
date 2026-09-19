@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/lead-request.json",
+  "title": "POST /api/v1/lead (request body)",
+  "description": "The operator picks this project's lead (master.json.lead). Operator only; the seat must be registered on the board.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["seat"],
+  "properties": {"seat": {"type": "string", "minLength": 1}, "project": {"type": "string"}}
+}

@@ -421,6 +421,72 @@ def make_release_override(kind, by, at, reason=""):
     return {"kind": kind, "by": by, "at": at, "reason": reason or ""}
 
 
+# --- T-1103 typed blocker chips ------------------------------------------------
+
+SEAT_OFFLINE_ADAPTER = ("offline", "queued-offline", "failed")
+AUTH_BLOCKING = ("login_required", "expired")
+_STATUS_WORD = {"open": "open", "claimed": "in flight", "review": "in review",
+                "blocked": "blocked", "done": "done"}
+
+
+def blockers_of(node, by_id, seats=None):
+    """Why this plan node cannot move, as typed chips. Pure; records only.
+
+    ``by_id`` maps ticket id -> ticket record; ``seats`` maps seat name ->
+    {limited, limit_until, adapter_state, state, auth_state, auth_label,
+    auth_cmd}. Kinds: dep_unaccepted (dep done, no structured accept),
+    dep_open (dep not done), seat_limited, seat_offline, auth, hold, capture,
+    blocked, and unaccepted (this node is done without an accept).
+    """
+    seats = seats or {}
+    out = []
+    tid = node.get("id") or ""
+    phase = node.get("phase") or ""
+    if phase == "done":
+        if node.get("unverified"):
+            out.append({"kind": "unaccepted", "on": tid, "text": "done, not accepted",
+                        "cmd": "atm accept %s --sha <review head> --notes \"...\"" % tid})
+        return out
+    for d in node.get("deps") or []:
+        dep = by_id.get(d)
+        if dep is None:
+            out.append({"kind": "dep_open", "on": d, "text": "dep %s is not on this board" % d,
+                        "cmd": "atm show %s" % d})
+        elif dep_released(dep):
+            continue
+        elif dep.get("status") == "done":
+            out.append({"kind": "dep_unaccepted", "on": d, "text": "dep %s done, not accepted" % d,
+                        "cmd": "atm accept %s --sha <review head> --notes \"...\"" % d})
+        else:
+            out.append({"kind": "dep_open", "on": d,
+                        "text": "dep %s still %s" % (d, _STATUS_WORD.get(dep.get("status"), dep.get("status") or "open")),
+                        "cmd": "atm show %s" % d})
+    wait = node.get("wait") or {}
+    if wait.get("kind") in ("hold", "capture", "blocked"):
+        out.append({"kind": wait["kind"], "on": tid, "text": wait.get("text") or wait["kind"],
+                    "cmd": wait.get("cmd") or ""})
+    seat = (node.get("owner") or node.get("reserved_for")
+            or ((node.get("dispatch") or {}).get("to") or "")).strip()
+    s = seats.get(seat) if seat else None
+    if s:
+        if s.get("limited"):
+            out.append({"kind": "seat_limited", "on": seat,
+                        "text": "seat %s limited until %s" % (seat, s.get("limit_until") or "reset unknown"),
+                        "cmd": "atm harness usage"})
+        waiting_for_seat = phase in ("posted", "reserved", "ready")
+        if (waiting_for_seat and s.get("adapter_state") in SEAT_OFFLINE_ADAPTER) or \
+                (phase in ("working", "review") and s.get("state") == "DOWN"):
+            out.append({"kind": "seat_offline", "on": seat,
+                        "text": "seat %s offline" % seat + (
+                            " (%s)" % s["adapter_state"] if s.get("adapter_state") in SEAT_OFFLINE_ADAPTER else ""),
+                        "cmd": "atm spawn %s --persist" % seat})
+        if s.get("auth_state") in AUTH_BLOCKING:
+            out.append({"kind": "auth", "on": seat,
+                        "text": "seat %s %s" % (seat, (s.get("auth_label") or "logged out").lower()),
+                        "cmd": s.get("auth_cmd") or ""})
+    return out
+
+
 def refuse_unreleased_reason(t, tickets, only_done=False):
     """Exit text when t's deps are not released, or ''."""
     pred = unreleased_dep_id(t, tickets, only_done=only_done)
