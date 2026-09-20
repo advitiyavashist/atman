@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from session_adapters import AMBIENT_TRANSPORT_VARS, TRANSPORT_BOARD_ENV
 from test_wakeup import run
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
@@ -159,9 +160,10 @@ class UiServer:
         self.marker = _board_marker(board, probe_prefix)
         self.port = _free_port()
         env = dict(os.environ, TICKETS_DIR=str(board))
+        # T-1107: the ui child must not inherit the suite runner's own
+        # session identity or transport.
         for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
-                    "TERM_SESSION_ID", "CURSOR_CONVERSATION_ID", "CODEX_THREAD_ID",
-                    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"):
+                    "TERM_SESSION_ID", *AMBIENT_TRANSPORT_VARS, TRANSPORT_BOARD_ENV):
             env.pop(var, None)
         ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
                   "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]

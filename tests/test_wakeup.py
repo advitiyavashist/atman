@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from session_adapters import AMBIENT_TRANSPORT_VARS
+from session_adapters import TRANSPORT_BOARD_ENV as ATMAN_TRANSPORT_BOARD
 from watch_reaper import collect_watch_pids_from_board
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
@@ -60,14 +62,20 @@ def run(board, *args, agent="", stdin="", env=None, cwd=None):
     # or no actor at all, get different (or no-record) ids and so cannot
     # inherit each other's recorded identity.
     for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
-                "TERM_SESSION_ID", "CURSOR_CONVERSATION_ID", "CODEX_THREAD_ID",
-                "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"):
+                "TERM_SESSION_ID", *AMBIENT_TRANSPORT_VARS):
         e.pop(var, None)
     if args and args[0] == "join" and len(args) > 1 and args[1]:
         actor = args[1]
     else:
         actor = agent or "__anonymous__"
     e["TICKET_SESSION_ID"] = "test-session-" + actor
+    # Every child here runs with its own HOME (above), so session_adapters
+    # treats it as an isolated board and refuses any transport it only
+    # inherited (T-1107). The suite's transport vars are scrubbed in
+    # conftest, so a socket a test sets is the test's own decoy, announced
+    # here for the board this run is actually against. The announcement names
+    # one board on purpose: a child that inherits it cannot use it elsewhere.
+    e[ATMAN_TRANSPORT_BOARD] = str(board)
     if env:
         e.update(env)
     where = cwd or (board.parent if board.parent.is_dir() else Path("/"))
@@ -88,7 +96,11 @@ def _wait_for_path(path, timeout=10.0, interval=0.05):
 
 
 @pytest.fixture
-def board(tmp_path):
+def board(tmp_path, monkeypatch):
+    # In-process session_adapters calls get the same announcement the CLI runs
+    # get from run(): this test's board owns whatever decoy transport the test
+    # sets, and no other board does (T-1107).
+    monkeypatch.setenv(ATMAN_TRANSPORT_BOARD, str(tmp_path / "repo" / ".tickets"))
     repo = tmp_path / "repo"
     repo.mkdir()
     (tmp_path / "home").mkdir()

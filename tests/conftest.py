@@ -12,7 +12,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
+from session_adapters import AMBIENT_TRANSPORT_VARS, TRANSPORT_BOARD_ENV  # noqa: E402
 from tmp_path_reaper import reap_green_basetemp  # noqa: E402
 from ui_server_harness import (  # noqa: E402
     leftover_suite_ui_children,
@@ -34,6 +37,22 @@ def pytest_sessionfinish(session, exitstatus):
         session.exitstatus = 1
         print("T-960: suite left ui children alive: %s" % leftover)
     reap_green_basetemp(session, exitstatus)
+
+
+@pytest.fixture(autouse=True)
+def _t1107_scrub_inherited_session_transport(monkeypatch):
+    """No test may inherit the transport of the session running the suite.
+
+    CLAUDE_CODE_MESSAGING_SOCKET/TOKEN, CODEX_THREAD_ID and
+    CURSOR_CONVERSATION_ID are process-global: whoever runs pytest inside a
+    live Claude/Codex/Cursor session hands every test a working wake path into
+    that session, and one scratch-board wake then lands in the operator's real
+    window (T-1107). A guard here, not per harness, so a new test file or a
+    direct in-process `session_adapters` call cannot miss it. A test that
+    wants a transport sets its own (decoy) value after this runs.
+    """
+    for var in (*AMBIENT_TRANSPORT_VARS, TRANSPORT_BOARD_ENV):
+        monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture(autouse=True)

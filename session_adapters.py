@@ -19,6 +19,11 @@ import subprocess
 import time
 import uuid
 
+try:
+    import pwd
+except ImportError:  # pragma: no cover - POSIX only, same as fcntl above
+    pwd = None
+
 
 ADAPTER_MODES = ("native", "supervised", "remote")
 PROVIDERS = ("claude", "codex", "cursor", "remote")
@@ -35,6 +40,119 @@ def cache_root():
 
 def board_hash(board):
     return hashlib.sha256(os.path.abspath(board).encode("utf-8")).hexdigest()[:16]
+
+
+def board_key(board):
+    """Identity of a board path for comparison: realpath, not abspath.
+
+    /tmp -> /private/tmp on macOS, a symlinked worktree and its real path, and
+    a relative TICKETS_DIR all have to compare equal, or a legitimate seat is
+    refused its own session (T-1107 regression).
+    """
+    return os.path.realpath(os.path.abspath(board or ""))
+
+
+# The harness's own transport env. It is process-global: every child of a live
+# session inherits it, which is exactly how a wake posted on a scratch board
+# reached the operator's live Claude session (T-1107).
+AMBIENT_TRANSPORT_VARS = (
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+    "CURSOR_CONVERSATION_ID", "CURSOR_SESSION_ID",
+)
+# A board announcing that the ambient transport really is its own. Board-scoped
+# on purpose: inheriting it names somebody else's board, so it cannot travel.
+TRANSPORT_BOARD_ENV = "ATMAN_SESSION_TRANSPORT_BOARD"
+
+
+def _real_home():
+    """The account's home from the password database, not $HOME.
+
+    $HOME is what a test, CI job or `quickstart --gate` redirects, so it is the
+    signal, never the reference.
+    """
+    if pwd is not None:
+        try:
+            return pwd.getpwuid(os.geteuid()).pw_dir or ""
+        except KeyError:
+            pass
+    return os.environ.get("HOME") or ""
+
+
+def default_cache_root():
+    return os.path.join(_real_home(), ".cache", "atman")
+
+
+def isolated_board_env():
+    """Why this process deliberately isolated its board state, else ''.
+
+    A redirected HOME or an explicit TICKETS_CACHE_DIR is the isolation the
+    T-1107 rule mandates for anyone testing wakes (tests, CI, `quickstart
+    --gate`, the app's own harness, a throwaway board in a live session).
+    """
+    home = os.environ.get("HOME") or ""
+    real = _real_home()
+    if home and real and board_key(home) != board_key(real):
+        return "isolated HOME=%s" % home
+    cache = (os.environ.get("TICKETS_CACHE_DIR") or "").strip()
+    if cache and board_key(cache) != board_key(default_cache_root()):
+        return "isolated TICKETS_CACHE_DIR=%s" % cache
+    return ""
+
+
+def transport_announced_for(board):
+    """True when ATMAN_SESSION_TRANSPORT_BOARD names this board.
+
+    An os.pathsep-separated list, because one session may legitimately hold
+    more than one board.
+    """
+    announced = (os.environ.get(TRANSPORT_BOARD_ENV) or "").strip()
+    if not announced:
+        return False
+    mine = board_key(board)
+    return any(board_key(one) == mine
+               for one in announced.split(os.pathsep) if one.strip())
+
+
+def ambient_session_key(provider):
+    """The session fingerprint the ambient environment is handing out, if any."""
+    if provider == "claude":
+        ident = (os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or "").strip()
+    elif provider == "codex":
+        ident = ((os.environ.get("CODEX_THREAD_ID")
+                  or os.environ.get("CODEX_SESSION_ID") or "").strip())
+    elif provider == "cursor":
+        ident = ((os.environ.get("CURSOR_CONVERSATION_ID")
+                  or os.environ.get("CURSOR_SESSION_ID") or "").strip())
+    else:
+        return None
+    return (provider, ident) if ident else None
+
+
+def borrowed_transport(board, key):
+    """Why this board may not use the ambient transport `key`, else ''.
+
+    The transport is global to the socket/thread, not to the cache, so this
+    cannot be decided by scanning cache_root(): an isolated board's cache is
+    empty by construction, which is why the first T-1107 attempt still leaked
+    under a temp HOME or a temp TICKETS_CACHE_DIR. Provenance is what tells a
+    real session apart from a child that merely inherited its env: a board
+    whose state is isolated has to ANNOUNCE the transport as its own
+    (ATMAN_SESSION_TRANSPORT_BOARD=<board>), and an announcement names one
+    board, so inheriting it refuses instead of leaking.
+    """
+    if not key:
+        return ""
+    if key != ambient_session_key(key[0]):
+        return ""
+    if transport_announced_for(board):
+        return ""
+    why = isolated_board_env()
+    if not why:
+        return ""
+    return ("inherited %s session transport (%s) on a board with %s; announce it with "
+            "%s=%s if this session really belongs to this board"
+            % (key[0], key[1], why, TRANSPORT_BOARD_ENV, os.path.abspath(board or "")))
 
 
 def endpoint_dir(board):
@@ -177,11 +295,6 @@ def commit_endpoint(board, seat, record, presented_lease=""):
     two seats cannot both scan-then-write the same provider identity.
     """
     key = session_key(record)
-    foreign = other_board_for_session(board, record)
-    if foreign:
-        return {"ok": False, "reason": (
-            "session already bound to another board (%s); refuse cross-board wake"
-            % foreign)}
     fp_fd = acquire_fingerprint_lock(board, key) if key else None
     fd = acquire_seat_lock(board, seat)
     try:
@@ -214,8 +327,9 @@ def _commit_endpoint_locked(board, seat, record, presented_lease=""):
     record["lease_id"] = uuid.uuid4().hex[:16]
     record["heartbeat_epoch"] = time.time()
     record.setdefault("heartbeat_at", record.get("at") or "")
-    record.setdefault("board", os.path.abspath(board))
-    record.setdefault("at", _iso_now())
+    # Where this endpoint was registered, by realpath, so a symlinked or
+    # relative board path is still the same board (T-1107).
+    record.setdefault("board", board_key(board))
     write_endpoint(board, seat, record)
     return {"ok": True, "fence": record["fence"], "lease_id": record["lease_id"],
             "record": redact_endpoint(record)}
@@ -321,59 +435,44 @@ def other_seat_for_session(board, seat, record):
     return None
 
 
-def _iter_foreign_endpoints(board):
-    mine = board_hash(board)
-    sessions = os.path.join(cache_root(), "sessions")
-    try:
-        names = os.listdir(sessions)
-    except OSError:
-        return
-    for h in names:
-        if h == mine:
-            continue
-        d = os.path.join(sessions, h)
-        if not os.path.isdir(d):
-            continue
-        try:
-            files = os.listdir(d)
-        except OSError:
-            continue
-        for fn in files:
-            if not fn.endswith(".json"):
-                continue
-            try:
-                with open(os.path.join(d, fn)) as f:
-                    ep = json.load(f)
-            except (IOError, ValueError):
-                continue
-            yield h, ep
+def foreign_board_for_record(board, ep):
+    """The other board this stored endpoint was registered for, else ''.
 
-
-def other_board_for_session(board, record, *, owner_only=False):
-    """Another board hash already owns this session fingerprint (T-1107).
-
-    Endpoints are per-board-hash, but the transport (Claude socket, Codex
-    thread, Cursor session) is process-global. A scratch board that inherits
-    the parent harness env must not claim or poke that transport.
-
-    When owner_only is True (wake path), only an earlier-or-equal `at`
-    on the other board counts as the owner, so a later stolen copy cannot
-    silence the board that registered first.
+    Compared by realpath (T-1107): a symlinked worktree path, a relative
+    TICKETS_DIR and /tmp vs /private/tmp are the same board, and refusing them
+    stranded a legitimate seat. A record with no stamp is pre-change and stays
+    wakeable on the board whose cache holds it.
     """
-    key = session_key(record)
-    if not key:
-        return None
-    my_at = (record or {}).get("at") or ""
-    for h, ep in _iter_foreign_endpoints(board):
-        if session_key(ep) != key:
-            continue
-        if owner_only:
-            other_at = (ep or {}).get("at") or ""
-            if other_at and (not my_at or other_at <= my_at):
-                return h
-            continue
-        return h
-    return None
+    bound = ((ep or {}).get("board") or "").strip()
+    if not bound:
+        return ""
+    other = board_key(bound)
+    return "" if other == board_key(board) else other
+
+
+def wake_refusal(board, seat, ep):
+    """'' when this board may poke this record, else a short refusal label.
+
+    One gate for every "can this seat be woken" surface -- wake_seat,
+    has_live_native_session and native_wake_online -- so a seat can never read
+    "native online" while the wake refuses (T-1107).
+    """
+    if not ep:
+        return ""
+    other = foreign_board_for_record(board, ep)
+    if other:
+        if not endpoint_still_live(ep):
+            # A dead foreign copy must never block this board forever: expire
+            # it and let the seat re-register.
+            lease, fence = _endpoint_lease_fence(ep)
+            removed = remove_endpoint_if_match(
+                board, seat, expected_lease=lease, expected_fence=fence)
+            return "endpoint stale (removed)" if removed else "no live endpoint"
+        return "refused (endpoint registered for another board: %s)" % other
+    why = borrowed_transport(board, session_key(ep))
+    if why:
+        return "refused (%s)" % why
+    return ""
 
 
 def redact_endpoint(ep):
@@ -833,6 +932,12 @@ def register_persistent(board, seat, harness, at_iso):
         return {"ok": False, "reason": "harness %r has no native session adapter" % harness}
     if provider == "remote":
         return {"ok": False, "reason": "remote seats use the schema-2 bridge, not join --persistent"}
+    # T-1107: an isolated board (its own HOME or TICKETS_CACHE_DIR) must not
+    # register the transport it merely inherited from the session that spawned
+    # it. Checked before probing, so a refused board pokes nothing at all.
+    borrowed = borrowed_transport(board, ambient_session_key(provider))
+    if borrowed:
+        return {"ok": False, "reason": borrowed}
     probe = probe_provider(provider)
     if not probe.get("ok"):
         return {"ok": False, "reason": probe.get("reason", "native transport unavailable")}
@@ -840,7 +945,7 @@ def register_persistent(board, seat, harness, at_iso):
     record = {"seat": seat, "agent_id": seat, "provider": provider,
               "mode": "native" if caps.get("native_inject") else "supervised",
               "pid": session_pid(), "at": at_iso, "capabilities": caps,
-              "board": os.path.abspath(board)}
+              "board": board_key(board)}
     if provider == "claude":
         sock = (os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or "").strip()
         token = (os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN") or "").strip()
@@ -1567,6 +1672,10 @@ def native_wake_online(board, seat):
     ep, _ = live_endpoint(board, seat)
     if ep is None or ep.get("mode") != "native":
         return False
+    # Same gate as the wake, or a seat reads "native online" while every wake
+    # is refused (T-1107).
+    if wake_refusal(board, seat, ep):
+        return False
     provider = ep.get("provider") or ""
     if provider == "codex":
         return _codex_thread_is_loaded((ep.get("thread") or "").strip())
@@ -1760,12 +1869,9 @@ def wake_seat(board, seat, text, harness=None, message_id=""):
     mid = str(message_id or "")
     provider = ep.get("provider") or ""
     lease, fence = _endpoint_lease_fence(ep)
-    bound = (ep.get("board") or "").strip()
-    if bound and os.path.abspath(bound) != os.path.abspath(board):
-        return "refused (session bound to another board)"
-    foreign = other_board_for_session(board, ep, owner_only=True)
-    if foreign:
-        return "refused (session bound to another board)"
+    refused = wake_refusal(board, seat, ep)
+    if refused:
+        return refused
     if expected and provider and expected != provider:
         remove_endpoint_if_match(board, seat, expected_lease=lease, expected_fence=fence)
         return "refused (harness %s != provider %s; removed stale endpoint)" % (harness, provider)
@@ -1798,6 +1904,10 @@ def has_live_native_session(board, seat):
     """
     ep, _ = live_endpoint(board, seat)
     if ep is None or ep.get("mode") != "native":
+        return False
+    # Same gate as the wake (T-1107): a borrowed or foreign-board endpoint is
+    # not a live native session for this board, so watch is not suppressed.
+    if wake_refusal(board, seat, ep):
         return False
     provider = ep.get("provider") or ""
     if provider == "codex":
