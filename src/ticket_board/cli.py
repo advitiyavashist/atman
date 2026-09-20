@@ -1956,6 +1956,8 @@ def cmd_graph(a, board):
         print("broken references:")
         for tid, miss in ghosts.items():
             print("  %s -> %s (no such ticket)" % (tid, ", ".join(miss)))
+            print("    repair: atm dep %s --drop %s   (re-point: add --after <id>)"
+                  % (tid, ",".join(miss)))
 
 
 def cmd_map(a, board):
@@ -3844,7 +3846,8 @@ def cmd_master(a, board):
               "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
-                t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
+                t["id"], t.get("owner", "?"), t["title"][:46],
+                _rv.review_queue_pin(t),
                 fmt_hours(hours_since(t.get("review_at", t["updated"]))),
                 ("  PR " + t["pr"]) if t.get("pr") else ""))
     print("")

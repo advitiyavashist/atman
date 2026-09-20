@@ -70,6 +70,22 @@ def displayed_review_head(t):
     return head if FULL_SHA_RE.fullmatch(head) else ""
 
 
+def review_queue_pin(t):
+    """`atm master` REVIEW QUEUE pin: branch@full40 so accept --sha is copyable."""
+    head = displayed_review_head(t)
+    commit = (t.get("commit") or "").strip()
+    if head:
+        if "@" in commit:
+            branch = commit.rsplit("@", 1)[0].strip()
+            if branch:
+                return "%s@%s" % (branch, head)
+        branch = (t.get("branch") or "").strip()
+        if branch:
+            return "%s@%s" % (branch, head)
+        return head
+    return commit or "?"
+
+
 def sha_match(a, b):
     a, b = (a or "").lower(), (b or "").lower()
     if not a or not b:

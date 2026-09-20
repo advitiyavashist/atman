@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 
 from test_wakeup import board, run  # noqa: F401
+from ui_server_harness import extract_ui_launch_token
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 
@@ -46,9 +47,21 @@ class _Server:
             self.stop()
             raise RuntimeError("tickets ui never came up on %d" % port)
 
-    def post(self, path, payload, headers=None, content_type="application/json", raw_body=None):
+    def launch_token(self):
+        if getattr(self, "_launch_token", None) is None:
+            with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=5) as r:
+                self._launch_token = extract_ui_launch_token(r.read().decode())
+        return self._launch_token
+
+    def post(self, path, payload, headers=None, content_type="application/json", raw_body=None, token=True):
         data = raw_body if raw_body is not None else json.dumps(payload).encode()
         head = {"Content-Type": content_type}
+        if token is True:
+            t = self.launch_token()
+            if t:
+                head["X-Atman-Token"] = t
+        elif token:
+            head["X-Atman-Token"] = token
         if headers:
             head.update(headers)
         req = urllib.request.Request(

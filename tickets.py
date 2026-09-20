@@ -37,10 +37,12 @@ import argparse
 import errno
 import glob
 import hashlib
+import hmac
 import io
 import json
 import os
 import re
+import secrets
 import shlex
 import sys
 import threading
@@ -3906,6 +3908,8 @@ def cmd_graph(a, board):
         print("broken references:")
         for tid, miss in ghosts.items():
             print("  %s -> %s (no such ticket)" % (tid, ", ".join(miss)))
+            print("    repair: atm dep %s --drop %s   (re-point: add --after <id>)"
+                  % (tid, ",".join(miss)))
 
 
 def cmd_map(a, board):
@@ -8010,7 +8014,8 @@ def cmd_master(a, board):
               "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
-                t["id"], t.get("owner", "?"), t["title"][:46], t.get("commit", "?"),
+                t["id"], t.get("owner", "?"), t["title"][:46],
+                _review_verdict().review_queue_pin(t),
                 fmt_hours(hours_since(t.get("review_at", t["updated"]))),
                 ("  PR " + t["pr"]) if t.get("pr") else ""))
     print("")
@@ -12456,6 +12461,7 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
 WORKER_PROMPT = """You are {agent}, a worker on the shared ticket board at {board} (repo {root}).
 TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
 {gate}
+{run}
 Rules: one ticket at a time; own git worktree, never main; `atm sync` before `atm review`;
 `atm update <id> "..."` every 45 minutes; finish with `atm review <id> --notes "paths, tests, decisions"`;
 never edit .tickets/ by hand; never run `atm clear`. Board-only comms: `atm msg`.
@@ -12493,6 +12499,9 @@ Your three jobs, every wake-up:
    (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
    keep one ticket per agent, spawn or brief workers when lanes are empty (`atm spawn <name> --model ...`).
    Log every non-obvious call: `atm master log "..."`. Post a short status pulse with `atm msg`.
+Optimization is fine; ENDLESS OVER-OPTIMIZATION is the bane. A check earns its place only if it could
+change what ships -- one that can only re-confirm something already confirmed is waste, however cheap.
+Verify a load-bearing claim once, properly; the third pass is the vice. Hand the rest to CI or the reviewer.
 Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
 {extra}"""
 
@@ -12516,6 +12525,9 @@ Your three jobs, every wake-up:
    (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
    keep one ticket per agent, spawn or brief workers when lanes are empty (`atm spawn <name> --model ...`).
    Log every non-obvious call: `atm master log "..."`. Post a short status pulse with `atm msg`.
+Optimization is fine; ENDLESS OVER-OPTIMIZATION is the bane. A check earns its place only if it could
+change what ships -- one that can only re-confirm something already confirmed is waste, however cheap.
+Verify a load-bearing claim once, properly; the third pass is the vice. Hand the rest to CI or the reviewer.
 Stop after that one bounded batch even if the review queue or inbox still has notification-only mail.
 {extra}"""
 
@@ -12834,7 +12846,8 @@ def seat_brief_text(board, owner):
         ticket_id=t.get("id") or "",
         ticket_title=(t.get("title") or "")[:80],
         ticket_status=LABEL.get(t.get("status") or "", ""),
-        review_head=(t.get("review_head") or "") if t.get("status") == "review" else "",
+        review_head=(_review_verdict().displayed_review_head(t)
+                     if t.get("status") == "review" else ""),
         scope=t.get("body") or "",
         reviewer=reviewer,
         usage_line=usage,
@@ -12924,7 +12937,8 @@ def prompt_text(a, board):
         parts.append(a.extra)
     sb = _seat_brief()
     body = WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                                gate=sb.GATE_ONE_LINER, extra="\n\n".join(parts))
+                                gate=sb.GATE_ONE_LINER, run=sb.RUN_ONE_LINER,
+                                extra="\n\n".join(parts))
     run_no = getattr(a, "run_no", None)
     if run_no is None:
         run_no = os.environ.get("TICKETS_RUN_NO") or ""
@@ -15343,6 +15357,32 @@ def _stop_requested(board, owner):
         pass
 
 
+# T-1097: --run-timeout is minutes (T-988). 90s cannot finish this repo's
+# tests (test_t1041_route_headroom.py alone is ~180s). Default stays 90 min;
+# spawn warns when the cap is below the floor.
+DEFAULT_RUN_TIMEOUT_MIN = 90
+RUN_TIMEOUT_FLOOR_MIN = 10
+
+
+def run_timeout_floor_warning(minutes):
+    """Warn when a seat run cap is too short to finish this repo's tests.
+
+    0 means no cap. The floor is minutes, matching --run-timeout.
+    """
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        return ""
+    if minutes <= 0 or minutes >= RUN_TIMEOUT_FLOOR_MIN:
+        return ""
+    return (
+        "warning: --run-timeout %s min is below the %s min floor "
+        "(this repo's tests need a longer seat run; "
+        "backgrounding a suite still loses the work when the run ends)"
+        % (minutes, RUN_TIMEOUT_FLOOR_MIN)
+    )
+
+
 def cmd_spawn(a, board):
     """Bring up a persistent worker: register it, give it a worktree, and start a
     detached watcher that launches the tool (with the chosen model) whenever the
@@ -15376,6 +15416,9 @@ def cmd_spawn(a, board):
     if not a.name:
         sys.exit("spawn needs a name (or --list)")
     owner = a.name
+    warn = run_timeout_floor_warning(getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN))
+    if warn and not a.stop:
+        print(warn)
     if not a.stop:
         _refuse_limited_seat(board, owner, "spawn")
     if a.stop:
@@ -15553,9 +15596,10 @@ def cmd_spawn(a, board):
         sys.exit("failure: spawn did not install a live watcher for %s "
                  "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; seat=%s pinned; log %s" % (
+    print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; run-timeout=%sm; seat=%s pinned; log %s" % (
         owner, pid, harness, model,
-        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs, owner, log_path))
+        effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs,
+        getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner, log_path))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
     # T-1076: what this seat's provider has left, from the recorded reading.
@@ -17185,6 +17229,8 @@ body[data-work-view=columns] #workJump{display:none}
 </div>
 </main>
 <script>
+const UI_TOKEN="";
+function writeHeaders(){const h={'Content-Type':'application/json'};if(UI_TOKEN)h['X-Atman-Token']=UI_TOKEN;return h}
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
 // Server sends timestamps as raw ISO-8601 UTC. Render in whatever timezone
@@ -17229,7 +17275,7 @@ function authReadiness(a){
 }
 async function reconnectAuth(name){
   try{
-    const r=await fetch('/auth-reconnect',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/auth-reconnect',{method:'POST',headers:writeHeaders(),
       body:JSON.stringify({agent:name})});
     const out=await r.json();
     const sel=(window.CSS&&CSS.escape)?CSS.escape(name):name;
@@ -17773,7 +17819,7 @@ document.getElementById('cSend').addEventListener('click',async()=>{
   localStorage.setItem('tickets-ui-from',from);
   btn.disabled=true;msg.className='';msg.textContent='posting…';
   try{
-    const r=await fetch('/msg',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/msg',{method:'POST',headers:writeHeaders(),
       body:JSON.stringify({from,text,to,re,kind})});
     const out=await r.json();
     if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
@@ -18890,12 +18936,46 @@ def _ui_auth_reconnect(board, payload):
     }
 
 
+def _ui_loopback_name(name):
+    name = (name or "").strip().lower()
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    return name in ("127.0.0.1", "localhost", "::1")
+
+
+def _ui_bind_host_ok(host):
+    """--host may only bind loopback. localhost-only is enforced, not a default."""
+    return _ui_loopback_name(host)
+
+
+def _ui_host_header_is_loopback(host_header):
+    """Host must be a loopback name (closes DNS rebinding; T-1105 / T-1103 §5)."""
+    raw = (host_header or "").strip()
+    if not raw:
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse("//" + raw)
+    return _ui_loopback_name(parsed.hostname or "")
+
+
+def _ui_new_launch_token():
+    return secrets.token_urlsafe(32)
+
+
+def _ui_token_ok(headers, token):
+    got = (headers.get("X-Atman-Token") or "").strip()
+    if not token or not got or len(got) != len(token):
+        return False
+    return hmac.compare_digest(got, token)
+
+
 def _ui_msg_origin_ok(headers):
     """Browser writes send Origin; it must match Host (same-origin).
 
     Local API clients (curl, urllib, tickets tests) omit Origin — that is
-    allowed once Content-Type is JSON and `from` is a registered agent.
+    allowed once Content-Type is JSON and the launch token is present.
     A present Origin that is missing, `null`, or a different host is rejected.
+    Host loopback is a separate check (_ui_host_header_is_loopback).
     """
     origin = (headers.get("Origin") or "").strip()
     if not origin:
@@ -18910,31 +18990,58 @@ def _ui_msg_origin_ok(headers):
     return parsed.netloc.lower() == host.lower()
 
 
-def _ui_page():
+def _ui_page(token=""):
     """T-889 hook: UI_HTML with the Work view module spliced in at its three
     named placeholders. Missing module -> the shell's own fallback graph."""
     mod = _safe(_work_view, None)
     css = getattr(mod, "WORK_CSS", "") if mod else ""
     html = getattr(mod, "WORK_HTML", "") if mod else ""
     js = getattr(mod, "WORK_JS", "") if mod else ""
-    return (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
+    page = (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
             .replace("<!--WORK_VIEW:html-->", html)
             .replace("<!--WORK_VIEW:js-->", js))
+    return page.replace('const UI_TOKEN="";',
+                        "const UI_TOKEN=%s;" % json.dumps(token or ""))
 
 
 def cmd_ui(a, board):
     """Local status UI: serves an auto-refreshing page, /board.json, and a
     composer POST at /msg that posts through post_message() -- same board,
     same messages.jsonl, no second store. /board.json?seat=<name> filters
-    messages to that agent-scoped thread (Advitiya PRIORITY agent chats)."""
+    messages to that agent-scoped thread (Advitiya PRIORITY agent chats).
+    Writes require a per-launch token; Host must be loopback (T-1105)."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     if a.json:
         print(json.dumps(board_snapshot(board), indent=2))
         return
+    if not _ui_bind_host_ok(a.host):
+        sys.exit("atm ui: --host must be loopback (127.0.0.1, localhost, ::1); got %s"
+                 % (a.host or ""))
+    token = _ui_new_launch_token()
 
     class H(BaseHTTPRequestHandler):
+        def _send_json(self, status, out):
+            body = json.dumps(out).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _gate(self, write=False):
+            if not _ui_host_header_is_loopback(self.headers.get("Host") or ""):
+                self._send_json(400, {"ok": False, "error": "host must be loopback"})
+                return False
+            if write and not _ui_token_ok(self.headers, token):
+                self._send_json(400, {"ok": False, "error": "launch token required"})
+                return False
+            return True
+
         def do_GET(self):
+            if not self._gate(write=False):
+                return
             if self.path.startswith("/board.json"):
                 from urllib.parse import parse_qs, urlparse
                 seat = (parse_qs(urlparse(self.path).query).get("seat") or [""])[0]
@@ -18947,7 +19054,7 @@ def cmd_ui(a, board):
                 })).encode()
                 ctype = "application/json"
             else:
-                body = _ui_page().encode()
+                body = _ui_page(token).encode()
                 ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
@@ -18957,18 +19064,15 @@ def cmd_ui(a, board):
             self.wfile.write(body)
 
         def do_POST(self):
+            if not self._gate(write=True):
+                return
             if self.path.startswith("/auth-reconnect"):
                 try:
                     payload = _ui_read_json_body(self)
                     status, out = _ui_auth_reconnect(board, payload)
                 except Exception as e:  # noqa: BLE001 - always answer, never hang
                     status, out = 400, {"ok": False, "executed": False, "ran": False, "error": str(e)}
-                body = json.dumps(out).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(status, out)
                 return
             if not self.path.startswith("/msg"):
                 self.send_response(404)
@@ -18991,12 +19095,7 @@ def cmd_ui(a, board):
                 status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
             except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
                 status, out = 400, {"ok": False, "error": str(e)}
-            body = json.dumps(out).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(status, out)
 
         def log_message(self, *args):
             pass
@@ -21047,7 +21146,9 @@ def main():
                    help="model runs this session then stop (default 1; 0 = loop until --stop)")
     c.add_argument("--persist", action="store_true", help="loop until spawn --stop / SIGTERM (sets --max-runs 0)")
     c.add_argument("--force", action="store_true", help="run once even if wake gates are empty")
-    c.add_argument("--run-timeout", type=int, default=90, help="minutes per run before it is killed (0 = none)")
+    c.add_argument("--run-timeout", type=int, default=DEFAULT_RUN_TIMEOUT_MIN,
+                   help="minutes per run before it is killed (default %s; 0 = none; "
+                        "warn below %s min)" % (DEFAULT_RUN_TIMEOUT_MIN, RUN_TIMEOUT_FLOOR_MIN))
     c.add_argument("--beat-every", type=int, default=0,
                    help="seconds between in-run heartbeats (0 = TICKETS_RUN_HEARTBEAT_SECS, default 30)")
     c.add_argument("--once", action="store_true", help="check once; exit 0 if work, 1 if not")
@@ -21085,7 +21186,7 @@ def main():
     c.add_argument("--every", type=int, default=60)
     c.add_argument("--exec", default="")
     c.add_argument("--cwd", default="")
-    c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--run-timeout", type=int, default=DEFAULT_RUN_TIMEOUT_MIN)
     c.add_argument("--safe", action="store_true",
                    help="watch confirms edits instead of running unattended (same as spawn --safe)")
     c.set_defaults(fn=cmd_boot)
@@ -21111,7 +21212,9 @@ def main():
                    help="target checkout path or origin slug for cross-repo spawn")
     c.add_argument("--base", default="", help="branch/ref to create the worktree from (default origin/main)")
     c.add_argument("--every", type=int, default=60)
-    c.add_argument("--run-timeout", type=int, default=90)
+    c.add_argument("--run-timeout", type=int, default=DEFAULT_RUN_TIMEOUT_MIN,
+                   help="minutes per run before it is killed (default %s; 0 = none; "
+                        "warn below %s min)" % (DEFAULT_RUN_TIMEOUT_MIN, RUN_TIMEOUT_FLOOR_MIN))
     c.add_argument("--heartbeat", type=int, default=0,
                    help="with --master: also wake every N minutes to drive the objective (0 = off)")
     c.add_argument("--persist", action="store_true",

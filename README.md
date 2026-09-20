@@ -57,7 +57,7 @@ talking to their own providers.
 ## One path
 
 Python 3.9+ and Git. Tested on one macOS machine:
-`git clone` plus `./install.sh`. Homebrew, Linux packages and pipx are planned.
+`git clone` plus `./install.sh`.
 
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
@@ -71,6 +71,21 @@ atm self                     # which file you are actually running
 `./install.sh --prefix DIR` places the symlinks in `DIR`; they still run
 `tickets.py` from this checkout. `--force` replaces the existing one on
 purpose. `atm` is the command; `tickets` is a compatibility alias.
+
+Or Homebrew on macOS, which installs the current tagged release instead of a
+checkout:
+
+```sh
+brew tap advitiyavashist/tap
+brew install atman
+atm --version                # tickets commit b34d423cac00266a2cc6fc23b94759ee04894f71 (verified release)
+```
+
+The formula `depends_on "python@3.13"`, so Homebrew installs and uses its own
+Python 3.13 even if you already have the Python 3.9+ the clone path needs.
+
+There is no PyPI package. `pip install atm` installs an unrelated project that
+happens to share the name; it is not Atman.
 
 ## Feel it in five minutes
 
@@ -130,20 +145,23 @@ purpose). Then, in your own repo:
 cd <your repo> && atm quickstart --agent <you>   # board + sample work + you, registered
 ```
 
+The sample tickets are T-001 through T-003. Remove them before you create your
+own (the walkthrough below does), or a `--deps T-001` of yours waits on a
+sample.
+
 Tell us where you got stuck: `atm feedback` prints a local-only, pasteable
 run summary (nothing leaves this machine) for a
 [friction report](https://github.com/advitiyavashist/atman/issues/new?template=friction-report.yml).
 
-In an existing git repo. `atm quickstart --remove` first if sample tickets
-are still T-001 through T-003 — otherwise the commands below hit the wrong
-ids.
+In an existing git repo:
 
 ```sh
 cd /path/to/your-project     # an existing git repo (git init if not)
 unset TICKETS_DIR            # a stale export wins over everything
 atm where                    # the board path atm will use
 atm quickstart --agent boss --roles backend
-atm ui                       # local app: Objective, Team, Work, Intervene
+atm ui                       # local app: Objective, Team, Work, Intervene (Ctrl-C to stop)
+atm quickstart --remove      # drop sample T-001..T-003; your first ticket is T-001
 ```
 
 `quickstart` writes `AGENTS.md`, `.gitignore` and `.cursor/rules/tickets.mdc`
@@ -151,6 +169,7 @@ without committing them. Two seats in your own shell: `boss` accepts,
 `worker` does the work.
 
 ```sh
+export TICKET_AGENT=boss
 atm master take
 atm objective "Add a CSV summary and a command that uses it" \
   --exit "summary command prints row and column counts"
@@ -160,6 +179,12 @@ atm create "CLI command that calls summarize()" --role backend --deps T-001 \
   --body "Cause: A ships summarize(). Change: add the command. Proof: command prints the summary."
 atm graph                    # T-002 (backend; waiting on T-001)
 ```
+
+If `atm graph` ever lists `broken references` (a dependency on a ticket that
+no longer exists, such as a removed sample), the repair is
+`atm dep <id> --drop <missing>`, plus `--after <id>` to re-point it. A
+checkout of `main` prints that line under each broken reference; the v0.3.0
+release does not yet.
 
 Dependencies are real `--after` edges (`atm create --deps` or `atm plan`).
 `atm review` pins a reviewable SHA. Human review is `atm accept --sha`
@@ -175,7 +200,7 @@ harness row.
    atm next                  # [>] IN PROGRESS T-001 ... owner=worker
    # ... write csv_summary.py and its test, commit ...
    atm review T-001 --notes "csv_summary.py summarize(path); test passes"
-   # pinned worker@76279da in <repo>/.git
+   # pinned worker@76279da in <repo>/.git (this checkout -- ...)
    ```
 
 2. Boss accepts that exact commit, then marks A done. `atm accept` refuses
@@ -197,10 +222,10 @@ harness row.
    ```sh
    export TICKET_AGENT=worker
    atm next
-   # [>] IN PROGRESS T-002  CLI command that calls summarize()  (after T-001)
+   # [>] IN PROGRESS T-002  CLI command that calls summarize()  (role=backend; owner=worker; after T-001)
    # Handoff from dependencies (all notes):
-   #   T-001 ... REVIEW: worker@76279da -- csv_summary.py summarize(path); test passes
-   #   T-001 ... worker@76279da -- summarize(path) -> dict in csv_summary.py
+   #   T-001 (CSV summary function): worker@76279da -- summarize(path) -> dict in csv_summary.py
+   #   T-001 (CSV summary function): ran the test: passes
    ```
 
 Claude Code, Codex and Cursor join the same board with their own identity,
@@ -235,7 +260,8 @@ repository.
 | Claim | Status on 2026-09-15 | Evidence |
 | --- | --- | --- |
 | Install: `git clone` + `./install.sh` | tested, one macOS machine | `tests/test_live_install.py`; walkthrough above |
-| Install: Homebrew on macOS | planned; formula in the repository, tap unpublished, no release tagged | `packaging/homebrew/atman.rb`; tap repository does not resolve |
+| Install: Homebrew on macOS (`brew tap advitiyavashist/tap && brew install atman`) | published: installs the current release, `v0.3.0`, and brings its own Python 3.13 via `depends_on "python@3.13"` | tap `advitiyavashist/homebrew-tap`, `Formula/atman.rb`; release `v0.3.0` tarball sha256 matches the formula; `packaging/homebrew/atman.rb` |
+| Install: PyPI | none: there is no PyPI package, and `pip install atm` installs an unrelated project | no upload from this repository |
 | Install: Linux packages, pipx | planned | no artifact in this repository yet |
 | Install: `pip install -e .` console scripts | not a supported preview path: the packaged `atm`/`tickets` is the smaller core-board CLI without `watch`, `spawn`, `hooks`, `ui` or `remote` | `pyproject.toml`; `src/ticket_board/cli.py` |
 | Claude Code seat takes tickets and reports back | tested on one macOS machine; public tests cover the hook, poke and wake path | `tests/test_t785_t789_all_provider_wake.py`; `tests/test_t857_claude_uds.py` |

@@ -23,7 +23,8 @@ def _same_origin_task(server, payload):
         origin + "/msg",
         data=json.dumps(payload).encode(),
         method="POST",
-        headers={"Content-Type": "application/json", "Origin": origin},
+        headers={"Content-Type": "application/json", "Origin": origin,
+                 "X-Atman-Token": server.launch_token()},
     )
     with urllib.request.urlopen(req, timeout=5) as response:
         return response.status, json.loads(response.read())
