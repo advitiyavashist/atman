@@ -35,6 +35,40 @@ Reads harness env vars only (never typed tokens). Endpoint files live under
 Capability probe fails closed with an actionable reason when transport is
 missing. `tickets self` reports probe/registration status.
 
+## Board scope of a transport (T-1107)
+
+The harness transport is process-global: `CLAUDE_CODE_MESSAGING_SOCKET`,
+`CODEX_THREAD_ID` and `CURSOR_CONVERSATION_ID` are inherited by every child of
+a live session, so anything running inside one (a test, CI, `quickstart
+--gate`, an in-session agent on a throwaway board) holds a working wake path
+into the operator's real window. That is how a wake posted on a scratch board
+was delivered into a live Claude Code session.
+
+Rules:
+
+- One live session **may** be joined to several boards, and each of those
+  boards can wake it. A second board is a normal operator setup (product repo
+  plus ops repo), not a leak, and refusing it strands the seat on "no live
+  endpoint" with nothing to recover with.
+- A board whose state is deliberately **isolated** — its own `HOME`, or a
+  `TICKETS_CACHE_DIR` that is not `~/.cache/atman` — may not register or poke
+  a transport it merely inherited. `join --persistent` refuses with the reason,
+  and `wake_seat`, `has_live_native_session` and `native_wake_online` all
+  refuse together, so a seat never reads "native online" while every wake is
+  refused.
+- Such a board can still use a transport that is genuinely its own by
+  announcing it: `ATMAN_SESSION_TRANSPORT_BOARD=<board path>` (an
+  `os.pathsep`-separated list for more than one board). The announcement names
+  a board, so inheriting it refuses instead of leaking, and
+  `quickstart --gate` and the test suite scrub it along with the transport
+  vars.
+- Ownership is never first-registrar: no board can claim a session and lock
+  another one out. Each endpoint records the board it was registered for
+  (by `realpath`, so a symlinked worktree, a moved repo and a relative
+  `TICKETS_DIR` are the same board), and a record found under another board's
+  cache is refused only while it is still live — a dead one is expired so the
+  seat can re-register.
+
 ## Wake path
 
 `tickets msg --to <seat>` writes the board first, then attempts native

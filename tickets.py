@@ -19383,9 +19383,16 @@ def _gate_env(root, board, seat=""):
     e["TICKETS_CACHE_DIR"] = os.path.join(root, "cache")
     e["TICKETS_DISPATCH_NO_SPAWN"] = "1"  # the demo runs the harness in the foreground
     e["TICKETS_GC_OPEN_PRS"] = "none"
+    # The session transport goes with the session id: the demo runs inside
+    # whoever's live Claude/Codex/Cursor session, and CLAUDE_CODE_MESSAGING_
+    # SOCKET & co. are inherited by every child, so a `join --persistent` in
+    # the scratch board would otherwise register -- and poke -- the operator's
+    # own session (T-1107).
     for var in ("TICKET_SEAT", "TICKETS_STOP_HOOK", "CLAUDE_CODE_SESSION_ID",
                 "CODEX_SESSION_ID", "CURSOR_SESSION_ID", "TERM_SESSION_ID",
-                "TICKET_SESSION_ID"):
+                "TICKET_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
+                "CLAUDE_CODE_MESSAGING_TOKEN", "CURSOR_CONVERSATION_ID",
+                "CODEX_THREAD_ID", "ATMAN_SESSION_TRANSPORT_BOARD"):
         e.pop(var, None)
     if seat:
         # A recorded per-seat session is what makes alice and bob two different
