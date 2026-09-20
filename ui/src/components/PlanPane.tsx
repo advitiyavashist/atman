@@ -16,7 +16,7 @@
  */
 
 import type { Plan, PlanNode } from "../api/types";
-import { acceptState, blockerChips, ownerLabel, runningLabel } from "../lib/map";
+import { acceptState, blockerDetail, ownerLabel, runningLabel, stepBlockers } from "../lib/map";
 import { Chip, Command, Failure, Missing } from "./bits";
 
 function Objective({ plan }: { plan: Plan }) {
@@ -47,7 +47,7 @@ function Step({
   onSelect: (id: string) => void;
 }) {
   const state = acceptState(node);
-  const chips = blockerChips(node);
+  const { chips, acceptCmd } = stepBlockers(node);
   const running = runningLabel(node, project);
   return (
     <li className="step" data-testid="plan-step" data-ticket={node.id}>
@@ -58,7 +58,9 @@ function Step({
         onClick={() => onSelect(node.id)}
       >
         <span className="step-id">{node.id}</span>
-        <span className="step-title">{node.title || <Missing what="untitled" />}</span>
+        <span className="step-title" title={node.title || undefined}>
+          {node.title || <Missing what="untitled" />}
+        </span>
         <span className="step-owner">{ownerLabel(node, project)}</span>
         <Chip tone={state.tone} title={state.corrected ? `the record's own label said "${state.corrected}"` : undefined}>
           {state.label}
@@ -74,18 +76,26 @@ function Step({
           This step is not accepted; the label on the record read “{state.corrected}”.
         </p>
       ) : null}
+      {acceptCmd ? (
+        // The state chip above has already said this step is not accepted;
+        // this is only the command that would change that.
+        <Command cmd={acceptCmd} />
+      ) : null}
       {chips.length ? (
         <ul className="blockers" data-testid="blockers">
-          {chips.map((c, i) => (
-            <li key={i}>
-              <Chip tone={c.tone} title={c.text}>
-                {c.label}
-                {c.on && c.on !== node.id ? ` · ${c.on}` : ""}
-              </Chip>
-              <span className="blocker-text">{c.text}</span>
-              {c.cmd ? <Command cmd={c.cmd} /> : null}
-            </li>
-          ))}
+          {chips.map((c, i) => {
+            const detail = blockerDetail(c);
+            return (
+              <li key={i}>
+                <Chip tone={c.tone} title={c.text}>
+                  {c.label}
+                  {c.on && c.on !== node.id ? ` · ${c.on}` : ""}
+                </Chip>
+                {detail ? <span className="blocker-text">{detail}</span> : null}
+                {c.cmd ? <Command cmd={c.cmd} /> : null}
+              </li>
+            );
+          })}
         </ul>
       ) : null}
     </li>
@@ -118,16 +128,28 @@ export function PlanPane({
     );
   }
 
-  const byId = new Map(plan.nodes.map((n) => [n.id, n]));
-  const layers = plan.layers.length ? plan.layers : [plan.nodes.map((n) => n.id)];
+  // The contract says nodes and layers are arrays. If a payload ever says
+  // otherwise, the screen names that instead of throwing: the operator needs to
+  // know the plan could not be read, not watch the column disappear.
+  const nodes = Array.isArray(plan.nodes) ? plan.nodes : [];
+  const shapeWrong = !Array.isArray(plan.nodes) || !Array.isArray(plan.layers);
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const declared = Array.isArray(plan.layers) ? plan.layers.filter((l) => Array.isArray(l)) : [];
+  const layers = declared.length ? declared : [nodes.map((n) => n.id)];
   const placed = new Set(layers.flat());
-  const loose = plan.nodes.filter((n) => !placed.has(n.id));
+  const loose = nodes.filter((n) => !placed.has(n.id));
 
   return (
     <section className="pane pane-plan" aria-label="Execution plan">
+      {shapeWrong ? (
+        <p className="failure" role="alert">
+          The plan payload is not the shape the contract describes (nodes and layers must be lists), so some of it
+          cannot be shown. Nothing here is a claim about the board.
+        </p>
+      ) : null}
       <Objective plan={plan} />
       <div className="counts">
-        {Object.entries(plan.counts).map(([k, v]) => (
+        {Object.entries(plan.counts || {}).map(([k, v]) => (
           <span key={k} className="count">
             <b>{v}</b> {k.replace(/_/g, " ")}
           </span>
@@ -168,7 +190,7 @@ export function PlanPane({
             </ul>
           </div>
         ) : null}
-        {!plan.nodes.length ? <p className="muted">This board's plan has no steps.</p> : null}
+        {!nodes.length ? <p className="muted">This board's plan has no steps.</p> : null}
       </div>
     </section>
   );

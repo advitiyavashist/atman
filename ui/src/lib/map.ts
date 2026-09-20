@@ -113,7 +113,55 @@ export function blockerChip(b: Blocker): BlockerChip {
 }
 
 export function blockerChips(node: { blockers?: Blocker[] }): BlockerChip[] {
-  return (node.blockers || []).map(blockerChip);
+  return (Array.isArray(node.blockers) ? node.blockers : []).map(blockerChip);
+}
+
+export interface StepBlockers {
+  chips: BlockerChip[];
+  /**
+   * The command that would accept THIS step, when its only problem is that it
+   * is finished without an accept.
+   */
+  acceptCmd: string;
+}
+
+/**
+ * The blockers to show beside a step, given that its state chip already says
+ * whether it is accepted.
+ *
+ * A finished-but-unaccepted step used to print the same phrase three times —
+ * the state chip, a blocker chip and the blocker's own sentence — and the
+ * override case printed *released by override (not accepted)* and then *done,
+ * not accepted* twice, so the step looked like it disagreed with itself. The
+ * `unaccepted` blocker for the step itself is therefore folded into the state
+ * chip, and only the thing the state chip cannot say — the command — is kept.
+ */
+export function stepBlockers(node: { id: string; blockers?: Blocker[] }): StepBlockers {
+  const chips: BlockerChip[] = [];
+  let acceptCmd = "";
+  for (const chip of blockerChips(node)) {
+    if (chip.kind === "unaccepted" && (!chip.on || chip.on === node.id)) {
+      acceptCmd = acceptCmd || chip.cmd;
+      continue;
+    }
+    chips.push(chip);
+  }
+  return { chips, acceptCmd };
+}
+
+/**
+ * The record's own sentence, when it adds something the chip's word does not.
+ *
+ * "hold: hold" is noise; "seat rev limited until 17:40" beside *seat limited*
+ * is the detail that matters.
+ */
+export function blockerDetail(chip: BlockerChip): string {
+  const text = (chip.text || "").trim();
+  if (!text) return "";
+  const label = chip.label.toLowerCase();
+  const lower = text.toLowerCase();
+  if (lower === label || lower === chip.kind.toLowerCase()) return "";
+  return text;
 }
 
 /* -------------------------------------------------------------------- usage */
@@ -365,6 +413,8 @@ export interface ReviewHead {
   label: string;
   /** "" when there is nothing to say; else why the length is not 40. */
   note: string;
+  /** true when the board holds no review head at all. */
+  missing: boolean;
 }
 
 /**
@@ -376,10 +426,13 @@ export interface ReviewHead {
  */
 export function reviewHead(review: { head: string; head_len: number; label: string }): ReviewHead {
   const head = (review.head || "").trim();
-  if (!head) return { head: "", label: review.label || "", note: `no review head ${NOT_RECORDED}` };
+  // `missing` rather than a note, so a caller cannot end up printing a phrase
+  // like "no review head not recorded" by pairing this with its own wording.
+  if (!head) return { head: "", label: review.label || "", note: "", missing: true };
   return {
     head,
     label: review.label || "",
     note: head.length === 40 ? "" : `${review.head_len || head.length} characters, not a 40-character sha`,
+    missing: false,
   };
 }

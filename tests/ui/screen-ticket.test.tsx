@@ -228,7 +228,8 @@ describe("the drill-down", () => {
     expect(pane).toHaveTextContent("no structured verdict on this ticket");
     expect(pane).toHaveTextContent("no handoff note");
     expect(pane).toHaveTextContent("no steers on this ticket");
-    expect(pane).toHaveTextContent("no review head not recorded");
+    expect(pane).toHaveTextContent("no review head recorded");
+    expect(pane.textContent).not.toContain("no review head not recorded");
   });
 
   it("reports a ticket that could not be read", async () => {

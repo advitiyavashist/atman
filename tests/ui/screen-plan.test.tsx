@@ -152,6 +152,52 @@ describe("the execution plan", () => {
     expect(within(s).queryByText("accepted by rev")).toBeNull();
   });
 
+  it("says a finished-but-unaccepted step is unaccepted exactly once", async () => {
+    const { api } = fakeApi({ plan: PLAN });
+    render(<App api={api} />);
+    await waitFor(() => expect(screen.getAllByTestId("plan-step")).toHaveLength(6));
+    const said = step("T-2").textContent || "";
+    // One state chip, and the command that would change it — not the same
+    // sentence three times over.
+    expect(said.match(/done, not accepted/g) || []).toHaveLength(1);
+    expect(said).toContain("atm accept T-2");
+  });
+
+  it("does not contradict itself on a step released by override", async () => {
+    const released = node({
+      id: "T-8",
+      title: "Released by override, never accepted",
+      status: "done",
+      status_label: "done, released by override (not accepted)",
+      phase: "done",
+      owner: "scout",
+      accepted: false,
+      released: true,
+      unverified: true,
+      blockers: [{ kind: "unaccepted", on: "T-8", text: "done, not accepted", cmd: "atm accept T-8 --sha <review head>" }],
+    });
+    const { api } = fakeApi({ plan: { ...PLAN, nodes: [released], layers: [["T-8"]], order: ["T-8"] } });
+    render(<App api={api} />);
+    const said = (await waitFor(() => step("T-8"))).textContent || "";
+    expect(said).toContain("done, released by override (not accepted)");
+    // The old screen then added "done, not accepted" twice underneath it.
+    expect(said.match(/(?<!released by override \()done, not accepted(?!\))/g) || []).toHaveLength(0);
+    expect(said).toContain("atm accept T-8");
+  });
+
+  it("gives a long unbroken title somewhere to be read", async () => {
+    const long = node({
+      id: "T-9",
+      title: "T" + "o".repeat(120) + "long",
+      status: "open",
+      status_label: "open",
+    });
+    const { api } = fakeApi({ plan: { ...PLAN, nodes: [long], layers: [["T-9"]], order: ["T-9"] } });
+    render(<App api={api} />);
+    const title = await waitFor(() => within(step("T-9")).getByTitle(long.title));
+    expect(title).toHaveTextContent(long.title);
+  });
+
   it("tells a dependency that is not accepted from one that is still open", async () => {
     const { api } = fakeApi({ plan: PLAN });
     render(<App api={api} />);

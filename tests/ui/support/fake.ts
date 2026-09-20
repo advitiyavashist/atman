@@ -27,6 +27,18 @@ export interface FakeParts {
   writeToken?: string;
   /** Older pages, keyed by the `before` cursor the app sends. */
   pages?: Record<string, Partial<Thread>>;
+  /**
+   * Answers that bypass the fixture generator entirely.
+   *
+   * Everything else here is schema-validated, which is the point — but a
+   * payload the contract *forbids* cannot be built that way, and the app still
+   * has to survive one. `raw` is how a test hands a screen a `nodes` that is
+   * not a list, or a `board` with no `agents` at all, to prove the page shows
+   * an error rather than nothing.
+   */
+  raw?: Partial<Record<"session" | "projects" | "board" | "plan" | "lead" | "thread" | "needs-you", unknown>>;
+  /** Routes that fail only after their first successful read, for the poll path. */
+  failAfterFirst?: Partial<Record<"board" | "plan" | "lead" | "thread" | "needs-you", string>>;
 }
 
 export interface Fake {
@@ -43,9 +55,20 @@ export function fakeApi(parts: FakeParts = {}): Fake {
   const leadSet: string[] = [];
   const calls: string[] = [];
 
+  const seen: Record<string, number> = {};
+
   function boom(route: keyof NonNullable<FakeParts["fail"]>): Promise<never> | null {
     const why = parts.fail?.[route];
-    return why ? Promise.reject(new Error(why)) : null;
+    if (why) return Promise.reject(new Error(why));
+    seen[route] = (seen[route] || 0) + 1;
+    const later = (parts.failAfterFirst as Record<string, string> | undefined)?.[route];
+    if (later && seen[route] > 1) return Promise.reject(new Error(later));
+    return null;
+  }
+
+  function raw(route: string): Promise<never> | Promise<unknown> | null {
+    const value = (parts.raw as Record<string, unknown> | undefined)?.[route];
+    return value === undefined ? null : (Promise.resolve(value) as Promise<unknown>);
   }
 
   const session = fixture<Session>("session.json", {
@@ -83,6 +106,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
       calls.push(`board:${project ?? ""}`);
       return (
         boom("board") ??
+        (raw("board") as never) ??
         Promise.resolve(fixture<Board>("board.json", { project: project || PROJECT, app: { project: project || PROJECT, operator: "ada", operator_note: "", lead: "planner", lead_note: "" }, ...parts.board }))
       );
     },
@@ -90,6 +114,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
       calls.push(`plan:${project ?? ""}`);
       return (
         boom("plan") ??
+        (raw("plan") as never) ??
         Promise.resolve(fixture<Plan>("plan.json", { project: project || PROJECT, available: true, ...parts.plan }))
       );
     },
@@ -97,6 +122,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
       calls.push(`lead:${project ?? ""}`);
       return (
         boom("lead") ??
+        (raw("lead") as never) ??
         Promise.resolve(
           fixture<Lead>("lead.json", {
             project: project || PROJECT,
@@ -112,6 +138,8 @@ export function fakeApi(parts: FakeParts = {}): Fake {
       calls.push(`thread:${opts.project ?? ""}:${opts.with ?? ""}:${opts.before ?? ""}`);
       const failed = boom("thread");
       if (failed) return failed;
+      const given = raw("thread");
+      if (given) return given as Promise<Thread>;
       if (opts.before) {
         const page = parts.pages?.[opts.before];
         return Promise.resolve(

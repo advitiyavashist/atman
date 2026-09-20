@@ -35,7 +35,7 @@ function HarnessBadge({ post }: { post: Post }) {
       data-testid="harness-badge"
     >
       {h.text}
-      {h.recorded ? "" : " ·not recorded"}
+      {h.recorded ? null : <span className="harness-note"> · not recorded</span>}
     </span>
   );
 }
@@ -377,6 +377,13 @@ export function LeadPane({
   return (
     <section className="pane pane-chat" aria-label="Chat with the lead">
       <header className="pane-head">
+        <button
+          type="button"
+          className="skip"
+          onClick={() => document.getElementById("composer-text")?.focus()}
+        >
+          Skip to the composer
+        </button>
         <h2 className="pill">
           lead ·{" "}
           {lead.lead ? (

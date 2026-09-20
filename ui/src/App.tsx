@@ -51,6 +51,22 @@ function routeFromHash(): { view: ViewName; ticket: string } {
   return { view, ticket };
 }
 
+/**
+ * What `main.tsx` mounts: the app inside a boundary of its own.
+ *
+ * The three column boundaries cannot catch a throw in the shell above them,
+ * and without this one such a throw leaves `#root` empty with nothing but a
+ * console line — the least honest failure this app could have. This one is the
+ * floor: whatever happens, the page says something.
+ */
+export function Root({ api }: { api?: AtmanApi } = {}) {
+  return (
+    <Boundary what="The app">
+      <App api={api} />
+    </Boundary>
+  );
+}
+
 export function App({ api: injected }: { api?: AtmanApi } = {}) {
   const api = useMemo(() => injected ?? new AtmanApi(), [injected]);
   const clock = useClock();
@@ -111,7 +127,33 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
     goTo(view, id);
   }
 
-  const knownTickets = useMemo(() => ticketIdsOf(plan.data?.nodes || []), [plan.data]);
+  // Shapes are checked before they are walked, because everything from here
+  // up to <Root> is outside the per-column boundaries: a throw here blanks the
+  // page, and a blank page looks exactly like an empty board.
+  /**
+   * A failed refresh does not erase what is already on screen.
+   *
+   * A pane is handed its error only when it has nothing to show instead:
+   * otherwise the last good read stays up and the freshness line carries the
+   * failure, because wiping a screen an operator is reading is both less
+   * useful and less honest than saying "this is what we last saw, and the last
+   * read failed".
+   */
+  const stale = (r: { data: unknown; error: unknown }) => (r.data ? null : r.error);
+  const failedReads = [
+    board.error ? "board" : "",
+    plan.error ? "plan" : "",
+    lead.error ? "lead" : "",
+    thread.error ? "thread" : "",
+    needsYou.error ? "needs you" : "",
+  ].filter(Boolean);
+
+  const seats = Array.isArray(board.data?.agents) ? board.data.agents : null;
+  const runGroups = Array.isArray(board.data?.agent_map?.groups) ? board.data.agent_map.groups : null;
+  const knownTickets = useMemo(
+    () => ticketIdsOf(Array.isArray(plan.data?.nodes) ? plan.data.nodes : []),
+    [plan.data],
+  );
   const operator = session.data?.operator ?? lead.data?.operator ?? "";
   const operatorNote = session.data?.operator_note ?? lead.data?.operator_note ?? "";
 
@@ -143,13 +185,13 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
 
   const centre =
     view === "needs-you" ? (
-      <NeedsYouPane data={needsYou.data} error={needsYou.error} onTicket={openTicket} />
+      <NeedsYouPane data={needsYou.data} error={stale(needsYou)} onTicket={openTicket} />
     ) : view === "fleet" ? (
-      <FleetPane board={board.data} error={board.error} project={project} />
+      <FleetPane board={board.data} error={stale(board)} project={project} />
     ) : view === "runs" ? (
-      <RunsPane board={board.data} error={board.error} project={project} onTicket={openTicket} />
+      <RunsPane board={board.data} error={stale(board)} project={project} onTicket={openTicket} />
     ) : (
-      <PlanPane plan={plan.data} error={plan.error} project={project} selected={selected} onSelect={openTicket} />
+      <PlanPane plan={plan.data} error={stale(plan)} project={project} selected={selected} onSelect={openTicket} />
     );
 
   return (
@@ -164,11 +206,9 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
         }}
         view={view}
         onView={goView}
-        needsYouCount={needsYou.data?.count ?? null}
-        seatCount={board.data?.agents.length ?? null}
-        runningCount={
-          board.data ? (board.data.agent_map?.groups || []).reduce((n, g) => n + (g.running || 0), 0) : null
-        }
+        needsYouCount={typeof needsYou.data?.count === "number" ? needsYou.data.count : null}
+        seatCount={seats ? seats.length : null}
+        runningCount={runGroups ? runGroups.reduce((n, g) => n + (Number(g?.running) || 0), 0) : null}
         clock={clock}
       />
 
@@ -187,7 +227,9 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
         </div>
         <div className="topbar-fresh muted" data-testid="freshness">
           {board.readAt ? `board read ${ago(board.readAt.toISOString())}` : "reading the board…"}
-          {board.error ? " · last read failed" : ""}
+          {failedReads.length ? (
+            <span className="missing"> · last read failed: {failedReads.join(", ")}</span>
+          ) : null}
         </div>
         <div className="tabs" role="tablist" aria-label="Panes">
           <button
@@ -218,9 +260,9 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
               api={api}
               project={project}
               lead={lead.data}
-              leadError={lead.error}
+              leadError={stale(lead)}
               thread={thread.data}
-              threadError={thread.error}
+              threadError={stale(thread)}
               knownTickets={knownTickets}
               onTicket={openTicket}
               onReload={() => {
@@ -238,7 +280,7 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
             <Boundary what="The ticket detail">
               <TicketPane
                 ticket={ticket.data}
-                error={ticket.error}
+                error={stale(ticket)}
                 loading={ticket.loading}
                 onClose={() => goTo(view, "")}
                 onTicket={openTicket}

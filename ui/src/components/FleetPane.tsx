@@ -2,9 +2,15 @@
  * FLEET — this project's seats, from `GET /api/v1/board` (`agents[]`).
  *
  * State, harness, lifecycle, wake mode, limit, auth and reachability, per seat
- * as `seat@project`. A seat whose harness the board never recorded reads
- * `unknown`: the snapshot no longer defaults it to a provider, and this screen
- * would show the honest value either way.
+ * as `seat@project`.
+ *
+ * **The harness column is not evidence, and this screen says so.** This route
+ * still defaults `agents[].harness` for a seat with no workforce entry, so a
+ * seat whose harness was never recorded arrives here already wearing a
+ * provider's name. The app cannot recover the truth from that — there is no
+ * "was it recorded" flag on this route — so it refuses to vouch for the value
+ * instead of dressing it up. T-1106 (#267) fixes the default; the chat's
+ * per-post badge is already honest because `post.harness.recorded` exists.
  *
  * Read-only, like the CLI's own view. Recovery is a command, shown to copy.
  */
@@ -17,20 +23,25 @@ import { Chip, Command, Failure, Missing } from "./bits";
 export function FleetPane({ board, error, project }: { board: Board | null; error: unknown; project: string }) {
   if (error) return <Failure what="The fleet" error={error} />;
   if (!board) return <p className="muted">Reading the fleet…</p>;
+  // A snapshot whose lists are missing is reported, not walked.
+  const agents = Array.isArray(board.agents) ? board.agents : null;
+  const usage = Array.isArray(board.provider_usage) ? board.provider_usage : [];
   return (
     <section className="pane pane-fleet" aria-label="Fleet">
       <header className="pane-head">
         <h2>Fleet</h2>
-        <span className="muted">{board.agents.length} seats</span>
+        <span className="muted">{agents ? `${agents.length} seats` : "seat list unreadable"}</span>
       </header>
-      <p className="muted">
-        The harness here is the seat's current value in the board's workforce record, not a stamp on a run or a
-        post. A post's badge (in the chat) is the one that says whether it was recorded at the time.
+      <p className="missing" data-testid="fleet-harness-caveat">
+        Do not read the harness column as a record. This route still fills it in for a seat that has no workforce
+        entry at all, so a seat whose harness was never recorded can appear here as a provider name — T-1106
+        (#267) is the fix, and until it lands the app cannot tell the two apart on this screen. The per-post badge
+        in the chat is the honest one: it says when a harness was not recorded.
       </p>
 
-      {board.provider_usage.length ? (
+      {usage.length ? (
         <ul className="usage" data-testid="fleet-usage">
-          {board.provider_usage.map((u, i) => {
+          {usage.map((u, i) => {
             // provider_usage rows in the snapshot carry no checked_at, so the
             // age is unknown here and says so rather than implying "now".
             const line = usageLine({
@@ -55,11 +66,16 @@ export function FleetPane({ board, error, project }: { board: Board | null; erro
         </ul>
       ) : null}
 
-      {board.agents.length === 0 ? (
+      {agents === null ? (
+        <p className="failure" role="alert">
+          This snapshot carries no seat list, so no seats are shown. That is a shape the contract does not allow,
+          not a board with no seats.
+        </p>
+      ) : agents.length === 0 ? (
         <Missing what="no seats registered on this board" />
       ) : (
         <ul className="seats" data-testid="seats">
-          {board.agents.map((a) => {
+          {agents.map((a) => {
             const recovery = (a.auth_surface as { recovery?: { cmd?: string } }).recovery?.cmd || "";
             return (
               <li key={a.name} className="seat">

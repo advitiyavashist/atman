@@ -208,6 +208,24 @@ describe("chat with the lead", () => {
     expect(calls.some((c) => c.startsWith("thread:alpha:planner:m2"))).toBe(true);
   });
 
+  it("puts the composer one tab away, past a thread of copy buttons", async () => {
+    // A hundred posts is a few hundred focusable controls between the top of
+    // the pane and the composer; the skip control is the first tab stop.
+    const user = userEvent.setup();
+    const many = Array.from({ length: 12 }, (_, i) =>
+      post({ id: `m${i}`, from: "planner", author: "planner@alpha", text: `note ${i}` }),
+    );
+    const { api } = fakeApi({ lead: WORKING, thread: { messages: many } });
+    render(<App api={api} />);
+    const skip = await screen.findByRole("button", { name: /Skip to the composer/ });
+    const chat = screen.getByLabelText("Chat with the lead");
+    const focusable = within(chat).getAllByRole("button");
+    expect(focusable.length).toBeGreaterThan(12);
+    expect(focusable[0]).toBe(skip);
+    await user.click(skip);
+    expect(screen.getByLabelText("Tell the lead")).toHaveFocus();
+  });
+
   it("posts through the composer as the operator", async () => {
     const user = userEvent.setup();
     const { api, posted } = fakeApi({ lead: WORKING, thread: { messages: [LEAD_POST] } });

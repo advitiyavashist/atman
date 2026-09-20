@@ -158,13 +158,42 @@ describe("fleet", () => {
     expect(seats).toHaveTextContent("atm auth reconnect rev");
   });
 
-  it("shows a seat with no recorded harness as unknown, not as a provider", async () => {
+  it("shows a harness value the route gives it, whatever it is", async () => {
     const user = userEvent.setup();
     const { api } = fakeApi({ board: BOARD });
     render(<App api={api} />);
     await user.click(await screen.findByRole("button", { name: /Fleet/ }));
     const seats = await screen.findByTestId("seats");
+    // BOARD's second seat carries "unknown" — but note that the live server
+    // does NOT return "unknown" here for a seat with no workforce entry: this
+    // route still defaults the field, so an unrecorded seat arrives wearing a
+    // provider name (T-1106 / #267 is the fix). That is why the next test
+    // exists: on this screen the app cannot tell the two apart, so it must not
+    // vouch for the column at all.
     expect(within(seats).getAllByText("unknown").length).toBeGreaterThan(0);
+  });
+
+  it("does not vouch for the harness column, because this route still defaults it", async () => {
+    const user = userEvent.setup();
+    // What the live API actually returns for two seats with no workforce entry
+    // at all: a provider name, indistinguishable from a recorded one.
+    const defaulted = {
+      ...BOARD,
+      agents: [
+        { ...BOARD.agents![0], name: "nohar", harness: "claude" },
+        { ...BOARD.agents![0], name: "ada", harness: "claude" },
+      ],
+    };
+    const { api } = fakeApi({ board: defaulted });
+    render(<App api={api} />);
+    await user.click(await screen.findByRole("button", { name: /Fleet/ }));
+    const caveat = await screen.findByTestId("fleet-harness-caveat");
+    expect(caveat).toHaveTextContent(/still fills it in for a seat that has no workforce entry/);
+    expect(caveat).toHaveTextContent("#267");
+    // And it must not claim the value came from a record.
+    const pane = screen.getByLabelText("Fleet").textContent || "";
+    expect(pane).not.toMatch(/current value in the board's workforce record/);
+    expect(pane).toMatch(/nohar@alpha/);
   });
 
   it("shows a provider reading from the snapshot as having no age", async () => {

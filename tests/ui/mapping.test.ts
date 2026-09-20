@@ -15,6 +15,7 @@ import {
   acceptState,
   authorOf,
   blockerChip,
+  blockerDetail,
   harnessChip,
   receiptLine,
   reviewHead,
@@ -22,6 +23,7 @@ import {
   runTokens,
   runningLabel,
   ownerLabel,
+  stepBlockers,
   textParts,
   usageLine,
   verdictChip,
@@ -257,8 +259,17 @@ describe("identity, links and heads", () => {
   });
 
   it("says when a head is not a 40-character sha instead of padding it", () => {
-    expect(reviewHead({ head: "9c1e5a0", head_len: 7, label: "" }).note).toContain("not a 40-character sha");
-    expect(reviewHead({ head: "", head_len: 0, label: "" }).note).toContain("not recorded");
+    const short = reviewHead({ head: "9c1e5a0", head_len: 7, label: "" });
+    expect(short.note).toContain("not a 40-character sha");
+    expect(short.missing).toBe(false);
+  });
+
+  it("reports a missing head as a flag, not as words a caller can double up", () => {
+    // The screen used to print "no review head not recorded", because it
+    // wrapped this note in its own "no ..." phrasing.
+    const none = reviewHead({ head: "", head_len: 0, label: "" });
+    expect(none.missing).toBe(true);
+    expect(none.note).toBe("");
   });
 
   it("names the running seat and the owner as seat@project", () => {
@@ -302,5 +313,59 @@ describe("verdicts from records the contract does not pin", () => {
     expect(verdictChip("")).toBeNull();
     expect(verdictChip(null)).toBeNull();
     expect(verdictChip(undefined)).toBeNull();
+  });
+});
+
+describe("a step says its state once", () => {
+  it("folds the step's own unaccepted blocker into the state chip, keeping the command", () => {
+    // Before this, a finished-but-unaccepted step printed "done, not accepted"
+    // three times: the state chip, the blocker chip, and the blocker's text.
+    const n = node({
+      id: "T-2",
+      status: "done",
+      accepted: false,
+      unverified: true,
+      status_label: "done, not accepted",
+      blockers: [{ kind: "unaccepted", on: "T-2", text: "done, not accepted", cmd: "atm accept T-2 --sha <review head>" }],
+    });
+    const { chips, acceptCmd } = stepBlockers(n);
+    expect(chips).toHaveLength(0);
+    expect(acceptCmd).toBe("atm accept T-2 --sha <review head>");
+    expect(acceptState(n).label).toBe("done, not accepted");
+  });
+
+  it("does not fold an unaccepted blocker that is about another ticket", () => {
+    const n = node({
+      id: "T-5",
+      blockers: [{ kind: "unaccepted", on: "T-2", text: "done, not accepted", cmd: "atm accept T-2" }],
+    });
+    expect(stepBlockers(n).chips).toHaveLength(1);
+    expect(stepBlockers(n).acceptCmd).toBe("");
+  });
+
+  it("keeps every other blocker, in order", () => {
+    const n = node({
+      id: "T-4",
+      blockers: [
+        { kind: "dep_open", on: "T-3", text: "dep T-3 still in flight", cmd: "atm show T-3" },
+        { kind: "seat_limited", on: "rev", text: "seat rev limited until 17:40", cmd: "atm harness usage" },
+        { kind: "unaccepted", on: "T-4", text: "done, not accepted", cmd: "atm accept T-4" },
+      ],
+    });
+    const { chips, acceptCmd } = stepBlockers(n);
+    expect(chips.map((c) => c.kind)).toEqual(["dep_open", "seat_limited"]);
+    expect(acceptCmd).toBe("atm accept T-4");
+  });
+
+  it("drops a blocker sentence that only repeats its own chip", () => {
+    expect(blockerDetail(blockerChip({ kind: "hold", on: "T-1", text: "hold", cmd: "" }))).toBe("");
+    expect(blockerDetail(blockerChip({ kind: "capture", on: "T-1", text: "capture", cmd: "" }))).toBe("");
+    expect(
+      blockerDetail(blockerChip({ kind: "seat_limited", on: "rev", text: "seat rev limited until 17:40", cmd: "" })),
+    ).toBe("seat rev limited until 17:40");
+  });
+
+  it("survives a node whose blockers are not a list", () => {
+    expect(stepBlockers({ id: "T-1", blockers: "nope" as never }).chips).toEqual([]);
   });
 });

@@ -98,7 +98,12 @@ records yet, so prose containing the word "ruling" is still an ask, never a
 ruling. Answering happens in the chat.
 
 **Fleet** — this project's seats: state, harness, lifecycle, wake mode,
-reachability, limit, auth, with the recovery command where there is one.
+reachability, limit, auth, with the recovery command where there is one. The
+screen says in so many words that **the harness column is not a record**: this
+route still fills the field in for a seat with no workforce entry, so an
+unrecorded harness can appear here as a provider name, and the app has no way
+to tell the two apart (T-1106 / #267 is the fix). The chat's per-post badge is
+the honest one.
 
 **Runs** — seat runs grouped by ticket, with elapsed time and token counts, and
 `unknown` wherever a count was never recorded.
@@ -106,7 +111,13 @@ reachability, limit, auth, with the recovery command where there is one.
 Anything the board does not hold is rendered, visibly, as `unknown` or *not
 recorded*, in italics. A read that fails says so where the data would have
 been: a screen of nothing would look exactly like an empty board, and those are
-different things.
+different things. When a **refresh** fails after a good read, the last good data
+stays on screen and the line at the top names the read that failed — wiping a
+screen someone is reading would be both less useful and less honest.
+
+Keyboard: the first tab stop in the chat is **Skip to the composer**, because a
+hundred-post thread is a few hundred controls deep. Focus is visible on
+everything, and every state has a word as well as a colour.
 
 ## Develop it
 
@@ -137,9 +148,19 @@ dist/assets/*.js` is 0 after `npm run build -w ui`.
 ## Test it
 
 ```sh
-npm test -w ui          # vitest: data mapping + one component test per screen
+npm test -w ui          # vitest: 143 tests, 10 files
 npm run build -w ui     # tsc -b && vite build — also the type-check gate
 ```
+
+| file | what it holds to account |
+|---|---|
+| `mapping.test.ts` | every honesty rule as a pure function: blocker chips, accept states, usage age, unknown harness, tokens, receipts, review head, ticket links, verdict shapes, one phrase per step |
+| `client.test.ts` | where the app may talk (loopback only), what it sends, what it refuses to send |
+| `writes.test.ts` | the `/api/v1/lead` **request** body against `lead-request.json`, and both refusal paths |
+| `polling.test.ts` | a failed refresh keeps the last good read and the freshness line names it |
+| `blanking.test.tsx` | the payload shapes and the shell throw that used to leave an empty page |
+| `fixtures.test.ts` | the fixture generator itself, including that it refuses a field the schema lacks |
+| `screen-*.test.tsx` | one file per screen, mounted: chat, plan, drill-down, and needs-you / fleet / runs / shell |
 
 The fixtures are **generated from the schemas** (`tests/ui/support/schema.ts`):
 each test's payload starts as a minimal instance of the real schema file, the
@@ -175,13 +196,19 @@ the top of this file, against a throwaway board.
 - **`agent_map` rows are not contract.** `board.json` types only
   `agent_map.groups`, so the Runs screen treats every field of a row as
   possibly absent. One field bit: a run's `verdict` is `{kind, sha}` there and a
-  plain string on `ticket.json`. It goes through `verdictChip` now, and each
-  column is wrapped in an error boundary, because rendering the raw object
-  blanked the whole page once — a blank page looks exactly like an empty board.
-- **`agents[].harness` still carries the snapshot's default.** The Fleet screen
-  shows the value it is given and says what it is (the seat's current workforce
-  value, not a stamp). A seat with nothing recorded cannot read `unknown` there
-  until T-1106 (#267) lands; the chat's per-post badge is already honest.
+  plain string on `ticket.json`. It goes through `verdictChip` now, rendering
+  the raw object having blanked the whole page once.
+- **A blank page is treated as a bug, everywhere.** `main.tsx` mounts `Root`,
+  which is the app inside a boundary, each column has its own boundary, and the
+  shell checks a list's shape before walking it. `tests/ui/blanking.test.tsx`
+  holds the shapes that used to do it: a `nodes` that is not a list, a snapshot
+  with no `agents`, and a throw in the shell above every column boundary.
+- **`agents[].harness` still carries the snapshot's default, so Fleet does not
+  vouch for it.** A seat with no workforce entry arrives already wearing a
+  provider's name and there is no "was it recorded" flag on this route, so the
+  screen says that in the caption rather than dressing the value up. T-1106
+  (#267) fixes the default; `post.harness.recorded` already makes the chat's
+  badge honest.
 - **The plan is a list, not a graph.** Layers and dependency order come from
   the API and read top-down. The graph and column layouts are a later phase.
 - **The thread polls.** Every read refreshes on a timer; there is no event

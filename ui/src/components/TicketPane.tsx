@@ -74,7 +74,7 @@ function Review({ t }: { t: Ticket }) {
             {head.note ? <span className="missing"> {head.note}</span> : null}
           </>
         ) : (
-          <Missing what={head.note} />
+          <Missing what="no review head recorded" />
         )}
       </Field>
       <Field label="label">{head.label || <Missing />}</Field>
@@ -140,7 +140,10 @@ export function TicketPane({
     <section className="pane pane-ticket" aria-label="Ticket detail" data-testid="ticket-pane">
       <header className="pane-head">
         <h2>
-          {ticket.id} <span className="ticket-title">{ticket.title || <Missing what="untitled" />}</span>
+          {ticket.id}{" "}
+          <span className="ticket-title" title={ticket.title || undefined}>
+            {ticket.title || <Missing what="untitled" />}
+          </span>
         </h2>
         <button type="button" className="btn-quiet" onClick={onClose}>
           back to plan
@@ -229,7 +232,7 @@ export function TicketPane({
                 <span className="post-author">{m.author}</span>
                 <span className="harness" title={h.title}>
                   {h.text}
-                  {h.recorded ? "" : " ·not recorded"}
+                  {h.recorded ? null : <span className="harness-note"> · not recorded</span>}
                 </span>
                 <time className="muted" title={exactTime(m.at)}>
                   {localTime(m.at)}

@@ -15,7 +15,7 @@ import { runTokens, verdictChip } from "../lib/map";
 import { Chip, Failure, Missing } from "./bits";
 
 function Group({ g, project, onTicket }: { g: RunGroup; project: string; onTicket: (id: string) => void }) {
-  const rows = g.rows || [];
+  const rows = Array.isArray(g.rows) ? g.rows : [];
   const groupTokens = runTokens({
     tokens: g.tokens ?? null,
     tokens_in: null,
@@ -95,7 +95,7 @@ export function RunsPane({
 }) {
   if (error) return <Failure what="Runs" error={error} />;
   if (!board) return <p className="muted">Reading the runs…</p>;
-  const groups = board.agent_map?.groups || [];
+  const groups = Array.isArray(board.agent_map?.groups) ? board.agent_map.groups : [];
   return (
     <section className="pane pane-runs" aria-label="Runs">
       <header className="pane-head">
