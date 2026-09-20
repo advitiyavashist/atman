@@ -111,9 +111,19 @@ the honest one.
 Anything the board does not hold is rendered, visibly, as `unknown` or *not
 recorded*, in italics. A read that fails says so where the data would have
 been: a screen of nothing would look exactly like an empty board, and those are
-different things. When a **refresh** fails after a good read, the last good data
-stays on screen and the line at the top names the read that failed — wiping a
+different things. When a **refresh of the same screen** fails, the last good
+data stays up and the line at the top names the read that failed — wiping a
 screen someone is reading would be both less useful and less honest.
+
+**Records are only ever shown under the project they were read from.** A value
+is held together with the question it answered, so switching project withholds
+the previous board's payload immediately: if the new read then fails, the pane
+says so instead of the shell pairing one board's steps, seats and objective
+with the other board's slug. The same rule holds the drill-down to the ticket
+that is actually open — one ticket's runs, review and accept are never shown
+under another's id. Mislabelling one project's work as another's is the worst
+thing this app could do, and it is the one behaviour with regression tests
+named after it.
 
 Keyboard: the first tab stop in the chat is **Skip to the composer**, because a
 hundred-post thread is a few hundred controls deep. Focus is visible on
@@ -148,7 +158,7 @@ dist/assets/*.js` is 0 after `npm run build -w ui`.
 ## Test it
 
 ```sh
-npm test -w ui          # vitest: 143 tests, 10 files
+npm test -w ui          # vitest: 146 tests, 10 files
 npm run build -w ui     # tsc -b && vite build — also the type-check gate
 ```
 
@@ -157,7 +167,7 @@ npm run build -w ui     # tsc -b && vite build — also the type-check gate
 | `mapping.test.ts` | every honesty rule as a pure function: blocker chips, accept states, usage age, unknown harness, tokens, receipts, review head, ticket links, verdict shapes, one phrase per step |
 | `client.test.ts` | where the app may talk (loopback only), what it sends, what it refuses to send |
 | `writes.test.ts` | the `/api/v1/lead` **request** body against `lead-request.json`, and both refusal paths |
-| `polling.test.ts` | a failed refresh keeps the last good read and the freshness line names it |
+| `polling.test.ts` | a failed refresh of the same screen keeps the last good read; a project switch or a ticket change whose read fails shows the error and never the other project's or ticket's records |
 | `blanking.test.tsx` | the payload shapes and the shell throw that used to leave an empty page |
 | `fixtures.test.ts` | the fixture generator itself, including that it refuses a field the schema lacks |
 | `screen-*.test.tsx` | one file per screen, mounted: chat, plan, drill-down, and needs-you / fleet / runs / shell |

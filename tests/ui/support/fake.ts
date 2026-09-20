@@ -39,6 +39,12 @@ export interface FakeParts {
   raw?: Partial<Record<"session" | "projects" | "board" | "plan" | "lead" | "thread" | "needs-you", unknown>>;
   /** Routes that fail only after their first successful read, for the poll path. */
   failAfterFirst?: Partial<Record<"board" | "plan" | "lead" | "thread" | "needs-you", string>>;
+  /**
+   * Routes that fail for one project only: `{ plan: { demo: "no answer" } }`.
+   * This is how a project switch whose read fails is reproduced — the case
+   * where stale data must never be relabelled with the new project's slug.
+   */
+  failByProject?: Partial<Record<"board" | "plan" | "lead" | "thread" | "needs-you", Record<string, string>>>;
 }
 
 export interface Fake {
@@ -57,9 +63,12 @@ export function fakeApi(parts: FakeParts = {}): Fake {
 
   const seen: Record<string, number> = {};
 
-  function boom(route: keyof NonNullable<FakeParts["fail"]>): Promise<never> | null {
+  function boom(route: keyof NonNullable<FakeParts["fail"]>, project?: string): Promise<never> | null {
     const why = parts.fail?.[route];
     if (why) return Promise.reject(new Error(why));
+    const perProject = (parts.failByProject as Record<string, Record<string, string>> | undefined)?.[route];
+    const forThis = perProject?.[project || PROJECT];
+    if (forThis) return Promise.reject(new Error(forThis));
     seen[route] = (seen[route] || 0) + 1;
     const later = (parts.failAfterFirst as Record<string, string> | undefined)?.[route];
     if (later && seen[route] > 1) return Promise.reject(new Error(later));
@@ -105,7 +114,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
     board(project?: string) {
       calls.push(`board:${project ?? ""}`);
       return (
-        boom("board") ??
+        boom("board", project) ??
         (raw("board") as never) ??
         Promise.resolve(fixture<Board>("board.json", { project: project || PROJECT, app: { project: project || PROJECT, operator: "ada", operator_note: "", lead: "planner", lead_note: "" }, ...parts.board }))
       );
@@ -113,7 +122,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
     plan(project?: string) {
       calls.push(`plan:${project ?? ""}`);
       return (
-        boom("plan") ??
+        boom("plan", project) ??
         (raw("plan") as never) ??
         Promise.resolve(fixture<Plan>("plan.json", { project: project || PROJECT, available: true, ...parts.plan }))
       );
@@ -121,7 +130,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
     lead(project?: string) {
       calls.push(`lead:${project ?? ""}`);
       return (
-        boom("lead") ??
+        boom("lead", project) ??
         (raw("lead") as never) ??
         Promise.resolve(
           fixture<Lead>("lead.json", {
@@ -136,7 +145,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
     },
     thread(opts: { project?: string; with?: string; before?: string }) {
       calls.push(`thread:${opts.project ?? ""}:${opts.with ?? ""}:${opts.before ?? ""}`);
-      const failed = boom("thread");
+      const failed = boom("thread", opts.project);
       if (failed) return failed;
       const given = raw("thread");
       if (given) return given as Promise<Thread>;
@@ -166,7 +175,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
     needsYou(project?: string) {
       calls.push(`needs-you:${project ?? ""}`);
       return (
-        boom("needs-you") ??
+        boom("needs-you", project) ??
         Promise.resolve(fixture<NeedsYou>("needs-you.json", { operator: "ada", ...parts.needsYou }))
       );
     },

@@ -85,21 +85,28 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
     if (slug) setProject(slug);
   }, [project, projects.data?.current, session.data?.project]);
 
+  // Every read below is scoped to one board, so none of them fires until the
+  // shell knows which board that is. Reading the started board first and the
+  // chosen one a moment later would put one project's records on screen on the
+  // way to another's, which is exactly the pairing this app must never make.
   const on = project || undefined;
-  const board = useResource(() => api.board(on), [api, on], POLL_MS);
-  const plan = useResource(() => api.plan(on), [api, on], POLL_MS);
-  const lead = useResource(() => api.lead(on), [api, on], POLL_MS);
+  const ready = !!project;
+  const board = useResource(() => api.board(on), [api, on], POLL_MS, ready);
+  const plan = useResource(() => api.plan(on), [api, on], POLL_MS, ready);
+  const lead = useResource(() => api.lead(on), [api, on], POLL_MS, ready);
   const leadSeat = lead.data?.lead || "";
   const thread = useResource(
     () => api.thread({ project: on, with: leadSeat || undefined }),
     [api, on, leadSeat],
     POLL_MS,
+    ready,
   );
-  const needsYou = useResource(() => api.needsYou(on), [api, on], POLL_MS);
+  const needsYou = useResource(() => api.needsYou(on), [api, on], POLL_MS, ready);
   const ticket = useResource(
-    () => (selected ? api.ticket(selected, on) : Promise.resolve(null)),
+    () => api.ticket(selected, on),
     [api, on, selected],
-    selected ? POLL_MS : 0,
+    POLL_MS,
+    ready && !!selected,
   );
 
   useEffect(() => {
@@ -131,28 +138,65 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
   // up to <Root> is outside the per-column boundaries: a throw here blanks the
   // page, and a blank page looks exactly like an empty board.
   /**
-   * A failed refresh does not erase what is already on screen.
+   * Records are only ever shown under the project they were read from.
    *
-   * A pane is handed its error only when it has nothing to show instead:
-   * otherwise the last good read stays up and the freshness line carries the
-   * failure, because wiping a screen an operator is reading is both less
-   * useful and less honest than saying "this is what we last saw, and the last
-   * read failed".
+   * `useResource` already withholds a value read for other deps, and this is
+   * the second lock on the same door, because the failure it prevents is the
+   * worst this app has: a payload from one board rendered beside another
+   * board's slug. Every screen composes `seat@project` from the shell's
+   * project, so one wrong pairing turns another project's work into this
+   * project's work on screen. A payload whose own `project` is not the
+   * selected one is therefore treated as absent, and the pane says it could
+   * not be read.
    */
-  const stale = (r: { data: unknown; error: unknown }) => (r.data ? null : r.error);
+  function onThisProject<T extends { project?: string }>(r: { data: T | null }): T | null {
+    const d = r.data;
+    if (!d) return null;
+    if (!project || !d.project) return d;
+    return d.project === project ? d : null;
+  }
+
+  /**
+   * A failed refresh does not erase what is already on screen — but only for
+   * the same question.
+   *
+   * With data to show, the pane keeps it and the freshness line carries the
+   * failure: wiping a screen an operator is reading is less useful and less
+   * honest than saying "this is what we last saw, and the last read failed".
+   * With nothing to show for *this* project, the pane gets the error, which is
+   * what a read that failed after a project switch must do.
+   */
+  const stale = (data: unknown, error: unknown, mismatch = false) =>
+    data ? null : error || (mismatch ? new Error(`that read was for another project, not ${project}`) : null);
+
+  const boardData = onThisProject(board);
+  const planData = onThisProject(plan);
+  const leadData = onThisProject(lead);
+  const threadData = onThisProject(thread);
+  // needs-you carries no project of its own, so the deps gate in useResource is
+  // the only thing standing between it and a mislabel; it is enough, because a
+  // switch withholds the previous board's items outright.
+  const needsYouData = needsYou.data;
+  /** The drill-down must show the ticket that is open, or nothing. */
+  const ticketData =
+    ticket.data && ticket.data.id === selected && (!ticket.data.project || ticket.data.project === project)
+      ? ticket.data
+      : null;
+
   const failedReads = [
     board.error ? "board" : "",
     plan.error ? "plan" : "",
     lead.error ? "lead" : "",
     thread.error ? "thread" : "",
     needsYou.error ? "needs you" : "",
+    ticket.error ? "ticket" : "",
   ].filter(Boolean);
 
-  const seats = Array.isArray(board.data?.agents) ? board.data.agents : null;
-  const runGroups = Array.isArray(board.data?.agent_map?.groups) ? board.data.agent_map.groups : null;
+  const seats = Array.isArray(boardData?.agents) ? boardData.agents : null;
+  const runGroups = Array.isArray(boardData?.agent_map?.groups) ? boardData.agent_map.groups : null;
   const knownTickets = useMemo(
-    () => ticketIdsOf(Array.isArray(plan.data?.nodes) ? plan.data.nodes : []),
-    [plan.data],
+    () => ticketIdsOf(Array.isArray(planData?.nodes) ? planData.nodes : []),
+    [planData],
   );
   const operator = session.data?.operator ?? lead.data?.operator ?? "";
   const operatorNote = session.data?.operator_note ?? lead.data?.operator_note ?? "";
@@ -185,13 +229,19 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
 
   const centre =
     view === "needs-you" ? (
-      <NeedsYouPane data={needsYou.data} error={stale(needsYou)} onTicket={openTicket} />
+      <NeedsYouPane data={needsYouData} error={stale(needsYouData, needsYou.error)} onTicket={openTicket} />
     ) : view === "fleet" ? (
-      <FleetPane board={board.data} error={stale(board)} project={project} />
+      <FleetPane board={boardData} error={stale(boardData, board.error, !!board.data)} project={project} />
     ) : view === "runs" ? (
-      <RunsPane board={board.data} error={stale(board)} project={project} onTicket={openTicket} />
+      <RunsPane board={boardData} error={stale(boardData, board.error, !!board.data)} project={project} onTicket={openTicket} />
     ) : (
-      <PlanPane plan={plan.data} error={stale(plan)} project={project} selected={selected} onSelect={openTicket} />
+      <PlanPane
+        plan={planData}
+        error={stale(planData, plan.error, !!plan.data)}
+        project={project}
+        selected={selected}
+        onSelect={openTicket}
+      />
     );
 
   return (
@@ -259,10 +309,10 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
             <LeadPane
               api={api}
               project={project}
-              lead={lead.data}
-              leadError={stale(lead)}
-              thread={thread.data}
-              threadError={stale(thread)}
+              lead={leadData}
+              leadError={stale(leadData, lead.error, !!lead.data)}
+              thread={threadData}
+              threadError={stale(threadData, thread.error, !!thread.data)}
               knownTickets={knownTickets}
               onTicket={openTicket}
               onReload={() => {
@@ -279,8 +329,19 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
           <div className="col col-detail">
             <Boundary what="The ticket detail">
               <TicketPane
-                ticket={ticket.data}
-                error={stale(ticket)}
+                ticket={ticketData}
+                // Whatever is open must be this ticket or an error: leaving the
+                // previous ticket's evidence under a new id in the URL would
+                // attribute one piece of work's runs, review and accept to
+                // another.
+                error={
+                  ticketData
+                    ? null
+                    : ticket.error ||
+                      (ticket.data && !ticket.loading
+                        ? new Error(`that read answered for ${ticket.data.id}, not ${selected}`)
+                        : null)
+                }
                 loading={ticket.loading}
                 onClose={() => goTo(view, "")}
                 onTicket={openTicket}

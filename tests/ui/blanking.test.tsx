@@ -13,11 +13,11 @@
  * they cannot be built from it, and the app still has to survive one.
  */
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { App, Root } from "../../ui/src/App";
+import { Root } from "../../ui/src/App";
 import type { AtmanApi } from "../../ui/src/api/client";
 import { fakeApi } from "./support/fake";
 import { fixture } from "./support/schema";
@@ -30,26 +30,28 @@ describe("a payload the contract forbids", () => {
   it("does not blank the page when plan.nodes is not a list", async () => {
     // `ticketIdsOf(plan.nodes)` ran above all three column boundaries, so this
     // threw "e.map is not a function" straight through them and left #root empty.
-    const plan = { ...fixture<Record<string, unknown>>("plan.json"), available: true, nodes: "not a list" };
+    // project must be the one the shell is on, or the (correct) project guard
+    // rejects the payload before its shape ever matters.
+    const plan = { ...fixture<Record<string, unknown>>("plan.json"), project: "alpha", available: true, nodes: "not a list" };
     const { api } = fakeApi({ raw: { plan } });
     render(<Root api={api} />);
     await shellIsThere();
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toBeTruthy();
-    expect(alert).toHaveTextContent(/not the shape the contract describes|could not be drawn/);
+    expect(alert).toHaveTextContent(/not the shape the contract describes/);
     // The chat is a separate read and must still be readable.
-    expect(screen.getByLabelText("Chat with the lead")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Chat with the lead")).toBeInTheDocument();
     expect(document.body.textContent?.length || 0).toBeGreaterThan(200);
   });
 
   it("does not blank the page when the snapshot carries no agents", async () => {
     // The sidebar read `board.agents.length` for its seat count, above the
     // boundaries, and threw on a null.
-    const board = { ...fixture<Record<string, unknown>>("board.json"), agents: null };
+    const board = { ...fixture<Record<string, unknown>>("board.json"), project: "alpha", agents: null };
     const { api } = fakeApi({ raw: { board } });
     render(<Root api={api} />);
     await shellIsThere();
-    expect(screen.getByLabelText("Chat with the lead")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Chat with the lead")).toBeInTheDocument();
     // The Fleet view says the list is unreadable rather than "no seats".
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /^Fleet/ }));
@@ -59,11 +61,11 @@ describe("a payload the contract forbids", () => {
   });
 
   it("does not blank the page when agent_map.groups is not a list", async () => {
-    const board = { ...fixture<Record<string, unknown>>("board.json"), agent_map: { groups: 7 } };
+    const board = { ...fixture<Record<string, unknown>>("board.json"), project: "alpha", agent_map: { groups: 7 } };
     const { api } = fakeApi({ raw: { board } });
     render(<Root api={api} />);
     await shellIsThere();
-    expect(screen.getByLabelText("Chat with the lead")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Chat with the lead")).toBeInTheDocument();
   });
 });
 
@@ -83,11 +85,20 @@ describe("the top-level boundary", () => {
     expect(screen.getByText(/not a statement about the board/)).toBeInTheDocument();
   });
 
-  it("is what main.tsx mounts, so nothing renders App bare", async () => {
-    // Root is the only export main.tsx uses; App on its own has no floor.
-    const { api } = fakeApi();
-    render(<Root api={api} />);
-    await shellIsThere();
-    expect(typeof App).toBe("function");
+  it("is what main.tsx mounts — App bare has no floor under it", async () => {
+    // The old version of this test asserted `typeof App === "function"` and so
+    // could not fail. This one mounts the real entry point with the App module
+    // replaced by two markers, and fails if main.tsx ever renders App directly.
+    vi.resetModules();
+    vi.doMock("../../ui/src/App", () => ({
+      Root: () => <p>root, with the floor under it</p>,
+      App: () => <p>app, bare</p>,
+    }));
+    document.body.innerHTML = '<div id="root"></div>';
+    await import("../../ui/src/main");
+    await waitFor(() => expect(document.body.textContent).toContain("root, with the floor under it"));
+    expect(document.body.textContent).not.toContain("app, bare");
+    vi.doUnmock("../../ui/src/App");
+    vi.resetModules();
   });
 });
