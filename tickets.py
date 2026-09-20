@@ -19523,8 +19523,7 @@ def _gate_ending(root, short="", author="", evaluator=""):
     print("               a different seat -- accepted that exact sha. No seat releases its own work.")
     print("in your repo:  cd <your repo> && atm quickstart --agent <you>   "
           "(then: atm next, atm review, atm accept)")
-    print("where to look: atm agents   (seats, harness, usage)   |   atm ui  ->  "
-          "http://127.0.0.1:8765")
+    print("where to look: atm agents   (seats, harness, usage)   |   atm ui")
     print("scratch kept:  %s   (rm -rf it whenever; nothing of yours was touched)" % root)
 
 

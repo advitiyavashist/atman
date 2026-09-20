@@ -7,15 +7,20 @@ headless (the live-login gate demo, the long-running app) are skipped.
 
 Also: `atm graph` names the repair for a dangling dependency, and that repair
 command really fixes the board (tickets.py and src/ticket_board/cli.py).
+The gate footer in the README capture must match `_gate_ending` output.
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import shlex
 import subprocess
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
+
+import tickets as tk
 
 import pytest
 
@@ -151,3 +156,20 @@ def test_graph_names_repair_for_dangling_dep(tool, tmp_path):
     g2 = atm(tool, proj, home, "graph")
     assert "broken references" not in g2.stdout
     assert "repair:" not in g2.stdout
+
+
+def test_readme_gate_ending_matches_printer():
+    """The README gate footer is `_gate_ending`'s real output, not a rewrite."""
+    text = README.read_text()
+    start = text.index("what happened: alice committed bcda9a0")
+    end = text.index("```", start)
+    captured = text[start:end]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        tk._gate_ending(
+            "/tmp/atm-quickstart-gate-5mvvgob2",
+            short="bcda9a0",
+            author="alice",
+            evaluator="bob",
+        )
+    assert buf.getvalue().lstrip("\n") == captured
