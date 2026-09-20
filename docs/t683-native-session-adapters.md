@@ -55,19 +55,24 @@ Rules:
   a transport it merely inherited. `join --persistent` refuses with the reason,
   and `wake_seat`, `has_live_native_session` and `native_wake_online` all
   refuse together, so a seat never reads "native online" while every wake is
-  refused.
+  refused. If the account home cannot be determined from the password
+  database, the environment is treated as isolated as well.
 - Such a board can still use a transport that is genuinely its own by
   announcing it: `ATMAN_SESSION_TRANSPORT_BOARD=<board path>` (an
   `os.pathsep`-separated list for more than one board). The announcement names
   a board, so inheriting it refuses instead of leaking, and
-  `quickstart --gate` and the test suite scrub it along with the transport
-  vars.
+  `quickstart --gate`, the test suite, and supervisor-launched spawn/watch
+  children scrub it along with the transport vars.
 - Ownership is never first-registrar: no board can claim a session and lock
   another one out. Each endpoint records the board it was registered for
   (by `realpath`, so a symlinked worktree, a moved repo and a relative
   `TICKETS_DIR` are the same board), and a record found under another board's
   cache is refused only while it is still live — a dead one is expired so the
   seat can re-register.
+
+This is an accident guard. A scratch board sharing the operator's HOME and
+cache can still register and wake the same readable transport; these checks
+do not provide a security boundary between processes running as one user.
 
 ## Wake path
 

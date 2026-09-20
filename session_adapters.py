@@ -76,7 +76,7 @@ def _real_home():
             return pwd.getpwuid(os.geteuid()).pw_dir or ""
         except KeyError:
             pass
-    return os.environ.get("HOME") or ""
+    return ""
 
 
 def default_cache_root():
@@ -92,6 +92,8 @@ def isolated_board_env():
     """
     home = os.environ.get("HOME") or ""
     real = _real_home()
+    if not real:
+        return "unknown account HOME (treating environment as isolated)"
     if home and real and board_key(home) != board_key(real):
         return "isolated HOME=%s" % home
     cache = (os.environ.get("TICKETS_CACHE_DIR") or "").strip()

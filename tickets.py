@@ -290,11 +290,13 @@ def _supervisor_launch_env(board, owner):
     """Environment for a supervisor-launched watch/spawn/probe child.
 
     Inherited provider session ids are stripped so the child cannot adopt a
-    parent seat's `.identities/` record. TICKET_SEAT is the authoritative
-    assignment; TICKET_SESSION_ID is a fresh launch key bound to `owner`.
+    parent seat's `.identities/` record or register its ambient transport.
+    TICKET_SEAT is the authoritative assignment; TICKET_SESSION_ID is a fresh
+    launch key bound to `owner`.
     """
     env = _clean_git_env()
-    for var in PROVIDER_SESSION_ID_VARS:
+    sa = _session_adapters()
+    for var in PROVIDER_SESSION_ID_VARS + sa.AMBIENT_TRANSPORT_VARS + (sa.TRANSPORT_BOARD_ENV,):
         env.pop(var, None)
     env.pop("TICKET_SEAT", None)
     env.pop("TICKET_AGENT", None)
