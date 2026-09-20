@@ -1,0 +1,175 @@
+/**
+ * THE EXECUTION PLAN — the centre of the screen, from `GET /api/v1/plan`.
+ *
+ * Every step shows its owner, its state and, when it cannot move, a typed
+ * blocker chip. The two dependency blockers are deliberately different words:
+ * *dependency not accepted* (the dep is finished but nobody accepted it) and
+ * *dependency still open* (the dep has not finished). They mean different
+ * things to whoever has to unblock it, and the API types them apart.
+ *
+ * Work that is done without a structured accept never renders as accepted.
+ * `acceptState` derives the label from the record, so a `status_label` that
+ * claimed otherwise could not put the word on screen.
+ *
+ * Layers come from the API (`layers`, dependency order), so the plan reads
+ * top-down in the order the work can actually happen.
+ */
+
+import type { Plan, PlanNode } from "../api/types";
+import { acceptState, blockerChips, ownerLabel, runningLabel } from "../lib/map";
+import { Chip, Command, Failure, Missing } from "./bits";
+
+function Objective({ plan }: { plan: Plan }) {
+  const o = plan.objective as { text?: string; exit_criterion?: string; state?: string };
+  const text = (o?.text || "").trim();
+  const exit = (o?.exit_criterion || "").trim();
+  return (
+    <div className="objective" data-testid="objective">
+      <h3>Objective</h3>
+      {text ? <p>{text}</p> : <Missing what="no objective recorded on this board" />}
+      <p className="muted">
+        Done when: {exit ? exit : <Missing what="no exit criterion recorded" />}
+        {o?.state ? ` · ${o.state}` : ""}
+      </p>
+    </div>
+  );
+}
+
+function Step({
+  node,
+  project,
+  selected,
+  onSelect,
+}: {
+  node: PlanNode;
+  project: string;
+  selected: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const state = acceptState(node);
+  const chips = blockerChips(node);
+  const running = runningLabel(node, project);
+  return (
+    <li className="step" data-testid="plan-step" data-ticket={node.id}>
+      <button
+        type="button"
+        className={`step-btn${selected ? " step-selected" : ""}`}
+        aria-pressed={selected}
+        onClick={() => onSelect(node.id)}
+      >
+        <span className="step-id">{node.id}</span>
+        <span className="step-title">{node.title || <Missing what="untitled" />}</span>
+        <span className="step-owner">{ownerLabel(node, project)}</span>
+        <Chip tone={state.tone} title={state.corrected ? `the record's own label said "${state.corrected}"` : undefined}>
+          {state.label}
+        </Chip>
+        {running ? (
+          <Chip tone="running" title="a run is open on this step right now">
+            running · {running}
+          </Chip>
+        ) : null}
+      </button>
+      {state.corrected ? (
+        <p className="failure" role="status">
+          This step is not accepted; the label on the record read “{state.corrected}”.
+        </p>
+      ) : null}
+      {chips.length ? (
+        <ul className="blockers" data-testid="blockers">
+          {chips.map((c, i) => (
+            <li key={i}>
+              <Chip tone={c.tone} title={c.text}>
+                {c.label}
+                {c.on && c.on !== node.id ? ` · ${c.on}` : ""}
+              </Chip>
+              <span className="blocker-text">{c.text}</span>
+              {c.cmd ? <Command cmd={c.cmd} /> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+export function PlanPane({
+  plan,
+  error,
+  project,
+  selected,
+  onSelect,
+}: {
+  plan: Plan | null;
+  error: unknown;
+  project: string;
+  selected: string;
+  onSelect: (id: string) => void;
+}) {
+  if (error) return <Failure what="The plan" error={error} />;
+  if (!plan) return <p className="muted">Reading the plan…</p>;
+  if (!plan.available) {
+    return (
+      <section className="pane pane-plan" aria-label="Execution plan">
+        <p className="failure" role="alert">
+          The plan could not be built from this board, so no steps are shown. Nothing here is a claim that the
+          board is empty.
+        </p>
+      </section>
+    );
+  }
+
+  const byId = new Map(plan.nodes.map((n) => [n.id, n]));
+  const layers = plan.layers.length ? plan.layers : [plan.nodes.map((n) => n.id)];
+  const placed = new Set(layers.flat());
+  const loose = plan.nodes.filter((n) => !placed.has(n.id));
+
+  return (
+    <section className="pane pane-plan" aria-label="Execution plan">
+      <Objective plan={plan} />
+      <div className="counts">
+        {Object.entries(plan.counts).map(([k, v]) => (
+          <span key={k} className="count">
+            <b>{v}</b> {k.replace(/_/g, " ")}
+          </span>
+        ))}
+      </div>
+      <div className="layers">
+        {layers.map((ids, i) => (
+          <div className="layer" key={i}>
+            <h4 className="layer-h">
+              {i === 0 ? "ready first" : `after layer ${i}`} <span className="muted">{ids.length} steps</span>
+            </h4>
+            <ul className="steps">
+              {ids.map((id) => {
+                const node = byId.get(id);
+                if (!node) {
+                  return (
+                    <li key={id} className="step">
+                      <Missing what={`${id} is in the order but not in nodes`} />
+                    </li>
+                  );
+                }
+                return (
+                  <Step key={id} node={node} project={project} selected={selected === id} onSelect={onSelect} />
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+        {loose.length ? (
+          <div className="layer">
+            <h4 className="layer-h">
+              not placed in a layer <span className="muted">{loose.length} steps</span>
+            </h4>
+            <ul className="steps">
+              {loose.map((node) => (
+                <Step key={node.id} node={node} project={project} selected={selected === node.id} onSelect={onSelect} />
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {!plan.nodes.length ? <p className="muted">This board's plan has no steps.</p> : null}
+      </div>
+    </section>
+  );
+}

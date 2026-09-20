@@ -3,7 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
     <title>atman</title>
+    <!--
+      When `atm ui` serves this file at /app/ it inserts two meta tags,
+      atman-token and atman-api, just before the closing head tag. The page
+      reads them from there; the token never travels in a URL.
+
+      Nothing in this head may spell the closing head tag inside a comment:
+      both vite's asset injection and atm ui's meta insertion cut at the first
+      occurrence of it in the file, and would land inside the comment.
+    -->
   </head>
   <body>
     <div id="root"></div>

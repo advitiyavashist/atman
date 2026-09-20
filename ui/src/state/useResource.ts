@@ -1,82 +1,77 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { BoardError } from "../api";
-import { useBoard } from "./BoardProvider";
-
 /**
- * One screen's snapshot: what it is, how old it is, and whether we know.
+ * One read, polled.
  *
- * The distinction that earns this hook its complexity is `data` + `error` being
- * able to hold values at the same time. When a refetch fails we keep showing
- * the last good snapshot — a dashboard that blanks itself on a hiccup is worse
- * than one that says "this is from 30 seconds ago" — but we never let it keep
- * *claiming* to be current. `fetchedAt` and `stale` are how a screen tells the
- * truth about data it is still displaying.
+ * The API is all GETs behind a local process, so the app polls rather than
+ * streams (there is no event route, and token streaming would mean reading
+ * harness transcripts, which this product does not do). A poll keeps the last
+ * good value on screen while a refresh is in flight and reports a failure
+ * instead of blanking, because a screen of nothing is not evidence that the
+ * board is empty.
  */
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
 export interface Resource<T> {
   data: T | null;
-  error: BoardError | null;
+  error: unknown;
   loading: boolean;
-  /** Server time is authoritative for board state; this is our own read clock. */
-  fetchedAt: string | null;
-  /** A newer read was attempted and failed, so `data` is known to be behind. */
-  stale: boolean;
-  refetch(): void;
+  /** When this value was read, for a freshness line. */
+  readAt: Date | null;
+  reload: () => void;
 }
 
 export function useResource<T>(
-  load: (client: ReturnType<typeof useBoard>["client"]) => Promise<T>,
-  deps: unknown[],
+  load: () => Promise<T>,
+  deps: ReadonlyArray<unknown>,
+  everyMs = 0,
 ): Resource<T> {
-  const { client, revision, snapshotEpoch } = useBoard();
   const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<BoardError | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
-  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
-  const [stale, setStale] = useState(false);
-  const [manual, setManual] = useState(0);
-
-  // Guards against a slow first response landing after a fast second one and
-  // overwriting it — the classic out-of-order fetch bug, which on a dashboard
-  // shows up as the board silently reverting to an older state.
-  const sequence = useRef(0);
+  const [readAt, setReadAt] = useState<Date | null>(null);
+  const [tick, setTick] = useState(0);
+  const alive = useRef(true);
   const loadRef = useRef(load);
   loadRef.current = load;
 
-  const refetch = useCallback(() => setManual((n) => n + 1), []);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   useEffect(() => {
-    const ticket = ++sequence.current;
     let cancelled = false;
     setLoading(true);
     loadRef
-      .current(client)
-      .then((result) => {
-        if (cancelled || ticket !== sequence.current) return;
-        setData(result);
+      .current()
+      .then((value) => {
+        if (cancelled || !alive.current) return;
+        setData(value);
         setError(null);
-        setStale(false);
-        setFetchedAt(new Date().toISOString());
+        setReadAt(new Date());
       })
-      .catch((err: unknown) => {
-        if (cancelled || ticket !== sequence.current) return;
-        setError(
-          err instanceof BoardError
-            ? err
-            : new BoardError("network_error", 0, err instanceof Error ? err.message : String(err)),
-        );
-        // Keep `data` — but mark it, so nothing downstream can present it as
-        // current. A blank screen and a confidently wrong screen are both worse
-        // than a dated one that says so.
-        setStale(true);
+      .catch((e) => {
+        if (cancelled || !alive.current) return;
+        setError(e);
       })
       .finally(() => {
-        if (!cancelled && ticket === sequence.current) setLoading(false);
+        if (cancelled || !alive.current) return;
+        setLoading(false);
       });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, revision, snapshotEpoch, manual, ...deps]);
+  }, [...deps, tick]);
 
-  return { data, error, loading, fetchedAt, stale, refetch };
+  useEffect(() => {
+    if (!everyMs) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), everyMs);
+    return () => window.clearInterval(id);
+  }, [everyMs]);
+
+  const reload = useCallback(() => setTick((n) => n + 1), []);
+  return { data, error, loading, readAt, reload };
 }

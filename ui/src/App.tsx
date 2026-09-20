@@ -1,179 +1,252 @@
-import { useEffect, useState } from "react";
-import { NavBar, VIEWS, type View } from "./components/NavBar";
-import { ToastHost } from "./components/Toast";
-import { Overview } from "./screens/Overview";
-import { Tickets } from "./screens/Tickets";
-import { Agents } from "./screens/Agents";
-import { Messages } from "./screens/Messages";
-import { Activity } from "./screens/Activity";
-import { ConnectDialog } from "./screens/ConnectDialog";
-import { MasterPanel } from "./screens/MasterPanel";
-import { BoardProvider, useBoard } from "./state/BoardProvider";
-import { resolveSession, type BoardSession, type SessionResolution } from "./session";
-import { recoveredGapCopy } from "./copy";
-import { FormationMark } from "./components/FormationMark";
+/**
+ * The shell: sidebar, chat with the lead on the left, the plan in the centre,
+ * the drill-down on the right.
+ *
+ * At 1440px all three read at once, which is the whole point of the app — you
+ * talk to the lead while the plan is in view and a step's evidence is one
+ * click away. Under 900px the drill-down becomes a sheet over the layout;
+ * at 390px the sidebar is a top bar and chat and the centre view are two tabs.
+ *
+ * Every screen here is a read of `atm ui`'s JSON API, polled. The one write
+ * this phase has is the composer (`POST /msg`, as the operator) and the lead
+ * picker (`POST /api/v1/lead`). With no operator configured the app says so
+ * and stays read-only rather than failing at the moment you press Send.
+ */
 
-function currentViewFromHash(): View {
-  const hash = window.location.hash.replace("#", "");
-  return (VIEWS as readonly string[]).includes(hash) ? (hash as View) : "overview";
+import { useEffect, useMemo, useState } from "react";
+import { AtmanApi } from "./api/client";
+import { FleetPane } from "./components/FleetPane";
+import { LeadPane } from "./components/LeadPane";
+import { NeedsYouPane } from "./components/NeedsYouPane";
+import { PlanPane } from "./components/PlanPane";
+import { RunsPane } from "./components/RunsPane";
+import { Boundary } from "./components/Boundary";
+import { Sidebar, VIEWS, type ViewName } from "./components/Sidebar";
+import { TicketPane } from "./components/TicketPane";
+import { Command, Failure } from "./components/bits";
+import { ago } from "./lib/format";
+import { ticketIdsOf } from "./lib/map";
+import { useResource } from "./state/useResource";
+
+const POLL_MS = 8000;
+
+function useClock(): string {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  return now.toLocaleTimeString();
 }
 
 /**
- * Shown when the board's event history moved past this tab.
- *
- * `snapshot_required` is not a warning to ignore: the contract's answer to a
- * cursor that aged out is to re-read the screen, not to keep listening
- * (docs/api-notes.md #6, retention 1000 events). The provider does the re-read;
- * this says so, because an operator who looked away deserves to know the board
- * jumped rather than moved.
+ * The URL hash is `#<view>` or `#<view>/<ticket>`, so a view and an open
+ * drill-down can both be linked, reloaded and shared with whoever is looking
+ * at the same board.
  */
-function GapNotice() {
-  const { recoveredGap } = useBoard();
-  if (!recoveredGap) return null;
-  return (
-    <p className="notice" role="status" data-testid="gap-notice">
-      {recoveredGapCopy(recoveredGap.at)}
-    </p>
-  );
+function routeFromHash(): { view: ViewName; ticket: string } {
+  const raw = (typeof location === "undefined" ? "" : location.hash.replace(/^#/, "")).split("/");
+  const view = (VIEWS as readonly string[]).includes(raw[0]) ? (raw[0] as ViewName) : "lead";
+  const ticket = /^T-\d{1,7}$/.test(raw[1] || "") ? raw[1] : "";
+  return { view, ticket };
 }
 
-function BoardShell({ session }: { session: BoardSession }) {
-  const [view, setView] = useState<View>(currentViewFromHash());
-  const [theme, setTheme] = useState<"dark" | "light">(() => {
-    try {
-      return (localStorage.getItem("ticket-board-ui-theme") as "dark" | "light") ?? "dark";
-    } catch {
-      return "dark";
-    }
-  });
-  const [connectOpen, setConnectOpen] = useState(false);
-  const [masterPanelOpen, setMasterPanelOpen] = useState(false);
+export function App({ api: injected }: { api?: AtmanApi } = {}) {
+  const api = useMemo(() => injected ?? new AtmanApi(), [injected]);
+  const clock = useClock();
+  const [view, setView] = useState<ViewName>(() => routeFromHash().view);
+  const [project, setProject] = useState<string>("");
+  const [selected, setSelected] = useState<string>(() => routeFromHash().ticket);
+  const [tab, setTab] = useState<"chat" | "centre">("chat");
+
+  const session = useResource(() => api.session(), [api]);
+  const projects = useResource(() => api.projects(), [api], POLL_MS * 4);
+
+  // The started board is the default; the operator can switch from the sidebar.
+  useEffect(() => {
+    if (project) return;
+    const slug = session.data?.project || projects.data?.current || "";
+    if (slug) setProject(slug);
+  }, [project, projects.data?.current, session.data?.project]);
+
+  const on = project || undefined;
+  const board = useResource(() => api.board(on), [api, on], POLL_MS);
+  const plan = useResource(() => api.plan(on), [api, on], POLL_MS);
+  const lead = useResource(() => api.lead(on), [api, on], POLL_MS);
+  const leadSeat = lead.data?.lead || "";
+  const thread = useResource(
+    () => api.thread({ project: on, with: leadSeat || undefined }),
+    [api, on, leadSeat],
+    POLL_MS,
+  );
+  const needsYou = useResource(() => api.needsYou(on), [api, on], POLL_MS);
+  const ticket = useResource(
+    () => (selected ? api.ticket(selected, on) : Promise.resolve(null)),
+    [api, on, selected],
+    selected ? POLL_MS : 0,
+  );
 
   useEffect(() => {
-    const onHashChange = () => setView(currentViewFromHash());
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
+    const onHash = () => {
+      const route = routeFromHash();
+      setView(route.view);
+      setSelected(route.ticket);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  useEffect(() => {
-    document.body.classList.toggle("light", theme === "light");
-    try {
-      localStorage.setItem("ticket-board-ui-theme", theme);
-    } catch {
-      // Private browsing or storage disabled — theme just resets next visit.
-    }
-  }, [theme]);
+  function goTo(v: ViewName, ticket: string) {
+    setView(v);
+    setSelected(ticket);
+    if (typeof location !== "undefined") location.hash = ticket ? `${v}/${ticket}` : v;
+  }
 
-  return (
-    <>
-      <header className="app-header">
-        <a className="brand" href="#overview">
-          <FormationMark />
-          <span className="wordmark">atman</span>
-        </a>
-        <span className="tag" data-testid="board-label">
-          workspace · {session.boardLabel}
-        </span>
-        <span className="spacer" />
-        <button
-          aria-pressed={theme === "light"}
-          onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-        >
-          {theme === "dark" ? "Light mode" : "Dark mode"}
-        </button>
-        <button className="primary" onClick={() => setConnectOpen(true)}>
-          Connect agent
-        </button>
-      </header>
+  function goView(v: ViewName) {
+    goTo(v, selected);
+    setTab(v === "lead" ? "chat" : "centre");
+  }
 
-      <div className="app-shell">
-        <NavBar current={view} />
-        <main className="screen">
-          <GapNotice />
-          {view === "overview" && (
-            <Overview
-              onNavigate={(v) => (window.location.hash = v)}
-              onOpenMasterPanel={() => setMasterPanelOpen(true)}
-            />
-          )}
-          {view === "tickets" && <Tickets />}
-          {view === "agents" && <Agents onConnect={() => setConnectOpen(true)} />}
-          {view === "messages" && <Messages />}
-          {view === "activity" && <Activity />}
-        </main>
-      </div>
+  function openTicket(id: string) {
+    goTo(view, id);
+  }
 
-      <ConnectDialog open={connectOpen} onClose={() => setConnectOpen(false)} />
-      <MasterPanel open={masterPanelOpen} onClose={() => setMasterPanelOpen(false)} />
-      <ToastHost />
-    </>
-  );
-}
+  const knownTickets = useMemo(() => ticketIdsOf(plan.data?.nodes || []), [plan.data]);
+  const operator = session.data?.operator ?? lead.data?.operator ?? "";
+  const operatorNote = session.data?.operator_note ?? lead.data?.operator_note ?? "";
 
-/**
- * No session, no board — and no pretending otherwise.
- *
- * An unconfigured dashboard renders this instead of empty screens. An empty
- * board and an unreachable one look identical if you render zeros for both,
- * and "0 tickets, nothing needs attention" is a dangerous thing to show an
- * operator whose board they cannot reach.
- */
-function Unconfigured({ reason }: { reason: string }) {
-  return (
-    <div className="app-shell">
-      <main className="screen">
-        <div className="heading">
-          <h1>Not connected</h1>
-        </div>
-        <section className="card" role="alert" data-testid="unconfigured">
-          <p>{reason}</p>
-          <p className="tag">
-            No board data is shown here. This is not an empty board — it is a board this tab cannot reach.
-          </p>
-        </section>
-      </main>
-    </div>
-  );
-}
-
-export function App({
-  /** Test seam: skip discovery and use a known session. */
-  session: provided,
-  reconnectDelayMs,
-}: {
-  session?: BoardSession;
-  reconnectDelayMs?: number;
-} = {}) {
-  const [resolution, setResolution] = useState<SessionResolution | null>(
-    provided ? { status: "ready", session: provided } : null,
-  );
-
-  useEffect(() => {
-    if (provided) return;
-    let cancelled = false;
-    resolveSession().then((result) => {
-      if (!cancelled) setResolution(result);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [provided]);
-
-  if (!resolution) {
+  if (api.origin.refused) {
     return (
-      <div className="app-shell">
-        <main className="screen">
-          <p data-testid="session-loading">Looking for a board session…</p>
-        </main>
-      </div>
+      <main className="boot">
+        <h1>atman</h1>
+        <Failure what="The API origin" error={new Error(api.origin.refused)} />
+        <p>Point the app at the local board server, or open the bundle it serves.</p>
+        <Command cmd="atm ui --dev-origin http://localhost:5173" />
+      </main>
     );
   }
 
-  if (resolution.status === "unconfigured") return <Unconfigured reason={resolution.reason} />;
+  if (session.error) {
+    return (
+      <main className="boot">
+        <h1>atman</h1>
+        <Failure what="The session" error={session.error} />
+        <p>
+          Nothing below this would be real, so nothing is drawn. Start the board server, then reload. From a dev
+          server it also has to be told this origin:
+        </p>
+        <Command cmd="atm ui --dev-origin http://localhost:5173" />
+        <p className="muted">Reading {api.origin.api || "(no API base)"}.</p>
+      </main>
+    );
+  }
+
+  const centre =
+    view === "needs-you" ? (
+      <NeedsYouPane data={needsYou.data} error={needsYou.error} onTicket={openTicket} />
+    ) : view === "fleet" ? (
+      <FleetPane board={board.data} error={board.error} project={project} />
+    ) : view === "runs" ? (
+      <RunsPane board={board.data} error={board.error} project={project} onTicket={openTicket} />
+    ) : (
+      <PlanPane plan={plan.data} error={plan.error} project={project} selected={selected} onSelect={openTicket} />
+    );
 
   return (
-    <BoardProvider session={resolution.session} reconnectDelayMs={reconnectDelayMs}>
-      <BoardShell session={resolution.session} />
-    </BoardProvider>
+    <div className={`shell${selected ? " shell-drilled" : ""}`} data-view={view}>
+      <Sidebar
+        projects={projects.data}
+        projectsError={projects.error}
+        project={project}
+        onProject={(slug) => {
+          setProject(slug);
+          goTo(view, "");
+        }}
+        view={view}
+        onView={goView}
+        needsYouCount={needsYou.data?.count ?? null}
+        seatCount={board.data?.agents.length ?? null}
+        runningCount={
+          board.data ? (board.data.agent_map?.groups || []).reduce((n, g) => n + (g.running || 0), 0) : null
+        }
+        clock={clock}
+      />
+
+      <div className="topbar">
+        <div className="topbar-who">
+          {operator ? (
+            <span>
+              you are <b>{operator}</b> (operator)
+            </span>
+          ) : (
+            <span className="missing" data-testid="read-only">
+              read-only: no operator configured
+            </span>
+          )}
+          {operator ? null : <span className="muted"> · {operatorNote}</span>}
+        </div>
+        <div className="topbar-fresh muted" data-testid="freshness">
+          {board.readAt ? `board read ${ago(board.readAt.toISOString())}` : "reading the board…"}
+          {board.error ? " · last read failed" : ""}
+        </div>
+        <div className="tabs" role="tablist" aria-label="Panes">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "chat"}
+            className={tab === "chat" ? "tab tab-on" : "tab"}
+            onClick={() => setTab("chat")}
+          >
+            Chat
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "centre"}
+            className={tab === "centre" ? "tab tab-on" : "tab"}
+            onClick={() => setTab("centre")}
+          >
+            {view === "lead" ? "Plan" : view.replace("-", " ")}
+          </button>
+        </div>
+      </div>
+
+      <main className="cols" data-tab={tab}>
+        <div className="col col-chat">
+          <Boundary what="The chat">
+            <LeadPane
+              api={api}
+              project={project}
+              lead={lead.data}
+              leadError={lead.error}
+              thread={thread.data}
+              threadError={thread.error}
+              knownTickets={knownTickets}
+              onTicket={openTicket}
+              onReload={() => {
+                thread.reload();
+                lead.reload();
+              }}
+            />
+          </Boundary>
+        </div>
+        <div className="col col-centre">
+          <Boundary what="This view">{centre}</Boundary>
+        </div>
+        {selected ? (
+          <div className="col col-detail">
+            <Boundary what="The ticket detail">
+              <TicketPane
+                ticket={ticket.data}
+                error={ticket.error}
+                loading={ticket.loading}
+                onClose={() => goTo(view, "")}
+                onTicket={openTicket}
+              />
+            </Boundary>
+          </div>
+        ) : null}
+      </main>
+    </div>
   );
 }

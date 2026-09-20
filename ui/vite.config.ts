@@ -1,24 +1,30 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { boardHost } from "./board-host";
 
 export default defineConfig({
-  // boardHost serves the dashboard on one origin with the board API under
-  // /api, because the board sends no CORS headers and only accepts its own
-  // Origin on writes. See ui/board-host.ts.
-  plugins: [react(), boardHost()],
+  plugins: [react()],
+  // `atm ui` serves the bundle under /app/, so asset URLs have to be relative
+  // to the page rather than rooted at /. The same relative base works on the
+  // dev server, which serves the app at /.
+  base: "./",
   server: {
+    // The schemas in docs/api/schemas are imported by the dev-time response
+    // check, which lives above ui/.
     fs: { allow: [".."] },
+    // Loopback only. The API refuses any origin it was not told about, and
+    // this server has no business listening anywhere else.
+    host: "127.0.0.1",
+  },
+  build: {
+    // No sourcemap in the shipped bundle: nothing here is minified secrets,
+    // but the bundle is served by a local process and should stay small.
+    sourcemap: false,
   },
   test: {
     environment: "jsdom",
     globals: true,
     setupFiles: ["../tests/ui/setup.ts"],
     include: ["../tests/ui/**/*.test.{ts,tsx}"],
-    // The integration suite spawns a real board server per file and drives it
-    // over a real socket; running those files in parallel would race on the
-    // port. Unit files stay parallel.
-    poolOptions: { threads: { singleThread: false } },
     testTimeout: 20000,
   },
 });

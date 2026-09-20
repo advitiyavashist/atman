@@ -1,440 +1,283 @@
+/**
+ * The one place this app talks to `atm ui`.
+ *
+ * Two deployments, one client:
+ *
+ * 1. **The served bundle** (`atm ui`, then `/app/`). The page is same-origin
+ *    with the API and carries `<meta name="atman-api">` and
+ *    `<meta name="atman-token">`, which the server inserts. Writes work,
+ *    including `POST /msg`, because Origin equals Host.
+ * 2. **The dev server** (`npm run dev -w ui` beside
+ *    `atm ui --dev-origin http://localhost:5173`). There is no meta tag, so
+ *    the base comes from `?api=`, `VITE_ATMAN_API` or the documented default
+ *    `http://127.0.0.1:8765`, and the write token comes from
+ *    `GET /api/v1/session` with `X-Atman-Client: app` (the custom header
+ *    forces a preflight only an allowed origin passes).
+ *
+ * No origin is ever accepted that is not loopback: `apiBase` refuses anything
+ * else rather than quietly reaching out to a host the operator did not name.
+ */
+
+import { SCHEMA_OF, type RouteName } from "./types";
 import type {
-  Agent,
-  AgentListResponse,
-  Assignment,
-  ActivityResponse,
-  Channel,
-  ChannelListResponse,
-  ChannelMember,
-  DeliveryListResponse,
-  MasterPanelResponse,
-  MemberListResponse,
-  MessageListResponse,
-  OverviewResponse,
-  Review,
+  Board,
+  Lead,
+  NeedsYou,
+  Plan,
+  Projects,
+  Session,
+  Thread,
   Ticket,
-  TicketDetailResponse,
-  TicketListResponse,
-  TicketUpdate,
-} from "../types";
-import { boardRequest, type BoardClientConfig } from "./http";
-import type {
-  AddChannelMemberRequest,
-  ClaimTicketRequest,
-  CreateAssignmentRequest,
-  CreateChannelRequest,
-  CreateEnrollmentRequest,
-  CreateEnrollmentResponse,
-  CreateReviewRequest,
-  CreateTicketRequest,
-  CreateUpdateRequest,
-  ExchangeEnrollmentRequest,
-  ListActivityParams,
-  ListMessagesParams,
-  ListTicketsParams,
-  MasterLease,
-  MasterLeaseRequest,
-  MasterPauseRequest,
-  ReviewDecisionRequest,
-  RevokeSessionLeaseRequest,
-  SendMessageRequest,
-  SendMessageResponse,
-  SendTaskRequest,
-  SendTaskResponse,
-  SessionCredentialResponse,
-  SetTicketBlockedRequest,
 } from "./types";
-import {
-  assertActivityResponse,
-  assertAgent,
-  assertAgentListResponse,
-  assertAssignment,
-  assertChannel,
-  assertChannelListResponse,
-  assertChannelMember,
-  assertCreateEnrollmentResponse,
-  assertDeliveryListResponse,
-  assertMasterLease,
-  assertMasterPanelResponse,
-  assertMemberListResponse,
-  assertMessageListResponse,
-  assertMutationRequest,
-  assertOverviewResponse,
-  assertReview,
-  assertSendMessageResponse,
-  assertSendTaskResponse,
-  assertSessionCredentialResponse,
-  assertTicket,
-  assertTicketDetailResponse,
-  assertTicketListResponse,
-  assertTicketUpdate,
-} from "./validate";
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly url: string;
+  constructor(message: string, status: number, url: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.url = url;
+  }
+}
+
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0:0:0:0:0:0:0:1"]);
+
+/** true for an http(s) origin on a loopback name. Nothing else may be an API base. */
+export function isLoopbackOrigin(value: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  return LOOPBACK.has(u.hostname.toLowerCase());
+}
+
+function metaContent(name: string): string {
+  if (typeof document === "undefined") return "";
+  const el = document.querySelector(`meta[name="${name}"]`);
+  return (el?.getAttribute("content") || "").trim();
+}
+
+export interface Origin {
+  /** e.g. "http://127.0.0.1:8765/api/v1" — no trailing slash. */
+  api: string;
+  /** e.g. "http://127.0.0.1:8765" — where POST /msg lives. */
+  server: string;
+  /** true when the page is served by atm ui itself (token in a meta tag). */
+  sameOrigin: boolean;
+  /** Set when the configured base was refused, so the screen can say why. */
+  refused?: string;
+}
+
+const DEV_DEFAULT = "http://127.0.0.1:8765";
 
 /**
- * Typed client for the Ticket Board V1 dashboard, against the T-178 frozen
- * contract (docs/contracts/openapi.yaml). Fixture-replay tested only — see
- * tests/ui/api/ and README.md. No route here has ever been called against a
- * live server; wiring that up is T-184's job.
+ * Where the API is, and whether we are same-origin with it.
+ *
+ * `?api=` and `VITE_ATMAN_API` take a server origin, not a path: the API
+ * always lives under `/api/v1` on that origin.
  */
-export class BoardClient {
-  constructor(private readonly config: BoardClientConfig) {}
+export function resolveOrigin(search = typeof location === "undefined" ? "" : location.search): Origin {
+  const metaApi = metaContent("atman-api");
+  if (metaApi) {
+    const base = metaApi.replace(/\/+$/, "");
+    const server = typeof location === "undefined" ? "" : location.origin;
+    return { api: base.startsWith("http") ? base : `${server}${base}`, server, sameOrigin: true };
+  }
+  const fromQuery = new URLSearchParams(search).get("api") || "";
+  const fromEnv = (import.meta.env?.VITE_ATMAN_API as string | undefined) || "";
+  const wanted = (fromQuery || fromEnv || DEV_DEFAULT).trim().replace(/\/+$/, "");
+  if (!isLoopbackOrigin(wanted)) {
+    return {
+      api: "",
+      server: "",
+      sameOrigin: false,
+      refused: `${wanted} is not a loopback origin; this app talks to atm ui on localhost only`,
+    };
+  }
+  return { api: `${wanted}/api/v1`, server: wanted, sameOrigin: false };
+}
 
-  // --------------------------------------------------------------- overview
+/** Dev-only response check against the real JSON Schema. Never bundled in a production build. */
+async function devCheck(route: RouteName, body: unknown, url: string): Promise<void> {
+  if (!import.meta.env.DEV) return;
+  const mod = await import("./devCheck");
+  mod.checkAgainstSchema(SCHEMA_OF[route], body, url);
+}
 
-  async getOverview(requestId?: string): Promise<OverviewResponse> {
-    const body = await boardRequest<OverviewResponse>(this.config, {
-      method: "GET",
-      path: "overview",
-      expectedStatus: 200,
-      requestId,
-    });
-    assertOverviewResponse(body);
-    return body;
+export class AtmanApi {
+  readonly origin: Origin;
+  private token = "";
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(origin: Origin = resolveOrigin(), fetchImpl?: typeof fetch) {
+    this.origin = origin;
+    this.fetchImpl = fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
+    if (origin.sameOrigin) this.token = metaContent("atman-token");
   }
 
-  // ---------------------------------------------------------------- tickets
-
-  async listTickets(params: ListTicketsParams = {}, requestId?: string): Promise<TicketListResponse> {
-    const body = await boardRequest<TicketListResponse>(this.config, {
-      method: "GET",
-      path: "tickets",
-      query: params,
-      expectedStatus: 200,
-      requestId,
-    });
-    assertTicketListResponse(body);
-    return body;
+  /** The write token, or "" when this deployment has none yet. */
+  get writeToken(): string {
+    return this.token;
   }
 
-  async getTicket(ticketId: string, requestId?: string): Promise<TicketDetailResponse> {
-    const body = await boardRequest<TicketDetailResponse>(this.config, {
-      method: "GET",
-      path: `tickets/${encodeURIComponent(ticketId)}`,
-      expectedStatus: 200,
-      requestId,
-    });
-    assertTicketDetailResponse(body);
-    return body;
+  private url(path: string, params?: Record<string, string | number | undefined>): string {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v === undefined || v === "") continue;
+      q.set(k, String(v));
+    }
+    const qs = q.toString();
+    return `${this.origin.api}${path}${qs ? `?${qs}` : ""}`;
   }
 
-  async createTicket(request: CreateTicketRequest): Promise<Ticket> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, [], "CreateTicketRequest");
-    const body = await boardRequest<Ticket>(this.config, {
-      method: "POST",
-      path: "tickets",
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertTicket(body);
-    return body;
+  private async get<T>(route: RouteName, path: string, params?: Record<string, string | number | undefined>): Promise<T> {
+    if (this.origin.refused) throw new ApiError(this.origin.refused, 0, path);
+    const url = this.url(path, params);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        method: "GET",
+        headers: { Accept: "application/json", "X-Atman-Client": "app" },
+      });
+    } catch (cause) {
+      throw new ApiError(
+        `no answer from ${this.origin.server} — is atm ui running? (${cause instanceof Error ? cause.message : String(cause)})`,
+        0,
+        url,
+      );
+    }
+    const text = await res.text();
+    let body: unknown;
+    try {
+      body = text ? JSON.parse(text) : undefined;
+    } catch {
+      throw new ApiError(`${url} answered ${res.status} with a body that is not JSON`, res.status, url);
+    }
+    if (!res.ok) {
+      const msg = (body as { error?: string } | undefined)?.error || `${res.status}`;
+      throw new ApiError(msg, res.status, url);
+    }
+    await devCheck(route, body, url);
+    return body as T;
   }
 
-  async claimTicket(ticketId: string, request: ClaimTicketRequest): Promise<Ticket> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, ["expected_version"], "ClaimTicketRequest");
-    const body = await boardRequest<Ticket>(this.config, {
-      method: "POST",
-      path: `tickets/${encodeURIComponent(ticketId)}/claim`,
-      body: request,
-      expectedStatus: 200,
-      requestId: request.request_id,
-    });
-    assertTicket(body);
-    return body;
+  /** GET /api/v1/session — also how the dev server gets the write token. */
+  async session(): Promise<Session> {
+    const s = await this.get<Session>("session", "/session");
+    if (s.token) this.token = s.token;
+    return s;
   }
 
-  async createTicketUpdate(ticketId: string, request: CreateUpdateRequest): Promise<TicketUpdate> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, [], "CreateUpdateRequest");
-    const body = await boardRequest<TicketUpdate>(this.config, {
-      method: "POST",
-      path: `tickets/${encodeURIComponent(ticketId)}/updates`,
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertTicketUpdate(body);
-    return body;
+  projects(): Promise<Projects> {
+    return this.get<Projects>("projects", "/projects");
   }
 
-  async requestReview(ticketId: string, request: CreateReviewRequest): Promise<Review> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, ["expected_version"], "CreateReviewRequest");
-    const body = await boardRequest<Review>(this.config, {
-      method: "POST",
-      path: `tickets/${encodeURIComponent(ticketId)}/reviews`,
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertReview(body);
-    return body;
+  board(project?: string, seat?: string): Promise<Board> {
+    return this.get<Board>("board", "/board", { project, seat });
   }
 
-  /** Accept or reject. "Done" is `decideReview(id, reviewId, { decision: "accept", ... })` — there is no separate done route. */
-  async decideReview(ticketId: string, reviewId: string, request: ReviewDecisionRequest): Promise<Review> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, ["expected_version"], "ReviewDecisionRequest");
-    const body = await boardRequest<Review>(this.config, {
-      method: "POST",
-      path: `tickets/${encodeURIComponent(ticketId)}/reviews/${encodeURIComponent(reviewId)}/decision`,
-      body: request,
-      expectedStatus: 200,
-      requestId: request.request_id,
-    });
-    assertReview(body);
-    return body;
+  plan(project?: string): Promise<Plan> {
+    return this.get<Plan>("plan", "/plan", { project });
   }
 
-  async setTicketBlocked(ticketId: string, request: SetTicketBlockedRequest): Promise<Ticket> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, ["expected_version"], "SetTicketBlockedRequest");
-    const body = await boardRequest<Ticket>(this.config, {
-      method: "POST",
-      path: `tickets/${encodeURIComponent(ticketId)}/blocked`,
-      body: request,
-      expectedStatus: 200,
-      requestId: request.request_id,
-    });
-    assertTicket(body);
-    return body;
+  lead(project?: string): Promise<Lead> {
+    return this.get<Lead>("lead", "/lead", { project });
   }
 
-  // ----------------------------------------------------------------- agents
-
-  async listAgents(requestId?: string): Promise<AgentListResponse> {
-    const body = await boardRequest<AgentListResponse>(this.config, {
-      method: "GET",
-      path: "agents",
-      expectedStatus: 200,
-      requestId,
+  thread(opts: { project?: string; with?: string; before?: string; limit?: number; all?: boolean }): Promise<Thread> {
+    return this.get<Thread>("thread", "/thread", {
+      project: opts.project,
+      with: opts.with,
+      before: opts.before,
+      limit: opts.limit,
+      all: opts.all ? "1" : undefined,
     });
-    assertAgentListResponse(body);
-    return body;
   }
 
-  /** Operator sessions only; an agent token gets 403 `agent_token_insufficient`. */
-  async createEnrollment(request: CreateEnrollmentRequest): Promise<CreateEnrollmentResponse> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, [], "CreateEnrollmentRequest");
-    const body = await boardRequest<CreateEnrollmentResponse>(this.config, {
-      method: "POST",
-      path: "enrollments",
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertCreateEnrollmentResponse(body);
-    return body;
+  ticket(id: string, project?: string): Promise<Ticket> {
+    return this.get<Ticket>("ticket", `/ticket/${encodeURIComponent(id)}`, { project });
   }
 
-  /** Unauthenticated by credential — the code is the proof (docs/contracts/openapi.yaml `/sessions`). */
-  async exchangeEnrollment(request: ExchangeEnrollmentRequest): Promise<SessionCredentialResponse> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, [], "ExchangeEnrollmentRequest");
-    const body = await boardRequest<SessionCredentialResponse>(this.config, {
-      method: "POST",
-      path: "sessions",
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertSessionCredentialResponse(body);
-    return body;
-  }
-
-  /** Preserves the agent's work; the ticket is not reassigned by this call. */
-  async revokeSessionLease(agentId: string, request: RevokeSessionLeaseRequest): Promise<Agent> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, ["expected_version"], "RevokeSessionLeaseRequest");
-    const body = await boardRequest<Agent>(this.config, {
-      method: "DELETE",
-      path: `agents/${encodeURIComponent(agentId)}/session-lease`,
-      body: request,
-      expectedStatus: 200,
-      requestId: request.request_id,
-    });
-    assertAgent(body);
-    return body;
-  }
-
-  // ----------------------------------------------------------------- master
-
-  async getMasterPanel(requestId?: string): Promise<MasterPanelResponse> {
-    const body = await boardRequest<MasterPanelResponse>(this.config, {
-      method: "GET",
-      path: "master",
-      expectedStatus: 200,
-      requestId,
-    });
-    assertMasterPanelResponse(body);
-    return body;
-  }
-
-  async takeMasterLease(request: MasterLeaseRequest): Promise<MasterLease> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, ["expected_epoch"], "MasterLeaseRequest");
-    const body = await boardRequest<MasterLease>(this.config, {
-      method: "POST",
-      path: "master/lease",
-      body: request,
-      expectedStatus: 200,
-      requestId: request.request_id,
-    });
-    assertMasterLease(body);
-    return body;
-  }
-
-  async setMasterPaused(request: MasterPauseRequest): Promise<MasterLease> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, ["lease_epoch"], "MasterPauseRequest");
-    const body = await boardRequest<MasterLease>(this.config, {
-      method: "POST",
-      path: "master/pause",
-      body: request,
-      expectedStatus: 200,
-      requestId: request.request_id,
-    });
-    assertMasterLease(body);
-    return body;
-  }
-
-  /** Reservation shows as "Queued -- waiting for agent", never "Working" (T-183 copy rule). */
-  async createAssignment(request: CreateAssignmentRequest): Promise<Assignment> {
-    assertMutationRequest(
-      request as unknown as Record<string, unknown>,
-      ["lease_epoch", "expected_version"],
-      "CreateAssignmentRequest",
-    );
-    const body = await boardRequest<Assignment>(this.config, {
-      method: "POST",
-      path: "assignments",
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertAssignment(body);
-    return body;
-  }
-
-  // --------------------------------------------------------------- activity
-
-  async listActivity(params: ListActivityParams = {}, requestId?: string): Promise<ActivityResponse> {
-    const body = await boardRequest<ActivityResponse>(this.config, {
-      method: "GET",
-      path: "activity",
-      query: params,
-      expectedStatus: 200,
-      requestId,
-    });
-    assertActivityResponse(body);
-    return body;
-  }
-
-  // --------------------------------------------------------------- messages
-
-  async listMembers(requestId?: string): Promise<MemberListResponse> {
-    const body = await boardRequest<MemberListResponse>(this.config, {
-      method: "GET",
-      path: "members",
-      expectedStatus: 200,
-      requestId,
-    });
-    assertMemberListResponse(body);
-    return body;
-  }
-
-  async listChannels(requestId?: string): Promise<ChannelListResponse> {
-    const body = await boardRequest<ChannelListResponse>(this.config, {
-      method: "GET",
-      path: "channels",
-      expectedStatus: 200,
-      requestId,
-    });
-    assertChannelListResponse(body);
-    return body;
-  }
-
-  async createChannel(request: CreateChannelRequest): Promise<Channel> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, [], "CreateChannelRequest");
-    const body = await boardRequest<Channel>(this.config, {
-      method: "POST",
-      path: "channels",
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertChannel(body);
-    return body;
-  }
-
-  /** Owner/admin only for private channels (docs/contracts/openapi.yaml). */
-  async addChannelMember(channelId: string, request: AddChannelMemberRequest): Promise<ChannelMember> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, [], "AddChannelMemberRequest");
-    const body = await boardRequest<ChannelMember>(this.config, {
-      method: "POST",
-      path: `channels/${encodeURIComponent(channelId)}/members`,
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertChannelMember(body);
-    return body;
-  }
-
-  /** ACL-filtered: a private channel the caller does not belong to is 403 `not_channel_member`; a revoked member is 403 `membership_revoked`. */
-  async listMessages(params: ListMessagesParams, requestId?: string): Promise<MessageListResponse> {
-    const body = await boardRequest<MessageListResponse>(this.config, {
-      method: "GET",
-      path: "messages",
-      query: params,
-      expectedStatus: 200,
-      requestId,
-    });
-    assertMessageListResponse(body);
-    return body;
+  needsYou(project?: string): Promise<NeedsYou> {
+    return this.get<NeedsYou>("needs-you", "/needs-you", { project });
   }
 
   /**
-   * The author is taken from the credential; there is deliberately no
-   * `author` field on `SendMessageRequest` (./types.ts) for a caller to set.
-   * `intent` is `"message" | "reply"` only — a task goes through `sendTask`
-   * below, against the message id this call returns.
+   * POST /api/v1/lead {seat} — the operator picks this project's lead.
+   *
+   * The same write as `atm lead set <seat>`. It needs the operator and the
+   * launch token; until T-1104 adds `--operator` the server answers 400 and
+   * the picker shows the command instead.
    */
-  async sendMessage(request: SendMessageRequest): Promise<SendMessageResponse> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, [], "SendMessageRequest");
-    const body = await boardRequest<SendMessageResponse>(this.config, {
+  async setLead(seat: string, project?: string): Promise<{ ok: boolean; lead: string; harness: string; capability: string; project: string }> {
+    const url = `${this.origin.api}/lead`;
+    const res = await this.fetchImpl(url, {
       method: "POST",
-      path: "messages",
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Atman-Token": this.token,
+        "X-Atman-Client": "app",
+      },
+      body: JSON.stringify(project ? { seat, project } : { seat }),
     });
-    assertSendMessageResponse(body);
-    return body;
+    const text = await res.text();
+    let parsed: { ok?: boolean; error?: string } = {};
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      throw new ApiError(`POST /api/v1/lead answered ${res.status} with a body that is not JSON`, res.status, url);
+    }
+    if (!res.ok || !parsed.ok) throw new ApiError(parsed.error || `${res.status}`, res.status, url);
+    return parsed as { ok: boolean; lead: string; harness: string; capability: string; project: string };
   }
 
   /**
-   * Turns an existing message into a task. Two-step by contract: the
-   * composer's "Send task" action calls `sendMessage` first, then this with
-   * the id it returned (docs/contracts/openapi.yaml `/messages/{id}/task`
-   * acts on an existing message, not a fresh body). A hook-only recipient
-   * comes back `queued` / `manual_resume_required` with no `wake_job`; a
-   * paused project comes back `queued` / `project_paused` — both are 201s,
-   * not errors, so the caller reads `deliveries` rather than a thrown status.
+   * POST /msg — the embedded composer's route, which is where a post goes
+   * (the API adds no message route; see docs/api/app-v2.md).
+   *
+   * `from` is the operator. Until T-1104 hardens the route the server still
+   * reads it from the payload, so the app sends the operator it was told and
+   * nothing else. With no operator the caller must not get here: the composer
+   * shows the command to set one instead.
    */
-  async sendTask(messageId: string, request: SendTaskRequest): Promise<SendTaskResponse> {
-    assertMutationRequest(request as unknown as Record<string, unknown>, [], "SendTaskRequest");
-    const body = await boardRequest<SendTaskResponse>(this.config, {
-      method: "POST",
-      path: `messages/${encodeURIComponent(messageId)}/task`,
-      body: request,
-      expectedStatus: 201,
-      requestId: request.request_id,
-    });
-    assertSendTaskResponse(body);
-    return body;
-  }
-
-  async listDeliveries(messageId: string, requestId?: string): Promise<DeliveryListResponse> {
-    const body = await boardRequest<DeliveryListResponse>(this.config, {
-      method: "GET",
-      path: `messages/${encodeURIComponent(messageId)}/deliveries`,
-      expectedStatus: 200,
-      requestId,
-    });
-    assertDeliveryListResponse(body);
-    return body;
+  async postMessage(body: { from: string; text: string; to?: string; re?: string; kind?: "message" | "task" }): Promise<{ ok: boolean; posted?: unknown }> {
+    if (!this.token) {
+      throw new ApiError(
+        "no write token: open the app that atm ui serves at /app/, or start atm ui --dev-origin <this origin>",
+        0,
+        "/msg",
+      );
+    }
+    const url = `${this.origin.server}/msg`;
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Atman-Token": this.token },
+        body: JSON.stringify(body),
+      });
+    } catch (cause) {
+      throw new ApiError(
+        this.origin.sameOrigin
+          ? `POST /msg never answered (${cause instanceof Error ? cause.message : String(cause)})`
+          : "POST /msg is same-origin only: it sends no CORS headers and refuses an Origin that is not its Host. " +
+            "Post from the bundle atm ui serves at /app/.",
+        0,
+        url,
+      );
+    }
+    const text = await res.text();
+    let parsed: { ok?: boolean; error?: string; posted?: unknown } = {};
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      throw new ApiError(`POST /msg answered ${res.status} with a body that is not JSON`, res.status, url);
+    }
+    if (!res.ok || !parsed.ok) throw new ApiError(parsed.error || `POST /msg answered ${res.status}`, res.status, url);
+    return { ok: true, posted: parsed.posted };
   }
 }

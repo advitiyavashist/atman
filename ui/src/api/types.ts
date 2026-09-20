@@ -1,301 +1,370 @@
-// Request/error/stream shapes for the routes T-184 needs that ../types.ts does
-// not already cover (that file only has fixture-read shapes for the T-183
-// screens). Mirrors docs/contracts/openapi.yaml at tickets origin/main@884be46
-// (post T-178 freeze, post T-183/T-179 merge). No live wire traffic happens in
-// this package — see README.md for what "fixture-replay tested" means here.
-
-import type { Agent, Delivery, GitEvidence, MasterLease, Message, SessionLease, Ticket } from "../types";
-
-// ------------------------------------------------------------------ scalars
-
-/** Pattern `^prj_[0-9a-z]{8,32}$` per openapi.yaml; not branded, to match ../types.ts. */
-export type ProjectId = string;
-export type RequestId = string;
-
-// -------------------------------------------------------------- error shape
-
-export type ErrorCode =
-  | "malformed_request"
-  | "unauthenticated"
-  | "forbidden_scope"
-  | "agent_token_insufficient"
-  | "not_channel_member"
-  | "membership_revoked"
-  | "sender_identity_rejected"
-  | "not_found"
-  | "ticket_version_conflict"
-  | "ticket_already_claimed"
-  | "capacity_exhausted"
-  | "assignment_expired"
-  | "session_lease_expired"
-  | "master_lease_conflict"
-  | "master_lease_expired"
-  | "run_already_active"
-  | "request_id_reused"
-  | "invalid_state_transition"
-  | "dependency_cycle"
-  | "dependency_unmet"
-  | "missing_acceptance_criteria"
-  | "invalid_review_evidence"
-  | "enrollment_code_invalid"
-  | "enrollment_code_expired"
-  | "budget_exceeded"
-  | "legacy_writer_active"
-  | "rate_limited";
-
-/** Codes this client raises itself; never sent by the server. */
-export type ClientErrorCode =
-  | "client_malformed_request"
-  | "unexpected_status"
-  | "invalid_response_shape"
-  | "network_error";
-
-export interface ErrorEnvelope {
-  error: {
-    code: ErrorCode;
-    status: 400 | 401 | 403 | 404 | 409 | 422 | 429;
-    message: string;
-    request_id: RequestId | null;
-    details?: Record<string, unknown>;
-  };
-}
-
-// -------------------------------------------------------- mutation envelope
-
 /**
- * Every mutation body carries request_id and nothing that identifies the
- * actor — the credential binds the actor server-side and a body `actor`
- * field is rejected 400 `malformed_request` (frozen decision #1, T-178).
- * There is deliberately no `actor` property anywhere in this file.
+ * TypeScript mirrors of `docs/api/schemas/*.json` (the contract for the
+ * `atm ui` JSON API under /api/v1).
+ *
+ * The schemas are the source of truth. These types are hand-written mirrors so
+ * the editor can help; they are not the check. The check is ajv against the
+ * real schema files — in dev (`api/devCheck.ts`) and in the tests
+ * (`tests/ui/support/schema.ts`), where a missing field fails loudly.
+ *
+ * Nothing here has a default that could invent data. A value the board never
+ * recorded arrives as `null` or `"unknown"` and is rendered that way.
  */
-export interface MutationEnvelope {
-  request_id: RequestId;
-}
 
-// ---------------------------------------------------------------- tickets
-
-export interface CreateTicketRequest extends MutationEnvelope {
-  title: string;
-  outcome: string;
-  acceptance: { text: string }[];
-  role?: string;
-  dependencies?: string[];
-  files?: string[];
-}
-
-export interface ClaimTicketRequest extends MutationEnvelope {
-  expected_version: number;
-  session_id: string;
-  assignment_id?: string | null;
-}
-
-export interface CreateUpdateRequest extends MutationEnvelope {
-  body: string;
-  next_step: string;
-  session_id?: string;
-}
-
-export interface CreateReviewRequest extends MutationEnvelope {
-  expected_version: number;
-  evidence: GitEvidence;
-  notes?: string;
-}
-
-export interface ReviewDecisionRequest extends MutationEnvelope {
-  expected_version: number;
-  decision: "accept" | "reject";
-  evidence_sha: string;
-  notes?: string;
-}
-
-export interface SetTicketBlockedRequest extends MutationEnvelope {
-  expected_version: number;
-  blocked: boolean;
-  reason?: string;
-}
-
-export interface ListTicketsParams {
-  [key: string]: string | number | boolean | undefined;
-  cursor?: string;
-  limit?: number;
-  state?: string;
-  role?: string;
-  owner?: string;
-  dependency_blocked?: boolean;
-  q?: string;
-}
-
-// ----------------------------------------------------------------- agents
-
-export interface CreateEnrollmentRequest extends MutationEnvelope {
-  agent_name: string;
-  role: string;
-  capabilities?: string[];
-  worktree?: string;
-  connection_mode?: "managed" | "hook_only";
-  max_active_tickets?: number;
-}
-
-export interface EnrollmentConfigChange {
-  path: string;
-  change: "add" | "update" | "none";
-  summary?: string;
-}
-
-export interface CreateEnrollmentResponse {
-  enrollment_id: string;
-  agent: Agent;
-  expires_at: string;
-  /** Real deployments send this once; fixtures carry a placeholder. */
-  code: string;
-  install_command: string;
-  config_changes: EnrollmentConfigChange[];
-}
-
-export interface ExchangeEnrollmentRequest extends MutationEnvelope {
-  code: string;
-  session_id: string;
-  runtime?: { adapter: "claude_code"; version?: string };
-}
-
-export interface SessionCredentialResponse {
-  agent: Agent;
-  /** Real deployments send this once; fixtures carry a placeholder. */
-  token: string;
-  lease: SessionLease;
-}
-
-export interface RevokeSessionLeaseRequest extends MutationEnvelope {
-  expected_version: number;
+/** common.json#/$defs/harness_badge */
+export interface HarnessBadge {
+  /** A harness name, "operator" for an operator post, or "unknown". Never defaulted to claude. */
+  value: string;
+  /** true only when stamped on the post at post time (or an operator post). */
+  recorded: boolean;
   note: string;
 }
 
-// ----------------------------------------------------------------- master
-
-export interface MasterLeaseRequest extends MutationEnvelope {
-  expected_epoch: number;
-  ttl_seconds?: number;
+/** common.json#/$defs/receipt — delivery receipts only, never an acknowledgement. */
+export interface Receipt {
+  agent: string;
+  words: string[];
 }
 
-export interface MasterPauseRequest extends MutationEnvelope {
-  lease_epoch: number;
-  paused: boolean;
+/** common.json#/$defs/post */
+export interface Post {
+  id: string;
+  /** ISO-8601 UTC, or "" when not recorded. */
+  at: string;
+  from: string;
+  /** from@project */
+  author: string;
+  to: string;
+  re: string;
+  text: string;
+  mentions: string[];
+  kind: string;
+  harness: HarnessBadge;
+  operator: boolean;
+  broadcast: boolean;
+  receipts: Receipt[];
 }
 
-export interface CreateAssignmentRequest extends MutationEnvelope {
-  ticket_id: string;
-  agent_id: string;
+/** common.json#/$defs/usage_view — a figure never read is null / "unknown", never 0. */
+export interface UsageView {
+  provider: string;
+  status: string;
+  level: string;
+  text: string;
+  remaining_pct: number | null;
+  reset: string;
+  checked_at: string;
+  /** Always present. "age unknown" when checked_at is "". */
+  age: string;
+}
+
+/** common.json#/$defs/blocker — the kinds are closed. */
+export type BlockerKind =
+  | "dep_unaccepted"
+  | "dep_open"
+  | "seat_limited"
+  | "seat_offline"
+  | "auth"
+  | "hold"
+  | "capture"
+  | "blocked"
+  | "unaccepted";
+
+export interface Blocker {
+  kind: BlockerKind;
+  on: string;
+  text: string;
+  /** A copyable atm command, or "". */
+  cmd: string;
+}
+
+export type CapabilityLine = "takes mid-run messages" | "answers on its next turn";
+
+export interface Capability {
+  midrun: boolean;
+  line: CapabilityLine;
   reason: string;
-  lease_epoch: number;
-  expected_version: number;
-  ttl_seconds?: number;
 }
 
-export type { MasterLease, GitEvidence };
-
-// ---------------------------------------------------------------- activity
-
-export interface ListActivityParams {
-  [key: string]: string | number | boolean | undefined;
-  cursor?: string;
-  limit?: number;
-  subject_type?: string;
+export interface PickerRow {
+  seat: string;
+  harness: string;
+  capability: CapabilityLine;
 }
 
-// --------------------------------------------------------------- messages
+export interface LeadStatus {
+  seat: string;
+  harness: string;
+  state: string;
+  detail: string;
+  running: { ticket: string; elapsed_s: number | null; tokens: number | null } | null;
+  last_output_at: string;
+  last_output_source: string;
+  limit: Record<string, unknown> | null;
+  limit_until: string;
+  auth: { state: string; label: string; cmd: string };
+  usage: UsageView;
+  reachable: boolean;
+  capability: Capability;
+  wake_mode: string;
+  cannot_answer: { kind: "logged_out" | "limited" | "quota" | "offline"; text: string; cmd: string } | null;
+}
 
-export interface CreateChannelRequest extends MutationEnvelope {
+/** session.json */
+export interface Session {
+  api_version: 1;
+  token: string;
+  token_header: "X-Atman-Token";
+  project: string;
+  /** "" when no operator is configured: the app is read-only. */
+  operator: string;
+  operator_note: string;
+  lead: string;
+  lead_note: string;
+}
+
+/** projects.json */
+export interface ProjectRow {
+  slug: string;
+  board: string;
+  repos: string[];
+  source: "started" | "registry" | "boards";
+  counts: Record<string, number>;
+  lead: string;
+  current: boolean;
+}
+
+export interface Projects {
+  projects: ProjectRow[];
+  current: string;
+}
+
+/** board.json (the stable subset) */
+export interface AgentRow {
   name: string;
-  visibility: "public" | "private";
-  topic?: string;
-}
-
-export interface AddChannelMemberRequest extends MutationEnvelope {
-  member_id: string;
-  subscribed?: boolean;
-}
-
-export interface ListMessagesParams {
-  [key: string]: string | number | boolean | undefined;
-  channel_id: string;
-  thread_id?: string;
-  cursor?: string;
-  limit?: number;
+  state: string;
+  harness: string;
+  lifecycle: string;
+  reachable: boolean;
+  adapter_state: string;
+  wake_mode: string;
+  limit: Record<string, unknown> | null;
+  limit_until: string;
+  auth_surface: { state: string; label: string; recovery?: { cmd?: string } | null };
 }
 
 /**
- * `intent` is deliberately `"message" | "reply"` here, not the full
- * `MessageIntent` union — a task is created through `POST
- * /messages/{id}/task` (see `SendTaskRequest` below), so that its required
- * fields are validated in one place rather than being optional on this body.
+ * One run row of `agent_map.groups[].rows[]`.
+ *
+ * board.json makes only `agent_map.groups` contract ("other snapshot fields
+ * may change"), so every field here is optional and the Runs screen renders
+ * "not recorded" rather than a number it cannot prove.
  */
-export interface SendMessageRequest extends MutationEnvelope {
-  channel_id: string;
-  body: string;
-  intent: "message" | "reply";
-  thread_id?: string | null;
-  mentions?: string[];
-  ticket_id?: string | null;
-  causation_id?: string | null;
+export interface RunRow {
+  seat?: string;
+  harness?: string;
+  ticket?: string;
+  title?: string;
+  role?: string;
+  state?: string;
+  /**
+   * Not a string on this route: the snapshot records `{kind, sha}` here. It is
+   * `unknown` so it can only reach the screen through `verdictChip`.
+   */
+  verdict?: unknown;
+  started?: string;
+  ended?: string;
+  elapsed_s?: number | null;
+  tokens?: number | null;
+  tokens_in?: number | null;
+  tokens_out?: number | null;
 }
 
-export interface SendMessageResponse {
-  message: Message;
-  /** Written in the same transaction as the message — a message persisted without its outbox rows is the bug this shape prevents. */
-  deliveries: Delivery[];
+export interface RunGroup {
+  ticket?: string;
+  title?: string;
+  status?: string;
+  pr?: string;
+  rows?: RunRow[];
+  runs?: number;
+  running?: number;
+  elapsed_s?: number | null;
+  tokens?: number | null;
+  tokens_unknown?: number;
 }
 
-export interface SendTaskRouting {
-  mode: "direct" | "via_master";
-  /** Required when mode is `direct`. This is an AgentId (`Member.agent_id`), not a MemberId. */
-  agent_id?: string | null;
+export interface Board {
+  project: string;
+  generated: string;
+  master: string;
+  cos: string;
+  seat?: string;
+  counts: { total: number; done: number; done_unverified: number; accepted: number };
+  agents: AgentRow[];
+  messages: Array<Record<string, unknown>>;
+  provider_usage: Array<{ provider: string; level: string; remaining_pct: number | null; text: string }>;
+  agent_map: { groups?: RunGroup[] } | null;
+  objective: Record<string, unknown>;
+  work: { nodes: Array<Record<string, unknown>> } | null;
+  app: { project: string; operator: string; operator_note: string; lead: string; lead_note: string };
 }
 
-export type SendTaskTicketLink = { existing_ticket_id: string } | { new_ticket: { title: string; role?: string } };
-
-/** "Send task" requires an outcome, an assignee or explicit routing, and a linked or new ticket. */
-export interface SendTaskRequest extends MutationEnvelope {
-  outcome: string;
-  routing: SendTaskRouting;
-  ticket?: SendTaskTicketLink;
+/** plan.json */
+export interface PlanNode {
+  id: string;
+  title: string;
+  phase: string;
+  status: string;
+  status_label: string;
+  owner: string;
+  reserved_for: string;
+  deps: string[];
+  depth: number;
+  /** done without a structured accept. */
+  unverified: boolean;
+  /** true only for done with a structured accept or merge record bound to the review head. */
+  accepted: boolean;
+  /** dependents may start (accept, merge, or a recorded release override). */
+  released: boolean;
+  blockers: Blocker[];
+  running: { seat: string; elapsed_s: number | null } | null;
+  review: { verified: boolean; label: string; head?: string };
+  artifact: { commit: string; branch: string; pr: string; sha: string };
+  wait: Record<string, unknown> | null;
 }
 
-export interface SendTaskResponse {
-  message: Message;
-  ticket: Ticket;
-  deliveries: Delivery[];
-  /** Null when the recipient is hook-only or the project is paused. */
-  wake_job?: unknown | null;
+export interface Plan {
+  project: string;
+  generated: string;
+  /** false when the Work payload could not be built; nodes is then []. */
+  available: boolean;
+  objective: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  counts: Record<string, number>;
+  nodes: PlanNode[];
+  edges: Array<{ from: string; to: string; waiting?: boolean }>;
+  layers: string[][];
+  order: string[];
+  blocker_kinds: string[];
 }
 
-// ------------------------------------------------------------------- SSE
-
-export type StreamEventType =
-  | "ticket_changed"
-  | "agent_changed"
-  | "assignment_changed"
-  | "master_lease_changed"
-  | "review_changed"
-  | "message_created"
-  | "delivery_changed"
-  | "run_changed"
-  | "audit_appended"
-  | "snapshot_required"
-  | "heartbeat";
-
-export type SnapshotRequiredReason = "cursor_expired" | "project_changed" | "acl_changed";
-
-export interface StreamEnvelope {
-  event_id: string;
-  type: StreamEventType;
-  snapshot_version: number;
-  occurred_at: string;
-  subject_id: string | null;
-  payload: Record<string, unknown> | null;
-  resume_hint: { reason: SnapshotRequiredReason } | null;
+/** thread.json */
+export interface Thread {
+  project: string;
+  operator: string;
+  operator_note: string;
+  lead: string;
+  lead_note: string;
+  with: string;
+  needs_lead: boolean;
+  /** Oldest first. */
+  messages: Post[];
+  has_more: boolean;
+  /** Pass as before= for the previous page. */
+  oldest_id: string;
+  total_in_window: number;
+  archives: boolean;
+  error?: string;
 }
 
-export interface SnapshotRequiredEnvelope extends StreamEnvelope {
-  type: "snapshot_required";
-  resume_hint: { reason: SnapshotRequiredReason };
+/** ticket.json */
+export interface TicketRun {
+  seat: string;
+  author: string;
+  harness: string;
+  role: string;
+  state: string;
+  verdict: string;
+  started: string;
+  ended: string;
+  elapsed_s: number | null;
+  /** null = unknown, never 0. */
+  tokens: number | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  /** "unknown" whenever tokens is null. */
+  tokens_label: string;
 }
+
+export interface Verdict {
+  kind: string;
+  by: string;
+  at: string;
+  sha: string;
+  superseded: boolean;
+  /** Bound to the current review head. */
+  applies: boolean;
+  notes: string;
+}
+
+export interface Ticket {
+  id: string;
+  project: string;
+  title: string;
+  status: string;
+  status_label: string;
+  accepted: boolean;
+  released: boolean;
+  owner: string;
+  owner_at_project: string;
+  deps: Array<{ id: string; state: string; title: string }>;
+  acceptance: { proof: string } & Record<string, unknown>;
+  review: { head: string; head_len: number; label: string; verified: boolean; verdicts: Verdict[] };
+  runs: TicketRun[];
+  usage: UsageView[];
+  handoff: Array<{ from: string; by: string; at: string; text: string }>;
+  /** Newest first; messages with re=<id>. */
+  messages: Post[];
+  messages_total: number;
+  steers: Array<Record<string, unknown>>;
+  artifact: { commit: string; branch: string; pr: string; sha: string };
+  diff_cmd: string;
+  diff_note: string;
+}
+
+/** lead.json */
+export interface Lead {
+  project: string;
+  operator: string;
+  operator_note: string;
+  lead: string;
+  lead_note: string;
+  needs_lead: boolean;
+  picker: PickerRow[];
+  status: LeadStatus | null;
+}
+
+/** needs-you.json */
+export interface NeedsYouItem {
+  kind: "message" | "escalated";
+  why: string;
+  id: string;
+  at: string;
+  from: string;
+  author: string;
+  re: string;
+  text: string;
+  state: "asked";
+  label: "asked (unstructured)";
+}
+
+export interface NeedsYou {
+  items: NeedsYouItem[];
+  count: number;
+  operator: string;
+  note: string;
+}
+
+/** The route name -> schema file map the dev check and the tests share. */
+export const SCHEMA_OF = {
+  session: "session.json",
+  projects: "projects.json",
+  board: "board.json",
+  plan: "plan.json",
+  thread: "thread.json",
+  ticket: "ticket.json",
+  lead: "lead.json",
+  "needs-you": "needs-you.json",
+} as const;
+
+export type RouteName = keyof typeof SCHEMA_OF;
