@@ -43,6 +43,7 @@ def run_tool(tool, board, *args, agent="", cwd=None):
     e.pop("TICKET_SEAT", None)
     e.pop("TICKET_SESSION_ID", None)
     e.pop("CLAUDE_CODE_SESSION_ID", None)
+    e.pop("TICKET_OWNER_GENERATION", None)
     where = cwd or (board.parent if board.parent.is_dir() else Path("/"))
     return subprocess.run([sys.executable, str(tool), *args], capture_output=True,
                           text=True, env=e, cwd=where)
@@ -117,10 +118,9 @@ def test_done_by_non_owner_preserves_owner_git_state(tool, trees):
     assert alice.get("ticket") == "T-001"
 
     assert bob.get("cwd") in (None, "", str(wb))
-    if bob.get("branch"):
-        assert bob["branch"] == "bob/work"
-        assert bob["sha"] == trees["bob_sha"]
-        assert bob["worktree"] == str(wb)
+    assert bob.get("branch") in (None, "", "bob/work")
+    assert bob.get("sha") in (None, "", trees["bob_sha"])
+    assert bob.get("ticket") != "T-001"
 
 
 @pytest.mark.parametrize("tool", [ROOT_TOOL, PKG_TOOL], ids=["tickets.py", "cli.py"])

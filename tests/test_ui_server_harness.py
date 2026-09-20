@@ -47,16 +47,28 @@ def test_ui_server_isolates_inherited_session(board, monkeypatch):
 
 
 def _pgrep_ui() -> list[tuple[int, str]]:
-    # Wide ps: default COLUMNS=80 on GitHub Actions truncates before
-    # `tickets.py ui`, so pgrep -fl misses the live server.
+    from watch_reaper import process_cmdline
+    rows: list[tuple[int, str]] = []
+    if os.path.isdir("/proc"):
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            names = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            rest = process_cmdline(int(name))
+            if "tickets.py" in rest and " ui " in rest:
+                rows.append((int(name), rest))
+        return rows
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     proc = subprocess.run(
-        ["ps", "-axww", "-o", "pid=,command="],
-        capture_output=True,
-        text=True,
+        ["ps", "-axww", "-o", "pid=,args="],
+        capture_output=True, text=True, env=env,
     )
     if proc.returncode != 0:
         return []
-    rows: list[tuple[int, str]] = []
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:

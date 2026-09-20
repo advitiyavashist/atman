@@ -164,7 +164,8 @@ def test_plan_without_fields_stays_capture_with_explicit_hint(tmp_path):
     n2 = run(repo, "next", tmp_path=tmp_path, agent="bob")
     assert n2.returncode != 0
     out2 = n2.stdout + n2.stderr
-    assert "T-002" not in n2.stdout or "waits in capture" in out2
+    assert "claimed T-002" not in out2
+    assert "T-002" not in n2.stdout
     assert "waiting on unfinished" not in out2.lower()
 
     g2 = run(repo, "graph", tmp_path=tmp_path)

@@ -40,6 +40,7 @@ def _run_pkg_cli(board, *args, agent="", cwd=None):
     e.pop("TICKET_SEAT", None)
     e.pop("TICKET_SESSION_ID", None)
     e.pop("CLAUDE_CODE_SESSION_ID", None)
+    e.pop("TICKET_OWNER_GENERATION", None)
     # Packaged ticket_coordination lives under src/.
     e["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(ROOT)])
     where = cwd or board.parent

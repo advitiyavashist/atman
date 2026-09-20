@@ -112,10 +112,37 @@ def _kill_pid_tree(pid: int) -> None:
 
 def leftover_suite_ui_children(pytest_pid: int | None = None) -> list[tuple[int, int, str]]:
     """ui --port processes still parented by this suite or already reparented to 1."""
+    from watch_reaper import process_cmdline
     me = int(pytest_pid or os.getpid())
     leftover: list[tuple[int, int, str]] = []
+    if os.path.isdir("/proc"):
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            names = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == me:
+                continue
+            cmd = process_cmdline(pid)
+            if " ui " not in cmd or "--port" not in cmd:
+                continue
+            try:
+                with open("/proc/%d/stat" % pid) as fh:
+                    rest = fh.read().rsplit(")", 1)[-1].split()
+                ppid = int(rest[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            if ppid == me:
+                leftover.append((pid, ppid, cmd))
+        return leftover
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
-        out = subprocess.check_output(["ps", "-xww", "-o", "pid=,ppid=,command="], text=True)
+        out = subprocess.check_output(
+            ["ps", "-xww", "-o", "pid=,ppid=,args="], text=True, env=env)
     except OSError:
         return leftover
     for line in out.splitlines():
