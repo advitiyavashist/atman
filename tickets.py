@@ -9793,7 +9793,7 @@ def resolve_to_and_mentions(text, to="", registered=None, master_owner=""):
 
 
 def post_message(board, sender, text, to="", re="", kind="", task=False, source="",
-                 explicit=None):
+                 explicit=None, via="", sender_kind=""):
     _rotate_messages_if_big(board)
     holder = ((current_master(board) or {}) or {}).get("owner") or ""
     to, mentions, unknown, explicit_unknown, dropped = resolve_to_and_mentions(
@@ -9810,13 +9810,24 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
                                 if t.lower() != retired_name.lower()]
     rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
            "to": to, "re": re, "text": text}
-    prov = _message_provenance(board, sender, explicit=explicit)
-    rec["session"] = prov["session"]
-    rec["via"] = prov["via"]
-    rec["endpoint_pid"] = prov["endpoint_pid"]
-    rec["unverified"] = prov["unverified"]
-    if prov["leadership_flag"]:
-        rec["leadership_flag"] = prov["leadership_flag"]
+    if sender_kind == "operator":
+        # T-1104: UI-operator posts must not inherit the atm ui process's
+        # session, endpoint_pid, or leadership_flag (those belong to the
+        # server shell, not the person who clicked Post).
+        rec["session"] = "ui-operator"
+        rec["via"] = via or "ui-operator"
+        rec["endpoint_pid"] = "ui-operator"
+        rec["unverified"] = False
+    else:
+        prov = _message_provenance(board, sender, explicit=explicit)
+        rec["session"] = prov["session"]
+        rec["via"] = via or prov["via"]
+        rec["endpoint_pid"] = prov["endpoint_pid"]
+        rec["unverified"] = False if via else prov["unverified"]
+        if prov["leadership_flag"]:
+            rec["leadership_flag"] = prov["leadership_flag"]
+    if sender_kind:
+        rec["sender_kind"] = sender_kind
     if forwarded:
         rec["forwarded_from"] = forwarded["from"]
         rec["forward_role"] = forwarded["role"]
@@ -17422,7 +17433,7 @@ body[data-work-view=columns] #workJump{display:none}
       <div class="msgs" id="msgs"></div>
       <section id="composer">
         <div id="composerRow">
-          <label class="who"><small>from</small> <select id="cFrom"></select></label>
+          <label class="who"><small>from</small> <span id="cFrom" class="operator-from" data-operator="">set an operator: atm ui --operator &lt;name&gt;</span></label>
           <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
           <label class="who"><small>re</small> <input id="cRe" placeholder="ticket id" size="8" style="width:88px" autocomplete="off"></label>
           <label class="who"><small>type</small> <select id="cKind"><option value="message">message</option><option value="task">task</option></select></label>
@@ -17438,6 +17449,7 @@ body[data-work-view=columns] #workJump{display:none}
 <script>
 const UI_TOKEN="";
 function writeHeaders(){const h={'Content-Type':'application/json'};if(UI_TOKEN)h['X-Atman-Token']=UI_TOKEN;return h}
+const UI_OPERATOR="";
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
 // Server sends timestamps as raw ISO-8601 UTC. Render in whatever timezone
@@ -17826,13 +17838,25 @@ function ensureToOption(name){
     const o=document.createElement('option');o.value=name;o.textContent=name;to.appendChild(o);
   }
 }
+function setComposerOperator(name){
+  const from=document.getElementById('cFrom');
+  const btn=document.getElementById('cSend');
+  const ta=document.getElementById('cText');
+  const msg=document.getElementById('composerMsg');
+  const op=String(name||UI_OPERATOR||'').trim();
+  if(from){
+    from.dataset.operator=op;
+    from.textContent=op?(op+' (operator)'):'set an operator: atm ui --operator <name>';
+  }
+  if(btn)btn.disabled=!op;
+  if(ta)ta.disabled=!op;
+  if(!op&&msg&&!msg.textContent){msg.className='mute';msg.textContent='set an operator: atm ui --operator <name>'}
+}
 function loadAgentPickers(){
-  const from=document.getElementById('cFrom'),to=document.getElementById('cTo');
-  const savedFrom=localStorage.getItem('tickets-ui-from')||'';
-  const prevFrom=from.value||savedFrom, prevTo=to.value;
-  from.innerHTML='<option value="">(pick agent)</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  const to=document.getElementById('cTo');
+  if(!to)return;
+  const prevTo=to.value;
   to.innerHTML='<option value="">everyone</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
-  if(AGENTS.includes(prevFrom))from.value=prevFrom;
   if(THREAD_SEAT){ensureToOption(THREAD_SEAT);to.value=THREAD_SEAT;to.disabled=true}
   else{to.disabled=false;if(AGENTS.includes(prevTo))to.value=prevTo}
 }
@@ -18015,19 +18039,18 @@ document.getElementById('cText').addEventListener('input',renderMentionBar);
 document.getElementById('cText').addEventListener('click',renderMentionBar);
 document.getElementById('cText').addEventListener('keyup',e=>{if(e.key!=='Enter')renderMentionBar()});
 document.getElementById('cSend').addEventListener('click',async()=>{
-  const from=document.getElementById('cFrom').value.trim();
+  const from=(document.getElementById('cFrom').dataset.operator||UI_OPERATOR||'').trim();
   const text=document.getElementById('cText').value.trim();
   const to=document.getElementById('cTo').value.trim();
   const re=document.getElementById('cRe').value.trim();
   const kind=document.getElementById('cKind').value.trim()||'message';
   const btn=document.getElementById('cSend'),msg=document.getElementById('composerMsg');
-  if(!from){msg.className='bad';msg.textContent='pick who you are posting as';return}
+  if(!from){msg.className='bad';msg.textContent='set an operator: atm ui --operator <name>';return}
   if(!text){msg.className='bad';msg.textContent='message is empty';return}
-  localStorage.setItem('tickets-ui-from',from);
   btn.disabled=true;msg.className='';msg.textContent='posting…';
   try{
     const r=await fetch('/msg',{method:'POST',headers:writeHeaders(),
-      body:JSON.stringify({from,text,to,re,kind})});
+      body:JSON.stringify({text,to,re,kind})});
     const out=await r.json();
     if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
       document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';
@@ -18133,6 +18156,7 @@ async function load(manual){
   renderAgentMap(d.agent_map);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
+  setComposerOperator(d.operator||UI_OPERATOR);
   defaultComposeTicket(d);
   renderChatRail(d);renderChatHead();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
@@ -18284,7 +18308,7 @@ document.getElementById('refreshBtn').addEventListener('click',()=>load(true));
   sync();
   if(mq.addEventListener)mq.addEventListener('change',sync);else if(mq.addListener)mq.addListener(sync);
 })();
-load();setInterval(load,5000);setInterval(tickClock,1000);
+setComposerOperator(UI_OPERATOR);load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
 
 
@@ -19188,6 +19212,7 @@ def _ui_msg_origin_ok(headers):
 
     Local API clients (curl, urllib, tickets tests) omit Origin — that is
     allowed once Content-Type is JSON and the launch token is present.
+    Sender is the configured operator, never a seat chosen in the page (T-1104).
     A present Origin that is missing, `null`, or a different host is rejected.
     Host loopback is a separate check (_ui_host_header_is_loopback).
     """
@@ -19204,7 +19229,7 @@ def _ui_msg_origin_ok(headers):
     return parsed.netloc.lower() == host.lower()
 
 
-def _ui_page(token=""):
+def _ui_page(operator="", token=""):
     """T-889 hook: UI_HTML with the Work view module spliced in at its three
     named placeholders. Missing module -> the shell's own fallback graph."""
     mod = _safe(_work_view, None)
@@ -19214,8 +19239,155 @@ def _ui_page(token=""):
     page = (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
             .replace("<!--WORK_VIEW:html-->", html)
             .replace("<!--WORK_VIEW:js-->", js))
-    return page.replace('const UI_TOKEN="";',
+    page = page.replace('const UI_TOKEN="";',
                         "const UI_TOKEN=%s;" % json.dumps(token or ""))
+    return page.replace('const UI_OPERATOR="";',
+                        "const UI_OPERATOR=%s;" % json.dumps(operator or ""))
+
+
+def _ui_operator_name(args):
+    """Launch-configured operator. Not a seat picker and not TICKET_AGENT."""
+    return (getattr(args, "operator", None) or "").strip()
+
+
+def _casefold_map_key(mapping, name):
+    """The unique mapping key whose casefold equals name, else empty."""
+    want = (name or "").casefold()
+    if not want or not isinstance(mapping, dict):
+        return ""
+    hits = [k for k in mapping if str(k).casefold() == want]
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _agent_canonical_owner(board, configured):
+    """agents/<owner>.json stem matching configured by casefold (not the FS)."""
+    want = (configured or "").casefold()
+    if not want:
+        return ""
+    hits = []
+    try:
+        for fn in os.listdir(agents_dir(board)):
+            if fn.endswith(".json") and fn[:-5].casefold() == want:
+                hits.append(fn[:-5])
+    except OSError:
+        return ""
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _endpoint_casefold(board, name):
+    """Session endpoint for name, matching the seat file by casefold."""
+    sa = _session_adapters()
+    ep = _safe(lambda: sa.read_endpoint(board, name), None)
+    if ep:
+        return ep
+    want = (name or "").casefold()
+    if not want:
+        return {}
+    try:
+        for fn in os.listdir(sa.endpoint_dir(board)):
+            if fn.endswith(".json") and fn[:-5].casefold() == want:
+                found = _safe(lambda stem=fn[:-5]: sa.read_endpoint(board, stem), None)
+                if found:
+                    return found
+    except OSError:
+        pass
+    return {}
+
+
+def _harness_run_mark(*records):
+    """First non-empty harness, tool, or provider across workforce / agent recs."""
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for key in ("harness", "tool", "provider"):
+            val = rec.get(key)
+            if isinstance(val, str):
+                val = val.strip()
+            if val:
+                return val if isinstance(val, str) else key
+    return ""
+
+
+def ui_operator(board, configured):
+    """(operator, why_not). The operator posts from the app; seats never do.
+
+    The name must have agents/<name>.json on this board and must not be a
+    harness-run seat. Match workforce keys, the session endpoint, and the
+    agent record's owner by casefold, then rewrite to the canonical owner
+    (or refuse). A seat with harness, tool, or provider in workforce.json
+    or agents/<name>.json is harness-run. `atm join <name>` with no
+    --harness is how a person registers.
+    """
+    name = (configured or "").strip()
+    if not name:
+        return "", "set an operator: atm ui --operator <name>"
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", name):
+        return "", "operator name %r is not a valid seat name" % name
+    owner = _agent_canonical_owner(board, name)
+    rec = _agent_rec(board, owner) if owner else {}
+    if not rec:
+        return "", "operator %s has no agents/%s.json on this board: atm join %s" % (
+            name, name, name)
+    canonical = (rec.get("owner") or owner or "").strip()
+    if not canonical or canonical.casefold() != name.casefold():
+        return "", ("operator %s does not match the registered owner %s"
+                    % (name, canonical or owner or "?"))
+    wf = load_workforce(board)
+    wf_key = _casefold_map_key(wf, canonical)
+    entry = (wf.get(wf_key) if wf_key else {}) or {}
+    mark = _harness_run_mark(entry, rec)
+    if mark:
+        return "", ("operator %s is a %s seat; the app posts as a person, "
+                    "never as a harness-run seat" % (canonical, mark))
+    ep = _endpoint_casefold(board, canonical)
+    if ep.get("provider") or ep.get("socket"):
+        return "", ("operator %s has a registered harness session on this board; the app posts "
+                    "as a person, never as a harness-run seat" % canonical)
+    return canonical, ""
+
+
+def _ui_refuse_harness_operator(board, configured):
+    """Exit when --operator names a harness-run seat. Unregistered stays a POST error."""
+    name = (configured or "").strip()
+    if not name:
+        return
+    _resolved, why = ui_operator(board, name)
+    if why and ("harness-run seat" in why):
+        sys.exit(why)
+
+
+def _ui_attach_operator(snapshot, operator):
+    if not isinstance(snapshot, dict):
+        return snapshot
+    out = dict(snapshot)
+    out["operator"] = operator or ""
+    return out
+
+
+def _ui_post_as_operator(board, payload, operator):
+    """POST /msg always posts as the configured operator (T-1104 / T-1103 §5).
+
+    A payload `from` that names anyone else is refused. Provenance is the
+    explicit ui-operator marker, never the atm ui process session.
+    """
+    operator, why = ui_operator(board, operator)
+    if not operator:
+        raise ValueError(why)
+    claimed = str((payload or {}).get("from") or "").strip()
+    if claimed and claimed.casefold() != operator.casefold():
+        raise ValueError("from must be the operator (%s), not a seat" % operator)
+    text = str((payload or {}).get("text") or "").strip()
+    if not text:
+        raise ValueError("text is required")
+    to = str((payload or {}).get("to") or "").strip()
+    re_ = str((payload or {}).get("re") or "").strip()
+    kind = str((payload or {}).get("kind") or "message").strip() or "message"
+    if kind not in _UI_MSG_KINDS:
+        raise ValueError("kind must be message or task")
+    return post_message(
+        board, operator, text, to, re_, kind=kind, explicit=operator,
+        via="ui-operator", sender_kind="operator",
+    )
 
 
 def cmd_ui(a, board):
@@ -19223,11 +19395,16 @@ def cmd_ui(a, board):
     composer POST at /msg that posts through post_message() -- same board,
     same messages.jsonl, no second store. /board.json?seat=<name> filters
     messages to that agent-scoped thread (Advitiya PRIORITY agent chats).
+    Composer posts as the launch --operator only (T-1104).
     Writes require a per-launch token; Host must be loopback (T-1105)."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    configured = _ui_operator_name(a)
+    _ui_refuse_harness_operator(board, configured)
+    resolved, _why = ui_operator(board, configured) if configured else ("", "")
+    operator = resolved or configured
     if a.json:
-        print(json.dumps(board_snapshot(board), indent=2))
+        print(json.dumps(_ui_attach_operator(board_snapshot(board), operator), indent=2))
         return
     if not _ui_bind_host_ok(a.host):
         sys.exit("atm ui: --host must be loopback (127.0.0.1, localhost, ::1); got %s"
@@ -19259,16 +19436,17 @@ def cmd_ui(a, board):
             if self.path.startswith("/board.json"):
                 from urllib.parse import parse_qs, urlparse
                 seat = (parse_qs(urlparse(self.path).query).get("seat") or [""])[0]
-                body = json.dumps(_safe(lambda: board_snapshot_for_request(board, seat=seat), {
+                body = json.dumps(_ui_attach_operator(_safe(
+                    lambda: board_snapshot_for_request(board, seat=seat), {
                     "error": "snapshot failed",
                     "counts": {"total": 0, "done": 0},
                     "next_step": {"kind": "unreachable", "label": "Snapshot failed",
                                   "message": "Could not read the board — check TICKETS_DIR and board files.",
                                   "cmd": "atm ui --json"},
-                })).encode()
+                }), operator)).encode()
                 ctype = "application/json"
             else:
-                body = _ui_page(token).encode()
+                body = _ui_page(operator, token).encode()
                 ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
@@ -19294,18 +19472,11 @@ def cmd_ui(a, board):
                 return
             try:
                 payload = _ui_read_json_body(self)
-                sender = str(payload.get("from") or "").strip()
-                text = str(payload.get("text") or "").strip()
-                to = str(payload.get("to") or "").strip()
-                re_ = str(payload.get("re") or "").strip()
-                kind = str(payload.get("kind") or "message").strip() or "message"
-                if not sender or not text:
-                    raise ValueError("from and text are required")
-                if kind not in _UI_MSG_KINDS:
-                    raise ValueError("kind must be message or task")
-                if not _agent_rec(board, sender):
-                    raise ValueError("from must be a registered agent")
-                rec = post_message(board, sender, text, to, re_, kind=kind)
+                # T-1104 decides WHO the post is from (the operator, never a
+                # seat); T-1106 decides that it wakes its recipients the way
+                # `atm msg` does. Both, or the app is either a forgery or a
+                # message nobody is woken for.
+                rec = _ui_post_as_operator(board, payload, operator)
                 _safe(lambda: deliver_wakes(board, rec), None)
                 status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
             except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
@@ -21462,6 +21633,8 @@ def main():
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
     c.add_argument("--parent-pid", type=int, default=0,
                    help="exit when this pid disappears (test/supervisor watchdog)")
+    c.add_argument("--operator", default="",
+                   help="identity the composer posts as; required to write. Never a seat picker.")
     c.set_defaults(fn=cmd_ui)
 
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")

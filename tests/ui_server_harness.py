@@ -154,6 +154,8 @@ def extract_ui_launch_token(html):
 
 
 # Same isolation run() builds: temp HOME/cache, no live seat or session.
+# T-1104 scrubs the runner's seat identity, T-1107 its transport: the ui child
+# can neither post as the runner nor wake the runner's own live session.
 _SESSION_ENV = (
     "TICKET_SEAT", "TICKET_AGENT", "TICKET_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
@@ -163,7 +165,7 @@ _SESSION_ENV = (
 
 class UiServer:
     def __init__(self, board, probe_prefix: str = "ui-probe",
-                 env: dict | None = None):
+                 env: dict | None = None, operator: str = ""):
         self.board = board
         self._stopped = False
         self.marker = _board_marker(board, probe_prefix)
@@ -174,15 +176,14 @@ class UiServer:
         home.mkdir(exist_ok=True)
         launch_env = dict(os.environ, TICKETS_DIR=str(board),
                           HOME=str(home), TICKETS_CACHE_DIR=str(cache))
-        # _SESSION_ENV carries both halves: T-1106 isolates the ui child from
-        # the suite runner's seat identity, T-1107 from its transport, so the
-        # child can neither post as the runner nor wake the runner's session.
         for var in _SESSION_ENV:
             launch_env.pop(var, None)
         if env:
             launch_env.update(env)
         ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
                   "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]
+        if operator:
+            ui_cmd += ["--operator", operator]
         self.proc = subprocess.Popen(
             [sys.executable, str(_SUPERVISOR), str(os.getpid())] + ui_cmd,
             env=launch_env,
@@ -282,10 +283,10 @@ def port_is_dead(port: int, timeout: float = 3) -> bool:
     return False
 
 
-def make_ui_server_fixture(probe_prefix: str):
+def make_ui_server_fixture(probe_prefix: str, operator: str = ""):
     @pytest.fixture
     def ui_server(board):
-        srv = UiServer(board, probe_prefix=probe_prefix)
+        srv = UiServer(board, probe_prefix=probe_prefix, operator=operator)
         try:
             yield srv
         finally:

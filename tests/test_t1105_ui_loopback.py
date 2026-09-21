@@ -48,7 +48,7 @@ def test_host_header_must_be_loopback(board):
 
 def test_write_requires_launch_token(board):
     run(board, "join", "boss", agent="boss")
-    srv = UiServer(board, probe_prefix="t1105-token")
+    srv = UiServer(board, probe_prefix="t1105-token", operator="boss")
     try:
         status, out = srv.post(
             "/msg",

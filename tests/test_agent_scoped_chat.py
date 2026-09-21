@@ -22,7 +22,7 @@ if str(_TESTS) not in sys.path:
 from test_wakeup import TOOL, board, run  # noqa: E402,F401
 from ui_server_harness import UiServer, _free_port, make_ui_server_fixture
 
-ui_server = make_ui_server_fixture("t546-probe")
+ui_server = make_ui_server_fixture("t546-probe", operator="alice")
 
 
 def _tickets():

@@ -35,7 +35,11 @@ def _write_fake_claude(board_dir, seat, sock_path):
 def test_harness_badge_never_defaults_to_claude(board):
     run(board, "join", "bare", agent="bare")
     run(board, "join", "coded", "--harness", "codex", agent="coded")
-    srv = UiServer(board, probe_prefix="t1106-harness")
+    # T-1104: the app posts as the operator, never as a seat, so the sender
+    # here is a person -- what is under test is the HARNESS the record carries
+    # for a seat that never declared one.
+    run(board, "join", "owner", agent="owner")
+    srv = UiServer(board, probe_prefix="t1106-harness", operator="owner")
     try:
         snap = srv.get("/board.json")
         by_name = {a["name"]: a for a in snap["agents"]}
@@ -46,7 +50,7 @@ def test_harness_badge_never_defaults_to_claude(board):
         assert by_name["coded"]["adapter_provider"] == "codex"
         assert by_name["bare"]["harness"] != "claude"
         status, out = srv.post("/msg", {
-            "from": "bare", "text": "no harness on this sender", "to": "",
+            "text": "no harness on this sender", "to": "",
         })
         assert status == 200 and out["ok"], out
         snap = srv.get("/board.json")
@@ -87,10 +91,11 @@ def test_ui_post_wakes_like_cli(board, monkeypatch):
         assert not inboxes["lead-ui"].received
         assert not inboxes["bystander"].received
 
-        srv = UiServer(board, probe_prefix="t1106-wake", env=isolated)
+        srv = UiServer(board, probe_prefix="t1106-wake", env=isolated,
+                       operator="owner")
         try:
             status, out = srv.post("/msg", {
-                "from": "owner", "text": "ui wake probe", "to": "lead-ui",
+                "text": "ui wake probe", "to": "lead-ui",
             })
             assert status == 200 and out["ok"], out
             ui_label = (_agent(board, "lead-ui").get("wake_delivery") or {}).get("label")

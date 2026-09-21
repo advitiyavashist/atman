@@ -14,7 +14,7 @@ from ui_server_harness import make_ui_server_fixture
 
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
-ui_server = make_ui_server_fixture("t609-launch")
+ui_server = make_ui_server_fixture("t609-launch", operator="boss")
 
 
 def _same_origin_task(server, payload):
