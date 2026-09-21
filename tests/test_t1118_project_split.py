@@ -538,7 +538,7 @@ def test_multi_project_seat_gets_one_record_per_home(shared, homes):
 # 8. the frozen shared board
 # --------------------------------------------------------------------------
 
-def _atm(board, *args, agent="ann", home=None, config=None):
+def _atm(board, *args, agent="ann", home=None, config=None, timeout=None):
     env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent,
                TICKETS_GC_OPEN_PRS="none")
     env.pop("TICKET_SEAT", None)
@@ -550,9 +550,15 @@ def _atm(board, *args, agent="ann", home=None, config=None):
         env["HOME"] = str(home)
     env["ATMAN_BOARD_CONFIG"] = str(config or (Path(board).parent / "board.json"))
     env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    return subprocess.run([sys.executable, str(TOOL), *args],
-                          capture_output=True, text=True, env=env,
-                          cwd=str(Path(board).parent))
+    try:
+        return subprocess.run([sys.executable, str(TOOL), *args],
+                              capture_output=True, text=True, env=env,
+                              cwd=str(Path(board).parent), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # `dash` refreshes in place forever by design. Being killed mid-refresh
+        # is the harshest moment to check for a stray write, so the caller
+        # still gets to compare the tree.
+        return None
 
 
 def test_frozen_shared_board_refuses_writes_with_new_board_named(shared, homes, tmp_path):
@@ -590,6 +596,68 @@ def test_frozen_shared_board_refuses_writes_with_new_board_named(shared, homes, 
     # and the new board takes writes normally
     out = _atm(Path(homes["atman"]), "note", "T-100", "on the new board", agent="ann")
     assert out.returncode == 0, out.stderr
+
+
+def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, homes):
+    """Check the allow-list instead of trusting an audit of it.
+
+    `status`, `here`, `identity` and `board-backup` all sat on this list until
+    I re-read each one and found they write -- but "I read the code" is exactly
+    the evidence that let them on in the first place. So run every name on the
+    list against a frozen board and compare the tree byte for byte. Any write
+    at all fails here: a status change, a check-in, an `inbox_seen` stamp, a
+    cache file dropped inside the board.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+
+    # Read the live allow-list out of a subprocess rather than importing
+    # `tickets` into this pytest session: the import has board-guard side
+    # effects, and a test about writes should not add any of its own.
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import json,sys; sys.path.insert(0, %r); import tickets; "
+         "print(json.dumps(sorted(tickets.SPLIT_READ_ONLY_CMDS)))" % str(ROOT)],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert probe.returncode == 0, probe.stderr
+    allow_listed = set(json.loads(probe.stdout))
+
+    # `project` is on the list on purpose and is the one entry that may write:
+    # `atm project split --undo --apply` has to be able to run on the board it
+    # is undoing. It is exercised here in its reading form.
+    invocations = {
+        "board": ["board"],
+        "show": ["show", "T-100"],
+        "list": ["list"],
+        "where": ["where"],
+        "dash": ["dash"],
+        "map": ["map"],
+        "graph": ["graph"],
+        "guide": ["guide"],
+        "limits": ["limits"],
+        "context": ["context"],
+        "who": ["who"],
+        "mine": ["mine"],
+        "trajectories": ["trajectories"],
+        "traj": ["traj"],
+        "turns": ["turns"],
+        "plan-status": ["plan-status"],
+        "util": ["util"],
+        "project": ["project", "list"],
+        "self": ["self"],
+        "doctor": ["doctor"],
+    }
+    assert set(invocations) == allow_listed, (
+        "the allow-list and this test disagree; a name was allowed without "
+        "being checked: %s" % sorted(set(invocations) ^ allow_listed))
+
+    before = _tree(shared)
+    for cmd, args in sorted(invocations.items()):
+        _atm(shared, *args, timeout=8)
+        after = _tree(shared)
+        assert after == before, "%s wrote to the frozen board: %s" % (
+            cmd, sorted(set(after) ^ set(before))
+            or [k for k in before if after.get(k) != before[k]])
 
 
 # --------------------------------------------------------------------------
