@@ -466,6 +466,44 @@ def test_cross_project_dep_snapshot(shared, homes):
     assert wv.unreleased_dep_id(t201, [t201]) == ""
 
 
+def test_the_release_gate_reads_external_deps_in_both_entry_points(shared, homes):
+    """The gate is Phase 1S scope, and "both entry points" is now a habit.
+
+    Two of this ticket's defects were one entry point having something the
+    other did not -- the frozen-board refusal, and the allocator floor. So the
+    cross-project gate is checked the same way rather than argued from the
+    fact that both CLIs call into `work_view`: a ticket whose parent landed on
+    another board refuses a claim through `tickets.py` AND through the
+    packaged `atm`, with the `project:T-id` reference in the message.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+
+    blocked = []
+    for slug in sorted(homes):
+        for path in sorted(Path(homes[slug]).glob("T-*.json")):
+            rec = json.loads(path.read_text())
+            if any(not d.get("released") for d in rec.get("external_deps") or []):
+                blocked.append((slug, rec))
+    assert blocked, "the fixture must leave a cross-project edge unreleased"
+
+    for slug, rec in blocked:
+        for runner, label in ((_atm, "tickets.py"), (_cli, "packaged atm")):
+            out = runner(Path(homes[slug]), "claim", rec["id"], agent="probe",
+                         timeout=30)
+            assert out.returncode != 0, "%s: %s was claimable" % (label, rec["id"])
+            text = (out.stdout or "") + (out.stderr or "")
+            assert ":" in text and rec["id"] in text, (label, text)
+            for dep in rec["external_deps"]:
+                if not dep.get("released"):
+                    assert "%s:%s" % (dep["project"], dep["id"]) in text, (
+                        "%s did not name the cross-project parent: %s"
+                        % (label, text))
+            assert json.loads(
+                (Path(homes[slug]) / (rec["id"] + ".json")).read_text()
+            )["status"] == rec["status"], "%s claimed it anyway" % label
+
+
 def test_external_dep_on_an_archived_parent_names_the_archive(shared, homes):
     # T-300 is done and unattributed, so it stays on the frozen archive. A
     # live child of it gets a snapshot naming `shared-archive`, not the
