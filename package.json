@@ -1,4 +1,5 @@
 {
+  "name": "atman-workspace",
   "private": true,
   "description": "npm workspace root so tests/ui/ (sibling to ui/, matching this repo's tests/<lane>/ convention) can resolve ui/ devDependencies. The app itself lives in ui/ — see ui/README.md.",
   "workspaces": [

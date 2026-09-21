@@ -13,13 +13,20 @@ Two commands, in this order, from the repo root:
 
 ```sh
 npm install && npm run build -w ui     # once, and after any change to ui/
-atm ui                                 # then open http://127.0.0.1:8765/app/
+atm ui --operator <your name>          # then open http://127.0.0.1:8765/app/
 ```
 
+`--operator` is the name the composer posts as, and it is the difference between
+reading the board and talking to the lead: without it the app is read-only and
+says so on screen. The name needs `agents/<name>.json` on this board (`atm join
+<name>`) and must not be a harness-run seat — the app posts as a person, never
+as a seat. The server sets `from` itself, records `via: ui-operator`, and wakes
+the recipient exactly as `atm msg` does.
+
 `atm ui` serves the built bundle at `/app/` on the same origin as the API, which
-is what makes the composer work: it inserts the per-launch write token into the
-page as a meta tag, and `POST /msg` only accepts a request whose `Origin` is its
-own `Host`. Nothing binds to anything but loopback.
+is what makes the composer work at all: it inserts the per-launch write token
+into the page as a meta tag, and `POST /msg` only accepts a request whose
+`Origin` is its own `Host`. Nothing binds to anything but loopback.
 
 ### What you should see
 
