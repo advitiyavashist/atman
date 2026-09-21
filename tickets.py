@@ -10308,8 +10308,16 @@ def _seat_harness(board, seat):
     return (entry.get("harness") or entry.get("tool") or "").strip()
 
 
-def deliver_wakes(board, m, announce=print):
-    """Native/persist wake after a board post. cmd_msg and atm ui share this (T-1106)."""
+def deliver_wakes(board, m, announce=None):
+    """Native/persist wake after a board post. cmd_msg and atm ui share this (T-1106).
+
+    `announce` defaults to None, not to `print` itself: a default argument is
+    bound at import time, so `announce=print` captured the builtin before a
+    test could replace it, and the wake lines bypassed the capture.
+    """
+    if announce is None:
+        def announce(*a, **kw):
+            print(*a, **kw)
     sa = None
     mid = _msg_id(m)
     labels = []
