@@ -87,6 +87,20 @@ One honest asymmetry: the packaged entry point does not carry `atm project`
 `python3 tickets.py project split --undo` rather than printing an `atm`
 invocation the operator cannot run. The split engine ships with the checkout.
 
+Because "both entry points carry it" is a claim about how many entry points
+exist, they are enumerated and pinned too. `pyproject.toml` installs exactly
+two console scripts, both `ticket_board.cli:main`; the self-runnable modules
+under `src/` are `cli.py`, `__main__.py` (which delegates to it),
+`board_backup.py`, the two Claude adapters and the runner. Only the first two
+touch a resolved board. The adapters and the runner talk to a server and never
+name a board directory — asserted, not assumed. `board_backup.py` writes only
+to an operator-named `--dest`, and it needs a `.fixture-board` marker or an
+explicit `--i-understand-live` to write anywhere real: that is the same carve
+out as `atm board-archive-shadow` and the same shape as `trajectories export`,
+which is refused only when `--out` lands *inside* the board.
+`test_the_write_surface_is_enumerated_not_assumed` fails when a new entry
+point appears, so the decision has to be made rather than inherited.
+
 One write path onto a frozen board is deliberately **not** guarded here, and
 it is named rather than left to be found: `storage/legacy.py`'s
 `take_ownership()` writes `.server-owned.json` into a legacy board directory

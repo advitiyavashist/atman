@@ -969,6 +969,61 @@ def test_the_packaged_entry_point_refuses_the_same_writes(shared, homes, tmp_pat
                 who, label)
 
 
+# Every shipped process that can reach a resolved `.tickets` board, with what
+# it writes to. A guard placed on "the CLI" is only as good as this list, and
+# the list is the thing that was wrong: four writes got past a name-only
+# allow-list, and the fifth was a whole entry point nobody had enumerated.
+WRITE_SURFACE = {
+    # module                                  what it can write to
+    "src/ticket_board/cli.py": "the resolved board -- carries the guard",
+    "src/ticket_board/__main__.py": "delegates to cli.main -- inherits it",
+    "src/ticket_board/board_backup.py": "an operator-named --dest only",
+    "src/ticket_board/adapters/claude/hook.py": "a server, never a board dir",
+    "src/ticket_board/adapters/claude/connect.py": "a project dir, not a board",
+    "src/ticket_board/runners/__main__.py": "a server, never a board dir",
+}
+
+
+def test_the_write_surface_is_enumerated_not_assumed():
+    """Pin the entry points, the way the flags and sub-commands are pinned.
+
+    `tickets.py` and the packaged CLI both carry the refusal now, but "both"
+    is a claim about how many CLIs exist. So this enumerates them: the console
+    scripts `pyproject.toml` installs, and every self-runnable module under
+    `src/`. A new entry point fails here until somebody decides whether it can
+    reach a board -- which is exactly the decision that was never made for
+    `ticket_board.cli:main`.
+    """
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    block = text.split("[project.scripts]", 1)[1].split("[", 1)[0]
+    scripts = dict(
+        (k.strip(), v.strip().strip('"'))
+        for k, v in (ln.split("=", 1) for ln in block.strip().splitlines() if "=" in ln))
+    assert scripts == {"atm": "ticket_board.cli:main",
+                       "tickets": "ticket_board.cli:main"}, (
+        "a console script changed; the split guard lives in the module each "
+        "one points at, so this decides where it has to be: %s" % scripts)
+
+    runnable = set()
+    for path in sorted((ROOT / "src").rglob("*.py")):
+        if '__name__ == "__main__"' in path.read_text(encoding="utf-8"):
+            runnable.add(path.relative_to(ROOT).as_posix())
+    assert runnable == set(WRITE_SURFACE), (
+        "a new self-runnable module appeared or vanished; decide whether it "
+        "can write to a resolved board before changing this list: %s"
+        % sorted(runnable ^ set(WRITE_SURFACE)))
+
+    # The three that are documented as never touching a board directory: hold
+    # them to it, so the claim fails here rather than on an archive.
+    for rel in ("src/ticket_board/adapters/claude/hook.py",
+                "src/ticket_board/adapters/claude/connect.py",
+                "src/ticket_board/runners/__main__.py"):
+        body = (ROOT / rel).read_text(encoding="utf-8")
+        assert ".tickets" not in body, (
+            "%s now names a board directory; it runs as its own process and "
+            "never passes through the guard in main()" % rel)
+
+
 def test_the_frozen_board_probe_needs_no_engine_import(shared, homes, tmp_path):
     """`split_marker` must not depend on importing the split engine.
 
