@@ -651,6 +651,248 @@ def successors_waiting_on(tickets, finished_id, released):
     return out
 
 
+# --- T-1053: handoff audit ---------------------------------------------------
+#
+# A ``--deps`` edge is a handoff. It is justified only when the predecessor
+# produces a concrete artifact -- an accepted commit, a file, a decision
+# recorded on its ticket -- that the successor reads. Splitting one artifact
+# across two seats so they can run in parallel is not a dependency; it is a
+# manufactured handoff. The Polylane critique is that handoffs lose more than
+# they save, and our graph makes splitting cheap, so every unnecessary edge
+# buys that failure mode for nothing.
+#
+# This is measurement and a visible nudge, never a gate: nothing here refuses
+# an edge, blocks a claim or changes a status. An edge is judged from records
+# already on the board -- the accepted release SHA and the handoff notes -- and
+# an edge without enough recorded evidence to judge stays ``unknown`` rather
+# than being counted as either linked or manufactured.
+#
+# The bias is deliberate and one-sided: any mention of the predecessor's SHA,
+# a path it recorded, or its ticket id counts as linkage, so a successor that
+# merely wrote "blocked on T-101" reads as linked. A nudge that accuses
+# wrongly gets ignored, so ``manufactured`` is a LOWER BOUND on manufactured
+# handoffs, and anyone reporting the count must say so.
+
+HANDOFF_VERDICTS = ("linked", "manufactured", "unknown")
+HANDOFF_LINK_KINDS = ("sha", "path", "decision")
+HANDOFF_SHA_MIN = 7
+HANDOFF_RULE = ("a --deps edge is justified only when the predecessor produces an "
+                "artifact the successor reads (docs/handoff-contract.md)")
+_HANDOFF_PATH_RE = re.compile(r"(?<![\w./:-])([\w\-]+(?:/[\w.\-]+)+\.\w{1,6})")
+# `atm accept` writes these onto the SUCCESSOR when the predecessor releases.
+# They quote the predecessor's id and its accepted SHA, so counting them as
+# the successor "reading the artifact" would link every gated edge and the
+# audit could never flag anything. The tool wrote them, not the seat.
+_HANDOFF_TOOL_NOTE_RES = (
+    re.compile(r"^T-\d+ accepted (?:at [0-9a-f]{7,40} )?by \S+ -- unblocked$"),
+    re.compile(r"^T-\d+ released \(.*?override\) by \S+ -- "),
+)
+_HANDOFF_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
+
+
+def _handoff_pin_sha(t):
+    """The review pin's git object, from ``branch@sha``."""
+    stamp = str((t or {}).get("commit") or "")
+    if "@" not in stamp:
+        return ""
+    return stamp.rsplit("@", 1)[-1].strip().lower()
+
+
+def handoff_artifact(t):
+    """What a predecessor demonstrably produced, from records only.
+
+    ``sha``       the accepted release head, else the review pin once done
+    ``paths``     file paths named in the notes a successor inherits
+    ``decision``  True when a seat recorded any prose on the ticket
+
+    Prose is never treated as a verdict here (T-892); it is only evidence that
+    a decision exists for a successor to have read.
+    """
+    t = t or {}
+    sha = (accepted_release_sha(t) or "").strip().lower()
+    if not sha and t.get("status") == "done":
+        sha = _handoff_pin_sha(t)
+    texts = [str((n or {}).get("text") or "").strip() for n in handoff_notes(t)]
+    texts = [x for x in texts if x]
+    paths = set()
+    for text in texts:
+        paths.update(_HANDOFF_PATH_RE.findall(text))
+    return {"sha": sha, "paths": sorted(paths), "decision": bool(texts)}
+
+
+def is_board_generated_dep_note(text):
+    """True for a note the TOOL wrote onto a successor about its predecessor.
+
+    ``atm accept`` appends the predecessor's id and accepted SHA to every
+    child it releases, and the unverified-gate instruction names the
+    predecessor too. Neither is the successor's seat recording that it read
+    anything, so neither can count as artifact linkage.
+    """
+    text = (text or "").strip()
+    if not text:
+        return False
+    if is_live_unverified_gate_note(text):
+        return True
+    return any(rx.match(text) for rx in _HANDOFF_TOOL_NOTE_RES)
+
+
+def handoff_successor_record(t):
+    """Only what a seat recorded while working this ticket.
+
+    The ``body`` is deliberately excluded: it is the planner's text, and a
+    planner writing "after T-101" into the successor's body is the very thing
+    a manufactured handoff looks like. It is not the successor having read
+    anything. Tool-written release notes are excluded for the same reason --
+    see :func:`is_board_generated_dep_note`.
+    """
+    t = t or {}
+    parts = [str(t.get("commit") or "")]
+    for n in t.get("notes") or []:
+        if not isinstance(n, dict):
+            continue
+        text = str(n.get("text") or "")
+        if is_board_generated_dep_note(text):
+            continue
+        parts.append(text)
+    for ev in t.get("review_events") or []:
+        if isinstance(ev, dict):
+            parts.append(str(ev.get("notes") or ""))
+    return "\n".join(p for p in parts if p.strip())
+
+
+def _handoff_sha_referenced(sha, text):
+    if not sha or len(sha) < HANDOFF_SHA_MIN:
+        return ""
+    head = sha[:HANDOFF_SHA_MIN]
+    for found in _HANDOFF_SHA_RE.findall(text.lower()):
+        if found.startswith(head) or sha.startswith(found):
+            return found
+    return ""
+
+
+def _handoff_path_referenced(paths, text):
+    for p in paths:
+        if len(p) >= 6 and p in text:
+            return p
+    return ""
+
+
+def classify_handoff(pred, succ):
+    """Judge one dependency edge ``pred -> succ``. Records only, never a gate.
+
+    Returns ``verdict`` in :data:`HANDOFF_VERDICTS`, the ``kind`` of linkage
+    found, the ``evidence`` string that established it, and a ``reason`` for
+    every verdict that is not ``linked``.
+    """
+    art = handoff_artifact(pred)
+    record = handoff_successor_record(succ)
+    row = {"pred": (pred or {}).get("id") or "", "succ": (succ or {}).get("id") or "",
+           "verdict": "unknown", "kind": "", "evidence": "", "reason": ""}
+
+    hit = _handoff_sha_referenced(art["sha"], record)
+    if hit:
+        row.update(verdict="linked", kind="sha", evidence=art["sha"][:12])
+        return row
+    hit = _handoff_path_referenced(art["paths"], record)
+    if hit:
+        row.update(verdict="linked", kind="path", evidence=hit)
+        return row
+    if art["decision"] and row["pred"] and row["pred"].lower() in record.lower():
+        row.update(verdict="linked", kind="decision", evidence=row["pred"])
+        return row
+
+    if not record.strip():
+        row["reason"] = "successor has recorded no work yet"
+        return row
+    if not (art["sha"] or art["paths"] or art["decision"]):
+        row["reason"] = "predecessor has produced no recorded artifact yet"
+        return row
+    row["verdict"] = "manufactured"
+    row["reason"] = "successor's records reference nothing %s produced" % row["pred"]
+    if art["sha"]:
+        row["evidence"] = "predecessor artifact %s unreferenced" % art["sha"][:12]
+    elif art["paths"]:
+        row["evidence"] = "predecessor paths unreferenced: %s" % ", ".join(art["paths"][:3])
+    else:
+        row["evidence"] = "predecessor decision notes unreferenced"
+    return row
+
+
+def handoff_audit(tickets, epic="", sprint="", objective=""):
+    """Every dependency edge in scope, judged, with counts for the run report.
+
+    An edge belongs to its SUCCESSOR's plan, so ``epic``/``sprint`` filter on
+    the successor. Edges pointing at a ticket that is not on this board are
+    skipped -- ``atm graph`` already reports those as broken references.
+
+    The returned dict is the contract the per-objective run report (T-1052)
+    embeds: ``handoffs`` is the total edge count, and ``manufactured`` is the
+    subset with no artifact linkage. ``unknown`` is never folded into either.
+    """
+    by_id = {}
+    for t in tickets or []:
+        if isinstance(t, dict) and t.get("id"):
+            by_id[t["id"]] = t
+    edges = []
+    for succ in tickets or []:
+        if not isinstance(succ, dict) or not succ.get("id"):
+            continue
+        if epic and (succ.get("epic") or "") != epic:
+            continue
+        if sprint and (succ.get("sprint") or "") != sprint:
+            continue
+        for dep in succ.get("deps") or []:
+            pred = by_id.get(dep)
+            if pred is None:
+                continue
+            edges.append(classify_handoff(pred, succ))
+    counts = dict((v, 0) for v in HANDOFF_VERDICTS)
+    for e in edges:
+        counts[e["verdict"]] = counts.get(e["verdict"], 0) + 1
+    out = {"objective": objective, "epic": epic, "sprint": sprint,
+           "handoffs": len(edges), "edges": edges,
+           # Carried in the payload so a report cannot quote the count without
+           # it. Linkage is detected permissively, so this under-counts.
+           "manufactured_is_lower_bound": True}
+    out.update(counts)
+    return out
+
+
+def handoff_report_lines(audit, limit=8):
+    """The visible nudge for ``atm graph``: one summary line, flagged edges."""
+    if not audit or not audit.get("handoffs"):
+        return ["Handoffs: no dependency edges in scope"]
+    lines = ["Handoffs: %d dependency edges -- %d linked to an artifact, "
+             "%d manufactured, %d unknown"
+             % (audit["handoffs"], audit.get("linked", 0),
+                audit.get("manufactured", 0), audit.get("unknown", 0))]
+    flagged = [e for e in audit.get("edges") or [] if e["verdict"] == "manufactured"]
+    for e in flagged[:limit]:
+        lines.append("  manufactured %s -> %s  %s" % (e["pred"], e["succ"], e["reason"]))
+    if len(flagged) > limit:
+        lines.append("  ... and %d more" % (len(flagged) - limit))
+    if flagged:
+        lines.append("  a lower bound: any mention of the predecessor counts as linkage")
+        lines.append("  not a gate -- nothing is blocked. %s" % HANDOFF_RULE)
+    unknown = audit.get("unknown", 0)
+    if unknown:
+        lines.append("  %d edge(s) not yet judgeable; unknown stays unknown" % unknown)
+    return lines
+
+
+def handoff_plan_nudge(created_edges):
+    """The nudge ``atm plan`` prints for edges it has just created.
+
+    Freshly planned edges have no artifacts yet, so none of them is judgeable;
+    the honest thing to surface at plan time is the count and the rule.
+    """
+    if not created_edges:
+        return []
+    return ["handoffs: %d dependency edge(s) created, each one a handoff." % created_edges,
+            "  Keep an edge only if the predecessor produces an artifact the "
+            "successor reads; parallelising one artifact is not a dependency.",
+            "  %s" % HANDOFF_RULE]
+
 # --- routing / delivery evidence --------------------------------------------
 
 def _task_messages_by_ticket(messages):

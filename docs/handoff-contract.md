@@ -111,6 +111,89 @@ intact, and does so even when it no longer appears in the addressable list.
 Stopping is reversible and nearly free. `handoff-check` WARNs on any active
 claim whose owner has no recorded id.
 
+## A dependency needs a real artifact boundary
+
+A `--deps` / `--after` edge is a **handoff**, and it is justified only when the
+predecessor produces a concrete artifact — an accepted commit, a file, or a
+decision recorded on its ticket — that the successor reads. Splitting one
+artifact across two tickets so two seats can run in parallel is **not** a
+dependency. It is a manufactured handoff.
+
+This matters because the graph makes splitting cheap. The Polylane critique is
+that *handoffs lose more than they save*: they collapsed a 15-sub-agent
+pipeline into one agent and their median time-to-PR went from 2.2h to 35min,
+their PR rate from 0.6% to 9.1%, and their cost per PR from $111 to $2.88.
+Those are their published numbers for their pipeline, not a measurement of
+this board. What carries over is the direction of the risk: every unnecessary
+edge buys that failure mode and returns nothing.
+
+Two seats on one artifact want **one ticket**, or two tickets with no edge
+between them. Sequencing preference is a note, not an edge.
+
+### How an edge is judged, after the fact
+
+`atm graph` prints a `Handoffs` section, and `atm graph --json` emits the same
+audit as JSON. Each edge gets one of three verdicts, from board records only:
+
+| verdict | what it means |
+| --- | --- |
+| `linked` | the successor's own records reference something the predecessor produced |
+| `manufactured` | both sides recorded work, and the successor referenced nothing the predecessor produced |
+| `unknown` | not judgeable yet — one side has recorded nothing to compare |
+
+Linkage counts when the successor's records name the predecessor's accepted
+release SHA (`kind=sha`), a file path the predecessor recorded (`kind=path`),
+or the predecessor's ticket id where that ticket carries a recorded decision
+(`kind=decision`). "The successor's records" means what a seat wrote while
+working it — notes, accept notes, its own pin. Two things are deliberately
+excluded, because otherwise the audit could never flag anything:
+
+- **The ticket body.** It is the planner's text, and a planner writing "after
+  T-101" into a successor body is exactly what a manufactured handoff looks
+  like, not evidence that anyone read anything.
+- **Notes the tool wrote.** `atm accept` appends
+  `<pred> accepted at <sha> by <seat> -- unblocked` to every child it
+  releases, and the unverified-gate instruction names the predecessor too.
+  Those quote the predecessor's id *and* its accepted SHA, so counting them
+  would mark every properly gated edge as linked — a check whose operands are
+  produced by the thing it is checking.
+
+A repo URL shared by two tickets is not a shared file path, for the same
+reason: review notes routinely carry the remote, and two tickets sharing
+nothing but a remote have not handed anything over.
+
+`unknown` is reported as `unknown` and never folded into either side, so
+`linked + manufactured + unknown == handoffs` always holds.
+
+**`manufactured` is a lower bound, and anyone quoting the number must say so.**
+The bias is deliberately one-sided: *any* mention of the predecessor's SHA, a
+path it recorded, or its ticket id counts as linkage, so a successor that
+merely wrote "blocked on T-101" reads as `linked`. A nudge that accuses
+wrongly gets ignored, and a missed flag costs less than a false one.
+
+### It is a nudge, not a gate
+
+Nothing here refuses an edge, blocks a claim, changes a status or writes a
+note. `atm plan` prints the number of edges it just created (freshly planned
+edges have no artifacts yet, so none of them is judgeable — the count and the
+rule are the honest thing to say at plan time), and `atm graph` prints the
+audit. The release gate is still `atm accept`; this is measurement.
+
+The per-objective run report is a separate ticket (T-1052) and does not exist
+yet. `handoff_audit()`'s dict is the contract it will embed, so a manufactured
+handoff shows up there as cost rather than as a scolding; until then the JSON
+is the surface:
+
+```sh
+atm graph --json                       # the whole board's standing objective
+atm graph --json --epic E-011          # scoped; the filter applies to the successor
+atm graph --handoffs                   # the section alone, no tree
+```
+
+The audit lives in `src/ticket_board/work_view.py`
+(`handoff_audit`, `classify_handoff`), is covered by
+`tests/test_t1053_handoff_audit.py`, and is wired into both CLI entry points.
+
 ## Run the checker as a gate, not a ritual
 
 It is deterministic, needs no model, and costs nothing. Run it before you

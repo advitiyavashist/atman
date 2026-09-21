@@ -77,6 +77,15 @@ Do **not** run one `atm create` per title. Edges have to be real `deps` /
 read prose. A blocker described in a ticket body is not an edge. Mid-run, add
 them with `atm dep` or `atm create --blocks`.
 
+**A `deps` edge is a handoff, and it needs a real artifact boundary.** Add one
+only when the predecessor produces something concrete — an accepted commit, a
+file, a decision on the ticket — that the successor reads. Splitting one
+artifact across two tickets so two seats can run in parallel is a manufactured
+handoff, and it buys the failure mode in
+[../handoff-contract.md](../handoff-contract.md#a-dependency-needs-a-real-artifact-boundary)
+for nothing. `atm plan` prints the edge count it just created and `atm graph`
+flags edges the successor never referenced; neither blocks anything.
+
 Each ticket carries `cause`, `change` and `proof` for a reason: with all
 three, `atm plan` writes it into `lane=ready` and a worker can claim it
 immediately. Omit any of them and the ticket lands in `lane=capture`, where

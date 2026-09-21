@@ -1810,6 +1810,41 @@ def cmd_plan(a, board):
         t = load(board, t0["id"])
         _plan_keep_gated_unstarted(board, it, t)
         print("created %s  %s" % (t["id"], t["title"]))
+    # T-1053: a --deps edge is a handoff. Freshly planned edges have no
+    # artifacts yet, so nothing here is judgeable and nothing is refused --
+    # the honest nudge at plan time is the count and the rule.
+    for _line in _work_view().handoff_plan_nudge(sum(len(v) for v in pending.values())):
+        print(_line)
+
+
+def _handoff_objective_label(board):
+    """One short line naming the objective the audit is scoped to, or ''."""
+    try:
+        with open(os.path.join(board, "objective.json")) as f:
+            obj = json.load(f)
+    except (IOError, ValueError):
+        return ""
+    return str((obj or {}).get("text") or "").strip().replace("\n", " ")[:120]
+
+
+def _handoff_audit_for(board, a=None):
+    """T-1053: judge every dependency edge in scope. Measurement, not a gate."""
+    return _work_view().handoff_audit(
+        load_all(board),
+        epic=(getattr(a, "epic", "") or ""),
+        sprint=(getattr(a, "sprint", "") or ""),
+        objective=_handoff_objective_label(board))
+
+
+def _print_handoff_section(board, a=None):
+    """The visible nudge under `atm graph`. Never changes a status."""
+    audit = _handoff_audit_for(board, a)
+    print("")
+    if audit.get("objective"):
+        print("Objective: %s" % audit["objective"])
+    for _line in _work_view().handoff_report_lines(audit):
+        print(_line)
+    return audit
 
 
 def _plan_keep_gated_unstarted(board, item, t):
@@ -1893,6 +1928,17 @@ def cmd_board(a, board):
 
 def cmd_graph(a, board):
     tickets = load_all(board)
+    if getattr(a, "json", False):
+        # T-1053: the machine-readable handoff audit the per-objective run
+        # report (T-1052) embeds. Counts only; `unknown` is never folded in.
+        print(json.dumps(_handoff_audit_for(board, a), indent=2))
+        return
+    if getattr(a, "handoffs", False):
+        if not tickets:
+            print("no tickets")
+            return
+        _print_handoff_section(board, a)
+        return
     if not tickets:
         print("no tickets")
         return
@@ -1958,6 +2004,7 @@ def cmd_graph(a, board):
             print("  %s -> %s (no such ticket)" % (tid, ", ".join(miss)))
             print("    repair: atm dep %s --drop %s   (re-point: add --after <id>)"
                   % (tid, ",".join(miss)))
+    _print_handoff_section(board, a)
 
 
 def cmd_map(a, board):
@@ -6059,6 +6106,12 @@ def main():
     c.set_defaults(fn=cmd_dep)
 
     c = sub.add_parser("graph", help="show the dependency graph with statuses")
+    c.add_argument("--handoffs", action="store_true",
+                   help="only the T-1053 handoff audit: edge count and manufactured edges")
+    c.add_argument("--json", action="store_true",
+                   help="the handoff audit as JSON, the run report's contract (implies --handoffs)")
+    c.add_argument("--epic", default="", help="scope the handoff audit to one epic")
+    c.add_argument("--sprint", default="", help="scope the handoff audit to one sprint")
     c.set_defaults(fn=cmd_graph)
 
     c = sub.add_parser("map", help="sprint -> epic -> tickets, with deps; the whole board")
