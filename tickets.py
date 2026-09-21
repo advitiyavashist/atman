@@ -8646,40 +8646,6 @@ def split_marker(board):
         return {}
 
 
-# Commands that only read. Everything else is refused on a frozen shared
-# board. The list is an allow-list on purpose: missing a read here costs an
-# operator one confusing refusal, while missing a *write* would strand real
-# records on a board nothing reads again -- the T-959 failure, at board scale.
-#
-# The value is the sub-commands that read; None means every form of the
-# command reads. Keying on the command name alone is not enough: `atm
-# trajectories` reads, but `atm trajectories backfill` writes synthesised
-# events into the board's own log, and a name-only check would wave it
-# through. `export` stays allowed because it reads the board and writes to a
-# path the operator names elsewhere -- getting data *out* of the archive is
-# the point of keeping it readable.
-#
-# `project` is allowed whole, including its writing forms, because `atm
-# project split --undo --apply` has to be able to run on the board it is
-# undoing; a second `--apply` is refused by the engine itself, not here.
-SPLIT_READ_ONLY_CMDS = {
-    "board": None, "show": None, "list": None, "where": None, "dash": None,
-    "map": None, "graph": None, "guide": None, "limits": None,
-    "context": None, "who": None, "mine": None, "turns": None,
-    "plan-status": None, "util": None, "project": None, "self": None,
-    "doctor": None,
-    "trajectories": frozenset(("list", "export")),
-    "traj": frozenset(("list", "export")),
-}
-
-# Where each sub-command-bearing entry keeps its sub-command, and what
-# argparse leaves there when the operator gave none.
-SPLIT_SUBCMD_ATTR = {
-    "trajectories": ("traj_cmd", "list"),
-    "traj": ("traj_cmd", "list"),
-}
-
-
 def _path_inside(root, path):
     """True when `path` resolves inside `root` (or is `root`)."""
     try:
@@ -8690,16 +8656,17 @@ def _path_inside(root, path):
     return path == root or path.startswith(root + os.sep)
 
 
-def _split_cmd_only_reads(a, board):
-    """True when this exact invocation may run on a frozen shared board."""
-    if a.cmd not in SPLIT_READ_ONLY_CMDS:
-        return False
-    reading = SPLIT_READ_ONLY_CMDS[a.cmd]
-    if reading is None:
-        return True
-    attr, default = SPLIT_SUBCMD_ATTR[a.cmd]
-    sub = getattr(a, attr, default) or default
-    if sub not in reading:
+def _reads_unless(*flags):
+    """Reads, except when one of these flags is given."""
+    def reads(a, board):
+        return not any(getattr(a, f, False) for f in flags)
+    return reads
+
+
+def _trajectories_reads(a, board):
+    """`trajectories` reads; `backfill` writes; `export` depends on --out."""
+    sub = getattr(a, "traj_cmd", "list") or "list"
+    if sub not in ("list", "export"):
         return False
     # `export` reads the board and writes wherever the operator points it,
     # which is why it stays allowed -- getting data out is the point of an
@@ -8707,9 +8674,45 @@ def _split_cmd_only_reads(a, board):
     # and not a harmless one: `--out <board>/agents/<seat>.json` replaces a
     # seat record outright. Measured, not supposed.
     out = getattr(a, "out", "") or ""
-    if sub == "export" and out and _path_inside(board, out):
+    return not (sub == "export" and out and _path_inside(board, out))
+
+
+# Commands that only read. Everything else is refused on a frozen shared
+# board. The list is an allow-list on purpose: missing a read here costs an
+# operator one confusing refusal, while missing a *write* would strand real
+# records on a board nothing reads again -- the T-959 failure, at board scale.
+#
+# The unit of "reads" is an invocation, not a command name. Three separate
+# things decide it, and each one caught a real write that the previous
+# spelling of this list waved through:
+#
+#   the name         -- most commands
+#   the sub-command  -- `atm trajectories` reads, `... backfill` writes
+#   a flag           -- `atm plan-status` reads, `... --write-master` writes
+#
+# So a value is either None (every form of this command reads) or a
+# predicate over the parsed args and the board.
+#
+# `project` is allowed whole, including its writing forms, because `atm
+# project split --undo --apply` has to be able to run on the board it is
+# undoing; a second `--apply` is refused by the engine itself, not here.
+SPLIT_READ_ONLY_CMDS = {
+    "board": None, "show": None, "list": None, "where": None, "dash": None,
+    "map": None, "graph": None, "guide": None, "limits": None,
+    "context": None, "who": None, "mine": None, "turns": None,
+    "util": None, "project": None, "self": None, "doctor": None,
+    "plan-status": _reads_unless("write_master"),
+    "trajectories": _trajectories_reads,
+    "traj": _trajectories_reads,
+}
+
+
+def _split_cmd_only_reads(a, board):
+    """True when this exact invocation may run on a frozen shared board."""
+    if a.cmd not in SPLIT_READ_ONLY_CMDS:
         return False
-    return True
+    reads = SPLIT_READ_ONLY_CMDS[a.cmd]
+    return True if reads is None else reads(a, board)
 
 
 def _split_board_refusal(board, marker, cmd, seat=""):

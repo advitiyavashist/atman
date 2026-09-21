@@ -598,6 +598,52 @@ def test_frozen_shared_board_refuses_writes_with_new_board_named(shared, homes, 
     assert out.returncode == 0, out.stderr
 
 
+# Every command-line surface the allow-list lets onto a frozen board, as it
+# stood when each one was checked by hand. The test below compares this with
+# `--help`, so a flag or sub-command added later to an allow-listed command
+# fails until somebody decides whether it writes. `plan-status --write-master`
+# is exactly the case that makes this worth pinning: a single flag on an
+# otherwise read-only command, writing MASTER.md.
+ALLOW_LISTED_SURFACE = {
+    "board": {"flags": ["--all", "--quiet"]},
+    "show": {"flags": ["--json"]},
+    "list": {"flags": ["--json", "--owner", "--role", "--status"],
+             "subs": ["blocked", "claimed", "done", "open", "review"]},
+    "where": {"flags": []},
+    "dash": {"flags": ["--every", "--messages", "--once"]},
+    "map": {"flags": ["--all"]},
+    "graph": {"flags": []},
+    "guide": {"flags": []},
+    "limits": {"flags": ["--hours", "--raw-scan", "--verbose"]},
+    "context": {"flags": []},
+    "who": {"flags": ["--no-liveness"]},
+    "mine": {"flags": ["--owner"]},
+    "turns": {"flags": ["--agent", "--epic", "--json", "--model", "--since",
+                        "--ticket", "--until"]},
+    "plan-status": {"flags": ["--write-master"]},
+    "util": {"flags": ["--hours", "--json"]},
+    "project": {"flags": [], "subs": ["add", "list", "refresh-external", "split"]},
+    "self": {"flags": []},
+    "doctor": {"flags": []},
+    "trajectories": {"flags": ["--agent", "--json", "--kind", "--limit",
+                               "--since", "--summary", "--ticket", "--until"],
+                     "subs": ["backfill", "export"]},
+    "traj": {"flags": ["--agent", "--json", "--kind", "--limit", "--since",
+                       "--summary", "--ticket", "--until"],
+             "subs": ["backfill", "export"]},
+}
+
+
+def _help_surface(cmd, *sub):
+    out = _atm(Path("/tmp/nope"), cmd, *sub, "--help", timeout=20)
+    text = out.stdout + out.stderr
+    flags = sorted({w.split("=")[0].rstrip(",:)") for w in text.split()
+                    if w.startswith("--")} - {"--help"})
+    import re
+    m = re.search(r"\{([a-z0-9,\-]+)\}", text)
+    return flags, sorted(m.group(1).split(",")) if m else []
+
+
 def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, homes):
     """Check the allow-list instead of trusting an audit of it.
 
@@ -607,6 +653,10 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
     list against a frozen board and compare the tree byte for byte. Any write
     at all fails here: a status change, a check-in, an `inbox_seen` stamp, a
     cache file dropped inside the board.
+
+    The unit of "reads" is an invocation, not a command name, and this test
+    found two real writes that a name-only check waved through:
+    `trajectories backfill`, and `plan-status --write-master`.
     """
     plan = good_plan(shared, homes)
     assert run_apply(shared, plan)["ok"]
@@ -617,16 +667,11 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
     probe = subprocess.run(
         [sys.executable, "-c",
          "import json,sys; sys.path.insert(0, %r); import tickets; "
-         "print(json.dumps({k: (sorted(v) if v else None) for k, v in "
-         "tickets.SPLIT_READ_ONLY_CMDS.items()}))" % str(ROOT)],
+         "print(json.dumps(sorted(tickets.SPLIT_READ_ONLY_CMDS)))" % str(ROOT)],
         capture_output=True, text=True, cwd=str(ROOT))
     assert probe.returncode == 0, probe.stderr
-    allow_list = json.loads(probe.stdout)
-    allow_listed = set(allow_list)
+    allow_listed = set(json.loads(probe.stdout))
 
-    # `project` is on the list on purpose and is the one entry that may write:
-    # `atm project split --undo --apply` has to be able to run on the board it
-    # is undoing. It is exercised here in its reading form.
     invocations = {
         "board": ["board"],
         "show": ["show", "T-100"],
@@ -640,31 +685,44 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
         "context": ["context"],
         "who": ["who"],
         "mine": ["mine"],
-        "trajectories": ["trajectories"],
-        "traj": ["traj"],
         "turns": ["turns"],
         "plan-status": ["plan-status"],
         "util": ["util"],
         "project": ["project", "list"],
         "self": ["self"],
         "doctor": ["doctor"],
+        "trajectories": ["trajectories"],
+        "traj": ["traj"],
     }
     assert set(invocations) == allow_listed, (
         "the allow-list and this test disagree; a name was allowed without "
         "being checked: %s" % sorted(set(invocations) ^ allow_listed))
+    assert set(ALLOW_LISTED_SURFACE) == allow_listed
 
-    # A command name is not the unit of "reads": `atm trajectories` reads and
-    # `atm trajectories backfill` writes. Every allow-listed sub-command is
-    # run too, or the name-only check would wave the writing one through --
-    # which is exactly what it did until this test grew this loop.
-    for cmd, reading in sorted(allow_list.items()):
-        if reading is not None:
-            invocations.update({"%s %s" % (cmd, sub): [cmd, sub]
-                                for sub in reading if sub != "list"})
-    invocations["trajectories export"] = [
-        "trajectories", "export", "--out", str(Path(homes["atman"]).parent
-                                               / "traj-export.jsonl")]
-    invocations["traj export"] = invocations["trajectories export"]
+    # A command's surface is what decides whether it writes, so pin the
+    # surface: a flag or sub-command added later to an allow-listed command
+    # fails here until somebody checks it.
+    for cmd, want in sorted(ALLOW_LISTED_SURFACE.items()):
+        flags, subs = _help_surface(cmd)
+        assert flags == want["flags"], (
+            "%s grew or lost a flag (%s); decide whether it writes on a "
+            "frozen board before changing this list"
+            % (cmd, sorted(set(flags) ^ set(want["flags"]))))
+        assert subs == want.get("subs", []), (
+            "%s grew or lost a sub-command (%s); decide whether it writes"
+            % (cmd, sorted(set(subs) ^ set(want.get("subs", [])))))
+
+    # every allow-listed sub-command of a reading command runs too
+    # a real ticket, not just `--help`: on the archive every ticket keeps its
+    # plain `deps` (external_deps are written onto the copies), so this is a
+    # no-op by construction -- but "by construction" is the kind of claim that
+    # stops being true, so it is checked.
+    invocations["project refresh-external"] = ["project", "refresh-external",
+                                               "T-200"]
+    for name in ("trajectories", "traj"):
+        invocations["%s export" % name] = [
+            name, "export", "--out",
+            str(Path(homes["atman"]).parent / ("%s-export.jsonl" % name))]
 
     # Give one archived ticket the timestamps a real board carries. Without
     # them `backfill` has nothing to synthesise, writes 0 events, and the
@@ -684,38 +742,44 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
             cmd, sorted(set(after) ^ set(before))
             or [k for k in before if after.get(k) != before[k]])
 
-    # `export` stays allowed because it writes where the operator points it
-    # -- but pointed back INSIDE the board it is a write to the archive, and
-    # a destructive one: `--out <board>/agents/<seat>.json` replaces a seat
-    # record outright. It did exactly that until this case was added.
-    for target in (shared / "trajectories.jsonl", shared / "agents" / "ann.json"):
-        out = _atm(shared, "trajectories", "export", "--out", str(target))
-        assert out.returncode != 0, "export into the board was allowed: %s" % target
-        assert "REFUSING WRITE" in out.stderr
-        assert _tree(shared) == before, "export clobbered %s" % target
+    # The three writing forms are refused, each with the archive's wording.
+    # None of them is a command name: one is a sub-command, one is a
+    # sub-command plus a path, one is a flag.
+    writing = {
+        "backfill": ["trajectories", "backfill"],
+        "export into the board": ["trajectories", "export", "--out",
+                                  str(shared / "agents" / "ann.json")],
+        "export onto the log": ["trajectories", "export", "--out",
+                                str(shared / "trajectories.jsonl")],
+        "plan-status --write-master": ["plan-status", "--write-master"],
+    }
+    for name, args in sorted(writing.items()):
+        out = _atm(shared, *args, agent="ann", timeout=20)
+        assert out.returncode != 0, "%s was allowed on a frozen board" % name
+        assert "REFUSING WRITE" in out.stderr, name
+        assert _tree(shared) == before, "%s wrote anyway" % name
 
-    # pointed outside it, it still works: an archive you cannot read out of
-    # is not an archive
-    outside = Path(homes["atman"]).parent / "exported.jsonl"
-    out = _atm(shared, "trajectories", "export", "--out", str(outside))
-    assert out.returncode == 0, out.stderr
-    assert outside.exists() and _tree(shared) == before
-
-    # and the sub-command that writes is refused, with the archive's wording
-    out = _atm(shared, "trajectories", "backfill", agent="ann")
-    assert out.returncode != 0
-    assert "REFUSING WRITE" in out.stderr
-    assert _tree(shared) == before
-
-    # ...and that refusal is load-bearing: the same board, unfrozen, is what
-    # backfill would have written into.
+    # ...and those refusals are load-bearing: the same board, unfrozen, is
+    # what each of them would have written into.
     (shared / ps.SPLIT_MARKER).rename(shared.parent / "split-aside")
-    out = _atm(shared, "trajectories", "backfill", agent="ann")
-    assert out.returncode == 0, out.stderr
-    assert _tree(shared) != before, (
-        "backfill wrote nothing even unfrozen, so the refusal above proves "
-        "nothing: %s" % out.stdout)
-    (shared.parent / "split-aside").rename(shared / ps.SPLIT_MARKER)
+    thawed = {k: v for k, v in before.items() if k != ps.SPLIT_MARKER}
+    try:
+        for name in ("backfill", "export into the board",
+                     "plan-status --write-master"):
+            out = _atm(shared, *writing[name], agent="ann", timeout=20)
+            assert out.returncode == 0, (name, out.stderr)
+            assert _tree(shared) != thawed, (
+                "%s wrote nothing even unfrozen, so refusing it proves "
+                "nothing: %s" % (name, out.stdout))
+            # put the board back for the next one -- the marker stays off
+            for rel, blob in thawed.items():
+                (shared / rel).write_bytes(blob)
+            for rel in set(_tree(shared)) - set(thawed):
+                (shared / rel).unlink()
+            assert _tree(shared) == thawed
+    finally:
+        (shared.parent / "split-aside").rename(shared / ps.SPLIT_MARKER)
+    assert _tree(shared) == before
 
 
 # --------------------------------------------------------------------------
