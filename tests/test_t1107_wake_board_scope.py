@@ -396,3 +396,49 @@ def test_wakeup_run_does_not_pass_the_parent_socket_to_children(board, monkeypat
     run(board, "join", "lead", "--persistent", "--wake-mode", "continuous", agent="lead")
     ep = sa.read_endpoint(str(board), "lead")
     assert (ep or {}).get("socket", "") != "/parent/live.sock"
+
+
+def test_supervisor_launch_env_scrubs_parent_transport(monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location("tickets_t1114", ROOT / "tickets.py")
+    tickets = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tickets)
+    for var in sa.AMBIENT_TRANSPORT_VARS + (sa.TRANSPORT_BOARD_ENV,):
+        monkeypatch.setenv(var, "parent-transport")
+    env = tickets._supervisor_launch_env(str(tmp_path / ".tickets"), "child")
+    for var in sa.AMBIENT_TRANSPORT_VARS + (sa.TRANSPORT_BOARD_ENV,):
+        assert var not in env, var
+    assert env["TICKET_AGENT"] == env["TICKET_SEAT"] == "child"
+    assert env["TICKET_SESSION_ID"].startswith("launch:child:")
+
+
+@pytest.mark.parametrize("lookup", ["missing-pwd", "unmapped-uid", "empty-home"])
+def test_unknown_account_home_refuses_unannounced_transport(
+        tmp_path, monkeypatch, decoy, lookup):
+    from types import SimpleNamespace
+
+    def getpwuid(uid):
+        if lookup == "unmapped-uid":
+            raise KeyError(uid)
+        return SimpleNamespace(pw_dir="")
+
+    monkeypatch.setattr(sa, "pwd", None if lookup == "missing-pwd" else
+                        SimpleNamespace(getpwuid=getpwuid))
+    scratch = _make_board(tmp_path, "scratch")
+    # Even a cache matching HOME must not turn an unknown account home into
+    # evidence that this is the operator's own environment.
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("TICKETS_CACHE_DIR", str(home / ".cache" / "atman"))
+    _inherit_session(monkeypatch, decoy)
+    assert sa._real_home() == ""
+    assert "unknown account HOME" in sa.isolated_board_env()
+    reg = sa.register_persistent(scratch, "lead", "claude", "now")
+    assert reg.get("ok") is False
+    assert "unknown account HOME" in reg.get("reason", "")
+    assert sa.read_endpoint(scratch, "lead") is None
+    sa.write_endpoint(scratch, "lead", _claude_record(scratch, decoy.path))
+    assert "refused" in sa.wake_seat(scratch, "lead", "no", harness="claude")
+    assert decoy.nothing_arrived()
+    # Explicit board provenance remains available on accounts without pwd.
+    monkeypatch.setenv(sa.TRANSPORT_BOARD_ENV, scratch)
+    assert sa.borrowed_transport(scratch, sa.ambient_session_key("claude")) == ""
