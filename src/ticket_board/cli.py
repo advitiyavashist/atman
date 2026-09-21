@@ -326,6 +326,17 @@ def _trajectories_reads(a, board):
     return not (sub == "export" and out and _path_inside(board, out))
 
 
+def _project_out_paths(a):
+    """The operator-named output paths of `atm project ...`, as (flag, value)."""
+    return (("--out", getattr(a, "out", "") or ""),
+            ("--manifest-out", getattr(a, "manifest_out", "") or ""))
+
+
+def _project_out_stays_outside(a, board):
+    """`project` reads the board; its reports must not be written into it."""
+    return not any(v and _path_inside(board, v) for _, v in _project_out_paths(a))
+
+
 # Commands that only read. Everything else is refused on a frozen shared
 # board. The list is an allow-list on purpose: missing a read here costs an
 # operator one confusing refusal, while missing a *write* would strand real
@@ -340,12 +351,15 @@ def _trajectories_reads(a, board):
 #
 # Names this entry point does not carry (`dash`, `guide`, `util`, `project`,
 # `plan-status`, `self`) stay on the list anyway: argparse refuses them first,
-# and keeping one list makes the parity test a set comparison.
+# and keeping one list makes the parity test a set comparison. Their
+# predicates are kept identical for the same reason -- the two lists have to
+# be comparable, not merely both present.
 SPLIT_READ_ONLY_CMDS = {
     "board": None, "show": None, "list": None, "where": None, "dash": None,
     "map": None, "graph": None, "guide": None, "limits": None,
     "context": None, "who": None, "mine": None, "turns": None,
-    "util": None, "project": None, "self": None, "doctor": None,
+    "util": None, "project": _project_out_stays_outside,
+    "self": None, "doctor": None,
     "plan-status": _reads_unless("write_master"),
     "trajectories": _trajectories_reads,
     "traj": _trajectories_reads,
@@ -1117,6 +1131,30 @@ def context_paths(board, owner=None):
     return paths
 
 
+def _alloc_floor(directory, prefix):
+    """Lowest id this directory may mint, from `_alloc.json`.
+
+    Written by `atm project split`: after a split each project board gets its
+    own disjoint block above the shared board's highest id, so two boards that
+    both descend from one shared board can never mint the same `T-` id. A
+    board with no `_alloc.json` is unaffected -- it allocates exactly as
+    before.
+
+    This lives in both entry points because both of them mint ids. It existed
+    only in tickets.py at first, and correct `_alloc.json` files turned out to
+    prove nothing on their own: through the packaged CLI, a board with a floor
+    of 11,000 minted T-302 and another with a floor of 1,000 minted a T-102
+    that already existed in a sibling project. Found by this ticket's
+    independent reviewer, not by its author.
+    """
+    try:
+        with open(os.path.join(directory, "_alloc.json"), encoding="utf-8") as f:
+            rec = json.load(f)
+        return int(rec.get(prefix) or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+
+
 def _alloc(directory, prefix, width, record):
     """Write `record` under the next free `<prefix>-NNN` id. Race-safe via O_EXCL."""
     os.makedirs(directory, exist_ok=True)
@@ -1126,6 +1164,7 @@ def _alloc(directory, prefix, width, record):
         if stem.isdigit():
             used.append(int(stem))
     n = max(used) + 1 if used else 1
+    n = max(n, _alloc_floor(directory, prefix))
     while True:
         rid = "%s-%0*d" % (prefix, width, n)
         path = os.path.join(directory, rid + ".json")

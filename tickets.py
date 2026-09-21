@@ -8701,6 +8701,17 @@ def _trajectories_reads(a, board):
     return not (sub == "export" and out and _path_inside(board, out))
 
 
+def _project_out_paths(a):
+    """The operator-named output paths of `atm project ...`, as (flag, value)."""
+    return (("--out", getattr(a, "out", "") or ""),
+            ("--manifest-out", getattr(a, "manifest_out", "") or ""))
+
+
+def _project_out_stays_outside(a, board):
+    """`project` reads the board; its reports must not be written into it."""
+    return not any(v and _path_inside(board, v) for _, v in _project_out_paths(a))
+
+
 # Commands that only read. Everything else is refused on a frozen shared
 # board. The list is an allow-list on purpose: missing a read here costs an
 # operator one confusing refusal, while missing a *write* would strand real
@@ -8720,11 +8731,17 @@ def _trajectories_reads(a, board):
 # `project` is allowed whole, including its writing forms, because `atm
 # project split --undo --apply` has to be able to run on the board it is
 # undoing; a second `--apply` is refused by the engine itself, not here.
+# Except for one shape: an operator-named output path pointed back INSIDE the
+# board. `--propose --out <archive>/T-100.json` replaced that ticket with the
+# plan and printed "nothing was written to the board". Found by this ticket's
+# independent reviewer after I had pointed them at exactly this class on
+# `trajectories export` and then missed it on my own command.
 SPLIT_READ_ONLY_CMDS = {
     "board": None, "show": None, "list": None, "where": None, "dash": None,
     "map": None, "graph": None, "guide": None, "limits": None,
     "context": None, "who": None, "mine": None, "turns": None,
-    "util": None, "project": None, "self": None, "doctor": None,
+    "util": None, "project": _project_out_stays_outside,
+    "self": None, "doctor": None,
     "plan-status": _reads_unless("write_master"),
     "trajectories": _trajectories_reads,
     "traj": _trajectories_reads,
@@ -8848,6 +8865,10 @@ def cmd_project(a, board):
     sub = getattr(a, "project_cmd", "") or ""
     if not sub:
         sys.exit("atm project: split | refresh-external | add | list")
+    # Before anything reads the board: no sub-command of `project` may write
+    # its report inside the board it is reading. Guarded here rather than in
+    # `split` so a sub-command that grows an output path later inherits it.
+    _refuse_project_out_inside_board(a, board)
     ps = _project_split()
     if sub == "list":
         return _cmd_project_list(a, board)
@@ -8953,6 +8974,27 @@ def _cmd_project_refresh_external(a, board, ps):
               "accept on its own board.")
     elif getattr(a, "dry_run", False):
         print("(dry run -- %s was not written)" % a.ticket)
+
+
+def _refuse_project_out_inside_board(a, board):
+    """An operator-named output path must never land inside the board.
+
+    `atm project split --propose --out <board>/T-100.json` wrote the plan over
+    that ticket, exited 0, and printed "(read-only; nothing was written to the
+    board)". Same shape as `trajectories export --out` pointed back inside a
+    board, and the same fix -- but this one holds on ANY board, frozen or not:
+    spec 4.11 says the shared board is not edited except for the one `.split`
+    marker, and a plan or manifest written into it is an edit that destroys a
+    record.
+    """
+    for flag, value in _project_out_paths(a):
+        if value and _path_inside(board, value):
+            sys.exit(
+                "REFUSING %s %s: that path is inside the board being read "
+                "(%s).\n  A plan or manifest written into the board would "
+                "overwrite whatever record is already at that path -- "
+                "`--out <board>/T-100.json` replaced that ticket outright.\n"
+                "  Point it outside the board." % (flag, value, board))
 
 
 def _cmd_project_split(a, board, ps):

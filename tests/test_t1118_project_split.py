@@ -1000,6 +1000,109 @@ WRITE_SURFACE = {
 }
 
 
+def test_project_report_paths_never_land_inside_the_board(shared, homes, tmp_path):
+    """`--out` / `--manifest-out` pointed back inside the board is a write to it.
+
+    Blocking finding 1 of the T-1136 independent review. `project` was
+    allow-listed whole, so on a frozen archive
+    `project split --propose --out <archive>/T-100.json` exited 0, replaced
+    that ticket with the plan -- the ticket's own `id` disappeared -- and
+    printed "(read-only; nothing was written to the board)". I had pointed the
+    reviewer at exactly this class on `trajectories export --out` and then
+    missed it on my own command.
+
+    Two guards, because the rule is not only about frozen boards: spec 4.11
+    says the shared board is not edited except for the one `.split` marker, so
+    a plan written into a LIVE board is an edit that destroys a record too.
+    """
+    live = _tree(shared)
+    target = shared / "T-100.json"
+    before = target.read_bytes()
+
+    # on a live board: the command refuses before reading anything
+    for out in (target, shared / "plan.json", shared / "agents" / "ann.json"):
+        res = _atm(shared, "project", "split", "--propose", "--out", str(out),
+                   agent="ann", timeout=30)
+        assert res.returncode != 0, "--out %s was allowed" % out.name
+        assert "REFUSING --out" in res.stderr, res.stderr
+        assert _tree(shared) == live, "--out %s wrote anyway" % out.name
+    assert json.loads(target.read_bytes().decode())["id"] == "T-100"
+
+    # ...and pointed outside it, the same command works
+    outside = tmp_path / "plan-outside.json"
+    res = _atm(shared, "project", "split", "--propose", "--out", str(outside),
+               agent="ann", timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert json.loads(outside.read_text())["tickets"]
+    assert _tree(shared) == live
+
+    # on the frozen archive it is the archive refusal, not the generic one:
+    # the allow-list entry for `project` is a predicate for this reason.
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    frozen = _tree(shared)
+    for flag, out in (("--out", shared / "T-100.json"),
+                      ("--manifest-out", shared / "T-101.json")):
+        args = ["project", "split", "--propose", flag, str(out)]
+        if flag == "--manifest-out":
+            args = ["project", "split", "--plan", str(tmp_path / "p.json"),
+                    "--dry-run", flag, str(out)]
+            (tmp_path / "p.json").write_text(json.dumps(plan))
+        res = _atm(shared, *args, agent="ann", timeout=30)
+        assert res.returncode != 0, "%s was allowed on the archive" % flag
+        assert "REFUSING WRITE" in res.stderr, res.stderr
+        assert _tree(shared) == frozen, "%s wrote to the archive" % flag
+    assert json.loads((shared / "T-100.json").read_bytes().decode())["id"] == "T-100"
+
+
+@pytest.mark.parametrize("entry", ["tickets.py", "packaged atm"])
+def test_both_entry_points_mint_ids_above_the_seeded_floor(shared, homes, entry):
+    """`_alloc.json` files prove nothing if an entry point does not read them.
+
+    Blocking finding 2 of the T-1136 independent review. Only `tickets.py`
+    consulted `_alloc_floor`; the packaged CLI allocated from local maximum + 1
+    and never opened `_alloc.json`. With T-102 moved to steer, the packaged
+    `create` on the atman board minted **T-102** again -- a duplicate id across
+    two boards descended from one shared board, the exact thing the seeded
+    blocks exist to prevent -- and on steer it minted T-302 against a floor of
+    11,000.
+
+    Parametrised per entry point on purpose, with a fresh board each time. My
+    first version ran both runners against one board and passed without the
+    fix: `tickets.py` went first, minted correctly above the floor, and left a
+    local maximum that dragged the packaged CLI's "local maximum + 1" above
+    the floor too. One board cannot test two allocators.
+    """
+    runner = _atm if entry == "tickets.py" else _cli
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+
+    for slug in sorted(homes):
+        board = Path(homes[slug])
+        floor = json.loads((board / "_alloc.json").read_text())["T"]
+        local_max = max(int(p.stem.split("-")[1]) for p in board.glob("T-*.json"))
+        assert local_max < floor, (
+            "fixture is too weak to catch a missing floor read: %s already "
+            "allocates above its floor (%d >= %d)" % (slug, local_max, floor))
+        res = runner(board, "create", "%s probe" % entry, "--role", "backend",
+                     timeout=30)
+        assert res.returncode == 0, (slug, res.stderr)
+        minted = res.stdout.split()[1]
+        assert int(minted.split("-")[1]) >= floor, (
+            "%s on %s minted %s below its floor %d"
+            % (entry, slug, minted, floor))
+        assert (board / (minted + ".json")).exists()
+
+    ids = {slug: {p.stem for p in Path(homes[slug]).glob("T-*.json")}
+           for slug in homes}
+    names = sorted(ids)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            assert not (ids[a] & ids[b]), (
+                "%s: %s and %s now share ids %s"
+                % (entry, a, b, sorted(ids[a] & ids[b])))
+
+
 def test_the_write_surface_is_enumerated_not_assumed():
     """Pin the entry points, the way the flags and sub-commands are pinned.
 

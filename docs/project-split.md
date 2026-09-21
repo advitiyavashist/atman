@@ -48,6 +48,7 @@ is now refused:
 | flag | `atm plan-status --write-master` | wrote a Plan section into the archive's `MASTER.md` |
 | dispatch order | `atm board-mark-primary` | wrote `.primary`, making the archive **win** board resolution and route every seat back onto it |
 | entry point | the packaged `atm` (`ticket_board.cli:main`) | every write, from `note` to `clear`, on the CLI a pip install provides |
+| report path | `atm project split --propose --out <board>/T-100.json` | replaced that ticket with the plan, exit 0, printing "nothing was written to the board" |
 
 The last one never reaches the refusal at all: it is dispatched before
 `board_dir()` so it can repair board resolution on a board resolution itself
@@ -100,6 +101,29 @@ board*, so "outside the board" is an operator's choice rather than a guarantee.
 A future change would need the same path predicate `trajectories export` uses.
 The refusal is pinned in the parity matrix so the next person makes that
 decision rather than inheriting it.
+
+The sixth shape was found by this ticket's independent reviewer, in the one
+command the allow-list waves through whole. `project` is allowed entire because
+`--undo --apply` has to run on the board it is undoing — but `--out` and
+`--manifest-out` are operator-named paths, exactly like `trajectories export
+--out`, and nothing checked them. Pointed at a ticket on the archive,
+`--propose --out` wrote the plan over it and the ticket's own `id` disappeared.
+Two guards now: the allow-list entry for `project` is a predicate, so on a
+frozen board this is the archive refusal; and `cmd_project` refuses an output
+path inside the board on **any** board, frozen or not, because §4.11 says the
+shared board is not edited except for the one `.split` marker and a plan
+written into a live board destroys a record just the same.
+
+A seventh finding from the same review is not about the refusal at all but
+about the same *placement* mistake one layer down: `_alloc.json` files are
+useless if an entry point never reads them. The floor check lived only in
+`tickets.py`, so the packaged CLI allocated from local maximum + 1 — on a
+board whose floor was 11,000 it minted `T-302`, and on another it re-minted a
+`T-102` that already existed in a sibling project, which is precisely what the
+disjoint blocks exist to prevent. `_alloc_floor` is now in both entry points,
+and the test is parametrised per entry point with a fresh board each time: one
+board cannot test two allocators, because whichever runner goes first leaves a
+local maximum that drags the second one above the floor by accident.
 
 Because "both entry points carry it" is a claim about how many entry points
 exist, they are enumerated and pinned too. `pyproject.toml` installs exactly
