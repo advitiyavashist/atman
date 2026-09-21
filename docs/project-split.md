@@ -240,7 +240,10 @@ silent:
   over it.
 
 **What merge-back does not fold, and now says so.** Epics, sprints, agent
-records, briefs — anything new that is not a root-level ticket or log. They
+records, briefs — anything that is not a root-level ticket or log, whether it
+is new or a file the split wrote that a seat then *modified*. A check-in
+rewrites `agents/<seat>.json`, and that showed up in the drift count and
+nowhere else until the reviewer pointed at it; the count is not the name. They
 stay on the board `undo` moves aside (nothing is deleted), and the output
 names them per project:
 
@@ -249,12 +252,28 @@ NOT merged back (kept on the set-aside board, nothing deleted):
   atman            2 file(s): epics/E-002.json, sprints/S-01.json
 ```
 
-**Deletions on a project board are ignored, and that is the safe direction.**
-merge-back only appends and copies newer forward, so a log or a ticket deleted
-on a project board changes nothing on the shared board — the shared board holds
-the original, not a replica. The drift line still reports it (`2 changed since
-the split`), so nobody is told the board was untouched. Measured, with the
-whole file and the whole ticket set compared afterwards.
+**A deleted ticket is ignored; a missing log refuses.** Two different answers,
+and the second one was wrong until the reviewer defeated it. merge-back only
+appends and copies newer forward, so a *ticket* deleted on a project board
+changes nothing on the shared board — the shared board holds the original, not
+a replica. A *log* that is gone is the dangerous case: missing cannot be told
+from renamed, and `mv trajectories.jsonl trajectories.operator-rotated.jsonl`
+made the recorded name read as "gone, nothing appended" while the new name read
+as "a file the split never wrote, so all of it is new" — two defensible rules
+with a duplicated history between them. A missing recorded log is now a
+conflict, and a log the split never wrote contributes only lines the shared
+board does not already hold, compared line for line against the source. Both
+halves are pinned, including that a genuinely new line in such a file still
+comes back.
+
+**An operator-named report is written through a temp file and `os.replace`.**
+Not for crash safety: the target can be a *hard link* to a file inside the
+board, and `os.path.realpath` does not see through a hard link the way it sees
+through a symlink — `os.link(<archive>/T-100.json, outside.json)` then
+`--propose --out outside.json` passed the containment check and destroyed the
+ticket through its other name. Replacing the directory entry leaves the inode,
+so the board's own copy survives. The write itself is still allowed: the
+operator named a path outside the board and nothing inside it is harmed.
 
 Epics and sprints are not folded *by id* on purpose, and the reason is
 concrete: only `T-` ids get a per-project floor, so a project board minting a

@@ -1347,7 +1347,14 @@ def _appended_lines(board, rel, row):
     try:
         data = _read_bytes(os.path.join(board, rel))
     except OSError:
-        return [], True
+        # Gone. That used to read as "intact, nothing appended", which is the
+        # benign case for a ticket -- the shared board holds the original --
+        # but for a LOG it cannot be told apart from a rename, and a renamed
+        # log is the dangerous one: its pre-split lines then look like a brand
+        # new file and get appended to the shared board a second time. The
+        # reviewer defeated the merge that way. An undo that cannot tell must
+        # stop, not guess.
+        return [], False
     n = row["bytes"]
     if len(data) < n or sha256_bytes(data[:n]) != row["sha256"]:
         return [], False
@@ -1410,7 +1417,7 @@ def undo(man, merge_back=False, do_apply=False, at="", write_registry=None):
         if report["conflicts"]:
             report["refusals"].append(_refusal(
                 "merge-back-conflict",
-                "%d conflict(s): the shared board is not in the state the "
+                "%d conflict(s): the boards are not in the state the "
                 "manifest recorded. Nothing was merged."
                 % len(report["conflicts"])))
 
@@ -1471,6 +1478,13 @@ def _merge_back_leftovers(man, boards):
         known = set(rows.get(slug, {}))
         left = [rel for rel in drift.get("extra") or []
                 if rel not in known and not _merge_back_folds(rel)]
+        # A file the split DID write and a seat then modified is not folded
+        # either unless it is a ticket or a log -- a check-in rewrites
+        # agents/<seat>.json, which appeared in the drift count and nowhere
+        # else. Reported for the same reason: the count is not the name.
+        left += [row["file"] for row in drift.get("changed") or []
+                 if isinstance(row, dict) and row.get("file")
+                 and not _merge_back_folds(row["file"])]
         if left:
             out[slug] = sorted(left)
     return out
@@ -1488,6 +1502,23 @@ def _merge_back_items(man, source):
     externals = man.get("external_deps") or {}
     seen = {}
     lines, tickets, conflicts = {}, {}, []
+
+    def source_lines(_source, _cache={}):
+        """Every log line the shared board already holds, as raw bytes.
+
+        Built once per process and keyed by board path. It is the only way to
+        tell a genuinely new line in an unrecognised log file from a copy of
+        one the split handed out.
+        """
+        key = os.path.realpath(_source)
+        if key not in _cache:
+            got = set()
+            src = SourceBoard(_source)
+            for name in list(src.message_files()) + list(src.trajectory_files()):
+                for raw in src.lines(name):
+                    got.add(raw.strip())
+            _cache[key] = got
+        return _cache[key]
 
     def have_ids(name):
         """Line ids already on the shared board, so a merge never doubles one."""
@@ -1531,13 +1562,26 @@ def _merge_back_items(man, source):
                         fresh = _split_lines(_read_bytes(os.path.join(board, rel)))
                     except OSError:
                         fresh = []
+                    # "Every line in a file the split never wrote is new" is
+                    # false the moment someone copies a log to a second
+                    # basename: those lines are the shared board's own, and
+                    # appending them back duplicates history. So a line here
+                    # counts as new only if the shared board does not already
+                    # hold that exact line, in any of its logs.
+                    fresh = [raw for raw in fresh
+                             if raw.strip() not in source_lines(source)]
                     intact = True
                 else:
                     fresh, intact = _appended_lines(board, rel, row)
                 if not intact:
-                    conflicts.append({"file": "%s:%s" % (slug, rel),
-                                      "problem": "rewritten, not appended to, "
-                                                 "since the split"})
+                    gone = not os.path.exists(os.path.join(board, rel))
+                    conflicts.append({
+                        "file": "%s:%s" % (slug, rel),
+                        "problem": ("moved or removed since the split, so its "
+                                    "lines cannot be told from new ones"
+                                    if gone else
+                                    "rewritten, not appended to, since the "
+                                    "split")})
                     continue
                 for raw in fresh:
                     rec = _json_line(raw)

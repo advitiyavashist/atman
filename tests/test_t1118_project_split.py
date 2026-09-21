@@ -1089,6 +1089,24 @@ def test_project_report_paths_never_land_inside_the_board(shared, homes, tmp_pat
     assert _tree(shared) == live
     assert json.loads((shared / "T-100.json").read_bytes().decode())["id"] == "T-100"
 
+    # A HARD LINK is not a symlink, so `realpath` does not see through it:
+    # the reviewer defeated the containment check with
+    # `os.link(<board>/T-100.json, outside.json)` and destroyed the ticket
+    # through its other name. The fix is not a bigger check but a different
+    # write: a temp file plus os.replace changes the directory entry, so the
+    # inode -- and the board's own copy -- survives. The write is allowed,
+    # because the operator named a path outside the board and nothing inside
+    # it is harmed.
+    alias = tmp_path / "hardlink-out.json"
+    os.link(shared / "T-100.json", alias)
+    assert os.stat(shared / "T-100.json").st_nlink == 2
+    res = _atm(shared, "project", "split", "--propose", "--out", str(alias),
+               agent="ann", timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert json.loads((shared / "T-100.json").read_bytes().decode())["id"] == "T-100"
+    assert _tree(shared) == live, "writing through a hard link changed the board"
+    assert "tickets" in json.loads(alias.read_text()), "the plan was not written"
+
     # ...and `..` that genuinely escapes the board is allowed: the rule is
     # containment, not a ban on relative paths.
     res = _atm(shared, "project", "split", "--propose", "--out",
@@ -1446,15 +1464,20 @@ def test_merge_back_loses_no_log_line_and_still_dedups_by_id(shared, homes):
     assert [r.get("kind") for r in rows] == ["update"], rows
 
 
-def test_merge_back_ignores_deletions_because_the_archive_is_the_original(shared, homes):
-    """Deleting a copy on a project board cannot delete anything shared.
+def test_merge_back_ignores_a_deleted_ticket_but_refuses_a_missing_log(shared, homes):
+    """The other half of "nothing is lost", and it is two different answers.
 
-    The other half of "nothing is lost", and the half that is easy to assume:
-    merge-back only ever *appends* and *copies newer forward*, so a log or a
-    ticket deleted on a project board is ignored, and the shared board keeps
-    its own copy -- which is the original, not a replica of the project's. The
-    drift count still reports the change, so the operator is not told the
-    board was untouched.
+    A **ticket** deleted on a project board is ignored: merge-back only
+    appends and copies newer forward, and the shared board holds the original
+    rather than a replica, so there is nothing to decide.
+
+    A **log** that is gone is the dangerous case and it refuses. Missing
+    cannot be told from renamed, and a renamed log is how the reviewer
+    defeated the merge at 60f8a08: `mv trajectories.jsonl
+    trajectories.operator-rotated.jsonl` made its pre-split lines look like a
+    brand new file, and every one of them was appended to the shared board a
+    second time. `_appended_lines` used to read "gone" as "intact, nothing
+    appended". An undo that cannot tell must stop.
     """
     plan = good_plan(shared, homes)
     assert run_apply(shared, plan)["ok"]
@@ -1462,18 +1485,74 @@ def test_merge_back_ignores_deletions_because_the_archive_is_the_original(shared
     msgs_before = (shared / "messages.jsonl").read_bytes()
     tickets_before = sorted(p.name for p in shared.glob("T-*.json"))
 
-    (atman / "messages.jsonl").unlink()
+    # 1. a deleted ticket: ignored, and the shared board is untouched
     victim = sorted(atman.glob("T-*.json"))[0].name
     (atman / victim).unlink()
-
     out = _atm(shared, "project", "split", "--undo",
                str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
                agent="ann", timeout=60)
     assert out.returncode == 0, out.stderr
-    assert "2 changed since the split" in out.stdout, out.stdout
-    assert (shared / "messages.jsonl").read_bytes() == msgs_before
+    assert "1 changed since the split" in out.stdout, out.stdout
     assert (shared / victim).exists()
     assert sorted(p.name for p in shared.glob("T-*.json")) == tickets_before
+    assert (shared / "messages.jsonl").read_bytes() == msgs_before
+
+
+def test_merge_back_refuses_a_log_that_was_moved_not_appended_to(shared, homes):
+    """A log moved to a second basename must not have its history re-appended.
+
+    The reviewer's falsifier at `60f8a08`, in full: move a project board's
+    `trajectories.jsonl` aside to `trajectories.operator-rotated.jsonl` and
+    merge-back succeeded, appending every pre-split line to the shared board
+    again -- because the recorded name read as "gone, nothing appended" while
+    the new name read as "a file the split never wrote, so all of it is new".
+    Two defensible rules, one duplicated history between them.
+
+    Both halves are fixed and both are checked here: the missing recorded log
+    is a conflict, and -- with the conflict removed -- a copy of shared lines
+    under a new basename contributes nothing, while a genuinely new line in
+    that same file still comes back.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    atman, steer = Path(homes["atman"]), Path(homes["steer"])
+    log = steer / "trajectories.jsonl"
+    assert log.exists(), "fixture must give steer a trajectory log"
+    original = log.read_bytes()
+    shared_before = (shared / "trajectories.jsonl").read_bytes()
+
+    # 1. moved, not appended to -> conflict, nothing merged
+    os.rename(log, steer / "trajectories.operator-rotated.jsonl")
+    out = _atm(shared, "project", "split", "--undo",
+               str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
+               agent="ann", timeout=60)
+    assert out.returncode != 0, "a moved log was merged: %s" % out.stdout
+    assert "moved or removed since the split" in out.stdout, out.stdout
+    assert "Nothing was merged" in out.stdout
+    assert (shared / "trajectories.jsonl").read_bytes() == shared_before
+
+    # 2. put the recorded log back and keep the copy: the copy's lines are the
+    # shared board's own, so they must not come back, but a new line must.
+    log.write_bytes(original)
+    fresh = {"v": 1, "at": "2026-09-20T09:00:00Z", "kind": "update",
+             "ticket": "T-201", "agent": "ann"}
+    with open(steer / "trajectories.operator-rotated.jsonl", "a",
+              encoding="utf-8") as f:
+        f.write(json.dumps(fresh) + "\n")
+    out = _atm(shared, "project", "split", "--undo",
+               str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
+               agent="ann", timeout=60)
+    assert out.returncode == 0, out.stdout + out.stderr
+    rows = [json.loads(x) for x in
+            (shared / "trajectories.jsonl").read_text().splitlines() if x.strip()]
+    was = [json.loads(x) for x in shared_before.decode().splitlines() if x.strip()]
+    assert len(rows) == len(was), (
+        "pre-split lines came back under the new basename: %d -> %d"
+        % (len(was), len(rows)))
+    rotated = shared / "trajectories.operator-rotated.jsonl"
+    assert rotated.exists(), out.stdout
+    got = [json.loads(x) for x in rotated.read_text().splitlines() if x.strip()]
+    assert got == [fresh], got
 
 
 def test_undo_merge_back_names_what_it_leaves_behind(shared, homes):
@@ -1496,6 +1575,8 @@ def test_undo_merge_back_names_what_it_leaves_behind(shared, homes):
     made = _atm(atman, "epic", "create", "post-split epic", agent="ann", timeout=30)
     assert made.returncode == 0, made.stderr
     eid = made.stdout.split()[1]
+    # ...and a check-in, which rewrites a file the split DID write
+    assert _atm(atman, "here", agent="ann", timeout=30).returncode == 0
 
     out = _atm(shared, "project", "split", "--undo",
                str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
@@ -1504,6 +1585,10 @@ def test_undo_merge_back_names_what_it_leaves_behind(shared, homes):
     assert "NOT merged back" in out.stdout, out.stdout
     assert "epics/%s.json" % eid in out.stdout, out.stdout
     assert "nothing deleted" in out.stdout
+    # A file the split DID write and a seat then modified is not folded
+    # either, and it used to appear in the drift count and nowhere else --
+    # a check-in rewrites agents/<seat>.json. The count is not the name.
+    assert "agents/ann.json" in out.stdout, out.stdout
     # and it really is still there, on the board that was moved aside
     aside = sorted(atman.parent.glob(".tickets.split-undone-*"))
     assert aside, "the board was not moved aside"

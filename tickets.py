@@ -45,6 +45,7 @@ import re
 import secrets
 import shlex
 import sys
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -8976,6 +8977,29 @@ def _cmd_project_refresh_external(a, board, ps):
         print("(dry run -- %s was not written)" % a.ticket)
 
 
+def _write_report_atomically(path, text):
+    """Write an operator-named report without writing THROUGH an alias.
+
+    A temp file in the same directory plus os.replace, rather than opening the
+    path and writing into it. That is not only crash-safety here: the target
+    can be a HARD LINK to a file inside the board, which `os.path.realpath`
+    does not resolve because a hard link is not a symlink -- the reviewer
+    defeated the containment check with `os.link(<archive>/T-100.json,
+    outside.json)` and destroyed the ticket through its other name. Replacing
+    the directory entry leaves the inode, and therefore the board's own copy,
+    untouched.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".atm-report-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        _safe(lambda: os.unlink(tmp), None)
+        raise
+
+
 def _refuse_project_out_inside_board(a, board):
     """An operator-named output path must never land inside the board.
 
@@ -9005,8 +9029,7 @@ def _cmd_project_split(a, board, ps):
         plan = ps.propose(board, generated=now(), registry=registry)
         text = json.dumps(plan, indent=2, sort_keys=True)
         if getattr(a, "out", ""):
-            with open(a.out, "w", encoding="utf-8") as f:
-                f.write(text + "\n")
+            _write_report_atomically(a.out, text + "\n")
             s = plan["summary"]
             print("proposed plan -> %s  (read-only; nothing was written to the board)"
                   % a.out)
@@ -9052,8 +9075,9 @@ def _cmd_project_split(a, board, ps):
     report = ps.dry_run(src, plan, registry_before=registry,
                         allow_pending_external=allow)
     if getattr(a, "manifest_out", ""):
-        with open(a.manifest_out, "w", encoding="utf-8") as f:
-            json.dump(report["manifest"], f, indent=2, sort_keys=True)
+        _write_report_atomically(
+            a.manifest_out,
+            json.dumps(report["manifest"], indent=2, sort_keys=True))
     if getattr(a, "json", False):
         print(json.dumps(report, indent=2, sort_keys=True))
         return
