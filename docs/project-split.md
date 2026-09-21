@@ -209,6 +209,26 @@ board's highest id (block size 10,000). A shared floor would stop new ids
 colliding with old ones but not with each other — two boards seeded the same
 would both mint the next id.
 
+Three things about that floor are worth knowing, because two of them were
+wrong once:
+
+- **Both entry points read it.** It lived only in `tickets.py` at first, so the
+  packaged `atm` allocated from local maximum + 1 and immediately re-minted an
+  id that existed in a sibling project. Correct `_alloc.json` files prove
+  nothing on their own.
+- **Only `T-` ids are seeded.** §4.11 is about ticket ids, so `E-` and `S-`
+  allocation is untouched: two boards descended from one shared board can mint
+  the same epic id for different epics. That is why `undo --merge-back` does
+  not fold epics or sprints by id — see *Reversing it*. Whether the spec should
+  be read as covering every prefix is an open question this migration does not
+  decide.
+- **The floor is a file on the board.** Delete `_alloc.json` and that board
+  allocates from its local maximum again, which re-opens the collision the
+  block exists to prevent. `_alloc_floor` treats a missing or unreadable file
+  as "no floor" on purpose — a board that never had one must keep allocating
+  as before — so the failure is silent by design, and the manifest is where the
+  floors are recorded if one has to be rebuilt.
+
 ## Reversing it
 
 ```
