@@ -16,6 +16,16 @@ atm project split --plan split-plan.json --dry-run --manifest-out m.json
 atm project split --plan split-plan.json --apply --expect-manifest m.json
 ```
 
+Two things bracket those four steps on a live fleet, and both were measured on
+a copy of the real board rather than guessed. **Before `--apply`:** stop the
+seats. The 2026-09-21 21:03 snapshot carried seven live-state receipts — five
+seats with an active run and two with a live watcher — and `--apply` refuses on
+every one of them until `atm spawn --stop` has run. **After `--apply`:** the
+command prints one `TICKETS_DIR=<board> atm spawn <seat> --persist` line per
+seat per home project, because a seat that is homed in two projects needs a run
+on each board and its old session is pointed at the archive, which now takes no
+new records.
+
 `--propose` attributes a ticket by its `repo` field and nothing else. A ticket
 with no `repo` is listed as `unassigned` with `branch`, `artifact_dir` and
 epic-majority **hints**; it is never auto-attributed, and the dry run refuses
