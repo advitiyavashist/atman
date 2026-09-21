@@ -19,3 +19,12 @@ the catalog here.
 - **steer.md** is a separate runtime policy product. Do not mix Steer claims into Atman chrome.
 
 Full operator path: [docs/onboarding/role-context.md](../docs/onboarding/role-context.md) · [docs/byoa.md](../docs/byoa.md)
+
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.

@@ -3721,13 +3721,22 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
 3. You may create, split, re-wire and assign tickets (`create --blocks`,
    `dep`, `assign`, `plan`). Extending the graph is expected, not exceptional.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `atm done` refuses from main or with uncommitted files.
+   `atm review` refuses from main or with uncommitted files.
 5. Post `atm update <id> "..."` at least every 45 minutes and at each
    milestone. Silence longer than that is treated as a timeout.
-6. `done --notes` must include branch@sha (added automatically), the paths
-   you touched, and every decision a dependent ticket must match. Then merge
-   (or open the PR) before claiming the next ticket.
+6. Workers commit, run `atm sync`, then submit `atm review --notes` with paths,
+   tests and decisions dependents must match. The integrator follows the accept
+   gate below before merging.
 7. Set `TICKET_AGENT` to your own name so the board can tell agents apart.
+
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 
 ## Sprint plan
 (goals per sprint; `atm sprint list` has the live numbers)
@@ -5562,6 +5571,15 @@ dependency tree with each node's status and owner.
     atm master                             # briefing + health
     atm inbox                              # messages addressed to you
 
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
+
 **Rules for every agent**
 
 1. Claim before you work (`atm next`). Never work without a ticket; never
@@ -5571,15 +5589,15 @@ dependency tree with each node's status and owner.
 3. You may create, split, re-wire and assign tickets. Extending the graph is
    expected. Anyone can become master with `atm master take`.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `atm review` and `atm done` refuse from main or with uncommitted files.
+   `atm review` refuses from main or with uncommitted files; run `atm sync` first.
 5. Post `atm update <id> "..."` at least every 45 minutes and at every
    milestone. Longer silence is treated as a timeout and the ticket may be
    reopened for someone else.
 6. When finished, submit -- do not close: `atm review <id> --notes "paths
    touched, tests run, decisions dependents must match"` (branch@sha is added
-   automatically; `--pr N` if you opened one). Another seat then reviews it and
-   records `atm accept <id> --sha <exact sha>`; that accept -- not `atm done` --
-   is what releases the dependents. Claim your next ticket right away.
+   automatically; `--pr N` if you opened one). Follow the accept gate above.
+   The integrator may merge only the independently accepted review head.
+   Claim your next ticket right away.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.

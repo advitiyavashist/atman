@@ -29,6 +29,7 @@ T-1006/T-1007/T-1008 are onboarding defects on the same surface, fixed with the
 demo and pinned at the bottom of this file.
 """
 import hashlib
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
@@ -59,9 +60,10 @@ HARNESS_LOGGED_OUT = """#!/bin/sh
 if [ "$1" = "auth" ]; then echo "Not logged in. Please run /login"; exit 1; fi
 echo "no session"; exit 1
 """
-HARNESS_LIMITED = """#!/bin/sh
+LIMIT_RESET = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+HARNESS_LIMITED = f"""#!/bin/sh
 if [ "$1" = "auth" ]; then echo "Login: demo@example.com (Pro)"; exit 0; fi
-echo "You've hit your weekly limit. Your limit resets at 2026-09-19T00:00:00Z"
+echo "You've hit your weekly limit. Your limit resets at {LIMIT_RESET}"
 exit 1
 """
 
@@ -274,7 +276,7 @@ def test_usage_limit_is_reported_and_reaches_the_usage_ledger(tmp_path):
     # the T-1040 ledger got the reading, and the shared formatter printed it
     usage = [ln for ln in out.splitlines() if ln.startswith("usage:")]
     assert usage and "limited" in usage[0], usage
-    assert "resets 2026-09-19T00:00:00Z" in usage[0], usage
+    assert f"resets {LIMIT_RESET}" in usage[0], usage
     ledger = json.loads((scratch / "repo" / ".tickets" / "provider_usage.json").read_text())
     assert ledger["providers"]["claude"]["status"] == "limited"
     # a usage limit is not an auth failure: the gate is still demonstrated,
@@ -350,7 +352,8 @@ def test_t1006_no_surface_tells_a_worker_done_hands_off(tmp_path):
     agents_md = (repo / "AGENTS.md").read_text()
     assert "until those dependencies are marked done" not in agents_md
     assert "atm accept <id> --sha <sha>" in agents_md
-    assert "releases the dependents" in agents_md
+    assert "Dependents stay shut" in agents_md
+    assert "until that accept is recorded" in agents_md
     # both copies of the CLI carry the same wording (T-243 two-copy surface)
     for path in (TOOL, CLI):
         src = path.read_text()
