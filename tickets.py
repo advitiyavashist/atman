@@ -1185,7 +1185,62 @@ def save(board, t, expected_generation=None):
     return result
 
 
-def load_all(board):
+_BOARD_READS = threading.local()
+
+
+class _reuse_board_reads:
+    """Pin ticket/message/workforce reads for one UI snapshot.
+
+    `board_snapshot` calls `pending_work` once per named seat. Each call used
+    to re-parse every T-*.json and the whole messages.jsonl (measured: ~4M
+    json.loads / ~50s on a 200-run board). Nested contexts reuse the outer pin.
+    """
+
+    def __init__(self, board):
+        self.board = os.path.realpath(board)
+
+    def __enter__(self):
+        prev_bound = getattr(_BOARD_READS, "bound", False)
+        prev_board = getattr(_BOARD_READS, "board", None)
+        self._prev = (prev_bound, prev_board, getattr(_BOARD_READS, "data", None))
+        self._mine = not (prev_bound and prev_board == self.board)
+        if self._mine:
+            _BOARD_READS.bound = True
+            _BOARD_READS.board = self.board
+            _BOARD_READS.data = {}
+        return _BOARD_READS.data
+
+    def __exit__(self, *exc):
+        if not self._mine:
+            return
+        bound, board, data = self._prev
+        _BOARD_READS.bound = bound
+        _BOARD_READS.board = board
+        _BOARD_READS.data = data
+
+
+_BOARD_READS_MISS = object()
+
+
+def _board_reads_get(board, key, loader):
+    if not getattr(_BOARD_READS, "bound", False):
+        return loader()
+    data = getattr(_BOARD_READS, "data", None)
+    if data is None:
+        return loader()
+    # Realpath must run before the cache hit. Keys are per-pin, not per-path;
+    # a pin on board A would otherwise serve A's tickets/workforce/messages
+    # to load_*(B).
+    if os.path.realpath(board) != getattr(_BOARD_READS, "board", None):
+        return loader()
+    hit = data.get(key, _BOARD_READS_MISS)
+    if hit is not _BOARD_READS_MISS:
+        return hit
+    data[key] = loader()
+    return data[key]
+
+
+def _load_all_from_disk(board):
     out = []
     for path in sorted(glob.glob(os.path.join(board, "T-*.json"))):
         try:
@@ -1196,7 +1251,11 @@ def load_all(board):
     return out
 
 
-def load_roles(board):
+def load_all(board):
+    return _board_reads_get(board, "tickets", lambda: _load_all_from_disk(board))
+
+
+def _load_roles_from_disk(board):
     path = os.path.join(board, "roles.json")
     roles = dict((k, list(v)) for k, v in DEFAULT_ROLES.items())
     if os.path.isfile(path):
@@ -1212,6 +1271,10 @@ def load_roles(board):
     return roles
 
 
+def load_roles(board):
+    return _board_reads_get(board, "roles", lambda: _load_roles_from_disk(board))
+
+
 def roles_for(board, owner, explicit=None):
     if explicit:
         return [r.strip() for r in explicit.split(",") if r.strip()]
@@ -1225,7 +1288,7 @@ def workforce_path(board):
     return os.path.join(board, "workforce.json")
 
 
-def load_workforce(board):
+def _load_workforce_from_disk(board):
     """{agent: {tool, can:[capabilities], cost: low|medium|high, best_for}}"""
     try:
         with open(workforce_path(board)) as f:
@@ -1233,6 +1296,10 @@ def load_workforce(board):
         return w if isinstance(w, dict) else {}
     except (IOError, ValueError):
         return {}
+
+
+def load_workforce(board):
+    return _board_reads_get(board, "workforce", lambda: _load_workforce_from_disk(board))
 
 
 def save_workforce(board, w):
@@ -1404,7 +1471,7 @@ def objective_path(board):
     return os.path.join(board, "objective.json")
 
 
-def load_objective(board):
+def _load_objective_from_disk(board):
     """The standing objective the master drives toward (`atm objective`).
     {} when none is set."""
     try:
@@ -1412,6 +1479,10 @@ def load_objective(board):
             return json.load(f)
     except (IOError, ValueError):
         return {}
+
+
+def load_objective(board):
+    return _board_reads_get(board, "objective", lambda: _load_objective_from_disk(board))
 
 
 OBJECTIVE_STATES = ("active", "achieved", "blocked", "replaced")
@@ -1494,12 +1565,16 @@ def master_state_path(board):
     return os.path.join(board, "master.json")
 
 
-def current_master(board):
+def _current_master_from_disk(board):
     try:
         with open(master_state_path(board)) as f:
             return json.load(f)
     except (IOError, ValueError):
         return None
+
+
+def current_master(board):
+    return _board_reads_get(board, "master", lambda: _current_master_from_disk(board))
 
 
 def _notify_review_submitted(board, author, tid, text, master_state=None):
@@ -1555,6 +1630,13 @@ def wake_mode_of(board, owner, master_state=None, workforce=None):
     every other seat stays task-only. The setting is harness-neutral, so the
     same policy applies to Claude, Codex, Cursor, or a remote/custom bridge.
     """
+    if (master_state is None and workforce is None
+            and getattr(_BOARD_READS, "bound", False)):
+        return _board_reads_get(
+            board, "wake_mode:%s" % owner,
+            lambda: wake_mode_of(board, owner,
+                                 master_state=current_master(board) or {},
+                                 workforce=load_workforce(board)))
     wf = workforce if workforce is not None else _safe(lambda: load_workforce(board), {})
     configured = ((wf or {}).get(owner, {}) or {}).get("wake_mode")
     if configured in WAKE_MODES:
@@ -1881,7 +1963,9 @@ def _agent_update(board, owner, mutate):
     """
     path = os.path.join(agents_dir(board), owner + ".json")
     with _AgentLock(board, owner):
-        rec = _agent_rec(board, owner) or {}
+        # Snapshot pins must not supply this pre-image (T-1074): a concurrent
+        # writer landing mid-board.json would otherwise be rolled back.
+        rec = _agent_rec_from_disk(board, owner) or {}
         if mutate(rec) is False:
             return None
         tmp = "%s.tmp.%d" % (path, os.getpid())
@@ -2024,7 +2108,9 @@ def _watch_bind_ticket(board, owner):
 
 
 def load_agents(board):
-    return _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else []
+    return _board_reads_get(
+        board, "agents",
+        lambda: _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else [])
 
 
 def worktree_warning(owner):
@@ -9612,7 +9698,7 @@ def parse_mentions(text):
     return out
 
 
-def _registered_handles(board):
+def _registered_handles_uncached(board):
     """Lowercase names from workforce.json and agents/*.json, plus broadcast words."""
     names = set(_MENTION_BROADCAST)
     for key in load_workforce(board):
@@ -9624,6 +9710,10 @@ def _registered_handles(board):
         if owner:
             names.add(owner.lower())
     return names
+
+
+def _registered_handles(board):
+    return _board_reads_get(board, "registered", lambda: _registered_handles_uncached(board))
 
 
 def _split_to_tokens(to):
@@ -9749,7 +9839,7 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
     return rec
 
 
-def load_messages(board, include_archives=False):
+def _load_messages_from_disk(board, include_archives=False):
     """By default reads only the live messages.jsonl (cheap, since the UI and
     every watch poll re-read this every few seconds). Pass include_archives=True
     to also read rotated messages.<date>.jsonl archives, oldest first, for
@@ -9775,6 +9865,12 @@ def load_messages(board, include_archives=False):
     return out
 
 
+def load_messages(board, include_archives=False):
+    key = "messages_all" if include_archives else "messages"
+    return _board_reads_get(
+        board, key, lambda: _load_messages_from_disk(board, include_archives))
+
+
 def _agent_set(board, owner, **fields):
     """Update fields on an agent record without touching the rest of it."""
     if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
@@ -9786,13 +9882,30 @@ def _agent_set(board, owner, **fields):
     return _agent_update(board, owner, lambda rec: rec.update(fields))
 
 
-def _agent_rec(board, owner):
+def _agent_rec_from_disk(board, owner):
     path = os.path.join(agents_dir(board), owner + ".json")
     try:
         with open(path) as f:
             return json.load(f)
     except (IOError, ValueError):
         return {}
+
+
+def _agent_rec(board, owner):
+    if getattr(_BOARD_READS, "bound", False) and os.path.realpath(board) == getattr(_BOARD_READS, "board", None):
+        by = _BOARD_READS.data.get("agent_by")
+        if by is None:
+            by = {}
+            for rec in load_agents(board):
+                if not isinstance(rec, dict):
+                    continue
+                name = rec.get("owner") or ""
+                if name:
+                    by[name] = rec
+            _BOARD_READS.data["agent_by"] = by
+        if owner in by:
+            return by[owner]
+    return _agent_rec_from_disk(board, owner)
 
 
 def _msg_id(m):
@@ -9975,7 +10088,7 @@ def _seen_since(rec):
     return ceiling if since > ceiling else since
 
 
-def _is_unread(m, since, remaining):
+def _is_unread(m, since, remaining, mid=None):
     """Is `m` new to an agent whose watermark is `since`?
 
     Two whole-second stamps cannot order events inside one second, so a strict
@@ -10000,7 +10113,7 @@ def _is_unread(m, since, remaining):
     at = m.get("at", "")
     if not at or at < since:
         return False
-    k = _msg_id(m)
+    k = mid if mid is not None else _msg_id(m)
     if remaining.get(k):
         # Explicit IDs are delivery identities: every replay of the same
         # record is already seen. Legacy content hashes remain a multiset so
@@ -10009,6 +10122,54 @@ def _is_unread(m, since, remaining):
             remaining[k] -= 1
         return False
     return True
+
+
+def _message_address_index(board, msgs):
+    """One (recipients, mentions, broadcast, msg_id) row per message.
+
+    Built once per pinned snapshot so `_inbox_scan` does not rebuild mention
+    sets for every seat. `mentions` is registered-filtered for addressing
+    (T-490). `broadcast` is exactly `is_board_broadcast` (unfiltered mentions)
+    so pending_work's pin shortcut cannot hide a queued wake.
+    """
+    def _build():
+        registered = _registered_handles(board)
+        out = []
+        for m in msgs:
+            recipients = _to_recipient_set(m.get("to") or "")
+            mentions = {h.lower() for h in (m.get("mentions") or [])}
+            mentions = {h for h in mentions if h in registered}
+            broadcast = is_board_broadcast(m)
+            out.append((m, recipients, mentions, broadcast, _msg_id(m)))
+        return out
+    if not getattr(_BOARD_READS, "bound", False):
+        return _build()
+    return _board_reads_get(board, "addr:%s" % id(msgs), _build)
+
+
+def _visible_addressed(board, msgs, owner, joined, registered=None):
+    """Same filter as `_addressed` + `_visible_after_join`, using a pinned index."""
+    target = (owner or "").lower()
+    visible = []
+    for m, recipients, mentions, _channel_broadcast, _mid in _message_address_index(board, msgs):
+        if m.get("from") == owner:
+            continue
+        # Addressing uses the registered-filtered mention set, not the
+        # channel-broadcast flag. Empty --to plus only an unknown @mention
+        # is visible to every seat (T-490) even though is_board_broadcast
+        # is false (the mention is unfiltered there).
+        if not (
+            (not recipients and not mentions)
+            or (recipients & _MENTION_BROADCAST)
+            or (mentions & _MENTION_BROADCAST)
+            or target in recipients
+            or target in mentions
+        ):
+            continue
+        if joined and target not in recipients and m.get("at", "") < joined:
+            continue
+        visible.append(m)
+    return visible
 
 
 def _inbox_scan(board, owner):
@@ -10059,13 +10220,26 @@ def _inbox_scan(board, owner):
             msgs = load_messages(board, include_archives=True)
     remaining = _seen_counts(seen_ids)
     registered = _registered_handles(board)
-    visible = _visible_after_join(
-        [m for m in msgs if _addressed(m, owner, registered)],
-        owner, joined)
+    mid_of = None
+    if getattr(_BOARD_READS, "bound", False):
+        visible = _visible_addressed(board, msgs, owner, joined, registered)
+        mid_of = {id(m): mid for m, _r, _n, _b, mid in _message_address_index(board, msgs)}
+    else:
+        visible = _visible_after_join(
+            [m for m in msgs if _addressed(m, owner, registered)],
+            owner, joined)
+
+    def _mid(message):
+        if mid_of is not None:
+            cached = mid_of.get(id(message))
+            if cached is not None:
+                return cached
+        return _msg_id(message)
+
     out = []
     explicit_ids = set()
     for message in visible:
-        if not _is_unread(message, since, remaining):
+        if not _is_unread(message, since, remaining, mid=_mid(message)):
             continue
         explicit = message.get("id")
         if explicit and explicit in explicit_ids:
@@ -10073,7 +10247,9 @@ def _inbox_scan(board, owner):
         if explicit:
             explicit_ids.add(explicit)
         out.append(message)
-    watermark = max([m.get("at", "") for m in msgs] or [""])
+    watermark = _board_reads_get(
+        board, "msg_watermark:%s" % id(msgs),
+        lambda: max([m.get("at", "") for m in msgs] or [""]))
     ceiling = now()
     if watermark > ceiling:
         watermark = ceiling    # a future stamp is not something anyone observed
@@ -10095,7 +10271,7 @@ def _inbox_scan(board, owner):
     for message in visible:
         if message.get("at", "") < watermark:
             continue
-        identity = _msg_id(message)
+        identity = _mid(message)
         if message.get("id") and identity in retained_explicit:
             continue
         if message.get("id"):
@@ -11763,7 +11939,12 @@ def pending_work(board, owner):
     def task_released(message):
         ticket = by_id.get(message.get("re"))
         return not ticket or not _work_view().unreleased_dep_id(ticket, tickets)
-    direct = [m for m in msgs if not is_board_broadcast(m)]
+    if getattr(_BOARD_READS, "bound", False):
+        bcast = {id(m): flag for m, _r, _n, flag, _mid
+                 in _message_address_index(board, load_messages(board))}
+        direct = [m for m in msgs if not bcast.get(id(m), is_board_broadcast(m))]
+    else:
+        direct = [m for m in msgs if not is_board_broadcast(m)]
     if direct:
         out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
         tasks = [_wake_message_summary(m) for m in direct
@@ -11777,7 +11958,8 @@ def pending_work(board, owner):
     if held:
         out["holding"] = [t["id"] + " " + t.get("title", "")[:60] for t in held]
     roles = _safe(lambda: roles_for(board, owner, None), None)
-    ready = _safe(lambda: [t for t in _filter_ready(unblocked(board, tickets), roles)
+    ready_pool = _board_reads_get(board, "unblocked", lambda: unblocked(board, tickets))
+    ready = _safe(lambda: [t for t in _filter_ready(ready_pool, roles)
                            if can_do(board, owner, t)
                            and not _reservation_blocks(t, owner)
                            and not _ticket_on_hold(t)
@@ -12385,7 +12567,7 @@ def _active_seat_limit(board, owner, rec=None):
         # A quota failure must not keep the same trigger exhausted after reset.
         current.pop("adapter_failure", None)
     current = _agent_update(board, owner, clear)
-    return (current if current is not None else (_agent_rec(board, owner) or {})).get("limit")
+    return (current if current is not None else (_agent_rec_from_disk(board, owner) or {})).get("limit")
 
 
 def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
@@ -18483,7 +18665,8 @@ def _snapshot_single_flight(board, messages=40):
 def board_snapshot(board, messages=40):
     """Everything the UI shows, as plain data. Read-only."""
     with _shared_watch_table():
-        return _board_snapshot_body(board, messages)
+        with _reuse_board_reads(board):
+            return _board_snapshot_body(board, messages)
 
 
 def _board_snapshot_body(board, messages=40):
