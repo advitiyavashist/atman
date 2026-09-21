@@ -1344,6 +1344,23 @@ def context_paths(board, owner=None):
     return paths
 
 
+def _alloc_floor(directory, prefix):
+    """Lowest id this directory may mint, from `_alloc.json`.
+
+    Written by `atm project split`: after a split each project board gets its
+    own disjoint block above the shared board's highest id, so two boards that
+    both descend from one shared board can never mint the same `T-` id. A
+    board with no `_alloc.json` is unaffected -- it allocates exactly as
+    before.
+    """
+    try:
+        with open(os.path.join(directory, "_alloc.json"), encoding="utf-8") as f:
+            rec = json.load(f)
+        return int(rec.get(prefix) or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+
+
 def _alloc(directory, prefix, width, record):
     """Write `record` under the next free `<prefix>-NNN` id. Race-safe via O_EXCL."""
     os.makedirs(directory, exist_ok=True)
@@ -1353,6 +1370,7 @@ def _alloc(directory, prefix, width, record):
         if stem.isdigit():
             used.append(int(stem))
     n = max(used) + 1 if used else 1
+    n = max(n, _alloc_floor(directory, prefix))
     while True:
         rid = "%s-%0*d" % (prefix, width, n)
         path = os.path.join(directory, rid + ".json")
@@ -8590,6 +8608,376 @@ def cmd_board_archive_shadow(a):
         )
     os.rename(path, dest)
     print("archived shadow board %s -> %s (nothing deleted)" % (path, dest))
+
+
+# --------------------------------------------------------------------------
+# atm project: one board per project (spec 4.11 / Phase 1S)
+# --------------------------------------------------------------------------
+
+def _project_split():
+    """The split engine. Kept in src/ so the CLI stays a thin front end."""
+    _ensure_src_path()
+    try:
+        from ticket_board import project_split as m
+    except ImportError:
+        import project_split as m
+    return m
+
+
+def _write_atman_registry(data):
+    """Atomic write of the machine registry, so a crash never truncates it."""
+    path = _atman_config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+    return path
+
+
+def split_marker(board):
+    """The `.split` record on a frozen shared board, or {}."""
+    try:
+        with open(os.path.join(board, _project_split().SPLIT_MARKER),
+                  encoding="utf-8") as f:
+            rec = json.load(f)
+        return rec if isinstance(rec, dict) else {}
+    except (OSError, ValueError, ImportError):
+        return {}
+
+
+# Commands that only read. Everything else is refused on a frozen shared
+# board. The list is an allow-list on purpose: missing a read here costs an
+# operator one confusing refusal, while missing a *write* would strand real
+# records on a board nothing reads again -- the T-959 failure, at board scale.
+SPLIT_READ_ONLY_CMDS = frozenset((
+    "board", "show", "list", "where", "dash", "map", "graph", "guide",
+    "limits", "context", "who", "mine", "trajectories", "traj", "turns",
+    "plan-status", "util", "project", "self", "doctor",
+))
+
+
+def _split_board_refusal(board, marker, cmd, seat=""):
+    projects = marker.get("projects") or {}
+    homes = (marker.get("seats") or {}).get(seat) or []
+    lines = ["REFUSING WRITE to %s: this shared board was split on %s and is "
+             "now the frozen archive (%s). Nothing here is deleted and it "
+             "stays readable; it just takes no new records."
+             % (board, marker.get("at") or "an earlier run",
+                marker.get("archive_slug") or "shared-archive")]
+    if seat and homes:
+        lines.append("  %s now works on:" % seat)
+        for slug in homes:
+            lines.append("    %-16s TICKETS_DIR=%s atm %s ..."
+                         % (slug, projects.get(slug, "?"), cmd))
+    else:
+        if seat:
+            lines.append("  %s has no home project in the split manifest; it "
+                         "was archived with this board." % seat)
+        lines.append("  the project boards are:")
+        for slug in sorted(projects):
+            lines.append("    %-16s %s" % (slug, projects[slug]))
+    lines.append("  undo the split:  atm project split --undo <manifest> --apply")
+    sys.exit("\n".join(lines))
+
+
+def _project_boards_from_registry():
+    reg = _ui_registry()
+    projects = reg.get("projects") if isinstance(reg.get("projects"), dict) else {}
+    out = {}
+    for slug, rec in projects.items():
+        if isinstance(rec, dict) and rec.get("board"):
+            out[str(slug)] = os.path.realpath(os.path.expanduser(str(rec["board"])))
+    return out
+
+
+def _print_refusals(refusals, header):
+    if not refusals:
+        return False
+    print(header)
+    shown = refusals[:40]
+    for r in shown:
+        print("  [%s] %s" % (r.get("kind", "?"), r.get("text", "")))
+    if len(refusals) > len(shown):
+        print("  ... and %d more (use --json for all)" % (len(refusals) - len(shown)))
+    return True
+
+
+def _print_dry_run(report, plan):
+    man = report["manifest"]
+    summary = report["summary"]
+    print("split dry run -- NOTHING WAS WRITTEN")
+    print("  source board: %s  (frozen as %s after apply)"
+          % (man["source_board"], man["archive"]["slug"]))
+    print("  plan digest:  %s" % man["plan_digest"])
+    print("")
+    print("per project:")
+    files = man["files"]
+    counts = man["line_counts"]
+    for slug in sorted(man["projects"]):
+        per = summary["per_project"].get(slug, {})
+        rows = files.get(slug, {})
+        msgs = sum(v.get(slug, 0) for k, v in counts.items() if k.startswith("messages"))
+        traj = sum(v.get(slug, 0) for k, v in counts.items() if k.startswith("trajectories"))
+        agents = sum(1 for r in rows if r.startswith("agents" + os.sep))
+        print("  %-16s tickets %4d (%d done)  messages %6d  trajectory %6d  "
+              "agents %4d  files %5d  id floor T-%d"
+              % (slug, per.get("tickets", 0), per.get("done", 0), msgs, traj,
+                 agents, len(rows), man["projects"][slug]["id_floor"]))
+    left = summary["per_project"].get(_project_split().UNASSIGNED, {})
+    print("  %-16s tickets %4d (%d done)  -- stay readable on the archive"
+          % (man["archive"]["slug"], left.get("tickets", 0), left.get("done", 0)))
+    print("")
+    print("cross-project edges by kind: %s  (total %d)"
+          % (", ".join("%s=%d" % kv for kv in
+                       sorted(summary["cross_project_edges_by_kind"].items())) or "none",
+             summary["cross_project_edges"]))
+    print("seats in more than one project: %d" % len(summary["seats_multi_project"]))
+    print("unassigned tickets: %d total, %d not done"
+          % (summary["unassigned_total"], len(summary["unassigned_live"])))
+    inv = man["source_inventory"]
+    print("source files: %d copied, %d archive-only, %d live state not copied"
+          % (len(inv["copied"]), len(inv["archive_only"]),
+             len(inv["not_copied_live_state"])))
+    _print_refusals(report["refusals"], "\nrefusals (the plan cannot be applied):")
+    _print_refusals(report["preconditions"],
+                    "\nlive-state refusals (--apply would stop here):")
+    if not report["refusals"] and not report["preconditions"]:
+        print("\nno refusals. apply with:")
+        print("  atm project split --plan <plan> --apply")
+    del plan
+
+
+def _load_plan(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            plan = json.load(f)
+    except OSError as e:
+        sys.exit("cannot read plan %s: %s" % (path, e))
+    except ValueError as e:
+        sys.exit("plan %s is not valid JSON: %s" % (path, e))
+    if not isinstance(plan, dict):
+        sys.exit("plan %s is not an object" % path)
+    return plan
+
+
+def cmd_project(a, board):
+    """Split the shared board, and manage the project registry (spec 4.11)."""
+    sub = getattr(a, "project_cmd", "") or ""
+    if not sub:
+        sys.exit("atm project: split | refresh-external | add | list")
+    ps = _project_split()
+    if sub == "list":
+        return _cmd_project_list(a, board)
+    if sub == "add":
+        return _cmd_project_add(a, board)
+    if sub == "refresh-external":
+        return _cmd_project_refresh_external(a, board, ps)
+    return _cmd_project_split(a, board, ps)
+
+
+def _cmd_project_list(a, board):
+    rows = ui_projects(board)
+    reg = _ui_registry()
+    projects = reg.get("projects") if isinstance(reg.get("projects"), dict) else {}
+    out = []
+    for row in rows:
+        rec = projects.get(row["slug"]) if isinstance(projects.get(row["slug"]), dict) else {}
+        counts, lead = _safe(lambda b=row["board"]: _ui_project_counts(b), ({}, ""))
+        out.append({"slug": row["slug"], "board": row["board"],
+                    "repos": row["repos"], "source": row["source"],
+                    "read_only": bool(rec.get("read_only")),
+                    "split": bool(split_marker(row["board"])),
+                    "counts": counts, "lead": lead})
+    if getattr(a, "json", False):
+        print(json.dumps(out, indent=2))
+        return
+    if not out:
+        print("no projects registered (atm project add <slug> --board <path>)")
+        return
+    for r in out:
+        flags = []
+        if r["read_only"]:
+            flags.append("read-only")
+        if r["split"]:
+            flags.append("split/frozen")
+        c = r["counts"]
+        print("%-18s %s%s" % (r["slug"], r["board"],
+                              ("  [" + ", ".join(flags) + "]") if flags else ""))
+        print("    open %d  claimed %d  review %d  blocked %d  done %d  lead %s"
+              % (c.get("open", 0), c.get("claimed", 0), c.get("review", 0),
+                 c.get("blocked", 0), c.get("done", 0), r["lead"] or "unset"))
+        for repo in r["repos"]:
+            print("    repo %s" % repo)
+
+
+def _cmd_project_add(a, board):
+    del board
+    slug = (a.slug or "").strip()
+    if not slug:
+        sys.exit("atm project add <slug> --board <path>")
+    path = os.path.realpath(os.path.expanduser(a.board_path))
+    reg = _ui_registry()
+    projects = reg.get("projects") if isinstance(reg.get("projects"), dict) else {}
+    boards = reg.get("boards") if isinstance(reg.get("boards"), dict) else {}
+    rec = projects.get(slug) if isinstance(projects.get(slug), dict) else {}
+    repos = list(rec.get("repos") or [])
+    for repo in (a.repo or []):
+        real = os.path.realpath(os.path.expanduser(repo))
+        boards[real] = path
+        if real not in repos:
+            repos.append(real)
+    projects[slug] = {"board": path, "repos": sorted(repos)}
+    if getattr(a, "read_only", False):
+        projects[slug]["read_only"] = True
+    reg["projects"] = projects
+    reg["boards"] = boards
+    written = _write_atman_registry(reg)
+    print("project %s -> %s  (registry %s)" % (slug, path, written))
+    if not os.path.isdir(path):
+        print("  note: %s does not exist yet; nothing was created." % path)
+
+
+def _cmd_project_refresh_external(a, board, ps):
+    boards_by_slug = _project_boards_from_registry()
+    man_path = os.path.join(board, ps.MANIFEST_NAME)
+    if os.path.isfile(man_path):
+        try:
+            with open(man_path, encoding="utf-8") as f:
+                man = json.load(f)
+            for slug, rec in (man.get("projects") or {}).items():
+                boards_by_slug.setdefault(slug, rec.get("board") or "")
+        except (OSError, ValueError):
+            pass
+    result = ps.refresh_external(board, a.ticket, boards_by_slug,
+                                 apply=not getattr(a, "dry_run", False))
+    if getattr(a, "json", False):
+        print(json.dumps(result, indent=2))
+        return
+    if not result["ok"]:
+        sys.exit(result["reason"])
+    if result["reason"]:
+        print(result["reason"])
+        return
+    for dep in result["changed"]:
+        rel = dep.get("released") or {}
+        print("released %s:%s  (%s at %s, sha %s)"
+              % (dep.get("project"), dep.get("id"), rel.get("kind"),
+                 rel.get("at") or "?", (rel.get("sha") or "?")[:12]))
+    for dep in result["unchanged"]:
+        print("still blocked %s -- %s" % (dep.get("id"), dep.get("why")))
+    if not result["changed"]:
+        print("nothing flipped: an external dep releases only on a recorded "
+              "accept on its own board.")
+    elif getattr(a, "dry_run", False):
+        print("(dry run -- %s was not written)" % a.ticket)
+
+
+def _cmd_project_split(a, board, ps):
+    registry = _ui_registry()
+    if getattr(a, "undo", ""):
+        return _cmd_project_undo(a, ps)
+    if getattr(a, "propose", False):
+        plan = ps.propose(board, generated=now(), registry=registry)
+        text = json.dumps(plan, indent=2, sort_keys=True)
+        if getattr(a, "out", ""):
+            with open(a.out, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+            s = plan["summary"]
+            print("proposed plan -> %s  (read-only; nothing was written to the board)"
+                  % a.out)
+            print("  tickets %d, projects %s, unassigned %d (%d not done)"
+                  % (len(plan["tickets"]), ", ".join(sorted(plan["projects"])),
+                     s["unassigned_total"], len(s["unassigned_live"])))
+            print("  edit it: every non-done unassigned ticket needs a project, "
+                  "and every project needs a board path.")
+        else:
+            print(text)
+        return
+    if not getattr(a, "plan", ""):
+        sys.exit("atm project split needs --propose, or --plan <file> with "
+                 "--dry-run / --apply, or --undo <manifest>")
+    plan = _load_plan(a.plan)
+    src = ps.SourceBoard(board)
+    allow = True if getattr(a, "allow_pending_external", False) else None
+    if getattr(a, "apply", False):
+        expected = None
+        if getattr(a, "expect_manifest", ""):
+            try:
+                with open(a.expect_manifest, encoding="utf-8") as f:
+                    expected = json.load(f)
+            except (OSError, ValueError) as e:
+                sys.exit("cannot read --expect-manifest %s: %s"
+                         % (a.expect_manifest, e))
+        result = ps.apply_split(
+            src, plan, registry_before=registry, expected_manifest=expected,
+            allow_pending_external=allow, at=now(),
+            write_registry=_write_atman_registry)
+        if not result["ok"]:
+            _print_refusals(result["refusals"], "split REFUSED -- nothing was moved:")
+            sys.exit(1)
+        man = result["manifest"]
+        for slug in sorted(result["boards"]):
+            print("%-16s %s" % (slug, result["boards"][slug]))
+        print("archive (frozen): %s" % man["source_board"])
+        print("manifest written into every new board as %s" % ps.MANIFEST_NAME)
+        print("\nrestart each seat on its new board:")
+        for line in ps.restart_lines(plan, result["boards"]):
+            print("  " + line)
+        return
+    report = ps.dry_run(src, plan, registry_before=registry,
+                        allow_pending_external=allow)
+    if getattr(a, "manifest_out", ""):
+        with open(a.manifest_out, "w", encoding="utf-8") as f:
+            json.dump(report["manifest"], f, indent=2, sort_keys=True)
+    if getattr(a, "json", False):
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    _print_dry_run(report, plan)
+    if getattr(a, "manifest_out", ""):
+        print("manifest -> %s" % a.manifest_out)
+
+
+def _cmd_project_undo(a, ps):
+    try:
+        with open(a.undo, encoding="utf-8") as f:
+            man = json.load(f)
+    except (OSError, ValueError) as e:
+        sys.exit("cannot read manifest %s: %s" % (a.undo, e))
+    do_apply = bool(getattr(a, "apply", False))
+    report = ps.undo(man, merge_back=bool(getattr(a, "merge_back", False)),
+                     do_apply=do_apply,
+                     at=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+                     write_registry=_write_atman_registry if do_apply else None)
+    if getattr(a, "json", False):
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    for slug in sorted(report["boards"]):
+        d = report["boards"][slug]["drift"]
+        print("%-16s %s  (+%d files, %d changed since the split)"
+              % (slug, report["boards"][slug]["board"],
+                 len(d["extra"]), len(d["changed"])))
+    if report.get("would_merge"):
+        wm = report["would_merge"]
+        print("would merge back: %d ticket(s), lines %s"
+              % (len(wm.get("tickets") or []),
+                 ", ".join("%s=%d" % kv for kv in sorted((wm.get("lines") or {}).items()))
+                 or "none"))
+    for c in report["conflicts"][:40]:
+        print("  conflict: %s -- %s" % (c.get("file") or c.get("ticket"), c.get("problem")))
+    if _print_refusals(report["refusals"], "undo REFUSED -- nothing was changed:"):
+        sys.exit(1)
+    if not do_apply:
+        print("dry run -- nothing was changed. Re-run with --apply.")
+        return
+    if report.get("merged"):
+        print("merged back: %d ticket(s), lines %s"
+              % (len(report["merged"].get("tickets") or []),
+                 ", ".join("%s=%d" % kv for kv in
+                           sorted((report["merged"].get("lines") or {}).items())) or "none"))
+    for slug, dest in sorted(report["moved_aside"].items()):
+        print("%-16s moved aside -> %s  (nothing deleted)" % (slug, dest))
+    print("shared board unfrozen: %s" % report["source_board"])
 
 
 def cmd_context(a, board):
@@ -22540,6 +22928,43 @@ def main():
     c.add_argument("--yes", action="store_true", help="actually move it (default is a dry run)")
     c.set_defaults(fn=cmd_board_archive_shadow)
 
+    c = sub.add_parser("project", help="one board per project: split | refresh-external | add | list")
+    prj = c.add_subparsers(dest="project_cmd")
+    x = prj.add_parser("split", help="split this shared board into one board per project (spec 4.11)")
+    x.add_argument("--propose", action="store_true",
+                   help="read-only: print the plan to edit (nothing is auto-attributed)")
+    x.add_argument("--out", default="", help="write the proposed plan here instead of stdout")
+    x.add_argument("--plan", default="", help="the edited plan to dry-run or apply")
+    x.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="writes nothing; prints counts, refusals and the exact manifest")
+    x.add_argument("--apply", action="store_true",
+                   help="build, verify, then rename into place and freeze this board")
+    x.add_argument("--manifest-out", dest="manifest_out", default="",
+                   help="write the dry run's manifest here (compare it against --apply)")
+    x.add_argument("--expect-manifest", dest="expect_manifest", default="",
+                   help="refuse --apply unless the manifest still matches this one")
+    x.add_argument("--allow-pending-external", dest="allow_pending_external",
+                   action="store_true",
+                   help="record an unreleased snapshot instead of refusing a not-done cross-project parent")
+    x.add_argument("--undo", default="", help="a split-manifest.json to reverse")
+    x.add_argument("--merge-back", dest="merge_back", action="store_true",
+                   help="with --undo: fold post-split writes back into the shared board")
+    x.add_argument("--json", action="store_true")
+    x = prj.add_parser("refresh-external",
+                       help="re-read another project's board once and release a snapshot it has since accepted")
+    x.add_argument("ticket")
+    x.add_argument("--dry-run", dest="dry_run", action="store_true")
+    x.add_argument("--json", action="store_true")
+    x = prj.add_parser("add", help="register a project board in the machine registry")
+    x.add_argument("slug")
+    x.add_argument("--board", dest="board_path", required=True)
+    x.add_argument("--repo", action="append", default=[],
+                   help="a local repo root that should resolve to this board (repeatable)")
+    x.add_argument("--read-only", dest="read_only", action="store_true")
+    x = prj.add_parser("list", help="registered project boards and their counts")
+    x.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_project)
+
     c = sub.add_parser("pending", help="exit 0 if there is work for the agent (messages, held or ready ticket)")
     c.add_argument("--agent", default="")
     c.add_argument("--json", action="store_true")
@@ -23265,6 +23690,14 @@ def main():
         sys.stderr = _RedactingStream(sys.stderr, os.path.expanduser("~"), os.getcwd())
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
+    # A board that has been split is the frozen archive: it stays readable
+    # forever, but a session still pointed at it must not write there. Same
+    # shape as the T-959 shadow-board refusal, and it names where to go.
+    if a.cmd not in SPLIT_READ_ONLY_CMDS:
+        marker = _safe(lambda: split_marker(board), {})
+        if marker:
+            _split_board_refusal(board, marker, a.cmd,
+                                 _safe(lambda: session_seat(board), "") or "")
     if a.cmd not in (
         "create",
         "plan",
@@ -23280,6 +23713,7 @@ def main():
         "board-restore",
         "knowledge",
         "kb",
+        "project",
     ):
         if not os.path.isdir(board):
             if a.cmd in ("board", "stop-hook"):

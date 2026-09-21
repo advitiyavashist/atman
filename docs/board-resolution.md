@@ -75,3 +75,21 @@ the older four-line version that calls `git rev-parse --git-common-dir` with
 the ambient environment. That is a real gap in the *ambient* resolver and
 belongs to T-243's area, not this ticket. `_init_cwd_worktree_root()` is
 self-contained precisely so it behaves identically in both copies regardless.
+
+## After a split: the frozen shared board (T-1118)
+
+`atm project split --apply` writes one file into the shared board it copied
+from: `.split`. From then on that directory is the **archive**. Resolution is
+unchanged — `TICKETS_DIR` and rule 2 still point sessions at it — but every
+command outside a read-only allow-list (`SPLIT_READ_ONLY_CMDS` in
+`tickets.py`) refuses before it can write, and the refusal names the boards
+this seat now works on, taken from the marker's `seats` map.
+
+The allow-list is an allow-list and not a deny-list on purpose: a read left
+off it costs one confusing refusal, while a *write* left off it would strand
+real records on a board nothing reads again — the T-959 failure at board
+scale. Note that `inbox` is not on it: reading mail stamps `inbox_seen`, so
+it is a write.
+
+Reads never refuse, so the archive stays readable forever. `atm project split
+--undo <manifest> --apply` removes the marker and the board writes again.

@@ -399,11 +399,48 @@ def dep_released(t, msgs=None):
     return isinstance(ov, dict) and bool(ov.get("kind"))
 
 
+def external_deps(t):
+    """The ticket's cross-project dependency snapshots, as records.
+
+    Written by `atm project split` when a dependency's parent landed on
+    another board (spec 4.11). The gate reads the snapshot and never the
+    other board, so the two boards stay independent.
+    """
+    out = []
+    for dep in t.get("external_deps") or []:
+        if isinstance(dep, dict) and dep.get("id"):
+            out.append(dep)
+    return out
+
+
+def external_ref(dep):
+    """`steer:T-807` -- how a cross-project id is written everywhere."""
+    return "%s:%s" % (dep.get("project") or "?", dep.get("id") or "?")
+
+
+def unreleased_external(t, only_done=False):
+    """First cross-project predecessor whose snapshot is not released, or ''.
+
+    Returns the `project:T-id` form. An unreleased snapshot is *never*
+    upgraded by reading it: the only way it flips is a recorded accept on the
+    other board, replayed by `atm project refresh-external`.
+    """
+    for dep in external_deps(t):
+        if dep.get("released"):
+            continue
+        if only_done and (dep.get("reason") or "") != "done-unaccepted":
+            continue
+        return external_ref(dep)
+    return ""
+
+
 def unreleased_dep_id(t, tickets, only_done=False):
     """First predecessor that is not dep_released, or ''.
 
     ``only_done=True`` skips unfinished predecessors so reserve can still
     point at future work. Claim/assign/reopen refuse every unreleased dep.
+    Cross-project predecessors are checked too, from their `external_deps`
+    snapshot, so the gate does not weaken when a board is split.
     """
     by_id = dict((x["id"], x) for x in tickets)
     for dep_id in t.get("deps") or []:
@@ -415,7 +452,7 @@ def unreleased_dep_id(t, tickets, only_done=False):
         if only_done and pred.get("status") != "done":
             continue
         return dep_id
-    return ""
+    return unreleased_external(t, only_done=only_done)
 
 
 def released_ids(tickets, messages=None):
@@ -468,6 +505,22 @@ def blockers_of(node, by_id, seats=None):
             out.append({"kind": "dep_open", "on": d,
                         "text": "dep %s still %s" % (d, dep.get("status") or "open"),
                         "cmd": "atm show %s" % d})
+    # The node carries its own snapshots when the caller built one; a raw
+    # ticket record from by_id is the fallback for callers that pass nodes
+    # built before this field existed.
+    source = node if node.get("external_deps") else (by_id.get(tid) or node)
+    for dep in external_deps(source):
+        if dep.get("released"):
+            continue
+        ref = external_ref(dep)
+        if (dep.get("reason") or "") == "done-unaccepted":
+            out.append({"kind": "dep_unaccepted", "on": ref,
+                        "text": "dep %s done, not accepted (other project)" % ref,
+                        "cmd": "atm project refresh-external %s" % tid})
+        else:
+            out.append({"kind": "dep_open", "on": ref,
+                        "text": "dep %s is not done (other project)" % ref,
+                        "cmd": "atm project refresh-external %s" % tid})
     return out
 
 
@@ -1154,6 +1207,7 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
             "lane": ticket_lane(t),
             "hold": bool(ticket_on_hold(t)),
             "deps": list(t.get("deps") or []),
+            "external_deps": external_deps(t),
             "waiting": waiting,
             "children": [c for c in kids.get(tid, []) if c in keep_set],
             "depth": depths.get(tid, 0),
