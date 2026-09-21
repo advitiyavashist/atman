@@ -81,15 +81,29 @@ self-contained precisely so it behaves identically in both copies regardless.
 `atm project split --apply` writes one file into the shared board it copied
 from: `.split`. From then on that directory is the **archive**. Resolution is
 unchanged — `TICKETS_DIR` and rule 2 still point sessions at it — but every
-command outside a read-only allow-list (`SPLIT_READ_ONLY_CMDS` in
+*invocation* outside a read-only allow-list (`SPLIT_READ_ONLY_CMDS` in
 `tickets.py`) refuses before it can write, and the refusal names the boards
 this seat now works on, taken from the marker's `seats` map.
+
+An invocation, not a command name: the name is one of three things that
+decide whether something writes, and the other two each hid a real write.
+`atm trajectories` reads but `atm trajectories backfill` writes; `atm
+plan-status` reads but `atm plan-status --write-master` writes. So an entry
+is either `None` (every form of this command reads) or a predicate over the
+parsed args and the board. `atm board-mark-primary` is guarded at the command
+itself, because it is dispatched before `board_dir()` — by design, so it can
+repair resolution on a board resolution refuses — and so never reaches this
+check at all. Marking the archive primary is the worst of the lot: it would
+win resolution for the repo and route every seat back onto the board that
+takes no new records.
 
 The allow-list is an allow-list and not a deny-list on purpose: a read left
 off it costs one confusing refusal, while a *write* left off it would strand
 real records on a board nothing reads again — the T-959 failure at board
 scale. Note that `inbox` is not on it: reading mail stamps `inbox_seen`, so
-it is a write.
+it is a write. `atm trajectories export` *is* on it, because reading data out
+of an archive is the point — but only when `--out` lands outside the board;
+pointed back inside it replaces whatever file it names.
 
 Reads never refuse, so the archive stays readable forever. `atm project split
 --undo <manifest> --apply` removes the marker and the board writes again.
