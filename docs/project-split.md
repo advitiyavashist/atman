@@ -214,10 +214,47 @@ atm project split --undo <board>/split-manifest.json --apply
 Undo removes `.split`, restores the machine registry, and renames each new
 board to `.tickets.split-undone-<ts>`. It never deletes one. A board written
 to since the split refuses unless `--merge-back` is passed, which appends the
-new lines back into the shared board (deduplicated by message id, so one
-message copied into two projects and appended in both comes back once) and
-copies back tickets whose `updated` is newer. Any conflict refuses and merges
-nothing.
+new lines back into the shared board and copies back tickets whose `updated`
+is newer. Any conflict refuses and merges nothing.
+
+**What merge-back folds, exactly.** Root-level `T-*.json`, and lines appended
+to any root-level `.jsonl` — including a log the split never wrote for that
+project, such as one created by the board's first `note` or by a rotation
+after the split. Two defects here were found by following the reviewer's
+question about allocator floors, and both are worth naming because both were
+silent:
+
+- Dedup used to hash `at`/`from`/`to`/`re`/`text` for records without an `id`
+  — tickets' own identity for message lines that predate message ids. A
+  trajectory event carries none of those fields, so four `note` calls
+  produced four events that collapsed to two and merge-back **dropped two real
+  events while reporting success**. Content is not identity in an event
+  stream: three identical "update T-100 by ann" lines are three things that
+  happened. Dedup now runs only on records that carry a real `id` — the case
+  §4.11 means, one message appended to two project boards with a recipient
+  homed in each — and a line with no id cannot collide, because
+  `_appended_lines` slices strictly past the bytes the split wrote.
+- Only files the manifest recorded for that board were scanned, so a project
+  that received no `trajectories.jsonl` at split time and created one with its
+  first write had every one of those lines dropped, with `lines none` printed
+  over it.
+
+**What merge-back does not fold, and now says so.** Epics, sprints, agent
+records, briefs — anything new that is not a root-level ticket or log. They
+stay on the board `undo` moves aside (nothing is deleted), and the output
+names them per project:
+
+```
+NOT merged back (kept on the set-aside board, nothing deleted):
+  atman            2 file(s): epics/E-002.json, sprints/S-01.json
+```
+
+Epics and sprints are not folded *by id* on purpose, and the reason is
+concrete: only `T-` ids get a per-project floor, so a project board minting a
+new epic can land on an `E-` id the shared board already uses for a different
+epic — merging that back by id would overwrite the original. Reporting it
+beats guessing, and `merged back: 1 ticket(s)` printed over a board that also
+grew an epic is a true sentence that leaves a false impression.
 
 ## Not handled yet
 

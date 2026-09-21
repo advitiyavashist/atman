@@ -124,12 +124,25 @@ def _json_line(raw):
 
 
 def _line_id(rec):
-    """Identity used for merge-back dedup. Mirrors tickets._msg_id."""
-    if rec.get("id"):
-        return str(rec["id"])
-    raw = json.dumps([rec.get("at", ""), rec.get("from", ""), rec.get("to", ""),
-                      rec.get("re", ""), rec.get("text", "")], sort_keys=True)
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    """Merge-back dedup identity, or None when a line must not be deduped.
+
+    Dedup exists for one case: the same MESSAGE, which carries a real `id`,
+    is appended to two project boards after the split -- one recipient homed
+    in each -- and must reach the restored shared board once. That is what
+    §4.11's "dedup by id" means and what the acceptance test checks.
+
+    Everything else must not be deduped, and the first spelling of this
+    function did it anyway: it fell back to tickets._msg_id's at/from/to/re/
+    text tuple, which a trajectory event does not carry. Four `note` calls
+    produced four events whose records were byte-identical apart from a
+    one-second gap, so they collapsed to two and merge-back dropped two real
+    events while reporting success. Content is not identity in an event
+    stream: three identical "update T-100 by ann" lines are three things that
+    happened. A line with no id can only have been appended after the split,
+    on exactly one board -- `_appended_lines` slices strictly past the bytes
+    the split wrote -- so there is nothing for it to collide with.
+    """
+    return str(rec["id"]) if rec.get("id") else None
 
 
 def _to_tokens(value):
@@ -1392,6 +1405,7 @@ def undo(man, merge_back=False, do_apply=False, at="", write_registry=None):
                 report["conflicts"].append({"file": rel, "problem": "changed on the frozen shared board"})
         plan_merge = _plan_merge_back(man, source)
         report["would_merge"] = plan_merge["summary"]
+        report["left_behind"] = _merge_back_leftovers(man, report["boards"])
         report["conflicts"] += plan_merge["conflicts"]
         if report["conflicts"]:
             report["refusals"].append(_refusal(
@@ -1425,6 +1439,43 @@ def undo(man, merge_back=False, do_apply=False, at="", write_registry=None):
     return report
 
 
+def _merge_back_folds(rel):
+    """True when `--merge-back` folds this new file into the shared board."""
+    if rel.endswith(".lock"):
+        return True          # transient; deliberately not carried back
+    if "/" in rel or os.sep in rel:
+        return False         # epics/, sprints/, agents/, briefs/ are not folded
+    return rel.endswith(".jsonl") or (
+        rel.startswith("T-") and rel.endswith(".json"))
+
+
+def _merge_back_leftovers(man, boards):
+    """New files on a project board that `--merge-back` does NOT fold.
+
+    It folds root-level `T-*.json` and lines appended to the append-only logs
+    the manifest recorded. Anything else a seat created after the split -- an
+    epic, a sprint, a new agent record, a brief, a newly rotated log file --
+    stays on the board `undo` moves aside. Nothing is deleted, but "merged
+    back: 1 ticket(s)" printed over a board that also grew an epic is a true
+    sentence that leaves a false impression, so the leftovers are named.
+
+    Epics and sprints are not folded by id on purpose. Only `T-` ids get a
+    seeded floor per project (§4.11), so two boards descended from one shared
+    board can mint the same `E-` id for different records -- merging those by
+    id would be a guess, and a guess is the one thing an undo must not make.
+    """
+    out = {}
+    rows = man.get("files") or {}
+    for slug in sorted(boards):
+        drift = boards[slug].get("drift") or {}
+        known = set(rows.get(slug, {}))
+        left = [rel for rel in drift.get("extra") or []
+                if rel not in known and not _merge_back_folds(rel)]
+        if left:
+            out[slug] = sorted(left)
+    return out
+
+
 def _merge_back_items(man, source):
     """(log lines to append, tickets to copy back) with dedup already applied."""
     projects = man.get("projects") or {}
@@ -1437,24 +1488,52 @@ def _merge_back_items(man, source):
     externals = man.get("external_deps") or {}
     seen = {}
     lines, tickets, conflicts = {}, {}, []
+
+    def have_ids(name):
+        """Line ids already on the shared board, so a merge never doubles one."""
+        if name not in seen:
+            got = set()
+            try:
+                for raw in _split_lines(_read_bytes(os.path.join(source, name))):
+                    rec = _json_line(raw)
+                    mid = _line_id(rec) if rec else None
+                    if mid is not None:
+                        got.add(mid)
+            except OSError:
+                pass
+            seen[name] = got
+        return seen[name]
+
     for name in sorted(set(
             [n for rows in files.values() for n in rows
              if n.endswith(".jsonl")])):
-        have = set()
-        try:
-            for raw in _split_lines(_read_bytes(os.path.join(source, name))):
-                rec = _json_line(raw)
-                if rec:
-                    have.add(_line_id(rec))
-        except OSError:
-            pass
-        seen[name] = have
+        have_ids(name)
     for slug in sorted(projects):
         board = projects[slug].get("board") or ""
         rows = files.get(slug, {})
-        for rel, row in sorted(rows.items()):
+        # A log the split never wrote for this project -- the board had no
+        # trajectories.jsonl at all, and the first `note` created one -- is
+        # not in `rows`, so the loop below never looked at it and its lines
+        # were dropped while the report said "lines none". Every line in such
+        # a file is new by construction; dedup still runs against the shared
+        # board, so a file that reappeared identically costs nothing.
+        pending = dict(rows)
+        try:
+            for name in sorted(os.listdir(board)):
+                if name.endswith(".jsonl") and name not in pending:
+                    pending[name] = None
+        except OSError:
+            pass
+        for rel, row in sorted(pending.items()):
             if rel.endswith(".jsonl"):
-                fresh, intact = _appended_lines(board, rel, row)
+                if row is None:
+                    try:
+                        fresh = _split_lines(_read_bytes(os.path.join(board, rel)))
+                    except OSError:
+                        fresh = []
+                    intact = True
+                else:
+                    fresh, intact = _appended_lines(board, rel, row)
                 if not intact:
                     conflicts.append({"file": "%s:%s" % (slug, rel),
                                       "problem": "rewritten, not appended to, "
@@ -1465,9 +1544,10 @@ def _merge_back_items(man, source):
                     if rec is None:
                         continue
                     mid = _line_id(rec)
-                    if mid in seen.setdefault(rel, set()):
-                        continue
-                    seen[rel].add(mid)
+                    if mid is not None:
+                        if mid in have_ids(rel):
+                            continue
+                        seen[rel].add(mid)
                     lines.setdefault(rel, []).append(raw)
         for root, dirs, names in os.walk(board):
             dirs[:] = sorted(dirs)

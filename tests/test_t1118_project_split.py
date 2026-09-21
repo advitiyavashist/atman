@@ -1305,6 +1305,121 @@ def test_merge_back_refuses_a_rewritten_log(shared, homes):
                for c in report["conflicts"]), report["conflicts"]
 
 
+def test_merge_back_loses_no_log_line_and_still_dedups_by_id(shared, homes):
+    """Two defects the reviewer's question about floors led me to, both mine.
+
+    1. **Identical event lines were folded into one.** Dedup hashed
+       `at/from/to/re/text` when a record had no `id` -- tickets._msg_id's
+       identity for old MESSAGE lines. A trajectory event carries none of
+       those fields, so four `note` calls produced four events that collapsed
+       to two values, and merge-back dropped two real events while reporting
+       success. Content is not identity in an event stream: three identical
+       "update T-100 by ann" lines are three things that happened. Dedup now
+       runs only on records that carry a real `id`, which is the case §4.11
+       means and the only one that can collide -- the same message appended to
+       two project boards, one recipient homed in each.
+
+    2. **A log the split never wrote for a project was skipped entirely.**
+       merge-back only looked at files the manifest recorded for that board,
+       so a project that got no `trajectories.jsonl` at split time and created
+       one with its first `note` had every one of those lines dropped, with
+       "lines none" printed over it.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    atman, steer = Path(homes["atman"]), Path(homes["steer"])
+
+    # (1) three byte-identical id-less events, on a log the split DID write
+    event = {"v": 1, "at": "2026-09-20T10:00:00Z", "kind": "update",
+             "ticket": "T-100", "agent": "ann"}
+    log = atman / "messages.jsonl"
+    assert log.exists(), "fixture must have a log the split wrote"
+    with open(log, "a", encoding="utf-8") as f:
+        for _ in range(3):
+            f.write(json.dumps(event) + "\n")
+        # ...and one message that is ALREADY on the shared board, by id:
+        have = [json.loads(x) for x in
+                (shared / "messages.jsonl").read_text().splitlines() if x.strip()]
+        dup = next(r for r in have if r.get("id"))
+        f.write(json.dumps(dup) + "\n")
+
+    # (2) a log file the split never wrote at all -- a rotation after the
+    # split is the realistic case, and it is not in the manifest's rows
+    rotated = "messages.2026-09-30.jsonl"
+    man = json.loads((atman / ps.MANIFEST_NAME).read_text())
+    assert not any(rotated in (rows or {}) for rows in man["files"].values())
+    (steer / rotated).write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    before_msgs = (shared / "messages.jsonl").read_text().splitlines()
+    out = _atm(shared, "project", "split", "--undo",
+               str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
+               agent="ann", timeout=60)
+    assert out.returncode == 0, out.stderr
+
+    after = [json.loads(x) for x in
+             (shared / "messages.jsonl").read_text().splitlines() if x.strip()]
+    same = [r for r in after if r.get("at") == event["at"]
+            and r.get("kind") == "update" and not r.get("id")]
+    assert len(same) == 3, (
+        "merge-back kept %d of 3 identical event lines -- identical content is "
+        "not one event" % len(same))
+    assert sum(1 for r in after if r.get("id") == dup["id"]) == 1, (
+        "a message already on the shared board was appended again; dedup by "
+        "id is what §4.11 asks for and it must still hold")
+    assert len(after) == len(
+        [x for x in before_msgs if x.strip()]) + 3
+
+    landed = shared / rotated
+    assert landed.exists(), (
+        "a log file created after the split was dropped entirely: %s"
+        % out.stdout)
+    rows = [json.loads(x) for x in landed.read_text().splitlines() if x.strip()]
+    assert [r.get("kind") for r in rows] == ["update"], rows
+
+
+def test_undo_merge_back_names_what_it_leaves_behind(shared, homes):
+    """An epic created after the split is not folded -- and must be reported.
+
+    merge-back folds root-level `T-*.json` and the append-only logs. An epic,
+    a sprint, a new agent record or a brief created on a project board after
+    the split stays on the board `undo` moves aside. Nothing is deleted, but
+    "merged back: 1 ticket(s)" printed over a board that also grew an epic is
+    a true sentence that leaves a false impression.
+
+    Epics are not folded by id on purpose: only `T-` ids get a per-project
+    floor, so two boards descended from one shared board can mint the same
+    `E-` id for different records, and merging those by id would be a guess.
+    This test pins that this is a *reported* boundary rather than a silent one.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    atman = Path(homes["atman"])
+    made = _atm(atman, "epic", "create", "post-split epic", agent="ann", timeout=30)
+    assert made.returncode == 0, made.stderr
+    eid = made.stdout.split()[1]
+
+    out = _atm(shared, "project", "split", "--undo",
+               str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
+               agent="ann", timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert "NOT merged back" in out.stdout, out.stdout
+    assert "epics/%s.json" % eid in out.stdout, out.stdout
+    assert "nothing deleted" in out.stdout
+    # and it really is still there, on the board that was moved aside
+    aside = sorted(atman.parent.glob(".tickets.split-undone-*"))
+    assert aside, "the board was not moved aside"
+    assert (aside[-1] / "epics" / (eid + ".json")).exists()
+    # And the reason it is not folded, made concrete: the id the project board
+    # minted for its new epic is an id the SHARED board already uses for a
+    # different epic. Only `T-` ids get a per-project floor, so merging an
+    # `E-` record back by id would overwrite the original.
+    clash = shared / "epics" / (eid + ".json")
+    if clash.exists():
+        assert json.loads(clash.read_text())["title"] != "post-split epic", (
+            "merge-back overwrote the shared board's %s with the project's "
+            "new epic of the same id" % eid)
+
+
 def test_undo_merge_back_refuses_on_a_changed_shared_board(shared, homes):
     plan = good_plan(shared, homes)
     man = run_apply(shared, plan)["manifest"]

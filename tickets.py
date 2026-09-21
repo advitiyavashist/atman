@@ -9087,6 +9087,21 @@ def _cmd_project_undo(a, ps):
               % (len(wm.get("tickets") or []),
                  ", ".join("%s=%d" % kv for kv in sorted((wm.get("lines") or {}).items()))
                  or "none"))
+    left = report.get("left_behind") or {}
+    if left:
+        # `--merge-back` folds tickets and appended log lines. An epic, a
+        # sprint, a new agent record or a freshly rotated log created after
+        # the split stays on the board this undo moves aside. Nothing is
+        # deleted, but the operator has to be told where it is.
+        print("NOT merged back (kept on the set-aside board, nothing deleted):")
+        for slug in sorted(left):
+            names = left[slug]
+            print("  %-16s %d file(s): %s%s"
+                  % (slug, len(names), ", ".join(names[:6]),
+                     " ..." if len(names) > 6 else ""))
+        print("  epics and sprints are not folded by id on purpose: only T- "
+              "ids get a per-project floor, so two boards can mint the same "
+              "E-/S- id for different records.")
     for c in report["conflicts"][:40]:
         print("  conflict: %s -- %s" % (c.get("file") or c.get("ticket"), c.get("problem")))
     if _print_refusals(report["refusals"], "undo REFUSED -- nothing was changed:"):
