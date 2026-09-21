@@ -120,7 +120,50 @@ def test_board_snapshot_one_ps_scan(board, monkeypatch):
     monkeypatch.setattr(subprocess, "run", wrapped)
     snap = tk.board_snapshot(str(board))
     assert "agents" in snap and "master" in snap
-    assert calls["ps"] == 1
+    # Linux reads /proc/<pid>/cmdline and forks no ps. macOS has no /proc,
+    # so the snapshot is one `ps -axww`. More than one is the per-pid pile-up.
+    assert calls["ps"] <= 1
+
+
+def test_proc_snapshot_skips_empty_cmdline_without_per_pid_ps(monkeypatch):
+    """Kernel threads have an empty cmdline. Do not fork ps once per thread."""
+    tk = _load_tk()
+    real_isdir = os.path.isdir
+    real_listdir = os.listdir
+
+    def isdir(path):
+        if path == "/proc":
+            return True
+        return real_isdir(path)
+
+    def listdir(path):
+        if path == "/proc":
+            return ["900011", "900012", "900013", "self"]
+        return real_listdir(path)
+
+    monkeypatch.setattr(tk.os.path, "isdir", isdir)
+    monkeypatch.setattr(tk.os, "listdir", listdir)
+
+    def cmdline(pid):
+        if int(pid) == 900012:
+            return "python tickets.py watch"
+        return ""
+
+    monkeypatch.setattr(tk, "_proc_cmdline", cmdline)
+    calls = {"ps": 0}
+    real = subprocess.run
+
+    def wrapped(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "ps":
+            calls["ps"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", wrapped)
+    rows, ok = tk._process_table_snapshot()
+    assert ok is True
+    assert calls["ps"] == 0
+    assert rows == [(900012, "python tickets.py watch")]
 
 
 def test_fixture_board_json_warm_under_1s_no_pileup(board):

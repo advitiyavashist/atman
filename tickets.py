@@ -5844,6 +5844,11 @@ def _process_table_snapshot():
 
     Returns ``(rows, available)``. ``available`` is False when the table
     could not be read at all; an empty ``rows`` then means unknown, not idle.
+
+    On Linux, read ``/proc/<pid>/cmdline`` only. Kernel threads have an
+    empty cmdline; a per-pid ``ps -ww -p`` fallback is the pile-up T-604
+    forbids (~one fork per thread, per snapshot). When ``/proc`` is absent,
+    one ``ps -axww`` covers the table.
     """
     import subprocess
 
@@ -5861,7 +5866,7 @@ def _process_table_snapshot():
             pid = int(name)
             if pid == me:
                 continue
-            cmd = _process_command(pid)
+            cmd = _proc_cmdline(pid)
             if cmd:
                 rows.append((pid, cmd))
         return rows, True
