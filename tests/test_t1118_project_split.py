@@ -868,6 +868,22 @@ PARITY_INVOCATIONS = {
     "turns": (["turns"], False),
     "trajectories": (["trajectories"], False),
     "traj": (["traj"], False),
+    # A read that is refused on purpose, recorded as a decision rather than
+    # left as an accident. `knowledge` / `kb` query a graph that is never
+    # inside the board -- knowledge_root() is documented as "never place it
+    # below .tickets/" -- so refusing it on the archive blocks a read that
+    # could not have touched the archive. Measured, both directions: every
+    # reading form (list, query, show, validate) leaves the board tree
+    # byte-identical, and so does `knowledge add`, which writes only into the
+    # knowledge directory. It stays off the allow-list anyway, because the
+    # list is deliberately conservative -- a read left off costs one
+    # confusing refusal, a write left off strands records on a board nothing
+    # reads again -- and because a seat's `knowledge_dir` can be configured
+    # from the board, so "outside the board" is an operator's choice rather
+    # than a guarantee. Pinned so the next person makes the decision instead
+    # of inheriting it.
+    "knowledge": (["knowledge", "list"], True),
+    "kb": (["kb", "list"], True),
     # the three shapes that are not a command name
     "traj backfill": (["trajectories", "backfill"], True),
     "traj export inside": (["trajectories", "export", "--out", "AGENTS/ann.json"],

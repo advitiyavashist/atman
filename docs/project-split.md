@@ -87,6 +87,20 @@ One honest asymmetry: the packaged entry point does not carry `atm project`
 `python3 tickets.py project split --undo` rather than printing an `atm`
 invocation the operator cannot run. The split engine ships with the checkout.
 
+One refusal is deliberate and worth naming, because it looks like a mistake:
+`atm knowledge` / `atm kb` are refused on the archive even though the knowledge
+graph is never part of a board — `knowledge_root()` is documented as "never
+place it below `.tickets/`". It was measured both ways: every reading form
+(`list`, `query`, `show`, `validate`) leaves the board byte-identical, and so
+does `knowledge add`, which writes only into the knowledge directory. It stays
+off the allow-list anyway. The list is conservative on purpose — a read left
+off costs one confusing refusal, a write left off strands records on a board
+nothing reads again — and a seat's `knowledge_dir` can be configured *from the
+board*, so "outside the board" is an operator's choice rather than a guarantee.
+A future change would need the same path predicate `trajectories export` uses.
+The refusal is pinned in the parity matrix so the next person makes that
+decision rather than inheriting it.
+
 Because "both entry points carry it" is a claim about how many entry points
 exist, they are enumerated and pinned too. `pyproject.toml` installs exactly
 two console scripts, both `ticket_board.cli:main`; the self-runnable modules
