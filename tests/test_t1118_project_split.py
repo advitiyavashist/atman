@@ -684,6 +684,23 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
             cmd, sorted(set(after) ^ set(before))
             or [k for k in before if after.get(k) != before[k]])
 
+    # `export` stays allowed because it writes where the operator points it
+    # -- but pointed back INSIDE the board it is a write to the archive, and
+    # a destructive one: `--out <board>/agents/<seat>.json` replaces a seat
+    # record outright. It did exactly that until this case was added.
+    for target in (shared / "trajectories.jsonl", shared / "agents" / "ann.json"):
+        out = _atm(shared, "trajectories", "export", "--out", str(target))
+        assert out.returncode != 0, "export into the board was allowed: %s" % target
+        assert "REFUSING WRITE" in out.stderr
+        assert _tree(shared) == before, "export clobbered %s" % target
+
+    # pointed outside it, it still works: an archive you cannot read out of
+    # is not an archive
+    outside = Path(homes["atman"]).parent / "exported.jsonl"
+    out = _atm(shared, "trajectories", "export", "--out", str(outside))
+    assert out.returncode == 0, out.stderr
+    assert outside.exists() and _tree(shared) == before
+
     # and the sub-command that writes is refused, with the archive's wording
     out = _atm(shared, "trajectories", "backfill", agent="ann")
     assert out.returncode != 0

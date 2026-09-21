@@ -8680,7 +8680,17 @@ SPLIT_SUBCMD_ATTR = {
 }
 
 
-def _split_cmd_only_reads(a):
+def _path_inside(root, path):
+    """True when `path` resolves inside `root` (or is `root`)."""
+    try:
+        root = os.path.realpath(root)
+        path = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    except OSError:
+        return False
+    return path == root or path.startswith(root + os.sep)
+
+
+def _split_cmd_only_reads(a, board):
     """True when this exact invocation may run on a frozen shared board."""
     if a.cmd not in SPLIT_READ_ONLY_CMDS:
         return False
@@ -8688,7 +8698,18 @@ def _split_cmd_only_reads(a):
     if reading is None:
         return True
     attr, default = SPLIT_SUBCMD_ATTR[a.cmd]
-    return (getattr(a, attr, default) or default) in reading
+    sub = getattr(a, attr, default) or default
+    if sub not in reading:
+        return False
+    # `export` reads the board and writes wherever the operator points it,
+    # which is why it stays allowed -- getting data out is the point of an
+    # archive. Pointed back INSIDE the board it is a write to the archive,
+    # and not a harmless one: `--out <board>/agents/<seat>.json` replaces a
+    # seat record outright. Measured, not supposed.
+    out = getattr(a, "out", "") or ""
+    if sub == "export" and out and _path_inside(board, out):
+        return False
+    return True
 
 
 def _split_board_refusal(board, marker, cmd, seat=""):
@@ -23727,7 +23748,7 @@ def main():
     # A board that has been split is the frozen archive: it stays readable
     # forever, but a session still pointed at it must not write there. Same
     # shape as the T-959 shadow-board refusal, and it names where to go.
-    if not _split_cmd_only_reads(a):
+    if not _split_cmd_only_reads(a, board):
         marker = _safe(lambda: split_marker(board), {})
         if marker:
             _split_board_refusal(board, marker, a.cmd,
