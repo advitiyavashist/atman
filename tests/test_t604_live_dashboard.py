@@ -34,12 +34,15 @@ def _wait_up(port, timeout=20):
 
 
 class _Server:
-    def __init__(self, board, port):
+    def __init__(self, board, port, operator=""):
         self.port = port
         env = dict(os.environ, TICKETS_DIR=str(board))
+        cmd = [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1",
+               "--parent-pid", str(os.getpid())]
+        if operator:
+            cmd += ["--operator", operator]
         self.proc = subprocess.Popen(
-            [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1",
-             "--parent-pid", str(os.getpid())],
+            cmd,
             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -144,7 +147,7 @@ def test_snapshot_includes_epics_attention_limits_and_delivery(board):
 def test_composer_task_kind_round_trips(board):
     run(board, "join", "boss", agent="boss")
     run(board, "join", "worker", agent="worker")
-    srv = _Server(board, _free_port())
+    srv = _Server(board, _free_port(), operator="boss")
     try:
         status, out = srv.post("/msg", {
             "from": "boss", "text": "claim T-001", "to": "worker", "re": "T-001", "kind": "task",
