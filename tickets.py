@@ -10475,20 +10475,42 @@ def cmd_msg(a, board):
         print("forward: %s -> %s [%s] receipt=%s" % (
             forwarded.get("from"), forwarded.get("to"),
             forwarded.get("role") or "-", forwarded.get("state") or "forwarded"))
+    deliver_wakes(board, m)
+
+
+def _seat_harness(board, seat):
+    """Workforce harness, then tool. Empty means unknown -- never invent claude."""
+    entry = load_workforce(board).get(seat, {}) or {}
+    return (entry.get("harness") or entry.get("tool") or "").strip()
+
+
+def deliver_wakes(board, m, announce=None):
+    """Native/persist wake after a board post. cmd_msg and atm ui share this (T-1106).
+
+    `announce` defaults to None, not to `print` itself: a default argument is
+    bound at import time, so `announce=print` captured the builtin before a
+    test could replace it, and the wake lines bypassed the capture.
+    """
+    if announce is None:
+        def announce(*a, **kw):
+            print(*a, **kw)
     sa = None
     mid = _msg_id(m)
+    labels = []
     for to in _split_to_tokens(m.get("to") or ""):
         if to.lower() in _MENTION_BROADCAST:
             continue
         if not _message_wakes_seat(board, to, m):
             continue
         if _already_autonomous_wake(board, to, mid):
-            print("wake: %s -> deduped" % to)
+            announce("wake: %s -> deduped" % to)
+            labels.append((to, "deduped"))
             continue
         limit = _active_seat_limit(board, to)
         if limit:
-            print("wake: %s -> limited (reset %s)" % (
+            announce("wake: %s -> limited (reset %s)" % (
                 to, limit.get("reset_at") or limit.get("until") or "unknown"))
+            labels.append((to, "limited"))
             continue
         harness = _seat_harness(board, to)
         if sa is None:
@@ -10501,23 +10523,19 @@ def cmd_msg(a, board):
             if poked:
                 label = "watch-poked"
         if label == "queued-offline":
-            print("wake: %s -> %s (%s)" % (
+            announce("wake: %s -> %s (%s)" % (
                 to, label, "run the thread in terminal Codex to enable native wake"))
         else:
-            print("wake: %s -> %s" % (to, label))
+            announce("wake: %s -> %s" % (to, label))
         if label == "held":
-            print("  recovery: %s" % getattr(
+            announce("  recovery: %s" % getattr(
                 sa, "CLAUDE_HELD_RECOVERY",
                 "approve in the recipient session or set crossSessionInbound accept"))
         _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
-
-
-def _seat_harness(board, seat):
-    """Workforce harness, then tool. Empty means unknown -- never invent claude."""
-    entry = load_workforce(board).get(seat, {}) or {}
-    return (entry.get("harness") or entry.get("tool") or "").strip()
+        labels.append((to, label))
+    return labels
 
 
 def _should_poke_persist(label):
@@ -18697,14 +18715,19 @@ def _board_snapshot_body(board, messages=40):
     for r in rows:
         rec = agents.get(r["agent"], {})
         agent_wf = wf.get(r["agent"], {}) or {}
-        harness_name = agent_wf.get("harness") or agent_wf.get("tool") or "claude"
+        recorded_harness = _seat_harness(board, r["agent"])
+        display_harness = recorded_harness or "unknown"
+        harness_name = recorded_harness  # empty is unknown; never invent claude
         lim = _active_seat_limit(board, r["agent"], rec)
         wc = _watcher_count(r["agent"], board)
         wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
         wake_pending = actionable(wake)
+        sa = _session_adapters()
+        if not harness_name:
+            ep, _ = sa.live_endpoint(board, r["agent"])
+            harness_name = ((ep or {}).get("provider") or (ep or {}).get("harness") or "")
         remote = (_remote_public_state(load_remote_state(board, r["agent"]))
                   if harness_name == "remote" else {})
-        sa = _session_adapters()
         local_failure = _local_adapter_failure(rec, harness_name)
         failure_state = remote.get("failure_state", "") or local_failure.get("state", "")
         failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
@@ -18754,7 +18777,7 @@ def _board_snapshot_body(board, messages=40):
         if life == "ephemeral" and not reachable and adapter_state == "offline":
             adapter_extra["adapter_delivery"] = "exited"
         out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
-                           "harness": harness_name,
+                           "harness": display_harness,
                            "agent_id": agent_wf.get("agent_id") or r["agent"],
                            "lifecycle": life,
                            "reachable": reachable,
@@ -18843,6 +18866,7 @@ def _board_snapshot_body(board, messages=40):
         row = {"id": _msg_id(x), "at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
                "kind": x.get("kind") or "message",
+               "harness": x.get("harness") or _seat_harness(board, x.get("from") or "") or "unknown",
                "delivery": _message_delivery(board, x, agents_by=agents)}
         raw_msgs.append(row)
     seat_names = []
@@ -19275,6 +19299,7 @@ def cmd_ui(a, board):
                 if not _agent_rec(board, sender):
                     raise ValueError("from must be a registered agent")
                 rec = post_message(board, sender, text, to, re_, kind=kind)
+                _safe(lambda: deliver_wakes(board, rec), None)
                 status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
             except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
                 status, out = 400, {"ok": False, "error": str(e)}
