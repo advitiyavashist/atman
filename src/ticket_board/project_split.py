@@ -1504,19 +1504,26 @@ def _merge_back_items(man, source):
     lines, tickets, conflicts = {}, {}, []
 
     def source_lines(_source, _cache={}):
-        """Every log line the shared board already holds, as raw bytes.
+        """How many times the shared board already holds each log line.
 
-        Built once per process and keyed by board path. It is the only way to
-        tell a genuinely new line in an unrecognised log file from a copy of
-        one the split handed out.
+        A COUNT, not a set, and the difference matters. Set membership would
+        drop a genuinely new line that happens to be byte-identical to a
+        pre-split one -- three identical `update T-100 by ann` events are
+        three things that happened, which is the same mistake content-based
+        dedup made. Counting means an unrecognised log contributes its
+        EXCESS: a copy of a log the split handed out contributes nothing, and
+        a fourth copy of a line the source holds three times comes back.
+
+        Built once per process and keyed by board path.
         """
         key = os.path.realpath(_source)
         if key not in _cache:
-            got = set()
+            got = {}
             src = SourceBoard(_source)
             for name in list(src.message_files()) + list(src.trajectory_files()):
                 for raw in src.lines(name):
-                    got.add(raw.strip())
+                    k = raw.strip()
+                    got[k] = got.get(k, 0) + 1
             _cache[key] = got
         return _cache[key]
 
@@ -1565,11 +1572,20 @@ def _merge_back_items(man, source):
                     # "Every line in a file the split never wrote is new" is
                     # false the moment someone copies a log to a second
                     # basename: those lines are the shared board's own, and
-                    # appending them back duplicates history. So a line here
-                    # counts as new only if the shared board does not already
-                    # hold that exact line, in any of its logs.
-                    fresh = [raw for raw in fresh
-                             if raw.strip() not in source_lines(source)]
+                    # appending them back duplicates history. So this file
+                    # contributes only its EXCESS over what the source
+                    # already holds, counted per line rather than by set
+                    # membership -- a real fourth copy of a line the source
+                    # holds three times is still a new event.
+                    budget = dict(source_lines(source))
+                    kept = []
+                    for raw in fresh:
+                        k = raw.strip()
+                        if budget.get(k):
+                            budget[k] -= 1
+                            continue
+                        kept.append(raw)
+                    fresh = kept
                     intact = True
                 else:
                     fresh, intact = _appended_lines(board, rel, row)

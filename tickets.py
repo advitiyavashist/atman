@@ -8990,11 +8990,20 @@ def _write_report_atomically(path, text):
     untouched.
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp = tempfile.mkstemp(prefix=".atm-report-", dir=directory)
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".atm-report-", dir=directory)
+    except OSError as e:
+        sys.exit("cannot write %s: %s" % (path, e))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, path)
+    except OSError as e:
+        # A directory, a path on another filesystem, a full disk. The report
+        # is the last step of a read-only command, so say what happened in
+        # one line instead of ending a successful propose in a traceback.
+        _safe(lambda: os.unlink(tmp), None)
+        sys.exit("cannot write %s: %s" % (path, e))
     except BaseException:
         _safe(lambda: os.unlink(tmp), None)
         raise

@@ -261,10 +261,12 @@ from renamed, and `mv trajectories.jsonl trajectories.operator-rotated.jsonl`
 made the recorded name read as "gone, nothing appended" while the new name read
 as "a file the split never wrote, so all of it is new" — two defensible rules
 with a duplicated history between them. A missing recorded log is now a
-conflict, and a log the split never wrote contributes only lines the shared
-board does not already hold, compared line for line against the source. Both
-halves are pinned, including that a genuinely new line in such a file still
-comes back.
+conflict, and a log the split never wrote contributes only its **excess** over
+what the source already holds — a multiset comparison, not set membership,
+because a fourth copy of a line the source holds three times is a real fourth
+event. Fixing duplication by dropping real lines would have been the same
+mistake content dedup made, one layer along. Both halves are pinned, including
+that a genuinely new line in such a file still comes back.
 
 **An operator-named report is written through a temp file and `os.replace`.**
 Not for crash safety: the target can be a *hard link* to a file inside the

@@ -1107,6 +1107,28 @@ def test_project_report_paths_never_land_inside_the_board(shared, homes, tmp_pat
     assert _tree(shared) == live, "writing through a hard link changed the board"
     assert "tickets" in json.loads(alias.read_text()), "the plan was not written"
 
+    # A DIRECTORY symlink into the board is the same resolution, and checked
+    # rather than assumed to follow from the file case.
+    dirlink = tmp_path / "dirlink"
+    dirlink.symlink_to(shared)
+    res = _atm(shared, "project", "split", "--propose", "--out",
+               str(dirlink / "plan.json"), agent="ann", timeout=30)
+    assert res.returncode != 0 and "REFUSING --out" in res.stderr
+    assert _tree(shared) == live
+
+    # An --out that cannot be written -- here an existing directory -- ends in
+    # one line, not a traceback: the report is the last step of a read-only
+    # command and the propose itself succeeded.
+    adir = tmp_path / "adir"
+    adir.mkdir()
+    res = _atm(shared, "project", "split", "--propose", "--out", str(adir),
+               agent="ann", timeout=30)
+    assert res.returncode != 0
+    assert "Traceback" not in res.stderr, res.stderr
+    assert "cannot write" in res.stderr, res.stderr
+    assert not any(p.name.startswith(".atm-report-") for p in adir.parent.iterdir()), (
+        "the temp file was left behind")
+
     # ...and `..` that genuinely escapes the board is allowed: the rule is
     # containment, not a ban on relative paths.
     res = _atm(shared, "project", "split", "--propose", "--out",
@@ -1553,6 +1575,37 @@ def test_merge_back_refuses_a_log_that_was_moved_not_appended_to(shared, homes):
     assert rotated.exists(), out.stdout
     got = [json.loads(x) for x in rotated.read_text().splitlines() if x.strip()]
     assert got == [fresh], got
+
+
+def test_a_rotated_copy_contributes_only_its_excess(shared, homes):
+    """The count matters, not membership: a fourth copy of a real line is new.
+
+    Comparing an unrecognised log against the source by *set* membership would
+    fix duplication by starting to drop real lines -- the same mistake
+    content-based dedup made, one layer along. So the comparison is a multiset:
+    a copy of a log the split handed out contributes nothing, and one extra
+    copy of a line the source already holds comes back as the one event it is.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    atman, steer = Path(homes["atman"]), Path(homes["steer"])
+    source_log = shared / "trajectories.jsonl"
+    before = source_log.read_text().splitlines()
+    repeated = before[0]
+
+    (steer / "trajectories.rot.jsonl").write_text(
+        (steer / "trajectories.jsonl").read_text() + repeated + "\n",
+        encoding="utf-8")
+    out = _atm(shared, "project", "split", "--undo",
+               str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
+               agent="ann", timeout=60)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert source_log.read_text().splitlines() == before, (
+        "the copied lines came back into the recorded log")
+    rotated = shared / "trajectories.rot.jsonl"
+    assert rotated.exists(), out.stdout
+    assert rotated.read_text().strip() == repeated.strip(), (
+        "the excess copy is the one line that should come back, and only it")
 
 
 def test_undo_merge_back_names_what_it_leaves_behind(shared, homes):
