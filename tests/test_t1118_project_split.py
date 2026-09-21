@@ -391,6 +391,70 @@ def test_split_refuses_with_active_run(shared, homes):
     assert run_apply(shared, plan)["ok"]
 
 
+def _undo_back_to_shared(shared, homes):
+    """Reverse an apply so one test can exercise several preconditions."""
+    man = json.loads((Path(homes["atman"]) / ps.MANIFEST_NAME).read_text())
+    report = ps.undo(man, do_apply=True, at="test")
+    assert report["ok"], report["refusals"]
+    for slug in homes:
+        assert not os.path.exists(homes[slug])
+
+
+def test_split_refuses_a_live_watcher_and_a_held_merge_lock(shared, homes):
+    """The other two live-state preconditions, which my own suite had missed.
+
+    The ticket names three: an active `agents/*.run`, a live watcher, and a
+    held `merge.lock`. Only the first was pinned here -- the independent
+    reviewer probed all three and found they refuse, which is how I learned
+    that two of them were covered by someone else's evidence and not by mine.
+
+    The watcher probe uses this test process's own pid, because "alive" has to
+    mean alive: a made-up number would pass the check by being dead.
+    """
+    plan = good_plan(shared, homes)
+
+    watch = shared / "agents" / "ann.watch.pid"
+    watch.write_text("%d\n" % os.getpid())
+    result = run_apply(shared, plan)
+    assert not result["ok"]
+    assert [r["kind"] for r in result["refusals"]] == ["watcher-alive"], result
+    assert "atm spawn --stop" in result["refusals"][0]["text"]
+    assert not os.path.exists(homes["atman"]), "a board was built anyway"
+
+    # A pid that is not alive is not a refusal -- the check is liveness, not
+    # the presence of the file -- and a held lock is. Both in one apply, so
+    # the refusal list itself says which of the two is load-bearing.
+    watch.write_text("2147483646\n")
+    lock = shared / "merge.lock"
+    lock.write_text("held by a merge\n")
+
+    # The refusal is about a HELD lock, not a file that exists: a stale
+    # merge.lock left by a crashed merge must not block a migration forever.
+    # So the file alone is not a refusal...
+    result = run_apply(shared, plan)
+    assert result["ok"], (
+        "a merge.lock nobody holds refused the split: %s" % result["refusals"])
+    assert os.path.exists(homes["atman"])
+    _undo_back_to_shared(shared, homes)
+
+    # ...and the same file with a real exclusive flock on it is.
+    import fcntl
+    fd = os.open(str(lock), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = run_apply(shared, plan)
+        assert not result["ok"]
+        assert [r["kind"] for r in result["refusals"]] == ["merge-lock"], result
+        assert "merge is in flight" in result["refusals"][0]["text"]
+        assert not os.path.exists(homes["atman"])
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    # ...and with the lock released and only the dead pid left, it applies.
+    assert run_apply(shared, plan)["ok"]
+
+
 def test_split_refuses_second_run_on_a_split_board(shared, homes):
     plan = good_plan(shared, homes)
     assert run_apply(shared, plan)["ok"]

@@ -284,6 +284,22 @@ epic — merging that back by id would overwrite the original. Reporting it
 beats guessing, and `merged back: 1 ticket(s)` printed over a board that also
 grew an epic is a true sentence that leaves a false impression.
 
+## The live-state preconditions, and what "held" means
+
+`--apply` refuses on three live-state conditions, all read from the board's own
+receipts rather than from a process table: an `agents/*.run` receipt marked
+active, an `agents/*.watch.pid` whose pid is **alive**, and a `merge.lock` that
+is **held** — an exclusive `flock`, not merely a file that exists, so a stale
+lock from a crashed merge cannot block a migration forever. Both distinctions
+are tested with the real thing: the watcher probe uses the test process's own
+pid, because a made-up number would pass by being dead, and the lock probe
+takes an actual `flock` after checking that the unlocked file alone applies
+cleanly.
+
+My own suite pinned only the first of the three until the independent reviewer
+probed all of them; two of the rules were covered by someone else's evidence
+and not by mine. They are pinned here now.
+
 ## Not handled yet
 
 `decisions.jsonl` (spec §5.1, Phase 2A) does not exist on any board today, so

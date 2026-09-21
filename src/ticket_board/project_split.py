@@ -1552,9 +1552,10 @@ def _merge_back_items(man, source):
         # A log the split never wrote for this project -- the board had no
         # trajectories.jsonl at all, and the first `note` created one -- is
         # not in `rows`, so the loop below never looked at it and its lines
-        # were dropped while the report said "lines none". Every line in such
-        # a file is new by construction; dedup still runs against the shared
-        # board, so a file that reappeared identically costs nothing.
+        # were dropped while the report said "lines none". Such a file is
+        # folded, but NOT as "all new": see the excess rule below, which is
+        # what stops a log copied to a second basename from replaying the
+        # shared board's own history into it.
         pending = dict(rows)
         try:
             for name in sorted(os.listdir(board)):
