@@ -742,6 +742,17 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
             cmd, sorted(set(after) ^ set(before))
             or [k for k in before if after.get(k) != before[k]])
 
+    # `board-mark-primary` never reaches the refusal above: it is dispatched
+    # before board_dir() so it can repair resolution on a board resolution
+    # itself refuses. It is also the most dangerous thing to allow here --
+    # marking the archive primary would win resolution for the repo and route
+    # every seat back onto the board that takes no new records, silently. It
+    # wrote `.primary` into the frozen board until this case was added.
+    out = _atm(shared, "board-mark-primary", agent="ann", timeout=20)
+    assert out.returncode != 0, "the archive was marked primary"
+    assert "REFUSING WRITE" in out.stderr
+    assert _tree(shared) == before
+
     # The three writing forms are refused, each with the archive's wording.
     # None of them is a command name: one is a sub-command, one is a
     # sub-command plus a path, one is a flag.

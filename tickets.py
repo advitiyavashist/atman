@@ -8557,6 +8557,16 @@ def cmd_board_mark_primary(a):
     board = os.path.join(root, ".tickets") if root else os.path.join(os.getcwd(), ".tickets")
     if not os.path.isdir(board):
         sys.exit("no .tickets directory at %s -- nothing to mark" % board)
+    # This command is dispatched before board_dir() so it can repair board
+    # resolution on a board that resolution itself refuses -- which also
+    # means it runs before the frozen-board refusal. A split archive is the
+    # one board that must never be marked primary: it would win resolution
+    # for this repo and route every seat back onto the board that takes no
+    # new records, silently.
+    split = _safe(lambda: split_marker(board), {})
+    if split:
+        _split_board_refusal(board, split, "board-mark-primary",
+                             _safe(lambda: session_seat(board), "") or "")
     marker = os.path.join(board, PRIMARY_BOARD_MARKER)
     with open(marker, "w", encoding="utf-8") as f:
         f.write("marked primary %s\n" % datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
