@@ -1,10 +1,24 @@
 """T-1112: remaining or-claude defaults outside the UI.
 
 Display sites show unknown. Launch sites that still need a provider say
-claude (default) in their output.
+claude (default) in their output. The usage ledger still keys off that
+launch default, so a bare join keeps its USAGE line.
 """
+import importlib.util
+import json
+from pathlib import Path
+
 from test_wakeup import board, run  # noqa: F401
+from ticket_board import provider_usage as pu
 from ticket_board import seat_brief
+
+
+def _tickets_mod():
+    spec = importlib.util.spec_from_file_location(
+        "tickets_t1112", Path(__file__).resolve().parents[1] / "tickets.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def test_who_does_not_invent_claude_for_a_bare_seat(board):
@@ -59,13 +73,22 @@ def test_seat_brief_says_unknown_when_no_harness_recorded():
 
 
 def test_seat_brief_text_uses_recorded_harness(board):
-    import importlib.util
-    from pathlib import Path
-    spec = importlib.util.spec_from_file_location(
-        "tickets_t1112", Path(__file__).resolve().parents[1] / "tickets.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _tickets_mod()
     run(board, "join", "bare", agent="bare")
     run(board, "join", "coded", "--harness", "codex", agent="coded")
     assert "harness unknown" in mod.seat_brief_text(str(board), "bare")
     assert "harness codex" in mod.seat_brief_text(str(board), "coded")
+
+
+def test_bare_seat_brief_keeps_unknown_and_claude_usage(board):
+    mod = _tickets_mod()
+    run(board, "join", "bare", agent="bare")
+    rec = pu.parse_claude_oauth_usage(json.dumps({
+        "five_hour": {"used_percent": 20, "resets_at": "2026-09-16T18:00:00Z"},
+    }), checked_at="2026-09-16T10:00:00Z")
+    pu.put_reading(str(board), rec)
+    text = mod.seat_brief_text(str(board), "bare")
+    assert "harness unknown" in text
+    assert "harness claude" not in text
+    assert "claude ok" in text
+    assert "remaining 80%" in text

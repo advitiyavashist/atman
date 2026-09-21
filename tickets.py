@@ -8684,7 +8684,8 @@ def cmd_who(a, board):
             "", life, (ep or {}).get("provider") or harness_name or "unknown",
             (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
             "yes" if reachable else "no"))
-        usage = _provider_usage().get_reading(board, harness_name)
+        usage = _provider_usage().get_reading(
+            board, _usage_ledger_key(board, r["owner"]))
         print("%-14s %s" % ("", _provider_usage().format_usage_line(usage).strip()))
     # collisions
     by_branch = {}
@@ -10560,6 +10561,16 @@ def deliver_wakes(board, m, announce=None):
             board, to, label, mid), None)
         labels.append((to, label))
     return labels
+
+
+def _usage_ledger_key(board, seat):
+    """Provider the usage ledger is filed under for this seat.
+
+    Display stays unknown when join recorded no harness. The ledger is
+    still the launch default from harness_of (claude, unless a harness
+    was stored), so a bare `atm join` keeps its USAGE line.
+    """
+    return harness_of(board, seat)[0]
 
 
 def _display_harness(board, seat):
@@ -13074,6 +13085,7 @@ def seat_brief_text(board, owner):
     """
     sb = _seat_brief()
     harness = _safe(lambda: _seat_harness(board, owner), "") or ""
+    usage_key = _safe(lambda: _usage_ledger_key(board, owner), "") or "claude"
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     roles = _safe(lambda: roles_for(board, owner), None) or []
     m = _safe(lambda: current_master(board), None) or {}
@@ -13084,7 +13096,7 @@ def seat_brief_text(board, owner):
     if reviewer == owner:
         reviewer = ""  # a seat is never its own reviewer
     usage = _safe(lambda: _provider_usage().brief_usage_line(
-        _provider_usage().get_reading(board, harness)), "") or ""
+        _provider_usage().get_reading(board, usage_key)), "") or ""
     t = _seat_ticket(board, owner) or {}
     return sb.compose(
         owner,
