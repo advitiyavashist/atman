@@ -1,7 +1,13 @@
 {
+  "name": "atman-workspace",
   "private": true,
-  "description": "npm workspace root so tests/ui/ (sibling to ui/, matching this repo's tests/<lane>/ convention) can resolve ui/'s devDependencies. No package of its own lives here — see ui/package.json.",
+  "description": "npm workspace root so tests/ui/ (sibling to ui/, matching this repo's tests/<lane>/ convention) can resolve ui/ devDependencies. The app itself lives in ui/ — see ui/README.md.",
   "workspaces": [
     "ui"
-  ]
+  ],
+  "scripts": {
+    "test:ui": "npm test -w ui",
+    "build:ui": "npm run build -w ui",
+    "dev:ui": "npm run dev -w ui"
+  }
 }
