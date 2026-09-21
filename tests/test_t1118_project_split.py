@@ -77,7 +77,23 @@ def shared(tmp_path):
     # parent T-102.
     _ticket(board, "T-200", repo=STEER, status="open", deps=["T-100"],
             owner="", epic="E-002")
-    _ticket(board, "T-201", repo=STEER, status="open", deps=["T-101"], epic="E-002")
+    # T-201 is the ticket the split REWRITES (its parent lands in another
+    # project), so it carries the two fields §4.11 names explicitly beyond
+    # the review ones -- `steers` and `owner_lease`. A rewritten record is
+    # re-serialised rather than copied byte for byte, which is exactly where
+    # a field the rewriter does not know about would go missing, and the
+    # preservation test compares the whole dict.
+    _ticket(board, "T-201", repo=STEER, status="open", deps=["T-101"], epic="E-002",
+            steers=[{"at": "2026-09-05T00:00:00Z", "by": "cy",
+                     "text": "narrow this to the release gate"}],
+            owner_lease={"owner": "cy", "generation": 3,
+                         "at": "2026-09-06T00:00:00Z"},
+            # open again after a rejected review, so the rewritten record
+            # carries review history too
+            review_head=HEAD_B,
+            review_events=[{"kind": "reject", "by": "bo", "sha": HEAD_B,
+                            "at": "2026-09-07T00:00:00Z",
+                            "reason": "needs the gate"}])
     _ticket(board, "T-202", repo=STEER, status="open", deps=["T-102"], epic="E-002")
     _ticket(board, "T-203", repo=STEER, status="claimed", owner="cy", epic="E-002")
 
@@ -242,6 +258,15 @@ def test_split_preserves_every_record(shared, homes):
         if tid in rewritten:
             old = json.loads(source_bytes[tid])
             new = json.loads(landed.read_bytes())
+            if tid == "T-201":
+                # The rewritten ticket built to carry every field 4.11 names.
+                # Asserted present BEFORE the comparison, so the comparison
+                # cannot pass by their absence.
+                for field in ("review_events", "review_head", "steers",
+                              "owner_lease"):
+                    assert field in old, (
+                        "the fixture stopped carrying %s, so nothing proves a "
+                        "rewritten ticket keeps it" % field)
             old.pop("deps"), new.pop("deps"), new.pop("external_deps")
             assert old == new, "%s changed beyond its deps" % tid
         else:
