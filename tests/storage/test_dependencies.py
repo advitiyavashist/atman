@@ -109,6 +109,34 @@ def test_claim_refuses_while_dependencies_are_unmet(store, project, agent):
     assert claimed["state"] == "claimed"
 
 
+def test_done_accepted_review_without_sha_releases_dependents(store, project):
+    """Legacy import: done + accepted review whose evidence sha is None.
+
+    T-224 writes that review as real history. The sha never existed, so
+    binding release to evidence.sha permanently blocks dependents (LEG-3
+    on a imported board). An accepted review is enough; decide_review
+    already enforced any pin that was present.
+    """
+    store.create_ticket(project["id"], "LEG-91", "Upstream")
+    store.create_ticket(project["id"], "LEG-92", "Downstream",
+                        dependencies=["LEG-91"])
+    up = store.get_ticket(project["id"], "LEG-91")
+    store.transition(project["id"], "LEG-91", "done",
+                     expected_version=up["version"])
+    assert store.get_ticket(project["id"], "LEG-92")["dependency_blocked"] is False
+
+    store.conn.execute(
+        "INSERT INTO reviews (id, project_id, ticket_id, state, submitted_by,"
+        " submitted_at, evidence, notes) VALUES (?, ?, ?, 'accepted', ?, ?, NULL, ?)",
+        ("rev_legacy_nonesha", project["id"], "LEG-91",
+         '{"type":"agent","id":"legacy","display_name":"legacy"}',
+         "2026-01-01T00:00:00Z",
+         "Imported from the legacy board."),
+    )
+    store.conn.commit()
+    assert store.get_ticket(project["id"], "LEG-92")["dependency_blocked"] is False
+
+
 def test_unknown_dependency_counts_as_unmet(store, project, agent):
     """A dependency on a ticket that does not exist must not read as satisfied."""
     store.create_ticket(project["id"], "GHOST-1", "Depends on a ghost")

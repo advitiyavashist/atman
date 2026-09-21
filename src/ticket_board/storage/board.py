@@ -632,7 +632,7 @@ class BoardStore(MessagingMixin):
         ]
 
     def _unmet_dependencies(self, conn, project_id, deps):
-        """Use the shared release gate for the SQL representation too."""
+        """Shared CLI release gate, plus done-without-review and accepted-without-sha."""
         from ..work_view import dep_released
         unmet = []
         for dep in deps:
@@ -664,8 +664,16 @@ class BoardStore(MessagingMixin):
                     for ev in ticket["review_events"]
                 ):
                     ticket["review_events"].append({"kind": "accept", "sha": sha})
-            if not dep_released(ticket):
-                unmet.append(dep)
+            if dep_released(ticket):
+                continue
+            # Storage still allows open/claimed -> done with no review, and
+            # legacy import can leave done + accepted with evidence sha None
+            # (T-224). decide_review already enforced any pin; accepted is
+            # enough to release dependents either way.
+            if row["state"] == "done" and (
+                    not review or review["state"] == "accepted"):
+                continue
+            unmet.append(dep)
         return unmet
 
     def _require_released_dependencies(self, conn, project_id, ticket_id):
