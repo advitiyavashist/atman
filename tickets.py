@@ -1548,7 +1548,7 @@ def drive_status(board, tickets=None):
     idle = []
     for r in load_agents(board):
         who = r.get("owner", "")
-        if not who or r.get("limit") or hours_since(r.get("seen", "")) > 2:
+        if not who or _route_headroom().seat_limit(r) or hours_since(r.get("seen", "")) > 2:
             continue
         holds = any(t.get("owner") == who and t.get("status") in ("claimed", "review") for t in tickets)
         if holds:
@@ -2521,8 +2521,7 @@ def _route_seat_limit(board, name):
     tickets.py also persists an expired reset so later reads see it cleared.
     """
     rec = _agent_rec(board, name) or {}
-    _active_seat_limit(board, name, rec)
-    return _route_headroom().seat_limit(rec)
+    return _active_seat_limit(board, name, rec)
 
 
 def _refuse_limited_seat(board, seat, verb):
@@ -3807,6 +3806,10 @@ def cmd_board(a, board):
     ready = unblocked(board, tickets)
     if ready:
         print("  -> ready to claim: %s" % ", ".join(t["id"] for t in ready))
+    for rec in load_agents(board):
+        warning = _stale_limit_warning(board, rec)
+        if warning:
+            print("  attention: " + warning)
     if not a.quiet:
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
@@ -6567,7 +6570,7 @@ def _watch_log_state(board, owner):
     # speed dropped it the moment one of those failures happened to take
     # longer than the usual few seconds.
     streak = []
-    expired_at = ((_agent_rec(board, owner) or {}).get("limit_expired_at") or "")
+    expired_at = _seat_limit_expired_at(_agent_rec(board, owner) or {})
     for r in reversed(runs):
         if expired_at and (r["exit_at"] or r["start"]) <= expired_at:
             break
@@ -6737,9 +6740,9 @@ def agent_liveness(board, rec, peers=None):
             # which two we looked for, rather than picking one's error message.
             tdetail = "no Claude or Codex transcript for %s" % _tilde(cwd)
 
-    expired_age = _age_secs(((_agent_rec(board, owner) or {}).get("limit_expired_at")))
+    expired_age = _age_secs(_seat_limit_expired_at(_agent_rec(board, owner) or {}))
     if tstate == "limited" and expired_age is not None and tage is not None and tage >= expired_age:
-        tstate, tdetail = "unknown", "previous provider reset elapsed; awaiting fresh session evidence"
+        tstate, tdetail = "unknown", "previous limit expired; awaiting fresh session evidence"
     if tstate != "unknown":
         out.update(state=tstate, source=tsource, heuristic=False, detail=tdetail)
         # A dead watcher under a quiet transcript is a real dead lane; a dead
@@ -6882,7 +6885,8 @@ def cmd_limit(a, board):
         msg = "%s is back (limit cleared)" % owner
     else:
         limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
-        mutate = lambda rec: rec.update({"limit": limit})
+        limit["reset_at"] = _provider_reset_at(limit["until"] or limit["note"], limit["at"])
+        mutate = lambda rec: rec.update({"limit": limit, "expired_limit": None, "limit_expired_reason": ""})
         msg = "%s hit a usage limit%s%s" % (owner, (" until %s" % a.until) if a.until else "",
                                             (": %s" % a.note) if a.note else "")
     # Read-modify-write under the lock: a watch-loop heartbeat lands on this
@@ -6900,13 +6904,18 @@ def cmd_limits(a, board):
     """Who is limited: manual records + silence + a scan of local tool logs."""
     print("Recorded limits:")
     any_ = False
-    for r in load_agents(board):
-        lim = r.get("limit")
+    records = load_agents(board)
+    records.sort(key=lambda r: _route_headroom()._stamp(
+        (r.get("limit") or r.get("expired_limit") or {}).get("at")) or datetime.min.replace(tzinfo=timezone.utc))
+    for r in records:
+        lim = r.get("limit") or r.get("expired_limit")
         if lim:
             any_ = True
-            print("  %-14s hit %s ago%s%s" % (r["owner"], fmt_hours(hours_since(lim["at"])),
+            expired, _, reason = _route_headroom().limit_expiry(lim)
+            print("  %-14s hit %s ago%s%s%s" % (r["owner"], fmt_hours(hours_since(lim.get("at", ""))),
                                              (", back %s" % lim["until"]) if lim.get("until") else "",
-                                             (" -- %s" % lim["note"]) if lim.get("note") else ""))
+                                             (" -- %s" % lim["note"]) if lim.get("note") else "",
+                                             (" [STALE: %s; no longer blocks]" % reason) if expired else ""))
     if not any_:
         print("  none (agents record one with `atm limit --until \"...\"`)")
     print("")
@@ -8243,7 +8252,11 @@ def _health_body(board, tickets):
                     t["id"], ",".join(missing)),
                     "atm join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
     for r in load_agents(board):
-        if r.get("limit"):
+        warning = _stale_limit_warning(board, r)
+        if warning:
+            out.append(("WARN", warning, "atm pending --agent %s" % r["owner"]))
+            continue
+        if _route_headroom().seat_limit(r):
             held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
             out.append(("WARN", "%s hit a usage limit %s ago%s%s" % (
                 r["owner"], fmt_hours(hours_since(r["limit"]["at"])),
@@ -8267,7 +8280,7 @@ def _health_body(board, tickets):
             continue
         rec = agents_by.get(who) or {}
         reason = ""
-        if rec.get("limit"):
+        if _route_headroom().seat_limit(rec):
             reason = "limited"
         elif not rec.get("seen"):
             reason = "no heartbeat"
@@ -12531,48 +12544,37 @@ def cmd_remote(a, board):
 
 
 def _provider_reset_at(text, observed_at):
-    """Normalize only explicit, unambiguous provider reset times.
+    return _route_headroom().provider_reset_at(text, observed_at)
 
-    Bare clock times without a timezone remain display-only. Resolve a daily
-    clock against detection time once, never against each subsequent poll.
-    """
-    from datetime import timedelta
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-    value = (text or "").strip()
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if stamp.tzinfo is not None:
-            return stamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except ValueError:
-        pass
-    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^()]+)\)", value, re.I)
-    if not match:
+
+def _stale_limit_warning(board, rec):
+    lim = rec.get("limit") or rec.get("expired_limit")
+    if not lim:
         return ""
-    hour, minute, meridiem, zone = match.groups()
-    if not 1 <= int(hour) <= 12 or not 0 <= int(minute or 0) < 60:
+    expired, deadline, reason = _route_headroom().limit_expiry(lim)
+    started = _route_headroom()._stamp(_read_run(board, rec["owner"]).get("started"))
+    if not expired or (started and started > deadline):
         return ""
-    try:
-        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(ZoneInfo(zone))
-    except (ValueError, ZoneInfoNotFoundError):
-        return ""
-    reset = observed.replace(hour=int(hour) % 12 + (12 if meridiem.lower() == "pm" else 0),
-                             minute=int(minute or 0), second=0, microsecond=0)
-    if reset <= observed:
-        reset += timedelta(days=1)
-    return reset.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return "%s stale usage limit no longer blocks: %s; check seat resumed" % (rec["owner"], reason)
+
+
+def _seat_limit_expired_at(rec):
+    # Read-only snapshots must suppress the same old rejection as mutating reads.
+    lim = rec.get("limit")
+    if lim:
+        expired, deadline, _ = _route_headroom().limit_expiry(lim)
+        if expired:
+            return deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return rec.get("limit_expired_at") or ""
 
 
 def _active_seat_limit(board, owner, rec=None):
-    """Expire observed limits atomically; unknown resets require explicit clear."""
+    """Expire limits atomically using the shared bounded retry policy."""
     rec = rec if rec is not None else (_agent_rec(board, owner) or {})
     lim = rec.get("limit")
-    if not lim or not lim.get("reset_at"):
-        return lim
-    try:
-        reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-        expired = reset.tzinfo is not None and reset <= datetime.now(timezone.utc)
-    except (ValueError, TypeError):
-        expired = False
+    if not lim:
+        return None
+    expired, deadline, reason = _route_headroom().limit_expiry(lim)
     if not expired:
         return lim
     if getattr(_WATCH_TABLE, "read_only", False):
@@ -12581,7 +12583,9 @@ def _active_seat_limit(board, owner, rec=None):
         if current.get("limit") != lim:
             return False
         current.pop("limit", None)
-        current["limit_expired_at"] = lim["reset_at"]
+        current["limit_expired_at"] = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+        current["limit_expired_reason"] = reason
+        current["expired_limit"] = lim
         # A quota failure must not keep the same trigger exhausted after reset.
         current.pop("adapter_failure", None)
     current = _agent_update(board, owner, clear)
@@ -12620,20 +12624,23 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
     if match:
         until = match.group(1).strip()
     observed = now()
+    _active_seat_limit(board, owner)
     lim = {"at": observed, "until": until, "note": note[:400],
            "source": "provider", "harness": harness,
-           "reset_at": _provider_reset_at(until, observed)}
+           "reset_at": _provider_reset_at(note, observed)}
     def record(rec):
         if rec.get("limit"):
             return False
         rec["limit"] = lim
         rec.pop("limit_expired_at", None)
+        rec.pop("limit_expired_reason", None)
+        rec.pop("expired_limit", None)
     if _agent_update(board, owner, record) is None:
         return
     reason = "LIMITED: %s; %s. Automatic retrigger paused %s." % (
         owner, lim["note"],
         ("until " + lim["reset_at"]) if lim["reset_at"] else
-        ("(provider reset %s; explicit limit clear required)" % (until or "unknown")))
+        ("(provider reset %s; bounded retry window applies)" % (until or "unknown")))
     # Scan actual held claims; a run's stale binding must never annotate work
     # already transferred to a different seat.
     from contextlib import nullcontext
@@ -20944,7 +20951,7 @@ def _feedback_seat_counts(board):
 
     agent_liveness() scans the process table (`ps`, sometimes `lsof`) and
     clears expired limits by rewriting the agent file, so feedback cannot
-    use it. LIMITED is a recorded limit that has not reached its reset_at;
+    use it. LIMITED is a recorded limit whose shared expiry policy is active;
     "stalled" is a seat whose recorded watcher pid (agents/<seat>.watch.pid)
     is no longer running -- a signal-0 probe, not a process scan.
     """
@@ -20955,19 +20962,9 @@ def _feedback_seat_counts(board):
         if not owner:
             continue
         lim = rec.get("limit")
-        if lim:
-            active = True
-            if lim.get("reset_at"):
-                try:
-                    reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-                    if reset.tzinfo is None:
-                        reset = reset.replace(tzinfo=timezone.utc)  # naive stamps are UTC
-                    active = reset > now_utc
-                except (ValueError, TypeError):
-                    pass
-            if active:
-                limited += 1
-                continue
+        if lim and _route_headroom().seat_limit(rec, now_utc):
+            limited += 1
+            continue
         try:
             with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
                 pid = int((f.read() or "0").strip() or 0)
