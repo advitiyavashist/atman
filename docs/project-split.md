@@ -33,6 +33,36 @@ wrote, compares the whole manifest against the dry run's, and only then
 renames the boards into place. A refusal at any point leaves the shared board
 exactly as it was.
 
+## What the frozen archive still allows
+
+The archive stays readable forever and takes no new records. "Takes no new
+records" is enforced per *invocation*, not per command name, because a command
+name is not the unit that decides whether something writes. Four different
+shapes got through a name-only check while this was being built, and each one
+is now refused:
+
+| shape | example | what it would have done |
+|---|---|---|
+| sub-command | `atm trajectories backfill` | synthesised events into the archive's own append-only log |
+| sub-command + path | `atm trajectories export --out <board>/agents/<seat>.json` | replaced a seat record outright |
+| flag | `atm plan-status --write-master` | wrote a Plan section into the archive's `MASTER.md` |
+| dispatch order | `atm board-mark-primary` | wrote `.primary`, making the archive **win** board resolution and route every seat back onto it |
+
+The last one never reaches the refusal at all: it is dispatched before
+`board_dir()` so it can repair board resolution on a board resolution itself
+refuses, so it is guarded at the command. `atm board-archive-shadow` is left
+alone deliberately — it takes an explicit operator-named path.
+
+`atm trajectories export` stays allowed when `--out` points *outside* the
+board: an archive you cannot read data out of is not an archive. `atm project`
+stays allowed whole, writing forms included, because `atm project split --undo
+--apply` has to run on the board it is undoing.
+
+`tests/test_t1118_project_split.py` pins the whole command-line surface the
+allow-list exposes — every flag and sub-command of every allow-listed command,
+compared against `--help` — so a flag added later to a read-only command fails
+the test until somebody decides whether it writes.
+
 ## Why the manifest has no timestamp
 
 The manifest is deterministic: given the same source bytes and the same plan
