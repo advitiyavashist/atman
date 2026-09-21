@@ -490,10 +490,12 @@ def test_post_lead_is_operator_only_and_recorded(env):
     srv2 = env.serve(operator="")
     st, out = srv2.post("/api/v1/lead", {"seat": "planner"})
     assert st == 400 and "operator" in out["error"]
-    # a harness-run seat is never the operator
-    srv3 = env.serve(operator="coder")
-    st, out = srv3.post("/api/v1/lead", {"seat": "planner"})
-    assert st == 400 and "harness-run seat" in out["error"]
+    # a harness-run seat is never the operator: `atm ui` refuses it at launch
+    # (T-1104), and the API's own check refuses it too
+    r = cli(env, env.demo, "ui", "--port", "0", "--operator", "coder")
+    assert r.returncode != 0 and "harness-run seat" in (r.stderr + r.stdout)
+    name, why = env.tk.ui_operator(str(env.demo), "coder")
+    assert name == "" and "harness-run seat" in why
 
 
 def test_lead_cli_set_show_clear(env):

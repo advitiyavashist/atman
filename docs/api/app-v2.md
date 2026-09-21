@@ -9,12 +9,12 @@ The embedded `atm ui` page (`/`, `/board.json`, `POST /msg`, `POST /auth-reconne
 ## Running it
 
 ```sh
-atm ui                                                # http://127.0.0.1:8765, bundle at /app/
-atm ui --dev-origin http://localhost:5173             # also allow the app's dev server
-atm ui --app-dir path/to/dist                         # serve a bundle from somewhere else
+atm ui --operator <name>                              # http://127.0.0.1:8765, bundle at /app/
+atm ui --operator <name> --dev-origin http://localhost:5173   # also allow the app's dev server
+atm ui --operator <name> --app-dir path/to/dist       # serve a bundle from somewhere else
 ```
 
-- **`atm ui` has no `--operator` flag on main today.** T-1104 (#265) adds it and is still open. With no operator the API is read-only: `operator` is `""`, `operator_note` says how to set one, and `POST /api/v1/lead` answers 400 ("set an operator"). The API reads the flag through `getattr`, so the flag is all that is missing.
+- `--operator` names the person using the app (T-1104). The name needs an `agents/<name>.json` on the board and must not be a harness-run seat. `atm join <name>` with no `--harness` registers a person. With no operator the API is read-only: `operator` is `""`, `operator_note` says how to set one, and `POST /api/v1/lead` answers 400 ("set an operator").
 - `--dev-origin` may be repeated. Each value must be a loopback `http(s)://host:port` origin. Anything else makes `atm ui` exit.
 - `--app-dir` defaults to `ui/dist` next to `tickets.py`. The bundle is served at `/app/`.
 
@@ -58,13 +58,13 @@ Every `GET` is read-only. It starts no subprocess (no `ps`, no `git`), opens not
 | `GET /api/v1/ticket/{id}?project=&all=1` | `ticket.json` | The drill-down: runs with tokens or `unknown`, usage with age, the full review head, structured verdicts, handoff, messages `re=<id>` (newest 50, with `messages_total`), steers, commit / branch / PR, and a copyable `diff_cmd`. No git runs. `{id}` must match `T-<digits>` (400 otherwise). A missing ticket is 404. |
 | `GET /api/v1/lead?project=` | `lead.json` | Who the operator talks to. With no lead there is a `picker`: every registered seat with its harness and its capability line from the steer table. It never falls back to master or CoS. With a lead there is a `status`: liveness, running ticket and elapsed time, last output, limit, auth, usage with age, reachability, capability, and `cannot_answer`. |
 | `GET /api/v1/needs-you?project=` | `needs-you.json` | Asks waiting on the operator: direct messages with no reply since, prose DECIDEs, `@owner` / `@<operator>` mentions, `stuck:` posts older than an hour, and escalated automated nodes. Every item is `state: "asked"` and `label: "asked (unstructured)"`. Prose is never a ruling. |
-| `POST /api/v1/lead` | request `lead-request.json`, response `lead-response.json` | `{seat, project?}`. Needs the operator, the token and an allowed or absent Origin. The seat must be registered on that board and must not be the operator. The route writes `master.json.lead` and a `MASTER.md` line. It is the same as `atm lead set <seat>` (spec §9, decision 2). **Picking a lead also changes how that seat runs:** unless `workforce.json` sets `lifecycle` or `wake_mode` for it, the lead becomes `persistent` and `continuous`, as the master and CoS are (`lifecycle_of` / `wake_mode_of`). A master or CoS change keeps the lead. It needs an operator, so it answers 400 until #265 adds `--operator`. |
+| `POST /api/v1/lead` | request `lead-request.json`, response `lead-response.json` | `{seat, project?}`. Needs the operator, the token and an allowed or absent Origin. The seat must be registered on that board and must not be the operator. The route writes `master.json.lead` and a `MASTER.md` line. It is the same as `atm lead set <seat>` (spec §9, decision 2). **Picking a lead also changes how that seat runs:** unless `workforce.json` sets `lifecycle` or `wake_mode` for it, the lead becomes `persistent` and `continuous`, as the master and CoS are (`lifecycle_of` / `wake_mode_of`). A master or CoS change keeps the lead. With no operator configured it answers 400. |
 | `OPTIONS /api/v1/*` | — | The CORS preflight: 204 for an allowed origin, 403 otherwise. Allowed headers are `Content-Type`, `X-Atman-Token` and `X-Atman-Client`. |
 | `GET /app/`, `GET /app/<path>` | the bundle | Static files from `--app-dir`. `index.html` gets the token meta tag. A client-side route (a path without an extension) gets `index.html`. Paths cannot leave the bundle directory. With no bundle, the route returns 404 JSON with a hint. |
 
 Any non-2xx answer is a JSON object with an `error` string (`error.json`).
 
-**Not in this API:** posting a message. The app posts through `POST /msg`, the embedded composer's route. It takes the same wake path as `atm msg` (T-1106, merged). Its sender is still the payload's `from`, which must name a registered agent; T-1104 (#265) is the change that makes it post as the operator only, with `via: ui-operator`, and it has not merged. There is also no accept, reject, merge, done, claim, assign, dispatch, spawn or objective-set route, in any phase (spec §6). The app shows the copyable command instead.
+**Not in this API:** posting a message. The app posts through `POST /msg`, the embedded composer's route. It posts as the configured operator only, never as the payload's `from` (T-1104): a `from` naming anyone else is refused, and the record carries `via: "ui-operator"` and `sender_kind: "operator"`. It takes the same wake path as `atm msg`, `deliver_wakes` (T-1106). There is also no accept, reject, merge, done, claim, assign, dispatch, spawn or objective-set route, in any phase (spec §6). The app shows the copyable command instead.
 
 ## Invariants the contract encodes
 
