@@ -37,9 +37,9 @@ exactly as it was.
 
 The archive stays readable forever and takes no new records. "Takes no new
 records" is enforced per *invocation*, not per command name, because a command
-name is not the unit that decides whether something writes. Four different
-shapes got through a name-only check while this was being built, and each one
-is now refused:
+name is not the unit that decides whether something writes. **Six** different
+shapes got past a name-only check while this was being built -- four found by
+the author, two by the independent reviewer -- and each one is now refused:
 
 | shape | example | what it would have done |
 |---|---|---|
@@ -50,15 +50,19 @@ is now refused:
 | entry point | the packaged `atm` (`ticket_board.cli:main`) | every write, from `note` to `clear`, on the CLI a pip install provides |
 | report path | `atm project split --propose --out <board>/T-100.json` | replaced that ticket with the plan, exit 0, printing "nothing was written to the board" |
 
-The last one never reaches the refusal at all: it is dispatched before
-`board_dir()` so it can repair board resolution on a board resolution itself
-refuses, so it is guarded at the command. `atm board-archive-shadow` is left
-alone deliberately — it takes an explicit operator-named path.
+`atm board-mark-primary` never reaches the refusal at all: it is dispatched
+before `board_dir()` so it can repair board resolution on a board resolution
+itself refuses, so it is guarded at the command instead. `atm
+board-archive-shadow` is left alone deliberately — it takes an explicit
+operator-named path.
 
-`atm trajectories export` stays allowed when `--out` points *outside* the
-board: an archive you cannot read data out of is not an archive. `atm project`
-stays allowed whole, writing forms included, because `atm project split --undo
---apply` has to run on the board it is undoing.
+Two commands stay allowed with a condition rather than outright, and the
+condition is the same one in both cases: a path the operator names must not
+resolve inside the board. `atm trajectories export` is allowed when `--out`
+points *outside* the board, because an archive you cannot read data out of is
+not an archive. `atm project` is allowed in every form, writing ones included,
+because `atm project split --undo --apply` has to run on the board it is
+undoing — except when its `--out` or `--manifest-out` points back inside it.
 
 The fifth is not a command at all. `pyproject.toml` maps **both** console
 scripts — `atm` and `tickets` — to `ticket_board.cli:main`, a second
@@ -103,8 +107,9 @@ The refusal is pinned in the parity matrix so the next person makes that
 decision rather than inheriting it.
 
 The sixth shape was found by this ticket's independent reviewer, in the one
-command the allow-list waves through whole. `project` is allowed entire because
-`--undo --apply` has to run on the board it is undoing — but `--out` and
+command the allow-list used to wave through whole. `project` was allowed
+entire because `--undo --apply` has to run on the board it is undoing — but
+`--out` and
 `--manifest-out` are operator-named paths, exactly like `trajectories export
 --out`, and nothing checked them. Pointed at a ticket on the archive,
 `--propose --out` wrote the plan over it and the ticket's own `id` disappeared.
