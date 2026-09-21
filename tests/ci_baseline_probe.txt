@@ -1,0 +1,8 @@
+Throwaway marker for T-1118.
+
+This branch is origin/main d311de5 plus this file. It exists only to get a
+SECOND CI sample of main.s own code: tests/test_t686_auth_v2_probes.py
+failed in three PR runs and in zero of the one main run, and one sample
+cannot tell a PR-caused failure from a CI-environment failure. The
+workflow is path-filtered, so an empty commit would not trigger it.
+Delete this branch once the run has been read.
