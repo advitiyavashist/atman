@@ -1408,6 +1408,36 @@ def test_merge_back_loses_no_log_line_and_still_dedups_by_id(shared, homes):
     assert [r.get("kind") for r in rows] == ["update"], rows
 
 
+def test_merge_back_ignores_deletions_because_the_archive_is_the_original(shared, homes):
+    """Deleting a copy on a project board cannot delete anything shared.
+
+    The other half of "nothing is lost", and the half that is easy to assume:
+    merge-back only ever *appends* and *copies newer forward*, so a log or a
+    ticket deleted on a project board is ignored, and the shared board keeps
+    its own copy -- which is the original, not a replica of the project's. The
+    drift count still reports the change, so the operator is not told the
+    board was untouched.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    atman = Path(homes["atman"])
+    msgs_before = (shared / "messages.jsonl").read_bytes()
+    tickets_before = sorted(p.name for p in shared.glob("T-*.json"))
+
+    (atman / "messages.jsonl").unlink()
+    victim = sorted(atman.glob("T-*.json"))[0].name
+    (atman / victim).unlink()
+
+    out = _atm(shared, "project", "split", "--undo",
+               str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
+               agent="ann", timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert "2 changed since the split" in out.stdout, out.stdout
+    assert (shared / "messages.jsonl").read_bytes() == msgs_before
+    assert (shared / victim).exists()
+    assert sorted(p.name for p in shared.glob("T-*.json")) == tickets_before
+
+
 def test_undo_merge_back_names_what_it_leaves_behind(shared, homes):
     """An epic created after the split is not folded -- and must be reported.
 

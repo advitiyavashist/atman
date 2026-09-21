@@ -249,6 +249,13 @@ NOT merged back (kept on the set-aside board, nothing deleted):
   atman            2 file(s): epics/E-002.json, sprints/S-01.json
 ```
 
+**Deletions on a project board are ignored, and that is the safe direction.**
+merge-back only appends and copies newer forward, so a log or a ticket deleted
+on a project board changes nothing on the shared board — the shared board holds
+the original, not a replica. The drift line still reports it (`2 changed since
+the split`), so nobody is told the board was untouched. Measured, with the
+whole file and the whole ticket set compared afterwards.
+
 Epics and sprints are not folded *by id* on purpose, and the reason is
 concrete: only `T-` ids get a per-project floor, so a project board minting a
 new epic can land on an `E-` id the shared board already uses for a different
