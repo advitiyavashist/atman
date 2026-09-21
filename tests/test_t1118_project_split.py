@@ -617,10 +617,12 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
     probe = subprocess.run(
         [sys.executable, "-c",
          "import json,sys; sys.path.insert(0, %r); import tickets; "
-         "print(json.dumps(sorted(tickets.SPLIT_READ_ONLY_CMDS)))" % str(ROOT)],
+         "print(json.dumps({k: (sorted(v) if v else None) for k, v in "
+         "tickets.SPLIT_READ_ONLY_CMDS.items()}))" % str(ROOT)],
         capture_output=True, text=True, cwd=str(ROOT))
     assert probe.returncode == 0, probe.stderr
-    allow_listed = set(json.loads(probe.stdout))
+    allow_list = json.loads(probe.stdout)
+    allow_listed = set(allow_list)
 
     # `project` is on the list on purpose and is the one entry that may write:
     # `atm project split --undo --apply` has to be able to run on the board it
@@ -651,6 +653,29 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
         "the allow-list and this test disagree; a name was allowed without "
         "being checked: %s" % sorted(set(invocations) ^ allow_listed))
 
+    # A command name is not the unit of "reads": `atm trajectories` reads and
+    # `atm trajectories backfill` writes. Every allow-listed sub-command is
+    # run too, or the name-only check would wave the writing one through --
+    # which is exactly what it did until this test grew this loop.
+    for cmd, reading in sorted(allow_list.items()):
+        if reading is not None:
+            invocations.update({"%s %s" % (cmd, sub): [cmd, sub]
+                                for sub in reading if sub != "list"})
+    invocations["trajectories export"] = [
+        "trajectories", "export", "--out", str(Path(homes["atman"]).parent
+                                               / "traj-export.jsonl")]
+    invocations["traj export"] = invocations["trajectories export"]
+
+    # Give one archived ticket the timestamps a real board carries. Without
+    # them `backfill` has nothing to synthesise, writes 0 events, and the
+    # check below would pass for the wrong reason -- it would prove only that
+    # backfill is refused, never that being allowed would have cost anything.
+    archived = json.loads((shared / "T-101.json").read_text())
+    archived.update(claimed_at="2026-09-02T00:00:00Z",
+                    review_at="2026-09-03T00:00:00Z",
+                    done_at="2026-09-04T00:00:00Z")
+    (shared / "T-101.json").write_text(json.dumps(archived, indent=2) + "\n")
+
     before = _tree(shared)
     for cmd, args in sorted(invocations.items()):
         _atm(shared, *args, timeout=8)
@@ -658,6 +683,22 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
         assert after == before, "%s wrote to the frozen board: %s" % (
             cmd, sorted(set(after) ^ set(before))
             or [k for k in before if after.get(k) != before[k]])
+
+    # and the sub-command that writes is refused, with the archive's wording
+    out = _atm(shared, "trajectories", "backfill", agent="ann")
+    assert out.returncode != 0
+    assert "REFUSING WRITE" in out.stderr
+    assert _tree(shared) == before
+
+    # ...and that refusal is load-bearing: the same board, unfrozen, is what
+    # backfill would have written into.
+    (shared / ps.SPLIT_MARKER).rename(shared.parent / "split-aside")
+    out = _atm(shared, "trajectories", "backfill", agent="ann")
+    assert out.returncode == 0, out.stderr
+    assert _tree(shared) != before, (
+        "backfill wrote nothing even unfrozen, so the refusal above proves "
+        "nothing: %s" % out.stdout)
+    (shared.parent / "split-aside").rename(shared / ps.SPLIT_MARKER)
 
 
 # --------------------------------------------------------------------------

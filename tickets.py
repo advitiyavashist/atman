@@ -8650,11 +8650,45 @@ def split_marker(board):
 # board. The list is an allow-list on purpose: missing a read here costs an
 # operator one confusing refusal, while missing a *write* would strand real
 # records on a board nothing reads again -- the T-959 failure, at board scale.
-SPLIT_READ_ONLY_CMDS = frozenset((
-    "board", "show", "list", "where", "dash", "map", "graph", "guide",
-    "limits", "context", "who", "mine", "trajectories", "traj", "turns",
-    "plan-status", "util", "project", "self", "doctor",
-))
+#
+# The value is the sub-commands that read; None means every form of the
+# command reads. Keying on the command name alone is not enough: `atm
+# trajectories` reads, but `atm trajectories backfill` writes synthesised
+# events into the board's own log, and a name-only check would wave it
+# through. `export` stays allowed because it reads the board and writes to a
+# path the operator names elsewhere -- getting data *out* of the archive is
+# the point of keeping it readable.
+#
+# `project` is allowed whole, including its writing forms, because `atm
+# project split --undo --apply` has to be able to run on the board it is
+# undoing; a second `--apply` is refused by the engine itself, not here.
+SPLIT_READ_ONLY_CMDS = {
+    "board": None, "show": None, "list": None, "where": None, "dash": None,
+    "map": None, "graph": None, "guide": None, "limits": None,
+    "context": None, "who": None, "mine": None, "turns": None,
+    "plan-status": None, "util": None, "project": None, "self": None,
+    "doctor": None,
+    "trajectories": frozenset(("list", "export")),
+    "traj": frozenset(("list", "export")),
+}
+
+# Where each sub-command-bearing entry keeps its sub-command, and what
+# argparse leaves there when the operator gave none.
+SPLIT_SUBCMD_ATTR = {
+    "trajectories": ("traj_cmd", "list"),
+    "traj": ("traj_cmd", "list"),
+}
+
+
+def _split_cmd_only_reads(a):
+    """True when this exact invocation may run on a frozen shared board."""
+    if a.cmd not in SPLIT_READ_ONLY_CMDS:
+        return False
+    reading = SPLIT_READ_ONLY_CMDS[a.cmd]
+    if reading is None:
+        return True
+    attr, default = SPLIT_SUBCMD_ATTR[a.cmd]
+    return (getattr(a, attr, default) or default) in reading
 
 
 def _split_board_refusal(board, marker, cmd, seat=""):
@@ -23693,7 +23727,7 @@ def main():
     # A board that has been split is the frozen archive: it stays readable
     # forever, but a session still pointed at it must not write there. Same
     # shape as the T-959 shadow-board refusal, and it names where to go.
-    if a.cmd not in SPLIT_READ_ONLY_CMDS:
+    if not _split_cmd_only_reads(a):
         marker = _safe(lambda: split_marker(board), {})
         if marker:
             _split_board_refusal(board, marker, a.cmd,
