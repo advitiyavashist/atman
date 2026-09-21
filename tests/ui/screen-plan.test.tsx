@@ -15,6 +15,14 @@ import { fakeApi } from "./support/fake";
 import { subFixture } from "./support/schema";
 
 const NODE = "/properties/nodes/items";
+/** Whatever the API's dep sentence says today; the app must not care. */
+const DEP_OPEN_TEXT = "dep T-3 still claimed";
+/**
+ * `status_label` is the server's word too (it reads "IN PROGRESS" on a live
+ * board today). The tests assert the screen shows whatever arrives, so the
+ * string lives here once rather than being spelled out in an assertion.
+ */
+const RUNNING_LABEL = "in flight";
 
 function node(over: Partial<PlanNode>): PlanNode {
   return subFixture<PlanNode>("plan.json", NODE, over as never);
@@ -65,7 +73,10 @@ const WAITS_ON_OPEN = node({
   deps: ["T-3"],
   reserved_for: "rev",
   blockers: [
-    { kind: "dep_open", on: "T-3", text: "dep T-3 still in flight", cmd: "atm show T-3" },
+    // The status word here is the server's and has changed once already, so
+    // the assertions below read it back from the fixture instead of spelling
+    // it out. DEP_OPEN_TEXT is the only place it appears.
+    { kind: "dep_open", on: "T-3", text: DEP_OPEN_TEXT, cmd: "atm show T-3" },
     { kind: "seat_limited", on: "rev", text: "seat rev limited until 17:40", cmd: "atm harness usage" },
   ],
 });
@@ -74,7 +85,7 @@ const RUNNING = node({
   id: "T-3",
   title: "In flight",
   status: "claimed",
-  status_label: "in flight",
+  status_label: RUNNING_LABEL,
   phase: "working",
   owner: "coder",
   running: { seat: "coder", elapsed_s: 840 },
@@ -122,7 +133,7 @@ describe("the execution plan", () => {
     render(<App api={api} />);
     await waitFor(() => expect(screen.getAllByTestId("plan-step")).toHaveLength(6));
     expect(step("T-3")).toHaveTextContent("coder@alpha");
-    expect(step("T-3")).toHaveTextContent("in flight");
+    expect(step("T-3")).toHaveTextContent(RUNNING_LABEL);
     expect(step("T-4")).toHaveTextContent("reserved for rev@alpha");
   });
 
@@ -209,8 +220,26 @@ describe("the execution plan", () => {
 
     const open = within(step("T-4")).getByTestId("blockers");
     expect(open).toHaveTextContent("dependency still open");
-    expect(open).toHaveTextContent("dep T-3 still in flight");
+    expect(open).toHaveTextContent(DEP_OPEN_TEXT);
     expect(open.textContent).not.toContain("dependency not accepted");
+  });
+
+  it("renders a dependency sentence it has never seen before, unchanged", async () => {
+    const odd = node({
+      id: "T-9",
+      title: "Waits on a dep in a state this app does not know",
+      status: "open",
+      status_label: "open",
+      deps: ["T-7"],
+      blockers: [{ kind: "dep_open", on: "T-7", text: "dep T-7 still frobnicating", cmd: "atm show T-7" }],
+    });
+    const { api } = fakeApi({ plan: { ...PLAN, nodes: [odd], layers: [["T-9"]], order: ["T-9"] } });
+    render(<App api={api} />);
+    const s = await waitFor(() => step("T-9"));
+    expect(s).toHaveTextContent("dep T-7 still frobnicating");
+    // The app's own word for the kind is still beside it, from the closed enum.
+    expect(s).toHaveTextContent("dependency still open");
+    expect(s).toHaveTextContent("atm show T-7");
   });
 
   it("shows a limited seat, an offline seat and an auth blocker with their commands", async () => {

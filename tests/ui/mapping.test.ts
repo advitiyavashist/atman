@@ -48,7 +48,7 @@ describe("blocker chips", () => {
       defFixture<Blocker>("blocker", { kind: "dep_unaccepted", on: "T-2", text: "dep T-2 done, not accepted", cmd: "atm accept T-2 --sha <review head>" }),
     );
     const open = blockerChip(
-      defFixture<Blocker>("blocker", { kind: "dep_open", on: "T-3", text: "dep T-3 still in flight", cmd: "atm show T-3" }),
+      defFixture<Blocker>("blocker", { kind: "dep_open", on: "T-3", text: "dep T-3 still claimed", cmd: "atm show T-3" }),
     );
     expect(unaccepted.label).toBe("dependency not accepted");
     expect(open.label).toBe("dependency still open");
@@ -69,6 +69,25 @@ describe("blocker chips", () => {
       defFixture<Blocker>("blocker", { kind: "seat_limited", on: "rev", text: "seat rev limited until 17:40" }),
     );
     expect(chip.text).toBe("seat rev limited until 17:40");
+  });
+
+  it("passes the dependency sentence through verbatim, whatever the status word is", () => {
+    // The API composes this sentence from the dep's own status word, and that
+    // word has already changed once (`still in flight` -> `still claimed`).
+    // The app must never match on the phrase or rebuild it: the chip's word
+    // comes from the closed `kind` enum, the sentence comes from the record.
+    for (const text of [
+      "dep T-3 still claimed",
+      "dep T-3 still in flight",
+      "dep T-7 still review",
+      "dep T-9 still some-word-this-app-has-never-seen",
+      "dep T-42 is not on this board",
+    ]) {
+      const chip = blockerChip(defFixture<Blocker>("blocker", { kind: "dep_open", on: "T-3", text }));
+      expect(chip.text).toBe(text);
+      expect(chip.label).toBe("dependency still open");
+      expect(blockerDetail(chip)).toBe(text);
+    }
   });
 
   it("shows an unknown kind as itself rather than dropping it", () => {
@@ -347,7 +366,7 @@ describe("a step says its state once", () => {
     const n = node({
       id: "T-4",
       blockers: [
-        { kind: "dep_open", on: "T-3", text: "dep T-3 still in flight", cmd: "atm show T-3" },
+        { kind: "dep_open", on: "T-3", text: "dep T-3 still claimed", cmd: "atm show T-3" },
         { kind: "seat_limited", on: "rev", text: "seat rev limited until 17:40", cmd: "atm harness usage" },
         { kind: "unaccepted", on: "T-4", text: "done, not accepted", cmd: "atm accept T-4" },
       ],

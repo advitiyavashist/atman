@@ -74,7 +74,7 @@ describe("POST /api/v1/lead", () => {
   });
 
   it("passes the server's refusal through, word for word", async () => {
-    // What the route answers today, because --operator does not exist yet.
+    // What the route answers when atm ui was started without --operator.
     const { api } = apiWith(() => ({
       status: 400,
       body: { ok: false, error: "only the operator picks the lead: set an operator: atm ui --operator <name>" },

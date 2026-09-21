@@ -51,8 +51,10 @@ are looking at can be reloaded or handed to someone else.
 - When the lead cannot answer — limited, logged out, at quota, no live
   session — a plain line says so, with the command that fixes it, and says your
   message still lands on the board.
-- The composer posts **as the operator**. Until `atm ui --operator <name>`
-  exists (T-1104, #265), no operator is configured: the app says *read-only: no
+- The composer posts **as the operator** — the name `atm ui --operator <name>`
+  was started with. The server sets `from` itself, records `via: ui-operator`,
+  and wakes the recipient the same way `atm msg` does; the app never offers to
+  post as a seat. Started without an operator, the app says *read-only: no
   operator configured* and shows the exact command instead of a Send button
   that could only fail.
 - On a project with no lead picked, you get a **picker** of every registered
@@ -99,11 +101,11 @@ ruling. Answering happens in the chat.
 
 **Fleet** — this project's seats: state, harness, lifecycle, wake mode,
 reachability, limit, auth, with the recovery command where there is one. The
-screen says in so many words that **the harness column is not a record**: this
-route still fills the field in for a seat with no workforce entry, so an
-unrecorded harness can appear here as a provider name, and the app has no way
-to tell the two apart (T-1106 / #267 is the fix). The chat's per-post badge is
-the honest one.
+screen says what the harness column is: **each seat's value now** — its
+workforce entry, or the provider of a live session — with `unknown` for a seat
+that has none recorded (since #267 the route no longer invents one). It is not
+a stamp on a run or a post, so for what a seat was running when it wrote
+something, the chat's per-post badge is the one to read.
 
 **Runs** — seat runs grouped by ticket, with elapsed time and token counts, and
 `unknown` wherever a count was never recorded.
@@ -201,8 +203,10 @@ the top of this file, against a throwaway board.
 
 ## Known limits
 
-- **No operator until #265.** `atm ui --operator <name>` does not exist yet, so
-  posting is off and the app says so. The read screens are all live.
+- **Posting needs an operator, by design.** Started without
+  `--operator <name>`, the app is read-only and says so; the read screens are
+  all live either way. The name must have `agents/<name>.json` on the board and
+  must not be a harness-run seat — the app posts as a person, never as a seat.
 - **`agent_map` rows are not contract.** `board.json` types only
   `agent_map.groups`, so the Runs screen treats every field of a row as
   possibly absent. One field bit: a run's `verdict` is `{kind, sha}` there and a
@@ -213,12 +217,11 @@ the top of this file, against a throwaway board.
   shell checks a list's shape before walking it. `tests/ui/blanking.test.tsx`
   holds the shapes that used to do it: a `nodes` that is not a list, a snapshot
   with no `agents`, and a throw in the shell above every column boundary.
-- **`agents[].harness` still carries the snapshot's default, so Fleet does not
-  vouch for it.** A seat with no workforce entry arrives already wearing a
-  provider's name and there is no "was it recorded" flag on this route, so the
-  screen says that in the caption rather than dressing the value up. T-1106
-  (#267) fixes the default; `post.harness.recorded` already makes the chat's
-  badge honest.
+- **`agents[].harness` is current, not historical.** Since #267 it reads
+  `unknown` for a seat with nothing recorded, so the column is honest — but it
+  is still the seat's value *now*, with no "as of when" on this route. The
+  caption says so, and `post.harness.recorded` is what makes the chat's badge a
+  statement about the past.
 - **The plan is a list, not a graph.** Layers and dependency order come from
   the API and read top-down. The graph and column layouts are a later phase.
 - **The thread polls.** Every read refreshes on a timer; there is no event

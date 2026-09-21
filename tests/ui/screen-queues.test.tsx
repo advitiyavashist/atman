@@ -164,36 +164,35 @@ describe("fleet", () => {
     render(<App api={api} />);
     await user.click(await screen.findByRole("button", { name: /Fleet/ }));
     const seats = await screen.findByTestId("seats");
-    // BOARD's second seat carries "unknown" — but note that the live server
-    // does NOT return "unknown" here for a seat with no workforce entry: this
-    // route still defaults the field, so an unrecorded seat arrives wearing a
-    // provider name (T-1106 / #267 is the fix). That is why the next test
-    // exists: on this screen the app cannot tell the two apart, so it must not
-    // vouch for the column at all.
+    // Since #267 the route reports "unknown" for a seat with no workforce
+    // entry, which is what BOARD's second seat carries and what the live
+    // server now returns — verified against a real board, not assumed.
     expect(within(seats).getAllByText("unknown").length).toBeGreaterThan(0);
   });
 
-  it("does not vouch for the harness column, because this route still defaults it", async () => {
+  it("says the harness column is the seat's value now, not a stamp on a run or a post", async () => {
     const user = userEvent.setup();
-    // What the live API actually returns for two seats with no workforce entry
-    // at all: a provider name, indistinguishable from a recorded one.
-    const defaulted = {
+    // Two seats with no workforce entry, as the route reports them since #267.
+    const unrecorded = {
       ...BOARD,
       agents: [
-        { ...BOARD.agents![0], name: "nohar", harness: "claude" },
-        { ...BOARD.agents![0], name: "ada", harness: "claude" },
+        { ...BOARD.agents![0], name: "nohar", harness: "unknown" },
+        { ...BOARD.agents![0], name: "ada", harness: "unknown" },
       ],
     };
-    const { api } = fakeApi({ board: defaulted });
+    const { api } = fakeApi({ board: unrecorded });
     render(<App api={api} />);
     await user.click(await screen.findByRole("button", { name: /Fleet/ }));
     const caveat = await screen.findByTestId("fleet-harness-caveat");
-    expect(caveat).toHaveTextContent(/still fills it in for a seat that has no workforce entry/);
-    expect(caveat).toHaveTextContent("#267");
-    // And it must not claim the value came from a record.
+    expect(caveat).toHaveTextContent(/value/);
+    expect(caveat).toHaveTextContent(/not a stamp on a run or a post/);
+    expect(caveat).toHaveTextContent(/read the badge on that post in the chat/);
+    // The caveat that named #267 as a pending fix is no longer true: it merged.
+    expect(caveat.textContent).not.toContain("#267 is the fix");
+    expect(caveat.textContent).not.toMatch(/still fills it in|until it lands/);
     const pane = screen.getByLabelText("Fleet").textContent || "";
-    expect(pane).not.toMatch(/current value in the board's workforce record/);
     expect(pane).toMatch(/nohar@alpha/);
+    expect(pane).toMatch(/unknown/);
   });
 
   it("shows a provider reading from the snapshot as having no age", async () => {

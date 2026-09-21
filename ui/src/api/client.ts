@@ -209,9 +209,9 @@ export class AtmanApi {
   /**
    * POST /api/v1/lead {seat} — the operator picks this project's lead.
    *
-   * The same write as `atm lead set <seat>`. It needs the operator and the
-   * launch token; until T-1104 adds `--operator` the server answers 400 and
-   * the picker shows the command instead.
+   * The same write as `atm lead set <seat>`. It needs the operator (`atm ui
+   * --operator <name>`) and the launch token; with no operator the server
+   * answers 400 and the picker shows the command instead.
    */
   async setLead(seat: string, project?: string): Promise<{ ok: boolean; lead: string; harness: string; capability: string; project: string }> {
     const url = `${this.origin.api}/lead`;
@@ -239,10 +239,13 @@ export class AtmanApi {
    * POST /msg — the embedded composer's route, which is where a post goes
    * (the API adds no message route; see docs/api/app-v2.md).
    *
-   * `from` is the operator. Until T-1104 hardens the route the server still
-   * reads it from the payload, so the app sends the operator it was told and
-   * nothing else. With no operator the caller must not get here: the composer
-   * shows the command to set one instead.
+   * The server decides who the post is from: it refuses a payload naming
+   * anyone but the configured operator, records it as that operator with
+   * `via: ui-operator`, and wakes the recipients the way `atm msg` does. The
+   * app still sends `from: <operator>`, which that route accepts and the
+   * older one requires, and it never offers to send anything else. With no
+   * operator the caller must not get here: the composer shows the command to
+   * set one instead.
    */
   async postMessage(body: { from: string; text: string; to?: string; re?: string; kind?: "message" | "task" }): Promise<{ ok: boolean; posted?: unknown }> {
     if (!this.token) {

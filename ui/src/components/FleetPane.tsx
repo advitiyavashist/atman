@@ -4,13 +4,14 @@
  * State, harness, lifecycle, wake mode, limit, auth and reachability, per seat
  * as `seat@project`.
  *
- * **The harness column is not evidence, and this screen says so.** This route
- * still defaults `agents[].harness` for a seat with no workforce entry, so a
- * seat whose harness was never recorded arrives here already wearing a
- * provider's name. The app cannot recover the truth from that — there is no
- * "was it recorded" flag on this route — so it refuses to vouch for the value
- * instead of dressing it up. T-1106 (#267) fixes the default; the chat's
- * per-post badge is already honest because `post.harness.recorded` exists.
+ * **The harness column is current, not historical.** Since #267 the route no
+ * longer invents a provider: a seat with nothing recorded arrives as
+ * `unknown`, and that is what this screen shows. What it still cannot say is
+ * *when* the value was true — it is the seat's value now (its workforce entry,
+ * or the provider of a live session), not a stamp on a run or a post. For what
+ * a seat was running when it wrote something, the chat's per-post badge is the
+ * one to read, because `post.harness.recorded` says whether it was recorded at
+ * post time.
  *
  * Read-only, like the CLI's own view. Recovery is a command, shown to copy.
  */
@@ -32,11 +33,11 @@ export function FleetPane({ board, error, project }: { board: Board | null; erro
         <h2>Fleet</h2>
         <span className="muted">{agents ? `${agents.length} seats` : "seat list unreadable"}</span>
       </header>
-      <p className="missing" data-testid="fleet-harness-caveat">
-        Do not read the harness column as a record. This route still fills it in for a seat that has no workforce
-        entry at all, so a seat whose harness was never recorded can appear here as a provider name — T-1106
-        (#267) is the fix, and until it lands the app cannot tell the two apart on this screen. The per-post badge
-        in the chat is the honest one: it says when a harness was not recorded.
+      <p className="muted" data-testid="fleet-harness-caveat">
+        The harness column is each seat's value <em>now</em> — its workforce entry, or the provider of a live
+        session — and a seat with none recorded reads <span className="missing">unknown</span>. It is not a stamp
+        on a run or a post: for what a seat was running when it wrote something, read the badge on that post in
+        the chat.
       </p>
 
       {usage.length ? (
