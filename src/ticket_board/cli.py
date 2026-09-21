@@ -2375,6 +2375,7 @@ def cmd_next(a, board):
     ready = [t for t in ready if not _reservation_blocks(t, owner, steal_id)]
     ready = [t for t in ready if not _ticket_on_hold(t)]
     ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
+    ready, repo_miss = _repo_routing().filter_for_checkout(ready, os.getcwd())
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -2425,13 +2426,16 @@ def cmd_next(a, board):
     role_miss, reserved_miss = _next_refusal_parts(
         ready_all, roles, owner, steal_id, board)
     parts = []
+    if repo_miss:
+        parts.append("%d repository-mismatched or unattributed ticket(s): %s" % (
+            len(repo_miss), ", ".join(t["id"] for t in repo_miss)))
     if role_miss:
         parts.append("%d ready for other roles: %s" % (
             len(role_miss), ", ".join(t["id"] for t in role_miss)))
     if reserved_miss:
         parts.append("%d reserved for other agents: %s" % (
             len(reserved_miss), ", ".join(t["id"] for t in reserved_miss)))
-    if roles is not None and parts:
+    if parts:
         print("no ticket for roles %s; %s" % (roles, "; ".join(parts)))
         sys.exit(1)
     cyc = find_cycle(tickets)
@@ -4853,6 +4857,15 @@ def _scheduler_cmd():
 
 
 # ---- routing: which agent should take which open ticket -----------------
+
+def _repo_routing():
+    try:
+        from ticket_board import repo_routing as m
+        return m
+    except ImportError:
+        import repo_routing as m
+        return m
+
 
 def _route_headroom():
     try:
