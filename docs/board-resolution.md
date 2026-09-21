@@ -81,9 +81,18 @@ self-contained precisely so it behaves identically in both copies regardless.
 `atm project split --apply` writes one file into the shared board it copied
 from: `.split`. From then on that directory is the **archive**. Resolution is
 unchanged — `TICKETS_DIR` and rule 2 still point sessions at it — but every
-*invocation* outside a read-only allow-list (`SPLIT_READ_ONLY_CMDS` in
-`tickets.py`) refuses before it can write, and the refusal names the boards
-this seat now works on, taken from the marker's `seats` map.
+*invocation* outside a read-only allow-list (`SPLIT_READ_ONLY_CMDS`) refuses
+before it can write, and the refusal names the boards this seat now works on,
+taken from the marker's `seats` map.
+
+That list exists once per entry point, in `tickets.py` and in
+`src/ticket_board/cli.py`, because there are two CLIs that can write: the
+console scripts `atm` and `tickets` both resolve to `ticket_board.cli:main`.
+Wiring it into only one of them left the packaged `atm` writing freely to the
+archive. The duplication is deliberate — a guard every write passes through
+must not depend on an import that can fail, the same reason
+`_shadow_board_refusal` is duplicated — and a parity test drives one
+invocation matrix through both entry points so the two copies cannot drift.
 
 An invocation, not a command name: the name is one of three things that
 decide whether something writes, and the other two each hid a real write.

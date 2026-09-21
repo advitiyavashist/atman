@@ -47,6 +47,7 @@ is now refused:
 | sub-command + path | `atm trajectories export --out <board>/agents/<seat>.json` | replaced a seat record outright |
 | flag | `atm plan-status --write-master` | wrote a Plan section into the archive's `MASTER.md` |
 | dispatch order | `atm board-mark-primary` | wrote `.primary`, making the archive **win** board resolution and route every seat back onto it |
+| entry point | the packaged `atm` (`ticket_board.cli:main`) | every write, from `note` to `clear`, on the CLI a pip install provides |
 
 The last one never reaches the refusal at all: it is dispatched before
 `board_dir()` so it can repair board resolution on a board resolution itself
@@ -57,6 +58,45 @@ alone deliberately — it takes an explicit operator-named path.
 board: an archive you cannot read data out of is not an archive. `atm project`
 stays allowed whole, writing forms included, because `atm project split --undo
 --apply` has to run on the board it is undoing.
+
+The fifth is not a command at all. `pyproject.toml` maps **both** console
+scripts — `atm` and `tickets` — to `ticket_board.cli:main`, a second
+implementation with its own parser, and the guard first existed only in
+`tickets.py`: on a board with a `.split` marker, `python3 tickets.py note T-1 x`
+refused while the packaged `atm note T-1 x` wrote the note. So the block lives
+in both files. Sharing it through an import was the obvious fix and the wrong
+one: a gate that every write passes through must not be switchable off by an
+ImportError, and `tickets.py` also ships as a single file whose `src/` is found
+relative to itself. `_shadow_board_refusal` (T-959) is duplicated for the same
+reason. What keeps the copies honest is not an import but
+`test_the_packaged_entry_point_refuses_the_same_writes`, which drives one
+invocation matrix through both entry points and fails if either decides
+differently, plus a comparison of the two allow-lists as sets.
+
+For the same reason the marker probe reads `.split` by a literal name instead
+of importing the split engine for the constant. It used to call
+`_project_split().SPLIT_MARKER` and swallow `ImportError` — which returns "no
+marker", i.e. turns the whole refusal off, on any install where the engine is
+not importable. The documented install is a symlink, where `realpath` finds
+`src/`, so that was defensive rather than a live hole; a bare *copy* of
+`tickets.py` on `PATH` is the case the test covers. It also charged an engine
+import (measured 18.8 ms) to every invocation that is not on the allow-list.
+
+One honest asymmetry: the packaged entry point does not carry `atm project`
+(nor `plan-status`, `dash`, `util`, `guide`, `self`), so its refusal points at
+`python3 tickets.py project split --undo` rather than printing an `atm`
+invocation the operator cannot run. The split engine ships with the checkout.
+
+One write path onto a frozen board is deliberately **not** guarded here, and
+it is named rather than left to be found: `storage/legacy.py`'s
+`take_ownership()` writes `.server-owned.json` into a legacy board directory
+when `import_legacy_board(..., take_over=True)` runs. Pointed at an archive it
+would add a record to the board that takes no new records, and it would make
+the archive's `source_digests` no longer match what `undo` compares. Nothing
+ships that reaches it — no CLI command and no API route calls
+`import_legacy_board` today, only tests — so it is latent, and it belongs to
+the Phase 2A storage layer rather than to the 4.11 CLI. Guarding it there,
+when a route does exist, is the fix; guessing at it from this side is not.
 
 `tests/test_t1118_project_split.py` pins the whole command-line surface the
 allow-list exposes — every flag and sub-command of every allow-listed command,

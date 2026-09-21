@@ -249,6 +249,147 @@ def _shadow_board_refusal(candidate, configured):
     )
 
 
+# --------------------------------------------------------------------------
+# The frozen shared board (T-1118 / spec 4.11)
+#
+# This whole block is a second copy of the one in tickets.py, on purpose, and
+# the duplication is the safe choice rather than the lazy one. pyproject
+# installs BOTH console scripts -- `atm` and `tickets` -- as
+# ticket_board.cli:main, so THIS file is the entry point a pip install gives
+# an operator, and it is the one CI runs. Until this block existed the split
+# refusal lived only in tickets.py: `python3 tickets.py note T-1 x` refused on
+# a frozen board and the packaged `atm note T-1 x` wrote the note. Measured,
+# not reasoned.
+#
+# Sharing the code through an import was the obvious fix and it is the wrong
+# one here: a guard that every write passes through must not depend on an
+# import that can fail. tickets.py ships as a standalone copy (~/.local/bin/
+# atm) with no `src/` beside it, and an ImportError there silently turns the
+# refusal off. The same reasoning already made `_shadow_board_refusal` a
+# duplicate. What keeps the two copies honest is not an import, it is
+# tests/test_t1118_project_split.py, which drives the same invocation matrix
+# through both entry points and fails if either one decides differently.
+# --------------------------------------------------------------------------
+
+# Spelled here, not imported from project_split for its SPLIT_MARKER: the
+# probe below is the gate, so it must not depend on an import that can fail.
+# tests/test_t1118 pins this literal against the engine's own constant.
+SPLIT_MARKER_NAME = ".split"
+
+
+def _split_safe(fn, default):
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001 - a guard must never take a session down
+        return default
+
+
+def split_marker(board):
+    """The `.split` record on a frozen shared board, or {}."""
+    try:
+        with open(os.path.join(board, SPLIT_MARKER_NAME),
+                  encoding="utf-8") as f:
+            rec = json.load(f)
+        return rec if isinstance(rec, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _path_inside(root, path):
+    """True when `path` resolves inside `root` (or is `root`)."""
+    try:
+        root = os.path.realpath(root)
+        path = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    except OSError:
+        return False
+    return path == root or path.startswith(root + os.sep)
+
+
+def _reads_unless(*flags):
+    """Reads, except when one of these flags is given."""
+    def reads(a, board):
+        return not any(getattr(a, f, False) for f in flags)
+    return reads
+
+
+def _trajectories_reads(a, board):
+    """`trajectories` reads; `backfill` writes; `export` depends on --out."""
+    sub = getattr(a, "traj_cmd", "list") or "list"
+    if sub not in ("list", "export"):
+        return False
+    # `export` reads the board and writes wherever the operator points it,
+    # which is why it stays allowed -- getting data out is the point of an
+    # archive. Pointed back INSIDE the board it is a write to the archive,
+    # and not a harmless one: `--out <board>/agents/<seat>.json` replaces a
+    # seat record outright. Measured, not supposed.
+    out = getattr(a, "out", "") or ""
+    return not (sub == "export" and out and _path_inside(board, out))
+
+
+# Commands that only read. Everything else is refused on a frozen shared
+# board. The list is an allow-list on purpose: missing a read here costs an
+# operator one confusing refusal, while missing a *write* would strand real
+# records on a board nothing reads again -- the T-959 failure, at board scale.
+#
+# The unit of "reads" is an invocation, not a command name: the name, the
+# sub-command (`trajectories` reads, `... backfill` writes) and a flag
+# (`plan-status` reads, `... --write-master` writes) each decide it, and each
+# one caught a real write that a name-only list waved through. A value is
+# either None (every form of this command reads) or a predicate over the
+# parsed args and the board.
+#
+# Names this entry point does not carry (`dash`, `guide`, `util`, `project`,
+# `plan-status`, `self`) stay on the list anyway: argparse refuses them first,
+# and keeping one list makes the parity test a set comparison.
+SPLIT_READ_ONLY_CMDS = {
+    "board": None, "show": None, "list": None, "where": None, "dash": None,
+    "map": None, "graph": None, "guide": None, "limits": None,
+    "context": None, "who": None, "mine": None, "turns": None,
+    "util": None, "project": None, "self": None, "doctor": None,
+    "plan-status": _reads_unless("write_master"),
+    "trajectories": _trajectories_reads,
+    "traj": _trajectories_reads,
+}
+
+
+def _split_cmd_only_reads(a, board):
+    """True when this exact invocation may run on a frozen shared board."""
+    if a.cmd not in SPLIT_READ_ONLY_CMDS:
+        return False
+    reads = SPLIT_READ_ONLY_CMDS[a.cmd]
+    return True if reads is None else reads(a, board)
+
+
+def _split_board_refusal(board, marker, cmd, seat=""):
+    projects = marker.get("projects") or {}
+    homes = (marker.get("seats") or {}).get(seat) or []
+    lines = ["REFUSING WRITE to %s: this shared board was split on %s and is "
+             "now the frozen archive (%s). Nothing here is deleted and it "
+             "stays readable; it just takes no new records."
+             % (board, marker.get("at") or "an earlier run",
+                marker.get("archive_slug") or "shared-archive")]
+    if seat and homes:
+        lines.append("  %s now works on:" % seat)
+        for slug in homes:
+            lines.append("    %-16s TICKETS_DIR=%s %s %s ..."
+                         % (slug, projects.get(slug, "?"), cli_prog(), cmd))
+    else:
+        if seat:
+            lines.append("  %s has no home project in the split manifest; it "
+                         "was archived with this board." % seat)
+        lines.append("  the project boards are:")
+        for slug in sorted(projects):
+            lines.append("    %-16s %s" % (slug, projects[slug]))
+    # `project` is a tickets.py command; this packaged entry point does not
+    # carry it (nor `plan-status`, `dash`, `util`, `self`, `guide`). Naming an
+    # invocation the operator cannot run would be its own small lie, so say
+    # where the engine lives instead of printing `atm project ...` here.
+    lines.append("  undo the split:  python3 tickets.py project split --undo "
+                 "<manifest> --apply   (from the atman checkout -- this "
+                 "packaged %s does not carry `project`)" % cli_prog())
+    sys.exit("\n".join(lines))
+
+
 def _apply_shared_board_config(candidate):
     if os.environ.get("TICKETS_DIR"):
         return candidate
@@ -4208,6 +4349,16 @@ def cmd_board_mark_primary(a):
     board = os.path.join(root, ".tickets") if root else os.path.join(os.getcwd(), ".tickets")
     if not os.path.isdir(board):
         sys.exit("no .tickets directory at %s -- nothing to mark" % board)
+    # This command is dispatched before board_dir() so it can repair board
+    # resolution on a board that resolution itself refuses -- which also
+    # means it runs before the frozen-board refusal in main(). A split
+    # archive is the one board that must never be marked primary: it would
+    # win resolution for this repo and route every seat back onto the board
+    # that takes no new records, silently.
+    split = _split_safe(lambda: split_marker(board), {})
+    if split:
+        _split_board_refusal(board, split, "board-mark-primary",
+                             _split_safe(lambda: session_seat(board), "") or "")
     marker = os.path.join(board, PRIMARY_BOARD_MARKER)
     with open(marker, "w", encoding="utf-8") as f:
         f.write("marked primary %s\n" % datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -6213,6 +6364,14 @@ def main():
         return
     discover = a.cmd != "board"
     board = board_dir(discover_children=discover)
+    # A board that has been split is the frozen archive: it stays readable
+    # forever, but a session still pointed at it must not write there. Same
+    # shape as the T-959 shadow-board refusal, and it names where to go.
+    if not _split_cmd_only_reads(a, board):
+        marker = _split_safe(lambda: split_marker(board), {})
+        if marker:
+            _split_board_refusal(board, marker, a.cmd,
+                                 _split_safe(lambda: session_seat(board), "") or "")
     if a.cmd not in (
         "create",
         "plan",

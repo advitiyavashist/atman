@@ -793,6 +793,234 @@ def test_every_allow_listed_command_writes_nothing_to_the_frozen_board(shared, h
     assert _tree(shared) == before
 
 
+def _cli(board, *args, agent="ann", home=None, config=None, timeout=None):
+    """Run the PACKAGED entry point, not tickets.py.
+
+    pyproject maps both console scripts -- `atm` and `tickets` -- to
+    `ticket_board.cli:main`, so this is the CLI a pip install actually gives
+    an operator, and the one CI installs. It is a separate implementation with
+    its own 50-command parser, which is why the frozen-board refusal has to
+    exist in it too and why these tests drive it directly.
+    """
+    env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent,
+               TICKETS_GC_OPEN_PRS="none")
+    env.pop("TICKET_SEAT", None)
+    env.pop("TICKETS_STOP_HOOK", None)
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID", "TICKET_SESSION_ID"):
+        env.pop(var, None)
+    if home:
+        env["HOME"] = str(home)
+    env["ATMAN_BOARD_CONFIG"] = str(config or (Path(board).parent / "board.json"))
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", "from ticket_board.cli import main; main()",
+             *args],
+            capture_output=True, text=True, env=env,
+            cwd=str(Path(board).parent), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+# Invocations the two entry points must agree about, one per shape that
+# decides the verdict. `refused` is the expected verdict; the tree is compared
+# byte for byte after every one of them either way, because a command that
+# writes and *then* refuses would pass a returncode check.
+PARITY_INVOCATIONS = {
+    # writes, by command name
+    "note": (["note", "T-100", "after the split"], True),
+    "claim": (["claim", "T-102"], True),
+    "status": (["status", "T-102", "done"], True),
+    "update": (["update", "T-102", "still going"], True),
+    "assign": (["assign", "T-102", "--role", "ui"], True),
+    "dep": (["dep", "T-102", "--after", "T-100"], True),
+    "block": (["block", "T-102", "--reason", "x"], True),
+    "reopen": (["reopen", "T-101"], True),
+    "review": (["review", "T-102", "--notes", "x"], True),
+    "accept": (["accept", "T-101", "--sha", HEAD_A, "--notes", "x"], True),
+    "reject": (["reject", "T-101", "--sha", HEAD_A, "--reason", "x"], True),
+    "msg": (["msg", "hello", "--to", "cy"], True),
+    "inbox": (["inbox"], True),
+    "here": (["here"], True),
+    "next": (["next"], True),
+    "sync": (["sync"], True),
+    "identity": (["identity"], True),
+    "role": (["role", "take", "planner"], True),
+    "pulse": (["pulse"], True),
+    "clear": (["clear"], True),
+    "route": (["route"], True),
+    "retire": (["retire", "ann"], True),
+    "reserve": (["reserve", "T-102", "--for", "cy"], True),
+    "hold": (["hold", "T-102"], True),
+    "limit": (["limit", "ann", "--note", "x"], True),
+    # reads: the archive stays readable forever
+    "show": (["show", "T-100"], False),
+    "list": (["list"], False),
+    "board": (["board"], False),
+    "who": (["who"], False),
+    "mine": (["mine"], False),
+    "map": (["map"], False),
+    "graph": (["graph"], False),
+    "where": (["where"], False),
+    "context": (["context"], False),
+    "limits": (["limits"], False),
+    "turns": (["turns"], False),
+    "trajectories": (["trajectories"], False),
+    "traj": (["traj"], False),
+    # the three shapes that are not a command name
+    "traj backfill": (["trajectories", "backfill"], True),
+    "traj export inside": (["trajectories", "export", "--out", "AGENTS/ann.json"],
+                           True),
+    "traj export outside": (["trajectories", "export", "--out", "OUT/ex.jsonl"],
+                            False),
+}
+
+
+def test_the_packaged_entry_point_refuses_the_same_writes(shared, homes, tmp_path):
+    """The refusal has to live in every CLI that can write, not just one.
+
+    This is the fifth write onto a frozen archive this ticket has produced,
+    and the only one that is not a command: it is a whole ENTRY POINT the
+    guard never reached. pyproject installs `atm` and `tickets` as
+    `ticket_board.cli:main`, a separate 6,000-line implementation, and the
+    split refusal lived only in tickets.py. Measured before the fix, on a
+    board with a `.split` marker: `python3 tickets.py note T-1 x` refused,
+    and the packaged `atm note T-1 x` printed "noted on T-001" and changed
+    the ticket file. CI installs that entry point, so it was the one most
+    likely to be pointed at the archive.
+
+    Sharing the block through an import was the obvious fix and the wrong one:
+    a gate every write passes through must not be switchable off by an
+    ImportError. So the block is duplicated, exactly as `_shadow_board_refusal`
+    already is, and this test is what keeps the copies honest -- it drives one
+    invocation matrix through BOTH entry points and fails if either decides
+    differently.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    outside = tmp_path / "exports"
+    outside.mkdir()
+
+    # the exact measured regression first, spelled out
+    before = _tree(shared)
+    out = _cli(shared, "note", "T-100", "after the split", agent="ann")
+    assert out.returncode != 0, "the packaged entry point wrote a note"
+    assert "REFUSING WRITE" in out.stderr
+    assert _tree(shared) == before
+    assert "atm project split --undo" not in out.stderr, (
+        "this entry point does not carry `project`, so it must not name an "
+        "invocation the operator cannot run")
+    assert "python3 tickets.py project split --undo" in out.stderr
+
+    # one allow-list, not two: the names have to match exactly
+    lists = {}
+    for name, code in (("tickets", "import tickets as m"),
+                       ("cli", "from ticket_board import cli as m")):
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import json,sys; sys.path.insert(0, %r); sys.path.insert(0, %r); "
+             "%s; print(json.dumps(sorted(m.SPLIT_READ_ONLY_CMDS)))"
+             % (str(ROOT), str(ROOT / "src"), code)],
+            capture_output=True, text=True, cwd=str(ROOT))
+        assert probe.returncode == 0, probe.stderr
+        lists[name] = json.loads(probe.stdout)
+    assert lists["tickets"] == lists["cli"], (
+        "the two entry points disagree about what only reads: %s"
+        % sorted(set(lists["tickets"]) ^ set(lists["cli"])))
+
+    # One allow-list covers two parsers only because this entry point's
+    # command set is a subset of tickets.py's -- 55 shared, 0 unique when this
+    # was written. A command added to only this CLI is refused by default
+    # (it is not on the list), which is the safe direction; this assertion is
+    # what makes "one list" a checked fact rather than an assumption.
+    import re as _re
+
+    def _commands(out):
+        text = out.stdout + out.stderr
+        m = _re.search(r"\{([a-z0-9,\-]+)\}", text)
+        return set(m.group(1).split(",")) if m else set()
+
+    only_packaged = _commands(_cli(shared, "--help")) - _commands(
+        _atm(shared, "--help"))
+    assert not only_packaged, (
+        "the packaged CLI carries commands tickets.py does not, so the shared "
+        "allow-list has not been checked against them: %s" % sorted(only_packaged))
+
+    for label, (args, refused) in sorted(PARITY_INVOCATIONS.items()):
+        args = [str(shared / "agents" / "ann.json") if a == "AGENTS/ann.json"
+                else str(outside / "ex.jsonl") if a == "OUT/ex.jsonl" else a
+                for a in args]
+        runs = {"tickets.py": _atm(shared, *args, agent="ann", timeout=20),
+                "packaged atm": _cli(shared, *args, agent="ann", timeout=20)}
+        for who, out in runs.items():
+            assert out is not None, "%s: %s timed out" % (who, label)
+            # A command this entry point does not carry is argparse's business,
+            # not the guard's: parity is about the verdict where both can run.
+            if out.returncode == 2 and "invalid choice" in out.stderr:
+                continue
+            if refused:
+                assert out.returncode != 0, "%s: %s was allowed" % (who, label)
+                assert "REFUSING WRITE" in out.stderr, "%s: %s" % (who, label)
+            else:
+                assert out.returncode == 0, "%s: %s refused: %s" % (
+                    who, label, out.stderr)
+            assert _tree(shared) == before, "%s: %s wrote to the archive" % (
+                who, label)
+
+
+def test_the_frozen_board_probe_needs_no_engine_import(shared, homes, tmp_path):
+    """`split_marker` must not depend on importing the split engine.
+
+    It is the gate every write passes through. When it built the marker
+    filename as `_project_split().SPLIT_MARKER` it also swallowed ImportError
+    and returned {} -- "no marker" -- so any install where the engine is not
+    importable turned the whole refusal off silently, which is the T-959
+    failure shape one level up. `_ensure_src_path()` is dirname(__file__)/src,
+    so a bare COPY of tickets.py on PATH has no engine beside it. The
+    documented install is a symlink, where realpath finds `src/`, so this is a
+    defensive case rather than a live hole -- but the guard is the wrong place
+    to find out. It also charged an engine import (measured 18.8ms) to every
+    invocation that is not on the allow-list.
+
+    The filename is now a literal in each entry point, pinned here against the
+    engine's own constant so the three cannot drift.
+    """
+    for label, code in (("tickets", "import tickets as m"),
+                        ("cli", "from ticket_board import cli as m")):
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, %r); sys.path.insert(0, %r); "
+             "%s; print(m.SPLIT_MARKER_NAME)" % (str(ROOT), str(ROOT / "src"), code)],
+            capture_output=True, text=True, cwd=str(ROOT))
+        assert probe.returncode == 0, probe.stderr
+        assert probe.stdout.strip() == ps.SPLIT_MARKER, label
+
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    before = _tree(shared)
+
+    # a bare copy: tickets.py alone, no src/ beside it, nothing on PYTHONPATH
+    bare = tmp_path / "bin"
+    bare.mkdir()
+    copy = bare / "atm"
+    copy.write_bytes((ROOT / "tickets.py").read_bytes())
+    env = dict(os.environ, TICKETS_DIR=str(shared), TICKET_AGENT="ann",
+               TICKETS_GC_OPEN_PRS="none",
+               ATMAN_BOARD_CONFIG=str(Path(shared).parent / "board.json"))
+    env.pop("PYTHONPATH", None)
+    env.pop("TICKET_SEAT", None)
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID", "TICKET_SESSION_ID"):
+        env.pop(var, None)
+    out = subprocess.run([sys.executable, str(copy), "note", "T-100", "bare"],
+                         capture_output=True, text=True, env=env,
+                         cwd=str(Path(shared).parent), timeout=60)
+    assert out.returncode != 0, "a bare copy wrote to the frozen board"
+    assert "REFUSING WRITE" in out.stderr
+    assert _tree(shared) == before
+
+
 # --------------------------------------------------------------------------
 # 9 and 10. undo
 # --------------------------------------------------------------------------

@@ -8645,14 +8645,28 @@ def _write_atman_registry(data):
     return path
 
 
+# The marker filename is spelled here rather than imported from the split
+# engine, and that is the whole point. `split_marker` is the gate every write
+# on a frozen board passes through, so it must not depend on an import that
+# can fail. `_ensure_src_path()` is dirname(__file__)/src, and the documented
+# shim install is a COPY of this file at ~/.local/bin/atm with no src/ beside
+# it: there the engine import raised ImportError, the probe returned {}, and
+# the entire refusal became a silent no-op on exactly the install an operator
+# is most likely to be running. Reading one byte-string costs nothing and
+# cannot fail that way. It also drops an 18.8ms engine import that every
+# non-allow-listed invocation was paying. tests/test_t1118 pins this string
+# against project_split.SPLIT_MARKER so the two can never drift.
+SPLIT_MARKER_NAME = ".split"
+
+
 def split_marker(board):
     """The `.split` record on a frozen shared board, or {}."""
     try:
-        with open(os.path.join(board, _project_split().SPLIT_MARKER),
+        with open(os.path.join(board, SPLIT_MARKER_NAME),
                   encoding="utf-8") as f:
             rec = json.load(f)
         return rec if isinstance(rec, dict) else {}
-    except (OSError, ValueError, ImportError):
+    except (OSError, ValueError):
         return {}
 
 
