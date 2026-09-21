@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/ticket.json",
+  "title": "GET /api/v1/ticket/{id}",
+  "description": "The drill-down for one ticket, from board files only. No git runs on this read: the diff is a copyable command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "project", "title", "status", "status_label", "accepted", "released", "owner", "owner_at_project",
+               "deps", "acceptance", "review", "runs", "usage", "handoff", "messages", "messages_total", "steers",
+               "artifact", "diff_cmd", "diff_note"],
+  "properties": {
+    "id": {"$ref": "common.json#/$defs/ticket_id"},
+    "project": {"$ref": "common.json#/$defs/slug"},
+    "title": {"type": "string"},
+    "status": {"type": "string"},
+    "status_label": {"type": "string"},
+    "accepted": {"type": "boolean", "description": "Only a structured accept or merge record; never prose, a done flag or an override."},
+    "released": {"type": "boolean"},
+    "owner": {"type": "string"},
+    "owner_at_project": {"type": "string"},
+    "deps": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "state", "title"],
+        "properties": {
+          "id": {"type": "string"},
+          "state": {"type": "string", "description": "accepted | released by override | done, not accepted | <status> | missing"},
+          "title": {"type": "string"}
+        }
+      }
+    },
+    "acceptance": {"type": "object", "required": ["proof"], "properties": {"proof": {"type": "string"}}},
+    "review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["head", "head_len", "label", "verified", "verdicts"],
+      "properties": {
+        "head": {"type": "string", "description": "The full review head sha, never truncated."},
+        "head_len": {"type": "integer"},
+        "label": {"type": "string"},
+        "verified": {"type": "boolean"},
+        "verdicts": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["kind", "by", "at", "sha", "superseded", "applies", "notes"],
+            "properties": {
+              "kind": {"type": "string"}, "by": {"type": "string"}, "at": {"type": "string"},
+              "sha": {"type": "string"}, "superseded": {"type": "boolean"},
+              "applies": {"type": "boolean", "description": "Bound to the current review head."},
+              "notes": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["seat", "author", "harness", "role", "state", "verdict", "started", "ended", "elapsed_s",
+                     "tokens", "tokens_in", "tokens_out", "tokens_label"],
+        "properties": {
+          "seat": {"type": "string"}, "author": {"type": "string"},
+          "harness": {"$ref": "common.json#/$defs/harness_value"},
+          "role": {"type": "string"}, "state": {"type": "string"}, "verdict": {"type": "string"},
+          "started": {"type": "string"}, "ended": {"type": "string"},
+          "elapsed_s": {"type": ["number", "null"]},
+          "tokens": {"type": ["integer", "null"], "description": "null = unknown, never 0."},
+          "tokens_in": {"type": ["integer", "null"]},
+          "tokens_out": {"type": ["integer", "null"]},
+          "tokens_label": {"type": "string"}
+        },
+        "if": {"properties": {"tokens": {"type": "null"}}},
+        "then": {"properties": {"tokens_label": {"const": "unknown"}}}
+      }
+    },
+    "usage": {"type": "array", "items": {"$ref": "common.json#/$defs/usage_view"}},
+    "handoff": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["from", "by", "at", "text"],
+        "properties": {"from": {"type": "string"}, "by": {"type": "string"}, "at": {"type": "string"}, "text": {"type": "string"}}
+      }
+    },
+    "messages": {"type": "array", "maxItems": 50, "items": {"$ref": "common.json#/$defs/post"}, "description": "Newest first; messages with re=<id>."},
+    "messages_total": {"type": "integer", "minimum": 0},
+    "steers": {"type": "array", "items": {"type": "object"}},
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["commit", "branch", "pr", "sha"],
+      "properties": {"commit": {"type": "string"}, "branch": {"type": "string"}, "pr": {"type": "string"}, "sha": {"type": "string"}}
+    },
+    "diff_cmd": {"type": "string"},
+    "diff_note": {"type": "string"}
+  },
+  "allOf": [
+    {"if": {"properties": {"accepted": {"const": true}}}, "then": {"properties": {"status": {"const": "done"}, "status_label": {"const": "done, accepted"}}}},
+    {"if": {"properties": {"accepted": {"const": false}}}, "then": {"properties": {"status_label": {"not": {"const": "done, accepted"}}}}}
+  ]
+}

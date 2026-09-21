@@ -1565,6 +1565,14 @@ def master_state_path(board):
     return os.path.join(board, "master.json")
 
 
+def _keep_lead(state, prev):
+    """A master/CoS change never drops the user's lead choice (T-1103)."""
+    lead = ((prev or {}).get("lead") or "").strip()
+    if lead:
+        state["lead"] = lead
+    return state
+
+
 def _current_master_from_disk(board):
     try:
         with open(master_state_path(board)) as f:
@@ -1642,7 +1650,8 @@ def wake_mode_of(board, owner, master_state=None, workforce=None):
     if configured in WAKE_MODES:
         return configured
     state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
-    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos"),
+                           (state or {}).get("lead")):
         return "continuous"
     return "task-only"
 
@@ -1659,7 +1668,8 @@ def lifecycle_of(board, owner, master_state=None, workforce=None):
     if configured in LIFECYCLES:
         return configured
     state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
-    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos"),
+                           (state or {}).get("lead")):
         return "persistent"
     return "ephemeral"
 
@@ -6503,6 +6513,9 @@ def _finish_followup(board, tid, event):
 
 
 def _watcher_count(owner, board=None):
+    if board and getattr(_WATCH_TABLE, "read_only", False):
+        # T-1103: a read route runs no `ps`; the board pid file is the evidence.
+        return 1 if _watcher_pid(board, owner) else 0
     return len(_live_watch_pids(owner, board=board))
 
 
@@ -8002,7 +8015,7 @@ def cmd_master(a, board):
         owner = whoami(a.owner)
         prev = current_master(board)
         with open(master_state_path(board), "w") as f:
-            json.dump({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, f)
+            json.dump(_keep_lead({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, prev), f)
         _master_log(board, "%s took over as master%s" % (
             owner, (" from %s" % prev["owner"]) if prev and prev.get("owner") != owner else ""))
         print("%s is master now. Run `atm master` for the briefing." % owner)
@@ -11847,7 +11860,7 @@ def _apply_connect_roles(board, a):
     prev = current_master(board) or {}
     os.makedirs(board, exist_ok=True)
     if master:
-        rec = {"owner": master, "since": now(), "cos": cos or (prev.get("cos") or "")}
+        rec = _keep_lead({"owner": master, "since": now(), "cos": cos or (prev.get("cos") or "")}, prev)
         with open(master_state_path(board), "w") as f:
             json.dump(rec, f)
         print("applied master=%s CoS=%s" % (master, rec["cos"] or "no CoS yet"))
@@ -15723,7 +15736,7 @@ def cmd_spawn(a, board):
     if a.master:
         prev = current_master(board) or {}
         with open(master_state_path(board), "w") as f:
-            json.dump({"owner": owner, "since": now(), "cos": prev.get("cos", "")}, f)
+            json.dump(_keep_lead({"owner": owner, "since": now(), "cos": prev.get("cos", "")}, prev), f)
         _master_log(board, "%s spawned as persistent master (planner)" % owner, by=whoami())
     if a.cos:
         prev = current_master(board) or {}
@@ -18934,6 +18947,12 @@ def _board_snapshot_body(board, messages=40):
             # 9f50606 work_payload has no agents=; revised T-889 does.
             return fn(tickets, graph, all_msgs, **kwargs)
     work = _safe(_work_payload, None)
+    # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
+    amap = _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
+                                        live=live, events=events), None)
+    # T-1103: typed blocker chips and the running pulse, joined onto plan nodes
+    # from records the snapshot already holds (no new reads, no writes).
+    _safe(lambda: _annotate_plan(work, tickets, out_agents, amap), None)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -18960,9 +18979,7 @@ def _board_snapshot_body(board, messages=40):
         # T-1076: per-provider quota for the Team header. Same ledger reader as
         # `atm agents`; still read-only, so board.json spawns nothing.
         "provider_usage": _safe(lambda: provider_usage_snapshot(board), []) or [],
-        # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
-        "agent_map": _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
-                                                  live=live, events=events), None),
+        "agent_map": amap,
         "promise": promise,
         "objective": {
             **objective_view,
@@ -18975,6 +18992,79 @@ def _board_snapshot_body(board, messages=40):
         "work": work,
         "first_screen": _first_screen(work),
     }
+
+
+_UI_SEAT_OFFLINE = ("offline", "queued-offline", "failed")
+
+
+def _ui_seat_blockers(node, seats):
+    """The seat-shaped blocker chips: seat_limited, seat_offline, auth, plus the
+    node's own hold / capture / blocked wait. Pure; records only.
+
+    ``seats`` maps a seat name to {limited, limit_until, adapter_state, state,
+    auth_state, auth_label, auth_cmd}. The record-only chips (unaccepted,
+    dep_unaccepted, dep_open) come from work_view.blockers_of.
+    """
+    phase = (node.get("phase") or "").strip()
+    if phase == "done":
+        return []
+    out = []
+    wait = node.get("wait") or {}
+    if wait.get("kind") in ("hold", "capture", "blocked"):
+        out.append({"kind": wait["kind"], "on": node.get("id") or "",
+                    "text": wait.get("text") or wait["kind"], "cmd": wait.get("cmd") or ""})
+    seat = (node.get("owner") or node.get("reserved_for")
+            or ((node.get("dispatch") or {}).get("to") or "")).strip()
+    s = (seats or {}).get(seat) if seat else None
+    if not s:
+        return out
+    if s.get("limited"):
+        out.append({"kind": "seat_limited", "on": seat,
+                    "text": "seat %s limited until %s" % (seat, s.get("limit_until") or "reset unknown"),
+                    "cmd": "atm harness usage"})
+    offline = s.get("adapter_state") in _UI_SEAT_OFFLINE
+    if (offline and phase in ("posted", "reserved", "ready")) or \
+            (phase in ("working", "review") and s.get("state") == "DOWN"):
+        out.append({"kind": "seat_offline", "on": seat,
+                    "text": "seat %s offline" % seat + (" (%s)" % s["adapter_state"] if offline else ""),
+                    "cmd": "atm spawn %s --persist" % seat})
+    if s.get("auth_state") in _UI_AUTH_BLOCKING:
+        out.append({"kind": "auth", "on": seat,
+                    "text": "seat %s %s" % (seat, (s.get("auth_label") or "logged out").lower()),
+                    "cmd": s.get("auth_cmd") or ""})
+    return out
+
+
+def _annotate_plan(work, tickets, out_agents, amap):
+    if not work:
+        return
+    wv = _work_view()
+    by_id = dict((t["id"], t) for t in tickets)
+    seats = {}
+    for a in out_agents or []:
+        surf = a.get("auth_surface") or {}
+        seats[a["name"]] = {
+            "limited": bool(a.get("limit")), "limit_until": a.get("limit_until") or "",
+            "adapter_state": a.get("adapter_state") or "", "state": a.get("state") or "",
+            "auth_state": surf.get("state") or "", "auth_label": surf.get("label") or "",
+            "auth_cmd": (surf.get("recovery") or {}).get("cmd") or "",
+        }
+    running = {}
+    for g in (amap or {}).get("groups") or []:
+        for r in g.get("rows") or []:
+            if r.get("state") == "running" and g.get("ticket"):
+                running.setdefault(g["ticket"], {"seat": r.get("seat") or "", "elapsed_s": r.get("elapsed_s")})
+    for n in work.get("nodes") or []:
+        # work_payload already carries the record-only chips (unaccepted,
+        # dep_unaccepted, dep_open). The seat-shaped ones are the app API's,
+        # as work_view.blockers_of says.
+        base = n.get("blockers")
+        if base is None:
+            base = wv.blockers_of(n, by_id)
+        n["blockers"] = list(base) + _ui_seat_blockers(n, seats)
+        n["running"] = running.get(n.get("id"))
+        # the shared-board repo lens (until the split) filters on this
+        n["repo"] = ((by_id.get(n.get("id")) or {}).get("repo") or "").strip()
 
 
 def _first_screen(work):
@@ -19097,7 +19187,7 @@ def _ui_payload_has_secrets(payload):
     return False
 
 
-def _ui_read_json_body(handler):
+def _ui_read_json_body(handler, origin_ok=None):
     try:
         length = int(handler.headers.get("Content-Length") or 0)
     except ValueError:
@@ -19107,7 +19197,7 @@ def _ui_read_json_body(handler):
     raw = handler.rfile.read(length) if length else b"{}"
     if not _ui_msg_is_json(handler.headers):
         raise ValueError("Content-Type must be application/json")
-    if not _ui_msg_origin_ok(handler.headers):
+    if not (origin_ok or _ui_msg_origin_ok)(handler.headers):
         raise ValueError("origin mismatch")
     payload = json.loads(raw or b"{}")
     if not isinstance(payload, dict):
@@ -19403,6 +19493,13 @@ def cmd_ui(a, board):
         sys.exit("atm ui: --host must be loopback (127.0.0.1, localhost, ::1); got %s"
                  % (a.host or ""))
     token = _ui_new_launch_token()
+    try:
+        # T-1103: the /api/v1 JSON API for the TypeScript app shares this gate.
+        api = UiApi(board, token, port=a.port, operator=getattr(a, "operator", "") or "",
+                    dev_origins=getattr(a, "dev_origin", None) or (),
+                    app_dir=getattr(a, "app_dir", "") or None)
+    except ValueError as e:
+        sys.exit("atm ui: %s" % e)
 
     class H(BaseHTTPRequestHandler):
         def _send_json(self, status, out):
@@ -19425,6 +19522,9 @@ def cmd_ui(a, board):
 
         def do_GET(self):
             if not self._gate(write=False):
+                return
+            if _ui_api_route(self.path):
+                ui_api_do_get(self, api)
                 return
             if self.path.startswith("/board.json"):
                 from urllib.parse import parse_qs, urlparse
@@ -19450,6 +19550,9 @@ def cmd_ui(a, board):
 
         def do_POST(self):
             if not self._gate(write=True):
+                return
+            if _ui_api_route(self.path):
+                ui_api_do_post(self, api)
                 return
             if self.path.startswith("/auth-reconnect"):
                 try:
@@ -19479,7 +19582,9 @@ def cmd_ui(a, board):
         def log_message(self, *args):
             pass
 
+    H.do_OPTIONS = lambda self: self._gate(write=False) and ui_api_options(self, api)
     srv = ThreadingHTTPServer((a.host, a.port), H)
+    api.port = srv.server_address[1]
     srv.daemon_threads = True
     print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via atm msg)" % (a.host, a.port))
     if a.open:
@@ -19507,6 +19612,1009 @@ def cmd_ui(a, board):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# --- T-1103: the local JSON API for the TypeScript app (/api/v1) -------------
+#
+# Every function in this block that serves a GET is a pure read: no
+# subprocess, no write-mode open, no watermark move (audit-hook tested). The
+# one write, POST /api/v1/lead, passes cmd_ui's T-1105 gate (loopback Host +
+# per-launch token) and an origin allowlist. Contract: docs/api/app-v2.md and
+# docs/api/schemas/.
+
+_UI_TOKEN_HEADER = "X-Atman-Token"
+_UI_THREAD_LIMIT_MAX = 200
+_UI_TICKET_ID_RE = re.compile(r"^T-\d{1,7}$")
+_UI_SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_UI_AUTH_BLOCKING = ("login_required", "expired")
+
+
+def _ui_registry():
+    """The machine registry (~/.config/atman/board.json or ATMAN_BOARD_CONFIG).
+
+    Missing or unparsable -> {}. Never raises, never exits.
+    """
+    try:
+        with open(_atman_config_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _ui_slug(text):
+    s = _UI_SLUG_RE.sub("-", str(text or "")).strip("-.")[:40]
+    return s or "board"
+
+
+def ui_projects(started_board, registry=None):
+    """[{slug, board, repos, source}] -- the board `atm ui` started on first.
+
+    A project is a board (T-1103 decision 1). `projects` in the registry
+    names boards; every distinct `boards` value is listed too, under
+    basename(dirname(board)). Boards that are not directories are skipped.
+    Never calls board_dir(), which can exit on a shadow board.
+    """
+    reg = _ui_registry() if registry is None else (registry if isinstance(registry, dict) else {})
+    projects = reg.get("projects") if isinstance(reg.get("projects"), dict) else {}
+    boards = reg.get("boards") if isinstance(reg.get("boards"), dict) else {}
+    out, by_real, slugs = [], {}, set()
+
+    def _real(path):
+        try:
+            return os.path.realpath(os.path.expanduser(str(path)))
+        except (TypeError, ValueError, OSError):
+            return ""
+
+    def add(slug, board, repos, source):
+        real = _real(board) if board else ""
+        if not real or not os.path.isdir(real):
+            return
+        repos = [str(r) for r in (repos or []) if isinstance(r, str) and r]
+        if real in by_real:
+            row = by_real[real]
+            row["repos"] = row["repos"] + [r for r in repos if r not in row["repos"]]
+            return
+        base = _ui_slug(slug or os.path.basename(os.path.dirname(real)))
+        slug, n = base, 2
+        while slug in slugs:
+            slug, n = "%s-%d" % (base, n), n + 1
+        slugs.add(slug)
+        row = {"slug": slug, "board": real, "repos": repos, "source": source}
+        by_real[real] = row
+        out.append(row)
+
+    started_real = _real(started_board)
+    started_slug = ""
+    for s, p in projects.items():
+        if isinstance(p, dict) and _real(p.get("board") or "") == started_real:
+            started_slug = s
+            break
+    add(started_slug, started_board, [], "started")
+    for s, p in projects.items():
+        if isinstance(p, dict):
+            add(s, p.get("board"), p.get("repos") if isinstance(p.get("repos"), list) else [], "registry")
+    for repo, b in boards.items():
+        if isinstance(b, str):
+            add("", b, [repo], "boards")
+    return out
+
+
+def _ui_project_counts(board):
+    """Cheap per-board counts: ticket statuses plus the chosen lead. No liveness."""
+    counts = {"open": 0, "blocked": 0, "claimed": 0, "review": 0, "done": 0}
+    for t in load_all(board):
+        st = t.get("status") or ""
+        if st in counts:
+            counts[st] += 1
+    m = current_master(board) or {}
+    return counts, (m.get("lead") or "").strip()
+
+
+def _ui_registered(board, name):
+    name = (name or "").strip()
+    if not name or "/" in name or name.startswith("."):
+        return False
+    return bool(_agent_rec(board, name)) or name in load_workforce(board)
+
+
+def ui_lead(board, master_state=None):
+    """(lead, note). The lead is master.json.lead, a per-project user choice.
+
+    There is no default: unset means '' and the app asks. A lead that is no
+    longer registered is reported, never silently replaced by master or CoS.
+    """
+    m = master_state if master_state is not None else (current_master(board) or {})
+    lead = ((m or {}).get("lead") or "").strip()
+    if not lead:
+        return "", "no lead picked for this project"
+    if not _ui_registered(board, lead):
+        return "", "lead %s is not registered on this board; pick again" % lead
+    return lead, ""
+
+
+def _ui_receipt_words(seen, wake):
+    """Receipts only. Never an agent acknowledgement (T-1103 invariant)."""
+    words = ["posted"]
+    if seen is True:
+        words.append("inbox read")
+    elif seen is False:
+        words.append("not read")
+    if wake and wake.get("confirmed"):
+        words.append("wake confirmed")
+    elif wake and wake.get("label"):
+        label = str(wake.get("label"))
+        if "ack" in label.lower():
+            label = "receipt recorded"
+        words.append("wake: " + label)
+    return words
+
+
+def _ui_harness_badge(m, operator, wf):
+    frm = (m.get("from") or "").strip()
+    if (operator and frm.lower() == operator.lower()) or m.get("sender_kind") == "operator":
+        return {"value": "operator", "recorded": True, "note": "operator"}
+    stamped = (m.get("harness") or "").strip()
+    if stamped:
+        return {"value": stamped, "recorded": True, "note": "recorded at post time"}
+    entry = wf.get(frm) or {}
+    cur = (entry.get("harness") or entry.get("tool") or "").strip()
+    if cur:
+        return {"value": cur, "recorded": False, "note": "current harness; not recorded at post time"}
+    return {"value": "unknown", "recorded": False, "note": "harness not recorded"}
+
+
+def _ui_post_row(board, m, project, operator, wf, agents_by):
+    delivery = _message_delivery(board, m, agents_by=agents_by)
+    if delivery.get("status") == "broadcast":
+        receipts = [{"agent": "", "words": ["posted", "broadcast"]}]
+    else:
+        receipts = [{"agent": r["agent"], "words": _ui_receipt_words(r.get("seen"), r.get("wake"))}
+                    for r in delivery.get("receipts") or []]
+    frm = m.get("from") or ""
+    return {
+        "id": _msg_id(m), "at": m.get("at", ""), "from": frm,
+        "author": "%s@%s" % (frm or "?", project),
+        "to": m.get("to", ""), "re": m.get("re", ""), "text": m.get("text", ""),
+        "mentions": m.get("mentions") or [], "kind": m.get("kind") or "message",
+        "harness": _ui_harness_badge(m, operator, wf),
+        "operator": bool(operator and frm.lower() == operator.lower()),
+        "broadcast": is_board_broadcast(m),
+        "receipts": receipts,
+    }
+
+
+def _ui_in_thread(m, operator, seat):
+    frm = (m.get("from") or "").strip().lower()
+    op, s = (operator or "").lower(), (seat or "").lower()
+    if not s:
+        return False
+    if op:
+        if frm == op:
+            return message_involves_seat(m, seat)
+        if frm == s:
+            return message_involves_seat(m, operator) or is_board_broadcast(m)
+        return False
+    return message_involves_seat(m, seat) or (frm == s and is_board_broadcast(m))
+
+
+def _ui_reachable(board, seat):
+    """Read-only: a watcher pid file with a live pid, or a native endpoint whose
+    transport still exists. Never live_endpoint() (it prunes), never ps."""
+    try:
+        with open(os.path.join(agents_dir(board), seat + ".watch.pid")) as f:
+            pid = int((f.read() or "0").strip() or 0)
+        if pid and _pid_alive(pid):
+            return True
+    except (OSError, ValueError):
+        pass
+    ep = _session_adapters().read_endpoint(board, seat) or {}
+    sock = ep.get("socket") or ""
+    if sock and os.path.exists(sock):
+        return True
+    return False
+
+
+def ui_capability(board, seat, harness):
+    """'takes mid-run messages' only for a steerable harness with a live socket.
+
+    Same table as `atm steer` (steer.harness_refuse_reason), so it cannot drift.
+    """
+    st = _steer()
+    ep = _session_adapters().read_endpoint(board, seat) or {}
+    refuse = st.harness_refuse_reason(harness, ep.get("provider") or "")
+    sock = ep.get("socket") or ""
+    if not refuse and sock and os.path.exists(sock):
+        return {"midrun": True, "line": "takes mid-run messages", "reason": ""}
+    return {"midrun": False, "line": "answers on its next turn",
+            "reason": refuse or "no live messaging socket right now"}
+
+
+def _ui_usage_view(board, harness):
+    pu = _provider_usage()
+    reading = pu.get_reading(board, harness)
+    ui = pu.ui_reading(reading)
+    compact = pu.compact_reading(reading)
+    age = ui.get("age") or ""
+    return {"provider": ui.get("provider") or (harness or "unknown"),
+            "status": ui.get("status") or "unknown",
+            "level": compact.get("level") or "unknown",
+            "text": compact.get("text") or "",
+            "remaining_pct": compact.get("remaining_pct"),
+            "reset": compact.get("reset") or "",
+            "checked_at": ui.get("checked_at") or "",
+            "age": age or "age unknown"}
+
+
+def ui_lead_status(board, lead, agent_map=None):
+    """The lead status strip: liveness, run, last output, limit, auth, usage.
+
+    Also says plainly when the lead cannot answer (limited, logged out, no
+    live session, quota), so the chat never hangs on a promise.
+    """
+    agent_list = load_agents(board)
+    rec = next((r for r in agent_list if (r.get("owner") or "") == lead), {}) or {}
+    wf = load_workforce(board)
+    entry = wf.get(lead) or {}
+    harness = (entry.get("harness") or entry.get("tool") or "").strip()
+    with _read_only_liveness():
+        live = (_safe(lambda: agent_liveness(board, rec, agent_list), {}) or {}) if rec else {}
+        lim = _active_seat_limit(board, lead, rec) if rec else None
+        if agent_map is None:
+            agent_map = _safe(lambda: agent_map_data(board, agent_list=agent_list,
+                                                     live={lead: live} if rec else {}), None)
+    running = None
+    for g in (agent_map or {}).get("groups") or []:
+        for row in g.get("rows") or []:
+            if row.get("seat") == lead and row.get("state") == "running":
+                running = {"ticket": g.get("ticket") or "", "elapsed_s": row.get("elapsed_s"),
+                           "tokens": row.get("tokens")}
+    last_at, last_src = _steer().last_output(rec, watch_log_ts=_steer_watch_log_ts(board, lead))
+    auth = _agent_auth_surface(board, rec, lead, harness) if rec else {}
+    usage = _ui_usage_view(board, harness)
+    reachable = _ui_reachable(board, lead)
+    cap = ui_capability(board, lead, harness)
+    state = live.get("state") or "unknown"
+    blocked = None
+    rec_cmd = ((auth or {}).get("recovery") or {}).get("cmd") or ""
+    if (auth or {}).get("state") in _UI_AUTH_BLOCKING:
+        blocked = {"kind": "logged_out",
+                   "text": "Lead's harness is logged out. Recovery (run on the enrolled host): %s"
+                           % (rec_cmd or "atm harness auth %s" % lead),
+                   "cmd": rec_cmd}
+    elif lim:
+        until = lim.get("until") or lim.get("reset_at") or "unknown"
+        blocked = {"kind": "limited",
+                   "text": "Lead is limited until %s (usage %s). Your message is queued."
+                           % (until, usage["age"]),
+                   "cmd": "atm harness usage"}
+    elif usage["level"] == "limited":
+        blocked = {"kind": "quota",
+                   "text": "Provider quota exhausted (%s). %s" % (
+                       usage["age"], ("Resets %s." % usage["reset"]) if usage["reset"] else "Reset unknown."),
+                   "cmd": "atm harness usage"}
+    elif state in ("dead", "stalled") or not reachable:
+        blocked = {"kind": "offline",
+                   "text": "No live session for the lead. Message queued; it runs when a watcher is up: "
+                           "atm spawn %s --persist" % lead,
+                   "cmd": "atm spawn %s --persist" % lead}
+    return {
+        "seat": lead, "harness": harness or "unknown",
+        "state": state, "detail": live.get("detail") or "",
+        "running": running,
+        "last_output_at": last_at, "last_output_source": last_src,
+        "limit": lim or None,
+        "limit_until": (lim or {}).get("until") or (lim or {}).get("reset_at") or "" if lim else "",
+        "auth": {"state": (auth or {}).get("state") or "", "label": (auth or {}).get("label") or "Not checked",
+                 "cmd": rec_cmd},
+        "usage": usage,
+        "reachable": reachable,
+        "capability": cap,
+        "wake_mode": wake_mode_of(board, lead),
+        "cannot_answer": blocked,
+    }
+
+
+def ui_thread(board, operator, seat, project, before="", limit=100, include_archives=False):
+    """Operator <-> seat thread, paged back through the whole live log (and
+    the archives on request) -- not the 40-message snapshot window."""
+    try:
+        limit = max(1, min(int(limit or 100), _UI_THREAD_LIMIT_MAX))
+    except (TypeError, ValueError):
+        limit = 100
+    msgs = load_messages(board, include_archives=include_archives)
+    rows = [m for m in msgs if _ui_in_thread(m, operator, seat)]
+    if before:
+        idx = next((i for i, m in enumerate(rows) if _msg_id(m) == before), None)
+        if idx is None:
+            return {"messages": [], "has_more": False, "error": "unknown cursor %s" % before}
+        rows = rows[:idx]
+    page = rows[-limit:]
+    wf = load_workforce(board)
+    agents_by = dict((r.get("owner"), r) for r in load_agents(board) if r.get("owner"))
+    return {
+        "messages": [_ui_post_row(board, m, project, operator, wf, agents_by) for m in page],
+        "has_more": len(rows) > len(page),
+        "oldest_id": _msg_id(page[0]) if page else "",
+        "total_in_window": len(rows),
+        "archives": bool(include_archives),
+    }
+
+
+def ui_needs_you(board, operator, project, tickets=None, now_dt=None):
+    """Read-only 'Needs you' queue. Unstructured asks only: state is always
+    'asked'. Prose is never a ruling (T-944), so nothing here says 'ruled'."""
+    now_dt = now_dt or datetime.now(timezone.utc)
+    msgs = load_messages(board)
+    op = (operator or "").lower()
+    items, seen_ids = [], set()
+    registered = _registered_handles(board)
+
+    def _age_h(at):
+        try:
+            d = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            return (now_dt - d).total_seconds() / 3600.0
+        except (TypeError, ValueError):
+            return None
+
+    def _push(m, why):
+        mid = _msg_id(m)
+        if mid in seen_ids:
+            return
+        seen_ids.add(mid)
+        frm = m.get("from") or ""
+        items.append({"kind": "message", "why": why, "id": mid, "at": m.get("at", ""),
+                      "from": frm, "author": "%s@%s" % (frm or "?", project),
+                      "re": m.get("re", ""), "text": (m.get("text") or "")[:400],
+                      "state": "asked", "label": "asked (unstructured)"})
+
+    for i, m in enumerate(msgs):
+        frm = (m.get("from") or "").strip()
+        if op and frm.lower() == op:
+            continue
+        text = (m.get("text") or "").strip()
+        low = text.lower()
+        directed = bool(op) and not is_board_broadcast(m) and _addressed_to(m, operator, registered)
+        if directed:
+            answered = any((x.get("from") or "").lower() == op and message_involves_seat(x, frm)
+                           for x in msgs[i + 1:])
+            if not answered:
+                _push(m, "addressed to you, no reply from you since")
+                continue
+        if text.upper().startswith("DECIDE") or "@owner" in low or (op and ("@" + op) in low):
+            _push(m, "decision asked in prose")
+            continue
+        if low.startswith("stuck:"):
+            age = _age_h(m.get("at"))
+            if age is not None and age > 1.0:
+                _push(m, "stuck for over an hour")
+    for t in (tickets if tickets is not None else load_all(board)):
+        auto = t.get("automated") or {}
+        if (t.get("kind") == "automated" and auto.get("escalated")
+                and t.get("status") not in ("done",)):
+            items.append({"kind": "escalated", "why": "escalated automated node: keep or remove",
+                          "id": t["id"], "at": auto.get("escalated_at") or t.get("created") or "",
+                          "from": "", "author": "", "re": t["id"],
+                          "text": (auto.get("escalate_reason") or t.get("title") or "")[:400],
+                          "state": "asked", "label": "asked (unstructured)"})
+    items.sort(key=lambda x: x.get("at") or "")
+    return {"items": items[:100], "count": len(items),
+            "operator": operator or "",
+            "note": "" if operator else "no operator configured; showing prose asks only"}
+
+
+def _ui_dep_state(dep):
+    if dep is None:
+        return "missing"
+    wv = _work_view()
+    if dep.get("status") == "done":
+        if wv.structured_accept(dep) or wv.structured_merge(dep):
+            return "accepted"
+        if wv.dep_released(dep):
+            return "released by override"
+        return "done, not accepted"
+    return dep.get("status") or "open"
+
+
+def ui_ticket(board, tid, operator, project, include_archives=False):
+    """GET /ticket/<id>.json: the drill-down. Board files only; no git.
+
+    The diff is a copyable command, never run on a read.
+    """
+    try:
+        with open(ticket_path(board, tid)) as f:
+            t = json.load(f)
+    except (OSError, ValueError):
+        return None
+    wv = _work_view()
+    rv = _review_verdict()
+    tickets = load_all(board)
+    by_id = dict((x["id"], x) for x in tickets)
+    msgs = load_messages(board, include_archives=include_archives)
+    about = [m for m in msgs if (m.get("re") or "") == tid]
+    review = wv.review_of(t, about)
+    status = t.get("status") or ""
+    # Only a structured accept or merge record makes done "accepted"; prose,
+    # a done flag or a release override never does (T-992 / T-1031).
+    accepted = bool(status == "done" and (wv.structured_accept(t) or wv.structured_merge(t)))
+    released = bool(wv.dep_released(t))
+    verified = bool(review.get("verified"))
+    if status == "done" and accepted:
+        status_label = "done, accepted"
+    elif status == "done" and released:
+        status_label = "done, released by override (not accepted)"
+    elif status == "done":
+        status_label = "done, not accepted"
+    else:
+        status_label = LABEL.get(status, status)
+    head = rv.displayed_review_head(t)
+    verdicts = []
+    for ev in rv.iter_structured(t):
+        verdicts.append({"kind": (ev.get("kind") or "").lower(), "by": ev.get("by") or "",
+                         "at": ev.get("at") or "", "sha": ev.get("sha") or "",
+                         "superseded": bool(ev.get("superseded")),
+                         "applies": bool(head and rv.sha_match(ev.get("sha"), head)),
+                         "notes": (ev.get("notes") or ev.get("reason") or "")[:600]})
+    agent_list = load_agents(board)
+    with _read_only_liveness():
+        amap = _safe(lambda: agent_map_data(board, show_all=True, tickets=tickets,
+                                            agent_list=agent_list), None)
+    runs = []
+    for g in (amap or {}).get("groups") or []:
+        if g.get("ticket") != tid:
+            continue
+        for r in g.get("rows") or []:
+            v = r.get("verdict")
+            verdict = ("%s @%s" % (v.get("kind") or "", v.get("sha") or "?")) if isinstance(v, dict) else (v or "")
+            runs.append({"seat": r.get("seat") or "", "author": "%s@%s" % (r.get("seat") or "?", project),
+                         "harness": r.get("harness") or "unknown", "role": r.get("role") or "",
+                         "state": r.get("state") or "", "verdict": verdict,
+                         "started": r.get("started") or "", "ended": r.get("ended") or "",
+                         "elapsed_s": r.get("elapsed_s"),
+                         "tokens": r.get("tokens"), "tokens_in": r.get("tokens_in"),
+                         "tokens_out": r.get("tokens_out"),
+                         "tokens_label": ("unknown" if r.get("tokens") is None
+                                          else "{:,}".format(int(r.get("tokens"))))})
+    wf = load_workforce(board)
+    harnesses = []
+    for seat in [x["seat"] for x in runs] + [(t.get("owner") or "").strip()]:
+        entry = wf.get(seat) or {}
+        h = (entry.get("harness") or entry.get("tool") or "").strip()
+        if seat and h and h not in harnesses:
+            harnesses.append(h)
+    usage = [_ui_usage_view(board, h) for h in harnesses]
+    handoff = []
+    for d in t.get("deps") or []:
+        dep = by_id.get(d)
+        if dep and dep.get("status") == "done":
+            for n in wv.handoff_notes(dep)[-1:]:
+                handoff.append({"from": d, "by": n.get("by") or "", "at": n.get("at") or "",
+                                "text": (n.get("text") or "")[:1200]})
+    own_handoff = [{"from": tid, "by": n.get("by") or "", "at": n.get("at") or "",
+                    "text": (n.get("text") or "")[:1200]} for n in wv.handoff_notes(t)[-3:]]
+    agents_by = dict((r.get("owner"), r) for r in agent_list if r.get("owner"))
+    msg_rows = [_ui_post_row(board, m, project, operator, wf, agents_by) for m in about[-50:]][::-1]
+    sha = head or rv.submitted_sha(t) or ""
+    branch = (t.get("branch") or "").strip()
+    commit = (t.get("commit") or "").strip()
+    if not branch and "@" in commit:
+        branch = commit.rsplit("@", 1)[0]
+    target = sha or branch
+    deps = [{"id": d, "state": _ui_dep_state(by_id.get(d)),
+             "title": (by_id.get(d) or {}).get("title") or ""} for d in t.get("deps") or []]
+    return {
+        "id": tid, "project": project, "title": t.get("title") or "",
+        "status": status, "status_label": status_label,
+        "accepted": accepted,
+        "released": released,
+        "owner": (t.get("owner") or "").strip(),
+        "owner_at_project": ("%s@%s" % (t.get("owner"), project)) if t.get("owner") else "",
+        "deps": deps,
+        "acceptance": {"proof": (t.get("proof") or "").strip()},
+        "review": {"head": head, "head_len": len(head), "label": review.get("label") or "",
+                   "verified": verified, "verdicts": verdicts},
+        "runs": runs,
+        "usage": usage,
+        "handoff": handoff + own_handoff,
+        "messages": msg_rows,
+        "messages_total": len(about),
+        "steers": [dict((k, s.get(k)) for k in ("id", "kind", "from", "to", "seat", "text", "at",
+                                               "receipt", "reply") if k in s)
+                   for s in (t.get("steers") or []) if isinstance(s, dict)],
+        "artifact": {"commit": commit, "branch": branch, "pr": str(t.get("pr") or ""), "sha": sha},
+        "diff_cmd": ("git diff main...%s" % target) if target else "",
+        "diff_note": "copy and run it in the repo; the app never runs git on a read",
+    }
+
+
+def _write_master_state(board, state):
+    os.makedirs(board, exist_ok=True)
+    path = master_state_path(board)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def set_lead(board, seat, by):
+    """master.json.lead = seat (T-1103 decision 2), plus a master log line."""
+    seat = (seat or "").strip()
+    prev = dict(current_master(board) or {})
+    if not seat:
+        old = prev.pop("lead", "")
+        _write_master_state(board, prev)
+        _master_log(board, "lead cleared (was %s)" % (old or "unset"), by=by)
+        return ""
+    if not _ui_registered(board, seat):
+        raise ValueError("%s is not a registered seat on this board" % seat)
+    prev["lead"] = seat
+    _write_master_state(board, prev)
+    _master_log(board, "lead set to %s (the seat the operator talks to on this project)" % seat, by=by)
+    return seat
+
+
+def cmd_lead(a, board):
+    """`atm lead` / `atm lead set <seat>` / `atm lead clear` (T-1103)."""
+    action = (getattr(a, "action", "") or "show").strip()
+    if action == "show":
+        lead, note = ui_lead(board)
+        print("lead: %s" % (lead or "(none) -- %s; pick one: atm lead set <seat>" % note))
+        return
+    if action == "clear":
+        set_lead(board, "", by=whoami(getattr(a, "owner", None)))
+        print("lead cleared; the app will ask who to talk to")
+        return
+    if action == "set":
+        seat = (getattr(a, "seat", "") or "").strip()
+        if not seat:
+            sys.exit("atm lead set <seat>")
+        try:
+            set_lead(board, seat, by=whoami(getattr(a, "owner", None)))
+        except ValueError as e:
+            sys.exit("lead: %s" % e)
+        harness = _seat_harness(board, seat)
+        cap = ui_capability(board, seat, harness)
+        print("lead: %s (%s; %s)" % (seat, harness or "harness unknown", cap["line"]))
+        return
+    sys.exit("atm lead [show|set <seat>|clear]")
+
+
+_UI_API_PREFIX = "/api/v1/"
+_UI_API_VERSION = 1
+_UI_CLIENT_HEADER = "X-Atman-Client"
+_UI_APP_PREFIX = "/app/"
+_UI_STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+    ".json": "application/json", ".map": "application/json", ".svg": "image/svg+xml",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
+def _ui_origin_of(value):
+    """'http://localhost:5173/' -> 'http://localhost:5173' when loopback http(s); else ''."""
+    from urllib.parse import urlparse
+    raw = (value or "").strip()
+    try:
+        u = urlparse(raw)
+    except ValueError:
+        return ""
+    if u.scheme not in ("http", "https") or not u.netloc or u.path not in ("", "/") \
+            or u.query or u.fragment or "@" in u.netloc:
+        return ""
+    try:
+        name = u.hostname or ""
+        u.port  # noqa: B018 - raises ValueError on a malformed port
+    except ValueError:
+        return ""
+    if not _ui_loopback_name(name):
+        return ""
+    return "%s://%s" % (u.scheme, u.netloc.lower())
+
+
+def _ui_default_app_dir():
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui", "dist")
+
+
+class UiApi:
+    """Per-launch state the /api/v1 routes need: the started board, the T-1105
+    launch token, the bound port, the launch operator, the origins allowed to
+    call the API (the app's own, plus loopback --dev-origin values) and the
+    built app bundle served at /app/."""
+
+    def __init__(self, board, token, port=0, operator="", dev_origins=(), app_dir=None):
+        self.board = os.path.abspath(board)
+        self.token = token
+        self.port = int(port or 0)
+        self.operator_flag = (operator or "").strip()
+        self.dev_origins = []
+        for o in dev_origins or ():
+            norm = _ui_origin_of(o)
+            if not norm:
+                raise ValueError("--dev-origin %s is not a loopback http origin "
+                                 "(e.g. http://localhost:5173)" % o)
+            if norm not in self.dev_origins:
+                self.dev_origins.append(norm)
+        self.app_dir = os.path.realpath(app_dir) if app_dir else _ui_default_app_dir()
+        # Import lazily-loaded modules now, so a read route never writes a
+        # bytecode cache file on its first request.
+        for load_mod in (_work_view, _steer, _review_verdict, _provider_usage,
+                         _agent_map_mod, _session_adapters, _turns_mod):
+            _safe(load_mod, None)
+        _safe(lambda: __import__("auth_v2_contract"), None)
+
+    def own_origins(self):
+        p = self.port
+        return ["http://127.0.0.1:%d" % p, "http://localhost:%d" % p, "http://[::1]:%d" % p]
+
+    def origin_allowed(self, origin):
+        """The app's own origin (served bundle) or a configured loopback dev origin."""
+        norm = _ui_origin_of(origin)
+        return bool(norm) and (norm in self.own_origins() or norm in self.dev_origins)
+
+    def projects(self):
+        return ui_projects(self.board)
+
+    def resolve(self, slug):
+        """(board, slug) for ?project=; (None, slug) for an unknown slug."""
+        rows = self.projects()
+        slug = (slug or "").strip()
+        if not slug:
+            return rows[0]["board"] if rows else self.board, (rows[0]["slug"] if rows else "board")
+        for row in rows:
+            if row["slug"] == slug:
+                return row["board"], slug
+        return None, slug
+
+    def operator(self, board):
+        """(operator, why_not) from the launch --operator (T-1104's flag)."""
+        return ui_operator(board, self.operator_flag)
+
+
+def _ui_query(path):
+    from urllib.parse import parse_qs, urlparse
+    u = urlparse(path)
+    q = parse_qs(u.query)
+    return u.path, (lambda k, d="": (q.get(k) or [d])[0])
+
+
+def _ui_snapshot_ro(board, seat=""):
+    """board_snapshot for a read route: no `ps`, no writes (pid files are the
+    watcher evidence). Not single-flighted with the embedded page's refresh,
+    which still probes the process table."""
+    with _read_only_liveness():
+        snap = board_snapshot(board)
+    seat = (seat or "").strip()
+    if seat:
+        snap = dict(snap)
+        snap["messages"] = [m for m in snap.get("messages") or [] if message_involves_seat(m, seat)]
+        snap["seat"] = seat
+    return snap
+
+
+def _ui_node_accept_state(node, by_id):
+    """(accepted, released, status_label) for one plan node. Records only."""
+    wv = _work_view()
+    t = by_id.get(node.get("id")) or {}
+    if (t.get("status") or node.get("status")) != "done":
+        return False, False, LABEL.get(node.get("status") or "", node.get("status") or "")
+    accepted = bool(wv.structured_accept(t) or wv.structured_merge(t))
+    released = bool(wv.dep_released(t))
+    if accepted:
+        return True, True, "done, accepted"
+    if released:
+        return False, True, "done, released by override (not accepted)"
+    return False, False, "done, not accepted"
+
+
+def ui_plan(board, slug, snap=None):
+    """GET /api/v1/plan: the execution plan with typed blocker reasons per step.
+
+    The Work payload (same planner as the embedded page) plus, per node:
+    blockers[] (dep_unaccepted / dep_open / seat_limited / seat_offline / auth /
+    hold / capture / blocked / unaccepted), running, accepted, released.
+    """
+    snap = snap if snap is not None else _ui_snapshot_ro(board)
+    work = snap.get("work") or {}
+    by_id = dict((t["id"], t) for t in load_all(board))
+    nodes = []
+    for n in work.get("nodes") or []:
+        n = dict(n)
+        accepted, released, label = _ui_node_accept_state(n, by_id)
+        n["accepted"], n["released"], n["status_label"] = accepted, released, label
+        n.setdefault("blockers", [])
+        n.setdefault("running", None)
+        nodes.append(n)
+    return {
+        "project": slug, "generated": snap.get("generated") or now(),
+        "available": bool(work),
+        "objective": snap.get("objective") or {},
+        "summary": work.get("summary") or {},
+        "counts": work.get("counts") or {},
+        "nodes": nodes,
+        "edges": work.get("edges") or [],
+        "layers": work.get("layers") or [],
+        "order": work.get("order") or [],
+        "blocker_kinds": list(_UI_BLOCKER_KINDS),
+    }
+
+
+_UI_BLOCKER_KINDS = ("dep_unaccepted", "dep_open", "seat_limited", "seat_offline", "auth",
+                     "hold", "capture", "blocked", "unaccepted")
+
+
+def ui_lead_view(board, slug, operator, operator_note):
+    """GET /api/v1/lead: who the operator talks to here, and whether it can answer.
+
+    No lead picked -> a picker (every registered seat with its harness and the
+    steer table's capability line). The app never guesses master or CoS.
+    """
+    lead, lead_note = ui_lead(board)
+    out = {"project": slug, "operator": operator, "operator_note": operator_note,
+           "lead": lead, "lead_note": lead_note, "needs_lead": not lead,
+           "picker": [], "status": None}
+    if not lead:
+        out["picker"] = _ui_lead_picker(board, operator)
+        return out
+    out["status"] = ui_lead_status(board, lead)
+    return out
+
+
+def _ui_lead_picker(board, operator):
+    wf = load_workforce(board)
+    names = sorted(set([r.get("owner") for r in load_agents(board) if r.get("owner")]) | set(wf))
+    picks = []
+    for n in names:
+        if n == operator or n.startswith("agent-"):
+            continue
+        entry = wf.get(n) or {}
+        h = (entry.get("harness") or entry.get("tool") or "").strip()
+        picks.append({"seat": n, "harness": h or "unknown",
+                      "capability": ui_capability(board, n, h)["line"]})
+    return picks
+
+
+def _ui_json(status, obj):
+    return status, "application/json", json.dumps(obj).encode()
+
+
+def ui_api_get(ctx, route, q):
+    """Route one GET under /api/v1/. Returns (status, ctype, body). Read-only:
+    no subprocess, no write-mode open, no watermark move."""
+    name = route[len(_UI_API_PREFIX):]
+    if name == "session":
+        return _ui_json(500, {"error": "session is answered by the handler"})
+    board, slug = ctx.resolve(q("project"))
+    if board is None:
+        return _ui_json(404, {"error": "unknown project %s" % slug})
+    op, why = ctx.operator(board)
+    if name == "projects":
+        rows = []
+        for row in ctx.projects():
+            counts, lead = _safe(lambda b=row["board"]: _ui_project_counts(b), ({}, ""))
+            rows.append(dict(row, counts=counts or {}, lead=lead or "", current=row["slug"] == slug))
+        return _ui_json(200, {"projects": rows, "current": slug})
+    if name == "board":
+        snap = dict(_ui_snapshot_ro(board, seat=q("seat")))
+        lead, lead_note = ui_lead(board)
+        snap["app"] = {"project": slug, "operator": op, "operator_note": why,
+                       "lead": lead, "lead_note": lead_note}
+        return _ui_json(200, snap)
+    if name == "plan":
+        return _ui_json(200, ui_plan(board, slug))
+    if name == "lead":
+        return _ui_json(200, ui_lead_view(board, slug, op, why))
+    if name == "thread":
+        seat = q("with")
+        lead, lead_note = ui_lead(board)
+        seat = seat or lead
+        out = {"project": slug, "operator": op, "operator_note": why,
+               "lead": lead, "lead_note": lead_note, "with": seat,
+               "needs_lead": False, "messages": [], "has_more": False,
+               "oldest_id": "", "total_in_window": 0, "archives": q("all") == "1"}
+        if not seat:
+            out["needs_lead"] = True
+            return _ui_json(200, out)
+        if not _ui_registered(board, seat):
+            out["error"] = "%s is not registered on this board" % seat
+            return _ui_json(404, out)
+        out.update(ui_thread(board, op, seat, slug, before=q("before"), limit=q("limit", "100"),
+                             include_archives=q("all") == "1"))
+        if out.get("error"):
+            return _ui_json(400, out)
+        return _ui_json(200, out)
+    if name == "needs-you":
+        return _ui_json(200, ui_needs_you(board, op, slug))
+    m = re.match(r"^ticket/([^/]+)$", name)
+    if m:
+        tid = m.group(1)
+        if not _UI_TICKET_ID_RE.match(tid):
+            return _ui_json(400, {"error": "bad ticket id"})
+        data = ui_ticket(board, tid, op, slug, include_archives=q("all") == "1")
+        if data is None:
+            return _ui_json(404, {"error": "no such ticket %s" % tid})
+        return _ui_json(200, data)
+    return _ui_json(404, {"error": "no such route"})
+
+
+def ui_app_file(ctx, route):
+    """GET /app/...: the built TypeScript app. index.html carries the
+    per-launch token in <meta name="atman-token"> (same-origin page load; the
+    token is never in a URL). Paths never leave the bundle directory."""
+    import html as _html
+    rel = route[len(_UI_APP_PREFIX):] if route.startswith(_UI_APP_PREFIX) else ""
+    rel = rel or "index.html"
+    root = ctx.app_dir
+    if not os.path.isfile(os.path.join(root, "index.html")):
+        return _ui_json(404, {"error": "no app bundle at %s; build it: npm run build -w ui "
+                                       "(or pass atm ui --app-dir DIR)" % root})
+    path = os.path.realpath(os.path.join(root, rel))
+    if not (path == root or path.startswith(root + os.sep)):
+        return _ui_json(404, {"error": "not found"})
+    if not os.path.isfile(path):
+        # client-side routes fall back to the app shell; real assets 404
+        if "." in os.path.basename(rel):
+            return _ui_json(404, {"error": "not found"})
+        path = os.path.join(root, "index.html")
+    try:
+        with open(path, "rb") as f:
+            body = f.read()
+    except OSError:
+        return _ui_json(404, {"error": "not found"})
+    ext = os.path.splitext(path)[1].lower()
+    ctype = _UI_STATIC_TYPES.get(ext, "application/octet-stream")
+    if os.path.basename(path) == "index.html":
+        meta = ('<meta name="atman-token" content="%s"><meta name="atman-api" content="%s">'
+                % (_html.escape(ctx.token, quote=True), _UI_API_PREFIX.rstrip("/")))
+        text = body.decode("utf-8", "replace")
+        low = text.lower()
+        at = low.find("</head>")
+        text = (text[:at] + meta + text[at:]) if at >= 0 else meta + text
+        body = text.encode("utf-8")
+    return 200, ctype, body
+
+
+def ui_post_lead(ctx, board, payload):
+    """POST /api/v1/lead {seat}: the operator picks this project's lead (§9 #2)."""
+    extra = set(payload) - {"seat", "project"}
+    if extra:
+        return 400, {"ok": False, "error": "lead accepts only seat"}
+    op, why = ctx.operator(board)
+    if not op:
+        return 400, {"ok": False, "error": "only the operator picks the lead: " + why}
+    seat = str(payload.get("seat") or "").strip()
+    if not seat:
+        return 400, {"ok": False, "error": "seat is required"}
+    if seat.lower() == op.lower():
+        return 400, {"ok": False, "error": "the lead is a seat, not you"}
+    try:
+        set_lead(board, seat, by=op)
+    except ValueError as e:
+        return 400, {"ok": False, "error": str(e)}
+    harness = _seat_harness(board, seat)
+    return 200, {"ok": True, "lead": seat, "harness": harness or "unknown",
+                 "capability": ui_capability(board, seat, harness)["line"]}
+
+
+
+
+def _ui_api_route(path):
+    """'api', 'app' or '' for a request path."""
+    route = _ui_query(path)[0]
+    if route.startswith(_UI_API_PREFIX):
+        return "api"
+    if route == _UI_APP_PREFIX.rstrip("/") or route.startswith(_UI_APP_PREFIX):
+        return "app"
+    return ""
+
+
+def _ui_api_send(handler, api, status, ctype, body, extra=None):
+    handler.send_response(status)
+    handler.send_header("Content-Type", ctype)
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("X-Frame-Options", "DENY")
+    handler.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+    handler.send_header("Referrer-Policy", "no-referrer")
+    origin = (handler.headers.get("Origin") or "").strip()
+    if origin and api.origin_allowed(origin) and _ui_api_route(handler.path) == "api":
+        # CORS only for the app's own origin or a --dev-origin
+        handler.send_header("Access-Control-Allow-Origin", _ui_origin_of(origin))
+        handler.send_header("Vary", "Origin")
+    for k, v in (extra or {}).items():
+        handler.send_header(k, v)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _ui_api_refuse_foreign(handler, api):
+    """403 when the request carries an Origin that is not allowed, or the
+    browser says it is cross-site without one (a no-cors embed). Runs after
+    cmd_ui's loopback-Host gate. Returns True when it answered."""
+    origin = (handler.headers.get("Origin") or "").strip()
+    if origin and not api.origin_allowed(origin):
+        _ui_api_send(handler, api, *_ui_json(403, {"ok": False, "error": "origin %s is not allowed" % origin[:80]}))
+        return True
+    site = (handler.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if not origin and site in ("cross-site", "same-site"):
+        _ui_api_send(handler, api, *_ui_json(403, {"ok": False, "error": "cross-site request without an allowed origin"}))
+        return True
+    return False
+
+
+def ui_api_options(handler, api):
+    """CORS preflight for /api/v1: answered only for an allowed origin."""
+    origin = (handler.headers.get("Origin") or "").strip()
+    if _ui_api_route(handler.path) != "api" or not origin or not api.origin_allowed(origin):
+        _ui_api_send(handler, api, *_ui_json(403, {"ok": False, "error": "preflight refused"}))
+        return
+    _ui_api_send(handler, api, 204, "text/plain", b"", {
+        "Access-Control-Allow-Methods": "GET, POST",
+        "Access-Control-Allow-Headers": "Content-Type, %s, %s" % (_UI_TOKEN_HEADER, _UI_CLIENT_HEADER),
+        "Access-Control-Max-Age": "600",
+    })
+
+
+def ui_api_session(api):
+    board, slug = api.resolve("")
+    op, why = api.operator(board)
+    lead, lead_note = ui_lead(board)
+    return {"api_version": _UI_API_VERSION, "token": api.token, "token_header": _UI_TOKEN_HEADER,
+            "project": slug, "operator": op, "operator_note": why, "lead": lead, "lead_note": lead_note}
+
+
+def ui_api_do_get(handler, api):
+    """GET /api/v1/* and /app/*. Called after cmd_ui's loopback-Host gate."""
+    if _ui_api_refuse_foreign(handler, api):
+        return
+    route, q = _ui_query(handler.path)
+    try:
+        if _ui_api_route(handler.path) == "app":
+            status, ctype, body = ui_app_file(api, route)
+        elif route == _UI_API_PREFIX + "session":
+            # The token for the app on a dev origin. X-Atman-Client cannot be
+            # sent cross-origin without a preflight, and the preflight is
+            # answered only for an allowed origin. The token never rides a URL.
+            if not (handler.headers.get(_UI_CLIENT_HEADER) or "").strip():
+                status, ctype, body = _ui_json(400, {"error": "send the %s header" % _UI_CLIENT_HEADER})
+            else:
+                status, ctype, body = _ui_json(200, ui_api_session(api))
+        else:
+            status, ctype, body = ui_api_get(api, route, q)
+    except Exception as e:  # noqa: BLE001 - a read must answer, never hang
+        status, ctype, body = _ui_json(500, {"error": str(e)})
+    _ui_api_send(handler, api, status, ctype, body)
+
+
+def ui_api_do_post(handler, api):
+    """POST /api/v1/*. Called after cmd_ui's gate (loopback Host + launch token)."""
+    if _ui_api_refuse_foreign(handler, api):
+        return
+    route, q = _ui_query(handler.path)
+    if route != _UI_API_PREFIX + "lead":
+        _ui_api_send(handler, api, *_ui_json(404, {"ok": False, "error": "no such route"}))
+        return
+    try:
+        payload = _ui_read_json_body(handler, origin_ok=lambda h: True)  # origin checked above
+    except Exception as e:  # noqa: BLE001 - always answer, never hang
+        _ui_api_send(handler, api, *_ui_json(400, {"ok": False, "error": str(e)}))
+        return
+    board, slug = api.resolve(str(payload.get("project") or q("project") or ""))
+    if board is None:
+        _ui_api_send(handler, api, *_ui_json(404, {"ok": False, "error": "unknown project %s" % slug}))
+        return
+    try:
+        status, out = ui_post_lead(api, board, payload)
+    except Exception as e:  # noqa: BLE001
+        status, out = 400, {"ok": False, "error": str(e)}
+    if isinstance(out, dict):
+        out.setdefault("project", slug)
+    _ui_api_send(handler, api, *_ui_json(status, out))
 
 
 QUICKSTART_MARKER = "quickstart.json"
@@ -21638,7 +22746,18 @@ def main():
                    help="exit when this pid disappears (test/supervisor watchdog)")
     c.add_argument("--operator", default="",
                    help="identity the composer posts as; required to write. Never a seat picker.")
+    c.add_argument("--dev-origin", action="append", default=[],
+                   help="also let this loopback origin call /api/v1 (the app's dev server, "
+                        "e.g. http://localhost:5173); repeatable")
+    c.add_argument("--app-dir", default="",
+                   help="serve this built app bundle at /app/ (default: ui/dist next to tickets.py)")
     c.set_defaults(fn=cmd_ui)
+
+    c = sub.add_parser("lead", help="who the operator talks to on this project: atm lead set <seat>")
+    c.add_argument("action", nargs="?", default="show", choices=("show", "set", "clear"))
+    c.add_argument("seat", nargs="?", default="")
+    c.add_argument("--owner", default=None, help="who is recording this (default: $TICKET_AGENT)")
+    c.set_defaults(fn=cmd_lead)
 
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
     c.add_argument("--agent", help="register under this name (default: $TICKET_AGENT)")

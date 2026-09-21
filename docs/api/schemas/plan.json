@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/plan.json",
+  "title": "GET /api/v1/plan",
+  "description": "The execution plan: the Work payload (same planner as the embedded page) with typed blocker reasons, a running marker and the accept state on every step. Node fields beyond 'required' come from the Work payload and are informational.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "generated", "available", "objective", "summary", "counts", "nodes", "edges", "layers", "order", "blocker_kinds"],
+  "properties": {
+    "project": {"$ref": "common.json#/$defs/slug"},
+    "generated": {"type": "string"},
+    "available": {"type": "boolean", "description": "false when the Work payload could not be built; nodes is then []."},
+    "objective": {"type": "object"},
+    "summary": {"type": "object"},
+    "counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "edges": {
+      "type": "array",
+      "items": {"type": "object", "required": ["from", "to"],
+                "properties": {"from": {"type": "string"}, "to": {"type": "string"}, "waiting": {"type": "boolean"}}}
+    },
+    "layers": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+    "order": {"type": "array", "items": {"type": "string"}},
+    "blocker_kinds": {"type": "array", "items": {"type": "string"}},
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "phase", "status", "status_label", "owner", "reserved_for", "deps", "depth",
+                     "unverified", "accepted", "released", "blockers", "running", "review", "artifact", "wait"],
+        "properties": {
+          "id": {"$ref": "common.json#/$defs/ticket_id"},
+          "title": {"type": "string"},
+          "phase": {"type": "string"},
+          "status": {"type": "string"},
+          "status_label": {"type": "string"},
+          "owner": {"type": "string"},
+          "reserved_for": {"type": "string"},
+          "deps": {"type": "array", "items": {"type": "string"}},
+          "depth": {"type": "integer"},
+          "unverified": {"type": "boolean", "description": "done without a structured accept."},
+          "accepted": {"type": "boolean", "description": "true only for done with a structured accept or merge record bound to the review head."},
+          "released": {"type": "boolean", "description": "dependents may start (accept, merge, or a recorded release override)."},
+          "blockers": {"type": "array", "items": {"$ref": "common.json#/$defs/blocker"}},
+          "running": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["seat", "elapsed_s"],
+            "properties": {"seat": {"type": "string"}, "elapsed_s": {"type": ["number", "null"]}}
+          },
+          "review": {"type": "object", "required": ["verified", "label"]},
+          "artifact": {"type": "object", "required": ["commit", "branch", "pr", "sha"]},
+          "wait": {"type": ["object", "null"]}
+        },
+        "allOf": [
+          {"if": {"properties": {"accepted": {"const": true}}}, "then": {"properties": {"status": {"const": "done"}, "unverified": {"const": false}}}},
+          {"if": {"properties": {"status": {"const": "done"}, "accepted": {"const": false}}, "required": ["status", "accepted"]},
+           "then": {"properties": {"status_label": {"not": {"const": "done, accepted"}}}}}
+        ]
+      }
+    }
+  }
+}

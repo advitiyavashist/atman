@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/needs-you.json",
+  "title": "GET /api/v1/needs-you",
+  "description": "What is waiting on the operator. Unstructured asks only: every item's state is 'asked'. Prose is never a ruling.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "count", "operator", "note"],
+  "properties": {
+    "count": {"type": "integer", "minimum": 0},
+    "operator": {"type": "string"},
+    "note": {"type": "string"},
+    "items": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "why", "id", "at", "from", "author", "re", "text", "state", "label"],
+        "properties": {
+          "kind": {"enum": ["message", "escalated"]},
+          "why": {"type": "string"},
+          "id": {"type": "string"},
+          "at": {"type": "string"},
+          "from": {"type": "string"},
+          "author": {"type": "string"},
+          "re": {"type": "string"},
+          "text": {"type": "string", "maxLength": 400},
+          "state": {"const": "asked"},
+          "label": {"const": "asked (unstructured)"}
+        }
+      }
+    }
+  }
+}
