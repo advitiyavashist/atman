@@ -538,7 +538,8 @@ def test_multi_project_seat_gets_one_record_per_home(shared, homes):
 # 8. the frozen shared board
 # --------------------------------------------------------------------------
 
-def _atm(board, *args, agent="ann", home=None, config=None, timeout=None):
+def _atm(board, *args, agent="ann", home=None, config=None, timeout=None,
+         cwd=None):
     env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent,
                TICKETS_GC_OPEN_PRS="none")
     env.pop("TICKET_SEAT", None)
@@ -553,7 +554,7 @@ def _atm(board, *args, agent="ann", home=None, config=None, timeout=None):
     try:
         return subprocess.run([sys.executable, str(TOOL), *args],
                               capture_output=True, text=True, env=env,
-                              cwd=str(Path(board).parent), timeout=timeout)
+                              cwd=str(cwd or Path(board).parent), timeout=timeout)
     except subprocess.TimeoutExpired:
         # `dash` refreshes in place forever by design. Being killed mid-refresh
         # is the harshest moment to check for a stray write, so the caller
@@ -1027,6 +1028,36 @@ def test_project_report_paths_never_land_inside_the_board(shared, homes, tmp_pat
         assert "REFUSING --out" in res.stderr, res.stderr
         assert _tree(shared) == live, "--out %s wrote anyway" % out.name
     assert json.loads(target.read_bytes().decode())["id"] == "T-100"
+
+    # Three ways to spell "inside the board" that a plain string compare would
+    # have missed. `_path_inside` resolves both ends, so all three refuse.
+    linked = tmp_path / "linked-board"
+    linked.symlink_to(shared)
+    res = _atm(shared, "project", "split", "--propose", "--out",
+               str(linked / "T-100.json"), agent="ann", timeout=30)
+    assert res.returncode != 0 and "REFUSING --out" in res.stderr, (
+        "a symlink outside the board that points AT the board got through")
+    for rel in ("T-100.json", "./agents/ann.json"):
+        res = _atm(shared, "project", "split", "--propose", "--out", rel,
+                   agent="ann", timeout=30, cwd=shared)
+        assert res.returncode != 0 and "REFUSING --out" in res.stderr, (
+            "relative path %r with cwd inside the board got through" % rel)
+    for missing in (shared / "no" / "such" / "dir" / "plan.json",
+                    shared / "brand-new-plan.json"):
+        res = _atm(shared, "project", "split", "--propose", "--out",
+                   str(missing), agent="ann", timeout=30)
+        assert res.returncode != 0 and "REFUSING --out" in res.stderr, (
+            "a path that does not exist yet got through: %s" % missing)
+    assert _tree(shared) == live
+    assert json.loads((shared / "T-100.json").read_bytes().decode())["id"] == "T-100"
+
+    # ...and `..` that genuinely escapes the board is allowed: the rule is
+    # containment, not a ban on relative paths.
+    res = _atm(shared, "project", "split", "--propose", "--out",
+               str(shared / ".." / "escaped.json"), agent="ann", timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert (Path(shared).parent / "escaped.json").exists()
+    assert _tree(shared) == live
 
     # ...and pointed outside it, the same command works
     outside = tmp_path / "plan-outside.json"
