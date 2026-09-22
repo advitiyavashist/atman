@@ -505,14 +505,26 @@ def _accepted_pin_branch(t):
     return ""
 
 
-def done_pin_mismatch_warning(tree_sha, accepted_sha):
-    """Remedy when a done tree's HEAD is not the accepted commit."""
+def done_pin_mismatch_warning(tree_sha, accepted_sha, used_artifact=False):
+    """Remedy when a done tree's HEAD is not the accepted commit.
+
+    The second remedy names the tree's sha (the unreviewed commit), never
+    the already-accepted one. ``--artifact`` is only suggested when the
+    closer actually passed that flag.
+    """
     tree = (tree_sha or "")[:12]
     accepted = (accepted_sha or "")[:12] if len(accepted_sha or "") >= 12 else (accepted_sha or "")
+    if used_artifact:
+        return (
+            "WARNING: that tree is at %s, the accepted commit is %s -- "
+            "point --artifact at the accepted worktree, or review and accept %s"
+            % (tree, accepted, tree)
+        )
     return (
         "WARNING: that tree is at %s, the accepted commit is %s -- "
-        "point --artifact at the accepted worktree, or re-accept %s"
-        % (tree, accepted, accepted)
+        "this close records the accepted commit; review and accept %s "
+        "if that commit is the deliverable"
+        % (tree, accepted, tree)
     )
 
 
@@ -526,8 +538,9 @@ def done_pin_state(t, g, honor_cwd=False):
 
     ``honor_cwd`` is True when the closer passed --artifact. That flag names
     a LOCATION, not a verdict, so it never short-circuits this rewrite: a
-    tree whose HEAD moved past the accept still pins the accepted sha and
-    always warns with the named remedy.
+    tree whose HEAD moved past the accept still pins the accepted sha.
+    It only selects the warning remedy (suggest ``--artifact`` only when
+    that flag was actually passed).
 
     Returns ``(g_for_pin, warning_or_None)``. ``g_for_pin`` is ``g`` when
     there is nothing to rewrite.
@@ -544,7 +557,7 @@ def done_pin_state(t, g, honor_cwd=False):
     cwd = (g.get("sha_full") or g.get("sha") or "").strip()
     warn = None
     if cwd and not _event_sha_match(cwd, sha):
-        warn = done_pin_mismatch_warning(cwd, sha)
+        warn = done_pin_mismatch_warning(cwd, sha, used_artifact=honor_cwd)
     if cwd and _event_sha_match(cwd, sha):
         return g, None
     out = dict(g)
@@ -560,8 +573,6 @@ def done_pin_state(t, g, honor_cwd=False):
     branch = _accepted_pin_branch(t)
     if branch:
         out["branch"] = branch
-    # honor_cwd used to skip the rewrite; callers still pass it.
-    _ = honor_cwd
     return out, warn
 
 

@@ -66,8 +66,9 @@ def test_done_pin_state_defaults_to_accepted_sha():
     assert pin["sha"].startswith(accepted[:7])
     assert pin["branch"] == "fix/t1082"
     assert warn and later[:12] in warn and accepted[:12] in warn
-    assert "point --artifact at the accepted worktree" in warn
-    assert "re-accept" in warn
+    assert "point --artifact" not in warn
+    assert "re-accept" not in warn
+    assert "review and accept %s" % later[:12] in warn
     same, no_warn = work_view.done_pin_state(
         t, {"branch": "main", "sha": accepted[:7], "sha_full": accepted})
     assert same["sha_full"] == accepted
@@ -78,9 +79,31 @@ def test_done_pin_state_defaults_to_accepted_sha():
     assert honoured_warn and later[:12] in honoured_warn
     assert accepted[:12] in honoured_warn
     assert "point --artifact at the accepted worktree" in honoured_warn
-    assert "re-accept" in honoured_warn
+    assert "re-accept" not in honoured_warn
+    assert "review and accept %s" % later[:12] in honoured_warn
     bare, _ = work_view.done_pin_state({"id": "T-009"}, g)
     assert bare is g
+
+
+def test_readme_done_records_accepted_commit_not_artifact_head():
+    text = (ROOT / "README.md").read_text()
+    assert "records the commit of the artifact checkout" not in text
+    assert "records that accepted commit" in text
+    assert "point it at the accepted worktree" in text
+
+
+def test_done_pin_mismatch_warning_names_tree_sha():
+    tree = "b" * 40
+    accepted = "a" * 40
+    plain = work_view.done_pin_mismatch_warning(tree, accepted)
+    assert "point --artifact" not in plain
+    assert "re-accept" not in plain
+    assert "review and accept %s" % tree[:12] in plain
+    assert accepted[:12] in plain
+    flagged = work_view.done_pin_mismatch_warning(tree, accepted, used_artifact=True)
+    assert "point --artifact at the accepted worktree" in flagged
+    assert "review and accept %s" % tree[:12] in flagged
+    assert "re-accept" not in flagged
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=TOOL_IDS)
@@ -100,7 +123,9 @@ def test_done_without_artifact_records_accepted_sha_not_cwd(tool, board):
     assert done.returncode == 0, done.stderr + done.stdout
     err = done.stderr + done.stdout
     assert "the accepted commit is" in err
-    assert "point --artifact at the accepted worktree" in err
+    assert "point --artifact" not in err
+    assert "re-accept" not in err
+    assert "review and accept" in err
     assert later_short in err or later_full[:12] in err
 
     parent = load_ticket(board, "T-002")
@@ -174,7 +199,8 @@ def test_done_artifact_moved_head_does_not_hand_unreviewed_sha(board):
     assert "that tree is at" in err
     assert "the accepted commit is" in err
     assert "point --artifact at the accepted worktree" in err
-    assert "re-accept" in err
+    assert "re-accept" not in err
+    assert "review and accept" in err
     assert later_short in err or later_full[:12] in err
 
     parent = load_ticket(board, "T-002")
