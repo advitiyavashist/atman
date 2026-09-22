@@ -126,6 +126,10 @@ def test_process_command_reads_full_cmdline():
                 break
             time.sleep(0.05)
         assert marker in cmd, cmd
+        rows, ok = tk._process_table_snapshot()
+        assert ok
+        snapped = [c for p, c in rows if p == proc.pid]
+        assert snapped and marker in snapped[0], snapped
     finally:
         proc.terminate()
         proc.wait(timeout=5)

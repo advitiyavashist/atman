@@ -37,6 +37,10 @@ def _run_pkg_cli(board, *args, agent="", cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    e.pop("TICKET_SEAT", None)
+    e.pop("TICKET_SESSION_ID", None)
+    e.pop("CLAUDE_CODE_SESSION_ID", None)
+    e.pop("TICKET_OWNER_GENERATION", None)
     # Packaged ticket_coordination lives under src/.
     e["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(ROOT)])
     where = cwd or board.parent
@@ -52,10 +56,24 @@ def _commit(repo, name, text="x"):
     _git(repo, "commit", "-m", name)
 
 
+def _ensure_main_branch(repo):
+    """CI checkouts and `git init` without -b main may only have master."""
+    heads = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    names = set(heads.split())
+    if "main" in names:
+        return
+    if "master" in names:
+        _git(repo, "branch", "-m", "master", "main")
+        return
+    current = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    _git(repo, "branch", "-f", "main", current or "HEAD")
+
+
 def _behind_trunk_branch(repo, branch):
     """Leave `repo` checked out on `branch`, which does NOT contain trunk:
     trunk moved on after the branch was cut. This is the real shape -- another
     agent's merge landed on main while this branch was being worked."""
+    _ensure_main_branch(repo)
     _git(repo, "checkout", "-q", "-b", branch)
     _commit(repo, "work.txt", "branch work")
     trunk = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")  # placeholder, replaced below
@@ -77,6 +95,7 @@ def _ensure_origin_fetchable(repo):
                        capture_output=True, text=True)
     if r.returncode != 0:
         _git(repo, "remote", "add", "origin", str(repo.resolve()))
+    _ensure_main_branch(repo)
     _git(repo, "fetch", "-q", "origin", "main")
 
 
@@ -155,7 +174,7 @@ def test_same_repo_behind_trunk_keeps_the_original_wording(board):
     assert r.returncode != 0
     out = (r.stdout + r.stderr).strip()
     assert out == (
-        "RULE: your branch is behind main. Run `tickets sync` (merges main in, so conflicts "
+        "RULE: your branch is behind main. Run `atm sync` (merges main in, so conflicts "
         "are yours to fix now, not the master's later), then submit again."
     ), "common-path wording must be byte-identical: %r" % out
 
@@ -175,7 +194,7 @@ def test_artifact_pointing_at_the_cwd_tree_gets_the_common_path_wording(board):
     assert r.returncode != 0
     out = (r.stdout + r.stderr).strip()
     assert out == (
-        "RULE: your branch is behind main. Run `tickets sync` (merges main in, so conflicts "
+        "RULE: your branch is behind main. Run `atm sync` (merges main in, so conflicts "
         "are yours to fix now, not the master's later), then submit again."
     ), "same tree must not get the cross-repo wording: %r" % out
 
@@ -241,13 +260,16 @@ def test_cli_py_review_refuses_without_minting_a_repo_none_pin(board):
     # Message must be the common-path line -- flags cli.py actually accepts.
     _behind_trunk_branch(repo_a, "alice/cli-behind")
     tid2 = _create(board, "cli.py behind-trunk wording", role="backend")
-    run(board, "claim", tid2, agent="alice")
+    # alice still holds tid; claim the wording ticket as bob.
+    run(board, "join", "bob", "--roles", "backend", agent="bob")
+    claimed = run(board, "claim", tid2, agent="bob")
+    assert claimed.returncode == 0, claimed.stderr + claimed.stdout
     r2 = _run_pkg_cli(board, "review", tid2, "--notes", "n",
-                      agent="alice", cwd=repo_a)
+                      agent="bob", cwd=repo_a)
     assert r2.returncode != 0
     out = (r2.stdout + r2.stderr).strip()
     assert out == (
-        "RULE: your branch is behind main. Run `tickets sync` (merges main in, so conflicts "
+        "RULE: your branch is behind main. Run `atm sync` (merges main in, so conflicts "
         "are yours to fix now, not the master's later), then submit again."
     ), "cli.py refusal must name only flags this copy accepts: %r" % out
     rec2 = _ticket(board, tid2)

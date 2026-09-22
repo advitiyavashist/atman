@@ -227,43 +227,53 @@ def _find_lsof():
     return ""
 
 
-def live_cwds(path, lsof_fn=None):
-    """Processes whose cwd is this worktree (including interactive shells)."""
-    real = os.path.realpath(path)
-    hits = []
-    if lsof_fn:
-        return lsof_fn(real)
-    # /proc (Linux)
+def _proc_live_cwds(real):
+    """Walk /proc for cwds under ``real``. None if /proc is unavailable.
+
+    Fail-closed: any unreadable cwd (except a pid that vanished) returns a
+    single unknown row. Callers may try a targeted lsof probe of this
+    worktree before treating that unknown as final. Own-uid EACCES is not
+    skipped -- a same-uid helper whose cwd cannot be read still blocks GC.
+    A non-root lsof is uid-blind and cannot prove other-uid cwds absent, so
+    an empty lsof result is not a proof that the worktree is unused.
+    """
     proc = "/proc"
-    if os.path.isdir(proc):
+    if not os.path.isdir(proc):
+        return None
+    try:
+        names = os.listdir(proc)
+    except OSError as exc:
+        return [{"pid": 0, "cmd": "proc scan failed: %s" % exc, "unknown": True}]
+    hits = []
+    for name in names:
+        if not name.isdigit():
+            continue
         try:
-            names = os.listdir(proc)
+            cwd = os.path.realpath(os.readlink(os.path.join(proc, name, "cwd")))
         except OSError as exc:
-            return [{"pid": 0, "cmd": "proc scan failed: %s" % exc, "unknown": True}]
-        for name in names:
-            if not name.isdigit():
+            # Processes can exit during enumeration. Other errors leave
+            # their cwd unknown and must not authorize removal.
+            if exc.errno in (errno.ENOENT, errno.ESRCH):
                 continue
+            return [{"pid": int(name), "cmd": "proc cwd failed: %s" % exc,
+                     "unknown": True}]
+        if cwd == real or cwd.startswith(real + os.sep):
+            cmd = name
             try:
-                cwd = os.path.realpath(os.readlink(os.path.join(proc, name, "cwd")))
-            except OSError as exc:
-                # Processes can exit during enumeration. Other errors leave
-                # their cwd unknown and must not authorize removal.
-                if exc.errno in (errno.ENOENT, errno.ESRCH):
-                    continue
-                return [{"pid": int(name), "cmd": "proc cwd failed: %s" % exc,
-                         "unknown": True}]
-            if cwd == real or cwd.startswith(real + os.sep):
-                cmd = name
-                try:
-                    cmd = open(os.path.join(proc, name, "comm")).read().strip() or name
-                except OSError:
-                    pass
-                hits.append({"pid": int(name), "cmd": cmd})
-        return hits
-    # macOS / BSD: lsof cwd (often /usr/sbin/lsof, not on a slim PATH)
+                cmd = open(os.path.join(proc, name, "comm")).read().strip() or name
+            except OSError:
+                pass
+            hits.append({"pid": int(name), "cmd": cmd})
+    return hits
+
+
+def _lsof_live_cwds(real):
+    """Targeted ``lsof +D`` probe of one worktree. May contain unknown=True."""
+    hits = []
     lsof = _find_lsof()
     if not lsof:
         return [{"pid": 0, "cmd": "lsof-missing", "unknown": True}]
+
     def unknown(detail):
         return [{"pid": 0, "cmd": detail, "unknown": True}]
 
@@ -299,6 +309,28 @@ def live_cwds(path, lsof_fn=None):
     if not complete:
         return unknown("empty or incomplete lsof output")
     return hits
+
+
+def live_cwds(path, lsof_fn=None):
+    """Processes whose cwd is this worktree (including interactive shells)."""
+    real = os.path.realpath(path)
+    if lsof_fn:
+        return lsof_fn(real)
+    proc_rows = _proc_live_cwds(real)
+    if proc_rows is not None and not any(x.get("unknown") for x in proc_rows):
+        return proc_rows
+    # Incomplete /proc (EACCES on an unrelated helper is common on GHA):
+    # try a targeted lsof of THIS worktree. Caveat: a non-root lsof is
+    # uid-blind -- it cannot see an other-uid process whose /proc cwd was
+    # also unreadable, so a clean empty lsof result does not prove those
+    # pids are absent. If lsof is also inconclusive, keep the /proc
+    # unknown -- fail closed.
+    lsof_rows = _lsof_live_cwds(real)
+    if not any(x.get("unknown") for x in lsof_rows):
+        return lsof_rows
+    if proc_rows is not None:
+        return proc_rows
+    return lsof_rows
 
 
 def open_prs_for_branch(branch, cwd, gh_fn=None):

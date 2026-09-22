@@ -39,7 +39,7 @@ def test_page_order_is_promise_path_status_start():
 
 
 def test_hero_is_one_clear_promise_sentence():
-    hero = LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
+    hero = LANDING[LANDING.index('id="promise"') : LANDING.index('id="path"')]
     assert PROMISE in hero
     assert "fewest turns" not in hero.lower()
     assert "coordinates the agents you already run" not in hero.lower()

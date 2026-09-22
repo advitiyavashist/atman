@@ -5839,27 +5839,49 @@ def _is_desk_merge_pytest_cmd(cmd):
     return "-x" in argv and _argv_has_ignore_worktrees(argv)
 
 
-def _desk_pytest_pids(extra_pids=()):
-    """Pids of desk-merge-shaped pytest processes, plus any still-alive extra.
+def _process_table_snapshot():
+    """All (pid, full_command) rows. Linux /proc is not truncated at COLUMNS=80.
 
-    Extra pids are the ACCEPT "or the pid" fallback (T-554 waiter also
-    checked `ps -p 51475`). Never filters on cwd. Does not spawn --stop.
+    Returns ``(rows, available)``. ``available`` is False when the table
+    could not be read at all; an empty ``rows`` then means unknown, not idle.
+
+    On Linux, read ``/proc/<pid>/cmdline`` only. Kernel threads have an
+    empty cmdline; a per-pid ``ps -ww -p`` fallback is the pile-up T-604
+    forbids (~one fork per thread, per snapshot). When ``/proc`` is absent,
+    one ``ps -axww`` covers the table.
     """
     import subprocess
 
-    extra = set()
-    for p in extra_pids or ():
+    proc = "/proc"
+    if os.path.isdir(proc):
         try:
-            extra.add(int(p))
-        except (TypeError, ValueError):
-            continue
-    out = [p for p in extra if _pid_alive(p)]
+            names = os.listdir(proc)
+        except OSError:
+            return [], False
+        me = os.getpid()
+        rows = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == me:
+                continue
+            cmd = _proc_cmdline(pid)
+            if cmd:
+                rows.append((pid, cmd))
+        return rows, True
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,args="],
+            capture_output=True, text=True, env=env,
+        )
     except OSError:
-        return sorted(set(out))
-    me = os.getpid()
+        return [], False
+    if r.returncode != 0:
+        return [], False
+    rows = []
     for line in (r.stdout or "").splitlines():
         line = line.strip()
         if not line:
@@ -5871,11 +5893,33 @@ def _desk_pytest_pids(extra_pids=()):
             pid = int(parts[0])
         except ValueError:
             continue
+        rows.append((pid, parts[1]))
+    return rows, True
+
+
+def _desk_pytest_pids(extra_pids=()):
+    """Pids of desk-merge-shaped pytest processes, plus any still-alive extra.
+
+    Extra pids are the ACCEPT "or the pid" fallback (T-554 waiter also
+    checked `ps -p 51475`). Never filters on cwd. Does not spawn --stop.
+    """
+    extra = set()
+    for p in extra_pids or ():
+        try:
+            extra.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    out = [p for p in extra if _pid_alive(p)]
+    rows, ok = _process_table_snapshot()
+    if not ok:
+        return sorted(set(out))
+    me = os.getpid()
+    for pid, cmd in rows:
         if pid == me:
             continue
         if pid in extra:
             continue
-        if _is_desk_merge_pytest_cmd(parts[1]) and _pid_alive(pid):
+        if _is_desk_merge_pytest_cmd(cmd) and _pid_alive(pid):
             out.append(pid)
     return sorted(set(out))
 
@@ -5930,28 +5974,12 @@ def _parse_watch_table():
     callers that are about to signal or to report absence must say so rather
     than claim the fleet is idle (T-926).
     """
-    import subprocess
-
     out = []
-    try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
-    except OSError:
-        return out, False
-    if r.returncode != 0:
+    rows, ok = _process_table_snapshot()
+    if not ok:
         return out, False
     me = os.getpid()
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        cmd = parts[1]
+    for pid, cmd in rows:
         # T-875 (12): installed `tickets`/`atm` shims do not contain tickets.py.
         if pid == me or " watch" not in cmd:
             continue
@@ -6236,8 +6264,10 @@ def _process_command(pid):
     """Full, untruncated command line for pid, or '' if gone/unreadable.
 
     T-875 (12): mere PID existence is not evidence of a watcher -- PIDs get
-    recycled. Callers must read this string. Linux /proc is preferred; macOS
-    `ps -ww` avoids the default ARG_MAX truncation.
+    recycled. Callers must read this string. When ``/proc`` exists, read
+    ``/proc/<pid>/cmdline`` only: an empty cmdline (kernel threads) is
+    ``''``, never a per-pid ``ps`` fork (T-604). Use ``ps -ww`` only when
+    there is no ``/proc`` (macOS).
     """
     import subprocess
 
@@ -6245,22 +6275,25 @@ def _process_command(pid):
         pid = int(pid)
     except (TypeError, ValueError):
         return ""
-    proc_path = "/proc/%d/cmdline" % pid
+    if os.path.isdir("/proc"):
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                raw = f.read()
+        except (OSError, IOError):
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
-        with open(proc_path, "rb") as f:
-            raw = f.read()
-        if raw:
-            return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
-    except (OSError, IOError):
-        pass
-    try:
-        r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "args="],
+            capture_output=True, text=True, env=env,
+        )
     except (OSError, ValueError):
-        return _proc_cmdline(pid)
+        return ""
     if r.returncode != 0:
-        return _proc_cmdline(pid)
-    return (r.stdout or "").strip() or _proc_cmdline(pid)
+        return ""
+    return (r.stdout or "").strip()
 
 
 def _validated_owned_watch_pid(board, owner):
@@ -15690,8 +15723,6 @@ def cmd_spawn(a, board):
     warn = run_timeout_floor_warning(getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN))
     if warn and not a.stop:
         print(warn)
-    if not a.stop:
-        _refuse_limited_seat(board, owner, "spawn")
     if a.stop:
         return _spawn_stop(board, owner, all_boards=bool(getattr(a, "all_boards", False)))
     requested_harness = getattr(a, "harness", "") or a.tool
@@ -15703,6 +15734,9 @@ def cmd_spawn(a, board):
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
+    # Reuse/transfer first: a leftover limit is identity-bound state, not a
+    # live dispatch block on a name we are about to refuse or strip.
+    _refuse_limited_seat(board, owner, "spawn")
     git_root, wt, expected_origin, base, origin_err = _resolve_spawn_target(
         board, owner,
         worktree_arg=getattr(a, "worktree", "") or "",

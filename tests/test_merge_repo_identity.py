@@ -215,6 +215,12 @@ def _artifact_repo(tmp_root, name, board):
     repo = tmp_root / name
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
+    # tickets sync --artifact creates a merge commit; CI has no user.ident
+    # and may have commit.gpgsign=true, which fails with an empty CONFLICTS
+    # list (merge rc!=0, no unmerged paths).
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "commit.gpgsign", "false")
     _git(repo, "commit", "-q", "--allow-empty", "-m", "artifact repo init")
     # A distinct origin URL is what makes repo_identity() stable and distinct
     # across worktrees of the same repo -- the real repos both have one.
