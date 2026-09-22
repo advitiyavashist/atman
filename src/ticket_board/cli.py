@@ -4894,6 +4894,7 @@ def cmd_trajectories(a, board):
         out = getattr(a, "out", "") or ""
         if not out:
             sys.exit("export needs --out <file.jsonl>")
+        _traj.refuse_export_inside_board(out, board)
         tmp = out + ".tmp"
         with open(tmp, "w") as f:
             for e in sel:

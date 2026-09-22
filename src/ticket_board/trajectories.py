@@ -30,6 +30,7 @@ import glob
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime, timezone
 
 TRAJ_VERSION = 1
@@ -44,6 +45,32 @@ def _now():
 
 def trajectories_path(board):
     return os.path.join(board, "trajectories.jsonl")
+
+
+def export_path_inside_board(out, board):
+    """True when `trajectories export --out` would land under the active board.
+
+    Export uses os.replace onto --out. Pointing that at agents/<seat>.json (or
+    any other board file) silently replaces the record with JSONL -- exit 0,
+    no warning. Both CLI entry points must refuse before writing (T-1140).
+    """
+    if not out or not board:
+        return False
+    try:
+        board_root = os.path.realpath(board)
+        target = os.path.realpath(out)
+        return os.path.commonpath([board_root, target]) == board_root
+    except (OSError, ValueError):
+        return True
+
+
+def refuse_export_inside_board(out, board):
+    """Exit if --out is under the board. Shared by the packaged CLI entry point."""
+    if export_path_inside_board(out, board):
+        sys.exit(
+            "REFUSING: trajectories export --out must live outside the ticket "
+            "board (would replace board records): %s" % out
+        )
 
 
 def rotate_if_big(board):

@@ -11123,6 +11123,30 @@ def _traj_summary(events):
     return by_ticket
 
 
+def _traj_export_path_inside_board(out, board):
+    """True when `trajectories export --out` would land under the active board.
+
+    Mirror of ticket_board.trajectories.export_path_inside_board (T-1140).
+    Root tickets.py ships alone, so this copy cannot import the package helper.
+    """
+    if not out or not board:
+        return False
+    try:
+        board_root = os.path.realpath(board)
+        target = os.path.realpath(out)
+        return os.path.commonpath([board_root, target]) == board_root
+    except (OSError, ValueError):
+        return True
+
+
+def _refuse_traj_export_inside_board(out, board):
+    if _traj_export_path_inside_board(out, board):
+        sys.exit(
+            "REFUSING: trajectories export --out must live outside the ticket "
+            "board (would replace board records): %s" % out
+        )
+
+
 def cmd_trajectories(a, board):
     """Read, export or backfill the trajectory log."""
     sub = getattr(a, "traj_cmd", "list") or "list"
@@ -11138,6 +11162,7 @@ def cmd_trajectories(a, board):
         out = getattr(a, "out", "") or ""
         if not out:
             sys.exit("export needs --out <file.jsonl>")
+        _refuse_traj_export_inside_board(out, board)
         tmp = out + ".tmp"
         with open(tmp, "w") as f:
             for e in sel:
