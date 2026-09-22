@@ -16,6 +16,7 @@ FILES = (
     "tickets.py",
     "session_adapters.py",
     "auth_v2_contract.py",
+    "tickets_harness.py",
 )
 PACKAGE_PREFIX = "src/ticket_board"
 
