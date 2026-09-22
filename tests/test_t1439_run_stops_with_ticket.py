@@ -28,6 +28,19 @@ import tickets as tool  # noqa: E402
 
 TOOL = ROOT / "tickets.py"
 
+# A live seat's own environment renames the agent and fakes a run number in
+# every subprocess this file launches, which turns a healthy tree red several
+# tests later. Clear it for the whole module (reported by steer-spec-claude-0921).
+SEAT_ENV = ("TICKET_SEAT", "TICKET_AGENT", "TICKETS_DIR", "TICKETS_RUN_NO",
+            "TICKETS_RUN_ID", "TICKET_SESSION_ID", "TICKETS_WATCH_PINNED",
+            "TICKETS_PY", "TICKET_OWNER_GENERATION")
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_seat(monkeypatch):
+    for var in SEAT_ENV:
+        monkeypatch.delenv(var, raising=False)
+
 
 def _ticket(status="claimed", owner="runner", generation=1, **extra):
     t = {"id": "T-001", "title": "Write docs", "status": status, "owner": owner,
@@ -179,7 +192,10 @@ def _start_watch(board, agent, exec_cmd, extra_env=None, once=False):
     env = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent,
                HOME=str(home), TICKETS_RUN_TICKET_CHECK_SECS="1")
     env.pop("TICKETS_STOP_HOOK", None)
-    env.pop("TICKET_SEAT", None)
+    for var in SEAT_ENV:
+        env.pop(var, None)
+    env["TICKETS_DIR"] = str(board)
+    env["TICKET_AGENT"] = agent
     if extra_env:
         env.update(extra_env)
     proc = subprocess.Popen(
