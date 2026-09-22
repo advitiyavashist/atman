@@ -4761,6 +4761,18 @@ def cmd_sync(a, board):
         checkin(board, whoami(), None, "synced with %s" % remote_trunk)
         return
     conflicted = (git("diff", "--name-only", "--diff-filter=U", cwd=art) or "").splitlines()
+    if not conflicted:
+        # T-866: a merge that never started is not a conflict. The live case
+        # is a fresh Linux box or CI runner with no git identity: git refuses
+        # with "unable to auto-detect email address (got 'user@host.(none)')"
+        # (macOS hosts carry a domain, so it only shows on Linux). Naming
+        # git's own reason beats printing an empty conflict list.
+        lines = [l for l in (r.stderr or r.stdout or "").strip().splitlines() if l.strip()]
+        reason = lines[-1].strip() if lines else "git merge exited %d" % r.returncode
+        print("git merge %s into %s failed before any conflict: %s" % (remote_trunk, g["branch"], reason))
+        print("Fix that cause (for an identity error: git config --global user.name / user.email), "
+              "then `tickets sync` again.")
+        sys.exit(1)
     print("CONFLICTS merging %s into %s -- these files need you:" % (remote_trunk, g["branch"]))
     for f in conflicted:
         print("  " + f)
@@ -5855,7 +5867,7 @@ def _desk_pytest_pids(extra_pids=()):
             continue
     out = [p for p in extra if _pid_alive(p)]
     try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
+        r = subprocess.run(["ps", "-axww", "-o", "pid=,command="],
                            capture_output=True, text=True)
     except OSError:
         return sorted(set(out))
@@ -5934,7 +5946,7 @@ def _parse_watch_table():
 
     out = []
     try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
+        r = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True)
     except OSError:
         return out, False
     if r.returncode != 0:
@@ -16114,7 +16126,8 @@ def _persist_auth_profile(board, owner, harness, identity_label, kind):
     from auth_v2_contract import PROFILE_DIR_MODE, PROFILE_STORE_MODE, profile_store_path
     digest = hashlib.sha1(("%s:%s:%s" % (os.path.realpath(board), owner, harness)).encode()).hexdigest()[:12]
     ref = "prf_%s" % digest
-    cache = os.environ.get("TICKETS_CACHE_DIR") or os.path.expanduser("~/.cache/atman")
+    from session_adapters import cache_root  # one resolver: TICKETS_CACHE_DIR > XDG_CACHE_HOME > ~/.cache
+    cache = cache_root()
     board_hash = hashlib.sha1(os.path.realpath(board).encode()).hexdigest()[:16]
     path = profile_store_path(cache, board_hash, ref)
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
@@ -19521,6 +19534,40 @@ def _ui_post_as_operator(board, payload, operator):
     )
 
 
+
+def _browser_opener_argv(url, platform=None, which=None):
+    """argv that opens `url` in the user's browser, or None to fall back.
+
+    T-866: `open` is macOS-only; a Linux desktop has `xdg-open` and a headless
+    box (CI, a container) has neither, where the stdlib webbrowser module
+    (which knows about $BROWSER) is the honest last resort.
+    """
+    import shutil
+    platform = platform or sys.platform
+    which = which or shutil.which
+    if platform == "darwin":
+        return ["open", url]
+    if which("xdg-open"):
+        return ["xdg-open", url]
+    return None
+
+
+def _open_in_browser(url):
+    import subprocess
+    argv = _browser_opener_argv(url)
+    if argv:
+        try:
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except OSError:
+            pass
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
+
+
 def cmd_ui(a, board):
     """Local status UI: serves an auto-refreshing page, /board.json, and a
     composer POST at /msg that posts through post_message() -- same board,
@@ -19636,8 +19683,7 @@ def cmd_ui(a, board):
     srv.daemon_threads = True
     print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via atm msg)" % (a.host, a.port))
     if a.open:
-        import subprocess
-        subprocess.Popen(["open", "http://%s:%d" % (a.host, a.port)])
+        _open_in_browser("http://%s:%d" % (a.host, a.port))
     parent_pid = int(getattr(a, "parent_pid", 0) or 0)
     board_dir = os.path.abspath(board) if board else ""
     import threading

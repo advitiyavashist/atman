@@ -144,7 +144,7 @@ def _stub(tmp_path):
 def _ps_commands():
     try:
         out = subprocess.run(
-            ["ps", "-ax", "-o", "command="], capture_output=True, text=True, timeout=5
+            ["ps", "-axww", "-o", "command="], capture_output=True, text=True, timeout=5
         )
     except OSError:
         return []

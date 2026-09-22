@@ -47,8 +47,16 @@ def test_ui_server_isolates_inherited_session(board, monkeypatch):
 
 
 def _pgrep_ui() -> list[tuple[int, str]]:
+    """(pid, full command line) of every live `tickets.py ui` process.
+
+    T-866: not `pgrep -fl` -- on procps (Linux) `-l` prints only the process
+    NAME (`python`), never the argument list, so the worktree needle below
+    could never match and the orphan probe timed out on every Linux run.
+    BSD pgrep prints the full argv with -fl, which is why this passed on
+    macOS. `ps -axww` prints the whole line on both.
+    """
     proc = subprocess.run(
-        ["pgrep", "-fl", "tickets.py ui"],
+        ["ps", "-axww", "-o", "pid=,command="],
         capture_output=True,
         text=True,
     )
@@ -60,6 +68,9 @@ def _pgrep_ui() -> list[tuple[int, str]]:
         if not line:
             continue
         pid_s, _sep, rest = line.partition(" ")
+        rest = rest.strip()
+        if "tickets.py ui" not in rest:
+            continue
         try:
             rows.append((int(pid_s), rest))
         except ValueError:

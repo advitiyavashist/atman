@@ -2624,6 +2624,18 @@ def cmd_sync(a, board):
         checkin(board, whoami(), None, "synced with %s" % remote_trunk)
         return
     conflicted = (git("diff", "--name-only", "--diff-filter=U") or "").splitlines()
+    if not conflicted:
+        # T-866: a merge that never started is not a conflict. The live case
+        # is a fresh Linux box or CI runner with no git identity: git refuses
+        # with "unable to auto-detect email address (got 'user@host.(none)')"
+        # (macOS hosts carry a domain, so it only shows on Linux). Naming
+        # git's own reason beats printing an empty conflict list.
+        lines = [l for l in (r.stderr or r.stdout or "").strip().splitlines() if l.strip()]
+        reason = lines[-1].strip() if lines else "git merge exited %d" % r.returncode
+        print("git merge %s into %s failed before any conflict: %s" % (remote_trunk, g["branch"], reason))
+        print("Fix that cause (for an identity error: git config --global user.name / user.email), "
+              "then `tickets sync` again.")
+        sys.exit(1)
     print("CONFLICTS merging %s into %s -- these files need you:" % (remote_trunk, g["branch"]))
     for f in conflicted:
         print("  " + f)

@@ -173,7 +173,7 @@ def test_msg_pokes_live_persist_watch(board):
         assert r.returncode == 0, r.stderr + r.stdout
         assert "watch-poked" in r.stdout, r.stdout
         cmdline = subprocess.run(
-            ["ps", "-p", str(proc.pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(proc.pid), "-o", "command="],
             capture_output=True, text=True).stdout
         assert str(TOOL) in cmdline
         assert "sol-agy-harness" not in cmdline

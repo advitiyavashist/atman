@@ -238,7 +238,7 @@ def test_live_persist_watch_survives_queued_offline_poke(board, monkeypatch):
         rec = json.loads((board / "agents" / (seat + ".json")).read_text())
         assert rec["wake_delivery"]["label"] == "watch-poked"
         cmdline = subprocess.run(
-            ["ps", "-p", str(proc.pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(proc.pid), "-o", "command="],
             capture_output=True, text=True).stdout
         assert str(TOOL) in cmdline
     finally:

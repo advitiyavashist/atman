@@ -115,7 +115,7 @@ def leftover_suite_ui_children(pytest_pid: int | None = None) -> list[tuple[int,
     me = int(pytest_pid or os.getpid())
     leftover: list[tuple[int, int, str]] = []
     try:
-        out = subprocess.check_output(["ps", "-x", "-o", "pid=,ppid=,command="], text=True)
+        out = subprocess.check_output(["ps", "-ww", "-x", "-o", "pid=,ppid=,command="], text=True)
     except OSError:
         return leftover
     for line in out.splitlines():

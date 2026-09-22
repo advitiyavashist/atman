@@ -34,8 +34,20 @@ INFLIGHT_TTL_SECS = int(os.environ.get("TICKETS_NATIVE_INFLIGHT_TTL_SECS", "30")
 
 
 def cache_root():
-    return os.environ.get("TICKETS_CACHE_DIR") or os.path.join(
-        os.path.expanduser("~"), ".cache", "atman")
+    """Per-user cache root for endpoints and auth profiles.
+
+    TICKETS_CACHE_DIR wins (tests and multi-board setups pin it). Otherwise
+    honour $XDG_CACHE_HOME (T-866: the Linux convention; unset on a default
+    macOS shell, so the historical ~/.cache/atman stays the answer there and
+    on any machine that never exports it).
+    """
+    pinned = (os.environ.get("TICKETS_CACHE_DIR") or "").strip()
+    if pinned:
+        return pinned
+    xdg = (os.environ.get("XDG_CACHE_HOME") or "").strip()
+    if xdg and os.path.isabs(xdg):
+        return os.path.join(xdg, "atman")
+    return os.path.join(os.path.expanduser("~"), ".cache", "atman")
 
 
 def board_hash(board):

@@ -1,0 +1,26 @@
+# T-866 acceptance: a CLEAN Ubuntu container installs atm, joins a board and
+# gets the local app to its first win -- from a checkout (install.sh), from
+# pipx, and from the built wheel. Build from the repo root:
+#
+#   docker build -f packaging/linux/Dockerfile.acceptance -t atman-linux-acceptance .
+#
+# A successful build IS the proof: every RUN line below is an acceptance
+# step and the image only exists if all of them passed. Nothing here talks to
+# a network after apt-get; the board, HOME and bin/ all live inside the image.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv python3-pip pipx git procps ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -s /bin/bash dev
+COPY --chown=dev:dev . /home/dev/atman
+USER dev
+WORKDIR /home/dev/atman
+ENV PATH=/home/dev/.local/bin:$PATH
+RUN sh packaging/smoke.sh checkout
+RUN sh packaging/smoke.sh pipx
+RUN sh packaging/smoke.sh wheel
+# Sanity checks the ticket names explicitly, on this platform:
+#   file locking (fcntl.flock), AF_UNIX sockets, the default app port, XDG paths.
+RUN python3 packaging/linux/sanity.py
+CMD ["atm", "--help"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,32 @@ if str(ROOT) not in sys.path:
 
 from session_adapters import AMBIENT_TRANSPORT_VARS, TRANSPORT_BOARD_ENV  # noqa: E402
 from tmp_path_reaper import reap_green_basetemp  # noqa: E402
+
+
+def _pin_git_default_branch():
+    """T-866: fixtures run `git init` and later `checkout main` / `fetch origin
+    main`. On macOS that works because Xcode's SYSTEM gitconfig sets
+    init.defaultBranch=main; a stock Linux initialises `master`. Make the
+    suite's assumption explicit. GIT_CONFIG_COUNT is git >= 2.31.
+    """
+    if os.environ.get("GIT_CONFIG_COUNT"):
+        return
+    os.environ["GIT_CONFIG_COUNT"] = "1"
+    os.environ["GIT_CONFIG_KEY_0"] = "init.defaultBranch"
+    os.environ["GIT_CONFIG_VALUE_0"] = "main"
+
+
+def _pin_git_identity():
+    """T-866: give the suite an explicit git identity; Linux hosts without a
+    domain in the hostname refuse auto-detect (`user@host.(none)`).
+    """
+    for var, value in (("GIT_AUTHOR_NAME", "atman-tests"), ("GIT_AUTHOR_EMAIL", "tests@atman.invalid"),
+                       ("GIT_COMMITTER_NAME", "atman-tests"), ("GIT_COMMITTER_EMAIL", "tests@atman.invalid")):
+        os.environ.setdefault(var, value)
+
+
+_pin_git_default_branch()
+_pin_git_identity()
 from ui_server_harness import (  # noqa: E402
     leftover_suite_ui_children,
     reap_stale_ui_servers,

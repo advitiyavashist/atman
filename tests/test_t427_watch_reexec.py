@@ -85,7 +85,7 @@ def make_releases(tmp_path, sha_a="a" * 40, sha_b="b" * 40):
 
 def cmdline_of(pid):
     try:
-        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True)
+        out = subprocess.check_output(["ps", "-ww", "-p", str(pid), "-o", "command="], text=True)
     except subprocess.CalledProcessError:
         return ""
     return out.strip()

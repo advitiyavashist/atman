@@ -1,14 +1,48 @@
 name: contracts
 
+# Full suite + installed-wheel smoke on ubuntu AND macOS (T-866; before that
+# this ran on ubuntu only and the root CLI, packaging/ and scripts/ never
+# triggered it at all). The brew-formula job proves packaging/homebrew/atman.rb
+# installs from a tarball built at this exact commit -- under Homebrew on
+# Linux and on macOS -- without waiting for a published release.
 on:
   push:
-    paths: ['docs/contracts/**', 'src/**', 'tests/**', 'pyproject.toml', '.github/workflows/contracts.yml']
+    paths:
+      - 'docs/contracts/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '*.py'
+      - 'install.sh'
+      - 'packaging/**'
+      - 'scripts/**'
+      - '.github/workflows/contracts.yml'
   pull_request:
-    paths: ['docs/contracts/**', 'src/**', 'tests/**', 'pyproject.toml', '.github/workflows/contracts.yml']
+    paths:
+      - 'docs/contracts/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '*.py'
+      - 'install.sh'
+      - 'packaging/**'
+      - 'scripts/**'
+      - '.github/workflows/contracts.yml'
+
+concurrency:
+  group: contracts-${{ github.workflow }}-${{ github.ref }}
+  # Superseded PR pushes are cancelled; main runs always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    name: validate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,3 +62,56 @@ jobs:
         env:
           TICKET_BOARD_CONTRACTS_REQUIRED: '1'
         run: python -m pytest -q
+      - name: Installed-wheel smoke (build wheel, fresh venv, atm + tickets join)
+        run: sh packaging/smoke.sh wheel
+      - name: Checkout install smoke (install.sh, atm join, atm ui first win)
+        run: sh packaging/smoke.sh checkout
+
+  brew-formula:
+    name: brew formula (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      HOMEBREW_NO_ENV_HINTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Set up Homebrew (Linuxbrew on ubuntu, stock brew on macOS)
+        uses: Homebrew/actions/setup-homebrew@master
+      - name: Build the release tarball at this commit and pin a local formula
+        id: pin
+        run: |
+          python3 scripts/build_release_tarball.py --ref "$GITHUB_SHA" --outdir dist --json > dist/release.json
+          python3 scripts/pin_homebrew_formula.py \
+            --formula packaging/homebrew/atman.rb \
+            --release-json dist/release.json \
+            --url-base "http://127.0.0.1:8766/" \
+            --out "$RUNNER_TEMP/formula/atman.rb"
+          # The formula downloads over HTTP exactly as it would from a GitHub
+          # Release; a loopback file server stands in for the release asset.
+          (cd dist && nohup python3 -m http.server --bind 127.0.0.1 8766 > "$RUNNER_TEMP/http.log" 2>&1 &)
+          sleep 1
+          curl -sSf -o /dev/null "http://127.0.0.1:8766/$(basename "$(python3 -c 'import json;print(json.load(open("dist/release.json"))["tarball"])')")"
+      - name: brew install the formula from that tarball
+        run: brew install --formula "$RUNNER_TEMP/formula/atman.rb"
+      - name: brew test (atm --version verified release, atm join, atm ui /board.json)
+        run: brew test --verbose atman
+      - name: The installed atm reports the pinned commit
+        run: |
+          atm --version
+          atm --version | grep -q "^tickets commit $GITHUB_SHA (verified release)$"
+          tickets --version | grep -q "verified release"
+      - name: brew uninstall leaves nothing behind
+        run: |
+          brew uninstall atman
+          if command -v atm >/dev/null 2>&1; then echo "atm still on PATH after uninstall" >&2; exit 1; fi

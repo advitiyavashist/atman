@@ -56,7 +56,8 @@ talking to their own providers.
 
 ## One path
 
-Python 3.9+ and Git. Tested on one macOS machine:
+Python 3.9+ and Git. Proven on macOS and Linux (CI `ubuntu-latest` plus a
+clean Ubuntu 24.04 container; see [docs/linux.md](docs/linux.md)):
 `git clone` plus `./install.sh`.
 
 ```sh
@@ -72,8 +73,8 @@ atm self                     # which file you are actually running
 `tickets.py` from this checkout. `--force` replaces the existing one on
 purpose. `atm` is the command; `tickets` is a compatibility alias.
 
-Or Homebrew on macOS, which installs the current tagged release instead of a
-checkout:
+Or Homebrew (macOS, and Homebrew on Linux x86_64), which installs the current
+tagged release instead of a checkout:
 
 ```sh
 brew tap advitiyavashist/tap
@@ -83,6 +84,20 @@ atm --version                # tickets commit b34d423cac00266a2cc6fc23b94759ee04
 
 The formula `depends_on "python@3.13"`, so Homebrew installs and uses its own
 Python 3.13 even if you already have the Python 3.9+ the clone path needs.
+
+**pipx (fallback)** installs the packaged board CLI subset from this checkout
+or the git URL (`join` / `next` / `msg` / `review` work; `ui` / `hooks` /
+`watch` / `spawn` stay checkout- or formula-only — see [docs/linux.md](docs/linux.md)):
+
+```sh
+pipx install git+https://github.com/advitiyavashist/atman.git   # or: pipx install .
+atm join <name> --roles backend
+```
+
+**Linux first-win check** — `sh packaging/smoke.sh checkout` runs install →
+`atm join` → `atm ui` `/board.json` under an isolated `$SMOKE_WORK`;
+`packaging/linux/Dockerfile.acceptance` runs the same in a clean Ubuntu 24.04
+container.
 
 There is no PyPI package. `pip install atm` installs an unrelated project that
 happens to share the name; it is not Atman.
@@ -252,17 +267,18 @@ watcher. A custom harness is any command whose template names
 
 ## Preview status and limitations
 
-This is an early developer preview, tested on one macOS machine with Claude
-Code, Codex and Cursor. This table records what is tested, partial, and
-planned for this preview. Its evidence links point to files and tests in this
-repository.
+This is an early developer preview. Agent integrations have been exercised on
+one macOS machine with Claude Code, Codex and Cursor; the CLI, board and local
+app are also proven on Linux (see [docs/linux.md](docs/linux.md)). This table
+records what is tested, partial, and planned for this preview. Its evidence
+links point to files and tests in this repository.
 
 | Claim | Status on 2026-09-15 | Evidence |
 | --- | --- | --- |
-| Install: `git clone` + `./install.sh` | tested, one macOS machine | `tests/test_live_install.py`; walkthrough above |
-| Install: Homebrew on macOS (`brew tap advitiyavashist/tap && brew install atman`) | published: installs the current release, `v0.3.0`, and brings its own Python 3.13 via `depends_on "python@3.13"` | tap `advitiyavashist/homebrew-tap`, `Formula/atman.rb`; release `v0.3.0` tarball sha256 matches the formula; `packaging/homebrew/atman.rb` |
+| Install: `git clone` + `./install.sh` | tested on macOS and Linux | `tests/test_live_install.py`; `packaging/smoke.sh`; `packaging/linux/Dockerfile.acceptance`; [docs/linux.md](docs/linux.md) |
+| Install: Homebrew on macOS and Linux x86_64 (`brew tap advitiyavashist/tap && brew install atman`) | published: installs the current release, `v0.3.0`, and brings its own Python 3.13 via `depends_on "python@3.13"`; same formula proven under Homebrew on Linux in CI | tap `advitiyavashist/homebrew-tap`, `Formula/atman.rb`; release `v0.3.0` tarball sha256 matches the formula; `packaging/homebrew/atman.rb`; `.github/workflows/contracts.yml` `brew-formula` job |
 | Install: PyPI | none: there is no PyPI package, and `pip install atm` installs an unrelated project | no upload from this repository |
-| Install: Linux packages, pipx | planned | no artifact in this repository yet |
+| Install: pipx | supported for the packaged board CLI subset | `packaging/smoke.sh pipx`; [docs/linux.md](docs/linux.md) |
 | Install: `pip install -e .` console scripts | not a supported preview path: the packaged `atm`/`tickets` is the smaller core-board CLI without `watch`, `spawn`, `hooks`, `ui` or `remote` | `pyproject.toml`; `src/ticket_board/cli.py` |
 | Claude Code seat takes tickets and reports back | tested on one macOS machine; public tests cover the hook, poke and wake path | `tests/test_t785_t789_all_provider_wake.py`; `tests/test_t857_claude_uds.py` |
 | Codex seat takes tickets | partial: may stop waking after one run; restart the watcher | known issue since the first preview |

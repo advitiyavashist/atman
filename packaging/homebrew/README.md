@@ -1,4 +1,4 @@
-# Homebrew distribution (T-865)
+# Homebrew distribution (T-865, Linux: T-866)
 
 `Formula/atman.rb` installs `atm` (primary) and `tickets` (compatibility
 alias) from a pinned, sha256-verified release tarball — the same bundle
@@ -64,3 +64,29 @@ All three passed against `atman-identity-cursor-0912@3a585b6`. `tests/
 test_t865_homebrew_release.py` exercises the same chain (build, extract,
 `--version`, `join`, `ui` health) so CI keeps proving it without needing
 `brew` at all.
+
+## Homebrew on Linux (T-866)
+
+The same `Formula/atman.rb` installs under [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux):
+`depends_on "python@3.13"` resolves to the Linux bottle, the `bin/atm` and
+`bin/tickets` wrappers are plain `sh`, and the `test do` block (verified
+release, `atm join` on an isolated board, `atm ui` health on a free port)
+is platform-neutral. Nothing in the formula branches on the OS.
+
+Proof, without a published release: `.github/workflows/contracts.yml`'s
+`brew-formula` job runs on `ubuntu-latest` and `macos-latest` at every
+commit. It builds the tarball for `$GITHUB_SHA` with
+`scripts/build_release_tarball.py`, serves it from a loopback `http.server`,
+rewrites only the formula's `url`/`sha256` with `scripts/pin_homebrew_formula.py`,
+then `brew install --formula`, `brew test`, checks `atm --version` reports
+`tickets commit <sha> (verified release)`, and `brew uninstall`s. It is the
+real formula file that gets installed, not a test double.
+
+Limits, stated rather than claimed away:
+- Homebrew on Linux supports x86_64 only; `ubuntu-latest` is x86_64. On Linux
+  arm64 use `./install.sh` or `pipx` (see the repo README). The clean
+  Ubuntu 24.04 container acceptance (`packaging/linux/Dockerfile.acceptance`)
+  covers install.sh, pipx and the wheel on both architectures.
+- `pipx install` gives the packaged wheel subset (`join`, `next`, `msg`,
+  `review`, ...). `atm ui`, `atm --version`, hooks and `watch`/`spawn` are
+  checkout- and formula-only today (E-016).
