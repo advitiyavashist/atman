@@ -289,15 +289,12 @@ PROVIDER_SESSION_ID_VARS = (
 def _supervisor_launch_env(board, owner):
     """Environment for a supervisor-launched watch/spawn/probe child.
 
-    Inherited provider session ids are stripped so the child cannot adopt a
-    parent seat's `.identities/` record or register its ambient transport.
-    TICKET_SEAT is the authoritative assignment; TICKET_SESSION_ID is a fresh
-    launch key bound to `owner`.
+    Inherited provider identity and transport are stripped so the child cannot
+    adopt a parent seat's record or endpoint. TICKET_SEAT is the authoritative
+    assignment; TICKET_SESSION_ID is a fresh launch key bound to `owner`.
+    Explicit attach does not use this path.
     """
-    env = _clean_git_env()
-    sa = _session_adapters()
-    for var in PROVIDER_SESSION_ID_VARS + sa.AMBIENT_TRANSPORT_VARS + (sa.TRANSPORT_BOARD_ENV,):
-        env.pop(var, None)
+    env = _session_boundary().fresh_child_env(_clean_git_env())
     env.pop("TICKET_SEAT", None)
     env.pop("TICKET_AGENT", None)
     sid = "launch:%s:%s" % (owner, hashlib.sha256(os.urandom(16)).hexdigest()[:16])
