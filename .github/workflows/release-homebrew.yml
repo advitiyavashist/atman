@@ -64,10 +64,13 @@ jobs:
         with:
           files: ${{ steps.build.outputs.tarball }}
           fail_on_unmatched_files: true
-      # T-1108 / v0.3.0: the local tarball hashed 410cf802... (662,834 bytes)
-      # while the asset GitHub served hashed c125cb6f... (662,938 bytes).
-      # Contents matched; only the gzip wrapper differed. Homebrew must pin
-      # the bytes `brew` downloads, not the file we just built.
+      # T-1108 / v0.3.0 lesson: do not hand-copy a local sha into the formula
+      # and do not assume GitHub rewrote the upload. The published v0.3.0
+      # asset was a plain local build from the old non-reproducible builder
+      # (gzip FNAME atman-0.3.0.tar, OS=255, mtime ~3s before createdAt,
+      # tar uid 501/'runner'). Hash the downloaded asset, FAIL if it differs
+      # from steps.build.outputs.sha256, then pin Homebrew to that published
+      # hash.
       - name: Hash the published GitHub Release asset
         id: published
         env:
@@ -84,6 +87,16 @@ jobs:
           path = pathlib.Path('/tmp/published') / os.environ['ASSET']
           print('sha256=%s' % hashlib.sha256(path.read_bytes()).hexdigest())
           " >> "$GITHUB_OUTPUT"
+      - name: Fail if published asset differs from the local build
+        env:
+          BUILD_SHA: ${{ steps.build.outputs.sha256 }}
+          PUBLISHED_SHA: ${{ steps.published.outputs.sha256 }}
+        run: |
+          if [ "$BUILD_SHA" != "$PUBLISHED_SHA" ]; then
+            echo "::error::published asset sha256 ($PUBLISHED_SHA) != local build ($BUILD_SHA); refusing to bump Homebrew"
+            exit 1
+          fi
+          echo "published asset matches local build: $PUBLISHED_SHA"
       - name: Bump the tap formula
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         env:

@@ -11,9 +11,14 @@ uid/gid/uname/gname/mtime zeroed and modes pinned, and the gzip wrapper uses
 mtime 0 and an empty original-name field (T-1108). Two builds of the same
 ref produce the same sha256.
 
-The printed sha256 is of the *local* file. Homebrew must pin the sha256 of
-the asset GitHub actually serves after upload -- that gzip wrapper can differ
-from this file. See packaging/homebrew/README.md.
+The printed sha256 is of the *local* file. The release workflow (and the
+manual runbook) must download the published GitHub Release asset, hash that
+file, and FAIL if it differs from this local sha256. v0.3.0's mismatch was
+not GitHub rewriting bytes: the published asset was a plain local build from
+the old non-reproducible builder (gzip FNAME set, OS=255, mtime near
+createdAt, tar uid 501/'runner') plus a hand-copied formula hash. Pin
+Homebrew to the published-asset hash after that equality check passes.
+See packaging/homebrew/README.md.
 
 Usage:
   python3 scripts/build_release_tarball.py --ref <sha-or-tag> [--outdir dist]
@@ -149,7 +154,7 @@ def main():
         print("commit:  %s" % result["commit"])
         print("version: %s" % result["version"])
         print("tarball: %s" % result["tarball"])
-        print("sha256:  %s  (local file; pin Homebrew to the downloaded published asset)" % result["sha256"])
+        print("sha256:  %s  (local file; compare to published asset, then pin Homebrew to that)" % result["sha256"])
 
 
 if __name__ == "__main__":

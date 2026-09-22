@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-# Served v0.3.0 asset (GitHub digest), not the local 410cf802... build.
+# Served v0.3.0 asset digest (formula pin). That asset was a local build from
+# the old non-reproducible builder, not a GitHub rewrite of uploaded bytes.
 PUBLISHED_V030_SHA256 = "c125cb6f91f32e6168cd242c04efd1d09586f2b091451ff5821b747b6943cf33"
 PUBLISHED_V030_URL = (
     "https://github.com/advitiyavashist/atman/releases/download/v0.3.0/atman-0.3.0.tar.gz"
@@ -100,17 +101,30 @@ def test_workflow_hashes_the_downloaded_published_asset():
     text = (ROOT / ".github/workflows/release-homebrew.yml").read_text()
     assert "gh release download" in text
     assert "Hash the published GitHub Release asset" in text
+    assert "Fail if published asset differs from the local build" in text
+    assert "steps.build.outputs.sha256" in text
+    assert "steps.published.outputs.sha256" in text
+    assert "BUILD_SHA" in text and "PUBLISHED_SHA" in text
+    assert "exit 1" in text
     _, _, after = text.partition("name: Bump the tap formula")
     assert after
     assert "steps.published.outputs.sha256" in after
+    # Formula bump must pin the published hash, never the pre-upload build output alone.
     assert "steps.build.outputs.sha256" not in after
 
 
-def test_runbook_forbids_hashing_the_local_tarball():
+def test_runbook_forbids_hashing_the_local_tarball_without_compare():
     readme = (ROOT / "packaging/homebrew/README.md").read_text()
-    assert "Download the published asset and hash that file" in readme
-    assert "Do not hash" in readme
-    assert "GitHub Actions on this repository is currently blocked on billing" in readme
+    assert "Download the published asset" in readme
+    assert "FAIL if it differs" in readme
+    assert "LOCAL_SHA" in readme and "PUBLISHED_SHA" in readme
+    assert "not GitHub serving" in readme and "different bytes" in readme
+    assert "hand-copied" in readme
+    assert "GitHub Actions on this repository is currently blocked on billing" not in readme
+    builder = (ROOT / "scripts/build_release_tarball.py").read_text()
+    assert "old non-reproducible builder" in builder
+    assert "gzip wrapper can differ from this file" not in builder
+    assert "asset GitHub served" not in (ROOT / ".github/workflows/release-homebrew.yml").read_text()
 
 
 def test_in_repo_formula_matches_published_v030_tap():

@@ -9,8 +9,9 @@ formula is the pinned-release path for a fresh macOS user.
 
 The live formula lives in `advitiyavashist/homebrew-tap` as
 `Formula/atman.rb`. `packaging/homebrew/atman.rb` in this repo is a copy and
-must stay in sync with that tap. Its `sha256` is the hash of the asset
-GitHub serves, not of a locally built tarball (T-1108).
+must stay in sync with that tap. Its `sha256` is the hash of the published
+GitHub Release asset after it has been checked equal to the local build
+(T-1108).
 
 ## Building a release tarball
 
@@ -30,17 +31,17 @@ the same drift check `tickets self` and the release launcher shim rely on.
 That is what the formula's `test do` block asserts; it is not a weaker
 "binary exists" check.
 
-Do **not** copy the printed local sha256 into the formula. v0.3.0's local
-build hashed `410cf802...` (662,834 bytes) while the asset GitHub served
-hashed `c125cb6f...` (662,938 bytes). Contents were identical; only the gzip
-wrapper differed. A formula pinned to the local hash fails every
-`brew install`.
+Do **not** hand-copy a sha256 into the formula without the equality check
+below. v0.3.0's published asset was a plain local build from the old
+non-reproducible builder (gzip FNAME `atman-0.3.0.tar`, OS=255, mtime about
+3s before `createdAt`, tar uid 501/`runner`), and the formula was first
+published with a different hand-copied hash. That is not GitHub serving
+different bytes than were uploaded.
 
 ## Manual release runbook
 
-GitHub Actions on this repository is currently blocked on billing, so
-releases are cut by hand. Do this even after Actions is restored: the
-workflow follows the same hash-the-published-asset rule.
+Cut a release by hand when Actions is unavailable, or follow the same
+hash-and-compare rule the workflow uses:
 
 1. Tag the reviewed commit already on `origin/main` (not a pre-merge branch
    tip). `pyproject.toml`'s `version` plus a `vX.Y.Z` git tag is the pinned
@@ -51,10 +52,11 @@ workflow follows the same hash-the-published-asset rule.
    git push origin vX.Y.Z
    ```
 
-2. Build the tarball from that tag:
+2. Build the tarball from that tag and note the printed local sha256:
 
    ```sh
    python3 scripts/build_release_tarball.py --ref vX.Y.Z --outdir dist
+   LOCAL_SHA=$(python3 -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('dist/atman-X.Y.Z.tar.gz').read_bytes()).hexdigest())")
    ```
 
 3. Create the GitHub Release and upload the local tarball as its asset
@@ -67,8 +69,9 @@ workflow follows the same hash-the-published-asset rule.
      --notes-file <release-notes>
    ```
 
-4. **Download the published asset and hash that file.** Do not hash
-   `dist/atman-X.Y.Z.tar.gz`.
+4. **Download the published asset, hash it, and FAIL if it differs from
+   the local build.** Do not hash only `dist/` and paste that into the
+   formula; do not skip the compare.
 
    ```sh
    mkdir -p /tmp/published
@@ -76,10 +79,16 @@ workflow follows the same hash-the-published-asset rule.
      --repo advitiyavashist/atman \
      --pattern 'atman-X.Y.Z.tar.gz' \
      --dir /tmp/published
-   python3 -c "import hashlib, pathlib; print(hashlib.sha256(pathlib.Path('/tmp/published/atman-X.Y.Z.tar.gz').read_bytes()).hexdigest())"
+   PUBLISHED_SHA=$(python3 -c "import hashlib, pathlib; print(hashlib.sha256(pathlib.Path('/tmp/published/atman-X.Y.Z.tar.gz').read_bytes()).hexdigest())")
+   test "$LOCAL_SHA" = "$PUBLISHED_SHA" || {
+     echo "ERROR: published asset sha256 ($PUBLISHED_SHA) != local build ($LOCAL_SHA)" >&2
+     exit 1
+   }
+   echo "published asset matches local build: $PUBLISHED_SHA"
    ```
 
-5. Update **both** formulas with the tag URL and the published-asset sha256:
+5. Update **both** formulas with the tag URL and the published-asset sha256
+   (`$PUBLISHED_SHA`):
 
    - `advitiyavashist/homebrew-tap` `Formula/atman.rb` (what `brew` installs)
    - `packaging/homebrew/atman.rb` in this repo (the in-tree copy)
@@ -93,11 +102,10 @@ workflow follows the same hash-the-published-asset rule.
    brew test atman
    ```
 
-`.github/workflows/release-homebrew.yml` automates steps 2-5 on tag push
-when Actions is able to run. It still needs a `HOMEBREW_TAP_TOKEN` repo
-secret (a PAT with push access to the tap) for the bump-PR step; without it
-the release and tarball still publish and the published-asset hash is still
-computed.
+`.github/workflows/release-homebrew.yml` automates steps 2-5 on tag push.
+It still needs a `HOMEBREW_TAP_TOKEN` repo secret (a PAT with push access to
+the tap) for the bump-PR step; without it the release and tarball still
+publish and the published-vs-local hash check still runs.
 
 ## What was actually proven locally (no tap, no CLT upgrade)
 
@@ -118,5 +126,5 @@ python3 /tmp/atman-extract/atman-<version>/tickets.py ui --port 18765 &  # then 
 All three passed against `atman-identity-cursor-0912@3a585b6`. `tests/
 test_t865_homebrew_release.py` exercises the same chain (build, extract,
 `--version`, `join`, `ui` health). `tests/test_t1108_reproducible_release.py`
-locks byte-reproducible archives, published-asset hashing in the workflow,
-and the in-repo formula matching the tap's v0.3.0 pin.
+locks byte-reproducible archives, published-vs-build equality in the
+workflow, and the in-repo formula matching the tap's v0.3.0 pin.
