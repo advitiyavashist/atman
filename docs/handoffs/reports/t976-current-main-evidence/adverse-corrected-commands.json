@@ -1,0 +1,612 @@
+[
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "init",
+      "-q",
+      "-b",
+      "main"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "init"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "quickstart",
+      "--agent",
+      "boss",
+      "--roles",
+      "backend"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "board: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.tickets\n  resolved from the git worktree cwd is in (/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check)\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.cursor/rules/tickets.mdc\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/AGENTS.md\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.gitignore\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.tickets/MASTER.md\nbound: `atm` run from /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check resolves to this board (`tickets` is a compatibility alias).\n\nClaude Code: install a scoped hook with `atm hooks claude --agent <name>`.\nCodex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.\n\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.tickets\nepic:  E-001  Sample epic: a first slice end to end\n  T-001  Sample: design the data model              ready now\n  T-002  Sample: build the API on top of the model  after T-001\n  T-003  Sample: put a screen on the API            after T-002\njoined as boss  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral  alias=-\n\nThe three commands that matter:\n  TICKET_AGENT=boss atm next                      claim the next ready ticket\n  TICKET_AGENT=boss atm update <id> \"...\"         say where you are, at least every 45 min\n  TICKET_AGENT=boss atm review <id> --notes \"...\" hand it back with an exact artifact\n  (`tickets` is a compatibility alias for the same CLI.)\n\nFeel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket\n               stays shut until a DIFFERENT seat accepts the commit)\n\nSee it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)\nLearn it: atm guide   |   docs/first-session.md   |   README.md\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "quickstart",
+      "--remove"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "removed 3 sample ticket(s) (T-001, T-002, T-003)\nepic E-001 left in place (it may hold your own work now)\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "master",
+      "take"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "boss is master now. Run `atm master` for the briefing.\nWARNING: boss took master with no live endpoint. Mail stays queued until a native session or persist watcher is online.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "objective",
+      "Produce verified CSV statistics",
+      "--exit",
+      "exact row count accepted"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "objective set\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "onboard"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "join",
+      "alice",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "alice",
+    "code": 0,
+    "out": "joined as alice  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check alice` proves it works\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.tickets\nmaster: boss\ninbox: 1 unread (atm inbox)\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check worktree add .worktrees/alice-work -b alice-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/alice-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "join",
+      "bob",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "bob",
+    "code": 0,
+    "out": "joined as bob  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check bob` proves it works\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.tickets\nmaster: boss\ninbox: 2 unread (atm inbox)\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check worktree add .worktrees/bob-work -b bob-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/bob-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "create",
+      "Invalid result",
+      "--role",
+      "backend",
+      "--body",
+      "Cause: journey probe. Change: persisted artifact. Proof: independent assertion."
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "created T-001  Invalid result\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "worktree",
+      "add",
+      "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/alice",
+      "-b",
+      "alice"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "HEAD is now at f40b4c7 onboard\n",
+    "err": "Preparing worktree (new branch 'alice')\n"
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "next"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/alice",
+    "agent": "alice",
+    "code": 0,
+    "out": "usage  no provider read yet (atm harness usage)\n[>] IN PROGRESS T-001  Invalid result  (role=backend; owner=alice)\n\nRead this briefing before editing:\n  /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.tickets/MASTER.md\n\nBoard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.tickets  (cwd is /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/alice)\nTime: active 0m, waited 0m before claim, last update 0m ago\nlane: ready\n\nCause: journey probe. Change: persisted artifact. Proof: independent assertion.\n\nPost progress with `atm update T-001 \"...\"` at least every 45 min; finish with `atm review T-001 --notes \"exact SHA, paths, decisions\"`.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "bad result"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "rev-parse",
+      "HEAD"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "804d6f72c6c909c6dc529aed1f64698a5b460e80\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "review",
+      "T-001",
+      "--notes",
+      "Deliberately wrong fixture"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.worktrees/alice",
+    "agent": "alice",
+    "code": 0,
+    "out": "pinned alice@804d6f7 in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check/.git (this checkout -- pass --artifact <dir> if the deliverable is in another repo)\nreview_head: 804d6f72c6c909c6dc529aed1f64698a5b460e80\nT-001 -> IN REVIEW after 0m of work; master (boss) notified. Claim your next ticket.\nwake: boss -> inbox-posted\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "show",
+      "804d6f72c6c909c6dc529aed1f64698a5b460e80:stats.json"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "{\"rows\":999}\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "reject",
+      "T-001",
+      "--sha",
+      "804d6f72c6c909c6dc529aed1f64698a5b460e80",
+      "--reason",
+      "Check failed: expected rows 3, got 999"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/failed-check",
+    "agent": "bob",
+    "code": 0,
+    "out": "T-001 rejected 804d6f72c6c909c6dc529aed1f64698a5b460e80 by bob\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "init",
+      "-q",
+      "-b",
+      "main"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "init"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "quickstart",
+      "--agent",
+      "boss",
+      "--roles",
+      "backend"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "board: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.tickets\n  resolved from the git worktree cwd is in (/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer)\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.cursor/rules/tickets.mdc\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/AGENTS.md\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.gitignore\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.tickets/MASTER.md\nbound: `atm` run from /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer resolves to this board (`tickets` is a compatibility alias).\n\nClaude Code: install a scoped hook with `atm hooks claude --agent <name>`.\nCodex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.\n\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.tickets\nepic:  E-001  Sample epic: a first slice end to end\n  T-001  Sample: design the data model              ready now\n  T-002  Sample: build the API on top of the model  after T-001\n  T-003  Sample: put a screen on the API            after T-002\njoined as boss  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral  alias=-\n\nThe three commands that matter:\n  TICKET_AGENT=boss atm next                      claim the next ready ticket\n  TICKET_AGENT=boss atm update <id> \"...\"         say where you are, at least every 45 min\n  TICKET_AGENT=boss atm review <id> --notes \"...\" hand it back with an exact artifact\n  (`tickets` is a compatibility alias for the same CLI.)\n\nFeel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket\n               stays shut until a DIFFERENT seat accepts the commit)\n\nSee it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)\nLearn it: atm guide   |   docs/first-session.md   |   README.md\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "quickstart",
+      "--remove"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "removed 3 sample ticket(s) (T-001, T-002, T-003)\nepic E-001 left in place (it may hold your own work now)\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "master",
+      "take"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "boss is master now. Run `atm master` for the briefing.\nWARNING: boss took master with no live endpoint. Mail stays queued until a native session or persist watcher is online.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "objective",
+      "Produce verified CSV statistics",
+      "--exit",
+      "exact row count accepted"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "objective set\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "onboard"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "join",
+      "alice",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "alice",
+    "code": 0,
+    "out": "joined as alice  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check alice` proves it works\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.tickets\nmaster: boss\ninbox: 1 unread (atm inbox)\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer worktree add .worktrees/alice-work -b alice-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/alice-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "join",
+      "bob",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "bob",
+    "code": 0,
+    "out": "joined as bob  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check bob` proves it works\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.tickets\nmaster: boss\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer worktree add .worktrees/bob-work -b bob-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/bob-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "create",
+      "Transfer harness identity",
+      "--role",
+      "backend",
+      "--body",
+      "Cause: journey probe. Change: persisted artifact. Proof: independent assertion."
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "created T-001  Transfer harness identity\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "worktree",
+      "add",
+      "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/alice",
+      "-b",
+      "alice"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "HEAD is now at bc7291a onboard\n",
+    "err": "Preparing worktree (new branch 'alice')\n"
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "next"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/alice",
+    "agent": "alice",
+    "code": 0,
+    "out": "usage  no provider read yet (atm harness usage)\n[>] IN PROGRESS T-001  Transfer harness identity  (role=backend; owner=alice)\n\nRead this briefing before editing:\n  /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.tickets/MASTER.md\n\nBoard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.tickets  (cwd is /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/alice)\nTime: active 0m, waited 0m before claim, last update 0m ago\nlane: ready\n\nCause: journey probe. Change: persisted artifact. Proof: independent assertion.\n\nPost progress with `atm update T-001 \"...\"` at least every 45 min; finish with `atm review T-001 --notes \"exact SHA, paths, decisions\"`.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "intermediate"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "join",
+      "carol",
+      "--roles",
+      "backend",
+      "--harness",
+      "codex"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "carol",
+    "code": 0,
+    "out": "joined as carol  roles=['backend']  can=-  cost=medium  harness=codex  wake=task-only  lifecycle=ephemeral  alias=-\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.tickets\nmaster: boss\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer worktree add .worktrees/carol-work -b carol-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/carol-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "assign",
+      "T-001",
+      "--owner",
+      "carol"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "T-001: owner=carol\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0922-bin/atm",
+      "review",
+      "T-001",
+      "--notes",
+      "revoked owner"
+    ],
+    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-69tn691p/transfer/.worktrees/alice",
+    "agent": "alice",
+    "code": 1,
+    "out": "",
+    "err": "T-001 is owned by carol under generation 2; alice cannot review (stale ownership after restart or reassignment)\n"
+  }
+]

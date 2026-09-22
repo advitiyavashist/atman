@@ -1,0 +1,76 @@
+{
+  "title": "Resume interrupted artifact",
+  "body": "Cause: journey probe. Change: persisted artifact. Proof: independent assertion.",
+  "role": "backend",
+  "status": "review",
+  "deps": [],
+  "priority": 2,
+  "epic": "",
+  "sprint": "",
+  "needs": [],
+  "owner": "alice",
+  "created": "2026-09-22T12:20:55Z",
+  "updated": "2026-09-22T12:20:58Z",
+  "notes": [
+    {
+      "by": "alice",
+      "at": "2026-09-22T12:20:58Z",
+      "text": "REVIEW: alice@fcdaba9 -- finished.txt persists both stages"
+    }
+  ],
+  "id": "T-001",
+  "claimed_at": "2026-09-22T12:20:56Z",
+  "done_at": "",
+  "owner_generation": 1,
+  "revoked_owners": [],
+  "owner_lease": {
+    "generation": 1,
+    "owner": "alice",
+    "harness": "custom",
+    "issued_at": "2026-09-22T12:20:56.196660+00:00",
+    "reason": "claim",
+    "previous_owner": "",
+    "previous_generation": 0,
+    "revoked_owners": []
+  },
+  "handoff": {
+    "id": "568acdf3-512b-4b27-9d5d-5d0b9d387eb9",
+    "ticket": "T-001",
+    "objective_id": "obj-caa644f1",
+    "agent": "alice",
+    "harness": "custom",
+    "at": "2026-09-22T12:20:56.907051+00:00",
+    "completion_criteria": "finished.txt has both stages",
+    "work_completed": "mid.txt written",
+    "decisions": "preserve first stage",
+    "open_questions": "none",
+    "artifacts": [
+      "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-86rz4g6b/interrupted/.worktrees/alice/mid.txt"
+    ],
+    "worktree": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-86rz4g6b/interrupted/.worktrees/alice",
+    "checks": "mid.txt equals stage-one",
+    "next_action": "write finished.txt with stage-one and stage-two, commit and review",
+    "facts": "mid.txt is on disk",
+    "assumptions": "same worktree is available",
+    "missing_fields": [],
+    "missing_artifacts": [],
+    "missing_artifacts_flagged": false,
+    "context_budget": 4000,
+    "truncated": false
+  },
+  "review_at": "2026-09-22T12:20:58Z",
+  "commit": "alice@fcdaba9",
+  "branch": "alice",
+  "repo": "/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-86rz4g6b/interrupted/.git",
+  "repo_source": "cwd",
+  "review_head": "fcdaba983aaf769a7718403a49498c9450a7f903",
+  "review_events": [
+    {
+      "kind": "accept",
+      "by": "bob",
+      "at": "2026-09-22T12:20:58Z",
+      "sha": "fcdaba983aaf769a7718403a49498c9450a7f903",
+      "notes": "Independent committed artifact read: both stages"
+    }
+  ]
+}

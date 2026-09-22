@@ -1,0 +1,46 @@
+[
+  {
+    "width": 1440,
+    "route": "/",
+    "status": 200,
+    "sizing": {
+      "width": 1440,
+      "scroll": 1440
+    },
+    "errors": [],
+    "text": "atman\nAtman\n\nworkspace · normal\n\n^\nProducts · Atman\nmaster\nboss\nCoS\n—\n1\n/2 accepted\nmedian turns\n—\nyield@cost\n—\nWarning · 2\nBOARD SYNCED\n↻\nDark mode\nNEEDS ATTENTION 2\nNeeds attention\nbob is working on main (rule 4)\natm show\nOBJECTIVE\nactive · Produce verified CSV statistics · exit: exact row count accepted · stop: unattended task-only watchers run one model run then stop; continuous/scheduled adapters stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter.\nONBOARDING\n8/8\nObjective\nTeam\nWork\nIntervene\n\nObjective\n\nProduce verified CSV statistics\n\nDONE WHEN exact row count accepted\n\nFINISHING\nT-002 Consume verified statistics · @bob\nBLOCKED\n—\nNEXT STEP\nNeeds attention — bob is working on main (rule 4)\nMEDIAN TURNS\n—\nLower is better · unknown is not zero\nYIELD@COST\n—\ndone tickets with no harness cost — yield@cost unknown, not $0\nGraph\nList\nColumns\n\nFollow the work. Select a ticket for its blockers, handoff, and review. Same --after edges as atm graph / atm map — not a list of titles.\n\nFollow the work. Select a ticket for its blockers, handoff, and review.\n\nReady\nReserved\nTask posted\nWorking 1\nIn review\nBlocked\nWaiting\nCapture\nHold\nDone 1\nSTARTS\nT-001\nDONE\nWrite CSV statistics\n@alice\nAFTER 1 STEP\nT-002\nWORKING\nConsume verified statistics\n@bob\nTurns efficiency\nmeasured 0 ticket(s); unmeasured 2 (no run_end — typically backfill)\nWORST TICKETS (WATCH RUNS)\nticket\towner\tturns\toutcome\n—\t\t\t\nPER-AGENT MEDIAN\nagent\tn\tmedian\tmean\n—\t\t\t"
+  },
+  {
+    "width": 1440,
+    "route": "/app/",
+    "status": 200,
+    "sizing": {
+      "width": 1440,
+      "scroll": 1440
+    },
+    "errors": [],
+    "text": "atman\nPROJECT\nnormal\nnormal\n0 open\nno lead picked\nstarted\nLead\nPlan\nNeeds you\n0\nFleet\n3\nRuns\n0 live\n8:23:11 PM\nread-only: no operator configured · set an operator: atm ui --operator <name>\nboard read 1s ago\nSkip to the composer\nlead · not picked\nPICK WHO YOU TALK TO ON THIS PROJECT\n\nNothing is chosen for you. no lead picked for this project\n\nalice@normal\ncustom\nanswers on its next turn\nCopy command\nbob@normal\ncustom\nanswers on its next turn\nCopy command\nboss@normal\nunknown\nanswers on its next turn\nCopy command\n\nPicking a lead is a write, and this app has no operator. Use the command beside a seat.\n\nOBJECTIVE\n\nProduce verified CSV statistics\n\nDone when: exact row count accepted · active\n\n1 working\n0 review\n0 blocked\n0 posted\n0 reserved\n0 ready\n0 waiting\n0 capture\n0 hold\n1 done\n0 discarded\n0 done unverified\nready first 1 steps\nT-001\nWrite CSV statistics\nalice@normal\ndone, accepted\nafter layer 1 1 steps\nT-002\nConsume verified statistics\nbob@normal\nIN PROGRESS"
+  },
+  {
+    "width": 390,
+    "route": "/",
+    "status": 200,
+    "sizing": {
+      "width": 390,
+      "scroll": 390
+    },
+    "errors": [],
+    "text": "atman\nAtman\n\nworkspace · normal\n\n^\nProducts · Atman\n^\nStatus\n1/2 accepted\nBOARD SYNCED\n↻\nDark mode\nNEEDS ATTENTION 2\nNeeds attention\nbob is working on main (rule 4)\natm show\nONBOARDING\n8/8\nObjective\nTeam\nWork\nIntervene\n\nObjective\n\nProduce verified CSV statistics\n\nDONE WHEN exact row count accepted\n\nFINISHING\nT-002 Consume verified statistics · @bob\nBLOCKED\n—\nNEXT STEP\nNeeds attention — bob is working on main (rule 4)\nMEDIAN TURNS\n—\nLower is better · unknown is not zero\nYIELD@COST\n—\ndone tickets with no harness cost — yield@cost unknown, not $0\nGraph\nList\nColumns\n\nFollow the work. Select a ticket for its blockers, handoff, and review. Same --after edges as atm graph / atm map — not a list of titles.\n\nFollow the work. Select a ticket for its blockers, handoff, and review.\n\nReady\nReserved\nTask posted\nWorking 1\nIn review\nBlocked\nWaiting\nCapture\nHold\nDone 1\nSTARTS\nT-001\nDONE\nWrite CSV statistics\n@alice\nAFTER 1 STEP\nT-002\nWORKING\nConsume verified statistics\n@bob\nTurns efficiency\nmeasured 0 ticket(s); unmeasured 2 (no run_end — typically backfill)\nWORST TICKETS (WATCH RUNS)\nticket\towner\tturns\toutcome\n—\t\t\t\nPER-AGENT MEDIAN\nagent\tn\tmedian\tmean\n—\t\t\t"
+  },
+  {
+    "width": 390,
+    "route": "/app/",
+    "status": 200,
+    "sizing": {
+      "width": 390,
+      "scroll": 390
+    },
+    "errors": [],
+    "text": "atman\nPROJECT\nnormal\nLead\nPlan\nNeeds you\n0\nFleet\n3\nRuns\n0 live\n8:23:14 PM\nread-only: no operator configured · set an operator: atm ui --operator <name>\nboard read 1s ago\nChat\nPlan\nSkip to the composer\nlead · not picked\nPICK WHO YOU TALK TO ON THIS PROJECT\n\nNothing is chosen for you. no lead picked for this project\n\nalice@normal\ncustom\nanswers on its next turn\nCopy command\nbob@normal\ncustom\nanswers on its next turn\nCopy command\nboss@normal\nunknown\nanswers on its next turn\nCopy command\n\nPicking a lead is a write, and this app has no operator. Use the command beside a seat."
+  }
+]
