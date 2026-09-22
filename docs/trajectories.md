@@ -72,7 +72,7 @@ than filled with placeholders (T-259: unresolved must mean absent, not `"?"`).
 | kind | written by | notable fields |
 |---|---|---|
 | `run_start` | `tickets watch` | `run_no`, `trigger` (sorted pending keys), `harness_cmd`, `worktree` |
-| `run_end` | `tickets watch` | `started_at`, `ended_at`, `duration_s`, `exit`, `timed_out`, `outcome` (`limit` only on a limit-shaped failure; see below), plus harness usage when reported |
+| `run_end` | `tickets watch` | `started_at`, `ended_at`, `duration_s`, `exit`, `timed_out`, `outcome` (`limit` only on a limit-shaped failure, `stopped` when the watcher ended the run itself; see below), plus harness usage when reported |
 | `claim` | `try_claim` | `state_before: open`, `state_after: claimed` |
 | `update` | `tickets update` / `note` | `notes_len`, `state_after` |
 | `review` | `tickets review` | `outcome: review`, `pin`, `notes_len`, `active_hours` |
@@ -106,6 +106,30 @@ idle/limit/fail with zero bound writes still does not count a turn.
 
 Watch lives only on the live-shim `tickets.py`; `src/ticket_board/cli.py` has
 no watch loop, so this classifier is not duplicated there.
+
+### `run_end.outcome: "stopped"` (T-1439)
+
+A run the watcher ended on purpose, because the ticket it was launched for
+left the seat's active set while the child was still running. It carries
+`stop_reason` — one of `closed`, `blocked`, `reassigned`, `superseded` — and
+`stop_detail` (the observed cause, e.g. `status=done`, `owner=other`,
+`lane=discarded`, `lease generation 1 -> 2`). `exit` is 143: the child was
+killed, so that is what it exited with. **`stopped` is not a failure.** It
+arms no retry, writes no `adapter_failure`, and resets the consecutive-failure
+backoff — the run did not fail, it was ended.
+
+The same reason is appended to the ticket as a note. When the board refuses
+that write (the ticket may now belong to another seat, or be dependency
+gated), the event carries `stop_note_error` saying so, and the watch log
+carries the reason either way — a refused note never hides a stopped run.
+
+`review` is deliberately **not** a stop reason: a worker moves its own ticket
+to IN REVIEW from inside the run, so stopping there would kill every run at
+the moment it succeeded. A board that cannot be read is not a stop either —
+the run is kept and re-checked on the next tick, so a half-written ticket
+file can never kill live work. The check is armed only when the ticket was in
+the seat's active set at run start, and re-reads one ticket JSON every
+`TICKETS_RUN_TICKET_CHECK_SECS` (default 15) while the child runs.
 
 `claim` is written inside `try_claim()` rather than in `cmd_next`/`cmd_claim`,
 because that function is the single point where a claim actually succeeds — a

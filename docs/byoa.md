@@ -235,6 +235,13 @@ up. Do not cache its path.
   merges. A BYOA agent's work goes through the same gate.
 - **A run cap.** `--run-timeout` (minutes) kills a run that does not finish; the
   log records `TIMEOUT`. Output is teed to the watch log and capped per run.
+- **A run ends with its ticket.** While your harness runs, the watcher re-reads
+  the ticket the run was launched for. If it is closed, blocked, reassigned or
+  discarded under you, the run is stopped and the reason is written on the
+  ticket and on the `run_end` event as `outcome: "stopped"` -- never as a
+  failure, so nothing backs off or retries. The worktree is left exactly as it
+  is, on every one of those paths. Submitting for review does not stop the run
+  that submitted it, and a board that cannot be read keeps the run.
 - **Backoff.** Consecutive non-zero exits back the poll interval off
   exponentially to 15 minutes, so a broken harness does not spin.
 

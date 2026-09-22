@@ -5559,6 +5559,194 @@ def _finalize_active_watch_run(board, owner, rc=143):
     return True
 
 
+# ---- T-1439: a run must not outlive the ticket it was started for --------
+# A seat that keeps working after its ticket was closed, handed to someone
+# else or parked burns quota on work nobody will take, and pushes into a PR
+# that is already dead. The watcher is the only party that sees both the live
+# child and the board, so it is the one that has to look.
+
+# How often the in-flight guard re-reads the board. This is a single ticket
+# JSON read per interval, not a board scan, so it can be far tighter than the
+# poll interval; `atm watch --every 3600` must still notice within seconds.
+RUN_TICKET_CHECK_SECS = float(os.environ.get("TICKETS_RUN_TICKET_CHECK_SECS") or 15)
+# Exit recorded for a run the watcher stopped on purpose. 143 = SIGTERM,
+# which is literally what the child received; the run is told apart from a
+# failed one by outcome="stopped", never by this number.
+RUN_STOPPED_RC = 143
+# The only states that make further work on the held ticket worthless.
+# `review` is deliberately absent: the seat moves its OWN ticket to review
+# from inside the run (`atm review` is the last thing a worker does), so
+# stopping on review would kill every run at the exact moment it succeeded.
+RUN_STOP_STATES = {"done": "closed", "blocked": "blocked"}
+
+
+def _monotonic():
+    """`time` is imported per-function in this module; keep that convention."""
+    import time as _time
+    return _time.monotonic()
+
+
+def _run_ticket_snapshot(board, tid):
+    """(record, read_error) for one ticket id, without ever exiting.
+
+    `load()` sys.exits on a missing ticket, which a watcher must not do with
+    a child running. The caller needs the three-way answer -- record / gone /
+    unreadable -- so a failure comes back as (None, reason) and is treated as
+    "unknown", never as "this ticket left the active set".
+    """
+    try:
+        with open(ticket_path(board, tid)) as f:
+            rec = json.load(f)
+    except FileNotFoundError:
+        return None, "ticket file is gone"
+    except (OSError, ValueError) as e:  # unreadable, truncated, mid-write
+        return None, "%s" % e.__class__.__name__
+    if not isinstance(rec, dict):
+        return None, "not a ticket record"
+    return rec, ""
+
+
+def _ticket_lease_generation(t):
+    lease = t.get("owner_lease") if isinstance(t.get("owner_lease"), dict) else {}
+    for src in (t.get("owner_generation"), lease.get("generation")):
+        try:
+            if src is not None:
+                return int(src)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _run_abandon_reason(t, owner, baseline=None):
+    """('reason', 'detail') when a run holding ticket `t` should stop, else ('', '').
+
+    Four ways a ticket leaves a seat's active set mid-run:
+      closed      status is done -- terminal, nothing more to deliver
+      blocked     someone parked it; the seat is not the one to unpark it
+      reassigned  the owner is no longer this seat (released, or handed on)
+      superseded  the ticket was discarded (`atm discard`), or the claim was
+                  re-issued under the running child so this run holds a stale
+                  lease even where the name still reads as this seat
+                  (revoke-then-reclaim, A->B->A).
+    """
+    if not isinstance(t, dict):
+        return "", ""
+    status = (t.get("status") or "").strip()
+    ticket_owner = (t.get("owner") or "").strip()
+    if status in RUN_STOP_STATES:
+        return RUN_STOP_STATES[status], "status=%s" % status
+    # `atm discard` is how this board supersedes work: it drops the ticket
+    # back to open with the owner cleared and lane=discarded. Named for what
+    # it is, so the record does not read as an ordinary hand-off.
+    if (t.get("lane") or "").strip() == "discarded":
+        return "superseded", "lane=discarded"
+    if ticket_owner != owner:
+        return "reassigned", "owner=%s" % (ticket_owner or "(none)")
+    if baseline is not None:
+        generation = _ticket_lease_generation(t)
+        if generation > int(baseline or 0):
+            return "superseded", "lease generation %s -> %s" % (baseline, generation)
+    return "", ""
+
+
+class _RunTicketGuard:
+    """Re-read the held ticket while its run is in flight (T-1439).
+
+    Armed only when the ticket was in this seat's active set AT RUN START.
+    That is the whole point -- the guard reports a ticket that LEAVES the set
+    under a running child. Arming on an already-closed binding instead would
+    turn the stale `agent.json` ticket= field into a kill-relaunch-kill loop:
+    every fresh run woken by an unrelated message would die on its first tick.
+
+    `poll()` is called from the stop check, which fires every WATCH_STOP_SLICE
+    (0.2s); the board read itself is throttled to `every_s`, so a long run
+    costs one small JSON read every few seconds and nothing else.
+    """
+
+    def __init__(self, board, owner, ticket, baseline_generation=0,
+                 every_s=None, log=None, clock=None):
+        self.board = board
+        self.owner = owner
+        self.ticket = ticket
+        self.baseline_generation = baseline_generation
+        self.every_s = RUN_TICKET_CHECK_SECS if every_s is None else float(every_s)
+        self._log = log
+        self._clock = clock or _monotonic
+        self._next_check = 0.0
+        self.reason = ""
+        self.detail = ""
+
+    def poll(self, force=False):
+        """Reason to stop this run, or '' to keep it. Never raises."""
+        if self.reason:
+            return self.reason
+        nowm = self._clock()
+        if not force and nowm < self._next_check:
+            return ""
+        self._next_check = nowm + self.every_s
+        t, err = _run_ticket_snapshot(self.board, self.ticket)
+        if t is None:
+            # Board unreadable: keep the run and look again next tick. A
+            # transient read must never be able to kill live work.
+            if self._log:
+                self._log("%s ticket %s not read this tick (%s); keeping the run" % (
+                    now(), self.ticket, err))
+            return ""
+        reason, detail = _safe(
+            lambda: _run_abandon_reason(t, self.owner, self.baseline_generation),
+            ("", ""))
+        if reason:
+            self.reason, self.detail = reason, detail
+        return self.reason
+
+
+def _arm_run_ticket_guard(board, owner, ticket, log=None):
+    """A guard for `ticket`, or None when there is nothing to guard.
+
+    None whenever the ticket is not readable, not this seat's, or already out
+    of the active set at run start: a guard is about what changes DURING the
+    run, and a stale binding is not a reason to kill a run that was woken by
+    something else entirely.
+    """
+    if not ticket:
+        return None
+    t, _err = _run_ticket_snapshot(board, ticket)
+    if t is None:
+        return None
+    reason, _detail = _safe(lambda: _run_abandon_reason(t, owner), ("", ""))
+    if reason:
+        return None
+    return _RunTicketGuard(board, owner, ticket,
+                           baseline_generation=_ticket_lease_generation(t), log=log)
+
+
+def _record_run_stop_on_ticket(board, owner, ticket, run_no, reason, detail=""):
+    """Append the stop to the ticket itself. Returns '' on success, else why not.
+
+    Deliberately tolerant: the ticket may now be owned by another seat, or be
+    dependency-gated, and `save()` answers both of those with sys.exit. The
+    run has already been stopped by the time this runs, so a refusal here
+    must be reported, not propagated -- the trajectory run_end and the watch
+    log still carry the same reason.
+    """
+    if not ticket:
+        return "no ticket bound to the run"
+    text = "run stopped: %s left %s's active set mid-run (%s); run %s killed, worktree kept" % (
+        ticket, owner, ", ".join(x for x in (reason, detail) if x), run_no)
+    try:
+        t, err = _run_ticket_snapshot(board, ticket)
+        if t is None:
+            return err or "ticket unreadable"
+        t["notes"] = t.get("notes") or []
+        t["notes"].append({"by": owner, "at": now(), "text": text})
+        save(board, t)
+    except SystemExit as e:  # save() refuses by exiting; a watcher may not
+        return str(e) or "board refused the note"
+    except Exception as e:  # noqa: BLE001 - never take the watcher down
+        return "%s: %s" % (e.__class__.__name__, e)
+    return ""
+
+
 # ---- ground truth per tool ---------------------------------------------
 
 def _claude_project_dir(cwd):
@@ -15323,8 +15511,18 @@ def cmd_watch(a, board):
         # Event.wait + a same-thread handler deadlocked the poll wait.
         stop["now"] = True
 
+    # The guard for the run currently in flight, or None between runs and
+    # whenever the run holds no ticket. Rebound per run in the loop below.
+    ticket_guard = {"g": None}
+
     def _should_stop_watch():
-        return stop["now"] or os.path.exists(_stop_file(board, owner))
+        if stop["now"] or os.path.exists(_stop_file(board, owner)):
+            return True
+        # T-1439: the ticket this run was started for may have been closed,
+        # handed on or parked since. Throttled inside poll() to one small
+        # ticket read every RUN_TICKET_CHECK_SECS.
+        guard = ticket_guard["g"]
+        return bool(guard and guard.poll())
 
     def _usr1(signum, frame):
         # The interpreter writes this signal to poke_write through
@@ -15471,6 +15669,8 @@ def cmd_watch(a, board):
                     board, "run_start", agent=owner, ticket=ht, run_no=runs,
                     run_id=rid, trigger=sorted(p), harness_cmd=harness,
                     worktree=cwd, release_sha=rs), None)
+                # Nothing from a previous run may still be guarding this one.
+                ticket_guard["g"] = None
                 if a.dry_run:
                     print("  dry-run; would execute: %s" % run_cmd)
                     if cleanup:
@@ -15491,6 +15691,12 @@ def cmd_watch(a, board):
                     # the next call to it is on the far side of this line.
                     _safe(lambda: _run_begin(board, owner, runs, cwd,
                                              run_id=run_id, ticket=held_ticket), None)
+                    # T-1439: arm the in-flight ticket guard for THIS run.
+                    # Armed only when held_ticket is in this seat's active set
+                    # right now, so a stale binding cannot kill a fresh run.
+                    ticket_guard["g"] = _safe(
+                        lambda: _arm_run_ticket_guard(board, owner, held_ticket, log=log),
+                        None)
                     # Where this run's own output starts in the shared log, so
                     # the usage parse below reads THIS run's tail and not the
                     # previous run's result object (T-311: a stale JSON blob
@@ -15512,10 +15718,69 @@ def cmd_watch(a, board):
                             limited=bool(_active_seat_limit(board, owner)),
                         )
                     except InterruptedError:
-                        _safe(lambda: _finalize_active_watch_run(board, owner), None)
+                        guard = ticket_guard["g"]
+                        # A pending SIGTERM / spawn --stop outranks the
+                        # ticket guard: the operator asked for the WATCHER to
+                        # end, and that must not be recorded (or recovered
+                        # from) as a mere run stop.
+                        operator_stop = stop["now"] or os.path.exists(_stop_file(board, owner))
+                        stop_reason = "" if operator_stop else (guard.reason if guard else "")
+                        if not stop_reason:
+                            _safe(lambda: _finalize_active_watch_run(board, owner), None)
+                            if cleanup:
+                                cleanup()
+                            raise
+                        # T-1439: the ticket left this seat's active set while
+                        # the child ran. The child is already dead (killed by
+                        # _watch_run_capped); nothing else is touched -- no
+                        # worktree, no branch, no cleanup -- on either the
+                        # terminal or the reassigned/blocked path.
+                        ticket_guard["g"] = None
+                        rc, timed_out = RUN_STOPPED_RC, False
+                        _safe(lambda: _run_end(board, owner, runs, rc), None)
                         if cleanup:
                             cleanup()
-                        raise
+                        ended = now()
+                        detail = guard.detail
+                        noted = _record_run_stop_on_ticket(
+                            board, owner, held_ticket, runs, stop_reason, detail)
+                        _safe(lambda rid=run_id, ht=held_ticket: traj_event(
+                            board, "run_end", agent=owner, ticket=ht,
+                            run_no=runs, run_id=rid, trigger=sorted(p),
+                            harness_cmd=harness, worktree=cwd,
+                            started_at=run_started, ended_at=ended,
+                            exit=rc, outcome="stopped",
+                            stop_reason=stop_reason, stop_detail=detail,
+                            stop_note_error=noted or None,
+                            duration_s=_iso_span_secs(run_started, ended)), None)
+                        line = "%s run %d stopped: %s left the active set (%s%s)" % (
+                            now(), runs, held_ticket, stop_reason,
+                            ", " + detail if detail else "")
+                        log(line)
+                        if noted:
+                            log("%s run %d stop reason not written to %s: %s" % (
+                                now(), runs, held_ticket, noted))
+                        print("  run %d stopped: %s %s%s -- worktree kept%s" % (
+                            runs, held_ticket, stop_reason,
+                            "(%s)" % detail if detail else "",
+                            "" if not noted else "; note refused: %s" % noted))
+                        # Not a failure: no backoff, no adapter_failure, no
+                        # retry fence. The run did not fail, it was ended.
+                        failures = 0
+                        def _clear_stop_failure(rec):
+                            rec.pop("adapter_failure", None)
+                        _safe(lambda: _agent_update(board, owner, _clear_stop_failure), None)
+                        if a.once:
+                            # A stopped run is a clean outcome for a cron
+                            # wrapper: exit 0 so it does not arm a retry for
+                            # work that is deliberately over.
+                            sys.exit(0)
+                        if max_runs and runs >= max_runs:
+                            print("max-runs reached")
+                            break
+                        continue
+                    # The run is over; nothing should be guarding it now.
+                    ticket_guard["g"] = None
                     _safe(lambda: _run_end(board, owner, runs, rc), None)
                     if cleanup:
                         cleanup()
