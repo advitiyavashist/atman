@@ -81,9 +81,39 @@ DEFAULT_ROLES = {
 # is the compatibility alias. Behavior, board, and exit codes must not fork.
 PRIMARY_CLI_NAME = "atm"
 COMPAT_CLI_NAME = "tickets"
-# Keep in sync with pyproject.toml [project].version. Printed as the first
-# line of `atm --version` on every install shape that runs this file (T-1080).
-PACKAGE_VERSION = "0.3.0"
+
+
+def _package_version():
+    """Semver printed as the first line of `atm --version` (T-1080).
+
+    Reads ``ticket_board.__version__`` from the ``src/`` next to this file so
+    the monolith cannot drift from the package (and cannot silently adopt a
+    different site-packages install). Falls back to parsing ``__init__.py``.
+    """
+    root = os.path.dirname(os.path.realpath(__file__))
+    src = os.path.join(root, "src")
+    if os.path.isdir(src) and src not in sys.path:
+        sys.path.insert(0, src)
+    try:
+        import importlib
+        tb = importlib.import_module("ticket_board")
+        ver = getattr(tb, "__version__", None)
+        if ver:
+            return str(ver)
+    except Exception:
+        pass
+    init = os.path.join(src, "ticket_board", "__init__.py")
+    try:
+        with open(init, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+PACKAGE_VERSION = _package_version()
 
 
 def cli_prog(argv=None):
@@ -22093,7 +22123,20 @@ class _LoudArgumentParser(argparse.ArgumentParser):
     stderr, but with an explicit NO CHANGE WAS MADE as the trailing line, so
     the tail of the output is the warning rather than the caller's own text.
     add_subparsers() propagates this class to every subparser by default
-    (parser_class defaults to type(self)), so this covers all of them."""
+    (parser_class defaults to type(self)), so this covers all of them.
+
+    ``_lazy_release_epilog`` defers ``release_status()`` until help is formatted
+    so ``atm --version`` hashes the release tree only once (T-1080).
+    """
+    def __init__(self, *args, lazy_release_epilog=False, **kwargs):
+        self._lazy_release_epilog = lazy_release_epilog
+        argparse.ArgumentParser.__init__(self, *args, **kwargs)
+
+    def format_help(self):
+        if self._lazy_release_epilog and not self.epilog:
+            self.epilog = release_status()
+        return argparse.ArgumentParser.format_help(self)
+
     def error(self, message):
         self.print_usage(sys.stderr)
         self.exit(2, "%(prog)s: error: %(message)s\n%(prog)s: NO CHANGE WAS MADE\n" % {
@@ -22192,11 +22235,12 @@ def _source_behind_lines(root, head, remote):
         return []
     if git("merge-base", "--is-ancestor", head, remote, cwd=root) is None:
         return []
+    quoted = shlex.quote(root)
     return [
         "WARNING: running source %s is behind origin/main %s"
         % (head[:12], remote[:12]),
         "refresh: git -C %s fetch origin && git -C %s merge --ff-only origin/main"
-        % (root, root),
+        % (quoted, quoted),
     ]
 
 
@@ -22513,9 +22557,10 @@ class _RawVersion(argparse.Action):
 
 
 def main():
-    status = release_status()
+    # Defer release_status() until help; --version calls it once inside
+    # runtime_version_report() (T-1080 REQUEST CHANGES).
     p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
-                           epilog=status)
+                           lazy_release_epilog=True)
     p.add_argument("--version", action=_RawVersion, help="show program's version number and exit")
     sub = p.add_subparsers(dest="cmd")
 
@@ -23398,6 +23443,8 @@ def main():
         register(sub, globals())
 
     a = p.parse_args()
+    # After --version may have exited: hash once for drift warning / help epilog.
+    status = release_status()
     if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
         print("WARNING: %s -- see 'atm --version'" % status, file=sys.stderr)
     if not a.cmd:

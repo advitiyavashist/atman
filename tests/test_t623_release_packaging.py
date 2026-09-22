@@ -107,7 +107,16 @@ def test_install_live_staged_release_metrics_from_arbitrary_cwd(source, tmp_path
         assert "ModuleNotFoundError" not in r.stderr
         return r.stdout
 
-    assert run("--version").strip().splitlines()[0] == "tickets commit %s (verified release)" % sha
+    version_lines = run("--version").strip().splitlines()
+    # First line is package semver (T-1080); verified-release status follows.
+    expected_ver = None
+    for line in (ROOT / "src" / "ticket_board" / "__init__.py").read_text(
+            encoding="utf-8").splitlines():
+        if line.startswith("__version__"):
+            expected_ver = line.split("=", 1)[1].strip().strip("\"'")
+            break
+    assert version_lines[0] == expected_ver
+    assert "tickets commit %s (verified release)" % sha in version_lines
     turns = json.loads(run("turns", "--json"))
     assert turns["v"] == 1
     util = json.loads(run("util", "--json"))

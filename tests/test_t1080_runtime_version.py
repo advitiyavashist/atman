@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -48,15 +49,30 @@ def test_version_reports_running_source_path_and_sha():
                for ln in lines)
 
 
-def test_package_version_matches_pyproject():
+def test_package_version_matches_pyproject_and_ticket_board():
     tool = load_tickets()
     text = (ROOT / "pyproject.toml").read_text()
-    m = None
+    pyproject_ver = None
     for line in text.splitlines():
         if line.startswith("version = "):
-            m = line.split("=", 1)[1].strip().strip('"')
+            pyproject_ver = line.split("=", 1)[1].strip().strip('"')
             break
-    assert m == tool.PACKAGE_VERSION
+    init_ver = None
+    for line in (ROOT / "src" / "ticket_board" / "__init__.py").read_text(
+            encoding="utf-8").splitlines():
+        if line.startswith("__version__"):
+            init_ver = line.split("=", 1)[1].strip().strip("\"'")
+            break
+    assert pyproject_ver == tool.PACKAGE_VERSION
+    assert init_ver == tool.PACKAGE_VERSION
+    # Prefer the live package attribute when importable.
+    sys.path.insert(0, str(ROOT / "src"))
+    try:
+        import ticket_board as tb
+        assert tb.__version__ == tool.PACKAGE_VERSION
+    finally:
+        sys.path.pop(0)
+        sys.modules.pop("ticket_board", None)
 
 
 
@@ -84,22 +100,36 @@ def test_behind_origin_main_warns_and_prints_refresh(tmp_path):
         old[:12], new[:12])
     assert lines[1] == (
         "refresh: git -C %s fetch origin && git -C %s merge --ff-only origin/main"
-        % (repo, repo))
+        % (shlex.quote(str(repo)), shlex.quote(str(repo))))
     assert tool._source_behind_lines(str(repo), new, new) == []
 
 
 def _stage_release(dest: Path, commit: str) -> Path:
-    """install_live --live layout: dest/tickets.py + dest/release.json."""
+    """install_live --live layout: dest/tickets.py + dest/release.json + src/.
+
+    ``src/ticket_board/__init__.py`` is required so PACKAGE_VERSION resolves
+    from ``ticket_board.__version__`` the same way a real staged release does.
+    """
     dest.mkdir(parents=True)
     src = ROOT / "tickets.py"
     data = src.read_bytes()
     (dest / "tickets.py").write_bytes(data)
+    pkg = dest / "src" / "ticket_board"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text(
+        (ROOT / "src" / "ticket_board" / "__init__.py").read_text(encoding="utf-8"),
+        encoding="utf-8")
     (dest / "release.json").write_text(json.dumps({
         "commit": commit,
         "files": {
             "tickets.py": {
                 "sha256": hashlib.sha256(data).hexdigest(),
                 "size": len(data),
+            },
+            "src/ticket_board/__init__.py": {
+                "sha256": hashlib.sha256(
+                    (pkg / "__init__.py").read_bytes()).hexdigest(),
+                "size": (pkg / "__init__.py").stat().st_size,
             },
         },
     }) + "\n")

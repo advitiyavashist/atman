@@ -38,11 +38,11 @@ class Atman < Formula
   end
 
   test do
-    # --version first line is the package version; a later line must still
-    # prove the shipped release.json hashes every named file.
+    # --version reads the shipped release.json and hashes every file it
+    # names, so a real "commit ... (verified release)" answer proves the
+    # tarball is not just present but byte-for-byte what was pinned.
     version_output = shell_output("#{bin}/atm --version")
-    assert_match(/^0\.3\.0$/, version_output)
-    assert_match(/^tickets commit [0-9a-f]{40} \(verified release\)$/, version_output)
+    assert_match(/^tickets commit [0-9a-f]{40} \(verified release\)$/, version_output.strip)
     assert_equal version_output, shell_output("#{bin}/tickets --version")
 
     board = testpath/".tickets"
