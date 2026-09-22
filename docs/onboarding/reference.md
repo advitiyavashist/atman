@@ -82,9 +82,9 @@ warns and prints a refresh command with a shell-quoted `-C` path. A pinned
 `release.json` is the running source: an enclosing repo (for example
 `~/.claude` inside dotfiles) is not probed unless its HEAD equals that
 release commit. Otherwise `--version` prints the brew/tarball upgrade path
-(`brew upgrade atman`). An operator worktree such as
-`atman-runtime-current` that is not updated after merge will omit new
-commands from `atm --help` (T-1080). Refresh it with the printed line, or:
+(`brew upgrade atman`). An operator runtime worktree that is not
+updated after merge will omit new commands from `atm --help` (T-1080).
+Refresh it with the printed line, or:
 
 ```sh
 git -C "<runtime-worktree>" fetch origin

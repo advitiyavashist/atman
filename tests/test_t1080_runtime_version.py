@@ -49,7 +49,7 @@ def test_version_reports_running_source_path_and_sha():
                for ln in lines)
 
 
-def test_package_version_matches_pyproject_and_ticket_board():
+def test_package_version_matches_pyproject_and_ticket_board(monkeypatch):
     tool = load_tickets()
     text = (ROOT / "pyproject.toml").read_text()
     pyproject_ver = None
@@ -65,14 +65,12 @@ def test_package_version_matches_pyproject_and_ticket_board():
             break
     assert pyproject_ver == tool.PACKAGE_VERSION
     assert init_ver == tool.PACKAGE_VERSION
-    # Prefer the live package attribute when importable.
-    sys.path.insert(0, str(ROOT / "src"))
-    try:
-        import ticket_board as tb
-        assert tb.__version__ == tool.PACKAGE_VERSION
-    finally:
-        sys.path.pop(0)
-        sys.modules.pop("ticket_board", None)
+    # Snapshot/restore sys.modules so a parent-only pop cannot leave
+    # ticket_board.* submodules cached for later CI-ordered tests.
+    monkeypatch.setattr(sys, "modules", dict(sys.modules))
+    monkeypatch.syspath_prepend(str(ROOT / "src"))
+    import ticket_board as tb
+    assert tb.__version__ == tool.PACKAGE_VERSION
 
 
 
