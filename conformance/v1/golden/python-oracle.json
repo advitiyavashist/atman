@@ -1,7 +1,7 @@
 {
   "contract_version": "atman-core/v1",
-  "oracle_revision": "0c7510f12a6fa600e29189b24338640d029da21b",
-  "corpus_sha256": "7b71d8f8a193942f6074f1c80a1ccf8b33e4461e6e55303e5d8310e772ed50b3",
+  "oracle_revision": "818e1d6c66414e72aba2a4ed5b1db4e52c4922e4",
+  "corpus_sha256": "470908c029bd904770523a919932319704a1f127fa7e8aef62a879fd46eab19d",
   "implementation_command": [
     "python3",
     "${REPO}/tickets.py"
@@ -2965,8 +2965,8 @@
       "metrics": {
         "warm-board": {
           "samples": 7,
-          "p50_ms": 197.198,
-          "p95_ms": 225.123,
+          "p50_ms": 230.578,
+          "p95_ms": 248.599,
           "p95_under_ms": 1000.0
         }
       },

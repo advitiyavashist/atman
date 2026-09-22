@@ -3,7 +3,7 @@
   "status": "frozen",
   "oracle": {
     "implementation": "Python tickets CLI and BoardStore",
-    "git_revision": "0c7510f12a6fa600e29189b24338640d029da21b",
+    "git_revision": "818e1d6c66414e72aba2a4ed5b1db4e52c4922e4",
     "selection_rule": "Accepted documented behavior is normative; incidental formatting and known implementation quirks are not."
   },
   "compatibility": {

@@ -1,6 +1,6 @@
 {
   "contract_version": "atman-core/v1",
-  "oracle_revision": "0c7510f12a6fa600e29189b24338640d029da21b",
+  "oracle_revision": "818e1d6c66414e72aba2a4ed5b1db4e52c4922e4",
   "description": "Portable black-box cases selected from accepted Python behavior. T-817: ready-lane plan fixtures, DEPS-001/STORE-001 executable, dirty isolation.",
   "cases": [
     {
