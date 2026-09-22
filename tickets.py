@@ -81,6 +81,9 @@ DEFAULT_ROLES = {
 # is the compatibility alias. Behavior, board, and exit codes must not fork.
 PRIMARY_CLI_NAME = "atm"
 COMPAT_CLI_NAME = "tickets"
+# Keep in sync with pyproject.toml [project].version. Printed as the first
+# line of `atm --version` on every install shape that runs this file (T-1080).
+PACKAGE_VERSION = "0.3.0"
 
 
 def cli_prog(argv=None):
@@ -22217,12 +22220,14 @@ def _pinned_release_upgrade_line(pinned):
 
 
 def runtime_version_report():
-    """What `atm --version` prints: provenance, the file that is running, and
-    a behind warning when this checkout is older than origin/main.
+    """What `atm --version` prints: package version, provenance, the file
+    that is running, and a behind warning when this checkout is older than
+    origin/main.
 
-    First line stays `release_status()` so pinned-release smoke tests keep
-    matching. Extra lines are T-1080: an operator worktree must not silently
-    pin last week's CLI (`atm steer` missing from `--help`).
+    First line is ``PACKAGE_VERSION`` (e.g. ``0.3.0``) on every install shape
+    that executes this file. Second line is ``release_status()``. Extra lines
+    are T-1080: an operator worktree must not silently pin last week's CLI
+    (``atm steer`` missing from ``--help``).
 
     When release.json names a commit, that commit is the running source.
     An enclosing git repo (dotfiles / ~/.claude) is probed only when its
@@ -22230,7 +22235,7 @@ def runtime_version_report():
     """
     status = release_status()
     script = os.path.realpath(__file__)
-    lines = [status, "source: %s" % script]
+    lines = [PACKAGE_VERSION, status, "source: %s" % script]
     pinned = _release_commit()
     root = _git_root_from(script)
     head = (git("rev-parse", "HEAD", cwd=root) if root else None) or ""

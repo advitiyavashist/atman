@@ -22,6 +22,7 @@ cd atman
 ./install.sh                       # links atm + tickets into ~/.local/bin
 ./install.sh --prefix ~/isolated   # or somewhere of your own
 atm --version
+# 0.3.0
 # a raw checkout answers: tickets (uninstalled checkout; no pinned release)
 ```
 
@@ -34,6 +35,7 @@ already a symlink to this checkout — including a pinned release launcher.
 ```sh
 ./install.sh --live-release --ref <commit-sha>
 atm --version
+# 0.3.0
 # tickets commit <sha> (verified release)
 ```
 
@@ -73,7 +75,8 @@ whatever file the symlink points at — including a dirty working tree. `atm
 self` prints the resolved target, which is the only answer that settles it
 when several checkouts are on one machine.
 
-`--version` also prints `source:` (the file that is running). A git
+`--version` prints the package version first (`0.3.0`), then provenance.
+It also prints `source:` (the file that is running). A git
 checkout prints `source-sha:`; if that sha is behind `origin/main` it
 warns and prints the refresh command. A pinned `release.json` is the
 running source: an enclosing repo (for example `~/.claude` inside

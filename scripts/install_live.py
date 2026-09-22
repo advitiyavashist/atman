@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -99,9 +100,17 @@ def smoke(script, sha):
                 raise RuntimeError("smoke failed (%s): %s" % (" ".join(args), result.stderr))
             return result.stdout
 
-        version_line = run("--version").strip().splitlines()[0]
-        if version_line != "tickets commit %s (verified release)" % sha:
-            raise RuntimeError("smoke failed: version does not match pinned commit")
+        version_lines = run("--version").strip().splitlines()
+        expected_status = "tickets commit %s (verified release)" % sha
+        # First line is PACKAGE_VERSION (semver); release status is a later line.
+        if not version_lines or not re.fullmatch(r"\d+\.\d+\.\d+", version_lines[0] or ""):
+            raise RuntimeError(
+                "smoke failed: --version first line must be package version X.Y.Z, got %r"
+                % (version_lines[0] if version_lines else None))
+        if expected_status not in version_lines:
+            raise RuntimeError(
+                "smoke failed: version does not match pinned commit (missing %r)"
+                % expected_status)
         run("create", "Installer smoke fixture")
         if "Installer smoke fixture" not in run("show", "T-001"):
             raise RuntimeError("smoke failed: show did not read isolated fixture")

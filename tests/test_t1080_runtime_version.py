@@ -34,16 +34,30 @@ def _git(repo, *args):
 
 
 def test_version_reports_running_source_path_and_sha():
+    tool = load_tickets()
     r = subprocess.run(
         [sys.executable, str(ROOT / "tickets.py"), "--version"],
         capture_output=True, text=True, cwd=str(ROOT))
     assert r.returncode == 0, r.stderr
     lines = r.stdout.strip().splitlines()
-    assert lines[0]
+    assert lines[0] == tool.PACKAGE_VERSION
+    assert lines[1]
     assert any(ln.startswith("source: ") and str((ROOT / "tickets.py").resolve()) in ln
                for ln in lines)
     assert any(ln.startswith("source-sha: ") and len(ln.split()[1]) >= 7
                for ln in lines)
+
+
+def test_package_version_matches_pyproject():
+    tool = load_tickets()
+    text = (ROOT / "pyproject.toml").read_text()
+    m = None
+    for line in text.splitlines():
+        if line.startswith("version = "):
+            m = line.split("=", 1)[1].strip().strip('"')
+            break
+    assert m == tool.PACKAGE_VERSION
+
 
 
 def test_behind_origin_main_warns_and_prints_refresh(tmp_path):
@@ -121,7 +135,8 @@ def test_release_inside_foreign_git_repo_does_not_probe_enclosing_head(tmp_path)
     assert r.returncode == 0, r.stderr
     out = r.stdout
     lines = out.strip().splitlines()
-    assert lines[0] == "tickets commit %s (verified release)" % pinned
+    assert lines[0] == load_tickets().PACKAGE_VERSION
+    assert lines[1] == "tickets commit %s (verified release)" % pinned
     assert any(ln.startswith("source: ") and str(tickets_py.resolve()) in ln
                for ln in lines)
     assert not any(ln.startswith("source-sha:") for ln in lines)
@@ -142,7 +157,8 @@ def test_pinned_release_without_git_prints_brew_upgrade(tmp_path):
     assert r.returncode == 0, r.stderr
     out = r.stdout
     lines = out.strip().splitlines()
-    assert lines[0] == "tickets commit %s (verified release)" % pinned
+    assert lines[0] == load_tickets().PACKAGE_VERSION
+    assert lines[1] == "tickets commit %s (verified release)" % pinned
     assert not any(ln.startswith("source-sha:") for ln in lines)
     assert "WARNING:" not in out
     assert "pinned release %s; newer releases can't be checked from here: " \
