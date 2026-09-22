@@ -22,7 +22,7 @@ def test_first_class_section_ids_and_order():
 
 
 def test_hero_and_readme_share_the_promise():
-    assert PROMISE in LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
+    assert PROMISE in LANDING[LANDING.index('id="promise"') : LANDING.index('id="path"')]
     assert PROMISE in REPO_README
     assert "127.0.0.1" not in LANDING
     assert "localhost" not in LANDING.lower()

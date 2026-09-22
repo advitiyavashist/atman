@@ -497,3 +497,66 @@ def test_lsof_probe_protocol(tmp_path, monkeypatch, failure):
         assert result == []
     else:
         assert result == [{"pid": 123, "cmd": "sleep"}]
+
+
+def _fake_proc_eacces(monkeypatch, pid="1204"):
+    import errno
+    real_listdir = gc.os.listdir
+    real_readlink = gc.os.readlink
+    real_isdir = gc.os.path.isdir
+
+    def listdir(p):
+        if p == "/proc":
+            return [pid]
+        return real_listdir(p)
+
+    def readlink(p):
+        if str(p).replace("\\", "/").endswith("/%s/cwd" % pid):
+            raise OSError(errno.EACCES, "Permission denied", p)
+        return real_readlink(p)
+
+    def isdir(p):
+        if p == "/proc":
+            return True
+        return real_isdir(p)
+
+    monkeypatch.setattr(gc.os, "listdir", listdir)
+    monkeypatch.setattr(gc.os, "readlink", readlink)
+    monkeypatch.setattr(gc.os.path, "isdir", isdir)
+
+
+def test_proc_own_uid_eacces_fails_closed_without_lsof(tmp_path, monkeypatch):
+    path = tmp_path / "wt"
+    path.mkdir()
+    _fake_proc_eacces(monkeypatch)
+    monkeypatch.setattr(gc, "_find_lsof", lambda: "")
+    result = gc.live_cwds(str(path))
+    assert result and result[0].get("unknown")
+    assert "proc cwd failed" in result[0]["cmd"]
+    assert "Permission denied" in result[0]["cmd"]
+
+
+def test_proc_eacces_lsof_empty_is_definite(tmp_path, monkeypatch):
+    path = tmp_path / "wt"
+    path.mkdir()
+    _fake_proc_eacces(monkeypatch)
+    monkeypatch.setattr(gc, "_find_lsof", lambda: "lsof")
+    real_run = gc._run
+    monkeypatch.setattr(gc, "_run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 1, "", "")
+                        if argv[0] == "lsof" else real_run(argv, **kw))
+    assert gc.live_cwds(str(path)) == []
+
+
+def test_proc_eacces_lsof_failure_stays_fail_closed(tmp_path, monkeypatch):
+    path = tmp_path / "wt"
+    path.mkdir()
+    _fake_proc_eacces(monkeypatch)
+    monkeypatch.setattr(gc, "_find_lsof", lambda: "lsof")
+    real_run = gc._run
+    monkeypatch.setattr(gc, "_run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 2, "", "permission denied")
+                        if argv[0] == "lsof" else real_run(argv, **kw))
+    result = gc.live_cwds(str(path))
+    assert result and result[0].get("unknown")
+    assert "proc cwd failed" in result[0]["cmd"]

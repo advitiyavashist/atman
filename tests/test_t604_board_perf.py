@@ -120,7 +120,121 @@ def test_board_snapshot_one_ps_scan(board, monkeypatch):
     monkeypatch.setattr(subprocess, "run", wrapped)
     snap = tk.board_snapshot(str(board))
     assert "agents" in snap and "master" in snap
-    assert calls["ps"] == 1
+    # Linux reads /proc/<pid>/cmdline and forks no ps. macOS has no /proc,
+    # so the snapshot is one `ps -axww`. More than one is the per-pid pile-up.
+    assert calls["ps"] <= 1
+
+
+def test_proc_snapshot_skips_empty_cmdline_without_per_pid_ps(monkeypatch):
+    """Kernel threads have an empty cmdline. Do not fork ps once per thread."""
+    tk = _load_tk()
+    real_isdir = os.path.isdir
+    real_listdir = os.listdir
+
+    def isdir(path):
+        if path == "/proc":
+            return True
+        return real_isdir(path)
+
+    def listdir(path):
+        if path == "/proc":
+            return ["900011", "900012", "900013", "self"]
+        return real_listdir(path)
+
+    monkeypatch.setattr(tk.os.path, "isdir", isdir)
+    monkeypatch.setattr(tk.os, "listdir", listdir)
+
+    def cmdline(pid):
+        if int(pid) == 900012:
+            return "python tickets.py watch"
+        return ""
+
+    monkeypatch.setattr(tk, "_proc_cmdline", cmdline)
+    calls = {"ps": 0}
+    real = subprocess.run
+
+    def wrapped(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "ps":
+            calls["ps"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", wrapped)
+    rows, ok = tk._process_table_snapshot()
+    assert ok is True
+    assert calls["ps"] == 0
+    assert rows == [(900012, "python tickets.py watch")]
+
+
+def test_process_command_empty_proc_cmdline_skips_ps(monkeypatch):
+    """When /proc exists, empty cmdline must not fall back to per-pid ps."""
+    import builtins
+    from io import BytesIO
+
+    tk = _load_tk()
+    real_isdir = os.path.isdir
+    calls = {"ps": 0}
+    real = subprocess.run
+
+    def isdir(path):
+        if path == "/proc":
+            return True
+        return real_isdir(path)
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        if path == "/proc/900099/cmdline":
+            return BytesIO(b"")
+        raise AssertionError("unexpected open: %s" % path)
+
+    def wrapped(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "ps":
+            calls["ps"] += 1
+        return real(*args, **kwargs)
+
+    # Narrow patches: a function-scoped builtins.open monkeypatch outlives
+    # this body and breaks autouse t409 reaper teardown on Linux (real /proc).
+    with monkeypatch.context() as m:
+        m.setattr(tk.os.path, "isdir", isdir)
+        m.setattr(builtins, "open", fake_open)
+        m.setattr(subprocess, "run", wrapped)
+        assert tk._process_command(900099) == ""
+        assert calls["ps"] == 0
+
+
+def test_watch_reaper_empty_proc_cmdline_skips_ps(monkeypatch):
+    """watch_reaper.process_cmdline must match tickets.py: no ps when /proc."""
+    import builtins
+    from io import BytesIO
+    import watch_reaper
+
+    real_isdir = os.path.isdir
+    calls = {"ps": 0}
+    real = subprocess.run
+
+    def isdir(path):
+        if path == "/proc":
+            return True
+        return real_isdir(path)
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        if path == "/proc/900098/cmdline":
+            return BytesIO(b"")
+        raise AssertionError("unexpected open: %s" % path)
+
+    def wrapped(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "ps":
+            calls["ps"] += 1
+        return real(*args, **kwargs)
+
+    # Same narrow-patch rule as test_process_command_empty_proc_cmdline_skips_ps.
+    with monkeypatch.context() as m:
+        m.setattr(watch_reaper.os.path, "isdir", isdir)
+        m.setattr(builtins, "open", fake_open)
+        m.setattr(watch_reaper.subprocess, "run", wrapped)
+        assert watch_reaper.process_cmdline(900098) == ""
+        assert calls["ps"] == 0
 
 
 def test_fixture_board_json_warm_under_1s_no_pileup(board):
