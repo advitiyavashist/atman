@@ -406,9 +406,14 @@ def ui_reading(reading, now=None):
 
     The compact header never prints the provider's own sentence, and a
     Team-card tooltip must not either -- it is unsanitized free text.
+    ``reset_at`` is the same scrubbed label the compact line uses, not
+    the raw ledger value (a path-shaped reset must not sit in board.json).
     """
     rec = public_reading(reading, now)
     rec.pop("limit_message", None)
+    raw = rec.get("reset_at")
+    if raw:
+        rec["reset_at"] = reset_label(raw, now) or None
     return rec
 
 
@@ -588,7 +593,20 @@ def _scrub(text):
 
 def _is_tz_token(word):
     """True only for a short, IANA-area-anchored zone token."""
-    return bool(word) and len(word) < _TZ_EXEMPT_MAX and bool(_TZ_TOKEN.match(word))
+    if not word or len(word) >= _TZ_EXEMPT_MAX or not _TZ_TOKEN.match(word):
+        return False
+    parts = word.split("/")
+    # UTC and GMT have no real sub-zones. A slash after them is not a tz.
+    if parts[0] in ("UTC", "GMT") and len(parts) > 1:
+        return False
+    # Etc only has a handful of real suffixes (UTC, GMT, …), not 19 letters.
+    if parts[0] == "Etc":
+        return len(parts) == 2 and parts[1] in (
+            "UTC", "GMT", "UCT", "Zulu", "Greenwich", "Universal")
+    for seg in parts[1:]:
+        if _HINT_UNSAFE.search(seg):
+            return False
+    return True
 
 
 def _scrub_reset(text):
