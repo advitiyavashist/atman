@@ -108,3 +108,26 @@ def test_team_tooltip_does_not_carry_limit_message(board):
     assert "session limit" not in blob
     assert pu_row["status"] == "limited"
     assert pu_row.get("hint") or pu_row.get("age") or pu_row["status"]
+
+
+def test_tz_exemption_scrubs_unsafe_post_slash_segments():
+    """UTC/GMT have no sub-zones; credential-shaped city segments are not tzs."""
+    bad = (
+        "UTC/Bearer_TOKEN",
+        "GMT/sk_live_abcdefg",
+        "Etc/" + ("A" * 19),
+    )
+    for token in bad:
+        assert not pu._is_tz_token(token), token
+        assert pu.reset_label(token) == ""
+        assert token not in pu._scrub_reset(token)
+
+
+def test_ui_reading_scrubs_reset_at():
+    leaked = "Users/kavana/secrets"
+    rec = pu.record_observed_limit("claude", "cap", iso(-0.2), leaked)
+    public = pu.public_reading(rec)
+    ui = pu.ui_reading(rec)
+    assert public["reset_at"] == leaked
+    assert ui.get("reset_at") in (None, "")
+    assert leaked not in json.dumps(ui)

@@ -3226,6 +3226,8 @@ def cmd_limit(a, board):
             rec.pop("limit", None)
         else:
             rec["limit"] = {"at": now(), "until": a.until or "", "note": a.note or ""}
+            lim = rec["limit"]
+            lim["reset_at"] = _route_headroom().provider_reset_at(lim["until"] or lim["note"], lim["at"])
 
     rec = _locked_agent_update(board, owner, mutate)
     if rec is None:
@@ -3247,13 +3249,18 @@ def cmd_limits(a, board):
     """Who is limited: manual records + silence + a scan of local tool logs."""
     print("Recorded limits:")
     any_ = False
-    for r in load_agents(board):
-        lim = r.get("limit")
+    records = load_agents(board)
+    records.sort(key=lambda r: _route_headroom()._stamp(
+        (r.get("limit") or r.get("expired_limit") or {}).get("at")) or datetime.min.replace(tzinfo=timezone.utc))
+    for r in records:
+        lim = r.get("limit") or r.get("expired_limit")
         if lim:
             any_ = True
-            print("  %-14s hit %s ago%s%s" % (r["owner"], fmt_hours(hours_since(lim["at"])),
+            expired, _, reason = _route_headroom().limit_expiry(lim)
+            print("  %-14s hit %s ago%s%s%s" % (r["owner"], fmt_hours(hours_since(lim.get("at", ""))),
                                              (", back %s" % lim["until"]) if lim.get("until") else "",
-                                             (" -- %s" % lim["note"]) if lim.get("note") else ""))
+                                             (" -- %s" % lim["note"]) if lim.get("note") else "",
+                                             (" [STALE: %s; no longer blocks]" % reason) if expired else ""))
     if not any_:
         print("  none (agents record one with `atm limit --until \"...\"`)")
     print("")
@@ -4177,6 +4184,12 @@ def health(board, tickets):
                     t["id"], ",".join(missing)),
                     "atm join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
     for r in load_agents(board):
+        lim = r.get("limit") or r.get("expired_limit")
+        if lim and _route_headroom().limit_expiry(lim)[0]:
+            out.append(("WARN", "%s stale usage limit no longer blocks: %s; check seat resumed" % (
+                r["owner"], _route_headroom().limit_expiry(lim)[2]),
+                "atm pending --agent %s" % r["owner"]))
+            continue
         if r.get("limit"):
             held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
             out.append(("WARN", "%s hit a usage limit %s ago%s%s" % (
@@ -4196,7 +4209,7 @@ def health(board, tickets):
             continue
         rec = agents_by.get(who) or {}
         reason = ""
-        if rec.get("limit"):
+        if _route_headroom().seat_limit(rec):
             reason = "limited"
         elif not rec.get("seen"):
             reason = "no heartbeat"

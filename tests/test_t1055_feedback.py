@@ -151,7 +151,7 @@ def test_feedback_runs_no_subprocess(board, monkeypatch, capsys):
     agents.mkdir(exist_ok=True)
     (agents / "alice.json").write_text(json.dumps({"owner": "alice", "cwd": str(board.parent)}))
     (agents / "alice.watch.pid").write_text("999999\n")
-    (agents / "bob.json").write_text(json.dumps({"owner": "bob", "limit": {"note": "quota"}}))
+    (agents / "bob.json").write_text(json.dumps({"owner": "bob", "limit": {"at": tk.now(), "note": "quota"}}))
     assert t["id"] == "T-001"
 
     spawned = []
@@ -160,13 +160,15 @@ def test_feedback_runs_no_subprocess(board, monkeypatch, capsys):
         spawned.append(args[:1])
         raise AssertionError("atm feedback spawned a process: %r" % (args[:1],))
 
-    monkeypatch.setattr(sp.Popen, "__init__", refuse)
-    for name in ("system", "posix_spawn", "posix_spawnp", "fork", "execv", "execvp", "popen"):
-        if hasattr(os, name):
-            monkeypatch.setattr(os, name, refuse)
-    monkeypatch.chdir(board.parent)
-    tk.cmd_feedback(argparse.Namespace(), str(board))
-    out = capsys.readouterr().out
+    # Restore subprocess hooks before the board fixture reaps test watchers.
+    with monkeypatch.context() as guard:
+        guard.setattr(sp.Popen, "__init__", refuse)
+        for name in ("system", "posix_spawn", "posix_spawnp", "fork", "execv", "execvp", "popen"):
+            if hasattr(os, name):
+                guard.setattr(os, name, refuse)
+        guard.chdir(board.parent)
+        tk.cmd_feedback(argparse.Namespace(), str(board))
+        out = capsys.readouterr().out
     assert spawned == []
     assert "seats LIMITED: 1" in out
     assert 'seats whose recorded watcher is gone (closest tracked state to "stalled"): 1' in out
