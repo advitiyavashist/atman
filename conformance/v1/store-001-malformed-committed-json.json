@@ -1,0 +1,37 @@
+{
+  "contract_requirement": "STORE-001",
+  "ticket": "T-642",
+  "case_id": "malformed-committed-ticket-json",
+  "description": "Malformed committed T-*.json must fail closed; orphan partial residue may be ignored.",
+  "steps": [
+    {
+      "id": "seed",
+      "setup": "write valid T-001.json plus malformed T-002.json committed record"
+    },
+    {
+      "id": "board-read",
+      "argv": ["board", "--quiet"],
+      "expect": {
+        "exit_codes": [1],
+        "contains": ["corrupt ticket T-002"]
+      }
+    },
+    {
+      "id": "no-mutation",
+      "argv": ["create", "Should not land"],
+      "expect": {
+        "exit_codes": [1],
+        "contains": ["corrupt ticket T-002"]
+      }
+    },
+    {
+      "id": "orphan-partial-allowed",
+      "setup": "add .T-001.json.partial orphan residue only",
+      "argv": ["list"],
+      "expect": {
+        "exit_codes": [0],
+        "contains": ["T-001"]
+      }
+    }
+  ]
+}

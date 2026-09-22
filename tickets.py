@@ -1098,12 +1098,42 @@ def ticket_path(board, tid):
     return os.path.join(board, tid + ".json")
 
 
-def load(board, tid):
+def corrupt_ticket_exit(tid, path, err):
+    """Deterministic STORE-001 refusal; never a traceback."""
+    del path  # path kept in signature for call-site clarity / future diagnostics
+    sys.exit("corrupt ticket %s: %s" % (tid, err))
+
+
+def read_ticket_file(path):
+    """Load one committed T-*.json or exit with a deterministic corruption error.
+
+    Dangling committed symlinks and malformed JSON fail closed (STORE-001).
+    Orphan ``.partial`` residue is not matched by the T-*.json glob and is ignored.
+    """
+    tid = os.path.splitext(os.path.basename(path))[0]
+    if os.path.islink(path) and not os.path.exists(path):
+        corrupt_ticket_exit(tid, path, "dangling symlink")
     try:
-        with open(ticket_path(board, tid)) as f:
-            return json.load(f)
+        with open(path) as f:
+            data = json.load(f)
     except FileNotFoundError:
+        raise
+    except (OSError, ValueError) as err:
+        corrupt_ticket_exit(tid, path, err)
+    if not isinstance(data, dict):
+        corrupt_ticket_exit(tid, path, "expected JSON object")
+    return data
+
+
+def load(board, tid):
+    path = ticket_path(board, tid)
+    if not os.path.lexists(path):
         sys.exit("no such ticket: %s" % tid)
+    if os.path.islink(path) and not os.path.exists(path):
+        corrupt_ticket_exit(tid, path, "dangling symlink")
+    if not os.path.isfile(path):
+        sys.exit("no such ticket: %s" % tid)
+    return read_ticket_file(path)
 
 
 def _ensure_src_path():
@@ -1135,6 +1165,13 @@ def save(board, t, expected_generation=None):
     lock = tc.ticket_mutation_lock(board, t["id"]) if tc is not None else None
 
     def _publish():
+        # STORE-001 corruption boundary: refuse every write while any committed
+        # T-*.json sibling is unreadable (including note/update on an open ticket).
+        # Bypass the board-read cache so a stale pin cannot hide a new corrupt file.
+        for sibling in sorted(glob.glob(os.path.join(board, "T-*.json"))):
+            if os.path.realpath(sibling) == os.path.realpath(path):
+                continue  # replacing this record; may not be valid JSON yet on create
+            read_ticket_file(sibling)
         # Every active write (including update and owner transfers) shares the
         # same dependency gate; command-specific checks are only early errors.
         current = load(board, t["id"]) if os.path.isfile(path) else {}
@@ -1243,13 +1280,10 @@ def _board_reads_get(board, key, loader):
 
 
 def _load_all_from_disk(board):
+    # STORE-001: committed canonical records fail closed; never omit silently.
     out = []
     for path in sorted(glob.glob(os.path.join(board, "T-*.json"))):
-        try:
-            with open(path) as f:
-                out.append(json.load(f))
-        except (ValueError, IOError):
-            continue
+        out.append(read_ticket_file(path))
     return out
 
 
@@ -2144,7 +2178,12 @@ def worktree_warning(owner):
 
 
 def try_claim(board, tid, owner):
-    """Atomically take a ticket. Returns the ticket, or None if someone beat us."""
+    """Atomically take a ticket. Returns the ticket, or None if someone beat us.
+
+    Ready-lane and unreleased-dep checks are preserved. On any refusal — including
+    STORE-001 corruption surfaced by load_all — the O_EXCL lock is released so a
+    later valid claim is not obstructed (T-805 / T-817).
+    """
     lock = os.path.join(board, tid + ".lock")
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -2154,45 +2193,50 @@ def try_claim(board, tid, owner):
         raise
     os.write(fd, owner.encode())
     os.close(fd)
-    t = load(board, tid)
-    if t["status"] != "open":  # claimed by a slower path; give the lock back
-        os.unlink(lock)
-        return None
-    if _worktree_gc().is_automated(t):
-        os.unlink(lock)
-        return None
-    if _ticket_lane(t) != "ready":
-        os.unlink(lock)
-        return None
-    tickets = load_all(board)
-    reason = _work_view().refuse_unreleased_reason(t, tickets)
-    if reason:
-        os.unlink(lock)
-        sys.exit(reason)
-    prev_owner = t.get("owner") or ""
-    t["status"] = "claimed"
-    t["owner"] = owner
-    t["claimed_at"] = now()
-    t["done_at"] = ""
-    tc = _recovery()
-    if tc is not None:
-        harness = ""
-        try:
-            harness = _agent_harness(board, owner)[0]
-        except Exception:
+    keep_lock = False
+    try:
+        t = load(board, tid)
+        if t["status"] != "open":  # claimed by a slower path; give the lock back
+            return None
+        if _worktree_gc().is_automated(t):
+            return None
+        if _ticket_lane(t) != "ready":
+            return None
+        tickets = load_all(board)
+        reason = _work_view().refuse_unreleased_reason(t, tickets)
+        if reason:
+            sys.exit(reason)
+        prev_owner = t.get("owner") or ""
+        t["status"] = "claimed"
+        t["owner"] = owner
+        t["claimed_at"] = now()
+        t["done_at"] = ""
+        tc = _recovery()
+        if tc is not None:
             harness = ""
-        tc.issue_owner_lease(t, owner, harness=harness, reason="claim",
-                             previous_owner=prev_owner)
-    got = save(board, t)
-    # Written here, not in cmd_next/cmd_claim: this is the single point where a
-    # claim actually succeeds, so no future caller can add a claim path that
-    # silently produces no trajectory.
-    _safe(lambda: traj_event(board, "claim", agent=owner, ticket=got,
-                             state_before="open", state_after="claimed",
-                             **_traj_git()), None)
-    if prev_owner and prev_owner != owner:
-        _safe(lambda: _clear_agent_ticket(board, prev_owner, tid), None)
-    return got
+            try:
+                harness = _agent_harness(board, owner)[0]
+            except Exception:
+                harness = ""
+            tc.issue_owner_lease(t, owner, harness=harness, reason="claim",
+                                 previous_owner=prev_owner)
+        got = save(board, t)
+        # Written here, not in cmd_next/cmd_claim: this is the single point where a
+        # claim actually succeeds, so no future caller can add a claim path that
+        # silently produces no trajectory.
+        _safe(lambda: traj_event(board, "claim", agent=owner, ticket=got,
+                                 state_before="open", state_after="claimed",
+                                 **_traj_git()), None)
+        if prev_owner and prev_owner != owner:
+            _safe(lambda: _clear_agent_ticket(board, prev_owner, tid), None)
+        keep_lock = True
+        return got
+    finally:
+        if not keep_lock:
+            try:
+                os.unlink(lock)
+            except OSError:
+                pass
 
 
 def _try_lock_ticket_excl(board, tid, owner):

@@ -1,0 +1,18 @@
+{
+  "contract_requirement": "DEPS-001",
+  "ticket": "T-642",
+  "case_id": "dependency-ordering",
+  "step_id": "blocked-explicit-claim",
+  "description": "Explicit tickets claim must reject unfinished dependencies, matching tickets next.",
+  "argv": ["claim", "T-002"],
+  "agent": "worker",
+  "preconditions": ["upstream T-001 open or claimed, downstream T-002 depends on T-001"],
+  "expect": {
+    "exit_codes": [1],
+    "contains": ["unfinished dependencies", "T-001"]
+  },
+  "state_after": {
+    "T-002.json": {"status": "open", "owner": null},
+    "T-002.lock": {"exists": false}
+  }
+}

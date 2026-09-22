@@ -476,7 +476,14 @@ def refuse_unreleased_reason(t, tickets, only_done=False):
     pred = unreleased_dep_id(t, tickets, only_done=only_done)
     if not pred:
         return ""
-    return "%s: %s" % (t.get("id") or "?", unverified_block_reason(pred))
+    tid = t.get("id") or "?"
+    by_id = dict((x["id"], x) for x in tickets)
+    dep = by_id.get(pred)
+    # Open / claimed / missing predecessors: DEPS-001 wording (unfinished).
+    # Done-but-unaccepted predecessors keep the accept-gate wording.
+    if dep is None or dep.get("status") != "done":
+        return "%s has unfinished dependencies: %s" % (tid, pred)
+    return "%s: %s" % (tid, unverified_block_reason(pred))
 
 
 def unverified_block_reason(pred_id):
