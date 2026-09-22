@@ -20080,6 +20080,28 @@ def cmd_ui(a, board):
             if write and not _ui_token_ok(self.headers, token):
                 self._send_json(400, {"ok": False, "error": "launch token required"})
                 return False
+            # A server that was already running when the board was split is
+            # the one writer the refusal in main() cannot reach: it resolved
+            # the board once, at launch, when there was no marker, and it
+            # posts through post_message() in-process rather than through a
+            # command. So the marker is checked per REQUEST, on writes only --
+            # reads keep working, which is exactly the archive's promise. The
+            # independent reviewer left this surface open and named it; it is
+            # the last known way to add a record to a frozen board.
+            if write:
+                marker = _safe(lambda: split_marker(board), {})
+                if marker:
+                    self._send_json(409, {
+                        "ok": False,
+                        "error": "this board was split on %s and is now the "
+                                 "frozen archive (%s): it stays readable and "
+                                 "takes no new records. Restart the UI on a "
+                                 "project board."
+                                 % (marker.get("at") or "an earlier run",
+                                    marker.get("archive_slug") or "shared-archive"),
+                        "projects": marker.get("projects") or {},
+                    })
+                    return False
             return True
 
         def do_GET(self):

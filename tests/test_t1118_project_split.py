@@ -1113,6 +1113,62 @@ def test_the_packaged_entry_point_refuses_the_same_writes(shared, homes, tmp_pat
                 who, label)
 
 
+def test_a_ui_already_serving_the_board_stops_writing_when_it_is_split(shared, homes):
+    """The last writer the refusal in main() cannot reach.
+
+    `atm ui` is not on the allow-list, so it cannot be STARTED on a frozen
+    board. A server that was already running when the split happened is the
+    hard case: it resolved the board once, at launch, when there was no
+    marker, and it posts through `post_message()` in-process rather than
+    through a command, so the dispatch-time guard never sees it again. The
+    split's live-state preconditions cannot see it either -- a UI leaves no
+    `agents/*.run` receipt and no watch pidfile, so `--apply` has no way to
+    refuse on its account.
+
+    The independent reviewer inspected this surface and named it as not
+    exercised. It is the sixth and last known way to add a record to an
+    archive, and the fix has to be per REQUEST: writes refuse, reads keep
+    working, which is exactly the archive's promise.
+    """
+    from ui_server_harness import UiServer  # local: only this test needs it
+
+    # the composer posts as a PERSON, never as a harness-run seat (T-1104),
+    # and the operator has to be joined to the board like any other name
+    joined = _atm(shared, "join", "--as", "advitiya", agent="advitiya", timeout=30)
+    if joined.returncode != 0:
+        joined = _atm(shared, "join", "advitiya", agent="advitiya", timeout=30)
+    assert joined.returncode == 0, joined.stderr
+    srv = UiServer(shared, probe_prefix="t1118-frozen-ui", operator="advitiya")
+    try:
+        # before the split: the composer posts, which is what makes the
+        # refusal below mean something
+        status, out = srv.post("/msg", {"from": "advitiya",
+                                        "text": "before the split"})
+        assert status == 200 and out["ok"], out
+        assert "before the split" in (shared / "messages.jsonl").read_text()
+
+        plan = good_plan(shared, homes)
+        assert run_apply(shared, plan)["ok"]
+        frozen = _tree(shared)
+
+        # the same server, still running, still holding the same board
+        status, out = srv.post("/msg", {"from": "advitiya",
+                                        "text": "after the split"})
+        assert status == 409, (status, out)
+        assert not out["ok"]
+        assert "frozen archive" in (out.get("error") or ""), out
+        assert homes["atman"] in json.dumps(out.get("projects") or {}), out
+        assert "after the split" not in (shared / "messages.jsonl").read_text()
+        assert _tree(shared) == frozen, "the running UI wrote to the archive"
+
+        # ...and it is still a readable archive through the same server
+        snap = srv.get("/board.json")
+        assert snap.get("counts", {}).get("total"), snap
+        assert _tree(shared) == frozen
+    finally:
+        srv.stop()
+
+
 # Every shipped process that can reach a resolved `.tickets` board, with what
 # it writes to. A guard placed on "the CLI" is only as good as this list, and
 # the list is the thing that was wrong: four writes got past a name-only
