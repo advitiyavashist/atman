@@ -1550,7 +1550,7 @@ def drive_status(board, tickets=None):
     idle = []
     for r in load_agents(board):
         who = r.get("owner", "")
-        if not who or r.get("limit") or hours_since(r.get("seen", "")) > 2:
+        if not who or _route_headroom().seat_limit(r) or hours_since(r.get("seen", "")) > 2:
             continue
         holds = any(t.get("owner") == who and t.get("status") in ("claimed", "review") for t in tickets)
         if holds:
@@ -2533,8 +2533,7 @@ def _route_seat_limit(board, name):
     tickets.py also persists an expired reset so later reads see it cleared.
     """
     rec = _agent_rec(board, name) or {}
-    _active_seat_limit(board, name, rec)
-    return _route_headroom().seat_limit(rec)
+    return _active_seat_limit(board, name, rec)
 
 
 def _refuse_limited_seat(board, seat, verb):
@@ -3819,6 +3818,10 @@ def cmd_board(a, board):
     ready = unblocked(board, tickets)
     if ready:
         print("  -> ready to claim: %s" % ", ".join(t["id"] for t in ready))
+    for rec in load_agents(board):
+        warning = _stale_limit_warning(board, rec)
+        if warning:
+            print("  attention: " + warning)
     if not a.quiet:
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
@@ -6582,7 +6585,7 @@ def _watch_log_state(board, owner):
     # speed dropped it the moment one of those failures happened to take
     # longer than the usual few seconds.
     streak = []
-    expired_at = ((_agent_rec(board, owner) or {}).get("limit_expired_at") or "")
+    expired_at = _seat_limit_expired_at(_agent_rec(board, owner) or {})
     for r in reversed(runs):
         if expired_at and (r["exit_at"] or r["start"]) <= expired_at:
             break
@@ -6752,9 +6755,9 @@ def agent_liveness(board, rec, peers=None):
             # which two we looked for, rather than picking one's error message.
             tdetail = "no Claude or Codex transcript for %s" % _tilde(cwd)
 
-    expired_age = _age_secs(((_agent_rec(board, owner) or {}).get("limit_expired_at")))
+    expired_age = _age_secs(_seat_limit_expired_at(_agent_rec(board, owner) or {}))
     if tstate == "limited" and expired_age is not None and tage is not None and tage >= expired_age:
-        tstate, tdetail = "unknown", "previous provider reset elapsed; awaiting fresh session evidence"
+        tstate, tdetail = "unknown", "previous limit expired; awaiting fresh session evidence"
     if tstate != "unknown":
         out.update(state=tstate, source=tsource, heuristic=False, detail=tdetail)
         # A dead watcher under a quiet transcript is a real dead lane; a dead
@@ -6897,7 +6900,8 @@ def cmd_limit(a, board):
         msg = "%s is back (limit cleared)" % owner
     else:
         limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
-        mutate = lambda rec: rec.update({"limit": limit})
+        limit["reset_at"] = _provider_reset_at(limit["until"] or limit["note"], limit["at"])
+        mutate = lambda rec: rec.update({"limit": limit, "expired_limit": None, "limit_expired_reason": ""})
         msg = "%s hit a usage limit%s%s" % (owner, (" until %s" % a.until) if a.until else "",
                                             (": %s" % a.note) if a.note else "")
     # Read-modify-write under the lock: a watch-loop heartbeat lands on this
@@ -6915,13 +6919,18 @@ def cmd_limits(a, board):
     """Who is limited: manual records + silence + a scan of local tool logs."""
     print("Recorded limits:")
     any_ = False
-    for r in load_agents(board):
-        lim = r.get("limit")
+    records = load_agents(board)
+    records.sort(key=lambda r: _route_headroom()._stamp(
+        (r.get("limit") or r.get("expired_limit") or {}).get("at")) or datetime.min.replace(tzinfo=timezone.utc))
+    for r in records:
+        lim = r.get("limit") or r.get("expired_limit")
         if lim:
             any_ = True
-            print("  %-14s hit %s ago%s%s" % (r["owner"], fmt_hours(hours_since(lim["at"])),
+            expired, _, reason = _route_headroom().limit_expiry(lim)
+            print("  %-14s hit %s ago%s%s%s" % (r["owner"], fmt_hours(hours_since(lim.get("at", ""))),
                                              (", back %s" % lim["until"]) if lim.get("until") else "",
-                                             (" -- %s" % lim["note"]) if lim.get("note") else ""))
+                                             (" -- %s" % lim["note"]) if lim.get("note") else "",
+                                             (" [STALE: %s; no longer blocks]" % reason) if expired else ""))
     if not any_:
         print("  none (agents record one with `atm limit --until \"...\"`)")
     print("")
@@ -8258,7 +8267,11 @@ def _health_body(board, tickets):
                     t["id"], ",".join(missing)),
                     "atm join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
     for r in load_agents(board):
-        if r.get("limit"):
+        warning = _stale_limit_warning(board, r)
+        if warning:
+            out.append(("WARN", warning, "atm pending --agent %s" % r["owner"]))
+            continue
+        if _route_headroom().seat_limit(r):
             held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
             out.append(("WARN", "%s hit a usage limit %s ago%s%s" % (
                 r["owner"], fmt_hours(hours_since(r["limit"]["at"])),
@@ -8282,7 +8295,7 @@ def _health_body(board, tickets):
             continue
         rec = agents_by.get(who) or {}
         reason = ""
-        if rec.get("limit"):
+        if _route_headroom().seat_limit(rec):
             reason = "limited"
         elif not rec.get("seen"):
             reason = "no heartbeat"
@@ -8672,7 +8685,7 @@ def cmd_who(a, board):
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
         entry = wf.get(r["owner"], {}) or {}
-        harness_name = entry.get("harness") or entry.get("tool") or "claude"
+        harness_name = _seat_harness(board, r["owner"])
         ep, _ = sa.live_endpoint(board, r["owner"])
         life = lifecycle_of(board, r["owner"], workforce=wf)
         native = sa.native_wake_online(board, r["owner"])
@@ -8683,10 +8696,11 @@ def cmd_who(a, board):
         reachable = sa.is_reachable(native_online=native, watcher_online=watcher_on,
                                     remote_online=remote_on)
         print("%-14s lifecycle=%s provider=%s session=%s reachable=%s" % (
-            "", life, (ep or {}).get("provider") or harness_name,
+            "", life, (ep or {}).get("provider") or harness_name or "unknown",
             (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
             "yes" if reachable else "no"))
-        usage = _provider_usage().get_reading(board, harness_name)
+        usage = _provider_usage().get_reading(
+            board, _usage_ledger_key(board, r["owner"]))
         print("%-14s %s" % ("", _provider_usage().format_usage_line(usage).strip()))
     # collisions
     by_branch = {}
@@ -8829,7 +8843,7 @@ def cmd_steer(a, board):
             payload = st.frame_payload(kind, sender, text, tid, steer_id, at)
             # Native Claude inject only. Persist-watch poke would start a new
             # run; that is kill-and-replace, not a mid-run steer.
-            label = sa.wake_seat(board, seat, payload, harness=harness or "claude",
+            label = sa.wake_seat(board, seat, payload, harness=harness or provider,
                                  message_id=steer_id)
     record = st.steer_record(kind, sender, seat, text, label, steer_id, tid, at)
     note = st.ticket_note(kind, sender, seat, text, label, steer_id, at)
@@ -10564,6 +10578,31 @@ def deliver_wakes(board, m, announce=None):
     return labels
 
 
+def _usage_ledger_key(board, seat):
+    """Provider the usage ledger is filed under for this seat.
+
+    Display stays unknown when join recorded no harness. The ledger is
+    still the launch default from harness_of (claude, unless a harness
+    was stored), so a bare `atm join` keeps its USAGE line.
+    """
+    return harness_of(board, seat)[0]
+
+
+def _display_harness(board, seat):
+    """Who/list/self/brief: unknown, never an invented claude badge."""
+    return _seat_harness(board, seat) or "unknown"
+
+
+def _launch_harness_label(board, owner, explicit="", resolved=""):
+    """Spawn/check print: recorded name, or 'claude (default)' when invented."""
+    if (explicit or "").strip():
+        return (resolved or explicit).strip()
+    recorded = _seat_harness(board, owner)
+    if recorded:
+        return recorded
+    return "%s (default)" % ((resolved or "claude").strip() or "claude")
+
+
 def _should_poke_persist(label):
     """Native inject missed or only queued in the host UI; persist-watch remains.
 
@@ -11713,7 +11752,11 @@ def cmd_join(a, board):
     save_workforce(board, wf)
     if getattr(a, "persistent", False):
         sa = _session_adapters()
-        reg = sa.register_persistent(board, owner, harness or entry.get("harness") or "claude", now())
+        persist_harness = (harness or entry.get("harness") or "").strip()
+        persist_defaulted = not persist_harness
+        if persist_defaulted:
+            persist_harness = "claude"
+        reg = sa.register_persistent(board, owner, persist_harness, now())
         if reg.get("ok"):
             pid = (reg.get("record") or {}).get("pid")
             mode = reg.get("mode") or (reg.get("record") or {}).get("mode") or "native"
@@ -11722,10 +11765,15 @@ def cmd_join(a, board):
             lease = reg.get("lease_id") or (reg.get("record") or {}).get("lease_id") or ""
             if lease:
                 extra += "; lease %s" % lease
-            print("persistent: %s %s endpoint registered for %s (%s)" % (
-                mode, reg.get("provider"), owner, extra))
+            print("persistent: %s %s endpoint registered for %s (%s)%s" % (
+                mode, reg.get("provider"), owner, extra,
+                " [claude (default); pass --harness to pick a provider]"
+                if persist_defaulted else ""))
         else:
-            print("persistent: %s" % reg.get("reason", "registration failed"))
+            print("persistent: %s%s" % (
+                reg.get("reason", "registration failed"),
+                " [claude (default); pass --harness to pick a provider]"
+                if persist_defaulted else ""))
     join_cwd = os.path.abspath(getattr(a, "worktree", "") or "") or None
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""),
                   cwd=join_cwd)
@@ -12583,48 +12631,37 @@ def cmd_remote(a, board):
 
 
 def _provider_reset_at(text, observed_at):
-    """Normalize only explicit, unambiguous provider reset times.
+    return _route_headroom().provider_reset_at(text, observed_at)
 
-    Bare clock times without a timezone remain display-only. Resolve a daily
-    clock against detection time once, never against each subsequent poll.
-    """
-    from datetime import timedelta
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-    value = (text or "").strip()
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if stamp.tzinfo is not None:
-            return stamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except ValueError:
-        pass
-    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^()]+)\)", value, re.I)
-    if not match:
+
+def _stale_limit_warning(board, rec):
+    lim = rec.get("limit") or rec.get("expired_limit")
+    if not lim:
         return ""
-    hour, minute, meridiem, zone = match.groups()
-    if not 1 <= int(hour) <= 12 or not 0 <= int(minute or 0) < 60:
+    expired, deadline, reason = _route_headroom().limit_expiry(lim)
+    started = _route_headroom()._stamp(_read_run(board, rec["owner"]).get("started"))
+    if not expired or (started and started > deadline):
         return ""
-    try:
-        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(ZoneInfo(zone))
-    except (ValueError, ZoneInfoNotFoundError):
-        return ""
-    reset = observed.replace(hour=int(hour) % 12 + (12 if meridiem.lower() == "pm" else 0),
-                             minute=int(minute or 0), second=0, microsecond=0)
-    if reset <= observed:
-        reset += timedelta(days=1)
-    return reset.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return "%s stale usage limit no longer blocks: %s; check seat resumed" % (rec["owner"], reason)
+
+
+def _seat_limit_expired_at(rec):
+    # Read-only snapshots must suppress the same old rejection as mutating reads.
+    lim = rec.get("limit")
+    if lim:
+        expired, deadline, _ = _route_headroom().limit_expiry(lim)
+        if expired:
+            return deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return rec.get("limit_expired_at") or ""
 
 
 def _active_seat_limit(board, owner, rec=None):
-    """Expire observed limits atomically; unknown resets require explicit clear."""
+    """Expire limits atomically using the shared bounded retry policy."""
     rec = rec if rec is not None else (_agent_rec(board, owner) or {})
     lim = rec.get("limit")
-    if not lim or not lim.get("reset_at"):
-        return lim
-    try:
-        reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-        expired = reset.tzinfo is not None and reset <= datetime.now(timezone.utc)
-    except (ValueError, TypeError):
-        expired = False
+    if not lim:
+        return None
+    expired, deadline, reason = _route_headroom().limit_expiry(lim)
     if not expired:
         return lim
     if getattr(_WATCH_TABLE, "read_only", False):
@@ -12633,7 +12670,9 @@ def _active_seat_limit(board, owner, rec=None):
         if current.get("limit") != lim:
             return False
         current.pop("limit", None)
-        current["limit_expired_at"] = lim["reset_at"]
+        current["limit_expired_at"] = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+        current["limit_expired_reason"] = reason
+        current["expired_limit"] = lim
         # A quota failure must not keep the same trigger exhausted after reset.
         current.pop("adapter_failure", None)
     current = _agent_update(board, owner, clear)
@@ -12672,20 +12711,23 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
     if match:
         until = match.group(1).strip()
     observed = now()
+    _active_seat_limit(board, owner)
     lim = {"at": observed, "until": until, "note": note[:400],
            "source": "provider", "harness": harness,
-           "reset_at": _provider_reset_at(until, observed)}
+           "reset_at": _provider_reset_at(note, observed)}
     def record(rec):
         if rec.get("limit"):
             return False
         rec["limit"] = lim
         rec.pop("limit_expired_at", None)
+        rec.pop("limit_expired_reason", None)
+        rec.pop("expired_limit", None)
     if _agent_update(board, owner, record) is None:
         return
     reason = "LIMITED: %s; %s. Automatic retrigger paused %s." % (
         owner, lim["note"],
         ("until " + lim["reset_at"]) if lim["reset_at"] else
-        ("(provider reset %s; explicit limit clear required)" % (until or "unknown")))
+        ("(provider reset %s; bounded retry window applies)" % (until or "unknown")))
     # Scan actual held claims; a run's stale binding must never annotate work
     # already transferred to a different seat.
     from contextlib import nullcontext
@@ -13077,7 +13119,8 @@ def seat_brief_text(board, owner):
     second usage formatter is a second thing to keep honest.
     """
     sb = _seat_brief()
-    harness, _ = _safe(lambda: harness_of(board, owner), ("claude", "")) or ("claude", "")
+    harness = _safe(lambda: _seat_harness(board, owner), "") or ""
+    usage_key = _safe(lambda: _usage_ledger_key(board, owner), "") or "claude"
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     roles = _safe(lambda: roles_for(board, owner), None) or []
     m = _safe(lambda: current_master(board), None) or {}
@@ -13088,7 +13131,7 @@ def seat_brief_text(board, owner):
     if reviewer == owner:
         reviewer = ""  # a seat is never its own reviewer
     usage = _safe(lambda: _provider_usage().brief_usage_line(
-        _provider_usage().get_reading(board, harness)), "") or ""
+        _provider_usage().get_reading(board, usage_key)), "") or ""
     t = _seat_ticket(board, owner) or {}
     return sb.compose(
         owner,
@@ -15658,7 +15701,7 @@ def cmd_spawn(a, board):
             entry = wf.get(r["owner"], {})
             print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
                 r["owner"][:14], wlabel,
-                (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                _display_harness(board, r["owner"])[:9],
                 wake_mode_of(board, r["owner"], workforce=wf)[:10],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
@@ -15849,7 +15892,8 @@ def cmd_spawn(a, board):
                  "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
     print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; run-timeout=%sm; seat=%s pinned; log %s" % (
-        owner, pid, harness, model,
+        owner, pid, _launch_harness_label(
+            board, owner, getattr(a, "harness", "") or a.tool, harness), model,
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs,
         getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner, log_path))
     print("cmd: %s" % cmd)
@@ -16959,7 +17003,7 @@ def cmd_harness(a, board):
             e = wf.get(n, {}) or {}
             rec = _agent_rec(board, n) or {}
             print("%-16s %-12s %-14s %s" % (
-                n[:16], (e.get("harness") or e.get("tool") or "claude")[:12],
+                n[:16], _display_harness(board, n)[:12],
                 _harness_check_label(rec.get("harness_check")),
                 e.get("cmd") or "(built-in)"))
         return
@@ -16967,7 +17011,9 @@ def cmd_harness(a, board):
     if owner.startswith("agent-"):
         sys.exit("harness check needs an agent name: atm harness check <name>")
     harness, cmd_template = harness_of(board, owner, a.harness, a.cmd_template)
-    print("checking %s: harness=%s%s" % (owner, harness, (" cmd=%s" % cmd_template) if cmd_template else ""))
+    print("checking %s: harness=%s%s" % (
+        owner, _launch_harness_label(board, owner, a.harness, harness),
+        (" cmd=%s" % cmd_template) if cmd_template else ""))
     res = harness_probe(board, owner, a.harness, a.cmd_template, a.model, a.cwd, a.timeout)
     _safe(lambda: _agent_set(board, owner, harness_check=res), None)
     print("  cmd:      %s" % res["cmd"])
@@ -21511,7 +21557,7 @@ def cmd_hook_run(a, board):
         # fires do not (the brief's own "no second briefing" line).
         cmd_prompt(argparse.Namespace(
             agent=owner, master=kind == "master", cos=kind == "cos", extra="",
-            run_no=_task_wake_run_no(board, owner)), board)
+            run_no=_safe(lambda: _task_wake_run_no(board, owner), "")), board)
         return
     sys.exit("unsupported hook event %s" % a.event)
 
@@ -22162,7 +22208,7 @@ def cmd_self(a, board):
     print("why:    %s" % why)
     print("whoami: %s" % whoami())
     if board and seat and not seat.startswith("agent-"):
-        harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+        harness = _seat_harness(board, seat)
         sa = _session_adapters()
         ep, was_stale = sa.live_endpoint(board, seat)
         stored = sa.read_endpoint(board, seat)
@@ -22176,6 +22222,9 @@ def cmd_self(a, board):
         elif was_stale:
             print("persistent: no -- seat %s had a native endpoint but it went stale "
                   "(re-register with `atm join %s --persistent`)" % (seat, seat))
+        elif not harness:
+            print("persistent: no -- seat %s has no harness recorded (unknown); "
+                  "will not probe claude" % seat)
         else:
             probe = sa.probe_provider(sa.provider_for_harness(harness) or harness)
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
@@ -22273,7 +22322,7 @@ def _feedback_seat_counts(board):
 
     agent_liveness() scans the process table (`ps`, sometimes `lsof`) and
     clears expired limits by rewriting the agent file, so feedback cannot
-    use it. LIMITED is a recorded limit that has not reached its reset_at;
+    use it. LIMITED is a recorded limit whose shared expiry policy is active;
     "stalled" is a seat whose recorded watcher pid (agents/<seat>.watch.pid)
     is no longer running -- a signal-0 probe, not a process scan.
     """
@@ -22284,19 +22333,9 @@ def _feedback_seat_counts(board):
         if not owner:
             continue
         lim = rec.get("limit")
-        if lim:
-            active = True
-            if lim.get("reset_at"):
-                try:
-                    reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-                    if reset.tzinfo is None:
-                        reset = reset.replace(tzinfo=timezone.utc)  # naive stamps are UTC
-                    active = reset > now_utc
-                except (ValueError, TypeError):
-                    pass
-            if active:
-                limited += 1
-                continue
+        if lim and _route_headroom().seat_limit(rec, now_utc):
+            limited += 1
+            continue
         try:
             with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
                 pid = int((f.read() or "0").strip() or 0)
