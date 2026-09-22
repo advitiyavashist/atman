@@ -653,8 +653,11 @@ def test_served_bundle_carries_the_token_in_a_meta_tag(env, tmp_path):
         st, body = srv.get(path, raw=True)
         assert st == 404 and "outside the bundle" not in body, path
     none = env.serve(app_dir=str(tmp_path / "missing"))
-    st, out = none.get("/app/")
-    assert st == 404 and "npm run build" in out["error"]
+    st, out = none.get("/app/", raw=True)
+    assert st == 200 and "text/html" in none.last_headers.get("Content-Type", "")
+    assert "npm install" in out and "npm run build -w ui" in out
+    assert "<!doctype html>" in out.lower()
+    assert not out.lstrip().startswith("{")
 
 
 # --- honesty --------------------------------------------------------------------

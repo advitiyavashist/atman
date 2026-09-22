@@ -20274,6 +20274,8 @@ _UI_API_PREFIX = "/api/v1/"
 _UI_API_VERSION = 1
 _UI_CLIENT_HEADER = "X-Atman-Client"
 _UI_APP_PREFIX = "/app/"
+# Keep in sync with install.sh UI_BUILD_CMD (T-1443).
+_UI_BUILD_CMD = "npm install && npm run build -w ui"
 _UI_STATIC_TYPES = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
     ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -20530,6 +20532,36 @@ def ui_api_get(ctx, route, q):
     return _ui_json(404, {"error": "no such route"})
 
 
+
+def _ui_missing_app_page(app_dir):
+    """HTML 200 when ui/dist is absent: name the build command, never a bare 404."""
+    import html as _html
+    cmd = _html.escape(_UI_BUILD_CMD)
+    where = _html.escape(app_dir)
+    body = (
+        "<!doctype html><html lang=\"en\"><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>atman — build the local app</title>"
+        "<style>"
+        "body{font:16px/1.45 system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;"
+        "color:#ece8e1;background:#0c0e12}"
+        "code,pre{font:14px/1.4 ui-monospace,Menlo,monospace;background:#161a22;padding:.15rem .4rem;"
+        "border-radius:4px}"
+        "pre{display:block;padding:.75rem 1rem;overflow:auto}"
+        "a{color:#6aa9ff}"
+        "</style></head><body>"
+        "<h1>Build the local app</h1>"
+        "<p>No bundle at <code>%s</code>. From the Atman checkout run:</p>"
+        "<pre>%s</pre>"
+        "<p>Then restart <code>atm ui</code> and open <code>/app/</code>. "
+        "Or pass <code>atm ui --app-dir DIR</code> if the bundle lives elsewhere.</p>"
+        "<p><code>./install.sh</code> runs that build when Node and npm are on PATH.</p>"
+        "</body></html>"
+    ) % (where, cmd)
+    return 200, "text/html; charset=utf-8", body.encode()
+
+
 def ui_app_file(ctx, route):
     """GET /app/...: the built TypeScript app. index.html carries the
     per-launch token in <meta name="atman-token"> (same-origin page load; the
@@ -20539,8 +20571,9 @@ def ui_app_file(ctx, route):
     rel = rel or "index.html"
     root = ctx.app_dir
     if not os.path.isfile(os.path.join(root, "index.html")):
-        return _ui_json(404, {"error": "no app bundle at %s; build it: npm run build -w ui "
-                                       "(or pass atm ui --app-dir DIR)" % root})
+        # Never a bare JSON 404: strangers who skipped the UI build still get
+        # a page that names the one-line fix (T-1443).
+        return _ui_missing_app_page(root)
     path = os.path.realpath(os.path.join(root, rel))
     if not (path == root or path.startswith(root + os.sep)):
         return _ui_json(404, {"error": "not found"})
