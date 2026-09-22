@@ -1237,20 +1237,51 @@ def test_project_report_paths_never_land_inside_the_board(shared, homes, tmp_pat
     # A HARD LINK is not a symlink, so `realpath` does not see through it:
     # the reviewer defeated the containment check with
     # `os.link(<board>/T-100.json, outside.json)` and destroyed the ticket
-    # through its other name. The fix is not a bigger check but a different
-    # write: a temp file plus os.replace changes the directory entry, so the
-    # inode -- and the board's own copy -- survives. The write is allowed,
-    # because the operator named a path outside the board and nothing inside
-    # it is harmed.
+    # through its other name. Two layers now, and both are checked here,
+    # because either one alone leaves something wrong:
+    #
+    #   the write   -- a temp file plus `os.replace` changes a directory
+    #                  entry, so the inode, and with it the board's own copy,
+    #                  survives even if the refusal is ever bypassed;
+    #   the refusal -- identity by (st_dev, st_ino), not by string, because
+    #                  exiting 0 under "nothing was written to the board"
+    #                  while the operator's other name for an archived ticket
+    #                  stops being that ticket is still the wrong answer.
+    #
+    # Named in the refusal: which board record the target is a second name
+    # for, since the operator sees only the outside path.
     alias = tmp_path / "hardlink-out.json"
     os.link(shared / "T-100.json", alias)
     assert os.stat(shared / "T-100.json").st_nlink == 2
+    before_alias = alias.read_bytes()
     res = _atm(shared, "project", "split", "--propose", "--out", str(alias),
                agent="ann", timeout=30)
-    assert res.returncode == 0, res.stderr
+    assert res.returncode != 0, "a hard link into the board was allowed"
+    assert "REFUSING --out" in res.stderr, res.stderr
+    assert "hard link" in res.stderr and "T-100.json" in res.stderr, res.stderr
     assert json.loads((shared / "T-100.json").read_bytes().decode())["id"] == "T-100"
     assert _tree(shared) == live, "writing through a hard link changed the board"
-    assert "tickets" in json.loads(alias.read_text()), "the plan was not written"
+    assert alias.read_bytes() == before_alias, (
+        "the ticket's other name was overwritten anyway")
+
+    # The same target on a path with no second name is not refused: the rule
+    # is "reaches a board record", not "any file that exists".
+    plain = tmp_path / "plain-out.json"
+    plain.write_text("{}\n")
+    res = _atm(shared, "project", "split", "--propose", "--out", str(plain),
+               agent="ann", timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert "tickets" in json.loads(plain.read_text()), "the plan was not written"
+
+    # A hard link between two files that are both outside the board is also
+    # not the rule: the walk has to find the twin INSIDE the board.
+    twinned = tmp_path / "twin-a.json"
+    twinned.write_text("{}\n")
+    os.link(twinned, tmp_path / "twin-b.json")
+    res = _atm(shared, "project", "split", "--propose", "--out", str(twinned),
+               agent="ann", timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert "tickets" in json.loads(twinned.read_text())
 
     # A DIRECTORY symlink into the board is the same resolution, and checked
     # rather than assumed to follow from the file case.
@@ -1306,6 +1337,20 @@ def test_project_report_paths_never_land_inside_the_board(shared, homes, tmp_pat
         assert res.returncode != 0, "%s was allowed on the archive" % flag
         assert "REFUSING WRITE" in res.stderr, res.stderr
         assert _tree(shared) == frozen, "%s wrote to the archive" % flag
+    assert json.loads((shared / "T-100.json").read_bytes().decode())["id"] == "T-100"
+
+    # The reviewer's exact fixture: the archive, plus an outside hard link to
+    # an archived ticket. The allow-list predicate resolves the inode too, so
+    # this is the archive refusal and not a successful propose.
+    archived = tmp_path / "archive-hardlink.json"
+    os.link(shared / "T-100.json", archived)
+    was = archived.read_bytes()
+    res = _atm(shared, "project", "split", "--propose", "--out", str(archived),
+               agent="ann", timeout=30)
+    assert res.returncode != 0, "a hard link into the archive was allowed"
+    assert "REFUSING WRITE" in res.stderr, res.stderr
+    assert _tree(shared) == frozen, "the archive changed"
+    assert archived.read_bytes() == was
     assert json.loads((shared / "T-100.json").read_bytes().decode())["id"] == "T-100"
 
 
@@ -1751,6 +1796,69 @@ def test_a_rotated_copy_contributes_only_its_excess(shared, homes):
     assert rotated.exists(), out.stdout
     assert rotated.read_text().strip() == repeated.strip(), (
         "the excess copy is the one line that should come back, and only it")
+
+
+def test_merge_back_dedups_by_id_across_a_renamed_or_dated_log(shared, homes):
+    """An id already on the shared board does not come back under a new name.
+
+    The surviving half of the reviewer's second falsifier. Two rules stood
+    between a rotated log and a duplicated history, and neither one covers
+    this case:
+
+      the recorded name -- sliced past the bytes the split wrote, so only a
+                           file still under its recorded name is protected;
+      the byte multiset  -- a copy of a shared line contributes nothing, but
+                           only while it is byte-identical. Re-serialise the
+                           record (`json.dumps(rec, sort_keys=True)`: same
+                           event, different bytes) and it reads as new.
+
+    And the id check that should have caught it was keyed by BASENAME, so for
+    `messages.2026-09-20.jsonl` -- a name the shared board does not carry --
+    the set of "ids already there" was empty. Measured before the fix: the
+    pre-split `msg_c` was appended to the restored shared board a second time.
+    The set is board-wide now, over every root-level `*.jsonl`, so the rename
+    cannot hide an id.
+
+    A genuinely new id in the same file still comes back: dedup must not turn
+    into dropping.
+    """
+    plan = good_plan(shared, homes)
+    assert run_apply(shared, plan)["ok"]
+    atman, steer = Path(homes["atman"]), Path(homes["steer"])
+    live = steer / "messages.jsonl"
+    presplit = json.loads(live.read_text().splitlines()[0])
+    assert presplit["id"] == "msg_c", presplit
+    # the same event, different bytes, under a name the shared board has never
+    # seen -- and one real post-split message beside it
+    fresh = {"id": "msg_new", "at": "2026-09-20T09:00:00Z", "from": "cy",
+             "to": "ann", "re": "", "text": "after the split"}
+    rotated_name = "messages.2026-09-20.jsonl"
+    (steer / rotated_name).write_text(
+        json.dumps(presplit, sort_keys=True, separators=(",", ": ")) + "\n"
+        + json.dumps(fresh) + "\n", encoding="utf-8")
+    assert (steer / rotated_name).read_text().splitlines()[0] not in \
+        (shared / "messages.jsonl").read_text().splitlines(), (
+            "the probe must differ in BYTES or it proves only the multiset")
+
+    before = (shared / "messages.jsonl").read_text()
+    out = _atm(shared, "project", "split", "--undo",
+               str(atman / ps.MANIFEST_NAME), "--merge-back", "--apply",
+               agent="ann", timeout=60)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert (shared / "messages.jsonl").read_text() == before, (
+        "the recorded log was touched")
+    merged = shared / rotated_name
+    assert merged.exists(), out.stdout
+    got = [json.loads(x)["id"] for x in merged.read_text().splitlines() if x.strip()]
+    assert got == ["msg_new"], (
+        "a pre-split id came back under a dated name: %s" % got)
+    # ...and the board-wide count per id is still one
+    ids = []
+    for path in sorted(Path(shared).glob("*.jsonl")):
+        ids += [json.loads(x).get("id") for x in path.read_text().splitlines()
+                if x.strip()]
+    for mid in ("msg_a", "msg_b", "msg_c", "msg_d", "msg_e", "msg_new"):
+        assert ids.count(mid) == 1, "%s appears %d times" % (mid, ids.count(mid))
 
 
 def test_undo_merge_back_names_what_it_leaves_behind(shared, homes):

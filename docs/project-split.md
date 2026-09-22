@@ -303,14 +303,44 @@ event. Fixing duplication by dropping real lines would have been the same
 mistake content dedup made, one layer along. Both halves are pinned, including
 that a genuinely new line in such a file still comes back.
 
-**An operator-named report is written through a temp file and `os.replace`.**
-Not for crash safety: the target can be a *hard link* to a file inside the
-board, and `os.path.realpath` does not see through a hard link the way it sees
-through a symlink — `os.link(<archive>/T-100.json, outside.json)` then
-`--propose --out outside.json` passed the containment check and destroyed the
-ticket through its other name. Replacing the directory entry leaves the inode,
-so the board's own copy survives. The write itself is still allowed: the
-operator named a path outside the board and nothing inside it is harmed.
+**An operator-named report is refused when it is a second NAME for a board
+record, and written through a temp file and `os.replace` regardless.** The
+target can be a *hard link* to a file inside the board, and
+`os.path.realpath` does not see through a hard link the way it sees through a
+symlink — `os.link(<archive>/T-100.json, outside.json)` then `--propose
+--out outside.json` passed the containment check and destroyed the ticket
+through its other name. Two layers now, because either one alone leaves
+something wrong:
+
+- the **write** replaces a directory entry rather than a file's contents, so
+  the inode — and with it the board's own copy — survives even if the refusal
+  is ever bypassed. That alone was the first fix, and it is not enough: the
+  command still exited 0 and printed "nothing was written to the board" while
+  the operator's other name for an archived ticket stopped being that ticket.
+- the **refusal** resolves identity as `(st_dev, st_ino)`, not as a string,
+  and names which board record the target is a twin of. It holds on any
+  board, frozen or not, and in both entry points. The board is walked only
+  when the target already exists as a regular file whose link count is above
+  one, which is the only way it can be a second name; the ordinary case costs
+  one `stat`. A hard link between two files that are both outside the board
+  is not this rule and is not refused.
+
+**Dedup by id is board-wide, not per log name.** The surviving half of the
+same rename attack, and it survived two rules that each looked sufficient. A
+log still under its recorded name is protected by slicing past the bytes the
+split wrote; a log under an unrecognised name is protected by the excess
+multiset — but only while the bytes match, and re-serialising a record
+(`json.dumps(rec, sort_keys=True)`: same event, different bytes) breaks that.
+The id check that should have caught it was keyed by basename, so for
+`messages.2026-09-20.jsonl` — a name the shared board does not carry — the set
+of ids already present was empty, and the pre-split `msg_c` was appended to
+the restored shared board a second time. Measured, then fixed: the set is now
+every `id` in every root-level `*.jsonl` on the shared board, so a rename or a
+date stamp cannot hide one, and it is mutated as lines merge, so one message
+appended to two project boards still arrives once. A genuinely new id in the
+same rotated file still comes back. Lines with no `id` — every trajectory
+event on the real board carries none — stay governed by the slice and the
+multiset, because content is not identity in an event stream.
 
 Epics and sprints are not folded *by id* on purpose, and the reason is
 concrete: only `T-` ids get a per-project floor, so a project board minting a

@@ -8681,6 +8681,51 @@ def _path_inside(root, path):
     return path == root or path.startswith(root + os.sep)
 
 
+def _board_twin_of(root, path):
+    """The board record `path` is a SECOND NAME for, as a board-relative name.
+
+    A hard link is not a symlink: `realpath` sees nothing to resolve, so
+    `_path_inside` calls `<tmp>/out.json` outside the board while it and
+    `<board>/T-100.json` are one inode with two names. The reviewer wrote a
+    plan through such a name and the archived ticket's own `id` disappeared.
+    The write itself is atomic now -- temp file plus `os.replace`, which
+    changes a directory entry and leaves the inode alone -- so the board
+    survives either way. The refusal is still the right answer: the operator
+    is told they named a board record, instead of being told "nothing was
+    written to the board" while their other name for that record stops being
+    it. Identity here is (st_dev, st_ino), not a string.
+
+    The board is walked only when the target exists as a regular file with a
+    link count above one, which is the only way it can be a second name; the
+    common case costs one `stat`.
+    """
+    target = os.path.abspath(os.path.expanduser(path))
+    try:
+        st = os.stat(target)
+    except OSError:
+        return ""          # does not exist yet: it can have no other name
+    if not os.path.isfile(target) or st.st_nlink < 2:
+        return ""
+    want = (st.st_dev, st.st_ino)
+    root = os.path.realpath(root)
+    for dirpath, dirnames, names in os.walk(root):
+        dirnames[:] = sorted(dirnames)
+        for name in sorted(names):
+            here = os.path.join(dirpath, name)
+            try:
+                s = os.lstat(here)
+            except OSError:
+                continue
+            if (s.st_dev, s.st_ino) == want:
+                return os.path.relpath(here, root)
+    return ""
+
+
+def _path_reaches_board(root, path):
+    """True when writing `path` reaches inside `root` by name or by inode."""
+    return bool(_path_inside(root, path) or _board_twin_of(root, path))
+
+
 def _reads_unless(*flags):
     """Reads, except when one of these flags is given."""
     def reads(a, board):
@@ -8699,7 +8744,7 @@ def _trajectories_reads(a, board):
     # and not a harmless one: `--out <board>/agents/<seat>.json` replaces a
     # seat record outright. Measured, not supposed.
     out = getattr(a, "out", "") or ""
-    return not (sub == "export" and out and _path_inside(board, out))
+    return not (sub == "export" and out and _path_reaches_board(board, out))
 
 
 def _project_out_paths(a):
@@ -8710,7 +8755,8 @@ def _project_out_paths(a):
 
 def _project_out_stays_outside(a, board):
     """`project` reads the board; its reports must not be written into it."""
-    return not any(v and _path_inside(board, v) for _, v in _project_out_paths(a))
+    return not any(v and _path_reaches_board(board, v)
+                   for _, v in _project_out_paths(a))
 
 
 # Commands that only read. Everything else is refused on a frozen shared
@@ -9021,13 +9067,25 @@ def _refuse_project_out_inside_board(a, board):
     record.
     """
     for flag, value in _project_out_paths(a):
-        if value and _path_inside(board, value):
+        if not value:
+            continue
+        if _path_inside(board, value):
             sys.exit(
                 "REFUSING %s %s: that path is inside the board being read "
                 "(%s).\n  A plan or manifest written into the board would "
                 "overwrite whatever record is already at that path -- "
                 "`--out <board>/T-100.json` replaced that ticket outright.\n"
                 "  Point it outside the board." % (flag, value, board))
+        twin = _board_twin_of(board, value)
+        if twin:
+            sys.exit(
+                "REFUSING %s %s: that path is a second name (hard link) for "
+                "%s inside the board being read (%s).\n  The write is atomic, "
+                "so the board's own copy survives -- but the operator's other "
+                "name for that record would stop being it, under a line that "
+                "says nothing was written to the board.\n  Point it at a path "
+                "that is not linked into the board."
+                % (flag, value, twin, board))
 
 
 def _cmd_project_split(a, board, ps):

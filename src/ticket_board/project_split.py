@@ -1500,7 +1500,6 @@ def _merge_back_items(man, source):
     # restored shared board with a truncated `deps` and a snapshot that means
     # nothing there, so the original edge is put back.
     externals = man.get("external_deps") or {}
-    seen = {}
     lines, tickets, conflicts = {}, {}, []
 
     def source_lines(_source, _cache={}):
@@ -1527,25 +1526,43 @@ def _merge_back_items(man, source):
             _cache[key] = got
         return _cache[key]
 
-    def have_ids(name):
-        """Line ids already on the shared board, so a merge never doubles one."""
-        if name not in seen:
-            got = set()
-            try:
-                for raw in _split_lines(_read_bytes(os.path.join(source, name))):
-                    rec = _json_line(raw)
-                    mid = _line_id(rec) if rec else None
-                    if mid is not None:
-                        got.add(mid)
-            except OSError:
-                pass
-            seen[name] = got
-        return seen[name]
+    def board_line_ids(_source):
+        """Every line id the shared board already holds, in ANY of its logs.
 
-    for name in sorted(set(
-            [n for rows in files.values() for n in rows
-             if n.endswith(".jsonl")])):
-        have_ids(name)
+        Board-wide, not per-basename, and that is the whole fix for the
+        reviewer's second falsifier in its surviving form. Keyed by basename,
+        this set was empty for `messages.2026-09-20.jsonl` -- a name the
+        shared board does not carry -- so a pre-split `msg_c` copied into a
+        rotated or dated log came back a second time. The byte multiset in
+        `source_lines` did not catch it either: re-serialising the record
+        (different key order, different separators) changes the bytes while
+        the event stays the same event. An id is the one identity that
+        survives both a rename and a re-serialisation, which is why §4.11
+        dedups by it.
+
+        Ids collected from every root-level `*.jsonl`, not just the two known
+        families: a log the shared board rotated to a third name is exactly
+        the case being defended against, so the sweep must not depend on
+        recognising the name. Mutated as lines are merged, so the same id
+        appended to two project boards still reaches the shared board once.
+        """
+        got = set()
+        for path in sorted(glob.glob(os.path.join(_source, "*.jsonl"))):
+            try:
+                raws = _split_lines(_read_bytes(path))
+            except OSError:
+                continue
+            for raw in raws:
+                rec = _json_line(raw)
+                mid = _line_id(rec) if rec else None
+                if mid is not None:
+                    got.add(mid)
+        return got
+
+    # Read once per call, not cached across calls: `_do_merge_back` appends to
+    # these same logs, so a set kept between the plan and the apply would call
+    # its own writes duplicates on the next undo.
+    shared_ids = board_line_ids(source)
     for slug in sorted(projects):
         board = projects[slug].get("board") or ""
         rows = files.get(slug, {})
@@ -1606,9 +1623,9 @@ def _merge_back_items(man, source):
                         continue
                     mid = _line_id(rec)
                     if mid is not None:
-                        if mid in have_ids(rel):
+                        if mid in shared_ids:
                             continue
-                        seen[rel].add(mid)
+                        shared_ids.add(mid)
                     lines.setdefault(rel, []).append(raw)
         for root, dirs, names in os.walk(board):
             dirs[:] = sorted(dirs)
