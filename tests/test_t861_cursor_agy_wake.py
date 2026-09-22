@@ -239,6 +239,39 @@ def test_cursor_wake_is_the_same_from_a_codex_and_a_claude_sender(board, cursor_
     assert receipts["codex-sender"].endswith("-> woken"), receipts
 
 
+def test_cursor_wake_is_the_same_into_a_busy_and_an_idle_pane(board, cursor_seat):
+    """The other axis of any-to-any: a recipient mid-turn gets the same receipt.
+
+    `session_attached` is the only busy/idle signal tmux offers, and
+    `cursor_persist_sessions` does parse it, into `row["attached_clients"]`.
+    Nothing ever reads it back, so an attached pane (agent mid-turn, operator
+    watching) and a detached idle one cannot diverge. That is worth pinning
+    rather than assuming: it is what makes the live idle/busy cells
+    interchangeable, and a future caller that started gating a wake on
+    "looks busy" would silently reintroduce a dropped wake.
+    """
+    sa = _adapters()
+    receipts, typed, seen = {}, {}, {}
+    for state, attached, mid in (("idle", "0", "m-idle"), ("busy", "3", "m-busy")):
+        cursor_seat["install"](sessions=_session_row(attached=attached))
+        # Also refreshes the TTL cache, so the second pass cannot read the
+        # first pass's rows back out of it.
+        rows = sa.cursor_persist_sessions(refresh=True)
+        seen[state] = [r["attached_clients"] for r in rows]
+        _endpoint(sa, board)
+        before = len(cursor_seat["calls"]())
+        receipts[state] = sa.wake_seat(str(board), "grok-worker", "wake now",
+                                       harness="cursor", message_id=mid)
+        fresh = cursor_seat["calls"]()[before:]
+        typed[state] = [a for a in fresh if "send-keys" in a and "-l" in a]
+    # The difference really is visible to the adapter ...
+    assert seen == {"idle": [0], "busy": [3]}, seen
+    # ... and it changes neither the receipt nor a single keystroke.
+    assert receipts["idle"] == receipts["busy"] == "woken", receipts
+    assert typed["idle"], "the idle pass should have typed the line"
+    assert typed["idle"] == typed["busy"], typed
+
+
 # ---- Agy: supervised by design (no live-session injection exists) ----------
 
 def test_agy_wake_is_supervised_not_woken(board, cache_dir, monkeypatch):

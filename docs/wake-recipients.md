@@ -80,6 +80,31 @@ Throwaway board, one real persist seat, zero operator keystrokes:
 * after `agent persist stop`: `supervised (... is not a managed agent persist
   session on tmux -L cursor-agent ...)`, `reachable=no`.
 
+### Neither the sender nor a busy pane is a second axis
+
+The T-812 matrix reads as sender x recipient, but only one of those is a real
+variable, and both halves are now pinned by tests rather than by re-running a
+manual grid:
+
+* **Sender.** `wake_seat(board, seat, text, harness=None, message_id="")` takes
+  no sender argument at all and branches on the *recipient's* `ep["provider"]`
+  (`harness` is the recipient's too -- a mismatch against the stored provider is
+  refused). The one sender-sensitive gate is `wake_refusal` ->
+  `borrowed_transport`, and it fires only when the recipient endpoint's identity
+  equals the sender's ambient var *of the same provider* -- a genuine self-wake,
+  not a Claude-vs-Codex difference. Pinned by
+  `test_cursor_wake_is_the_same_from_a_codex_and_a_claude_sender`, which spawns
+  two real subprocess senders and asserts byte-identical receipts.
+* **Busy pane.** `session_attached` is the only busy/idle signal tmux gives us.
+  `cursor_persist_sessions` parses it into `row["attached_clients"]` and nothing
+  ever reads it back, so a pane mid-turn and an idle one cannot diverge. Pinned
+  by `test_cursor_wake_is_the_same_into_a_busy_and_an_idle_pane`, which proves
+  the adapter *can* see the difference (0 vs 3 clients) and still emits the same
+  receipt and the same keystrokes.
+
+The second one matters beyond bookkeeping: a future caller that started gating a
+wake on "looks busy" would silently drop wakes, and that test is what fails.
+
 ## Agy (Antigravity): supervised, and it says so
 
 Measured against `agy 1.2.2`:
