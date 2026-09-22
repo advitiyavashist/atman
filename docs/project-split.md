@@ -412,6 +412,19 @@ One ticket on the real board has `repo` set to the board's own
 name, so it is unassigned rather than silently folded into the `tickets`
 project.
 
+What the board-wide id sweep costs, measured on the live shared board with a
+read-only pass on 2026-09-22: **0.33 s** for 47,952 lines across its four
+root-level `*.jsonl` logs (n=1, one machine). 7,967 of those lines carry an
+`id` and 39,985 do not — every trajectory event and the older messages — which
+is the shape of the defence: ids cover message replay across a rename, and the
+slice and the multiset carry everything else. The sweep runs once per
+merge-back, not per file.
+
+The counts above were taken at `60f8a08`; the commit that added the id sweep
+and the hard-link refusal touches `_merge_back_items` and the two CLI guards
+only, and no part of `propose`, `apply` or the manifest, so they are not
+re-measured here and the diff says which is which.
+
 ### Scale exercise of `--apply` and `--undo`
 
 On a second copy, with every live unassigned ticket attributed mechanically
