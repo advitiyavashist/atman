@@ -57,13 +57,14 @@ talking to their own providers.
 
 ## One path
 
-Python 3.9+ and Git. Tested on one macOS machine:
+Python 3.9+ and Git. Node/npm are needed for the local app at `/app/`
+(install builds it when they are on PATH). Tested on one macOS machine:
 `git clone` plus `./install.sh`.
 
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
 cd atman
-./install.sh                 # links atm and tickets into ~/.local/bin
+./install.sh                 # links atm/tickets; builds ui/dist when Node is present
 export PATH="$HOME/.local/bin:$PATH"
 atm self                     # which file you are actually running
 ```
@@ -72,6 +73,9 @@ atm self                     # which file you are actually running
 `./install.sh --prefix DIR` places the symlinks in `DIR`; they still run
 `tickets.py` from this checkout. `--force` replaces the existing one on
 purpose. `atm` is the command; `tickets` is a compatibility alias.
+When Node/npm are missing, install prints the one-line UI build
+(`npm install && npm run build -w ui`); `atm ui` never serves a bare 404
+at `/app/` — it shows that same command on the page.
 
 Or Homebrew on macOS, which installs the current tagged release instead of a
 checkout:
