@@ -318,9 +318,12 @@ def live_cwds(path, lsof_fn=None):
     proc_rows = _proc_live_cwds(real)
     if proc_rows is not None and not any(x.get("unknown") for x in proc_rows):
         return proc_rows
-    # Incomplete /proc (EACCES on an unrelated helper is common on GHA): a
-    # targeted lsof of THIS worktree can still prove it unused. If lsof is
-    # also inconclusive, keep the /proc unknown -- fail closed.
+    # Incomplete /proc (EACCES on an unrelated helper is common on GHA):
+    # try a targeted lsof of THIS worktree. Caveat: a non-root lsof is
+    # uid-blind -- it cannot see an other-uid process whose /proc cwd was
+    # also unreadable, so a clean empty lsof result does not prove those
+    # pids are absent. If lsof is also inconclusive, keep the /proc
+    # unknown -- fail closed.
     lsof_rows = _lsof_live_cwds(real)
     if not any(x.get("unknown") for x in lsof_rows):
         return lsof_rows

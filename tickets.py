@@ -6264,8 +6264,10 @@ def _process_command(pid):
     """Full, untruncated command line for pid, or '' if gone/unreadable.
 
     T-875 (12): mere PID existence is not evidence of a watcher -- PIDs get
-    recycled. Callers must read this string. Linux /proc is preferred; macOS
-    `ps -ww` avoids the default ARG_MAX truncation.
+    recycled. Callers must read this string. When ``/proc`` exists, read
+    ``/proc/<pid>/cmdline`` only: an empty cmdline (kernel threads) is
+    ``''``, never a per-pid ``ps`` fork (T-604). Use ``ps -ww`` only when
+    there is no ``/proc`` (macOS).
     """
     import subprocess
 
@@ -6273,14 +6275,13 @@ def _process_command(pid):
         pid = int(pid)
     except (TypeError, ValueError):
         return ""
-    proc_path = "/proc/%d/cmdline" % pid
-    try:
-        with open(proc_path, "rb") as f:
-            raw = f.read()
-        if raw:
-            return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
-    except (OSError, IOError):
-        pass
+    if os.path.isdir("/proc"):
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                raw = f.read()
+        except (OSError, IOError):
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
     env = os.environ.copy()
     env["COLUMNS"] = "65535"
     try:
@@ -6289,10 +6290,10 @@ def _process_command(pid):
             capture_output=True, text=True, env=env,
         )
     except (OSError, ValueError):
-        return _proc_cmdline(pid)
+        return ""
     if r.returncode != 0:
-        return _proc_cmdline(pid)
-    return (r.stdout or "").strip() or _proc_cmdline(pid)
+        return ""
+    return (r.stdout or "").strip()
 
 
 def _validated_owned_watch_pid(board, owner):

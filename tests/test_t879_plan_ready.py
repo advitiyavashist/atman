@@ -85,7 +85,7 @@ def _ticket_blob(repo, tid):
     return (repo / ".tickets" / ("%s.json" % tid)).read_text()
 
 
-def test_plan_with_fields_is_ready_and_b_nextable_after_a(tmp_path):
+def test_plan_with_fields_is_ready_and_b_not_nextable_after_a_done_without_review(tmp_path):
     repo = boot(tmp_path)
     r = run(repo, "plan", tmp_path=tmp_path, stdin=PLAN_WITH_FIELDS)
     assert r.returncode == 0, r.stderr + r.stdout

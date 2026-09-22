@@ -159,18 +159,25 @@ def _cmd_mentions_fixture_root(cmd: str, root_tokens: set[str]) -> bool:
 
 
 def process_cmdline(pid):
-    """Full command line. Linux /proc is not truncated at COLUMNS=80."""
+    """Full command line. Linux /proc is not truncated at COLUMNS=80.
+
+    When ``/proc`` exists, read ``/proc/<pid>/cmdline`` only. An empty
+    cmdline (kernel threads) is ``''`` -- never fall back to per-pid
+    ``ps``, or every /proc walk (watch reaper, UI harness) forks once per
+    thread and recreates the T-604 pile-up. Use ``ps`` only when there is
+    no ``/proc``.
+    """
     try:
         pid = int(pid)
     except (TypeError, ValueError):
         return ""
-    try:
-        with open("/proc/%d/cmdline" % pid, "rb") as f:
-            raw = f.read()
-        if raw:
-            return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
-    except (OSError, IOError):
-        pass
+    if os.path.isdir("/proc"):
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                raw = f.read()
+        except (OSError, IOError):
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
     env = os.environ.copy()
     env["COLUMNS"] = "65535"
     try:
