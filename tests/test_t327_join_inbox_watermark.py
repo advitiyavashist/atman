@@ -52,7 +52,7 @@ def run(board, *args, agent="", entry="root"):
     e = _env(board, agent=agent)
     e["TICKET_AGENT"] = agent or ""
     if entry == "pkg":
-        # The packaged console script (pyproject: tickets = ticket_board.cli:main).
+        # The packaged console script (pyproject: tickets = tickets:main).
         # cli.py imports packaged ticket_coordination; src/ is on PYTHONPATH.
         e["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(ROOT)])
         cmd = [sys.executable, "-m", "ticket_board", *args]

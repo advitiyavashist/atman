@@ -18,11 +18,20 @@ authors = [{ name = "Atman contributors" }]
 contracts = ["pytest>=7", "jsonschema>=4.18", "pyyaml>=6", "pillow"]
 
 [project.scripts]
-atm = "ticket_board.cli:main"
-tickets = "ticket_board.cli:main"
+# T-1380: one CLI everywhere. brew/install.sh already run tickets.py; pip
+# must not wire atm/tickets to the older src/ticket_board/cli.py surface.
+# Root modules are symlinked into src/ so package-dir "" = "src" ships them.
+atm = "tickets:main"
+tickets = "tickets:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+py-modules = [
+    "tickets",
+    "session_adapters",
+    "auth_v2_contract",
+    "quota_adapters",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

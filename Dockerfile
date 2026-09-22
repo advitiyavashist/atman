@@ -12,7 +12,8 @@ LABEL org.opencontainers.image.title="atman-tickets" \
       org.opencontainers.image.source="https://github.com/advitiyavashist/atman"
 
 WORKDIR /opt/atman
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md setup.cfg setup.py ./
+COPY tickets.py session_adapters.py auth_v2_contract.py quota_adapters.py ./
 COPY src ./src
 COPY packaging/constraints.txt ./packaging/constraints.txt
 

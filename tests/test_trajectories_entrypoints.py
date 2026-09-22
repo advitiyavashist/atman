@@ -5,7 +5,7 @@ install.sh exec. It is not the only way this tool ships. `pyproject.toml`
 declares:
 
     [project.scripts]
-    tickets = "ticket_board.cli:main"
+    tickets = "tickets:main"
 
 so a `pip install` of the package produces a `tickets` command that runs
 `src/ticket_board/cli.py`, a second, independent copy of the delivery path.
@@ -50,13 +50,29 @@ PKG_TOOL = ROOT / "src" / "ticket_board" / "cli.py"
 
 
 def run_tool(tool, board, *args, agent="", cwd=None):
-    """test_wakeup.run, but against whichever copy of the tool we are testing."""
+    """Drive either delivery path. Scrub ambient session ids the way
+    test_wakeup.run does -- otherwise a Cursor seat hosting this pytest
+    outranks TICKET_AGENT once cli.py delegates to tickets.main (T-1380)."""
+    from session_adapters import AMBIENT_TRANSPORT_VARS
+    from session_adapters import TRANSPORT_BOARD_ENV as ATMAN_TRANSPORT_BOARD
+
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    e.pop("TICKET_SEAT", None)
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID", *AMBIENT_TRANSPORT_VARS):
+        e.pop(var, None)
+    if args and args[0] == "join" and len(args) > 1 and args[1]:
+        actor = args[1]
+    else:
+        actor = agent or "__anonymous__"
+    e["TICKET_SESSION_ID"] = "test-session-" + actor
+    e[ATMAN_TRANSPORT_BOARD] = str(board)
     where = cwd or (board.parent if board.parent.is_dir() else Path("/"))
     return subprocess.run([sys.executable, str(tool), *args], capture_output=True,
                           text=True, env=e, cwd=where)
+
 
 
 def events(board, **kw):

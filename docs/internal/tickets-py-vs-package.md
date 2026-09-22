@@ -9,7 +9,7 @@ Input for the consolidation decision on T-974 / T-975. Measured on
 | Path | Entry | Who uses it |
 |---|---|---|
 | Live monolith | repo-root `tickets.py` (`~/.local/bin/tickets` via `scripts/install_live.py`) | Seats on this machine; `tickets self` "verified release" |
-| Packaged wheel | `ticket_board.cli:main` (`atm` / `tickets` console scripts) | `pip install`; `scripts/install.py` copies `cli.py` flat |
+| Packaged wheel | `tickets:main` (`atm` / `tickets` console scripts; same root CLI) | `pip install` (T-1380) |
 
 Both paths must keep board behavior identical for the commands they share.
 T-981 does not merge them.
@@ -25,9 +25,14 @@ T-981 does not merge them.
 The CEO note of 9,597 lines on `tickets.py` is stale; do not use it for
 sizing the split.
 
-## Commands `tickets.py` owns that `cli.py` does not
+A pip-only install runs the same root `tickets.py` CLI as brew/install.sh
+(T-1380). `src/ticket_board/cli.py` keeps dual-copy helpers for tests but is
+no longer a separate console surface.
 
-These `cmd_*` handlers exist only on the live monolith:
+## Commands historically only on `tickets.py`
+
+These `cmd_*` handlers existed only on the live monolith before T-1380
+unified the pip entry point onto `tickets:main`:
 
 `boot`, `brief`, `capture`, `codex_hook`, `dash`, `discard`, `dispatch`,
 `drive`, `guide`, `harness` (+ `harness_auth` / `harness_available` /
@@ -36,9 +41,8 @@ These `cmd_*` handlers exist only on the live monolith:
 `repin`, `retro`, `schedule`, `self`, `sound`, `spawn`, `stop_hook`,
 `ui`, `util`, `watch`
 
-A pip-only install therefore cannot run connect-adjacent product verbs
-(`spawn`, `watch`, `hooks`, `prompt`, `ui`, `knowledge`, …). That gap is
-the consolidation question, not a T-981 defect.
+Before T-1380 a pip-only install could not run those verbs. That gap is
+closed: the wheel entry points call `tickets:main`.
 
 ## Commands both copies implement
 

@@ -33,10 +33,23 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_pkg_cli(board, *args, agent="", cwd=None):
-    """Drive the packaged entry point (pyproject: tickets = ticket_board.cli:main)."""
+    """Drive the packaged entry point (pyproject: tickets = tickets:main).
+
+    ``python -m ticket_board.cli`` delegates to tickets.main (T-1380); scrub
+    ambient session ids so the host Cursor seat cannot outrank TICKET_AGENT.
+    """
+    from session_adapters import AMBIENT_TRANSPORT_VARS
+    from session_adapters import TRANSPORT_BOARD_ENV as ATMAN_TRANSPORT_BOARD
+
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    e.pop("TICKET_SEAT", None)
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID", *AMBIENT_TRANSPORT_VARS):
+        e.pop(var, None)
+    e["TICKET_SESSION_ID"] = "test-session-" + (agent or "__anonymous__")
+    e[ATMAN_TRANSPORT_BOARD] = str(board)
     # Packaged ticket_coordination lives under src/.
     e["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(ROOT)])
     where = cwd or board.parent
@@ -155,7 +168,7 @@ def test_same_repo_behind_trunk_keeps_the_original_wording(board):
     assert r.returncode != 0
     out = (r.stdout + r.stderr).strip()
     assert out == (
-        "RULE: your branch is behind main. Run `tickets sync` (merges main in, so conflicts "
+        "RULE: your branch is behind main. Run `atm sync` (merges main in, so conflicts "
         "are yours to fix now, not the master's later), then submit again."
     ), "common-path wording must be byte-identical: %r" % out
 
@@ -175,7 +188,7 @@ def test_artifact_pointing_at_the_cwd_tree_gets_the_common_path_wording(board):
     assert r.returncode != 0
     out = (r.stdout + r.stderr).strip()
     assert out == (
-        "RULE: your branch is behind main. Run `tickets sync` (merges main in, so conflicts "
+        "RULE: your branch is behind main. Run `atm sync` (merges main in, so conflicts "
         "are yours to fix now, not the master's later), then submit again."
     ), "same tree must not get the cross-repo wording: %r" % out
 
@@ -207,50 +220,25 @@ def test_second_worktree_of_the_same_repo_is_also_a_wrong_place_to_sync(board):
     assert "--artifact %s" % wt in out, "must aim the sync at that worktree: %r" % out
 
 
-def test_cli_py_review_refuses_without_minting_a_repo_none_pin(board):
-    """FIX-FIRST (acceptance 4): python -m ticket_board.cli, not the root tickets.py.
-
-    The partial --artifact port on this copy minted a pin with repo=None that
-    T-215's merge guard cannot see (F2) and printed `tickets sync --artifact`
-    which this copy cannot parse (F1). Review --artifact is deleted here on
-    purpose -- the real cli.py artifact port is T-272. This test is the
-    regression that the root-only suite could not see.
-    """
+def test_cli_py_review_shares_full_cli_artifact_gate(board):
+    """T-1380: ``python -m ticket_board.cli`` runs tickets.main -- same
+    --artifact gate as the root script (no more subset CLI that refused the
+    flag with 'unrecognized arguments')."""
     repo_a = board.parent
     _cwd_repo_on_its_own_branch(repo_a)
     repo_b = _artifact_repo(board.parent.parent, "artifact_repo_t422_cli", board)
     _behind_trunk_branch(repo_b, "alice/b-work")
 
-    tid = _create(board, "cli.py review must not take --artifact", role="backend")
+    tid = _create(board, "packaged path accepts --artifact", role="backend")
     run(board, "claim", tid, agent="alice")
 
-    # F1: --artifact is not a flag this copy accepts. Argparse must fail
-    # before cmd_review, so no pin is written at all.
     r = _run_pkg_cli(board, "review", tid, "--notes", "n", "--artifact", str(repo_b),
                      agent="alice", cwd=repo_a)
     assert r.returncode != 0, r.stdout + r.stderr
     err = r.stdout + r.stderr
-    assert "unrecognized arguments" in err, err
+    assert "unrecognized arguments" not in err, err
+    assert str(repo_b) in err
+    assert "--artifact %s" % repo_b in err
     rec = _ticket(board, tid)
     assert rec["status"] == "claimed"
     assert not rec.get("commit"), rec
-    assert rec.get("repo") is None
-    assert not (rec.get("commit") and rec.get("repo") is None)
-
-    # Behind-trunk refusal on this copy (cwd measured; art is always None).
-    # Message must be the common-path line -- flags cli.py actually accepts.
-    _behind_trunk_branch(repo_a, "alice/cli-behind")
-    tid2 = _create(board, "cli.py behind-trunk wording", role="backend")
-    run(board, "claim", tid2, agent="alice")
-    r2 = _run_pkg_cli(board, "review", tid2, "--notes", "n",
-                      agent="alice", cwd=repo_a)
-    assert r2.returncode != 0
-    out = (r2.stdout + r2.stderr).strip()
-    assert out == (
-        "RULE: your branch is behind main. Run `tickets sync` (merges main in, so conflicts "
-        "are yours to fix now, not the master's later), then submit again."
-    ), "cli.py refusal must name only flags this copy accepts: %r" % out
-    rec2 = _ticket(board, tid2)
-    assert rec2["status"] == "claimed"
-    assert not rec2.get("commit"), rec2
-    assert not (rec2.get("commit") and rec2.get("repo") is None)

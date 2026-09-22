@@ -250,7 +250,7 @@ This tool ships along two paths and both write here:
 | path | file | how it runs |
 |---|---|---|
 | the live shim, `install.sh`, `tickets watch` | `tickets.py` (repo root) | shipped as a lone file, no package beside it |
-| `pip install` → the `tickets` console script | `src/ticket_board/cli.py` | `[project.scripts] tickets = "ticket_board.cli:main"` |
+| `pip install` → the `atm` / `tickets` console scripts | `tickets.py` via `tickets:main` (T-1380) | `[project.scripts] atm = tickets:main` / `tickets = tickets:main` |
 
 Instrumenting only the root script would not leave the packaged CLI merely
 uninstrumented — it would leave **this log wrong**. A board driven by both (a

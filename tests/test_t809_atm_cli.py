@@ -47,12 +47,14 @@ def test_cli_prog_follows_invocation_name():
 
 
 def test_pyproject_scripts_share_one_entry():
+    # T-1380: pip entry points run tickets.py (same CLI as brew/install.sh),
+    # not the older ticket_board.cli surface.
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'atm = "ticket_board.cli:main"' in text
-    assert 'tickets = "ticket_board.cli:main"' in text
+    assert 'atm = "tickets:main"' in text
+    assert 'tickets = "tickets:main"' in text
     cfg = (ROOT / "setup.cfg").read_text(encoding="utf-8")
-    assert "atm = ticket_board.cli:main" in cfg
-    assert "tickets = ticket_board.cli:main" in cfg
+    assert "atm = tickets:main" in cfg
+    assert "tickets = tickets:main" in cfg
 
 
 def test_help_prog_matches_invoked_name(tmp_path):
@@ -180,8 +182,8 @@ def test_clean_venv_atm_and_tickets_are_the_same_install(tmp_path):
     assert installed.returncode == 0, installed.stdout + installed.stderr
     assert atm.is_file(), "atm console script missing from isolated venv"
     assert tickets.is_file(), "tickets console script missing from isolated venv"
-    # setuptools generates both scripts from the same "ticket_board.cli:main"
-    # entry point; identical bytes proves there is no second implementation.
+    # setuptools generates both scripts from the same "tickets:main" entry
+    # point; identical bytes proves there is no second implementation.
     assert atm.read_bytes() == tickets.read_bytes()
 
     repo = tmp_path / "repo"
@@ -192,6 +194,11 @@ def test_clean_venv_atm_and_tickets_are_the_same_install(tmp_path):
     env = dict(os.environ, HOME=str(home), TICKET_AGENT="t809-wheel",
                TICKETS_DIR=str(repo / ".tickets"))
     env.pop("TICKETS_STOP_HOOK", None)
+
+    version = subprocess.run(
+        [str(atm), "--version"], capture_output=True, text=True, env=env, cwd=str(repo))
+    assert version.returncode == 0, version.stderr
+    assert "0.3.0" in version.stdout
 
     created = subprocess.run(
         [str(atm), "create", "wheel-install-proof", "--role", "backend"],
@@ -209,16 +216,13 @@ def test_clean_venv_atm_and_tickets_are_the_same_install(tmp_path):
                                    env=env, cwd=str(repo))
     assert "usage: atm" in help_atm.stdout
     assert "usage: tickets" in help_tickets.stdout
+    assert "steer" in help_atm.stdout and "hooks" in help_atm.stdout
 
-    # Honest packaged-surface limit: `hooks` lives on root tickets.py / install.sh,
-    # not on ticket_board.cli. Do not claim the wheel installs old hooks.
+    # T-1380: pip wheel runs the full tickets.py CLI, including hooks.
     hooks = subprocess.run(
         [str(atm), "hooks", "cursor", "--agent", "t809-wheel"],
         capture_output=True, text=True, env=env, cwd=str(repo))
-    assert hooks.returncode != 0
-    err = (hooks.stdout + hooks.stderr).lower()
-    assert "invalid choice" in err or "unrecognized arguments" in err
-    assert "hooks" in err
+    assert hooks.returncode == 0, hooks.stdout + hooks.stderr
 
 
 def test_live_installer_writes_atm_alias(tmp_path):

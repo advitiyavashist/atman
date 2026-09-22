@@ -1,21 +1,13 @@
 """The team trajectory log, written from the packaged CLI.
 
 T-311 instrumented the root `tickets.py` -- the file the live shim and
-`install.sh` both exec. It is not the only delivery path: `pyproject.toml`
-declares `tickets = "ticket_board.cli:main"`, so a `pip install` of this
-package produces a `tickets` command that goes through `ticket_board/cli.py`
-instead. Left uninstrumented, that entry point writes no events at all, and a
-board driven by both entry points -- a watcher on the root script, an operator
-on the installed console script -- yields a log with silent holes rather than
-an honest absence. `tickets turns` (T-312) cannot tell the two apart, so the
-metric would read as fact and be wrong.
-
-This module is the writer both call sites should agree on. `cli.py` imports
-it. The root `tickets.py` must stay a standalone single file (the live release
-ships it alone, with no package to import), so it keeps its own copy of the
-same logic -- and `tests/test_trajectories_entrypoints.py` fails the moment the
-two disagree on version, kinds, or emitted shape. A second copy is only safe
-while something goes red when it drifts.
+`install.sh` both exec. T-1380 points pip's `atm`/`tickets` scripts at
+`tickets:main` too, so install shapes share one CLI. `cli.py` still imports
+this module for dual-copy / library callers; the root `tickets.py` keeps its
+own copy of the same logic (it must stay a standalone single file for the
+live release), and `tests/test_trajectories_entrypoints.py` fails the moment
+the two disagree on version, kinds, or emitted shape. A second copy is only
+safe while something goes red when it drifts.
 
 Everything here is deliberately dependency-free: it reads the board's own
 `objective.json` and `workforce.json` and needs nothing from `cli.py`, which

@@ -22077,7 +22077,16 @@ def release_status():
     root = os.path.dirname(os.path.realpath(__file__))
     manifest = os.path.join(root, "release.json")
     if not os.path.isfile(manifest):
-        return "tickets (uninstalled checkout; no pinned release)"
+        # Checkout layout keeps the historic provenance string. A flat pip
+        # install (T-1380) has ticket_board next to this module, not under
+        # src/, and reports the package version from pyproject/metadata.
+        if os.path.isdir(os.path.join(root, "src", "ticket_board")):
+            return "tickets (uninstalled checkout; no pinned release)"
+        try:
+            from importlib.metadata import version as _pkg_version
+            return "tickets %s" % _pkg_version("ticket-board")
+        except Exception:
+            return "tickets (uninstalled checkout; no pinned release)"
     try:
         with open(manifest) as source:
             release = json.load(source)

@@ -157,7 +157,7 @@ def test_boundary_message_is_not_redelivered_forever(tmp_path, mod):
 # ---- and end to end, through the shipped console script ------------------
 
 def test_packaged_console_script_sees_mail_after_a_skewed_record(tmp_path):
-    """Not the module -- the actual `tickets = ticket_board.cli:main` path.
+    """Not the module -- the actual `tickets = tickets:main` path.
 
     cli.py's main() imports packaged `ticket_board.ticket_coordination`.
     PYTHONPATH includes src/ so the console script resolves the package.
@@ -170,10 +170,19 @@ def test_packaged_console_script_sees_mail_after_a_skewed_record(tmp_path):
     (b / "messages.jsonl").write_text(json.dumps(
         {"at": far, "from": "alice", "to": "carol", "re": "", "text": "SKEWED-DM"}) + "\n")
 
+    from session_adapters import AMBIENT_TRANSPORT_VARS
+    from session_adapters import TRANSPORT_BOARD_ENV as ATMAN_TRANSPORT_BOARD
+
     env = dict(os.environ, TICKETS_DIR=str(b), TICKET_AGENT="dave",
                HOME=str(tmp_path / "home"),
                PYTHONPATH=os.pathsep.join([str(ROOT / "src"), str(ROOT)]))
     env.pop("TICKETS_STOP_HOOK", None)
+    env.pop("TICKET_SEAT", None)
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+                "TERM_SESSION_ID", *AMBIENT_TRANSPORT_VARS):
+        env.pop(var, None)
+    env["TICKET_SESSION_ID"] = "test-session-dave"
+    env[ATMAN_TRANSPORT_BOARD] = str(b)
 
     def cli(*args):
         return subprocess.run([sys.executable, "-m", "ticket_board", *args],
