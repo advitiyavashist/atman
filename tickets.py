@@ -11210,7 +11210,9 @@ def _task_life_actionable(board, message):
         return True
     try:
         t = load(board, tid)
-    except Exception:
+    except (Exception, SystemExit):
+        # load() sys.exits on a missing ticket; SystemExit is BaseException, so
+        # a bare `except Exception` lets it kill the UI handler thread (T-1381).
         return True
     if not t:
         return True
@@ -20398,6 +20400,11 @@ def _ui_post_as_operator(board, payload, operator):
     kind = str((payload or {}).get("kind") or "message").strip() or "message"
     if kind not in _UI_MSG_KINDS:
         raise ValueError("kind must be message or task")
+    # Match cmd_msg: refuse a missing --re before anything is posted (T-1381).
+    # Without this, post_message succeeds and deliver_wakes -> load() sys.exits,
+    # which escapes the handler's `except Exception` and drops the connection.
+    if re_ and not os.path.isfile(ticket_path(board, re_)):
+        raise ValueError("no such ticket: %s" % re_)
     return post_message(
         board, operator, text, to, re_, kind=kind, explicit=operator,
         via="ui-operator", sender_kind="operator",

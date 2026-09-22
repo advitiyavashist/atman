@@ -1,3 +1,5 @@
+# Copy of advitiyavashist/homebrew-tap Formula/atman.rb. sha256 is the
+# GitHub-served release asset, not a locally built tarball (T-1108).
 class Atman < Formula
   desc "Ticket board CLI (atm) for coordinating AI coding agents on one board"
   homepage "https://github.com/advitiyavashist/atman"
