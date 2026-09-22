@@ -168,25 +168,23 @@ def test_proc_snapshot_skips_empty_cmdline_without_per_pid_ps(monkeypatch):
 
 def test_process_command_empty_proc_cmdline_skips_ps(monkeypatch):
     """When /proc exists, empty cmdline must not fall back to per-pid ps."""
+    import builtins
+    from io import BytesIO
+
     tk = _load_tk()
     real_isdir = os.path.isdir
+    calls = {"ps": 0}
+    real = subprocess.run
 
     def isdir(path):
         if path == "/proc":
             return True
         return real_isdir(path)
 
-    monkeypatch.setattr(tk.os.path, "isdir", isdir)
-
     def fake_open(path, mode="r", *args, **kwargs):
         if path == "/proc/900099/cmdline":
-            from io import BytesIO
             return BytesIO(b"")
         raise AssertionError("unexpected open: %s" % path)
-
-    monkeypatch.setattr("builtins.open", fake_open)
-    calls = {"ps": 0}
-    real = subprocess.run
 
     def wrapped(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args")
@@ -194,33 +192,35 @@ def test_process_command_empty_proc_cmdline_skips_ps(monkeypatch):
             calls["ps"] += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", wrapped)
-    assert tk._process_command(900099) == ""
-    assert calls["ps"] == 0
+    # Narrow patches: a function-scoped builtins.open monkeypatch outlives
+    # this body and breaks autouse t409 reaper teardown on Linux (real /proc).
+    with monkeypatch.context() as m:
+        m.setattr(tk.os.path, "isdir", isdir)
+        m.setattr(builtins, "open", fake_open)
+        m.setattr(subprocess, "run", wrapped)
+        assert tk._process_command(900099) == ""
+        assert calls["ps"] == 0
 
 
 def test_watch_reaper_empty_proc_cmdline_skips_ps(monkeypatch):
     """watch_reaper.process_cmdline must match tickets.py: no ps when /proc."""
+    import builtins
+    from io import BytesIO
     import watch_reaper
 
     real_isdir = os.path.isdir
+    calls = {"ps": 0}
+    real = subprocess.run
 
     def isdir(path):
         if path == "/proc":
             return True
         return real_isdir(path)
 
-    monkeypatch.setattr(watch_reaper.os.path, "isdir", isdir)
-
     def fake_open(path, mode="r", *args, **kwargs):
         if path == "/proc/900098/cmdline":
-            from io import BytesIO
             return BytesIO(b"")
         raise AssertionError("unexpected open: %s" % path)
-
-    monkeypatch.setattr("builtins.open", fake_open)
-    calls = {"ps": 0}
-    real = subprocess.run
 
     def wrapped(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args")
@@ -228,9 +228,13 @@ def test_watch_reaper_empty_proc_cmdline_skips_ps(monkeypatch):
             calls["ps"] += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(watch_reaper.subprocess, "run", wrapped)
-    assert watch_reaper.process_cmdline(900098) == ""
-    assert calls["ps"] == 0
+    # Same narrow-patch rule as test_process_command_empty_proc_cmdline_skips_ps.
+    with monkeypatch.context() as m:
+        m.setattr(watch_reaper.os.path, "isdir", isdir)
+        m.setattr(builtins, "open", fake_open)
+        m.setattr(watch_reaper.subprocess, "run", wrapped)
+        assert watch_reaper.process_cmdline(900098) == ""
+        assert calls["ps"] == 0
 
 
 def test_fixture_board_json_warm_under_1s_no_pileup(board):

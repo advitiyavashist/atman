@@ -233,8 +233,9 @@ def _proc_live_cwds(real):
     Fail-closed: any unreadable cwd (except a pid that vanished) returns a
     single unknown row. Callers may try a targeted lsof probe of this
     worktree before treating that unknown as final. Own-uid EACCES is not
-    skipped -- a same-uid helper whose cwd cannot be read still blocks GC
-    unless a targeted probe proves the worktree is unused.
+    skipped -- a same-uid helper whose cwd cannot be read still blocks GC.
+    A non-root lsof is uid-blind and cannot prove other-uid cwds absent, so
+    an empty lsof result is not a proof that the worktree is unused.
     """
     proc = "/proc"
     if not os.path.isdir(proc):
