@@ -42,6 +42,69 @@ RUN_ONE_LINER = (
     "backgrounding a test suite loses the work."
 )
 
+# T-1440: the always-loaded prompt is a fixed cost every seat pays before it
+# has done any work, and it grows with every fix. Between the release seats are
+# running today and this tree, the worker body went 289 -> 359 words, the
+# master 315 -> 368 and the CoS 319 -> 372, and the brief head above did not
+# exist at all. Nothing failed when that happened, because the caps that exist
+# bound each PART and never the total.
+#
+# Measured on this tree, 2026-09-22, and these budgets are set from those
+# measurements with headroom. They are a ratchet, not a ban: crossing one means
+# the new text earns its place by moving something behind a trigger that
+# already exists (`is_first_turn`, holding a ticket, a pinned review head)
+# rather than being added to what every seat always loads.
+#
+# tests/test_t1440_prompt_budget.py fails when a render crosses one.
+
+# The SCAFFOLD: the text the tool itself ships, rendered on a board with no
+# briefs, no role context, no knowledge graph and no ticket context. This is
+# the number that moves when someone edits a prompt string.
+FIRST_WAKE_BUDGET_WORDS = 800   # measured 678: brief head + worker body, turn 1
+STEADY_BUDGET_WORDS = 420       # measured 360: the worker body alone, turns 2+
+ROLE_PROMPT_BUDGET_WORDS = 440  # measured 372 CoS, 368 master, 290 planner
+
+# The TOTAL: the scaffold plus every board-content part filled to its own cap
+# (agent_brief 6000 chars, ROLE_CONTEXT_LIMIT 6000, the knowledge context
+# budget at its 6000 ceiling, TICKET_CONTEXT_LIMIT 2000, SCOPE_LIMIT 360).
+# This is the real worst case a seat can be handed, and it fails if any of
+# those caps is raised or a new uncapped part joins the prompt.
+TOTAL_FIRST_WAKE_BUDGET_WORDS = 3300  # measured with every text cap filled
+
+# The sum of those per-part caps, in characters: agent_brief 6000, role context
+# 6000 (shared + role file), the knowledge context budget at its ceiling 6000,
+# ticket context 2000. Stated here so raising any one of them fails a test and
+# the word budget above has to be re-measured, rather than drifting quietly.
+BOARD_CONTEXT_BUDGET_CHARS = 20000
+
+
+def word_count(text):
+    """Words in a rendered prompt -- the unit the budgets above are stated in."""
+    return len((text or "").split())
+
+
+def over_budget(text, budget):
+    """How far `text` runs past `budget`, in words. 0 when it fits.
+
+    Returned rather than raised so a caller can report the overage. The
+    budgets are enforced by the test, not by truncating a seat's prompt: a
+    silently trimmed prompt would drop a rule the seat needs and say nothing.
+    """
+    return max(0, word_count(text) - int(budget))
+
+
+def body_gate_line(with_brief_head):
+    """The one-line gate restatement for the worker body, or "" on a first turn.
+
+    On a first turn the brief head above states the gate in full (a different
+    seat accepts; a commit after `atm review` voids it; dependents stay shut),
+    so GATE_ONE_LINER would say the same thing a second time in the same
+    prompt -- 51 words, on every seat's most expensive turn. Later turns carry
+    no head and keep the one-liner: the rule that decides whether work counts
+    is never absent, only never doubled.
+    """
+    return "" if with_brief_head else GATE_ONE_LINER
+
 
 def _scope_lines(body, limit=SCOPE_LIMIT):
     """The ticket body, trimmed to something a reader holds in their head."""

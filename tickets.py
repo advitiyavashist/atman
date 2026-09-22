@@ -12949,7 +12949,12 @@ def brief_path(board, owner):
     return os.path.join(board, "briefs", owner + ".md")
 
 
-def agent_brief(board, owner, limit=6000):
+# T-1440: named so the prompt-budget test can fill this part to the cap the
+# code actually declares, instead of to a number copied into the test.
+AGENT_BRIEF_LIMIT = 6000
+
+
+def agent_brief(board, owner, limit=AGENT_BRIEF_LIMIT):
     """The agent's standing context (.tickets/briefs/<agent>.md), if any."""
     try:
         with open(brief_path(board, owner)) as f:
@@ -13044,7 +13049,15 @@ def _read_brief_file(path, limit=6000):
     return text if len(text) <= limit else text[:limit] + "\n...(brief truncated; read the file)"
 
 
-def ticket_context(board, owner):
+# T-1440: every other part of the always-loaded prompt is capped (agent_brief
+# 6000 chars, ROLE_CONTEXT_LIMIT 6000, the knowledge budget 6000, SCOPE_LIMIT
+# 360). This one concatenated every context note on every held ticket with no
+# bound at all, so the stated first-wake budget could be blown at runtime by
+# board content and no test would see it. Capped here so the total is real.
+TICKET_CONTEXT_LIMIT = 2000
+
+
+def ticket_context(board, owner, limit=TICKET_CONTEXT_LIMIT):
     """Context notes attached to the agent's held ticket(s)."""
     out = []
     for t in load_all(board):
@@ -13052,7 +13065,10 @@ def ticket_context(board, owner):
             ctx = [n["text"] for n in t.get("notes", []) if n.get("kind") == "context"]
             if ctx:
                 out.append("%s %s:\n  - %s" % (t["id"], t.get("title", "")[:60], "\n  - ".join(ctx)))
-    return "\n".join(out)
+    text = "\n".join(out)
+    if limit and len(text) > limit:
+        text = text[:limit].rstrip() + "\n...(context truncated; `atm show <id>` for the rest)"
+    return text
 
 
 def _task_dominant_extra(board, owner):
@@ -13207,15 +13223,23 @@ def prompt_text(a, board):
     if a.extra:
         parts.append(a.extra)
     sb = _seat_brief()
-    body = WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
-                                gate=sb.GATE_ONE_LINER, run=sb.RUN_ONE_LINER,
-                                extra="\n\n".join(parts))
     run_no = getattr(a, "run_no", None)
     if run_no is None:
         run_no = os.environ.get("TICKETS_RUN_NO") or ""
-    if not sb.is_first_turn(run_no):
-        return body
-    head = _safe(lambda: seat_brief_text(board, owner), "") or ""
+    head = ""
+    if sb.is_first_turn(run_no):
+        head = _safe(lambda: seat_brief_text(board, owner), "") or ""
+    # T-1440: the brief head states the accept gate in full, so the body's
+    # one-line restatement of it is dropped on a first turn and kept on every
+    # later turn, where there is no head. The rule is never absent, only never
+    # said twice in one prompt.
+    gate = sb.body_gate_line(bool(head))
+    body = WORKER_PROMPT.format(agent=owner, board=board, root=os.path.dirname(board), master=master,
+                                gate=gate, run=sb.RUN_ONE_LINER,
+                                extra="\n\n".join(parts))
+    if not gate:
+        # close the blank line the empty {gate} left behind
+        body = body.replace("board.\n\n", "board.\n", 1)
     return (head + "\n\n" + body) if head else body
 
 
