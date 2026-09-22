@@ -11598,10 +11598,16 @@ def cmd_join(a, board):
         board, owner,
         transfer=bool(getattr(a, "transfer", False)),
         on_behalf=bool(getattr(a, "on_behalf", False)))
-    # Read this BEFORE checkin(), which creates the record. Only a genuinely new
-    # agent gets a joined_at watermark; a re-join (and `atm spawn`, which
-    # calls straight through here) must leave delivery completely alone.
-    first_join = not _agent_rec(board, owner)
+    # Stamp joined_at when missing. Prefer reading AFTER guards but BEFORE
+    # checkin writes: checkin itself must not be the reason we think the seat
+    # already joined. `atm spawn` runs `_preflight_seat` → `_store_auth_check`
+    # → checkin first, which creates agents/<owner>.json with no joined_at;
+    # the old `not _agent_rec` gate then skipped the stamp on every spawned
+    # seat (T-1132), so pre-join broadcasts flooded messages_to_me and the
+    # SessionStart dump. setdefault never moves an existing watermark (T-327
+    # respawn). Legacy seats without joined_at that never re-join keep seeing
+    # full history (T-327 upgrade path).
+    needs_joined_at = not (_agent_rec(board, owner) or {}).get("joined_at")
     roles_path = os.path.join(board, "roles.json")
     roles = {}
     if os.path.isfile(roles_path):
@@ -11726,7 +11732,7 @@ def cmd_join(a, board):
     if harness:
         _safe(lambda: _clear_adapter_failure_on_provider_change(
             board, owner, harness, prev_harness), None)
-    if first_join:
+    if needs_joined_at:
         # setdefault, not update: if two joins race, the earlier stamp wins and
         # neither can move the watermark forward over unread mail.
         _agent_update(board, owner, lambda r: r.setdefault("joined_at", now()))
@@ -11975,27 +11981,47 @@ def pending_work(board, owner):
     obj_state = objective_state(obj)
     msgs = _safe(lambda: unread(board, owner), [])
     # unread() already applied registered, case-insensitive addressing and
-    # suppressed the author's own mail. Anything non-broadcast in that result
-    # is therefore a DM or named mention for this seat. This also collapses a
-    # message carrying BOTH --to and @mention to one record / one wake.
+    # suppressed the author's own mail. "Direct" for messages_to_me means
+    # named to this seat (--to or a registered @mention). Empty --to plus
+    # only an unregistered @handle (e.g. a commit sha in an idle line) is
+    # still channel mail in the inbox (T-490) but must not become
+    # messages_to_me — that is how fresh seats were woken by other agents'
+    # idle reports (T-1132).
     tickets = load_all(board)
     by_id = {t["id"]: t for t in tickets}
     def task_released(message):
         ticket = by_id.get(message.get("re"))
         return not ticket or not _work_view().unreleased_dep_id(ticket, tickets)
+    registered = _safe(lambda: _registered_handles(board), set()) or set()
+    target = (owner or "").lower()
+
+    def _named_to_me(m):
+        recipients = _to_recipient_set(m.get("to") or "")
+        mentions = {h.lower() for h in (m.get("mentions") or [])}
+        mentions = {h for h in mentions if h in registered}
+        return target in recipients or target in mentions
+
     if getattr(_BOARD_READS, "bound", False):
         bcast = {id(m): flag for m, _r, _n, flag, _mid
                  in _message_address_index(board, load_messages(board))}
-        direct = [m for m in msgs if not bcast.get(id(m), is_board_broadcast(m))]
+        def _channel_broadcast(m):
+            return bcast.get(id(m), is_board_broadcast(m))
     else:
-        direct = [m for m in msgs if not is_board_broadcast(m)]
+        def _channel_broadcast(m):
+            return is_board_broadcast(m)
+
+    direct = [m for m in msgs if _named_to_me(m)]
+    # Task wake source stays the pre-T-1132 set (named OR not a channel
+    # broadcast) so empty--to + unknown @mention + kind=task still wakes
+    # (T-1074) without turning true @everyone broadcasts into task_messages.
+    wake_src = [m for m in msgs if _named_to_me(m) or not _channel_broadcast(m)]
     if direct:
         out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
-        tasks = [_wake_message_summary(m) for m in direct
-                 if task_released(m) and _pending_message_triggers_wake(board, owner, m, obj_state)]
-        if tasks:
-            out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
-    elif msgs:
+    tasks = [_wake_message_summary(m) for m in wake_src
+             if task_released(m) and _pending_message_triggers_wake(board, owner, m, obj_state)]
+    if tasks:
+        out["task_messages"] = tasks[-WAKE_MESSAGE_LIMIT:]
+    elif not direct and msgs:
         out["broadcasts"] = len(msgs)
     held = [t for t in tickets if t.get("status") == "claimed" and t.get("owner") == owner
             and not _work_view().unreleased_dep_id(t, tickets)]
@@ -21537,6 +21563,15 @@ def main():
     if STATE.exists():
         try: last = json.loads(STATE.read_text()).get("last_at", "")
         except ValueError: pass
+    # T-1132: SessionStart dump must honor joined_at the same way inbox /
+    # pending_work do. Without this, a fresh spawn replays the whole board
+    # history (thousands of lines) even when joined_at already hides them
+    # from atm inbox / stop-hook messages_to_me.
+    joined = ""
+    agent_path = BOARD / "agents" / (AGENT + ".json")
+    if agent_path.is_file():
+        try: joined = json.loads(agent_path.read_text()).get("joined_at", "") or ""
+        except ValueError: pass
     new = []
     for ln in path.read_text().splitlines() if path.is_file() else []:
         try: m = json.loads(ln)
@@ -21545,6 +21580,10 @@ def main():
         to = m.get("to") or ""
         if to not in ("", "all", "everyone", AGENT): continue
         if m.get("from") == AGENT and to in ("", "all", "everyone"): continue
+        # Hide pre-join channel mail; keep directed --to AGENT of any age
+        # (briefs posted before the seat exists — same rule as T-327).
+        if joined and to in ("", "all", "everyone") and (m.get("at") or "") < joined:
+            continue
         new.append(m)
     out = {}
     if new:

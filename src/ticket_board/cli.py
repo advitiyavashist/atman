@@ -5279,9 +5279,11 @@ def cmd_join(a, board):
         seat, why = identity_resolution(board)
         print("session identity unchanged (%s via %s); joined %s on behalf" % (
             seat, why, owner))
-    # Before checkin(), which creates the record: only a genuinely new agent is
-    # stamped, so a re-join never moves the watermark over unread mail.
-    first_join = not _agent_rec(board, owner)
+    # Stamp joined_at when missing. Spawn preflight may create the agent
+    # record before join (T-1132); setdefault never moves an existing stamp
+    # (T-327 respawn). Legacy seats without joined_at that never re-join keep
+    # seeing full history (T-327 upgrade path).
+    needs_joined_at = not (_agent_rec(board, owner) or {}).get("joined_at")
     roles_path = os.path.join(board, "roles.json")
     roles = {}
     if os.path.isfile(roles_path):
@@ -5329,7 +5331,7 @@ def cmd_join(a, board):
     save_workforce(board, wf)
     rec = checkin(board, owner, None, "joined" + (" (%s)" % a.tool if a.tool else ""),
                   cwd=os.path.abspath(getattr(a, "worktree", "") or "") or None)
-    if first_join:
+    if needs_joined_at:
         jrec = _agent_rec(board, owner)
         jrec.setdefault("joined_at", now())
         os.makedirs(agents_dir(board), exist_ok=True)
