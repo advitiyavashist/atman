@@ -83,7 +83,11 @@ checkout:
 ```sh
 brew tap advitiyavashist/tap
 brew install atman
-atm --version                # tickets commit b34d423cac00266a2cc6fc23b94759ee04894f71 (verified release)
+atm --version
+# 0.3.0
+# tickets commit b34d423cac00266a2cc6fc23b94759ee04894f71 (verified release)
+# source: ...
+# pinned release b34d423cac00; newer releases can't be checked from here: brew upgrade atman (or re-run install_live)
 ```
 
 The formula `depends_on "python@3.13"`, so Homebrew installs and uses its own

@@ -22,6 +22,7 @@ cd atman
 ./install.sh                       # links atm + tickets into ~/.local/bin
 ./install.sh --prefix ~/isolated   # or somewhere of your own
 atm --version
+# 0.3.0
 # a raw checkout answers: tickets (uninstalled checkout; no pinned release)
 ```
 
@@ -34,6 +35,7 @@ already a symlink to this checkout — including a pinned release launcher.
 ```sh
 ./install.sh --live-release --ref <commit-sha>
 atm --version
+# 0.3.0
 # tickets commit <sha> (verified release)
 ```
 
@@ -72,6 +74,23 @@ clone, you are on the launcher. If it says `uninstalled checkout`, you are on
 whatever file the symlink points at — including a dirty working tree. `atm
 self` prints the resolved target, which is the only answer that settles it
 when several checkouts are on one machine.
+
+`--version` prints the package version first (`0.3.0`), then provenance.
+It also prints `source:` (the file that is running). A git
+checkout prints `source-sha:`; if that sha is behind `origin/main` it
+warns and prints a refresh command with a shell-quoted `-C` path. A pinned
+`release.json` is the running source: an enclosing repo (for example
+`~/.claude` inside dotfiles) is not probed unless its HEAD equals that
+release commit. Otherwise `--version` prints the brew/tarball upgrade path
+(`brew upgrade atman`). An operator runtime worktree that is not
+updated after merge will omit new commands from `atm --help` (T-1080).
+Refresh it with the printed line, or:
+
+```sh
+git -C "<runtime-worktree>" fetch origin
+git -C "<runtime-worktree>" merge --ff-only origin/main
+atm --version    # source-sha should match origin/main
+```
 
 `atm init` and `atm quickstart` belong in the project you are coordinating,
 never inside the `atm` clone.

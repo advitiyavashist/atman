@@ -83,6 +83,39 @@ PRIMARY_CLI_NAME = "atm"
 COMPAT_CLI_NAME = "tickets"
 
 
+def _package_version():
+    """Semver printed as the first line of `atm --version` (T-1080).
+
+    Reads ``ticket_board.__version__`` from the ``src/`` next to this file so
+    the monolith cannot drift from the package (and cannot silently adopt a
+    different site-packages install). Falls back to parsing ``__init__.py``.
+    """
+    root = os.path.dirname(os.path.realpath(__file__))
+    src = os.path.join(root, "src")
+    if os.path.isdir(src) and src not in sys.path:
+        sys.path.insert(0, src)
+    try:
+        import importlib
+        tb = importlib.import_module("ticket_board")
+        ver = getattr(tb, "__version__", None)
+        if ver:
+            return str(ver)
+    except Exception:
+        pass
+    init = os.path.join(src, "ticket_board", "__init__.py")
+    try:
+        with open(init, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+PACKAGE_VERSION = _package_version()
+
+
 def cli_prog(argv=None):
     """argparse/help/error name from how this process was invoked."""
     raw = (argv if argv is not None else sys.argv) or [""]
@@ -22123,7 +22156,20 @@ class _LoudArgumentParser(argparse.ArgumentParser):
     stderr, but with an explicit NO CHANGE WAS MADE as the trailing line, so
     the tail of the output is the warning rather than the caller's own text.
     add_subparsers() propagates this class to every subparser by default
-    (parser_class defaults to type(self)), so this covers all of them."""
+    (parser_class defaults to type(self)), so this covers all of them.
+
+    ``_lazy_release_epilog`` defers ``release_status()`` until help is formatted
+    so ``atm --version`` hashes the release tree only once (T-1080).
+    """
+    def __init__(self, *args, lazy_release_epilog=False, **kwargs):
+        self._lazy_release_epilog = lazy_release_epilog
+        argparse.ArgumentParser.__init__(self, *args, **kwargs)
+
+    def format_help(self):
+        if self._lazy_release_epilog and not self.epilog:
+            self.epilog = release_status()
+        return argparse.ArgumentParser.format_help(self)
+
     def error(self, message):
         self.print_usage(sys.stderr)
         self.exit(2, "%(prog)s: error: %(message)s\n%(prog)s: NO CHANGE WAS MADE\n" % {
@@ -22214,6 +22260,73 @@ def release_status():
 
 # Backward-compatible alias: scripts/tests may still import the old name.
 release_version = release_status
+
+
+def _source_behind_lines(root, head, remote):
+    """Warn when this checkout's HEAD is a strict ancestor of origin/main."""
+    if not (root and head and remote and head != remote):
+        return []
+    if git("merge-base", "--is-ancestor", head, remote, cwd=root) is None:
+        return []
+    quoted = shlex.quote(root)
+    return [
+        "WARNING: running source %s is behind origin/main %s"
+        % (head[:12], remote[:12]),
+        "refresh: git -C %s fetch origin && git -C %s merge --ff-only origin/main"
+        % (quoted, quoted),
+    ]
+
+
+def _same_commit(left, right):
+    a = (left or "").strip()
+    b = (right or "").strip()
+    if not a or not b:
+        return False
+    n = min(len(a), len(b), 40)
+    if n < 7:
+        return False
+    return a[:n] == b[:n]
+
+
+def _pinned_release_upgrade_line(pinned):
+    short = pinned[:12] if len(pinned or "") >= 12 else (pinned or "")
+    return (
+        "pinned release %s; newer releases can't be checked from here: "
+        "brew upgrade atman (or re-run install_live)" % short
+    )
+
+
+def runtime_version_report():
+    """What `atm --version` prints: package version, provenance, the file
+    that is running, and a behind warning when this checkout is older than
+    origin/main.
+
+    First line is ``PACKAGE_VERSION`` (e.g. ``0.3.0``) on every install shape
+    that executes this file. Second line is ``release_status()``. Extra lines
+    are T-1080: an operator worktree must not silently pin last week's CLI
+    (``atm steer`` missing from ``--help``).
+
+    When release.json names a commit, that commit is the running source.
+    An enclosing git repo (dotfiles / ~/.claude) is probed only when its
+    HEAD equals that commit. Otherwise print the brew/tarball upgrade path.
+    """
+    status = release_status()
+    script = os.path.realpath(__file__)
+    lines = [PACKAGE_VERSION, status, "source: %s" % script]
+    pinned = _release_commit()
+    root = _git_root_from(script)
+    head = (git("rev-parse", "HEAD", cwd=root) if root else None) or ""
+    if pinned and not (head and _same_commit(head, pinned)):
+        lines.append(_pinned_release_upgrade_line(pinned))
+        return "\n".join(lines)
+    if head:
+        lines.append("source-sha: %s" % head)
+        remote = (
+            git("rev-parse", "-q", "--verify", "origin/main", cwd=root)
+            or git("rev-parse", "-q", "--verify", "origin/master", cwd=root)
+            or "")
+        lines.extend(_source_behind_lines(root, head, remote))
+    return "\n".join(lines)
 
 
 def cmd_self(a, board):
@@ -22462,11 +22575,26 @@ def cmd_feedback(a, board):
     print(text)
 
 
+class _RawVersion(argparse.Action):
+    """Print runtime_version_report() without HelpFormatter wrapping (T-1080)."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help=None):
+        argparse.Action.__init__(
+            self, option_strings=option_strings, dest=dest, default=default,
+            nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        sys.stdout.write(runtime_version_report() + "\n")
+        parser.exit()
+
+
 def main():
-    status = release_status()
+    # Defer release_status() until help; --version calls it once inside
+    # runtime_version_report() (T-1080 REQUEST CHANGES).
     p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
-                           epilog=status)
-    p.add_argument("--version", action="version", version=status)
+                           lazy_release_epilog=True)
+    p.add_argument("--version", action=_RawVersion, help="show program's version number and exit")
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
@@ -23348,6 +23476,8 @@ def main():
         register(sub, globals())
 
     a = p.parse_args()
+    # After --version may have exited: hash once for drift warning / help epilog.
+    status = release_status()
     if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
         print("WARNING: %s -- see 'atm --version'" % status, file=sys.stderr)
     if not a.cmd:
