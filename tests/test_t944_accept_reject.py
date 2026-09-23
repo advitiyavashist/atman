@@ -177,9 +177,12 @@ def test_reject_records_structured_event(tool, board):
     r = run(tool, board, "reject", "T-001", "--sha", short,
             "--reason", "tests missing", agent="reviewer")
     assert r.returncode == 0, r.stderr + r.stdout
-    evs = load_ticket(board, "T-001")["review_events"]
+    t = load_ticket(board, "T-001")
+    evs = t["review_events"]
     assert evs[0]["kind"] == "reject" and evs[0]["reason"] == "tests missing"
     assert evs[0]["sha"] == short
+    # T-1460: reject returns the author to claimed (API decideReview parity).
+    assert t["status"] == "claimed" and t["owner"] == "alice"
     shown = run(tool, board, "show", "T-001", agent="reviewer")
     assert shown.returncode == 0
     assert "Review events:" in shown.stdout
