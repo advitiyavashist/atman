@@ -434,7 +434,8 @@ export function projectWorkloadLine(counts: Record<string, number> | undefined):
  *
  * Prefer the sounding/capture sentence when present. For an accepted ticket,
  * fall back to the structured accept record (who + sha) — never "no proof
- * recorded" next to "Accepted by @seat".
+ * recorded" next to "Accepted by @seat". When an accept exists but does not
+ * apply (no review_head), name that gap instead of "no proof recorded".
  */
 export function acceptanceProofText(ticket: {
   accepted: boolean;
@@ -443,7 +444,21 @@ export function acceptanceProofText(ticket: {
 }): { text: string; missing: string } {
   const sounding = (ticket.acceptance?.proof || "").trim();
   if (sounding) return { text: sounding, missing: "" };
-  if (!ticket.accepted) return { text: "", missing: "no proof recorded" };
+  if (!ticket.accepted) {
+    const unbound = (ticket.review?.verdicts || []).find(
+      (x) => x.kind === "accept" && !x.applies && !x.superseded,
+    );
+    if (unbound) {
+      const sha = (unbound.sha || "").trim();
+      return {
+        text:
+          `accept by @${unbound.by || "?"} on ${sha ? sha.slice(0, 7) : "?"} ` +
+          "is not bound to a review head: run atm review, then accept at that sha",
+        missing: "",
+      };
+    }
+    return { text: "", missing: "no proof recorded" };
+  }
   const label = (ticket.review?.label || "").trim();
   if (label) return { text: label, missing: "" };
   const v = (ticket.review?.verdicts || []).find(

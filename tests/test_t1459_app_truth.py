@@ -121,3 +121,104 @@ def test_acceptance_proof_helper_prefers_sounding():
         [],
     )
     assert tk._ui_acceptance_proof({"proof": ""}, False, "Accepted by @bob on 6cf5700") == ""
+    unbound = tk._ui_acceptance_proof(
+        {"proof": ""},
+        False,
+        "Accepted by @bob on 6cf5700",
+        [{
+            "kind": "accept",
+            "by": "bob",
+            "sha": "6cf57003447931cf822f50ee8aeca2389700507b",
+            "applies": False,
+            "superseded": False,
+        }],
+    )
+    assert "not bound to a review head" in unbound
+    assert "@bob" in unbound
+    assert "6cf5700" in unbound
+    assert "atm review" in unbound
+
+
+def test_unbound_accept_proof_via_real_cli(tmp_path):
+    """CEO REJECT repro: done --force then accept without review_head.
+
+    Seed through the real CLI, not hand-written review_head JSON. The
+    drill-down must name the unbound accept instead of 'no proof recorded',
+    and a dependent's plan hint must not offer bare atm accept.
+    """
+    import subprocess
+
+    board = tmp_path / "proj" / ".tickets"
+    board.mkdir(parents=True)
+    (board / "agents").mkdir()
+    for name in ("alice", "bob"):
+        write(board / "agents" / (name + ".json"), {"owner": name, "seen": stamp(1)})
+    write(board / "workforce.json", {"alice": {"harness": "codex"}, "bob": {"harness": "claude"}})
+    ticket(board, "T-001", "Write CSV statistics", status="open", owner="")
+    ticket(
+        board,
+        "T-002",
+        "Consume verified statistics",
+        status="open",
+        owner="",
+        deps=["T-001"],
+    )
+
+    full_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(ROOT), text=True
+    ).strip()
+    assert len(full_sha) == 40
+
+    def run(agent, *args):
+        env = os.environ.copy()
+        env["TICKETS_DIR"] = str(board)
+        env["TICKET_AGENT"] = agent
+        # Seat/session pins from the worker shell must not override the agent.
+        for k in ("TICKET_SEAT", "TICKETS_WATCH_PINNED", "TICKET_SESSION_ID"):
+            env.pop(k, None)
+        return subprocess.run(
+            [sys.executable, str(ROOT / "tickets.py"), *args],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    claim = run("alice", "claim", "T-001")
+    assert claim.returncode == 0, claim.stdout + claim.stderr
+    done = run("alice", "done", "T-001", "--force", "--notes", "shipped")
+    assert done.returncode == 0, done.stdout + done.stderr
+    accept = run("bob", "accept", "T-001", "--sha", full_sha, "--notes", "ok")
+    assert accept.returncode == 0, accept.stdout + accept.stderr
+
+    raw = json.loads((board / "T-001.json").read_text())
+    assert not raw.get("review_head"), "done --force must not invent review_head"
+    assert any(
+        (e.get("kind") or "").lower() == "accept" for e in (raw.get("review_events") or [])
+    )
+
+    out = tk.ui_ticket(str(board), "T-001", "boss", "normal")
+    assert out["accepted"] is False
+    proof = out["acceptance"]["proof"]
+    assert proof, "must not leave ACCEPTANCE PROOF empty beside Accepted by"
+    assert "no proof recorded" not in proof
+    assert "not bound to a review head" in proof
+    assert "@bob" in proof
+    assert full_sha[:7] in proof
+    assert "atm review" in proof
+    assert "Accepted by @bob" in (out["review"]["label"] or "")
+
+    # Dependent still blocked: hint must name the unbound accept, not bare accept.
+    from src.ticket_board import work_view as wv
+
+    tickets = tk.load_all(str(board))
+    by_id = {t["id"]: t for t in tickets}
+    child = {"id": "T-002", "phase": "ready", "deps": ["T-001"]}
+    blockers = wv.blockers_of(child, by_id)
+    assert len(blockers) == 1
+    b = blockers[0]
+    assert b["kind"] == "dep_unaccepted"
+    assert "not bound to a review head" in b["text"]
+    assert "atm review" in b["cmd"]
+    assert b["cmd"].index("atm review") < b["cmd"].index("atm accept")

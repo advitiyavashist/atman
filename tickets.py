@@ -20140,6 +20140,28 @@ def _ui_dep_state(dep):
     return dep.get("status") or "open"
 
 
+def _ui_unbound_accept_message(verdicts):
+    """Plain sentence when an accept exists but is not bound to review_head.
+
+    ``done --force`` then ``accept --sha`` records the event without
+    ``review_head``, so ``accepted`` stays false and the verdict's
+    ``applies`` is false. Name that gap instead of "no proof recorded".
+    """
+    for v in verdicts or []:
+        if (v.get("kind") or "").lower() != "accept":
+            continue
+        if v.get("superseded") or v.get("applies"):
+            continue
+        by = (v.get("by") or "").strip() or "?"
+        sha = (v.get("sha") or "").strip()
+        short = sha[:7] if sha else "?"
+        return (
+            "accept by @%s on %s is not bound to a review head: "
+            "run atm review, then accept at that sha" % (by, short)
+        )
+    return ""
+
+
 def _ui_acceptance_proof(t, accepted, review_label, verdicts=None):
     """What the drill-down shows under ACCEPTANCE PROOF.
 
@@ -20147,12 +20169,13 @@ def _ui_acceptance_proof(t, accepted, review_label, verdicts=None):
     ticket without that sentence still has a verification record — the
     structured accept/merge (who + sha). Prefer that label over silence so the
     app never says "no proof recorded" next to "Accepted by @seat on <sha>".
+    When an accept exists but does not apply (no review_head), say so plainly.
     """
     sounding = (t.get("proof") or "").strip()
     if sounding:
         return sounding
     if not accepted:
-        return ""
+        return _ui_unbound_accept_message(verdicts)
     label = (review_label or "").strip()
     if label:
         return label
