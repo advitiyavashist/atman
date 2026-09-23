@@ -72,7 +72,13 @@ def test_cast_header_and_public_evidence_do_not_expose_operator_paths():
         for path in [ASSETS / "demo.cast", ASSETS / "captions.md", *EVIDENCE.rglob("*")]
         if path.is_file()
     )
-    for forbidden in ("/Users/", "/private/", "kavana"):
+    # Also the operator's own home handle, read at test time so the repo never
+    # names it. On CI the home is a generic account ("runner") whose name is an
+    # ordinary word, so only the path checks apply there.
+    forbidden_all = ["/Users/", "/private/"]
+    if not os.environ.get("CI"):
+        forbidden_all.append(os.path.basename(os.path.expanduser("~")))
+    for forbidden in forbidden_all:
         assert forbidden not in published
 
 

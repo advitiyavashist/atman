@@ -484,7 +484,7 @@ COMPACT_MAX = 56
 # slip past the old 9–13 cap and print as a reset.
 _EPOCHISH = re.compile(r"^\d{9,}$")
 # IANA area names only. A slash in a reset is a timezone, but only when
-# the first segment is a real area -- otherwise Users/kavana/secrets and
+# the first segment is a real area -- otherwise Users/someone/secrets and
 # ghp/AAAAAAAAAAAA would skip _scrub's slash rule and 24-char cap.
 # Later segments are letters/underscore only (no dots, no digits), so
 # Etc/GMT is exempt and Etc/GMT+3 is not: a digit in a segment fails.

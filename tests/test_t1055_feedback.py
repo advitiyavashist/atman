@@ -105,7 +105,7 @@ def test_feedback_counts_a_limited_seat_without_naming_it(board):
 
 def test_feedback_does_not_print_a_seat_named_after_the_user(board):
     """Seat names are often the person's own login name: count, never name."""
-    user = "kavanauser"
+    user = "someoneuser"
     r = run(board, "limit", user, "--note", "quota")
     assert r.returncode == 0, r.stderr
     out = run(board, "feedback").stdout
