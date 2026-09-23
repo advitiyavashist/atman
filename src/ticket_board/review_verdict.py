@@ -175,6 +175,29 @@ def apply(t, reviewer, sha, kind, notes="", reason="", at=None, require_full=Fal
     return ev, None
 
 
+def return_to_author_for_revision(t, *, actor, reason, sha="", kind="reject"):
+    """Return IN REVIEW work to the author as claimed (T-1460).
+
+    Matches API ``decideReview(reject)``: status becomes ``claimed``, owner is
+    unchanged. ``review_at`` / ``review_head`` stay as history. Mutates ``t``.
+    Returns the author id (may be empty when the ticket had no owner).
+    """
+    author = (t.get("owner") or "").strip()
+    t["status"] = "claimed"
+    if kind == "reject":
+        text = "REJECT %s -- returned to %s for revision: %s" % (
+            (sha or "?")[:12], author or "author", (reason or "").strip())
+    else:
+        text = "REVISION: returned to %s as claimed -- %s" % (
+            author or "author", (reason or "").strip())
+    t.setdefault("notes", []).append({
+        "by": (actor or "?").strip() or "?",
+        "at": now(),
+        "text": text,
+    })
+    return author
+
+
 def format_detail(t):
     lines = []
     for ev in t.get("review_events") or []:

@@ -2567,14 +2567,37 @@ def cmd_accept(a, board):
 
 
 def cmd_reject(a, board):
-    """Record a structured reject bound to the submitted review head (T-944)."""
+    """Record a structured reject and return the ticket to its author (T-944/T-1460).
+
+    API decideReview(reject) already flips state to claimed with the same owner.
+    CLI used to leave status=review, so atm mine stayed empty and the author
+    idled until a coordinator ran reopen+assign. Reject now matches the API.
+    """
     t = load(board, a.id)
+    reviewer = whoami()
     ev, err = _rv.apply(
-        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+        t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
     if err:
         sys.exit(err)
+    author = _rv.return_to_author_for_revision(
+        t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
+        kind="reject")
+    tc = _recovery()
+    if tc is not None and author:
+        tc.issue_owner_lease(
+            t, author, harness=_lease_harness(board, author),
+            reason="reject-revision", previous_owner=author)
+        tc.rewrite_claim_lock(board, t["id"], author)
     save(board, t)
-    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
+    if author:
+        _bind_agent_ticket(board, author, t["id"])
+        post_message(
+            board, reviewer,
+            "%s rejected %s -- revise and resubmit: %s" % (
+                t["id"], ev["sha"][:12], ev.get("reason") or ""),
+            to=author, re=t["id"], task=True)
+    print("%s rejected %s by %s; returned to %s as claimed for revision" % (
+        a.id, ev["sha"], ev["by"], author or "?"))
 
 
 def _trunk():
@@ -3299,6 +3322,43 @@ def cmd_assign(a, board):
                     t = got
                     changed.append("claimed for %s" % a.owner)
                     bind_owner = a.owner
+            elif t["status"] == "review" and a.owner:
+                # T-1460: retarget an IN REVIEW ticket so the assignee can act.
+                # Free seat → claimed; already holding another → open+reserved
+                # (same one-active-hold rule as assign on open).
+                held = _held_claimed(board, a.owner, except_id=t["id"])
+                if held:
+                    t["status"] = "open"
+                    t["owner"] = ""
+                    t["reserved_for"] = a.owner
+                    if prev_owner:
+                        clear_prev = prev_owner
+                    lock = os.path.join(board, t["id"] + ".lock")
+                    if os.path.exists(lock):
+                        try:
+                            os.unlink(lock)
+                        except OSError:
+                            pass
+                    changed.append("reserved for %s (already holds %s); left IN REVIEW for revision" % (
+                        a.owner, ", ".join(x["id"] for x in held)))
+                else:
+                    if prev_owner and prev_owner != a.owner:
+                        clear_prev = prev_owner
+                        tc = _recovery()
+                        if tc is not None:
+                            expected_generation = tc.owner_generation(t)
+                            tc.issue_owner_lease(
+                                t, a.owner, harness=_lease_harness(board, a.owner),
+                                reason="review-retarget",
+                                previous_owner=prev_owner)
+                            rewrite_lock_to = a.owner
+                    t["status"] = "claimed"
+                    t["owner"] = a.owner
+                    if not t.get("claimed_at"):
+                        t["claimed_at"] = now()
+                    bind_owner = a.owner
+                    transfer_owner = a.owner
+                    changed.append("claimed for %s (returned from review)" % a.owner)
             elif t["status"] in ("claimed", "review"):
                 if t["status"] == "claimed" and a.owner and a.owner != prev_owner:
                     transfer_owner = a.owner
@@ -4008,14 +4068,47 @@ def cmd_reopen(a, board):
     t = load(board, a.id)
     _refuse_unreleased_deps(t, load_all(board), only_done=True)
     notes = getattr(a, "notes", "") or ""
+    revision = bool(getattr(a, "revision", False))
     # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
     # ticket to `next` while notes still read as REVIEW. Claimed work that
     # never entered review stays reopenable without notes (T-246).
-    if (t["status"] == "review" or t.get("review_at")) and not notes.strip():
+    if (t["status"] == "review" or t.get("review_at") or revision) and not notes.strip():
         sys.exit(
             'reopen of IN REVIEW work needs --notes "why" '
             "(silent reopen returns it to next and looks like a next-reissue bug)"
         )
+    # T-1460: explicit revise request -- return to the author as claimed,
+    # distinct from release-to-pool reopen (which clears owner → open).
+    if revision:
+        if t.get("status") != "review":
+            sys.exit("--revision only applies while the ticket is IN REVIEW")
+        prev_owner = (t.get("owner") or "").strip()
+        if not prev_owner:
+            sys.exit("%s has no owner to return the revision to" % a.id)
+        actor = whoami(getattr(a, "by", ""))
+        before = t["status"]
+        _work_view().supersede_release_evidence(t)
+        author = _rv.return_to_author_for_revision(
+            t, actor=actor, reason=notes, sha="", kind="revision")
+        t["owner"] = prev_owner
+        tc = _recovery()
+        if tc is not None:
+            tc.issue_owner_lease(
+                t, prev_owner, harness=_lease_harness(board, prev_owner),
+                reason="revision-request", previous_owner=prev_owner)
+            tc.rewrite_claim_lock(board, t["id"], prev_owner)
+        save(board, t)
+        traj_event(board, "reopen", agent=actor, ticket=t,
+                   state_before=before, state_after="claimed",
+                   outcome="revision", prev_owner=prev_owner,
+                   notes_len=len(notes), **_traj_git())
+        _bind_agent_ticket(board, prev_owner, t["id"])
+        post_message(
+            board, actor,
+            "%s returned for revision: %s" % (t["id"], notes[:160]),
+            to=prev_owner, re=t["id"], task=True)
+        print("%s returned to %s as claimed for revision" % (a.id, author or prev_owner))
+        return
     if notes:
         t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": notes})
     before = t["status"]
@@ -6015,7 +6108,7 @@ def main():
     c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
     c.set_defaults(fn=cmd_accept)
 
-    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c = sub.add_parser("reject", help="reject the submitted SHA and return the ticket to its author as claimed")
     c.add_argument("id")
     c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
     c.add_argument("--reason", required=True, help="why this artifact is rejected")
@@ -6138,6 +6231,9 @@ def main():
     c.add_argument("id")
     c.add_argument("--notes", "-n", default="",
                    help="why it's being reopened (required for IN REVIEW / review_at)")
+    c.add_argument("--revision", action="store_true",
+                   help="T-1460: return IN REVIEW work to its owner as claimed for revision "
+                        "(instead of releasing to open)")
     c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
     c.set_defaults(fn=cmd_reopen)
 
