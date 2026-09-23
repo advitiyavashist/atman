@@ -122,7 +122,7 @@ def test_acceptance_proof_helper_prefers_sounding():
     )
     assert tk._ui_acceptance_proof({"proof": ""}, False, "Accepted by @bob on 6cf5700") == ""
     unbound = tk._ui_acceptance_proof(
-        {"proof": ""},
+        {"proof": "", "id": "T-001"},
         False,
         "Accepted by @bob on 6cf5700",
         [{
@@ -136,7 +136,74 @@ def test_acceptance_proof_helper_prefers_sounding():
     assert "not bound to a review head" in unbound
     assert "@bob" in unbound
     assert "6cf5700" in unbound
+    assert "atm reopen T-001" in unbound
+    assert "then claim" in unbound
     assert "atm review" in unbound
+    applying = tk._ui_acceptance_proof(
+        {"proof": ""},
+        False,
+        "Accepted by @bob on 6cf5700",
+        [{
+            "kind": "accept",
+            "by": "bob",
+            "sha": "6cf57003447931cf822f50ee8aeca2389700507b",
+            "applies": True,
+            "superseded": False,
+        }],
+    )
+    assert applying == "Accepted by @bob on 6cf5700 (not marked done yet)"
+    # Newest unbound accept wins (not the first).
+    newest = tk._ui_unbound_accept_message(
+        [
+            {
+                "kind": "accept",
+                "by": "alice",
+                "sha": "1111111111111111111111111111111111111111",
+                "applies": False,
+                "superseded": False,
+            },
+            {
+                "kind": "accept",
+                "by": "bob",
+                "sha": "6cf57003447931cf822f50ee8aeca2389700507b",
+                "applies": False,
+                "superseded": False,
+            },
+        ],
+        tid="T-009",
+    )
+    assert "@bob" in newest and "6cf5700" in newest
+    assert "@alice" not in newest
+
+
+def _cli_board(tmp_path, *tids_titles):
+    board = tmp_path / "proj" / ".tickets"
+    board.mkdir(parents=True)
+    (board / "agents").mkdir()
+    for name in ("alice", "bob"):
+        write(board / "agents" / (name + ".json"), {"owner": name, "seen": stamp(1)})
+    write(board / "workforce.json", {"alice": {"harness": "codex"}, "bob": {"harness": "claude"}})
+    for tid, title, extra in tids_titles:
+        ticket(board, tid, title, status="open", owner="", **extra)
+    return board
+
+
+def _cli_run(board, agent, *args):
+    import subprocess
+
+    env = os.environ.copy()
+    env["TICKETS_DIR"] = str(board)
+    env["TICKET_AGENT"] = agent
+    for k in ("TICKET_SEAT", "TICKETS_WATCH_PINNED", "TICKET_SESSION_ID"):
+        env.pop(k, None)
+    return subprocess.run(
+        [sys.executable, str(ROOT / "tickets.py"), *args],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def test_unbound_accept_proof_via_real_cli(tmp_path):
@@ -144,24 +211,15 @@ def test_unbound_accept_proof_via_real_cli(tmp_path):
 
     Seed through the real CLI, not hand-written review_head JSON. The
     drill-down must name the unbound accept instead of 'no proof recorded',
-    and a dependent's plan hint must not offer bare atm accept.
+    and a dependent's plan hint must offer reopen (not review-on-DONE).
+    Then run that suggested path and prove it binds a review head.
     """
     import subprocess
 
-    board = tmp_path / "proj" / ".tickets"
-    board.mkdir(parents=True)
-    (board / "agents").mkdir()
-    for name in ("alice", "bob"):
-        write(board / "agents" / (name + ".json"), {"owner": name, "seen": stamp(1)})
-    write(board / "workforce.json", {"alice": {"harness": "codex"}, "bob": {"harness": "claude"}})
-    ticket(board, "T-001", "Write CSV statistics", status="open", owner="")
-    ticket(
-        board,
-        "T-002",
-        "Consume verified statistics",
-        status="open",
-        owner="",
-        deps=["T-001"],
+    board = _cli_board(
+        tmp_path,
+        ("T-001", "Write CSV statistics", {}),
+        ("T-002", "Consume verified statistics", {"deps": ["T-001"]}),
     )
 
     full_sha = subprocess.check_output(
@@ -169,27 +227,11 @@ def test_unbound_accept_proof_via_real_cli(tmp_path):
     ).strip()
     assert len(full_sha) == 40
 
-    def run(agent, *args):
-        env = os.environ.copy()
-        env["TICKETS_DIR"] = str(board)
-        env["TICKET_AGENT"] = agent
-        # Seat/session pins from the worker shell must not override the agent.
-        for k in ("TICKET_SEAT", "TICKETS_WATCH_PINNED", "TICKET_SESSION_ID"):
-            env.pop(k, None)
-        return subprocess.run(
-            [sys.executable, str(ROOT / "tickets.py"), *args],
-            cwd=str(ROOT),
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    claim = run("alice", "claim", "T-001")
+    claim = _cli_run(board, "alice", "claim", "T-001")
     assert claim.returncode == 0, claim.stdout + claim.stderr
-    done = run("alice", "done", "T-001", "--force", "--notes", "shipped")
+    done = _cli_run(board, "alice", "done", "T-001", "--force", "--notes", "shipped")
     assert done.returncode == 0, done.stdout + done.stderr
-    accept = run("bob", "accept", "T-001", "--sha", full_sha, "--notes", "ok")
+    accept = _cli_run(board, "bob", "accept", "T-001", "--sha", full_sha, "--notes", "ok")
     assert accept.returncode == 0, accept.stdout + accept.stderr
 
     raw = json.loads((board / "T-001.json").read_text())
@@ -206,10 +248,12 @@ def test_unbound_accept_proof_via_real_cli(tmp_path):
     assert "not bound to a review head" in proof
     assert "@bob" in proof
     assert full_sha[:7] in proof
+    assert "atm reopen T-001" in proof
+    assert "then claim" in proof
     assert "atm review" in proof
     assert "Accepted by @bob" in (out["review"]["label"] or "")
 
-    # Dependent still blocked: hint must name the unbound accept, not bare accept.
+    # Dependent still blocked: hint must lead with reopen, not review-on-DONE.
     from src.ticket_board import work_view as wv
 
     tickets = tk.load_all(str(board))
@@ -220,5 +264,62 @@ def test_unbound_accept_proof_via_real_cli(tmp_path):
     b = blockers[0]
     assert b["kind"] == "dep_unaccepted"
     assert "not bound to a review head" in b["text"]
-    assert "atm review" in b["cmd"]
+    assert b["cmd"] == wv.unbound_accept_fix_cmd("T-001")
+    assert "atm reopen T-001" in b["cmd"]
+    assert b["cmd"].index("atm reopen") < b["cmd"].index("atm claim")
+    assert b["cmd"].index("atm claim") < b["cmd"].index("atm review")
     assert b["cmd"].index("atm review") < b["cmd"].index("atm accept")
+
+    # Prove review-on-DONE fails, and the suggested reopen path works.
+    bad = _cli_run(board, "alice", "review", "T-001", "--force", "--notes", "cannot")
+    assert bad.returncode != 0
+    assert "DONE" in (bad.stderr + bad.stdout) or "done" in (bad.stderr + bad.stdout).lower()
+    reopen = _cli_run(board, "bob", "reopen", "T-001", "--notes", "bind a review head")
+    assert reopen.returncode == 0, reopen.stdout + reopen.stderr
+    reclaim = _cli_run(board, "alice", "claim", "T-001")
+    assert reclaim.returncode == 0, reclaim.stdout + reclaim.stderr
+    review = _cli_run(board, "alice", "review", "T-001", "--force", "--notes", "paths")
+    assert review.returncode == 0, review.stdout + review.stderr
+    raw2 = json.loads((board / "T-001.json").read_text())
+    head = (raw2.get("review_head") or "").strip()
+    assert len(head) == 40, "reopen path must pin a full review_head"
+    accept2 = _cli_run(board, "bob", "accept", "T-001", "--sha", head, "--notes", "bound")
+    assert accept2.returncode == 0, accept2.stdout + accept2.stderr
+    raw3 = json.loads((board / "T-001.json").read_text())
+    assert wv.structured_accept(raw3)
+
+
+def test_applying_accept_while_in_review_via_real_cli(tmp_path):
+    """CEO REJECT repro: IN REVIEW + accept at head still shows proof.
+
+    claim -> review --force -> accept --sha <head> leaves status=review so
+    accepted is false, but the accept applies. ACCEPTANCE PROOF must show
+    the applying accept, not 'no proof recorded'.
+    """
+    board = _cli_board(tmp_path, ("T-001", "Write CSV statistics", {}))
+
+    claim = _cli_run(board, "alice", "claim", "T-001")
+    assert claim.returncode == 0, claim.stdout + claim.stderr
+    review = _cli_run(board, "alice", "review", "T-001", "--force", "--notes", "paths")
+    assert review.returncode == 0, review.stdout + review.stderr
+    raw = json.loads((board / "T-001.json").read_text())
+    assert raw.get("status") == "review"
+    head = (raw.get("review_head") or "").strip()
+    assert len(head) == 40
+
+    accept = _cli_run(board, "bob", "accept", "T-001", "--sha", head, "--notes", "ok")
+    assert accept.returncode == 0, accept.stdout + accept.stderr
+    raw2 = json.loads((board / "T-001.json").read_text())
+    assert raw2.get("status") == "review", "accept must not mark done"
+
+    out = tk.ui_ticket(str(board), "T-001", "boss", "normal")
+    assert out["accepted"] is False
+    assert out["status"] == "review"
+    assert any(v.get("applies") for v in (out["review"]["verdicts"] or []))
+    proof = out["acceptance"]["proof"]
+    assert proof, "must not leave ACCEPTANCE PROOF empty beside Accepted by"
+    assert "no proof recorded" not in proof
+    assert "Accepted by @bob" in proof
+    assert head[:7] in proof
+    assert "not marked done yet" in proof
+    assert "Accepted by @bob" in (out["review"]["label"] or "")

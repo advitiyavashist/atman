@@ -459,6 +459,22 @@ def _unbound_accept_event(t):
     return latest
 
 
+def unbound_accept_fix_cmd(tid):
+    """Copyable path when an accept exists on a DONE ticket without review_head.
+
+    ``atm review`` refuses DONE work; reopen + claim + review + accept is the
+    path that actually binds a new head.
+    """
+    tid = tid or "<id>"
+    return (
+        'atm reopen %s --notes "..."; '
+        "atm claim %s; "
+        'atm review %s --notes "..."; '
+        'atm accept %s --sha <new head> --notes "..."'
+        % (tid, tid, tid, tid)
+    )
+
+
 def blockers_of(node, by_id, seats=None):
     """Why this node cannot move. Records only; prose is never evidence.
 
@@ -481,9 +497,7 @@ def blockers_of(node, by_id, seats=None):
                     "kind": "unaccepted", "on": tid,
                     "text": ("accept by @%s on %s is not bound to a review head"
                              % (by, sha)),
-                    "cmd": ("atm review %s --notes \"...\"; "
-                            "atm accept %s --sha <review head> --notes \"...\""
-                            % (tid, tid)),
+                    "cmd": unbound_accept_fix_cmd(tid),
                 })
             else:
                 out.append({"kind": "unaccepted", "on": tid, "text": "done, not accepted",
@@ -505,9 +519,7 @@ def blockers_of(node, by_id, seats=None):
                     "kind": "dep_unaccepted", "on": d,
                     "text": ("dep %s accept by @%s on %s is not bound to a review head"
                              % (d, by, sha)),
-                    "cmd": ("atm review %s --notes \"...\"; "
-                            "atm accept %s --sha <review head> --notes \"...\""
-                            % (d, d)),
+                    "cmd": unbound_accept_fix_cmd(d),
                 })
             else:
                 out.append({"kind": "dep_unaccepted", "on": d, "text": "dep %s done, not accepted" % d,

@@ -452,6 +452,7 @@ describe("acceptance proof (T-1459)", () => {
 
   it("names an accept that is not bound to a review head", () => {
     const out = acceptanceProofText({
+      id: "T-001",
       accepted: false,
       acceptance: { proof: "" },
       review: {
@@ -471,7 +472,59 @@ describe("acceptance proof (T-1459)", () => {
     expect(out.text).toContain("not bound to a review head");
     expect(out.text).toContain("@bob");
     expect(out.text).toContain("6cf5700");
+    expect(out.text).toContain('atm reopen T-001 --notes "..."');
+    expect(out.text).toContain("then claim");
     expect(out.text).toContain("atm review");
     expect(out.missing).not.toBe("no proof recorded");
+  });
+
+  it("names an applying accept while the ticket is not yet done", () => {
+    const out = acceptanceProofText({
+      accepted: false,
+      acceptance: { proof: "" },
+      review: {
+        label: "Accepted by @bob on 6cf5700",
+        verdicts: [
+          {
+            kind: "accept",
+            by: "bob",
+            sha: "6cf57003447931cf822f50ee8aeca2389700507b",
+            applies: true,
+            superseded: false,
+          },
+        ],
+      },
+    });
+    expect(out.missing).toBe("");
+    expect(out.text).toBe("Accepted by @bob on 6cf5700 (not marked done yet)");
+  });
+
+  it("picks the newest unbound accept, not the first", () => {
+    const out = acceptanceProofText({
+      id: "T-009",
+      accepted: false,
+      acceptance: { proof: "" },
+      review: {
+        verdicts: [
+          {
+            kind: "accept",
+            by: "alice",
+            sha: "1111111111111111111111111111111111111111",
+            applies: false,
+            superseded: false,
+          },
+          {
+            kind: "accept",
+            by: "bob",
+            sha: "6cf57003447931cf822f50ee8aeca2389700507b",
+            applies: false,
+            superseded: false,
+          },
+        ],
+      },
+    });
+    expect(out.text).toContain("@bob");
+    expect(out.text).toContain("6cf5700");
+    expect(out.text).not.toContain("@alice");
   });
 });

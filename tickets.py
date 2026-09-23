@@ -20140,26 +20140,56 @@ def _ui_dep_state(dep):
     return dep.get("status") or "open"
 
 
-def _ui_unbound_accept_message(verdicts):
+def _ui_newest_accept_verdict(verdicts, *, applies=None):
+    """Newest non-superseded accept verdict, optionally filtered by applies.
+
+    Matches ``work_view._unbound_accept_event`` (newest wins), not first-match.
+    """
+    latest = None
+    for v in verdicts or []:
+        if (v.get("kind") or "").lower() != "accept":
+            continue
+        if v.get("superseded"):
+            continue
+        if applies is True and not v.get("applies"):
+            continue
+        if applies is False and v.get("applies"):
+            continue
+        latest = v
+    return latest
+
+
+def _ui_unbound_accept_message(verdicts, tid=""):
     """Plain sentence when an accept exists but is not bound to review_head.
 
     ``done --force`` then ``accept --sha`` records the event without
     ``review_head``, so ``accepted`` stays false and the verdict's
     ``applies`` is false. Name that gap instead of "no proof recorded".
+    ``atm review`` refuses DONE work — reopen + claim + review + accept.
     """
-    for v in verdicts or []:
-        if (v.get("kind") or "").lower() != "accept":
-            continue
-        if v.get("superseded") or v.get("applies"):
-            continue
-        by = (v.get("by") or "").strip() or "?"
-        sha = (v.get("sha") or "").strip()
-        short = sha[:7] if sha else "?"
-        return (
-            "accept by @%s on %s is not bound to a review head: "
-            "run atm review, then accept at that sha" % (by, short)
-        )
-    return ""
+    v = _ui_newest_accept_verdict(verdicts, applies=False)
+    if not v:
+        return ""
+    by = (v.get("by") or "").strip() or "?"
+    sha = (v.get("sha") or "").strip()
+    short = sha[:7] if sha else "?"
+    slot = (tid or "").strip() or "<id>"
+    return (
+        "accept by @%s on %s is not bound to a review head: "
+        'run atm reopen %s --notes "...", then claim, then atm review, '
+        "then atm accept --sha <new head>" % (by, short, slot)
+    )
+
+
+def _ui_applying_accept_not_done_message(verdicts):
+    """Accept applies at the current head, but status is not yet done."""
+    v = _ui_newest_accept_verdict(verdicts, applies=True)
+    if not v:
+        return ""
+    by = (v.get("by") or "").strip() or "?"
+    sha = (v.get("sha") or "").strip()
+    short = sha[:7] if sha else "?"
+    return "Accepted by @%s on %s (not marked done yet)" % (by, short)
 
 
 def _ui_acceptance_proof(t, accepted, review_label, verdicts=None):
@@ -20170,20 +20200,21 @@ def _ui_acceptance_proof(t, accepted, review_label, verdicts=None):
     structured accept/merge (who + sha). Prefer that label over silence so the
     app never says "no proof recorded" next to "Accepted by @seat on <sha>".
     When an accept exists but does not apply (no review_head), say so plainly.
+    When an accept applies while the ticket is still IN REVIEW, name that too.
     """
     sounding = (t.get("proof") or "").strip()
     if sounding:
         return sounding
     if not accepted:
-        return _ui_unbound_accept_message(verdicts)
+        applying = _ui_applying_accept_not_done_message(verdicts)
+        if applying:
+            return applying
+        return _ui_unbound_accept_message(verdicts, tid=t.get("id") or "")
     label = (review_label or "").strip()
     if label:
         return label
-    for v in verdicts or []:
-        if (v.get("kind") or "").lower() != "accept":
-            continue
-        if v.get("superseded") or not v.get("applies"):
-            continue
+    v = _ui_newest_accept_verdict(verdicts, applies=True)
+    if v:
         by = (v.get("by") or "").strip() or "?"
         sha = (v.get("sha") or "").strip()
         short = sha[:7] if sha else "unrecorded artifact"
