@@ -19,7 +19,7 @@
 
 import type { Ticket } from "../api/types";
 import { NOT_RECORDED, UNKNOWN, exactTime, localTime } from "../lib/format";
-import { acceptState, harnessChip, receiptLines, reviewHead, runTiming, runTokens, usageLine, verdictChip } from "../lib/map";
+import { acceptState, acceptanceProofText, harnessChip, receiptLines, reviewHead, runTiming, runTokens, usageLine, verdictChip } from "../lib/map";
 import { Chip, Command, CopyButton, Failure, Field, Missing } from "./bits";
 
 function Runs({ t }: { t: Ticket }) {
@@ -136,6 +136,7 @@ export function TicketPane({
   }
 
   const state = acceptState(ticket);
+  const proof = acceptanceProofText(ticket);
   return (
     <section className="pane pane-ticket" aria-label="Ticket detail" data-testid="ticket-pane">
       <header className="pane-head">
@@ -153,7 +154,9 @@ export function TicketPane({
       <div className="ticket-top">
         <Chip tone={state.tone}>{state.label}</Chip>
         <Field label="owner">{ticket.owner_at_project || ticket.owner || <Missing what="unassigned" />}</Field>
-        <Field label="acceptance proof">{ticket.acceptance.proof || <Missing what="no proof recorded" />}</Field>
+        <div data-testid="acceptance-proof">
+          <Field label="acceptance proof">{proof.text || <Missing what={proof.missing} />}</Field>
+        </div>
       </div>
 
       <h3>Dependencies</h3>

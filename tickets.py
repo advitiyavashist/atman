@@ -20140,6 +20140,34 @@ def _ui_dep_state(dep):
     return dep.get("status") or "open"
 
 
+def _ui_acceptance_proof(t, accepted, review_label, verdicts=None):
+    """What the drill-down shows under ACCEPTANCE PROOF.
+
+    ``t.proof`` is the sounding/capture sentence when one exists. An accepted
+    ticket without that sentence still has a verification record — the
+    structured accept/merge (who + sha). Prefer that label over silence so the
+    app never says "no proof recorded" next to "Accepted by @seat on <sha>".
+    """
+    sounding = (t.get("proof") or "").strip()
+    if sounding:
+        return sounding
+    if not accepted:
+        return ""
+    label = (review_label or "").strip()
+    if label:
+        return label
+    for v in verdicts or []:
+        if (v.get("kind") or "").lower() != "accept":
+            continue
+        if v.get("superseded") or not v.get("applies"):
+            continue
+        by = (v.get("by") or "").strip() or "?"
+        sha = (v.get("sha") or "").strip()
+        short = sha[:7] if sha else "unrecorded artifact"
+        return "Accepted by @%s on %s" % (by, short)
+    return ""
+
+
 def ui_ticket(board, tid, operator, project, include_archives=False):
     """GET /ticket/<id>.json: the drill-down. Board files only; no git.
 
@@ -20226,6 +20254,7 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
     target = sha or branch
     deps = [{"id": d, "state": _ui_dep_state(by_id.get(d)),
              "title": (by_id.get(d) or {}).get("title") or ""} for d in t.get("deps") or []]
+    review_label = (review.get("label") or "").strip()
     return {
         "id": tid, "project": project, "title": t.get("title") or "",
         "status": status, "status_label": status_label,
@@ -20234,8 +20263,11 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
         "owner": (t.get("owner") or "").strip(),
         "owner_at_project": ("%s@%s" % (t.get("owner"), project)) if t.get("owner") else "",
         "deps": deps,
-        "acceptance": {"proof": (t.get("proof") or "").strip()},
-        "review": {"head": head, "head_len": len(head), "label": review.get("label") or "",
+        # Sounding proof (cause/change/proof) when present; for an accepted
+        # ticket the structured accept/merge label is the verification proof
+        # (who + sha). Never leave "no proof recorded" beside "Accepted by".
+        "acceptance": {"proof": _ui_acceptance_proof(t, accepted, review_label, verdicts)},
+        "review": {"head": head, "head_len": len(head), "label": review_label,
                    "verified": verified, "verdicts": verdicts},
         "runs": runs,
         "usage": usage,

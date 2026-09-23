@@ -405,6 +405,57 @@ export function ticketIdsOf(nodes: Array<Pick<PlanNode, "id">>): Set<string> {
   return new Set(nodes.map((n) => n.id));
 }
 
+/**
+ * One short workload line for the project switcher.
+ *
+ * The projects API counts by ticket *status* (`open` / `claimed` / …). The
+ * plan body counts by *phase* (`working` / …). Saying "0 open" beside "1
+ * working" for the same claimed ticket is a lie — prefer the plan's word when
+ * the live work is claimed/review/blocked, and only say "N open" for
+ * status-open tickets.
+ */
+export function projectWorkloadLine(counts: Record<string, number> | undefined): string | null {
+  if (!counts || !Object.keys(counts).length) return null;
+  const claimed = Number(counts.claimed) || 0;
+  const review = Number(counts.review) || 0;
+  const blocked = Number(counts.blocked) || 0;
+  const open = Number(counts.open) || 0;
+  const parts: string[] = [];
+  if (claimed) parts.push(`${claimed} working`);
+  if (review) parts.push(`${review} review`);
+  if (blocked) parts.push(`${blocked} blocked`);
+  if (open) parts.push(`${open} open`);
+  if (parts.length) return parts.join(" · ");
+  return "0 open";
+}
+
+/**
+ * ACCEPTANCE PROOF on the drill-down.
+ *
+ * Prefer the sounding/capture sentence when present. For an accepted ticket,
+ * fall back to the structured accept record (who + sha) — never "no proof
+ * recorded" next to "Accepted by @seat".
+ */
+export function acceptanceProofText(ticket: {
+  accepted: boolean;
+  acceptance?: { proof?: string };
+  review?: { label?: string; verdicts?: Array<{ kind: string; by: string; sha: string; applies: boolean; superseded: boolean }> };
+}): { text: string; missing: string } {
+  const sounding = (ticket.acceptance?.proof || "").trim();
+  if (sounding) return { text: sounding, missing: "" };
+  if (!ticket.accepted) return { text: "", missing: "no proof recorded" };
+  const label = (ticket.review?.label || "").trim();
+  if (label) return { text: label, missing: "" };
+  const v = (ticket.review?.verdicts || []).find(
+    (x) => x.kind === "accept" && x.applies && !x.superseded,
+  );
+  if (v) {
+    const sha = (v.sha || "").trim();
+    return { text: `Accepted by @${v.by || "?"} on ${sha ? sha.slice(0, 7) : "unrecorded artifact"}`, missing: "" };
+  }
+  return { text: "", missing: "accepted, but accept who/sha not on the record" };
+}
+
 /* ------------------------------------------------------------ review header */
 
 export interface ReviewHead {

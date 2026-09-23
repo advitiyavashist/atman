@@ -13,10 +13,12 @@ import type { Blocker, HarnessBadge, PlanNode, Receipt, Ticket, TicketRun, Usage
 import { duration, durationLabel, localTime } from "../../ui/src/lib/format";
 import {
   acceptState,
+  acceptanceProofText,
   authorOf,
   blockerChip,
   blockerDetail,
   harnessChip,
+  projectWorkloadLine,
   receiptLine,
   reviewHead,
   runTiming,
@@ -386,5 +388,65 @@ describe("a step says its state once", () => {
 
   it("survives a node whose blockers are not a list", () => {
     expect(stepBlockers({ id: "T-1", blockers: "nope" as never }).chips).toEqual([]);
+  });
+});
+
+describe("project workload line (T-1459)", () => {
+  it("says working for claimed tickets, not 0 open beside 1 working", () => {
+    expect(projectWorkloadLine({ open: 0, claimed: 1, review: 0, blocked: 0, done: 1 })).toBe("1 working");
+  });
+
+  it("lists each live status with the plan's words", () => {
+    expect(projectWorkloadLine({ open: 2, claimed: 1, review: 1, blocked: 3, done: 0 })).toBe(
+      "1 working · 1 review · 3 blocked · 2 open",
+    );
+  });
+
+  it("treats an empty counts object as unavailable", () => {
+    expect(projectWorkloadLine({})).toBeNull();
+    expect(projectWorkloadLine(undefined)).toBeNull();
+  });
+});
+
+describe("acceptance proof (T-1459)", () => {
+  it("prefers the sounding proof when present", () => {
+    expect(
+      acceptanceProofText({
+        accepted: true,
+        acceptance: { proof: "row count matches" },
+        review: { label: "Accepted by @bob on abc1234" },
+      }).text,
+    ).toBe("row count matches");
+  });
+
+  it("uses the accept record when sounding proof is empty on an accepted ticket", () => {
+    const out = acceptanceProofText({
+      accepted: true,
+      acceptance: { proof: "" },
+      review: {
+        label: "Accepted by @bob on 6cf5700",
+        verdicts: [
+          {
+            kind: "accept",
+            by: "bob",
+            sha: "6cf57003447931cf822f50ee8aeca2389700507b",
+            applies: true,
+            superseded: false,
+          },
+        ],
+      },
+    });
+    expect(out.text).toBe("Accepted by @bob on 6cf5700");
+    expect(out.missing).toBe("");
+  });
+
+  it("does not say no proof recorded next to an accepted ticket", () => {
+    const out = acceptanceProofText({
+      accepted: true,
+      acceptance: { proof: "" },
+      review: { label: "", verdicts: [] },
+    });
+    expect(out.missing).toBe("accepted, but accept who/sha not on the record");
+    expect(out.missing).not.toBe("no proof recorded");
   });
 });
