@@ -114,10 +114,10 @@ you already hold T-001 -- finish it (tickets done/block/reopen) before claiming 
 $ atm who
 agent          state     loop-seen branch@sha                     ticket               worktree
 worker         unknown ? 0m ago   worker@8b92cb3                 T-001 [>]            <scratch>/proj/.worktrees/worker
-               no Claude or Codex transcript for /private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-a
+               no Claude or Codex transcript for /private/tmp/claude-502/-Users-<user>-Downloads-atman--worktrees-a
                lifecycle=ephemeral provider=claude session=- reachable=no
 boss           unknown ? 1m ago   main@eff19e2 +3                -                    <scratch>/proj
-               no Claude or Codex transcript for /private/tmp/claude-502/-Users-kavana-Downloads-atman--worktrees-a
+               no Claude or Codex transcript for /private/tmp/claude-502/-Users-<user>-Downloads-atman--worktrees-a
                "joined"
                lifecycle=ephemeral provider=claude session=- reachable=no
 !! on main/master: boss -- rule 4, move to a worktree

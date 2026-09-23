@@ -104,8 +104,22 @@ worktrees of one repo share the main worktree's board, deliberately; do not
 "fix" that by creating a second `.tickets/` in a worktree.
 
 `$TICKETS_DIR` overrides everything. A stale export from another project
-sends every command to the wrong board and nothing warns you. `atm board`
-prints the resolved path. Details: [../board-resolution.md](../board-resolution.md).
+sends every command to the wrong board and nothing warns you.
+
+`atm where` prints the resolved board on its first line, and says on stderr
+how it found it. To make a repo use a board that lives somewhere else (one
+board shared by several repos), link it once per machine instead of
+exporting a path in every shell:
+
+```sh
+atm board-link /path/to/shared/.tickets   # run inside the repo
+atm board-link --show                     # list links
+atm board-link --unlink                   # back to this repo's own .tickets
+```
+
+The link lives in `~/.config/atman/board.json` (outside every repo, because
+board paths are machine-specific) and covers every checkout and linked
+worktree of the repo. Never hardcode a board path in docs or prompts. Details: [../board-resolution.md](../board-resolution.md).
 
 ---
 
