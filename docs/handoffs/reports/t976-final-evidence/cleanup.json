@@ -1,0 +1,16 @@
+{
+  "removed": [
+    "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-w7w74_h9",
+    "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-h4w9kz5p",
+    "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh",
+    "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v",
+    "/tmp/atman-t976-0923-source",
+    "/tmp/atman-t976-0923-bin",
+    "/tmp/atman-t976-0923-home",
+    "/tmp/t976-final-venv",
+    "/tmp/t976-final-browser",
+    "/tmp/t976-final-probes"
+  ],
+  "credentials_removed": true,
+  "ui_terminated": true
+}

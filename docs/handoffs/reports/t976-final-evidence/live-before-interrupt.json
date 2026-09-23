@@ -1,0 +1,36 @@
+{
+  "title": "Live two-stage continuation",
+  "body": "Cause: live interrupted-provider acceptance probe. Change: two-stage artifact. Proof: finished.txt must contain exactly stage-one newline stage-two newline. Use /tmp/atman-t976-0923-bin/atm for EVERY board command, including self (record its output). You have one ticket only. If mid.txt does not exist: write mid.txt containing stage-one newline, commit it, record an atm update explaining the exact artifact and next action to write finished.txt from mid.txt plus stage-two newline. Then run sleep 120 in the FOREGROUND; the evaluator will kill this real process once the progress note is durable. Do not finish before interruption. On a subsequent run when mid.txt exists: preserve it, write finished.txt, independently assert exact contents, commit, atm sync then atm review with paths and test. No new tests framework; no provider spawning. Do not edit .tickets by hand.",
+  "role": "liveprobe",
+  "status": "claimed",
+  "deps": [],
+  "priority": 2,
+  "epic": "",
+  "sprint": "",
+  "needs": [],
+  "owner": "live-codex",
+  "created": "2026-09-23T03:45:06Z",
+  "updated": "2026-09-23T03:45:38Z",
+  "notes": [
+    {
+      "by": "live-codex",
+      "at": "2026-09-23T03:45:38Z",
+      "text": "Committed mid.txt containing exactly stage-one followed by newline. atm self recorded: seat live-codex, script /private/tmp/atman-t976-0923-source/tickets.py, CLI /tmp/atman-t976-0923-bin/atm. Next action after interruption: preserve mid.txt, write finished.txt from mid.txt plus stage-two newline, independently assert exact contents, commit, atm sync, then atm review."
+    }
+  ],
+  "id": "T-001",
+  "claimed_at": "2026-09-23T03:45:21Z",
+  "done_at": "",
+  "owner_generation": 1,
+  "revoked_owners": [],
+  "owner_lease": {
+    "generation": 1,
+    "owner": "live-codex",
+    "harness": "codex",
+    "issued_at": "2026-09-23T03:45:21.023277+00:00",
+    "reason": "claim",
+    "previous_owner": "",
+    "previous_generation": 0,
+    "revoked_owners": []
+  }
+}
