@@ -11123,18 +11123,51 @@ def _traj_summary(events):
     return by_ticket
 
 
+def _traj_nearest_existing_ancestor(path):
+    """Walk parents until an existing path is found (or the filesystem root)."""
+    cur = os.path.abspath(path)
+    while not os.path.exists(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return cur
+
+
+def _traj_path_is_under_board_samefile(path, board):
+    """True when `path` is the board or a descendant, compared by inode.
+
+    String commonpath/realpath misses case aliases on macOS APFS/HFS+
+    (``.TICKETS`` vs ``.tickets``): samefile walks ancestors by dev/inode.
+    """
+    board_root = os.path.realpath(board)
+    cur = _traj_nearest_existing_ancestor(path)
+    while True:
+        try:
+            if os.path.samefile(cur, board_root):
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
 def _traj_export_path_inside_board(out, board):
     """True when `trajectories export --out` would land under the active board.
 
     Mirror of ticket_board.trajectories.export_path_inside_board (T-1140).
     Root tickets.py ships alone, so this copy cannot import the package helper.
+    Guards both --out and ``<out>.tmp`` via samefile/dev-inode (case aliases).
     """
     if not out or not board:
         return False
     try:
-        board_root = os.path.realpath(board)
-        target = os.path.realpath(out)
-        return os.path.commonpath([board_root, target]) == board_root
+        return (
+            _traj_path_is_under_board_samefile(out, board)
+            or _traj_path_is_under_board_samefile(out + ".tmp", board)
+        )
     except (OSError, ValueError):
         return True
 

@@ -94,6 +94,48 @@ def test_helper_agrees_across_entrypoints(tmp_path):
     outside = str(tmp_path / "outside.jsonl")
     assert traj.export_path_inside_board(inside, str(board_dir)) is True
     assert traj.export_path_inside_board(outside, str(board_dir)) is False
+    # <out>.tmp under the board is refused even when --out itself is new.
+    tmp_inside = str(board_dir / "agents" / "new.jsonl.tmp")
+    assert traj._path_is_under_board_samefile(tmp_inside, str(board_dir)) is True
     src = ROOT_TOOL.read_text(encoding="utf-8")
     assert "def _traj_export_path_inside_board" in src
     assert "_refuse_traj_export_inside_board" in src
+    assert "_traj_path_is_under_board_samefile" in src
+
+
+def _fs_is_case_insensitive(probe_dir: Path) -> bool:
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    marker = probe_dir / "CaseProbeT1140"
+    marker.mkdir(exist_ok=True)
+    return (probe_dir / "caseprobet1140").is_dir()
+
+
+@pytest.mark.parametrize("tool", [ROOT_TOOL, PKG_TOOL], ids=["tickets.py", "cli.py"])
+def test_export_refuses_case_aliased_board_path(tool, joined, tmp_path):
+    """macOS APFS: .TICKETS vs .tickets bypassed realpath/commonpath (CEO REJECT)."""
+    if not _fs_is_case_insensitive(tmp_path / "case-probe"):
+        pytest.skip("case-sensitive filesystem")
+
+    b = joined
+    repo = b.parent
+    seat = b / "agents" / "alice.json"
+    assert seat.is_file()
+    before = seat.read_text()
+
+    # Case-aliased board root: string paths differ, inode is the same.
+    aliased_board = str(b).replace("/.tickets", "/.TICKETS")
+    if aliased_board == str(b):
+        # Board path may already use mixed case; force a leaf rename style.
+        aliased_board = str(Path(str(b.parent)) / ".TICKETS")
+    assert aliased_board != str(b)
+    aliased_seat = str(Path(aliased_board) / "agents" / "alice.json")
+    assert os.path.samefile(aliased_seat, seat)
+
+    r = run_tool(tool, b, "trajectories", "export", "--out", aliased_seat,
+                 agent="alice", cwd=repo)
+    text = r.stdout + r.stderr
+    assert r.returncode != 0, "must refuse case-aliased --out onto seat record:\n" + text
+    assert "REFUSING" in text
+    assert seat.read_text() == before, "agent record must be unchanged"
+    assert not Path(aliased_seat + ".tmp").exists()
+    assert not (seat.parent / "alice.json.tmp").exists()

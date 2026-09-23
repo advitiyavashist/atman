@@ -47,19 +47,54 @@ def trajectories_path(board):
     return os.path.join(board, "trajectories.jsonl")
 
 
+def _nearest_existing_ancestor(path):
+    """Walk parents until an existing path is found (or the filesystem root)."""
+    cur = os.path.abspath(path)
+    while not os.path.exists(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return cur
+
+
+def _path_is_under_board_samefile(path, board):
+    """True when `path` is the board or a descendant, compared by inode.
+
+    String commonpath/realpath misses case aliases on macOS APFS/HFS+
+    (``.TICKETS`` vs ``.tickets``): samefile walks ancestors by dev/inode.
+    """
+    board_root = os.path.realpath(board)
+    cur = _nearest_existing_ancestor(path)
+    while True:
+        try:
+            if os.path.samefile(cur, board_root):
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
 def export_path_inside_board(out, board):
     """True when `trajectories export --out` would land under the active board.
 
-    Export uses os.replace onto --out. Pointing that at agents/<seat>.json (or
-    any other board file) silently replaces the record with JSONL -- exit 0,
-    no warning. Both CLI entry points must refuse before writing (T-1140).
+    Export writes ``<out>.tmp`` then os.replace onto --out. Pointing either at
+    agents/<seat>.json (or any other board file) silently replaces the record
+    with JSONL -- exit 0, no warning. Both CLI entry points must refuse before
+    writing (T-1140). Uses samefile/dev-inode so case-aliased board paths on
+    case-insensitive disks cannot bypass the guard.
     """
     if not out or not board:
         return False
     try:
-        board_root = os.path.realpath(board)
-        target = os.path.realpath(out)
-        return os.path.commonpath([board_root, target]) == board_root
+        # Guard both final --out and the .tmp opened for writing.
+        return (
+            _path_is_under_board_samefile(out, board)
+            or _path_is_under_board_samefile(out + ".tmp", board)
+        )
     except (OSError, ValueError):
         return True
 
