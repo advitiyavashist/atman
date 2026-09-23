@@ -40,7 +40,7 @@ def test_tz_exemption_requires_an_iana_area_and_the_24_char_cap():
     assert pu.reset_label("09:00 Etc/GMT+3") == ""
 
     leaked = (
-        "Users/kavana/secrets",
+        "Users/someone/secrets",
         "ghp/AAAAAAAAAAAA",
         "Bearer/mysecrettoken",
         "America/Argentina/Buenos_Aires",  # 30 chars: cap still applies
@@ -124,7 +124,7 @@ def test_tz_exemption_scrubs_unsafe_post_slash_segments():
 
 
 def test_ui_reading_scrubs_reset_at():
-    leaked = "Users/kavana/secrets"
+    leaked = "Users/someone/secrets"
     rec = pu.record_observed_limit("claude", "cap", iso(-0.2), leaked)
     public = pu.public_reading(rec)
     ui = pu.ui_reading(rec)

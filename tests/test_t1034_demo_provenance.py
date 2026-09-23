@@ -72,7 +72,10 @@ def test_cast_header_and_public_evidence_do_not_expose_operator_paths():
         for path in [ASSETS / "demo.cast", ASSETS / "captions.md", *EVIDENCE.rglob("*")]
         if path.is_file()
     )
-    for forbidden in ("/Users/", "/private/", "kavana"):
+    # The running operator's own home handle, read at test time so the repo
+    # never names it.
+    handle = os.path.basename(os.path.expanduser("~"))
+    for forbidden in ("/Users/", "/private/", handle):
         assert forbidden not in published
 
 

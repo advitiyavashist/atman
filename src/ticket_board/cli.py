@@ -4097,8 +4097,31 @@ def cmd_board_restore(a, board):
     print(json.dumps(result, indent=2))
 
 
+def _board_source(board):
+    """How board_dir() found `board`, in words, for `atm where` (stderr)."""
+    if os.environ.get("TICKETS_DIR"):
+        return "TICKETS_DIR"
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    real = os.path.realpath(board)
+    if configured and os.path.realpath(configured) == real:
+        return "the board linked to repo %s in %s" % (root, _atman_config_path())
+    if _is_marked_primary(board):
+        return "this repo's own .tickets (marked primary)"
+    return "the nearest .tickets directory; no board is linked for this repo"
+
+
 def cmd_where(a, board):
+    # stdout line 1 is always the board path (scripts read it); the
+    # explanation goes to stderr so it never changes that contract.
     print(board)
+    source = _board_source(board)
+    sys.stderr.write("found via: %s\n" % source)
+    if source.startswith("the nearest") and _repo_root():
+        sys.stderr.write(
+            "to make every checkout of this repo use one shared board: "
+            "atm board-link <path to that board's .tickets>\n"
+        )
     kids = child_boards(os.getcwd())
     if len(kids) > 1:
         print("other live boards in child dirs:")
@@ -4214,6 +4237,72 @@ def cmd_doctor(a):
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
         print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+
+
+def _read_board_config():
+    path = _atman_config_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return path, {"boards": {}}
+    except (OSError, ValueError) as e:
+        sys.exit("cannot read %s (%s) -- fix or move it aside; nothing changed" % (path, e))
+    if not isinstance(data, dict) or not isinstance(data.get("boards", {}), dict):
+        sys.exit("%s is not {\"boards\": {...}} -- fix or move it aside; nothing changed" % path)
+    data.setdefault("boards", {})
+    return path, data
+
+
+def cmd_board_link(a):
+    """Link a repo to a shared board in the machine config (T-959 map), so
+    every checkout and worktree of that repo resolves it without TICKETS_DIR."""
+    path, data = _read_board_config()
+    boards = data["boards"]
+    if a.show:
+        if not boards:
+            print("no boards linked (%s)" % path)
+        for repo, board in sorted(boards.items()):
+            print("%s -> %s" % (repo, board))
+        return
+    if a.repo:
+        repo = os.path.realpath(os.path.expanduser(a.repo))
+    else:
+        repo = _repo_root()
+        if not repo:
+            sys.exit("not inside a git repo -- pass --repo PATH")
+        repo = os.path.realpath(repo)
+    if a.unlink:
+        if boards.pop(repo, None) is None:
+            sys.exit("no board linked for %s; nothing changed" % repo)
+        _write_board_config(path, data)
+        print("unlinked %s" % repo)
+        return
+    if not a.board:
+        sys.exit("usage: atm board-link <board dir> [--repo PATH] | --show | --unlink")
+    board = os.path.realpath(os.path.expanduser(a.board))
+    if not os.path.isdir(board):
+        sys.exit("no such directory: %s" % board)
+    if not _board_has_content(board):
+        sys.exit("%s does not look like a board (no tickets, messages or agents); nothing changed" % board)
+    boards[repo] = board
+    _write_board_config(path, data)
+    print("linked %s -> %s (%s)" % (repo, board, path))
+    local = os.path.join(repo, ".tickets")
+    if os.path.realpath(local) != board and _is_marked_primary(local):
+        print(
+            "note: %s is marked primary and still wins for this repo; remove %s "
+            "to use the linked board" % (local, os.path.join(local, PRIMARY_BOARD_MARKER))
+        )
+
+
+def _write_board_config(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def cmd_board_mark_primary(a):
@@ -6183,6 +6272,13 @@ def main():
     c = sub.add_parser("doctor", help="diagnose board resolution and detect shadow boards (T-959)")
     c.set_defaults(fn=cmd_doctor)
 
+    c = sub.add_parser("board-link", help="link this repo to a shared board so every checkout finds it")
+    c.add_argument("board", nargs="?", help="the shared board's .tickets directory")
+    c.add_argument("--repo", help="repo to link (default: the repo you are in)")
+    c.add_argument("--show", action="store_true", help="list linked repos and boards")
+    c.add_argument("--unlink", action="store_true", help="remove this repo's link")
+    c.set_defaults(fn=cmd_board_link)
+
     c = sub.add_parser("board-mark-primary", help="opt this repo's local .tickets in as its board of record")
     c.set_defaults(fn=cmd_board_mark_primary)
 
@@ -6218,7 +6314,7 @@ def main():
     if not a.cmd:
         p.print_help()
         return
-    if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
+    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow"):
         # These diagnose/repair board resolution itself, so they must not go
         # through board_dir() -- a shadow board is exactly the case they are
         # for, and board_dir() would refuse before they ever ran (T-959).
