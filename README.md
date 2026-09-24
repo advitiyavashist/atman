@@ -310,7 +310,7 @@ Known first-run defects, each with the workaround that was tested:
 - [Agent onboarding](docs/onboarding/README.md) and [Master onboarding](docs/onboarding/master-howto.md)
 - [Bring your own agent](docs/byoa.md), [Messages and runners](docs/messages-and-runners.md), [Team knowledge](docs/knowledge/README.md)
 - [Recovery contract](docs/recovery-contract.md)
-- [Contributing](CONTRIBUTING.md), [Community](docs/community.md), [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Contributing](CONTRIBUTING.md), [Community](docs/community.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md)
 
 Operator and historical notes, not a first read: the author's
 [Mac runbook](docs/onboarding/ceo-mac-runbook.md) and the
@@ -318,4 +318,6 @@ Operator and historical notes, not a first read: the author's
 
 [License](LICENSE) (MIT). Fork, branch off `main`, and open a pull request.
 Questions and bug reports go to
-[GitHub issues](https://github.com/advitiyavashist/atman/issues).
+[GitHub issues](https://github.com/advitiyavashist/atman/issues); what belongs
+there is in [SUPPORT.md](SUPPORT.md). A vulnerability goes through
+[SECURITY.md](SECURITY.md) instead, never a public issue.
