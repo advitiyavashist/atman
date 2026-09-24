@@ -72,7 +72,7 @@ Everything else (paths, transcripts, receipts, limits, auth, usage, phase names)
 - **Now strip**: four pills. Each is a link that scrolls to its section. Zero renders as `0 blocked` in muted grey, never hidden and never highlighted.
 - **Sections**, in fixed order: Needs you · Working · Blocked · Up next · Done. A section with nothing in it collapses to its one-line empty copy (§5). The order never changes, so the eye learns where to look.
 - **Ticket card**: id + title on one line (title 15 px / 600), then exactly one sentence in plain words (§5.3), then a row of buttons that apply to that card (§6). `Open ›` opens the side sheet.
-- **Talk column** (360 px, sticky): who you are talking to (§4), the thread with that party (oldest first, newest visible), the composer. No status strip; the seat's state is one line under the name.
+- **Talk column** (360 px, sticky): who you are talking to (§4), the thread with that party (oldest first, newest visible), the composer (Enter sends, Shift+Enter adds a new line, §5.6). No status strip; the seat's state is one line under the name.
 - **Side sheet** (480 px, slides over the Talk column): ticket drill-down. Title, the one sentence, the body, acceptance proof, review head and verdicts, handoff notes, messages about it, Details block. Same buttons as the card.
 
 ### 390 px (phone)
@@ -172,7 +172,7 @@ Plain words, sentence case, no abbreviations the operator did not type. Times ar
 | Section | Header | Empty |
 |---|---|---|
 | Needs you | `Needs you (1)` | `Nothing needs you right now.` |
-| Working | `Working (2)` | `Nobody is working. Assign a ticket or start an agent.` |
+| Working | `Working (2)` | `Nobody is working. Assign a ticket or start an agent.` Buttons in this order: **Assign…** (primary, filled) then `Start an agent…` (quiet, text-only). Assigning is the action the app runs itself; starting an agent is a copied command (§6.4), so it never outranks Assign |
 | Blocked | `Blocked (1)` | `Nothing is blocked.` |
 | Up next | `Up next (2)` | `Nothing is queued.` |
 | Done | `Done (1)` | `Nothing accepted yet.` |
@@ -201,8 +201,10 @@ Plain words, sentence case, no abbreviations the operator did not type. Times ar
 | Everyone | `Everyone on the board` + `No agent is running. Messages land on the board; the next agent that wakes reads them.` |
 | Cannot answer now (seat) | `worker is not running. Your message is kept; it reads it when it starts.` |
 | Composer placeholder | `Message worker…` / `Message everyone…` |
-| About | `about [T-002 ▾]` — defaults to the ticket the seat is running, else none. Never prefilled with an id that is not on this board |
-| Send | `Send` |
+| About | `about [T-002 ▾]` — defaults to the ticket the seat is running, else the first option `no ticket`. Never prefilled with an id that is not on this board |
+| Send | `Send` button, kept. **Enter** also sends |
+| Keyboard | Enter sends the message. Shift+Enter adds a new line (so does Enter with any other modifier). While an IME composition is active (`KeyboardEvent.isComposing`, or the legacy `keyCode 229`), Enter belongs to the editor and nothing is sent. Empty or whitespace-only text is never sent; Enter just keeps focus in the box. A disabled composer (read-only) ignores Enter |
+| Hint under the box | `Enter to send · Shift+Enter for a new line` — one small muted line between the box and the about/Send row |
 | Empty thread | `No messages with worker yet.` |
 | Details on: per message | receipts `posted · inbox read · wake confirmed`, harness badge, `Copy` |
 
@@ -219,9 +221,9 @@ The app calls the local API only. Four write routes are new in T-1486; each is a
 | **Accept 3f2a1c0** | review card, sheet | Shows ticket, full sha, review notes, a `Notes` field (required). Primary `Accept 3f2a1c0` | `POST /api/v1/ticket/T-001/accept {sha, notes}` | `atm accept T-001 --sha <40> --notes "…"` | `review_verdict.apply(require_full=True)`: operator ≠ owner; sha equals the submitted review head. Disabled state copy: `You submitted this, so you cannot accept it.` / `Nothing was submitted for review.` |
 | **Reject…** | review card, sheet | `Reason` field (required). Primary `Reject and return to worker` | `POST /api/v1/ticket/T-001/reject {sha, reason}` | `atm reject T-001 --sha <40> --reason "…"` | same sha binding; returns the ticket to the author as claimed (T-1460) |
 | **Assign…** / **Reassign…** | up next card, blocked card, stuck item, sheet | Seat list with each seat's state; a `Why` field (optional). Primary `Assign to worker` | `POST /api/v1/ticket/T-004/assign {owner, notes}` | `atm assign T-004 --owner worker --notes "…"` | seat must be registered; a limited or logged-out seat is shown with its state and a warning, not hidden |
-| **Message** | any card, sheet | Focuses the composer with `about` set to that ticket and the recipient set to the ticket's owner (or Everyone) | `POST /msg` (existing; server fixes `from` to the operator, `via: ui-operator`) | `atm msg --to worker --re T-002 "…"` | existing |
-| **Answer** | question / stuck item | Same as Message, recipient = asker, about = the item's `re` | `POST /msg` | `atm msg --to worker --re T-002 "…"` | existing |
-| **Send** | composer | — | `POST /msg` | `atm msg …` | existing |
+| **Message** | any card, sheet | No dialog of its own: focuses the composer with `about` set to that ticket and the recipient set to the ticket's owner (or Everyone). Same keyboard rule as the Talk panel (§5.6): Enter sends, Shift+Enter new line, nothing during an IME composition | `POST /msg` (existing; server fixes `from` to the operator, `via: ui-operator`) | `atm msg --to worker --re T-002 "…"` | existing |
+| **Answer** | question / stuck item | Same as Message, recipient = asker, about = the item's `re`. Enter sends the answer; Shift+Enter for a new line; IME composition is left alone | `POST /msg` | `atm msg --to worker --re T-002 "…"` | existing |
+| **Send** | composer (button or Enter) | — | `POST /msg` | `atm msg …` | existing |
 | **Set as lead** | recipient picker | — | `POST /api/v1/lead {seat}` (existing) | — | existing |
 | **Keep** / **Remove** | escalated automated node | Confirm | `POST /api/v1/ticket/T-009/decide {keep: true/false}` | `atm capture`/`atm discard` per the node's `automated_action` | build ticket confirms which CLI verb; out of the mockup |
 
@@ -244,7 +246,7 @@ Each state is in the mockup's state switcher and in `docs/design/app-v3/` at 144
 | State | What is true | What the screen shows |
 |---|---|---|
 | **empty** | No tickets, no objective | Objective: `No objective yet…` with `Set objective…`; strip: `0 working · 0 needs you · 0 blocked · 0 done`; one line: `This board has no tickets…` with `Create ticket…`; Talk to Everyone |
-| **fresh** (quickstart) | 3 sample tickets, nobody running, no lead | `0 working · 0 needs you · 0 blocked · 0 done`; Needs you: `Nothing needs you right now.`; Working: empty copy with `Assign…`; Up next: T-001 `Nobody has it. Ready to start.` with `Assign…`, T-002 `Waits on T-001.`, T-003 `Waits on T-002.`; Talk to Everyone with `Start an agent…` |
+| **fresh** (quickstart) | 3 sample tickets, nobody running, no lead | `0 working · 0 needs you · 0 blocked · 0 done`; Needs you: `Nothing needs you right now.`; Working: empty copy with `Assign…` (primary) then `Start an agent…` (quiet); Up next: T-001 `Nobody has it. Ready to start.` with `Assign…`, T-002 `Waits on T-001.`, T-003 `Waits on T-002.`; Talk to Everyone with `Start an agent…` |
 | **working** | worker running T-001 for 12 min | `1 working · 0 needs you · 0 blocked · 0 done`; Working: T-001 `worker has it, running for 12 min.`; Talk to worker `running T-001 for 12 min` |
 | **needs-you** | T-001 in review at `3f2a1c0…`; worker asked a question about it | `0 working · 2 needs you · 0 blocked · 0 done`; Up next: T-002 `Waits on T-001, which is in review.`; Needs you: T-001 review card with Accept/Reject, and the question with Answer; Accept dialog shows the full sha |
 | **blocked** | T-002 blocked "needs staging DB credentials"; worker idle | `0 working · 1 needs you · 1 blocked · 1 done`; Blocked: T-002 `Blocked by worker 40 min ago: "…"` with Answer and Reassign…; Needs you also lists the block because it names the operator |

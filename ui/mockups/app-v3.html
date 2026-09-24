@@ -142,6 +142,7 @@ section h2 span{color:var(--ink)}
 .thread .empty-t{color:var(--muted);text-align:center;margin:auto}
 .composer{border-top:1px solid var(--line);padding:12px 16px}
 .composer textarea{width:100%;min-height:64px;border:1px solid var(--line-strong);border-radius:8px;padding:8px 10px;font:inherit;resize:vertical;background:var(--card);color:var(--ink)}
+.composer .hint{margin:4px 2px 0;font-size:12px;color:var(--muted)}
 .composer .row{display:flex;gap:8px;align-items:center;margin-top:8px;color:var(--muted)}
 .composer select{font:inherit;border:1px solid var(--line-strong);border-radius:6px;padding:4px 6px;background:var(--card);color:var(--ink)}
 .composer .grow{flex:1}
@@ -375,7 +376,7 @@ const STATES = {
 };
 
 /* ===================================================================== */
-let S, stateKey = "fresh", talkWith = null, aboutId = "";
+let S, stateKey = "fresh", talkWith = null, aboutId = null;  // aboutId null = not chosen yet: defaults to the ticket the seat is running (§5.6)
 const $ = (s, r=document) => r.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const short = s => s.slice(0,7);
@@ -474,7 +475,7 @@ function render(){
     const nNeeds = S.needs.length + by.needs.length;
     secs.innerHTML =
       section("needs", "Needs you", nNeeds, needsItems, "Nothing needs you right now.") +
-      section("working", "Working", by.working.length, by.working.map(renderCard).join(""), "Nobody is working. Assign a ticket or start an agent.", btn("Assign…","", "assign:") + btn("Start an agent…","quiet","start")) +
+      section("working", "Working", by.working.length, by.working.map(renderCard).join(""), "Nobody is working. Assign a ticket or start an agent.", btn("Assign…","primary", "assign:") + btn("Start an agent…","quiet","start")) +
       section("blocked", "Blocked", by.blocked.length, by.blocked.map(renderCard).join(""), "Nothing is blocked.") +
       section("next", "Up next", by.next.length, by.next.map(renderCard).join(""), "Nothing is queued.") +
       section("done", "Done", by.done.length, by.done.map(renderCard).join(""), "Nothing accepted yet.");
@@ -554,6 +555,7 @@ function renderTalk(){
   if (talkWith === null) talkWith = defaultTalk();
   const a = S.agents.find(x => x.name === talkWith);
   const everyone = talkWith === "everyone";
+  if (aboutId === null) aboutId = (a && a.ticket && S.tickets.some(t => t.id === a.ticket)) ? a.ticket : "";
   const opts = [`<option value="everyone" ${everyone?"selected":""}>Everyone on the board</option>`]
     .concat(S.agents.map(x => `<option value="${x.name}" ${x.name===talkWith?"selected":""}>${x.name} · ${seatState(x)}</option>`)).join("");
   let state = "", note = "";
@@ -574,14 +576,15 @@ function renderTalk(){
       <p class="body">${esc(m.text)}</p>
       <div class="receipts details">${m.receipts.map(r=>`<span>${r}</span>`).join("")}<span class="details inline">harness ${m.from==="worker"?"cursor":"—"}</span> <button class="btn quiet" style="height:22px;padding:0 6px;font-size:12px" data-act="copy">Copy</button></div>
     </div>`).join("") : `<div class="empty-t">No messages with ${everyone?"the board":talkWith} yet.</div>`;
-  const aboutOpts = [`<option value="">about nothing</option>`].concat(S.tickets.map(t => `<option value="${t.id}" ${t.id===aboutId?"selected":""}>about ${t.id}</option>`)).join("");
+  const aboutOpts = [`<option value="">no ticket</option>`].concat(S.tickets.map(t => `<option value="${t.id}" ${t.id===aboutId?"selected":""}>about ${t.id}</option>`)).join("");
   $("#talk").innerHTML = `<div class="th"><div class="label">Talk to</div>
       <div class="who"><select id="talkWith" title="Who you are talking to. Never picked for you unless a single agent is running.">${opts}</select></div>${state}${note}
       <div class="details muted" style="margin-top:8px;font-size:12.5px">${a ? `${esc(a.usage||"usage not read")} · auth checked 1 h ago · ${WORKER_DETAILS}` : "board thread is broadcast"}</div></div>
     <div class="thread" id="thread">${thread}</div>
     <div class="composer"><textarea id="composer" placeholder="Message ${everyone?"everyone":talkWith}…" ${canAct()?"":"disabled"}></textarea>
+      <div class="hint">Enter to send · Shift+Enter for a new line</div>
       <div class="row"><select id="about">${aboutOpts}</select><span class="grow"></span>${btn("Send","primary","send")}</div></div>`;
-  $("#talkWith").onchange = e => { talkWith = e.target.value; renderTalk(); };
+  $("#talkWith").onchange = e => { talkWith = e.target.value; aboutId = null; renderTalk(); };
   $("#about").onchange = e => { aboutId = e.target.value; };
   const th = $("#thread"); th.scrollTop = th.scrollHeight;
 }
@@ -661,11 +664,17 @@ function toast(html){
   el.innerHTML = html; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.remove(), 3200);
 }
 function focusComposer(to, re){
-  talkWith = to || "everyone"; aboutId = re || ""; document.body.dataset.tab = "talk"; syncSeg();
+  talkWith = to || "everyone"; aboutId = re || null; document.body.dataset.tab = "talk"; syncSeg();
   renderTalk(); setTimeout(() => $("#composer")?.focus(), 30);
 }
 
 /* ---------- events ---------- */
+function sendComposer(){
+  const box = $("#composer"); if (!box || box.disabled) return;
+  const txt = box.value.trim(); if (!txt){ box.focus(); return; }
+  toast(`Mockup: would <code>POST /msg</code> as ${esc(S.operator)} to ${esc(talkWith)}${aboutId?" re "+aboutId:""} (<code>atm msg --to ${esc(talkWith==="everyone"?"everyone":talkWith)}${aboutId?" --re "+aboutId:""} "…"</code>)`);
+  box.value = "";
+}
 document.addEventListener("click", e => {
   const el = e.target.closest("[data-act]"); if (!el || el.disabled) return;
   const [act, a1, a2] = el.dataset.act.split(":");
@@ -680,7 +689,7 @@ document.addEventListener("click", e => {
     case "create-ticket": openCreate(); break;
     case "message": closeOverlay(); focusComposer(a1, a2); break;
     case "answer": closeOverlay(); focusComposer(a1, a2); break;
-    case "send": { const txt = $("#composer").value.trim(); if (!txt){ $("#composer").focus(); return; } toast(`Mockup: would <code>POST /msg</code> as ${esc(S.operator)} to ${esc(talkWith)}${aboutId?" re "+aboutId:""} (<code>atm msg --to ${esc(talkWith==="everyone"?"everyone":talkWith)}${aboutId?" --re "+aboutId:""} "…"</code>)`); $("#composer").value = ""; break; }
+    case "send": sendComposer(); break;
     case "do-accept": { const t = ticket(a1); const n = $("#acceptNotes").value.trim(); if (!n){ $("#acceptNotes").focus(); return; } closeOverlay(); toast(`Mockup: would <code>POST /api/v1/ticket/${a1}/accept</code> {sha: ${short(t.sha)}…, notes} · gate: operator ≠ author, sha = submitted head`); break; }
     case "do-reject": { const r = $("#rejectReason").value.trim(); if (!r){ $("#rejectReason").focus(); return; } closeOverlay(); toast(`Mockup: would <code>POST /api/v1/ticket/${a1}/reject</code> {sha, reason} · returns ${a1} to its author as claimed`); break; }
     case "do-assign": { const seat = document.querySelector('input[name=seat]:checked')?.value; if (!seat){ toast("Pick a seat first. The app never picks one for you."); return; } const id = a1 || $("#assignTicket")?.value; closeOverlay(); toast(`Mockup: would <code>POST /api/v1/ticket/${id}/assign</code> {owner: ${seat}} (<code>atm assign ${id} --owner ${seat}</code>)`); break; }
@@ -689,7 +698,15 @@ document.addEventListener("click", e => {
     case "copy": toast("Copied."); break;
   }
 });
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeOverlay(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape"){ closeOverlay(); return; }
+  // Enter sends; Shift+Enter (or any modifier) keeps the default and adds a new line.
+  // While an IME composition is active (isComposing, or the legacy keyCode 229), Enter belongs to the editor: nothing is sent.
+  if (e.target && e.target.id === "composer" && e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey){
+    if (e.isComposing || e.keyCode === 229) return;
+    e.preventDefault(); sendComposer();
+  }
+});
 $("#detailsToggle").addEventListener("change", e => { document.body.classList.toggle("show-details", e.target.checked); $("#detailsLabel").textContent = e.target.checked ? "Details on" : "Details"; });
 function syncSeg(){ for (const b of $("#seg").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.tab === document.body.dataset.tab)); }
 $("#seg").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; document.body.dataset.tab = b.dataset.tab; syncSeg(); });
@@ -701,7 +718,7 @@ for (const [k, v] of Object.entries(STATES)){
   b.onclick = () => setState(k); bar.appendChild(b);
 }
 function setState(k){
-  stateKey = k; talkWith = null; aboutId = ""; closeOverlay();
+  stateKey = k; talkWith = null; aboutId = null; closeOverlay();
   for (const b of bar.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.state === k));
   render();
   history.replaceState(null, "", "?state=" + k + (document.body.classList.contains("show-details") ? "&details=1" : "") + (document.body.dataset.tab==="talk"?"&tab=talk":""));
