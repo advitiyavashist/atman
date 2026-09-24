@@ -231,11 +231,11 @@ section h2 span{color:var(--ink)}
 <div class="objective" id="objective"></div>
 
 <div class="layout">
+  <div class="seg" id="seg">
+    <button aria-pressed="true" data-tab="board">Board</button>
+    <button aria-pressed="false" data-tab="talk">Talk<span class="dot hidden" id="talkDot"></span></button>
+  </div>
   <div class="main" id="main">
-    <div class="seg" id="seg">
-      <button aria-pressed="true" data-tab="board">Board</button>
-      <button aria-pressed="false" data-tab="talk">Talk<span class="dot hidden" id="talkDot"></span></button>
-    </div>
     <div class="strip" id="strip"></div>
     <div id="sections"></div>
   </div>
