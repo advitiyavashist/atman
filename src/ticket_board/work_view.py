@@ -228,14 +228,15 @@ def _verdict_entries(t, msgs_re):
 def _review_verified(t, latest):
     """True only for a structured accept/merge bound to the current head.
 
-    A prose ``merged`` / ``ACCEPT`` note is never evidence (T-1111). Short-SHA
-    ``review_events`` accepts still count when they apply to the recorded
-    artifact, matching ``atm accept`` before a full 40-char ``review_head``.
+    A prose ``merged`` / ``ACCEPT`` note is never evidence (T-1111). An accept
+    event that matches the artifact but is not bound to ``review_head`` (for
+    example ``done --force`` then ``accept --sha``) is not verification either
+    (T-1481): ``verified`` agrees with ``structured_accept`` so the plan's
+    ``unverified`` flag, the ``done_unverified`` count and the ticket view's
+    ``accepted`` never disagree. ``latest`` is kept for the label only.
     """
-    if structured_accept(t) or structured_merge(t):
-        return True
-    return bool(latest and latest.get("source") == "event"
-                and latest["kind"] == "ACCEPT" and latest["applies"] == "exact")
+    del latest
+    return bool(structured_accept(t) or structured_merge(t))
 
 
 def review_of(t, msgs_re=None):
@@ -311,7 +312,9 @@ def unverified_done_ids(tickets, messages=None):
 
 # --- T-1031 accept gate (dependency release) --------------------------------
 
-UNVERIFIED_BLOCK_REASON = "%s marked done without verification; accept it or reopen"
+UNVERIFIED_BLOCK_REASON = "%s marked done without verification; reopen it, then review and accept"
+# The wording before T-1481; notes written then must still be recognised as gate notes.
+_LEGACY_UNVERIFIED_BLOCK_SUFFIX = "marked done without verification; accept it or reopen"
 DOCS_EXEMPT_ROLES = ("docs", "pm")
 
 
@@ -637,13 +640,15 @@ def done_pin_state(t, g, honor_cwd=False):
 
 
 def is_live_unverified_gate_note(text, pred_id=None):
-    """True when a note is still the 'accept it or reopen' instruction."""
+    """True when a note is still the live unverified-gate instruction (either wording)."""
     text = (text or "").strip()
     if not text or text.lower().startswith("resolved:"):
         return False
     if pred_id:
-        return text == unverified_block_reason(pred_id)
-    return bool(text.endswith("marked done without verification; accept it or reopen"))
+        return text in (unverified_block_reason(pred_id),
+                        "%s %s" % (pred_id, _LEGACY_UNVERIFIED_BLOCK_SUFFIX))
+    return bool(text.endswith("marked done without verification; reopen it, then review and accept")
+                or text.endswith(_LEGACY_UNVERIFIED_BLOCK_SUFFIX))
 
 
 def drop_unverified_gate_notes(child, pred_id):

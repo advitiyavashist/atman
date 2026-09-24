@@ -5,7 +5,7 @@ any success-trigger reader use only those events as ACCEPT/REJECT. A note or
 message whose text starts with accept/approved is an unstructured note, never
 a verdict. `atm done` is a separate close. T-1031: dependents release only after
 ACCEPT (or a recorded override); accept may bind a done ticket that still
-has a submitted review head so "accept it or reopen" is actionable.
+has a submitted review head so "reopen it, then review and accept" is actionable.
 
 `atm review --pr N` must pin a *verified* head: the SHA is on origin, the PR
 head equals or contains that SHA in the same repository, and the worktree is

@@ -25,7 +25,7 @@ TOOLS = [ROOT / "tickets.py", ROOT / "src" / "ticket_board" / "cli.py"]
 TOOL_IDS = ["tickets.py", "cli.py"]
 FALSE_CLAIM = "greet.py + tests/test_greet.py; pytest -q: 1 passed"
 ACCEPT_NOTE = "ran unittest discover myself; note's pytest claim unverified (pytest absent)"
-GATE = "T-002 marked done without verification; accept it or reopen"
+GATE = "T-002 marked done without verification; reopen it, then review and accept"
 CLOSE_NOTE = "closing without a verdict"
 
 
