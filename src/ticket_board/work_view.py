@@ -438,6 +438,43 @@ def make_release_override(kind, by, at, reason=""):
     return {"kind": kind, "by": by, "at": at, "reason": reason or ""}
 
 
+def _unbound_accept_event(t):
+    """Newest non-superseded accept that is not bound to review_head, or None.
+
+    ``done --force`` then ``accept --sha`` leaves an accept event without a
+    review_head, so structured_accept is false. Callers name that gap instead
+    of offering bare ``atm accept`` as if nobody had accepted.
+    """
+    if structured_accept(t):
+        return None
+    latest = None
+    for ev in t.get("review_events") or []:
+        if not isinstance(ev, dict):
+            continue
+        if (ev.get("kind") or "").strip().lower() != "accept":
+            continue
+        if ev.get("superseded"):
+            continue
+        latest = ev
+    return latest
+
+
+def unbound_accept_fix_cmd(tid):
+    """Copyable path when an accept exists on a DONE ticket without review_head.
+
+    ``atm review`` refuses DONE work; reopen + claim + review + accept is the
+    path that actually binds a new head.
+    """
+    tid = tid or "<id>"
+    return (
+        'atm reopen %s --notes "..."; '
+        "atm claim %s; "
+        'atm review %s --notes "..."; '
+        'atm accept %s --sha <new head> --notes "..."'
+        % (tid, tid, tid, tid)
+    )
+
+
 def blockers_of(node, by_id, seats=None):
     """Why this node cannot move. Records only; prose is never evidence.
 
@@ -451,8 +488,20 @@ def blockers_of(node, by_id, seats=None):
     tid = node.get("id") or ""
     if (node.get("phase") or "") == "done":
         if node.get("unverified"):
-            out.append({"kind": "unaccepted", "on": tid, "text": "done, not accepted",
-                        "cmd": "atm accept %s --sha <review head> --notes \"...\"" % tid})
+            # Plan nodes may only carry id/phase/unverified; full ticket is in by_id.
+            unbound = _unbound_accept_event(by_id.get(tid) or node)
+            if unbound:
+                by = (unbound.get("by") or "").strip() or "?"
+                sha = ((unbound.get("sha") or "").strip()[:7] or "?")
+                out.append({
+                    "kind": "unaccepted", "on": tid,
+                    "text": ("accept by @%s on %s is not bound to a review head"
+                             % (by, sha)),
+                    "cmd": unbound_accept_fix_cmd(tid),
+                })
+            else:
+                out.append({"kind": "unaccepted", "on": tid, "text": "done, not accepted",
+                            "cmd": "atm accept %s --sha <review head> --notes \"...\"" % tid})
         return out
     for d in node.get("deps") or []:
         dep = by_id.get(d)
@@ -462,8 +511,19 @@ def blockers_of(node, by_id, seats=None):
         elif dep_released(dep):
             continue
         elif dep.get("status") == "done":
-            out.append({"kind": "dep_unaccepted", "on": d, "text": "dep %s done, not accepted" % d,
-                        "cmd": "atm accept %s --sha <review head> --notes \"...\"" % d})
+            unbound = _unbound_accept_event(dep)
+            if unbound:
+                by = (unbound.get("by") or "").strip() or "?"
+                sha = ((unbound.get("sha") or "").strip()[:7] or "?")
+                out.append({
+                    "kind": "dep_unaccepted", "on": d,
+                    "text": ("dep %s accept by @%s on %s is not bound to a review head"
+                             % (d, by, sha)),
+                    "cmd": unbound_accept_fix_cmd(d),
+                })
+            else:
+                out.append({"kind": "dep_unaccepted", "on": d, "text": "dep %s done, not accepted" % d,
+                            "cmd": "atm accept %s --sha <review head> --notes \"...\"" % d})
         else:
             out.append({"kind": "dep_open", "on": d,
                         "text": "dep %s still %s" % (d, dep.get("status") or "open"),

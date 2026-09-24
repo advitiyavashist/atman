@@ -19,6 +19,12 @@ import type { Plan, PlanNode } from "../api/types";
 import { acceptState, blockerDetail, ownerLabel, runningLabel, stepBlockers } from "../lib/map";
 import { Chip, Command, Failure, Missing } from "./bits";
 
+type PlanSummaryShape = {
+  finishing?: Array<{ id: string; title?: string; owner?: string; who?: string }>;
+  blocked?: Array<{ id: string; title?: string; text?: string; kind?: string }>;
+  next?: { id: string; title?: string; who?: string; owner?: string; who_kind?: string } | null;
+};
+
 function Objective({ plan }: { plan: Plan }) {
   const o = plan.objective as { text?: string; exit_criterion?: string; state?: string };
   const text = (o?.text || "").trim();
@@ -31,6 +37,64 @@ function Objective({ plan }: { plan: Plan }) {
         Done when: {exit ? exit : <Missing what="no exit criterion recorded" />}
         {o?.state ? ` · ${o.state}` : ""}
       </p>
+    </div>
+  );
+}
+
+/**
+ * The board's next-owner / blocker strip — the same facts the legacy Work view
+ * puts under FINISHING / BLOCKED / NEXT STEP. Required at 390px so /app/ is not
+ * only a lead picker.
+ */
+function PlanSummary({ plan }: { plan: Plan }) {
+  const s = (plan.summary || {}) as PlanSummaryShape;
+  const finishing = Array.isArray(s.finishing) ? s.finishing : [];
+  const blocked = Array.isArray(s.blocked) ? s.blocked : [];
+  const next = s.next && typeof s.next === "object" ? s.next : null;
+  if (!finishing.length && !blocked.length && !next) return null;
+  return (
+    <div className="plan-summary" data-testid="plan-summary">
+      <div className="plan-summary-row" data-testid="plan-finishing">
+        <span className="field-label">Finishing</span>
+        {finishing.length ? (
+          <ul>
+            {finishing.map((n) => (
+              <li key={n.id}>
+                <b>{n.id}</b> {n.title || <Missing what="untitled" />}
+                <span className="muted"> · @{n.owner || n.who || "?"}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <span className="muted">—</span>
+        )}
+      </div>
+      <div className="plan-summary-row" data-testid="plan-blocked">
+        <span className="field-label">Blocked</span>
+        {blocked.length ? (
+          <ul>
+            {blocked.map((n) => (
+              <li key={n.id}>
+                <b>{n.id}</b> {n.title || <Missing what="untitled" />}
+                {n.text ? <span className="blocker-text"> — {n.text}</span> : null}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <span className="muted">—</span>
+        )}
+      </div>
+      <div className="plan-summary-row" data-testid="plan-next-owner">
+        <span className="field-label">Next owner</span>
+        {next ? (
+          <p>
+            <b>{next.id}</b> {next.title || <Missing what="untitled" />}
+            <span className="muted"> · @{next.owner || next.who || "?"}</span>
+          </p>
+        ) : (
+          <span className="muted">—</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -148,6 +212,7 @@ export function PlanPane({
         </p>
       ) : null}
       <Objective plan={plan} />
+      <PlanSummary plan={plan} />
       <div className="counts">
         {Object.entries(plan.counts || {}).map(([k, v]) => (
           <span key={k} className="count">
