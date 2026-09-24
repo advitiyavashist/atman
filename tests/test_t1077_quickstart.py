@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tickets.py"
 CLI = ROOT / "src" / "ticket_board" / "cli.py"
 
-GATE_REASON = "marked done without verification; accept it or reopen"
+GATE_REASON = "marked done without verification; reopen it, then review and accept"
 SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
 
 # A stub that behaves like a coding CLI: `auth status` reports a live login and

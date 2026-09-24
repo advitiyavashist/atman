@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from ticket_board import work_view  # noqa: E402
 TOOLS = [ROOT / "tickets.py", ROOT / "src" / "ticket_board" / "cli.py"]
 TOOL_IDS = ["tickets.py", "cli.py"]
-REASON = "T-002 marked done without verification; accept it or reopen"
+REASON = "T-002 marked done without verification; reopen it, then review and accept"
 
 
 def run(tool, board, *args, agent="", stdin=None):
