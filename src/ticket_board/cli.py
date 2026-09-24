@@ -4895,11 +4895,7 @@ def cmd_trajectories(a, board):
         if not out:
             sys.exit("export needs --out <file.jsonl>")
         _traj.refuse_export_inside_board(out, board)
-        tmp = out + ".tmp"
-        with open(tmp, "w") as f:
-            for e in sel:
-                f.write(json.dumps(e) + "\n")
-        os.replace(tmp, out)
+        _traj.write_export_file(out, sel)
         print("exported %d event(s) of %d to %s" % (len(sel), len(events), out))
         return
     limit = int(getattr(a, "limit", 0) or 0)

@@ -11123,10 +11123,22 @@ def _traj_summary(events):
     return by_ticket
 
 
+def _traj_absolute_uncollapsed(path):
+    """Make absolute without collapsing ``..`` (keeps symlink parents visible)."""
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.getcwd(), path)
+
+
 def _traj_nearest_existing_ancestor(path):
-    """Walk parents until an existing path is found (or the filesystem root)."""
-    cur = os.path.abspath(path)
-    while not os.path.exists(cur):
+    """Walk parents until a lexically-existing path is found (or the root).
+
+    Does not use abspath/normpath: those collapse ``..`` by string and miss
+    symlink escapes into the board (``dlink/../agents/alice.json``).
+    """
+    cur = _traj_absolute_uncollapsed(path)
+    while not os.path.lexists(cur):
         parent = os.path.dirname(cur)
         if parent == cur:
             break
@@ -11134,20 +11146,39 @@ def _traj_nearest_existing_ancestor(path):
     return cur
 
 
+def _traj_resolved_path_for_board_guard(path):
+    """realpath(nearest existing ancestor) + remaining path components."""
+    abs_path = _traj_absolute_uncollapsed(path)
+    ancestor = _traj_nearest_existing_ancestor(abs_path)
+    if not os.path.lexists(ancestor):
+        return os.path.normpath(abs_path)
+    real_anc = os.path.realpath(ancestor)
+    if abs_path == ancestor:
+        return real_anc
+    if abs_path.startswith(ancestor):
+        rest = abs_path[len(ancestor):].lstrip(os.sep)
+    else:
+        rest = os.path.basename(abs_path)
+    if not rest:
+        return real_anc
+    return os.path.normpath(os.path.join(real_anc, rest))
+
+
 def _traj_path_is_under_board_samefile(path, board):
     """True when `path` is the board or a descendant, compared by inode.
 
-    String commonpath/realpath misses case aliases on macOS APFS/HFS+
-    (``.TICKETS`` vs ``.tickets``): samefile walks ancestors by dev/inode.
+    Resolves symlink ancestors first, then samefile-walks so case aliases on
+    macOS APFS/HFS+ (``.TICKETS`` vs ``.tickets``) still match by dev/inode.
     """
     board_root = os.path.realpath(board)
-    cur = _traj_nearest_existing_ancestor(path)
+    cur = _traj_resolved_path_for_board_guard(path)
     while True:
-        try:
-            if os.path.samefile(cur, board_root):
-                return True
-        except OSError:
-            pass
+        if os.path.lexists(cur):
+            try:
+                if os.path.samefile(cur, board_root):
+                    return True
+            except OSError:
+                pass
         parent = os.path.dirname(cur)
         if parent == cur:
             return False
@@ -11159,11 +11190,14 @@ def _traj_export_path_inside_board(out, board):
 
     Mirror of ticket_board.trajectories.export_path_inside_board (T-1140).
     Root tickets.py ships alone, so this copy cannot import the package helper.
-    Guards both --out and ``<out>.tmp`` via samefile/dev-inode (case aliases).
+    Symlink ``--out`` / ``<out>.tmp`` are refused; path checks resolve symlink
+    ancestors before ``..`` collapse, then samefile/dev-inode for case aliases.
     """
     if not out or not board:
         return False
     try:
+        if os.path.islink(out) or os.path.islink(out + ".tmp"):
+            return True
         return (
             _traj_path_is_under_board_samefile(out, board)
             or _traj_path_is_under_board_samefile(out + ".tmp", board)
@@ -11178,6 +11212,54 @@ def _refuse_traj_export_inside_board(out, board):
             "REFUSING: trajectories export --out must live outside the ticket "
             "board (would replace board records): %s" % out
         )
+
+
+def _traj_open_export_tmp(tmp):
+    """Create ``<out>.tmp`` with O_CREAT|O_EXCL|O_NOFOLLOW (no symlink follow)."""
+    if os.path.islink(tmp):
+        sys.exit(
+            "REFUSING: trajectories export temp path must not be a symlink "
+            "(would follow into the board): %s" % tmp
+        )
+    if os.path.lexists(tmp):
+        if os.path.isdir(tmp) and not os.path.islink(tmp):
+            sys.exit(
+                "REFUSING: trajectories export temp path is a directory: %s" % tmp
+            )
+        os.unlink(tmp)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    try:
+        return os.open(tmp, flags, 0o644)
+    except OSError as exc:
+        sys.exit(
+            "REFUSING: cannot create trajectories export temp file safely: "
+            "%s (%s)" % (tmp, exc)
+        )
+
+
+def _traj_write_export_file(out, events):
+    """Write JSONL events to --out via a nofollow temp file + os.replace."""
+    if os.path.islink(out):
+        sys.exit(
+            "REFUSING: trajectories export --out must not be a symlink: %s" % out
+        )
+    tmp = out + ".tmp"
+    fd = _traj_open_export_tmp(tmp)
+    try:
+        with os.fdopen(fd, "w") as f:
+            for e in events:
+                f.write(json.dumps(e) + "\n")
+        os.replace(tmp, out)
+    except Exception:
+        try:
+            if os.path.lexists(tmp) and not os.path.islink(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def cmd_trajectories(a, board):
@@ -11196,11 +11278,7 @@ def cmd_trajectories(a, board):
         if not out:
             sys.exit("export needs --out <file.jsonl>")
         _refuse_traj_export_inside_board(out, board)
-        tmp = out + ".tmp"
-        with open(tmp, "w") as f:
-            for e in sel:
-                f.write(json.dumps(e) + "\n")
-        os.replace(tmp, out)
+        _traj_write_export_file(out, sel)
         print("exported %d event(s) of %d to %s" % (len(sel), len(events), out))
         return
     limit = int(getattr(a, "limit", 0) or 0)
