@@ -15490,7 +15490,9 @@ Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
   the next poll. `atm watch` and `atm spawn` share one launch policy:
   unattended (no permission prompts); --safe keeps prompts. The watcher header
   prints launch=unattended or launch=safe.
-  To survive reboot, add the watcher command from `spawn --list`'s log to a login item / launchd job.
+  To survive reboot and parent-session restarts: `atm service install`, then
+  `atm spawn <seat> --persist` (desired state on the board; the per-user service
+  owns the loops). `atm service uninstall` removes the launchd/systemd unit.
 
 Stuck rule (in every worker prompt): if blocked -- permission, failing test, unclear scope, missing
 access, a decision that is not yours -- post `atm msg "stuck: ..." --to <master> --re <id>`
@@ -15811,6 +15813,148 @@ def _stop_file(board, owner):
     return os.path.join(agents_dir(board), owner + ".watch.stop")
 
 
+def _seat_service():
+    """Lazy import so tests can stub the module and wheels stay optional."""
+    import seat_service as mod
+    return mod
+
+
+def _spawn_spec_from_argv(argv, *, worktree, cmd, harness, model, max_runs, safe):
+    """Serializable restart recipe for the per-user seat service (T-1499)."""
+    return {
+        "argv": list(argv),
+        "worktree": worktree,
+        "cmd": cmd,
+        "harness": harness or "",
+        "model": model or "",
+        "max_runs": int(max_runs),
+        "safe": bool(safe),
+    }
+
+
+def _start_watcher_from_spec(board, owner, spec, *, env=None, verify=True):
+    """Start one detached watch process from a recorded spawn spec.
+
+    Caller must hold the seat runner lock and have checked seat_may_spawn.
+    """
+    import subprocess
+
+    argv = list((spec or {}).get("argv") or [])
+    wt = (spec or {}).get("worktree") or ""
+    if not argv or not wt:
+        return False, "incomplete spawn spec (need argv + worktree)", None, ""
+    launch_env = env if env is not None else _supervisor_launch_env(board, owner)
+    launch_env = dict(launch_env)
+    launch_env["PYTHONUNBUFFERED"] = "1"
+    log_path = os.path.join(agents_dir(board), owner + ".watch.log")
+    with open(log_path, "a") as lf:
+        started = subprocess.Popen(
+            argv, cwd=wt, env=launch_env, stdout=lf, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    started_pid = started.pid
+    if not verify:
+        return True, "", started_pid, " ".join(argv)
+    ok, verify_detail, pid, started_cmd = _spawn_verify_started_watcher(
+        board, owner, started_pid)
+    if not ok:
+        import signal
+        try:
+            os.kill(started_pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        return False, verify_detail, started_pid, started_cmd or " ".join(argv)
+    return True, "", pid, started_cmd
+
+
+def _service_launch_env(board, owner, home=None):
+    """Supervisor launch env overlaid with the service's login-shell snapshot."""
+    ss = _seat_service()
+    base = _supervisor_launch_env(board, owner)
+    return ss.merge_launch_env(base, ss.load_login_env(home))
+
+
+def _record_desired_active(board, owner, spec, *, who=""):
+    ss = _seat_service()
+    ss.register_board(board)
+    return ss.save_desired(
+        board, owner, "active", spec=spec, backoff_until=None,
+        updated_by=who or whoami())
+
+
+def _record_desired_stopped(board, owner, *, who=""):
+    ss = _seat_service()
+    ss.register_board(board)
+    return ss.save_desired(
+        board, owner, "stopped", backoff_until=None,
+        updated_by=who or whoami(), keep_spec=True)
+
+
+def _service_try_start_seat(board, owner, desired=None, home=None):
+    """Start one seat when the deterministic rule allows. Returns a status dict."""
+    ss = _seat_service()
+    desired = desired or ss.load_desired(board, owner)
+    if not desired:
+        return {"started": False, "reason": "no-desired"}
+    with ss.RunnerLock(board, owner, blocking=False) as lock:
+        if not lock.held:
+            return {"started": False, "reason": "lock-busy"}
+        live = _live_watch_pids(owner, board=board)
+        if not ss.seat_may_spawn(desired, len(live)):
+            if live:
+                return {"started": False, "reason": "already-live", "pids": live}
+            return {"started": False, "reason": "not-eligible"}
+        try:
+            os.unlink(_stop_file(board, owner))
+        except OSError:
+            pass
+        _reclaim_unrelated_watch_pidfile(board, owner)
+        env = _service_launch_env(board, owner, home=home)
+        ok, detail, pid, cmdline = _start_watcher_from_spec(
+            board, owner, desired.get("spec") or {}, env=env)
+        if not ok:
+            ss.set_backoff(board, owner)
+            return {"started": False, "reason": "start-failed", "detail": detail}
+        ss.clear_backoff(board, owner)
+        return {"started": True, "pid": pid, "cmdline": cmdline}
+
+
+def _service_reconcile_once(home=None, boards=None):
+    """One reconcile pass: stop stopped seats, start eligible active seats."""
+    ss = _seat_service()
+    home_root = home if home is not None else os.path.expanduser("~")
+    targets = boards if boards is not None else ss.load_boards(home_root)
+    report = {"boards": 0, "started": [], "stopped": [], "skipped": [], "errors": []}
+    for board in targets:
+        if not os.path.isdir(board):
+            continue
+        report["boards"] += 1
+        for owner, desired in ss.list_desired_seats(board):
+            try:
+                live = _live_watch_pids(owner, board=board)
+                if ss.seat_should_stop(desired, len(live)):
+                    _spawn_stop(board, owner, all_boards=False)
+                    # _spawn_stop already records stopped; ensure state sticks
+                    ss.save_desired(
+                        board, owner, "stopped", keep_spec=True,
+                        updated_by="service")
+                    report["stopped"].append("%s:%s" % (board, owner))
+                    continue
+                if desired.get("state") != "active":
+                    report["skipped"].append("%s:%s:%s" % (board, owner, desired.get("state")))
+                    continue
+                result = _service_try_start_seat(
+                    board, owner, desired=desired, home=home_root)
+                if result.get("started"):
+                    report["started"].append("%s:%s:pid=%s" % (
+                        board, owner, result.get("pid")))
+                else:
+                    report["skipped"].append("%s:%s:%s" % (
+                        board, owner, result.get("reason")))
+            except Exception as exc:
+                report["errors"].append("%s:%s:%s" % (board, owner, exc))
+    return report
+
+
 def _spawn_stop(board, owner, all_boards=False):
     """`atm spawn <owner> --stop`: stop that seat's watcher ON THIS BOARD.
 
@@ -15825,6 +15969,12 @@ def _spawn_stop(board, owner, all_boards=False):
     `all_boards` is the separate, explicit fleet intent; it is never implied.
     """
     import signal
+
+    # T-1499: desired=stopped so the per-user service does not restart this seat.
+    try:
+        _record_desired_stopped(board, owner)
+    except Exception:
+        pass
 
     with _shared_watch_table():
         pids = _live_watch_pids(owner) if all_boards else _live_watch_pids(owner, board=board)
@@ -16116,31 +16266,61 @@ def cmd_spawn(a, board):
     # the launched process has a brand-new session id with no record of
     # its own yet -- otherwise a worker would be hidden from the very
     # mail it was launched to handle.
-    env = _supervisor_launch_env(board, owner)
-    env["PYTHONUNBUFFERED"] = "1"
-    log_path = os.path.join(agents_dir(board), owner + ".watch.log")
-    with open(log_path, "a") as lf:
-        started = subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
-                                   stdin=subprocess.DEVNULL, start_new_session=True)
-    started_pid = started.pid
-    ok, verify_detail, pid, started_cmd = _spawn_verify_started_watcher(
-        board, owner, started_pid)
-    if not ok:
-        import signal
-        try:
-            os.kill(started_pid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            pass
-        sys.exit("failure: spawn did not install a live watcher for %s "
-                 "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
+    persist = max_runs == 0
+    spec = _spawn_spec_from_argv(
+        argv, worktree=wt, cmd=cmd, harness=harness, model=model,
+        max_runs=max_runs, safe=bool(getattr(a, "safe", False)))
+    if persist:
+        # T-1499: desired state on the board; the per-user service owns restarts.
+        _record_desired_active(board, owner, spec)
+    ss = _seat_service()
+    service_home = os.environ.get("ATMAN_SERVICE_HOME") or os.path.expanduser("~")
+    service_owns = persist and ss.service_installed(service_home) and not os.environ.get(
+        "ATMAN_SPAWN_DIRECT")
+    if service_owns:
+        result = _service_try_start_seat(board, owner, home=service_home)
+        if result.get("started"):
+            pid = result["pid"]
+            print("desired=active for %s; service started watcher (pid %d); "
+                  "harness=%s; model=%s; wake=%s; launch=%s; persist=yes; max-runs=%s; "
+                  "run-timeout=%sm; seat=%s pinned; log %s" % (
+                      owner, pid,
+                      _launch_harness_label(
+                          board, owner, getattr(a, "harness", "") or a.tool, harness),
+                      model, effective_wake_mode, launch, max_runs,
+                      getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner,
+                      os.path.join(agents_dir(board), owner + ".watch.log")))
+            print("cmd: %s" % cmd)
+            print("watch-cmdline: %s" % (result.get("cmdline") or ""))
+        else:
+            print("desired=active for %s recorded; service will start the watcher "
+                  "(%s). active-with-no-process is wakeable, not an error."
+                  % (owner, result.get("reason") or "pending"))
+            print("cmd: %s" % cmd)
+        if getattr(a, "usage_line", True):
+            print_seat_usage(board, harness)
+        post_message(board, whoami(),
+                     "%s desired=active (service-owned persistent worker, %s, model %s)"
+                     % (owner, harness, model))
+        return
+    env = _supervisor_launch_env(board, owner)
+    ok, verify_detail, pid, started_cmd = _start_watcher_from_spec(
+        board, owner, spec, env=env)
+    if not ok:
+        sys.exit("failure: spawn did not install a live watcher for %s "
+                 "(started pid %s). %s" % (owner, pid, verify_detail))
     print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; run-timeout=%sm; seat=%s pinned; log %s" % (
         owner, pid, _launch_harness_label(
             board, owner, getattr(a, "harness", "") or a.tool, harness), model,
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs,
-        getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner, log_path))
+        getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner,
+        os.path.join(agents_dir(board), owner + ".watch.log")))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
+    if persist and not ss.service_installed(service_home):
+        print("note: install `atm service install` so seats survive parent-session "
+              "restarts and reboot (desired=active already recorded)")
     # T-1076: what this seat's provider has left, from the recorded reading.
     # `dispatch` printed it next to its own reservation line, so it asks for
     # this one to be left out rather than say the same thing twice.
@@ -16148,6 +16328,77 @@ def cmd_spawn(a, board):
         print_seat_usage(board, harness)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
+
+
+def cmd_service(a, board=None):
+    """Per-user OS service that owns persistent seat watchers (T-1499)."""
+    ss = _seat_service()
+    home = os.environ.get("ATMAN_SERVICE_HOME") or os.path.expanduser("~")
+    # Tests redirect the service home via ATMAN_SERVICE_HOME as the fake $HOME root.
+    if os.environ.get("ATMAN_SERVICE_HOME"):
+        home = os.environ["ATMAN_SERVICE_HOME"]
+    action = getattr(a, "service_cmd", None) or getattr(a, "action", None) or "status"
+    py, script = ss.tickets_argv(os.path.realpath(__file__))
+
+    if action == "install":
+        path, err = ss.install_service(
+            py, script, home=home, load=not getattr(a, "no_load", False))
+        if err:
+            sys.exit("service install wrote %s but failed to load: %s" % (path, err))
+        print("installed seat service at %s" % path)
+        print("login-shell env captured at %s" % ss.env_snapshot_path(home))
+        print("reconcile interval %ss; spawn --persist records desired=active"
+              % ss.RECONCILE_INTERVAL_SECS)
+        return
+
+    if action == "uninstall":
+        err = ss.uninstall_service(home=home, unload=not getattr(a, "no_load", False))
+        if err:
+            print("warning: %s" % err)
+        print("uninstalled seat service")
+        return
+
+    if action == "status":
+        boards = ss.load_boards(home)
+        print("installed: %s" % ("yes" if ss.service_installed(home) else "no"))
+        print("home: %s" % ss.service_home(home))
+        print("boards: %d" % len(boards))
+        for b in boards:
+            print("  %s" % b)
+            for owner, desired in ss.list_desired_seats(b):
+                live = _live_watch_pids(owner, board=b) if os.path.isdir(b) else []
+                print("    %s desired=%s live=%d may_spawn=%s" % (
+                    owner, desired.get("state"), len(live),
+                    ss.seat_may_spawn(desired, len(live))))
+        return
+
+    if action == "reconcile":
+        report = _service_reconcile_once(home=home)
+        print("reconciled boards=%d started=%d stopped=%d skipped=%d errors=%d" % (
+            report["boards"], len(report["started"]), len(report["stopped"]),
+            len(report["skipped"]), len(report["errors"])))
+        for line in report["started"]:
+            print("started %s" % line)
+        for line in report["stopped"]:
+            print("stopped %s" % line)
+        for line in report["errors"]:
+            print("error %s" % line)
+        return
+
+    if action == "run":
+        import time as _time
+        # Capture/refresh login env once at boot (launchd bare PATH).
+        ss.save_login_env(ss.capture_login_env(), home=home)
+        print("seat service running; reconcile every %ss; home=%s"
+              % (ss.RECONCILE_INTERVAL_SECS, ss.service_home(home)), flush=True)
+        while True:
+            try:
+                _service_reconcile_once(home=home)
+            except Exception as exc:
+                print("reconcile error: %s" % exc, flush=True)
+            _time.sleep(ss.RECONCILE_INTERVAL_SECS)
+
+    sys.exit("unknown service action: %s" % action)
 
 
 HARNESS_PROBE_PROMPT = "reply OK"
@@ -23273,6 +23524,21 @@ def main():
                         "strips auth, endpoint, session, ticket pointer, and limits; keeps message history")
     c.set_defaults(fn=cmd_spawn)
 
+    c = sub.add_parser(
+        "service",
+        help="per-user OS service that owns persistent seat watchers (T-1499)")
+    sc = c.add_subparsers(dest="service_cmd")
+    x = sc.add_parser("install", help="install launchd KeepAlive / systemd --user Restart=always")
+    x.add_argument("--no-load", action="store_true",
+                   help="write unit files only; do not launchctl/systemctl load")
+    x = sc.add_parser("uninstall", help="unload and remove the OS unit")
+    x.add_argument("--no-load", action="store_true",
+                   help="remove unit files only; do not unload")
+    sc.add_parser("status", help="show install state, boards, desired seats")
+    sc.add_parser("reconcile", help="one reconcile pass (start/stop due seats)")
+    sc.add_parser("run", help="reconcile loop (what launchd/systemd execs)")
+    c.set_defaults(fn=cmd_service, service_cmd="status")
+
     c = sub.add_parser("ui", help="local command board: http://localhost:8765 (auto-refresh + composer)")
     c.add_argument("--port", type=int, default=8765)
     c.add_argument("--host", default="127.0.0.1")
@@ -23793,9 +24059,10 @@ def main():
             found = None
         cmd_self(a, found if found and os.path.isdir(found) else None)
         return
-    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow"):
+    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow", "service"):
         # Diagnose/repair board resolution itself; must not go through
         # board_dir() or a shadow board is refused before we can report it.
+        # service is per-user (no board required).
         a.fn(a)
         return
     if a.cmd == "feedback":
