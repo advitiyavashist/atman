@@ -10980,6 +10980,11 @@ def _failure_provider(failure):
     return failure.get("provider") or _adapter_provider(failure.get("harness") or "")
 
 
+def _seat_failures():
+    import seat_failures as mod
+    return mod
+
+
 def _local_adapter_failure(rec, harness_name):
     """Native/watcher refusal is provider-local. Remote seats use the bridge failure only."""
     failure = (rec or {}).get("adapter_failure") or {}
@@ -10992,6 +10997,18 @@ def _local_adapter_failure(rec, harness_name):
     if scoped and current and scoped != current:
         return {}
     return failure
+
+
+def _note_run_failure(board, owner, *, reason, rc=None, auth_state="", trigger="",
+                      harness=""):
+    """Record a classified spawn/run failure with 1s→30s backoff (T-1500)."""
+    sf = _seat_failures()
+    previous = (_agent_rec(board, owner) or {}).get("adapter_failure") or {}
+    record = sf.next_failure_record(
+        previous, reason=reason, rc=rc, auth_state=auth_state,
+        trigger=trigger, provider=_adapter_provider(harness), harness=harness or "")
+    _agent_set(board, owner, adapter_failure=record)
+    return record
 
 
 def _clear_adapter_failure_on_provider_change(board, owner, new_harness,
@@ -15050,18 +15067,18 @@ def cmd_watch(a, board):
                 _agent_rec(board, owner) or {}, retry_harness)
             same_failure = bool(trigger_key and retry_state.get("trigger") == trigger_key)
             retry_deferred = (not a.once and same_failure and not force and
-                              (retry_state.get("state") == "failed" or
-                               float(retry_state.get("retry_epoch") or 0) > _remote_epoch()))
+                              _seat_failures().failure_blocks_retry(
+                                  retry_state, now_epoch=_remote_epoch(), force=force))
             if actionable(p) and retry_deferred:
-                log("%s skip retrigger on unchanged trigger; state=%s attempts=%s retry_at=%s" % (
-                    now(), retry_state.get("state"), retry_state.get("attempts"),
-                    retry_state.get("retry_at") or "manual"))
+                plain = _seat_failures().plain_failure_status(
+                    retry_state, now_epoch=_remote_epoch())
+                log("%s skip retrigger on unchanged trigger; %s" % (now(), plain or retry_state))
                 if a.verbose:
-                    print("%s dispatch %s (attempts=%s; queued trigger unchanged)" % (
-                        now(), retry_state.get("state"), retry_state.get("attempts")))
+                    print("%s %s" % (now(), plain or ("dispatch %s" % retry_state.get("state"))))
             elif actionable(p):
                 if (_auth_gates_spawn(retry_harness) and not getattr(a, "exec", None)
                         and not getattr(a, "dry_run", False)):
+                    # T-1500: re-read credentials every attempt; never trust a pinned probe alone.
                     auth = _refresh_auth_check(board, owner)
                     if (auth.get("state") != "ready"
                             and ((auth.get("pause") or {}).get("retry_model") is False)):
@@ -15223,27 +15240,20 @@ def cmd_watch(a, board):
                     log("%s run %d exit %s" % (now(), runs, rc))
                     print("  run %d finished exit=%s (log: %s)" % (runs, rc, log_path))
                 if not a.once and rc not in (0, None):
-                    previous = ((_agent_rec(board, owner) or {}).get("adapter_failure") or {})
-                    attempts = (int(previous.get("attempts") or 0) + 1
-                                if previous.get("trigger") == trigger_key else 1)
-                    retrying = attempts < LOCAL_DISPATCH_MAX_ATTEMPTS
-                    delay = min(every * (2 ** max(0, attempts - 1)), 60) if retrying else 0
-                    retry_epoch = _remote_epoch() + delay if delay else 0
-                    failure_record = {
-                        "state": "retrying" if retrying else "failed",
-                        "trigger": trigger_key, "attempts": attempts,
-                        "max_attempts": LOCAL_DISPATCH_MAX_ATTEMPTS,
-                        "reason": "local harness exit %s" % rc,
-                        "retry_epoch": retry_epoch,
-                        "retry_at": (datetime.fromtimestamp(retry_epoch, timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ") if retry_epoch else ""),
-                        "at": now(),
-                        "provider": _adapter_provider(retry_harness),
-                        "harness": retry_harness or "",
-                    }
-                    _safe(lambda fr=failure_record: _agent_set(board, owner, adapter_failure=fr), None)
-                    log("%s skip retrigger armed for unchanged failed trigger; bounded attempt %d/%d state=%s" % (
-                        now(), attempts, LOCAL_DISPATCH_MAX_ATTEMPTS, failure_record["state"]))
+                    reason = "local harness exit %s" % rc
+                    detail = ((run_output or "").strip().splitlines() or [""])[-1][:200]
+                    if detail:
+                        reason = "%s: %s" % (reason, detail)
+                    auth_state = ""
+                    if _auth_gates_spawn(retry_harness) or retry_harness == "cursor":
+                        auth_state = _classify_auth_output(rc, run_output) or ""
+                    failure_record = _note_run_failure(
+                        board, owner, reason=reason, rc=rc, auth_state=auth_state,
+                        trigger=trigger_key, harness=retry_harness)
+                    plain = _seat_failures().plain_failure_status(
+                        failure_record, now_epoch=_remote_epoch())
+                    log("%s %s" % (now(), plain))
+                    print("  %s" % plain)
                 elif not a.once:
                     def clear_failure(rec):
                         rec.pop("adapter_failure", None)
@@ -15256,7 +15266,14 @@ def cmd_watch(a, board):
                 print("%s nothing pending%s" % (now(), " (limited)" if p.get("limited") else ""))
             if a.once:
                 sys.exit(0 if actionable(p) else 1)
+            # Idle poll backoff stays separate; run-failure backoff lives in adapter_failure.
             wait = min(every * (2 ** min(failures, 5)), 900) if failures else every
+            fail_rec = _local_adapter_failure(_agent_rec(board, owner) or {}, retry_harness)
+            if fail_rec.get("state") == "retrying":
+                retry_epoch = float(fail_rec.get("retry_epoch") or 0)
+                remain = max(0, retry_epoch - _remote_epoch())
+                if remain:
+                    wait = max(wait, min(remain, _seat_failures().BACKOFF_CAP_SECS))
             _safe(lambda: checkin(board, owner, None, "watching (%d runs, %d failed in a row)" % (runs, failures)), None)
             import time as _time
             deadline = _time.monotonic() + wait
@@ -16099,6 +16116,9 @@ def cmd_spawn(a, board):
                 _harness_check_label(r.get("harness_check")),
                 (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
                 (r.get("worktree") or "").replace(os.path.expanduser("~"), "~")))
+            fail = _local_adapter_failure(r, entry.get("harness") or entry.get("tool") or "")
+            if fail:
+                print("  %s" % _seat_failures().plain_failure_status(fail))
         return
     if not a.name:
         sys.exit("spawn needs a name (or --list)")
@@ -16150,11 +16170,22 @@ def cmd_spawn(a, board):
     # must be ready before a watcher starts. Keep this before cmd_join so a
     # failed relaunch cannot alter roles/harness/worktree. --exec skips it.
     if _auth_gates_spawn(resolved_harness) and not a.exec:
-        auth = _preflight_seat(board, owner, requested_harness or resolved_harness)
-        reason = _preflight().dispatch_refuse(auth, resolved_harness)
-        if reason:
-            _print_auth_result(owner, auth)
-            sys.exit("watcher not started; %s" % reason)
+        # T-1500: re-read credentials/binaries/env every spawn; decide on the
+        # probe that just ran, never on a pinned earlier auth_check alone.
+        incoming = harness_auth_probe(board, owner, requested_harness or resolved_harness)
+        stored = _store_auth_check(board, owner, incoming)
+        auth = incoming if isinstance(incoming, dict) else (stored or {})
+        if auth.get("state") != "ready":
+            detail = (auth.get("detail") or auth.get("state") or "auth not ready")
+            failure = _note_run_failure(
+                board, owner, reason=detail, auth_state=auth.get("state") or "",
+                harness=resolved_harness)
+            _print_auth_result(owner, stored if isinstance(stored, dict) else auth)
+            plain = _seat_failures().plain_failure_status(failure)
+            sys.exit("watcher not started; %s" % (plain or detail))
+        def _clear_spawn_failure(rec):
+            rec.pop("adapter_failure", None)
+        _safe(lambda: _agent_update(board, owner, _clear_spawn_failure), None)
     if not os.path.isdir(wt):
         r = subprocess.run(["git", "-C", git_root, "worktree", "add", "-q", wt, "-b", owner, base],
                            capture_output=True, text=True)

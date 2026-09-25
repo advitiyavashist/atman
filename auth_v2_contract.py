@@ -482,6 +482,39 @@ def _trusted_agent_id(previous, incoming, runner_ctx):
     return ""
 
 
+def _fresh_ready_replaces_stored_failure(previous, incoming, runner_ctx):
+    """T-1500: a stored failure never outranks a fresh ready from same host+user.
+
+    Worktree / binary / runner_id may have drifted (the T-1490 pin). Host and
+    user must still match so a sandbox or other machine cannot rebind.
+    """
+    prev = previous or {}
+    if prev.get("state") not in NO_SPEND_STATES:
+        return False
+    rec = incoming or {}
+    if rec.get("state") != "ready":
+        return False
+    if rec.get("authoritative") is False:
+        return False
+    if not _incoming_is_legal_probe(rec):
+        return False
+    if not is_authoritative(rec, runner_ctx):
+        return False
+    prev_ctx = prev.get("execution_context") or {}
+    inc_ctx = rec.get("execution_context") or {}
+    for field in ("hostname", "username"):
+        pv = str(prev_ctx.get(field) or "").strip()
+        rv = str((runner_ctx or {}).get(field) or "").strip()
+        iv = str(inc_ctx.get(field) or "").strip()
+        if not pv or not rv or pv != rv or pv != iv:
+            return False
+    prev_agent = str(prev_ctx.get("agent_id") or "").strip()
+    run_agent = str((runner_ctx or {}).get("agent_id") or "").strip()
+    if prev_agent and run_agent and not seat_identity_matches(prev_agent, run_agent):
+        return False
+    return True
+
+
 def _same_seat_unavailable_reprobe(previous, incoming, runner_ctx):
     """Authoritative unavailable re-probe for the same fenced seat.
 
@@ -520,8 +553,9 @@ def merge_auth_check(previous, incoming, runner_ctx):
     Exception: an authoritative `unavailable` re-probe for the same fenced
     seat may replace stored lineage when only resolved binary / runner_id
     drifted (CLI disappeared). Cross-seat, sandbox, repo, argv0, and Ready
-    claims still cannot overwrite. Supported preview install is
-    source-prefix `install.sh`: atm and tickets are the same tickets.py.
+    claims still cannot overwrite — except T-1500: a fresh authoritative
+    `ready` from the same host and user outranks a stored failure so a
+    repaired CLI is not pinned forever by a wrong earlier worktree context.
 
     Pause and alert identity are derived from trusted stored/incoming
     enrolled context, never from an arbitrary caller.
@@ -544,6 +578,8 @@ def merge_auth_check(previous, incoming, runner_ctx):
             if not incoming_auth:
                 return previous
         elif _same_seat_unavailable_reprobe(previous, incoming, runner_ctx):
+            incoming_auth = True
+        elif _fresh_ready_replaces_stored_failure(previous, incoming, runner_ctx):
             incoming_auth = True
         else:
             return previous
