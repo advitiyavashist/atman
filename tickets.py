@@ -3048,6 +3048,10 @@ def detail(board, t, tickets):
             stamp += ", last update %s ago" % fmt_hours(tm["since_update"])
         out.append("Time: " + stamp)
     out.append("lane: %s" % _ticket_lane(t))
+    tc = _recovery()
+    if tc is not None:
+        out.append("revision: %s  (pass --seen %s on claim/accept/reject/msg --re)" % (
+            tc.ticket_revision(t), tc.ticket_revision(t)))
     if (t.get("kind") or "") == "automated":
         auto = t.get("automated") or {}
         out.append("kind: automated (%s for %s)" % (
@@ -4589,6 +4593,11 @@ def cmd_claim(a, board):
     t = load(board, a.id)
     if _worktree_gc().is_automated(t):
         sys.exit("%s is automated; Atman runs it (no claim, no model)" % a.id)
+    tc = _recovery()
+    if tc is not None:
+        err = tc.freshness_hold_error(t, getattr(a, "seen", "") or "")
+        if err:
+            sys.exit(err)
     lane = _ticket_lane(t)
     if lane != "ready":
         sys.exit("%s is lane=%s; sound it before claiming (atm sound %s)"
@@ -4710,6 +4719,11 @@ def cmd_review(a, board):
 def cmd_accept(a, board):
     """Record a structured accept bound to the submitted review head (T-944)."""
     t = load(board, a.id)
+    tc = _recovery()
+    if tc is not None:
+        err = tc.freshness_hold_error(t, getattr(a, "seen", "") or "")
+        if err:
+            sys.exit(err)
     ev, err = _review_verdict().apply(
         t, whoami(), a.sha, "accept", notes=a.notes, require_full=True)
     if err:
@@ -4730,6 +4744,11 @@ def cmd_reject(a, board):
     idled until a coordinator ran reopen+assign. Reject now matches the API.
     """
     t = load(board, a.id)
+    tc = _recovery()
+    if tc is not None:
+        err = tc.freshness_hold_error(t, getattr(a, "seen", "") or "")
+        if err:
+            sys.exit(err)
     reviewer = whoami()
     ev, err = _review_verdict().apply(
         t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
@@ -4738,7 +4757,6 @@ def cmd_reject(a, board):
     author = _review_verdict().return_to_author_for_revision(
         t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
         kind="reject")
-    tc = _recovery()
     if tc is not None and author:
         harness = ""
         try:
@@ -10727,6 +10745,13 @@ def cmd_msg(a, board):
     # join cannot rebind note attribution; do not collapse the two surfaces.
     sender = session_seat(board, a.owner)
     is_task = bool(getattr(a, "task", False))
+    if getattr(a, "re", "") and getattr(a, "seen", ""):
+        tc = _recovery()
+        if tc is not None:
+            t = load(board, a.re)
+            err = tc.freshness_hold_error(t, a.seen)
+            if err:
+                sys.exit(err)
     if a.to and a.to == sender:
         # Addressing yourself is never what anyone means, and it fails
         # SILENTLY: the message posts, the addressee's unread count rises,
@@ -23766,6 +23791,8 @@ def main():
     c.add_argument("text")
     c.add_argument("--to", default="", help="seat / agent name, or omit for everyone")
     c.add_argument("--re", default="", help="ticket id this is about")
+    c.add_argument("--seen", default="",
+                   help="T-1502: ticket revision from `atm show` (refuse if the ticket moved)")
     c.add_argument("--task", action="store_true",
                    help="explicit task message: wakes every mode (ordinary DMs wake only continuous; ACKs never auto-wake)")
     c.add_argument("--owner", "-o")
@@ -23841,12 +23868,16 @@ def main():
     c.add_argument("id")
     c.add_argument("--sha", required=True, help="full 40-character git SHA of the submitted review head")
     c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
+    c.add_argument("--seen", default="",
+                   help="T-1502: revision from `atm show` (refuse if the ticket moved)")
     c.set_defaults(fn=cmd_accept)
 
     c = sub.add_parser("reject", help="reject the submitted SHA and return the ticket to its author as claimed")
     c.add_argument("id")
     c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
     c.add_argument("--reason", required=True, help="why this artifact is rejected")
+    c.add_argument("--seen", default="",
+                   help="T-1502: revision from `atm show` (refuse if the ticket moved)")
     c.set_defaults(fn=cmd_reject)
 
     c = sub.add_parser("sync", help="agent: merge main into my branch now (do this before review)")
@@ -24001,6 +24032,8 @@ def main():
     c.add_argument("id")
     c.add_argument("--owner", "-o")
     c.add_argument("--another", action="store_true", help="claim even though I already hold one")
+    c.add_argument("--seen", default="",
+                   help="T-1502: revision from `atm show` (refuse if the ticket moved)")
     c.set_defaults(fn=cmd_claim)
 
     c = sub.add_parser("done", help="mark a ticket done")

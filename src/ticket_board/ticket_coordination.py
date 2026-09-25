@@ -1,6 +1,7 @@
 """Persistent roles and recovery context for the existing tickets CLI."""
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -479,6 +480,68 @@ def stale_write_error(current, incoming):
             % (incoming.get("id") or current.get("id"), incoming_gen, current_gen)
         )
     return None
+
+
+def ticket_freshness(ticket):
+    """Fields that define whether a caller's view of a ticket is still current."""
+    head = ""
+    rh = (ticket or {}).get("review_head")
+    if isinstance(rh, dict):
+        head = rh.get("sha") or rh.get("sha_full") or ""
+    elif isinstance(rh, str):
+        head = rh
+    head = head or ((ticket or {}).get("commit") or "")
+    notes = (ticket or {}).get("notes") or []
+    last_note = ""
+    if notes and isinstance(notes[-1], dict):
+        last_note = notes[-1].get("at") or ""
+    return {
+        "status": (ticket or {}).get("status") or "",
+        "owner": (ticket or {}).get("owner") or "",
+        "generation": str(owner_generation(ticket) or ""),
+        "review_head": (head or "")[:40],
+        "notes": str(len(notes)),
+        "updated": (
+            (ticket or {}).get("updated")
+            or (ticket or {}).get("review_at")
+            or (ticket or {}).get("claimed_at")
+            or ""
+        ),
+        "last_note_at": last_note,
+    }
+
+
+def ticket_revision(ticket):
+    """Opaque 16-hex revision token for --seen freshness holds (T-1502)."""
+    fields = ticket_freshness(ticket)
+    blob = "|".join("%s=%s" % (k, fields[k]) for k in sorted(fields))
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def freshness_hold_error(ticket, seen):
+    """Refuse when --seen does not match the ticket's current revision.
+
+    Returns a multi-line error naming exactly what the ticket looks like now
+    so the caller can re-read and retry.
+    """
+    seen = (seen or "").strip()
+    if not seen:
+        return None
+    current = ticket_revision(ticket)
+    if seen == current:
+        return None
+    fields = ticket_freshness(ticket)
+    lines = [
+        "%s moved since you last read it (seen=%s now=%s); what changed:"
+        % ((ticket or {}).get("id"), seen, current),
+    ]
+    for key in sorted(fields):
+        lines.append("  %s: %s" % (key, fields[key] or "-"))
+    lines.append(
+        "re-read with `atm show %s`, then retry with --seen %s"
+        % ((ticket or {}).get("id"), current)
+    )
+    return "\n".join(lines)
 
 
 def register(sub, api):
