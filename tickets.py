@@ -10980,6 +10980,70 @@ def _failure_provider(failure):
     return failure.get("provider") or _adapter_provider(failure.get("harness") or "")
 
 
+def _seat_session():
+    import seat_session as mod
+    return mod
+
+
+def _provider_session(board, owner):
+    return (_agent_rec(board, owner) or {}).get("provider_session") or {}
+
+
+def _store_provider_session(board, owner, harness, session_id, *, mode="resume", reason=""):
+    if not session_id and mode != "fresh":
+        return
+    rec = {
+        "harness": harness or "",
+        "id": session_id or "",
+        "mode": mode or "",
+        "reason": reason or "",
+        "at": now(),
+    }
+    _agent_set(board, owner, provider_session=rec)
+
+
+def _prepare_watch_session(board, owner, harness, run_cmd, env, *, force_fresh=False,
+                           fresh_reason=""):
+    """Attach resume/fresh session to a headless watch command (T-1501)."""
+    ss = _seat_session()
+    stored = _provider_session(board, owner)
+    # Never silently start fresh after an auth pause — caller must not invoke
+    # this while auth blocks the model.
+    plan = ss.plan_run(
+        harness, stored, force_fresh=force_fresh, fresh_reason=fresh_reason)
+    cmd = ss.apply_plan_to_cmd(run_cmd, harness, plan)
+    launch_env = dict(env or {})
+    launch_env.update(plan.get("env_updates") or {})
+    if plan.get("notice"):
+        print("  session: %s" % plan["notice"])
+    if plan.get("mode") == "fresh" and plan.get("session_id"):
+        _store_provider_session(
+            board, owner, harness, plan["session_id"],
+            mode="fresh", reason=plan.get("reason") or "")
+    return cmd, launch_env, plan
+
+
+def _finish_watch_session(board, owner, harness, plan, run_output, rc, env):
+    """Persist session id after a run, or fall back fresh visibly on resume fail."""
+    ss = _seat_session()
+    h = (harness or "").split("+", 1)[0]
+    if plan and plan.get("mode") == "resume" and ss.resume_failed(h, run_output, rc):
+        reason = "resume failed; starting fresh next wake"
+        print("  session: %s" % reason)
+        _store_provider_session(board, owner, harness, "", mode="fresh", reason=reason)
+        return
+    if rc not in (0, None):
+        # Keep the stored id after a non-resume failure (including auth); do not
+        # silently clear it.
+        return
+    found = ss.extract_session_id(
+        h, run_output, env_thread=(env or {}).get("CODEX_THREAD_ID") or "")
+    if not found and plan:
+        found = plan.get("session_id") or ""
+    if found:
+        _store_provider_session(board, owner, harness, found, mode="resume")
+
+
 def _seat_failures():
     import seat_failures as mod
     return mod
@@ -15073,6 +15137,8 @@ def cmd_watch(a, board):
                 plain = _seat_failures().plain_failure_status(
                     retry_state, now_epoch=_remote_epoch())
                 log("%s skip retrigger on unchanged trigger; %s" % (now(), plain or retry_state))
+                print("%s backoff; wake buffered (not dropped)%s" % (
+                    now(), ("; " + plain) if plain else ""))
                 if a.verbose:
                     print("%s %s" % (now(), plain or ("dispatch %s" % retry_state.get("state"))))
             elif actionable(p):
@@ -15134,6 +15200,11 @@ def cmd_watch(a, board):
                 env["TICKETS_RUN_ID"] = run_id
                 env["TICKETS_RUN_NO"] = str(runs)
                 release_sha = _release_commit()
+                session_plan = None
+                if not a.exec and not a.dry_run and (
+                        (retry_harness or "").split("+", 1)[0] in ("claude", "codex")):
+                    run_cmd, env, session_plan = _prepare_watch_session(
+                        board, owner, retry_harness, run_cmd, env)
                 _safe(lambda rid=run_id, ht=held_ticket, rs=release_sha: traj_event(
                     board, "run_start", agent=owner, ticket=ht, run_no=runs,
                     run_id=rid, trigger=sorted(p), harness_cmd=harness,
@@ -15188,6 +15259,15 @@ def cmd_watch(a, board):
                         cleanup()
                     ended = now()
                     run_output = _read_run_slice(log_path, log_before)
+                    if session_plan is not None:
+                        _safe(lambda: _finish_watch_session(
+                            board, owner, retry_harness, session_plan,
+                            run_output, rc, env), None)
+                    if rc in (0, None) and trigger_key:
+                        # T-1501: record last consumed wake so it is not replayed.
+                        _safe(lambda tk=trigger_key: _agent_set(
+                            board, owner, last_consumed_event={
+                                "trigger": tk, "at": now()}), None)
                     _watch_note_limit_from_log(
                         board, owner, run_output, rc=rc, timed_out=timed_out,
                         ticket=held_ticket, harness=_harness_of_cmd(run_cmd),
