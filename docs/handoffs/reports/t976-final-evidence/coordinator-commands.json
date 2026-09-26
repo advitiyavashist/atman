@@ -11,7 +11,7 @@
       "-b",
       "main"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "",
@@ -27,7 +27,7 @@
       "add",
       "."
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "",
@@ -44,7 +44,7 @@
       "-qm",
       "init"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "",
@@ -59,10 +59,10 @@
       "--roles",
       "backend"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
-    "out": "board: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.tickets\n  resolved from the git worktree cwd is in (/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator)\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.cursor/rules/tickets.mdc\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/AGENTS.md\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.gitignore\nwrote: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.tickets/MASTER.md\nbound: `atm` run from /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator resolves to this board (`tickets` is a compatibility alias).\n\nClaude Code: install a scoped hook with `atm hooks claude --agent <name>`.\nCodex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.\n\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.tickets\nepic:  E-001  Sample epic: a first slice end to end\n  T-001  Sample: design the data model              ready now\n  T-002  Sample: build the API on top of the model  after T-001\n  T-003  Sample: put a screen on the API            after T-002\njoined as boss  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral  alias=-\n\nThe three commands that matter:\n  TICKET_AGENT=boss atm next                      claim the next ready ticket\n  TICKET_AGENT=boss atm update <id> \"...\"         say where you are, at least every 45 min\n  TICKET_AGENT=boss atm review <id> --notes \"...\" hand it back with an exact artifact\n  (`tickets` is a compatibility alias for the same CLI.)\n\nFeel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket\n               stays shut until a DIFFERENT seat accepts the commit)\n\nSee it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)\nLearn it: atm guide   |   docs/first-session.md   |   README.md\n",
+    "out": "board: <tmp>/t976-journeys-bdyrm9nh/coordinator/.tickets\n  resolved from the git worktree cwd is in (<tmp>/t976-journeys-bdyrm9nh/coordinator)\nwrote: <tmp>/t976-journeys-bdyrm9nh/coordinator/.cursor/rules/tickets.mdc\nwrote: <tmp>/t976-journeys-bdyrm9nh/coordinator/AGENTS.md\nwrote: <tmp>/t976-journeys-bdyrm9nh/coordinator/.gitignore\nwrote: <tmp>/t976-journeys-bdyrm9nh/coordinator/.tickets/MASTER.md\nbound: `atm` run from <tmp>/t976-journeys-bdyrm9nh/coordinator resolves to this board (`tickets` is a compatibility alias).\n\nClaude Code: install a scoped hook with `atm hooks claude --agent <name>`.\nCodex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.\n\nboard: <tmp>/t976-journeys-bdyrm9nh/coordinator/.tickets\nepic:  E-001  Sample epic: a first slice end to end\n  T-001  Sample: design the data model              ready now\n  T-002  Sample: build the API on top of the model  after T-001\n  T-003  Sample: put a screen on the API            after T-002\njoined as boss  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral  alias=-\n\nThe three commands that matter:\n  TICKET_AGENT=boss atm next                      claim the next ready ticket\n  TICKET_AGENT=boss atm update <id> \"...\"         say where you are, at least every 45 min\n  TICKET_AGENT=boss atm review <id> --notes \"...\" hand it back with an exact artifact\n  (`tickets` is a compatibility alias for the same CLI.)\n\nFeel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket\n               stays shut until a DIFFERENT seat accepts the commit)\n\nSee it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)\nLearn it: atm guide   |   docs/first-session.md   |   README.md\n",
     "err": ""
   },
   {
@@ -71,7 +71,7 @@
       "quickstart",
       "--remove"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "removed 3 sample ticket(s) (T-001, T-002, T-003)\nepic E-001 left in place (it may hold your own work now)\n",
@@ -83,7 +83,7 @@
       "master",
       "take"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "boss is master now. Run `atm master` for the briefing.\nWARNING: boss took master with no live endpoint. Mail stays queued until a native session or persist watcher is online.\n",
@@ -97,7 +97,7 @@
       "--exit",
       "exact row count accepted"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "objective set\n",
@@ -113,7 +113,7 @@
       "add",
       "."
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "",
@@ -130,7 +130,7 @@
       "-qm",
       "onboard"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "",
@@ -148,10 +148,10 @@
       "--cmd",
       "/usr/bin/true {prompt_file}"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "alice",
     "code": 0,
-    "out": "joined as alice  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check alice` proves it works\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.tickets\nmaster: boss\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator worktree add .worktrees/alice-work -b alice-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.worktrees/alice-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "out": "joined as alice  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check alice` proves it works\nboard: <tmp>/t976-journeys-bdyrm9nh/coordinator/.tickets\nmaster: boss\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-bdyrm9nh/coordinator worktree add .worktrees/alice-work -b alice-work\n  cd <tmp>/t976-journeys-bdyrm9nh/coordinator/.worktrees/alice-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
     "err": ""
   },
   {
@@ -166,10 +166,10 @@
       "--cmd",
       "/usr/bin/true {prompt_file}"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "bob",
     "code": 0,
-    "out": "joined as bob  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check bob` proves it works\nboard: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.tickets\nmaster: boss\ninbox: 1 unread (atm inbox)\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator worktree add .worktrees/bob-work -b bob-work\n  cd /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.worktrees/bob-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "out": "joined as bob  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check bob` proves it works\nboard: <tmp>/t976-journeys-bdyrm9nh/coordinator/.tickets\nmaster: boss\ninbox: 1 unread (atm inbox)\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-bdyrm9nh/coordinator worktree add .worktrees/bob-work -b bob-work\n  cd <tmp>/t976-journeys-bdyrm9nh/coordinator/.worktrees/bob-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
     "err": ""
   },
   {
@@ -182,7 +182,7 @@
       "--body",
       "Cause: journey probe. Change: persisted artifact. Proof: independent assertion."
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "created T-001  Coordinator interruption target\n",
@@ -197,11 +197,11 @@
       "user.email=t976@example.invalid",
       "worktree",
       "add",
-      "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.worktrees/boss-probe",
+      "<tmp>/t976-journeys-bdyrm9nh/coordinator/.worktrees/boss-probe",
       "-b",
       "boss-probe"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator",
     "agent": "boss",
     "code": 0,
     "out": "HEAD is now at 80c0341 onboard\n",
@@ -218,15 +218,15 @@
       "--prompt-kind",
       "master",
       "--cwd",
-      "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.worktrees/boss-probe",
+      "<tmp>/t976-journeys-bdyrm9nh/coordinator/.worktrees/boss-probe",
       "--force",
       "--max-runs",
       "1"
     ],
-    "cwd": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.worktrees/boss-probe",
+    "cwd": "<tmp>/t976-journeys-bdyrm9nh/coordinator/.worktrees/boss-probe",
     "agent": "boss",
     "code": 0,
-    "out": "seat=boss (TICKET_SEAT pinned; inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped)\nwatching /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.tickets for boss every 5s; wake=continuous; launch=unattended; cwd=/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.worktrees/boss-probe; cmd=/usr/bin/true {prompt_file}\n2026-09-23T03:42:42Z work found (ready_in_my_lane) wake=ready_in_my_lane stop=unattended task-only watchers run one model run then stop; continuous/scheduled adapters stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter. -> run 1\n  run 1 finished exit=0 (log: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-bdyrm9nh/coordinator/.tickets/agents/boss.watch.log)\nmax-runs reached\nwatch stopped\n",
+    "out": "seat=boss (TICKET_SEAT pinned; inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped)\nwatching <tmp>/t976-journeys-bdyrm9nh/coordinator/.tickets for boss every 5s; wake=continuous; launch=unattended; cwd=<tmp>/t976-journeys-bdyrm9nh/coordinator/.worktrees/boss-probe; cmd=/usr/bin/true {prompt_file}\n2026-09-23T03:42:42Z work found (ready_in_my_lane) wake=ready_in_my_lane stop=unattended task-only watchers run one model run then stop; continuous/scheduled adapters stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter. -> run 1\n  run 1 finished exit=0 (log: <tmp>/t976-journeys-bdyrm9nh/coordinator/.tickets/agents/boss.watch.log)\nmax-runs reached\nwatch stopped\n",
     "err": ""
   }
 ]

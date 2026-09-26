@@ -1,6 +1,6 @@
 exec(open('/tmp/t976-final-probes/t976_journeys.py').read().split("for name,fn in [('normal'")[0])
 ENV.pop('PYTEST_CURRENT_TEST',None)
-ENV['PATH']='/tmp/atman-t976-0923-bin:/Users/kavana/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+ENV['PATH']='/tmp/atman-t976-0923-bin:'+os.path.expanduser('~/.local/bin')+':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 repo=setup('live');w=worktree(repo,'live-codex')
 atm(w,'join','live-codex','--roles','liveprobe','--harness','codex','--persistent','--wake-mode','continuous',agent='live-codex')
 atm(w,'inbox',agent='live-codex')

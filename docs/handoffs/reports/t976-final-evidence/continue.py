@@ -1,7 +1,7 @@
 exec(open('/tmp/t976-final-probes/t976_journeys.py').read().split("for name,fn in [('normal'")[0])
 import shutil
 shutil.rmtree(ROOT);ROOT=pathlib.Path(pathlib.Path('/tmp/t976-live-location').read_text());loc=json.loads((ROOT/'location.json').read_text());repo=pathlib.Path(loc['repo']);w=pathlib.Path(loc['worktree'])
-ENV.pop('PYTEST_CURRENT_TEST',None);ENV['PATH']='/tmp/atman-t976-0923-bin:/Users/kavana/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+ENV.pop('PYTEST_CURRENT_TEST',None);ENV['PATH']='/tmp/atman-t976-0923-bin:'+os.path.expanduser('~/.local/bin')+':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 body='''Cause: live interrupted-provider acceptance probe. Change: two-stage artifact. Proof: finished.txt must contain exactly stage-one newline stage-two newline. Use /tmp/atman-t976-0923-bin/atm for EVERY board command, including self (record its output). You have one ticket only. If mid.txt does not exist: write mid.txt containing stage-one newline, commit it, record an atm update explaining the exact artifact and next action to write finished.txt from mid.txt plus stage-two newline. Then run sleep 120 in the FOREGROUND; the evaluator will kill this real process once the progress note is durable. Do not finish before interruption. On a subsequent run when mid.txt exists: preserve it, write finished.txt, independently assert exact contents, commit, atm sync then atm review with paths and test. No new tests framework; no provider spawning. Do not edit .tickets by hand.'''
 atm(repo,'create','Live two-stage continuation','--role','liveprobe','--body',body)
 e=dict(ENV,TICKET_AGENT='live-codex');log=open(ROOT/'interrupt-watch.log','w')

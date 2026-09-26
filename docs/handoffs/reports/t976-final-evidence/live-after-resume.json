@@ -51,7 +51,7 @@
   "review_at": "2026-09-23T03:46:27Z",
   "commit": "live-codex@a829f64",
   "branch": "live-codex",
-  "repo": "/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.git",
+  "repo": "<tmp>/t976-journeys-1x_rtu5v/live/.git",
   "repo_source": "cwd",
   "review_head": "a829f64e28d94fcd3ee98929564c1fdc574a98bc"
 }

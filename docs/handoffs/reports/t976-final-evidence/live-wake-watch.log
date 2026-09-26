@@ -1,6 +1,6 @@
 seat=live-codex (TICKET_SEAT pinned; inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped)
-watching /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets for live-codex every 1s; wake=continuous; launch=unattended; cwd=/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex; cmd=codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "$(atm prompt)"
+watching <tmp>/t976-journeys-1x_rtu5v/live/.tickets for live-codex every 1s; wake=continuous; launch=unattended; cwd=<tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex; cmd=codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "$(atm prompt)"
 2026-09-23T03:43:43Z work found (messages_to_me, task_messages) wake=task_messages stop=unattended task-only watchers run one model run then stop; continuous/scheduled adapters stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter. -> run 1
-  run 1 finished exit=0 (log: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets/agents/live-codex.watch.log)
+  run 1 finished exit=0 (log: <tmp>/t976-journeys-1x_rtu5v/live/.tickets/agents/live-codex.watch.log)
 max-runs reached
 watch stopped

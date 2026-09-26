@@ -2,7 +2,7 @@
 Reading additional input from stdin...
 OpenAI Codex v0.154.0-alpha.6.2
 --------
-workdir: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+workdir: <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
 model: gpt-6-astra
 provider: openai
 approval: never
@@ -14,7 +14,7 @@ session id: 01a0cc5c-b990-7e60-9377-98ee76741b8c
 user
 SEAT BRIEF -- read once, then act from it. You get no second briefing.
 
-SEAT      live-codex · roles liveprobe · harness codex · worktree /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+SEAT      live-codex · roles liveprobe · harness codex · worktree <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
 TICKET    none held yet -- `atm next` hands you one and prints its scope and briefing files. Work only what it hands you.
 
 ACCEPT GATE -- the rule that decides whether your work counts
@@ -48,7 +48,7 @@ REFUSE -- not yours to do, ever
      recording one yourself. The accept must come from a seat that did not write the commit.
   3. Editing .tickets/ JSON (or any board file) by hand. Every board change goes through `atm`.
 
-You are live-codex, a worker on the shared ticket board at /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets (repo /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live).
+You are live-codex, a worker on the shared ticket board at <tmp>/t976-journeys-1x_rtu5v/live/.tickets (repo <tmp>/t976-journeys-1x_rtu5v/live).
 TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
 ACCEPT GATE: your commit lands only when a DIFFERENT seat runs `atm accept <id> --sha <full 40-char review head> --notes "..."`; you cannot accept your own ticket, a commit after `atm review` moves the head and voids the accept, and no ticket that depends on yours opens until the accept lands.
 RUN: long commands stay in the FOREGROUND; this run ends when you stop -- backgrounding a test suite loses the work.
@@ -70,29 +70,29 @@ Do now, in order:
 codex
 I’ll check the inbox and my assigned ticket, then work the scope handed to this seat.
 exec
-/bin/zsh -lc 'atm inbox' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'atm inbox' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 2046ms:
 1 unread for live-codex:
   09-23 11:43 +08  boss [unverified:TICKET_AGENT] [leadership-flag:no-registered-endpoint] -> live-codex: LIVE WAKE PROBE nonce t976-0923-wake: read this inbox and reply using atm msg --to boss with exactly ACK t976-0923-wake. No ticket is ready yet; stop after this receipt.
 
 exec
-/bin/zsh -lc 'atm mine' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'atm mine' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 347ms:
 no claimed tickets for live-codex
 
 exec
-/bin/zsh -lc 'atm next' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'atm next' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  exited 1 in 305ms:
 usage  codex unknown -- not read yet (atm harness usage)
 no tickets available (nothing open)
 
 exec
-/bin/zsh -lc 'atm msg "ACK t976-0923-wake" --to boss' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'atm msg "ACK t976-0923-wake" --to boss' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 160ms:
 posted: 09-23 11:43 +08  live-codex -> boss: ACK t976-0923-wake
 
 exec
-/bin/zsh -lc 'atm msg "idle: checked inbox, mine, and next; no claimed or ready tickets"' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'atm msg "idle: checked inbox, mine, and next; no claimed or ready tickets"' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 167ms:
 posted: 09-23 11:43 +08  live-codex: idle: checked inbox, mine, and next; no claimed or ready tickets
 
@@ -106,7 +106,7 @@ Acknowledged the wake probe to boss. No tickets are claimed or ready; posted the
 Reading additional input from stdin...
 OpenAI Codex v0.154.0-alpha.6.2
 --------
-workdir: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+workdir: <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
 model: gpt-6-astra
 provider: openai
 approval: never
@@ -118,7 +118,7 @@ session id: 01a0cc5e-0db6-7120-96ee-188078ceb8ce
 user
 SEAT BRIEF -- read once, then act from it. You get no second briefing.
 
-SEAT      live-codex · roles liveprobe · harness codex · worktree /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+SEAT      live-codex · roles liveprobe · harness codex · worktree <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
 TICKET    none held yet -- `atm next` hands you one and prints its scope and briefing files. Work only what it hands you.
 
 ACCEPT GATE -- the rule that decides whether your work counts
@@ -152,7 +152,7 @@ REFUSE -- not yours to do, ever
      recording one yourself. The accept must come from a seat that did not write the commit.
   3. Editing .tickets/ JSON (or any board file) by hand. Every board change goes through `atm`.
 
-You are live-codex, a worker on the shared ticket board at /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets (repo /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live).
+You are live-codex, a worker on the shared ticket board at <tmp>/t976-journeys-1x_rtu5v/live/.tickets (repo <tmp>/t976-journeys-1x_rtu5v/live).
 TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
 ACCEPT GATE: your commit lands only when a DIFFERENT seat runs `atm accept <id> --sha <full 40-char review head> --notes "..."`; you cannot accept your own ticket, a commit after `atm review` moves the head and voids the accept, and no ticket that depends on yours opens until the accept lands.
 RUN: long commands stay in the FOREGROUND; this run ends when you stop -- backgrounding a test suite loses the work.
@@ -174,25 +174,25 @@ Do now, in order:
 codex
 I’ll check the board messages and my assigned work, then carry the ticket through testing and review.
 exec
-/bin/zsh -lc 'atm inbox' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'atm inbox' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 121ms:
 inbox empty for live-codex (atm inbox --all for history)
 
 exec
-/bin/zsh -lc 'atm mine' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'atm mine' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 77ms:
 no claimed tickets for live-codex
 
 exec
-/bin/zsh -lc 'atm next' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'atm next' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 1232ms:
 usage  codex unknown -- not read yet (atm harness usage)
 [>] IN PROGRESS T-001  Live two-stage continuation  (role=liveprobe; owner=live-codex)
 
 Read this briefing before editing:
-  /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets/MASTER.md
+  <tmp>/t976-journeys-1x_rtu5v/live/.tickets/MASTER.md
 
-Board: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets  (cwd is /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex)
+Board: <tmp>/t976-journeys-1x_rtu5v/live/.tickets  (cwd is <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex)
 Time: active 0m, waited 0m before claim, last update 0m ago
 lane: ready
 
@@ -201,7 +201,7 @@ Cause: live interrupted-provider acceptance probe. Change: two-stage artifact. P
 Post progress with `atm update T-001 "..."` at least every 45 min; finish with `atm review T-001 --notes "exact SHA, paths, decisions"`.
 
 exec
-/bin/zsh -lc 'cat /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets/MASTER.md' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'cat <tmp>/t976-journeys-1x_rtu5v/live/.tickets/MASTER.md' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 **You are onboarding.**
 
@@ -392,7 +392,7 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
 - 2026-09-23 03:43 [boss] objective set: Produce verified CSV statistics
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm self' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm self' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 1376ms:
 script: /private/tmp/atman-t976-0923-source/tickets.py
 status: tickets (uninstalled checkout; no pinned release)
@@ -407,17 +407,17 @@ PATH:   /tmp/atman-t976-0923-bin/tickets (tickets)
         -> /private/tmp/atman-t976-0923-source/tickets.py
 
 exec
-/bin/zsh -lc 'git status --short --branch && if test -f mid.txt; then cat mid.txt; fi' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'git status --short --branch && if test -f mid.txt; then cat mid.txt; fi' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 ## live-codex
 
 exec
 /bin/zsh -lc "printf 'stage-one\\n' > mid.txt
 git add mid.txt
-git commit -m 'Record stage one continuation artifact'" in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+git commit -m 'Record stage one continuation artifact'" in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 [live-codex 4071ed0] Record stage one continuation artifact
- Committer: Kavana <kavana@Advitiyas-MacBook-Air.local>
+ Committer: <operator> <operator@host>
 Your name and email address were configured automatically based
 on your username and hostname. Please check that they are accurate.
 You can suppress this message by setting them explicitly. Run the
@@ -434,7 +434,7 @@ After doing this, you may fix the identity used for this commit with:
  create mode 100644 mid.txt
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm update T-001 "Committed mid.txt containing exactly stage-one followed by newline. atm self recorded: seat live-codex, script /private/tmp/atman-t976-0923-source/tickets.py, CLI /tmp/atman-t976-0923-bin/atm. Next action after interruption: preserve mid.txt, write finished.txt from mid.txt plus stage-two newline, independently assert exact contents, commit, atm sync, then atm review."' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm update T-001 "Committed mid.txt containing exactly stage-one followed by newline. atm self recorded: seat live-codex, script /private/tmp/atman-t976-0923-source/tickets.py, CLI /tmp/atman-t976-0923-bin/atm. Next action after interruption: preserve mid.txt, write finished.txt from mid.txt plus stage-two newline, independently assert exact contents, commit, atm sync, then atm review."' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 1355ms:
 update on T-001 recorded (0m into the task)
 
@@ -442,7 +442,7 @@ update on T-001 recorded (0m into the task)
 Reading additional input from stdin...
 OpenAI Codex v0.154.0-alpha.6.2
 --------
-workdir: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+workdir: <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
 model: gpt-6-astra
 provider: openai
 approval: never
@@ -454,7 +454,7 @@ session id: 01a0cc5e-9167-77b0-aece-5dccc22fea54
 user
 SEAT BRIEF -- read once, then act from it. You get no second briefing.
 
-SEAT      live-codex · roles liveprobe · harness codex · worktree /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+SEAT      live-codex · roles liveprobe · harness codex · worktree <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
 TICKET    T-001  Live two-stage continuation  [IN PROGRESS]
   scope   Cause: live interrupted-provider acceptance probe. Change: two-stage artifact. Proof: finished.txt must contain exactly stage-one newline stage-two newline. Use /tmp/atman-t976-0923-bin/atm for EVERY board command, including self (record its output). You have one ticket only. If mid.txt does not exist: write mid.txt containing stage-one newline, commit it, r ...(`atm show <id>` for the rest)
   exit    tests pass, then `atm review T-001` -- and an accept from another seat (below).
@@ -490,7 +490,7 @@ REFUSE -- not yours to do, ever
      recording one yourself. The accept must come from a seat that did not write the commit.
   3. Editing .tickets/ JSON (or any board file) by hand. Every board change goes through `atm`.
 
-You are live-codex, a worker on the shared ticket board at /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets (repo /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live).
+You are live-codex, a worker on the shared ticket board at <tmp>/t976-journeys-1x_rtu5v/live/.tickets (repo <tmp>/t976-journeys-1x_rtu5v/live).
 TICKET_AGENT is already set in your environment; run `atm ...` commands plainly (no env prefix). `tickets` is a compatibility alias for the same implementation and board.
 ACCEPT GATE: your commit lands only when a DIFFERENT seat runs `atm accept <id> --sha <full 40-char review head> --notes "..."`; you cannot accept your own ticket, a commit after `atm review` moves the head and voids the accept, and no ticket that depends on yours opens until the accept lands.
 RUN: long commands stay in the FOREGROUND; this run ends when you stop -- backgrounding a test suite loses the work.
@@ -518,18 +518,18 @@ codex
 I’ll read the held ticket and continuation notes, preserve the first stage, and complete the artifact before submitting it for review.
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm inbox' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm inbox' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 196ms:
 1 unread for live-codex:
   09-23 11:45 +08  boss [unverified:TICKET_AGENT] [leadership-flag:no-registered-endpoint] -> live-codex: Interruption completed. Continue your held ticket from mid.txt and the recorded next action; preserve the first stage. Use /tmp/atman-t976-0923-bin/atm for board operations.
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm mine' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm mine' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 268ms:
 [>] IN PROGRESS T-001  Live two-stage continuation  (role=liveprobe; owner=live-codex)
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm self' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm self' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 198ms:
 script: /private/tmp/atman-t976-0923-source/tickets.py
 status: tickets (uninstalled checkout; no pinned release)
@@ -544,14 +544,14 @@ PATH:   /tmp/atman-t976-0923-bin/tickets (tickets)
         -> /private/tmp/atman-t976-0923-source/tickets.py
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm show T-001' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm show T-001' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 136ms:
 [>] IN PROGRESS T-001  Live two-stage continuation  (role=liveprobe; owner=live-codex)
 
 Read this briefing before editing:
-  /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets/MASTER.md
+  <tmp>/t976-journeys-1x_rtu5v/live/.tickets/MASTER.md
 
-Board: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets  (cwd is /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex)
+Board: <tmp>/t976-journeys-1x_rtu5v/live/.tickets  (cwd is <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex)
 Time: active 1m, waited 0m before claim, last update 0m ago
 lane: ready
 
@@ -561,13 +561,13 @@ Notes:
   - [live-codex] Committed mid.txt containing exactly stage-one followed by newline. atm self recorded: seat live-codex, script /private/tmp/atman-t976-0923-source/tickets.py, CLI /tmp/atman-t976-0923-bin/atm. Next action after interruption: preserve mid.txt, write finished.txt from mid.txt plus stage-two newline, independently assert exact contents, commit, atm sync, then atm review.
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm msg "Resuming T-001 from committed mid.txt; will preserve stage one, verify exact finished.txt bytes, and submit the pinned SHA for your acceptance." --to boss --re T-001' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm msg "Resuming T-001 from committed mid.txt; will preserve stage one, verify exact finished.txt bytes, and submit the pinned SHA for your acceptance." --to boss --re T-001' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 837ms:
 posted: 09-23 11:46 +08  live-codex -> boss [T-001]: Resuming T-001 from committed mid.txt; will preserve stage one, verify exact finished.txt bytes, and submit the pinned SHA for your acceptance.
 wake: boss -> no live endpoint
 
 exec
-/bin/zsh -lc 'cat /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.tickets/MASTER.md' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'cat <tmp>/t976-journeys-1x_rtu5v/live/.tickets/MASTER.md' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 36ms:
 **You are onboarding.**
 
@@ -758,28 +758,28 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
 - 2026-09-23 03:43 [boss] objective set: Produce verified CSV statistics
 
 exec
-/bin/zsh -lc 'git status --short --branch' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'git status --short --branch' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 ## live-codex
 
 exec
-/bin/zsh -lc "rg --files --hidden -g '"'! .git'"' -g 'AGENTS.md' -g 'mid.txt' -g 'finished.txt'" in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc "rg --files --hidden -g '"'! .git'"' -g 'AGENTS.md' -g 'mid.txt' -g 'finished.txt'" in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  exited 127 in 0ms:
 zsh:1: command not found: rg
 
 exec
-/bin/zsh -lc 'git log -1 --oneline' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'git log -1 --oneline' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 4071ed0 Record stage one continuation artifact
 
 exec
-/bin/zsh -lc 'od -An -tx1 mid.txt' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'od -An -tx1 mid.txt' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
            73  74  61  67  65  2d  6f  6e  65  0a                        
 
 
 exec
-/bin/zsh -lc "find . -name AGENTS.md -not -path './.git/*'" in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc "find . -name AGENTS.md -not -path './.git/*'" in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 ./AGENTS.md
 
@@ -789,7 +789,7 @@ from pathlib import Path
 mid = Path('mid.txt').read_bytes()
 assert mid == b'stage-one\\n'
 Path('finished.txt').write_bytes(mid + b'stage-two\\n')
-PY" in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+PY" in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 exec
 /bin/zsh -lc "python3 - <<'PY'
@@ -799,23 +799,23 @@ assert Path('finished.txt').read_bytes() == b'stage-one\\nstage-two\\n'
 assert Path('mid.txt').read_bytes() == b'stage-one\\n'
 assert subprocess.check_output(['git', 'show', 'HEAD:mid.txt']) == Path('mid.txt').read_bytes()
 print('PASS: finished.txt exact bytes; mid.txt unchanged from committed stage one')
-PY" in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+PY" in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 PASS: finished.txt exact bytes; mid.txt unchanged from committed stage one
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm update T-001 "Preserved committed mid.txt and created finished.txt from it plus stage-two newline. Independent byte assertions passed for both files and confirmed mid.txt matches HEAD. atm self: seat live-codex; script /private/tmp/atman-t976-0923-source/tickets.py; CLI /tmp/atman-t976-0923-bin/atm; persistent no (no native endpoint). Preparing commit and review."' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm update T-001 "Preserved committed mid.txt and created finished.txt from it plus stage-two newline. Independent byte assertions passed for both files and confirmed mid.txt matches HEAD. atm self: seat live-codex; script /private/tmp/atman-t976-0923-source/tickets.py; CLI /tmp/atman-t976-0923-bin/atm; persistent no (no native endpoint). Preparing commit and review."' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 1053ms:
 update on T-001 recorded (1m into the task)
 
 exec
-/bin/zsh -lc 'git add finished.txt' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'git add finished.txt' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 exec
-/bin/zsh -lc 'git commit -m "Complete stage two continuation artifact"' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'git commit -m "Complete stage two continuation artifact"' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 [live-codex a829f64] Complete stage two continuation artifact
- Committer: Kavana <kavana@Advitiyas-MacBook-Air.local>
+ Committer: <operator> <operator@host>
 Your name and email address were configured automatically based
 on your username and hostname. Please check that they are accurate.
 You can suppress this message by setting them explicitly. Run the
@@ -832,20 +832,20 @@ After doing this, you may fix the identity used for this commit with:
  create mode 100644 finished.txt
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm sync' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm sync' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  exited 1 in 823ms:
 no 'origin' remote configured; cannot confirm main is not stale without one (comparing against the local main ref is the bug this refusal exists to avoid)
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm review T-001 --notes "Added finished.txt with exactly stage-one newline stage-two newline; preserved mid.txt and its original commit. Independent Python byte assertions passed for finished.txt and mid.txt, including comparison of mid.txt to HEAD before commit. No test framework added. Accept the pinned review SHA; no further artifact changes needed."' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm review T-001 --notes "Added finished.txt with exactly stage-one newline stage-two newline; preserved mid.txt and its original commit. Independent Python byte assertions passed for finished.txt and mid.txt, including comparison of mid.txt to HEAD before commit. No test framework added. Accept the pinned review SHA; no further artifact changes needed."' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 1306ms:
-pinned live-codex@a829f64 in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.git (this checkout -- pass --artifact <dir> if the deliverable is in another repo)
+pinned live-codex@a829f64 in <tmp>/t976-journeys-1x_rtu5v/live/.git (this checkout -- pass --artifact <dir> if the deliverable is in another repo)
 review_head: a829f64e28d94fcd3ee98929564c1fdc574a98bc
 T-001 -> IN REVIEW after 1m of work; master (boss) notified. Claim your next ticket.
 wake: boss -> inbox-posted
 
 exec
-/bin/zsh -lc 'git rev-parse HEAD' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'git rev-parse HEAD' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 a829f64e28d94fcd3ee98929564c1fdc574a98bc
 
@@ -853,29 +853,29 @@ codex
 The artifact passed exact-byte checks, and stage one is unchanged. Review is pinned at `a829f64`; `atm sync` failed because no `origin` remote is configured. I’ll report that to boss with the acceptance request.
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm msg "T-001 artifact verified and review pinned. Please independently review and accept SHA a829f64e28d94fcd3ee98929564c1fdc574a98bc. finished.txt is exactly stage-one newline stage-two newline; mid.txt preserved. stuck: atm sync failed because no origin remote is configured; review succeeded. Need boss to resolve the sync requirement or confirm this local probe setup before accepting." --to boss --re T-001' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm msg "T-001 artifact verified and review pinned. Please independently review and accept SHA a829f64e28d94fcd3ee98929564c1fdc574a98bc. finished.txt is exactly stage-one newline stage-two newline; mid.txt preserved. stuck: atm sync failed because no origin remote is configured; review succeeded. Need boss to resolve the sync requirement or confirm this local probe setup before accepting." --to boss --re T-001' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 1485ms:
 posted: 09-23 11:46 +08  live-codex -> boss [T-001]: T-001 artifact verified and review pinned. Please independently review and accept SHA a829f64e28d94fcd3ee98929564c1fdc574a98bc. finished.txt is exactly stage-one newline stage-two newline; mid.txt preserved. stuck: atm sync failed because no origin remote is configured; review succeeded. Need boss to resolve the sync requirement or confirm this local probe setup before accepting.
 wake: boss -> no live endpoint
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm update T-001 "Review pinned at a829f64e28d94fcd3ee98929564c1fdc574a98bc; exact-byte assertions passed. stuck: atm sync attempted but refused because no origin remote is configured. Reported to boss for resolution alongside independent acceptance request; no commits after review."' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm update T-001 "Review pinned at a829f64e28d94fcd3ee98929564c1fdc574a98bc; exact-byte assertions passed. stuck: atm sync attempted but refused because no origin remote is configured. Reported to boss for resolution alongside independent acceptance request; no commits after review."' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 1099ms:
 noted on T-001
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm next' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm next' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  exited 1 in 802ms:
 usage  codex unknown -- not read yet (atm harness usage)
 no tickets available (nothing open)
 
 exec
-/bin/zsh -lc 'git status --short --branch' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc 'git status --short --branch' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 0ms:
 ## live-codex
 
 exec
-/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm msg "idle: T-001 is in review at a829f64e28d94fcd3ee98929564c1fdc574a98bc, acceptance requested from boss, sync missing-origin issue reported; atm next says nothing open and worktree is clean."' in /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
+/bin/zsh -lc '/tmp/atman-t976-0923-bin/atm msg "idle: T-001 is in review at a829f64e28d94fcd3ee98929564c1fdc574a98bc, acceptance requested from boss, sync missing-origin issue reported; atm next says nothing open and worktree is clean."' in <tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex
  succeeded in 120ms:
 posted: 09-23 11:46 +08  live-codex: idle: T-001 is in review at a829f64e28d94fcd3ee98929564c1fdc574a98bc, acceptance requested from boss, sync missing-origin issue reported; atm next says nothing open and worktree is clean.
 
