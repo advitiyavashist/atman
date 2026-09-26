@@ -1,0 +1,80 @@
+[
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "create",
+      "Live two-stage continuation",
+      "--role",
+      "liveprobe",
+      "--body",
+      "Cause: live interrupted-provider acceptance probe. Change: two-stage artifact. Proof: finished.txt must contain exactly stage-one newline stage-two newline. Use /tmp/atman-t976-0923-bin/atm for EVERY board command, including self (record its output). You have one ticket only. If mid.txt does not exist: write mid.txt containing stage-one newline, commit it, record an atm update explaining the exact artifact and next action to write finished.txt from mid.txt plus stage-two newline. Then run sleep 120 in the FOREGROUND; the evaluator will kill this real process once the progress note is durable. Do not finish before interruption. On a subsequent run when mid.txt exists: preserve it, write finished.txt, independently assert exact contents, commit, atm sync then atm review with paths and test. No new tests framework; no provider spawning. Do not edit .tickets by hand."
+    ],
+    "cwd": "<tmp>/t976-journeys-1x_rtu5v/live",
+    "agent": "boss",
+    "code": 0,
+    "out": "created T-001  Live two-stage continuation\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "msg",
+      "Interruption completed. Continue your held ticket from mid.txt and the recorded next action; preserve the first stage. Use /tmp/atman-t976-0923-bin/atm for board operations.",
+      "--to",
+      "live-codex"
+    ],
+    "cwd": "<tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex",
+    "agent": "boss",
+    "code": 0,
+    "out": "posted: 09-23 11:45 +08  boss [unverified:TICKET_AGENT] [leadership-flag:no-registered-endpoint] -> live-codex: Interruption completed. Continue your held ticket from mid.txt and the recorded next action; preserve the first stage. Use /tmp/atman-t976-0923-bin/atm for board operations.\nwake: live-codex -> no live endpoint\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "rev-parse",
+      "HEAD"
+    ],
+    "cwd": "<tmp>/t976-journeys-1x_rtu5v/live/.worktrees/live-codex",
+    "agent": "boss",
+    "code": 0,
+    "out": "a829f64e28d94fcd3ee98929564c1fdc574a98bc\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "show",
+      "a829f64e28d94fcd3ee98929564c1fdc574a98bc:finished.txt"
+    ],
+    "cwd": "<tmp>/t976-journeys-1x_rtu5v/live",
+    "agent": "boss",
+    "code": 0,
+    "out": "stage-one\nstage-two\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "accept",
+      "T-001",
+      "--sha",
+      "a829f64e28d94fcd3ee98929564c1fdc574a98bc",
+      "--notes",
+      "Independent coordinator reads exact commit: both stages intact"
+    ],
+    "cwd": "<tmp>/t976-journeys-1x_rtu5v/live",
+    "agent": "bob",
+    "code": 0,
+    "out": "T-001 accepted a829f64e28d94fcd3ee98929564c1fdc574a98bc by bob\n",
+    "err": ""
+  }
+]

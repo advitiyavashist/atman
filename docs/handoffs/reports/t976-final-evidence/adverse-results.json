@@ -1,0 +1,35 @@
+{
+  "stub-auth-dispatch": {
+    "status": "PASS",
+    "output": "atm quickstart --gate: one ticket, two seats, and the gate between them.\nscratch: <tmp>/t976-journeys-h4w9kz5p/stub-auth-dispatch/tmp/atm-quickstart-gate-8vz9k7a4\n         (your repo and your board are not touched -- this all happens in there)\n1/8 preflight claude login is live (ready) -- same check `atm dispatch` makes\n2/8 repo      git init + first commit on main (<scratch>/repo)\n3/8 board     atm init -> <scratch>/repo/.tickets (a board of its own)\n4/8 seats     alice (author) and bob (reviewer) joined, harness=claude\n5/8 tickets   T-001 (the work) and T-002 (waits for T-001)\n6/8 dispatch  T-001 reserved for alice and claimed; running claude now...\n          | claude made the commit\n          | alice committed d245b86\n7/8 gate      T-002 blocked: T-001 has no accept from another seat\n          | blocked: T-002 -- T-001 marked done without verification; accept it or reopen\n          | atm claim T-002 (as bob) refused: T-002: T-001 marked done without verification; accept it or reopen\n8/8 released  T-002 released by bob accepting d245b86\n          | author alice != evaluator bob  (the board record, not a claim)\n          | T-001 accepted d245b866b1a1a77e3810186502eb4a18cfd2adae by bob\n          | unblocked: T-002\n          | started: T-002\nusage:  claude unknown \u00b7 UNKNOWN \u00b7 no data\n\nwhat happened: alice committed d245b86 and closed T-001; T-002 stayed shut until bob --\n               a different seat -- accepted that exact sha. No seat releases its own work.\nin your repo:  cd <your repo> && atm quickstart --agent <you>   (then: atm next, atm review, atm accept)\nwhere to look: atm agents   (seats, harness, usage)   |   atm ui\nscratch kept:  <tmp>/t976-journeys-h4w9kz5p/stub-auth-dispatch/tmp/atm-quickstart-gate-8vz9k7a4   (rm -rf it whenever; nothing of yours was touched)\n"
+  },
+  "missing-binary": {
+    "status": "PASS",
+    "output": "atm quickstart --gate: one ticket, two seats, and the gate between them.\n\nno coding CLI found on PATH (looked for: claude, codex, cursor-agent, agent).\ninstall one (Claude Code, Codex, or the Cursor CLI), then: atm quickstart --gate\n\nWALKTHROUGH ONLY -- nothing below ran. No repo, no board, no commit,\nno accept record, and no sha (a sha can only come from a real commit).\n  would 1/8 preflight check that a coding CLI has a live login (atm's own dispatch preflight)\n  would 2/8 scratch   make a throwaway git repo + board in a temp dir (never your repo, never your board)\n  would 3/8 board     atm init there, then commit the scaffolding\n  would 4/8 seats     atm join alice (author) and bob (reviewer) -- two different seats\n  would 5/8 tickets   atm create T-001, then T-002 --deps T-001\n  would 6/8 dispatch  atm dispatch T-001 --to alice, then a coding CLI runs and commits a one-line change\n  would 7/8 gate      atm done T-001 would print: blocked: T-002 -- T-001 marked done without verification; accept it or reopen\n  would 8/8 accept    atm accept T-001 --sha <the sha alice actually committed> as bob would release T-002\n\nThat was a WALKTHROUGH, not a run: nothing above happened and no accept exists.\nRun it for real:  atm quickstart --gate\n"
+  },
+  "missing-auth": {
+    "status": "PASS",
+    "output": "atm quickstart --gate: one ticket, two seats, and the gate between them.\n\npreflight: claude is logged out -- run `claude auth login`, then `atm harness auth <seat>`\nlog in with:  claude auth login\nthen verify:  atm harness auth <seat>\n\nWALKTHROUGH ONLY -- nothing below ran. No repo, no board, no commit,\nno accept record, and no sha (a sha can only come from a real commit).\nwhy: preflight: claude is logged out -- run `claude auth login`, then `atm harness auth <seat>`\nlog in first: claude auth login\n  would 1/8 preflight check that claude has a live login (atm's own dispatch preflight)\n  would 2/8 scratch   make a throwaway git repo + board in a temp dir (never your repo, never your board)\n  would 3/8 board     atm init there, then commit the scaffolding\n  would 4/8 seats     atm join alice (author) and bob (reviewer) -- two different seats\n  would 5/8 tickets   atm create T-001, then T-002 --deps T-001\n  would 6/8 dispatch  atm dispatch T-001 --to alice, then claude runs and commits a one-line change\n  would 7/8 gate      atm done T-001 would print: blocked: T-002 -- T-001 marked done without verification; accept it or reopen\n  would 8/8 accept    atm accept T-001 --sha <the sha alice actually committed> as bob would release T-002\n\nThat was a WALKTHROUGH, not a run: nothing above happened and no accept exists.\nRun it for real once logged in:  atm quickstart --gate\n"
+  },
+  "concurrent-and-repeated-claim": {
+    "status": "PASS",
+    "owner": "alice",
+    "codes": [
+      0,
+      1
+    ]
+  },
+  "failed-check": {
+    "status": "PASS reject records failed check",
+    "ticket_status": "review",
+    "sha": "50747311eb79df7bdb83a3a130bd15cc9ac0f54c"
+  },
+  "interchangeability-metadata": {
+    "status": "PASS metadata fencing ONLY; supported second harness execution NOT RUN",
+    "generation": 2
+  },
+  "stale-install": {
+    "status": "PASS foreign install refused; exact repair --prefix or --force printed",
+    "error": "install.sh: refusing to overwrite existing <tmp>/t976-journeys-h4w9kz5p/stale/bin/atm (it is not a\nsymlink to this checkout's tickets.py -- something else owns it).\nUse --prefix DIR (or PREFIX=DIR) for an isolated install, or --force\nto replace it anyway.\n"
+  }
+}
