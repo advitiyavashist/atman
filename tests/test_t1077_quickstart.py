@@ -344,12 +344,12 @@ def test_t1006_no_surface_tells_a_worker_done_hands_off(tmp_path):
     assert board.returncode == 0, board.stderr
     assert "`atm done <id>" not in board.stdout
     assert "hands off to dependents" not in board.stdout
-    assert "atm accept <id> --sha <sha>" in board.stdout
+    assert "atm accept <id> --sha <full 40-char review head>" in board.stdout
     assert "DIFFERENT seat" in board.stdout
     # AGENTS.md is what an external agent reads; it must not teach the bypass
     agents_md = (repo / "AGENTS.md").read_text()
     assert "until those dependencies are marked done" not in agents_md
-    assert "atm accept <id> --sha <sha>" in agents_md
+    assert "atm accept <id> --sha <full 40-char review head>" in agents_md
     assert "Dependents stay shut" in agents_md
     assert "until that accept is recorded" in agents_md
     # both copies of the CLI carry the same wording (T-243 two-copy surface)

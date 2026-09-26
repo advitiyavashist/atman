@@ -13,7 +13,7 @@ one-line gate, role templates, SEATS_AND_HOOKS, and regression tests.
 
 Steer's existing startup files are tracked in a separate repository. Their
 companion change is committed on `codex/t1089-steer-protocol` at
-[`2dc96043c35fdcfd84abf9b93d5db91101e791a4`](https://github.com/advitiyavashist/steer/commit/2dc96043c35fdcfd84abf9b93d5db91101e791a4).
+`9af51c964a3b063137783f958393abbe64e1b1bc`.
 It updates `AGENTS.md` and both files under `.cursor/rules/`, preserving Steer's
 project-specific preamble. There is one Atman PR; no second PR or merge was
 performed. The reviewer must inspect this companion commit too and coordinate
@@ -26,7 +26,7 @@ board. They are board state, not Git deliverables.
 
 ## Validation
 
-Foreground interpreter: `/Users/kavana/Downloads/steer/.venv/bin/python -m pytest`.
+Foreground interpreter: `.venv/bin/python -m pytest`.
 Initial run covered `test_t1089_protocol_gate.py`, `test_t263_init_isolation.py`,
 `test_t1077_quickstart.py`, and `test_t1078_seat_brief.py`: 62 passed, two failed.
 The failures were the replaced prose assertion and an expired fixed usage-limit

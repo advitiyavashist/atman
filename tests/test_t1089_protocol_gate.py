@@ -37,6 +37,13 @@ PRE_GATE = [
     r"`done --notes` must include",
     r"main, closes the ticket",
     r"master `atm merge` then `atm done`",
+    # The exact phrases above let a generic "finish with atm done" through
+    # (docs/first-session.md:94 at d772a19), and three CLI strings claimed
+    # review itself was the gate.
+    r"finish with .{0,3}atm done",
+    r"human review is the gate",
+    r"human .{0,3}atm review.{0,3} is the gate",
+    r"`atm pr-sync` then master `atm done`",
 ]
 
 
@@ -67,6 +74,8 @@ def test_every_committed_protocol_surface_teaches_gate():
     "The master reviews, merges to main and closes it.",
     "Wait until those dependencies are marked done.",
     "main, closes the ticket",
+    "Post progress every 45 min; finish with `atm done T-001 --notes ...`.",
+    "Unattended persist ends at a reviewable SHA; human review is the gate.",
 ])
 def test_sweep_detects_stale_instruction_even_beside_valid_gate(bad):
     with pytest.raises(AssertionError):
@@ -120,3 +129,48 @@ def test_checked_in_startup_files_match_generator():
     mod = module(TOOLS[0])
     assert (ROOT / "AGENTS.md").read_text() == mod.PROTOCOL
     assert (ROOT / ".cursor/rules/tickets.mdc").read_text() == mod.CURSOR_RULE
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=lambda p: p.name)
+def test_connect_and_onboarding_startup_teach_the_gate(tool):
+    """AGENTS.md calls CONNECT "the long form pasted at the start of any
+    session", so a reader of CONNECT alone must learn the gate. Same for the
+    text an onboarding seat is handed. Both said "human review is the gate"
+    at d772a19 (T-1089 REJECT, blocker 2a/2b)."""
+    mod = module(tool)
+    for name in ("CONNECT", "ONBOARDING_STARTUP"):
+        text = getattr(mod, name)
+        assert_gate(text)
+        assert_no_pre_gate(text)
+
+
+@pytest.mark.parametrize("relative", [
+    "docs/first-session.md",
+    "docs/onboarding/ceo-connect.md",
+])
+def test_named_onboarding_docs_teach_no_pre_gate_close(relative):
+    """quickstart points at first-session.md under "Learn it" and the CEO
+    walkthrough is the other doc a first reader follows; neither may show a
+    close that skips the independent accept (T-1089 REJECT, blocker 2c/2d)."""
+    assert_no_pre_gate((ROOT / relative).read_text())
+
+
+GATE_CLAIMS = [
+    r"human review is the gate",
+    r"human .{0,3}atm review.{0,3} is the gate",
+    r"review is the gate",
+]
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=lambda p: p.name)
+def test_no_cli_string_claims_review_alone_is_the_gate(tool):
+    """Catch the class, not just the three known lines: nothing in either
+    entry point may tell a reader that review itself is the gate.
+
+    Scoped to that claim rather than reusing PRE_GATE, because the CLI
+    legitimately contains strings like "tickets done, unverified: %d" -- a
+    metrics label is not a close instruction.
+    """
+    flat = " ".join(tool.read_text().split())
+    for pattern in GATE_CLAIMS:
+        assert not re.search(pattern, flat, re.I), "%s in %s" % (pattern, tool.name)

@@ -3856,7 +3856,7 @@ def cmd_board(a, board):
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
             "`atm review <id> --notes \"...\"` submits it. A dependent opens only when a "
-            "DIFFERENT seat runs `atm accept <id> --sha <sha>` -- `atm done` alone releases "
+            "DIFFERENT seat runs `atm accept <id> --sha <full 40-char review head>` -- `atm done` alone releases "
             "nothing (atm quickstart --gate shows it)."
         )
     owner = whoami()
@@ -7717,7 +7717,14 @@ CLI: `atm` (the `tickets` command is an alias).
 Run `atm harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
 When they name tasks, use `atm plan` so deps are real `--after` edges.
-Unattended persist ends at a reviewable SHA; human review is the gate.
+Unattended persist ends at a reviewable SHA. That SHA is not the end:
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 """
 
 # Probe-only catalog for a new board. Codex stays listed with unknown usage.
@@ -8042,8 +8049,9 @@ objective; drain the review queue. Show `atm graph` / `atm map`.
 If HEALTH flags prose-only deps, wire `atm dep` instead of leaving
 them in the body.
 
-Unattended persist ends at `atm review` (reviewable SHA); human review is
-the gate. Capture / sound / dispatch (Fatih loop on this board, not a plans/
+Unattended persist ends at `atm review` (reviewable SHA); the gate is a
+DIFFERENT seat recording `atm accept <id> --sha <full 40-char review head>`,
+never the author. Capture / sound / dispatch (Fatih loop on this board, not a plans/
 tree): `atm capture`, `atm sound`, CoS `atm dispatch --harness …`,
 `atm pr-sync` after the PR is merged. CEO does not `atm next`.
 
@@ -8260,7 +8268,7 @@ def cmd_master(a, board):
     if queue:
         print("")
         print("REVIEW QUEUE (%d) -- coordinator close is three distinct steps: "
-              "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
+              "`atm accept <id> --sha <full 40-char review head>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
                 t["id"], t.get("owner", "?"), t["title"][:46],
@@ -11532,8 +11540,14 @@ Then the loop, until `atm next` says nothing is ready:
     atm msg "..." --to <agent> --re <id>             # questions, blockers
     git add -A && git commit -m "..."                    # commit as you go
     atm review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
-    # human review is the gate; then:
     atm next
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 
 Plan dependent work with `atm plan` so JSON `deps` become real `--after`
 edges (`atm graph` to inspect). Unattended persist ends at that reviewable
@@ -12217,7 +12231,9 @@ def cmd_connect(a, board):
     print("for the objective and tasks. Turn tasks into a graph with `atm plan`")
     print("(JSON keys + deps), then `atm graph` / `atm map`. Follow up with")
     print("`atm update` / `here`, reopen silent >90m claims, `atm drive`.")
-    print("Unattended persist ends at a reviewable SHA; human `atm review` is the gate.")
+    print("Unattended persist ends at a reviewable SHA. A DIFFERENT seat must "
+          "then record `atm accept <id> --sha <full 40-char review head>`; "
+          "no seat accepts its own work.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
     _apply_connect_roles(board, a)
@@ -18703,7 +18719,8 @@ def _next_step_hint(board, tickets, done_ids, health_items=None):
     review = [t for t in tickets if t.get("status") == "review"]
     if review:
         return {"kind": "merge", "label": "Review queue",
-                "message": "%d ticket(s) at a reviewable SHA — human review is the gate." % len(review),
+                "message": "%d ticket(s) at a reviewable SHA — a DIFFERENT seat must "
+                           "accept each exact head before it can be merged." % len(review),
                 "cmd": "atm merge"}
     agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
     workforce = load_workforce(board)
@@ -22445,8 +22462,8 @@ reference a `key` from the same plan or an existing `T-` id:
 
 Tickets whose dependencies are unfinished stay invisible to `atm next`, and a
 finished dependency stays withheld until a DIFFERENT seat accepts its exact sha
-(`atm accept <id> --sha <sha>`), so nobody -- human or agent -- can release
-their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
+(`atm accept <id> --sha <full 40-char review head>`), so nobody -- human or
+agent -- can release their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:

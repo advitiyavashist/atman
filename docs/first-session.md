@@ -91,7 +91,7 @@ RULE: you are on branch 'main' in the primary worktree. Work on your own tree:
   cd ~/demo/.worktrees/alice-work
 
 Post progress with `atm update T-001 "..."` at least every 45 min; finish with
-`atm done T-001 --notes "branch@sha, paths, decisions"`.
+`atm review T-001 --notes "exact SHA, paths, decisions"`.
 ```
 
 `next` did not just hand over an id. It printed the briefing files to read, the
@@ -163,8 +163,11 @@ The sample chain (`T-002` after `T-001`) is the same contract as a real board:
    title with no edges.
 3. **Unattended persist** — the worker runs to a **reviewable SHA** on its
    own branch (`atm review <id> --notes "..."`).
-4. **Human review is the gate** — `atm merge` is not silent
-   auto-promote. Success of a node can start the next unblocked child.
+4. **An independent accept is the gate** — a DIFFERENT seat records
+   `atm accept <id> --sha <full 40-char review head> --notes "evidence"`;
+   no seat accepts its own work, and a moved head voids the accept.
+   `atm merge` is not silent auto-promote, and it may take only an
+   accepted head. Success of a node can start the next unblocked child.
 
 Then read the worker loop and master loop sections of
 [README.md](../README.md), and `atm connect` for wiring a real agent to the

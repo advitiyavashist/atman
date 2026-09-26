@@ -93,8 +93,8 @@ reference a `key` from the same plan or an existing `T-` id:
 
 Tickets whose dependencies are unfinished stay invisible to `atm next`, and a
 finished dependency stays withheld until a DIFFERENT seat accepts its exact sha
-(`atm accept <id> --sha <sha>`), so nobody -- human or agent -- can release
-their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
+(`atm accept <id> --sha <full 40-char review head>`), so nobody -- human or
+agent -- can release their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
