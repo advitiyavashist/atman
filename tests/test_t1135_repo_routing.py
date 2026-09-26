@@ -103,7 +103,12 @@ def test_next_never_attempts_cross_repo_claim(repos, monkeypatch, capsys, entry,
         with pytest.raises(SystemExit):
             cli.cmd_next(args, "unused")
         assert attempts == []
-        assert "repository is not this checkout's" in capsys.readouterr().out
+        refusal = capsys.readouterr().out
+        assert "repository is not this checkout's" in refusal
+        # The stamp can be a create-time guess, so the refusal has to tell
+        # the seat how to get the ticket anyway or fix the attribution.
+        assert "claim one explicitly" in refusal
+        assert "--target-repo -" in refusal
 
 
 def test_unattributed_ticket_stays_claimable(repos, tmp_path):

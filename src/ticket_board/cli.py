@@ -2464,8 +2464,13 @@ def cmd_next(a, board):
         ready_all, roles, owner, steal_id, board)
     parts = []
     if repo_miss:
-        parts.append("%d ticket(s) whose repository is not this checkout's: %s" % (
-            len(repo_miss), ", ".join(t["id"] for t in repo_miss)))
+        # The attribution can be a create-time guess, so name the escape
+        # hatches: an explicit claim still works, and "-" clears a wrong stamp.
+        parts.append(
+            "%d ticket(s) whose repository is not this checkout's: %s"
+            " (claim one explicitly if it really is yours, or correct it with"
+            " `atm assign <id> --target-repo -`)" % (
+                len(repo_miss), ", ".join(t["id"] for t in repo_miss)))
     if role_miss:
         parts.append("%d ready for other roles: %s" % (
             len(role_miss), ", ".join(t["id"] for t in role_miss)))
