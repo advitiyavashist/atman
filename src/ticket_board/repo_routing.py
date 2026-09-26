@@ -40,8 +40,10 @@ def filter_for_checkout(tickets, cwd):
     branch name are absence of evidence, not a mismatch. Making them skip
     (the first cut of this filter) broke `atm next` on every ordinary board,
     because a freshly created ticket carries none of these fields while any
-    real clone has an origin -- see tests/test_t946_worktree_gc.py
-    ::test_next_and_claim_skip_automated and test_fresh_clone_* below.
+    real clone has an origin. Covered by
+    tests/test_t946_worktree_gc.py::test_next_and_claim_skip_automated and
+    tests/test_t1135_repo_routing.py (the fresh-clone repro and
+    test_unattributed_ticket_stays_claimable).
 
     Unknown callers (a checkout with no origin) retain legacy behavior.
     Known checkouts never infer a ticket's repository from the board
