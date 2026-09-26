@@ -34,12 +34,15 @@ def _wait_up(port, timeout=20):
 
 
 class _Server:
-    def __init__(self, board, port):
+    def __init__(self, board, port, operator=""):
         self.port = port
         env = dict(os.environ, TICKETS_DIR=str(board))
+        cmd = [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1",
+               "--parent-pid", str(os.getpid())]
+        if operator:
+            cmd += ["--operator", operator]
         self.proc = subprocess.Popen(
-            [sys.executable, str(TOOL), "ui", "--port", str(port), "--host", "127.0.0.1",
-             "--parent-pid", str(os.getpid())],
+            cmd,
             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -137,7 +140,7 @@ def test_rejects_wrong_origin(board):
 
 def test_rejects_unregistered_from(board):
     run(board, "join", "worker", agent="worker")
-    srv = _Server(board, _free_port())
+    srv = _Server(board, _free_port(), operator="worker")
     try:
         status, out = srv.post(
             "/msg",
@@ -145,7 +148,7 @@ def test_rejects_unregistered_from(board):
         )
         assert status == 400 and not out["ok"]
         err = (out.get("error") or "").lower()
-        assert "registered" in err or "from" in err
+        assert "operator" in err or "from" in err or "registered" in err
         assert "unregistered-from-task" not in _live(board)
     finally:
         srv.stop()
@@ -154,7 +157,7 @@ def test_rejects_unregistered_from(board):
 def test_same_origin_registered_task_succeeds(board):
     run(board, "join", "boss", agent="boss")
     run(board, "join", "worker", agent="worker")
-    srv = _Server(board, _free_port())
+    srv = _Server(board, _free_port(), operator="boss")
     try:
         origin = "http://127.0.0.1:%d" % srv.port
         status, out = srv.post(

@@ -11,28 +11,75 @@ from pathlib import Path
 
 import pytest
 
+from test_wakeup import board  # noqa: F401
+import ui_server_harness as harness
+
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = Path(__file__).resolve().parent
 
 
+def test_ui_server_isolates_inherited_session(board, monkeypatch):
+    """A server launched inside a live seat must not inherit its wake routes."""
+    monkeypatch.setenv("HOME", str(board.parent / "foreign-home"))
+    monkeypatch.setenv("TICKETS_CACHE_DIR", str(board.parent / "foreign-cache"))
+    for key in harness._SESSION_ENV:
+        monkeypatch.setenv(key, "foreign-session")
+    original_popen = subprocess.Popen
+    launches = []
+
+    def capture_launch(*args, **kwargs):
+        if str(harness._SUPERVISOR) in args[0]:
+            launches.append(kwargs["env"].copy())
+        return original_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", capture_launch)
+    srv = harness.UiServer(board, probe_prefix="isolated-session")
+    try:
+        assert len(launches) == 1
+        env = launches[0]
+        assert env["HOME"] == str(board.parent.parent / "home")
+        assert env["TICKETS_CACHE_DIR"] == str(board.parent / "cache")
+        assert env["TICKETS_DIR"] == str(board)
+        assert not set(harness._SESSION_ENV).intersection(env)
+        assert srv.get("/board.json")
+    finally:
+        srv.stop()
+
+
 def _pgrep_ui() -> list[tuple[int, str]]:
+    from watch_reaper import process_cmdline
+    rows: list[tuple[int, str]] = []
+    if os.path.isdir("/proc"):
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            names = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            rest = process_cmdline(int(name))
+            if "tickets.py" in rest and " ui " in rest:
+                rows.append((int(name), rest))
+        return rows
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     proc = subprocess.run(
-        ["pgrep", "-fl", "tickets.py ui"],
-        capture_output=True,
-        text=True,
+        ["ps", "-axww", "-o", "pid=,args="],
+        capture_output=True, text=True, env=env,
     )
     if proc.returncode != 0:
         return []
-    rows: list[tuple[int, str]] = []
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
             continue
         pid_s, _sep, rest = line.partition(" ")
         try:
-            rows.append((int(pid_s), rest))
+            pid = int(pid_s)
         except ValueError:
             continue
+        if "tickets.py" in rest and " ui " in rest:
+            rows.append((pid, rest))
     return rows
 
 

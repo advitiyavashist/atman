@@ -76,7 +76,7 @@ def _real_home():
             return pwd.getpwuid(os.geteuid()).pw_dir or ""
         except KeyError:
             pass
-    return os.environ.get("HOME") or ""
+    return ""
 
 
 def default_cache_root():
@@ -92,6 +92,8 @@ def isolated_board_env():
     """
     home = os.environ.get("HOME") or ""
     real = _real_home()
+    if not real:
+        return "unknown account HOME (treating environment as isolated)"
     if home and real and board_key(home) != board_key(real):
         return "isolated HOME=%s" % home
     cache = (os.environ.get("TICKETS_CACHE_DIR") or "").strip()
@@ -1929,7 +1931,12 @@ def has_live_native_session(board, seat):
 
 def public_adapter_state(board, seat, harness, adapter_online, wake_pending):
     """UI/API fields: provider, mode, online, last receipt hints."""
-    provider = provider_for_harness(harness) or "custom"
+    harness_name = (harness or "").strip()
+    # Empty / unknown is not a provider. "custom" is a real --harness value.
+    if not harness_name or harness_name == "unknown":
+        provider = "unknown"
+    else:
+        provider = provider_for_harness(harness_name) or "custom"
     mode = adapter_mode_for(board, seat, harness)
     ep, _ = live_endpoint(board, seat)
     native_online = native_wake_online(board, seat)

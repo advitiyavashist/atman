@@ -56,9 +56,9 @@ def test_unverified_done_ids_is_review_evidence_not_status():
                                 "sha": "aaaaaaa", "notes": "old"}]}
     still_open = {"id": "T-005", "status": "review", "commit": "br@ccccccc"}
     ids = work_view.unverified_done_ids([chat, accepted, merged, stale, still_open])
-    assert ids == {"T-001", "T-004"}
-    # a chat-style ACCEPT (note or board message) is prose, not a verdict (T-944):
-    # only review_events written by atm accept, or a tickets merge note, verify
+    assert ids == {"T-001", "T-003", "T-004"}
+    # a chat-style ACCEPT or a prose merge note is not a verdict (T-944 / T-1111):
+    # only review_events written by atm accept, or a merge_record, verify
     msg = {"id": "m1", "re": "T-001", "from": "cos", "to": "bob", "at": "2026-09-15T00:05:00Z",
            "text": "ACCEPT abc1234 -- looks good to me"}
     assert "T-001" in work_view.unverified_done_ids([chat], [msg])

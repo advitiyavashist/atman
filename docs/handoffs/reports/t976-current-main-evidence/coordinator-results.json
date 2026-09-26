@@ -1,0 +1,6 @@
+{
+  "status": "PASS custom master watcher killed/restarted",
+  "killed_returncode": -9,
+  "restart": "seat=boss (TICKET_SEAT pinned; inherited TICKET_SEAT/TICKET_AGENT/TICKET_SESSION_ID stripped)\nwatching /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-rgqtapjh/coordinator/.tickets for boss every 5s; wake=continuous; launch=unattended; cwd=/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-rgqtapjh/coordinator/.worktrees/boss-probe; cmd=/usr/bin/true {prompt_file}\n2026-09-22T12:23:43Z work found (ready_in_my_lane) wake=ready_in_my_lane stop=unattended task-only watchers run one model run then stop; continuous/scheduled adapters stay online until spawn --stop. Interactive Codex/Claude sessions are separate from their persistent adapter. -> run 1\n  run 1 finished exit=0 (log: /private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-rgqtapjh/coordinator/.tickets/agents/boss.watch.log)\nmax-runs reached\nwatch stopped\n",
+  "artifact": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-rgqtapjh/coordinator/.worktrees/boss-probe/coordinator-mid.txt"
+}

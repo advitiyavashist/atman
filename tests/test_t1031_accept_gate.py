@@ -122,7 +122,7 @@ def test_pure_gate_helpers():
     prose = dict(reviewed, notes=[{
         "by": "alice", "at": "2026-09-15T00:03:00Z",
         "text": "Merged into main as " + ("b" * 40)}])
-    assert work_view.review_of(prose)["verified"] is True  # UI may still label MERGED
+    assert work_view.review_of(prose)["verified"] is False  # prose MERGED is not evidence (T-1111)
     assert work_view.dep_released(prose) is False  # release never trusts prose
     assert work_view.structured_accept(prose) is False
     assert work_view.structured_merge(prose) is False

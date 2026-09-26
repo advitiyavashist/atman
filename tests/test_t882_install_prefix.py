@@ -21,6 +21,8 @@ INSTALL_SH = ROOT / "install.sh"
 def _run_install(home, *args):
     env = dict(os.environ, HOME=str(home))
     env.pop("PREFIX", None)
+    # Linking-only tests: skip the T-1443 UI build (covered by test_t1443_*).
+    env["ATMAN_SKIP_UI_BUILD"] = "1"
     return subprocess.run(["sh", str(INSTALL_SH), *args], cwd=str(ROOT),
                           capture_output=True, text=True, env=env)
 
@@ -50,7 +52,8 @@ def test_prefix_flag_installs_to_an_isolated_directory(tmp_path):
 
 def test_prefix_env_var_is_honored(tmp_path):
     isolated = tmp_path / "env-bin"
-    env = dict(os.environ, HOME=str(tmp_path), PREFIX=str(isolated))
+    env = dict(os.environ, HOME=str(tmp_path), PREFIX=str(isolated),
+               ATMAN_SKIP_UI_BUILD="1")
     result = subprocess.run(["sh", str(INSTALL_SH)], cwd=str(ROOT),
                             capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr

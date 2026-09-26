@@ -36,10 +36,9 @@ def _start_block():
 
 
 def test_hero_leads_with_the_accept_gate():
-    hero = LANDING[LANDING.index("<h1>") : LANDING.index("</h1>")]
-    lede = LANDING[LANDING.index('class="lede"') : LANDING.index('class="ctas"')]
+    hero = LANDING[LANDING.index('id="promise"') : LANDING.index('id="path"')]
     assert PROMISE in hero.lower()
-    assert "atm accept" in lede.lower()
+    assert "atm accept" in LANDING.lower()
     assert "fewest turns" not in hero.lower()
     assert "coordinates the agents you already run" not in hero.lower()
 

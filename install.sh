@@ -70,6 +70,33 @@ echo "linked $BIN/atm -> $HERE/tickets.py (primary)"
 echo "linked $BIN/tickets -> $HERE/tickets.py (compatibility alias)"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "add $BIN to your PATH";; esac
 
+# Local app at /app/ needs ui/dist. Build it when Node is present so a fresh
+# clone + install.sh alone never leaves atm ui serving a bare /app/ 404 (T-1443).
+# ATMAN_SKIP_UI_BUILD=1 skips this (tests that only assert the symlink).
+UI_BUILD_CMD='npm install && npm run build -w ui'
+UI_INDEX="$HERE/ui/dist/index.html"
+if [ -n "${ATMAN_SKIP_UI_BUILD:-}" ]; then
+  :
+elif [ -f "$UI_INDEX" ]; then
+  echo "local app already built at $HERE/ui/dist"
+elif [ -f "$HERE/ui/package.json" ]; then
+  if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    echo "building the local app (ui/dist)..."
+    if (cd "$HERE" && npm install && npm run build -w ui); then
+      echo "built $HERE/ui/dist"
+    else
+      echo "install.sh: ui build failed. From the checkout run:" >&2
+      echo "  $UI_BUILD_CMD" >&2
+      echo "atm ui still starts; open /app/ for that same command." >&2
+    fi
+  else
+    echo "Node/npm not found; the local app was not built."
+    echo "After installing Node, from the checkout run:"
+    echo "  $UI_BUILD_CMD"
+    echo "Until then, atm ui serves /app/ with that command on the page (never a bare 404)."
+  fi
+fi
+
 if [ "$HOOK" -eq 1 ]; then
   if [ -z "${TICKET_AGENT:-}" ]; then
     echo "--claude-hook needs TICKET_AGENT set to the identity this hook will own" >&2

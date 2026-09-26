@@ -90,7 +90,10 @@ def test_extracted_tarball_reports_a_verified_release(source, tmp_path):
     tickets_py, sha = _extracted_tickets_py(source, tmp_path)
     out = subprocess.check_output([str(tickets_py), "--version"], text=True,
                                   env=dict(installer.clean_env(), HOME=str(tmp_path)))
-    assert out.strip() == "tickets commit %s (verified release)" % sha
+    lines = out.strip().splitlines()
+    tk = _load("tickets_t865_ver", ROOT / "tickets.py")
+    assert lines[0] == tk.PACKAGE_VERSION
+    assert "tickets commit %s (verified release)" % sha in lines
 
 
 def test_extracted_tarball_joins_an_isolated_board(source, tmp_path):

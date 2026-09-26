@@ -112,10 +112,37 @@ def _kill_pid_tree(pid: int) -> None:
 
 def leftover_suite_ui_children(pytest_pid: int | None = None) -> list[tuple[int, int, str]]:
     """ui --port processes still parented by this suite or already reparented to 1."""
+    from watch_reaper import process_cmdline
     me = int(pytest_pid or os.getpid())
     leftover: list[tuple[int, int, str]] = []
+    if os.path.isdir("/proc"):
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            names = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == me:
+                continue
+            cmd = process_cmdline(pid)
+            if " ui " not in cmd or "--port" not in cmd:
+                continue
+            try:
+                with open("/proc/%d/stat" % pid) as fh:
+                    rest = fh.read().rsplit(")", 1)[-1].split()
+                ppid = int(rest[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            if ppid == me:
+                leftover.append((pid, ppid, cmd))
+        return leftover
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
-        out = subprocess.check_output(["ps", "-x", "-o", "pid=,ppid=,command="], text=True)
+        out = subprocess.check_output(
+            ["ps", "-xww", "-o", "pid=,ppid=,args="], text=True, env=env)
     except OSError:
         return leftover
     for line in out.splitlines():
@@ -153,23 +180,40 @@ def extract_ui_launch_token(html):
     return m.group(1) if m else ""
 
 
+# Same isolation run() builds: temp HOME/cache, no live seat or session.
+# T-1104 scrubs the runner's seat identity, T-1107 its transport: the ui child
+# can neither post as the runner nor wake the runner's own live session.
+_SESSION_ENV = (
+    "TICKET_SEAT", "TICKET_AGENT", "TICKET_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
+    "TERM_SESSION_ID", *AMBIENT_TRANSPORT_VARS, TRANSPORT_BOARD_ENV,
+)
+
+
 class UiServer:
-    def __init__(self, board, probe_prefix: str = "ui-probe"):
+    def __init__(self, board, probe_prefix: str = "ui-probe",
+                 env: dict | None = None, operator: str = ""):
         self.board = board
         self._stopped = False
         self.marker = _board_marker(board, probe_prefix)
         self.port = _free_port()
-        env = dict(os.environ, TICKETS_DIR=str(board))
-        # T-1107: the ui child must not inherit the suite runner's own
-        # session identity or transport.
-        for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CURSOR_SESSION_ID",
-                    "TERM_SESSION_ID", *AMBIENT_TRANSPORT_VARS, TRANSPORT_BOARD_ENV):
-            env.pop(var, None)
+        home = board.parent.parent / "home"
+        cache = board.parent / "cache"
+        cache.mkdir(exist_ok=True)
+        home.mkdir(exist_ok=True)
+        launch_env = dict(os.environ, TICKETS_DIR=str(board),
+                          HOME=str(home), TICKETS_CACHE_DIR=str(cache))
+        for var in _SESSION_ENV:
+            launch_env.pop(var, None)
+        if env:
+            launch_env.update(env)
         ui_cmd = [sys.executable, str(TOOL), "ui", "--port", str(self.port),
                   "--host", "127.0.0.1", "--parent-pid", str(os.getpid())]
+        if operator:
+            ui_cmd += ["--operator", operator]
         self.proc = subprocess.Popen(
             [sys.executable, str(_SUPERVISOR), str(os.getpid())] + ui_cmd,
-            env=env,
+            env=launch_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -266,10 +310,10 @@ def port_is_dead(port: int, timeout: float = 3) -> bool:
     return False
 
 
-def make_ui_server_fixture(probe_prefix: str):
+def make_ui_server_fixture(probe_prefix: str, operator: str = ""):
     @pytest.fixture
     def ui_server(board):
-        srv = UiServer(board, probe_prefix=probe_prefix)
+        srv = UiServer(board, probe_prefix=probe_prefix, operator=operator)
         try:
             yield srv
         finally:

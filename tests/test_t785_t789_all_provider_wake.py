@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from watch_reaper import collect_watch_pids_from_board
+from watch_reaper import collect_watch_pids_from_board, process_cmdline
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
 
@@ -172,9 +172,7 @@ def test_msg_pokes_live_persist_watch(board):
         r = run(board, "msg", "wake this persist loop", "--to", seat, "--task", agent="lead")
         assert r.returncode == 0, r.stderr + r.stdout
         assert "watch-poked" in r.stdout, r.stdout
-        cmdline = subprocess.run(
-            ["ps", "-p", str(proc.pid), "-o", "command="],
-            capture_output=True, text=True).stdout
+        cmdline = process_cmdline(proc.pid)
         assert str(TOOL) in cmdline
         assert "sol-agy-harness" not in cmdline
     finally:

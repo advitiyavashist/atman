@@ -26,6 +26,9 @@ def run(board, *args, agent="", stdin="", env=None, cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "", HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
     e.pop("TICKET_SEAT", None)
+    e.pop("TICKET_OWNER_GENERATION", None)
+    e.pop("TICKETS_RUN_NO", None)
+    e.pop("TICKETS_RUN_ID", None)
     # Strip every session-id var the harness running THIS test might itself
     # be sitting in (e.g. CLAUDE_CODE_SESSION_ID from an outer coding-agent
     # session) -- left in place, every subprocess this file launches would
@@ -104,7 +107,10 @@ def board(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     (tmp_path / "home").mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "commit.gpgsign", "false"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "init"], check=True,
                    env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
                             GIT_COMMITTER_EMAIL="t@t"))

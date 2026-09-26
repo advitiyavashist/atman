@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from watch_reaper import collect_watch_pids_from_board
+from watch_reaper import collect_watch_pids_from_board, process_cmdline
 
 
 TOOL = Path(__file__).resolve().parents[1] / "tickets.py"
@@ -237,9 +237,7 @@ def test_live_persist_watch_survives_queued_offline_poke(board, monkeypatch):
         assert "watch-poked" in r.stdout, r.stdout
         rec = json.loads((board / "agents" / (seat + ".json")).read_text())
         assert rec["wake_delivery"]["label"] == "watch-poked"
-        cmdline = subprocess.run(
-            ["ps", "-p", str(proc.pid), "-o", "command="],
-            capture_output=True, text=True).stdout
+        cmdline = process_cmdline(proc.pid)
         assert str(TOOL) in cmdline
     finally:
         try:

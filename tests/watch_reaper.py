@@ -158,14 +158,63 @@ def _cmd_mentions_fixture_root(cmd: str, root_tokens: set[str]) -> bool:
     return any(token in cmd for token in root_tokens)
 
 
+def process_cmdline(pid):
+    """Full command line. Linux /proc is not truncated at COLUMNS=80.
+
+    When ``/proc`` exists, read ``/proc/<pid>/cmdline`` only. An empty
+    cmdline (kernel threads) is ``''`` -- never fall back to per-pid
+    ``ps``, or every /proc walk (watch reaper, UI harness) forks once per
+    thread and recreates the T-604 pile-up. Use ``ps`` only when there is
+    no ``/proc``.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    if os.path.isdir("/proc"):
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                raw = f.read()
+        except (OSError, IOError):
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
+    try:
+        r = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "args="],
+            capture_output=True, text=True, env=env, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return (r.stdout or "").strip()
+
+
 def watch_pids_under(root: Path):
     """Watch-loop pids whose command line mentions this fixture root."""
     root_tokens = _fixture_root_tokens(root)
     found = set()
+    if os.path.isdir("/proc"):
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            names = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            cmd = process_cmdline(pid)
+            if not _cmd_mentions_fixture_root(cmd, root_tokens):
+                continue
+            if "watch" in cmd and "--agent" in cmd:
+                found.add(pid)
+        return found
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
         out = subprocess.run(
-            ["ps", "-ax", "-o", "pid=,command="],
-            capture_output=True, text=True, timeout=5,
+            ["ps", "-axww", "-o", "pid=,args="],
+            capture_output=True, text=True, timeout=5, env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return found

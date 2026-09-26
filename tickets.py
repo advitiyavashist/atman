@@ -83,6 +83,39 @@ PRIMARY_CLI_NAME = "atm"
 COMPAT_CLI_NAME = "tickets"
 
 
+def _package_version():
+    """Semver printed as the first line of `atm --version` (T-1080).
+
+    Reads ``ticket_board.__version__`` from the ``src/`` next to this file so
+    the monolith cannot drift from the package (and cannot silently adopt a
+    different site-packages install). Falls back to parsing ``__init__.py``.
+    """
+    root = os.path.dirname(os.path.realpath(__file__))
+    src = os.path.join(root, "src")
+    if os.path.isdir(src) and src not in sys.path:
+        sys.path.insert(0, src)
+    try:
+        import importlib
+        tb = importlib.import_module("ticket_board")
+        ver = getattr(tb, "__version__", None)
+        if ver:
+            return str(ver)
+    except Exception:
+        pass
+    init = os.path.join(src, "ticket_board", "__init__.py")
+    try:
+        with open(init, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+PACKAGE_VERSION = _package_version()
+
+
 def cli_prog(argv=None):
     """argparse/help/error name from how this process was invoked."""
     raw = (argv if argv is not None else sys.argv) or [""]
@@ -289,13 +322,12 @@ PROVIDER_SESSION_ID_VARS = (
 def _supervisor_launch_env(board, owner):
     """Environment for a supervisor-launched watch/spawn/probe child.
 
-    Inherited provider session ids are stripped so the child cannot adopt a
-    parent seat's `.identities/` record. TICKET_SEAT is the authoritative
+    Inherited provider identity and transport are stripped so the child cannot
+    adopt a parent seat's record or endpoint. TICKET_SEAT is the authoritative
     assignment; TICKET_SESSION_ID is a fresh launch key bound to `owner`.
+    Explicit attach does not use this path.
     """
-    env = _clean_git_env()
-    for var in PROVIDER_SESSION_ID_VARS:
-        env.pop(var, None)
+    env = _session_boundary().fresh_child_env(_clean_git_env())
     env.pop("TICKET_SEAT", None)
     env.pop("TICKET_AGENT", None)
     sid = "launch:%s:%s" % (owner, hashlib.sha256(os.urandom(16)).hexdigest()[:16])
@@ -1185,7 +1217,62 @@ def save(board, t, expected_generation=None):
     return result
 
 
-def load_all(board):
+_BOARD_READS = threading.local()
+
+
+class _reuse_board_reads:
+    """Pin ticket/message/workforce reads for one UI snapshot.
+
+    `board_snapshot` calls `pending_work` once per named seat. Each call used
+    to re-parse every T-*.json and the whole messages.jsonl (measured: ~4M
+    json.loads / ~50s on a 200-run board). Nested contexts reuse the outer pin.
+    """
+
+    def __init__(self, board):
+        self.board = os.path.realpath(board)
+
+    def __enter__(self):
+        prev_bound = getattr(_BOARD_READS, "bound", False)
+        prev_board = getattr(_BOARD_READS, "board", None)
+        self._prev = (prev_bound, prev_board, getattr(_BOARD_READS, "data", None))
+        self._mine = not (prev_bound and prev_board == self.board)
+        if self._mine:
+            _BOARD_READS.bound = True
+            _BOARD_READS.board = self.board
+            _BOARD_READS.data = {}
+        return _BOARD_READS.data
+
+    def __exit__(self, *exc):
+        if not self._mine:
+            return
+        bound, board, data = self._prev
+        _BOARD_READS.bound = bound
+        _BOARD_READS.board = board
+        _BOARD_READS.data = data
+
+
+_BOARD_READS_MISS = object()
+
+
+def _board_reads_get(board, key, loader):
+    if not getattr(_BOARD_READS, "bound", False):
+        return loader()
+    data = getattr(_BOARD_READS, "data", None)
+    if data is None:
+        return loader()
+    # Realpath must run before the cache hit. Keys are per-pin, not per-path;
+    # a pin on board A would otherwise serve A's tickets/workforce/messages
+    # to load_*(B).
+    if os.path.realpath(board) != getattr(_BOARD_READS, "board", None):
+        return loader()
+    hit = data.get(key, _BOARD_READS_MISS)
+    if hit is not _BOARD_READS_MISS:
+        return hit
+    data[key] = loader()
+    return data[key]
+
+
+def _load_all_from_disk(board):
     out = []
     for path in sorted(glob.glob(os.path.join(board, "T-*.json"))):
         try:
@@ -1196,7 +1283,11 @@ def load_all(board):
     return out
 
 
-def load_roles(board):
+def load_all(board):
+    return _board_reads_get(board, "tickets", lambda: _load_all_from_disk(board))
+
+
+def _load_roles_from_disk(board):
     path = os.path.join(board, "roles.json")
     roles = dict((k, list(v)) for k, v in DEFAULT_ROLES.items())
     if os.path.isfile(path):
@@ -1212,6 +1303,10 @@ def load_roles(board):
     return roles
 
 
+def load_roles(board):
+    return _board_reads_get(board, "roles", lambda: _load_roles_from_disk(board))
+
+
 def roles_for(board, owner, explicit=None):
     if explicit:
         return [r.strip() for r in explicit.split(",") if r.strip()]
@@ -1225,7 +1320,7 @@ def workforce_path(board):
     return os.path.join(board, "workforce.json")
 
 
-def load_workforce(board):
+def _load_workforce_from_disk(board):
     """{agent: {tool, can:[capabilities], cost: low|medium|high, best_for}}"""
     try:
         with open(workforce_path(board)) as f:
@@ -1233,6 +1328,10 @@ def load_workforce(board):
         return w if isinstance(w, dict) else {}
     except (IOError, ValueError):
         return {}
+
+
+def load_workforce(board):
+    return _board_reads_get(board, "workforce", lambda: _load_workforce_from_disk(board))
 
 
 def save_workforce(board, w):
@@ -1404,7 +1503,7 @@ def objective_path(board):
     return os.path.join(board, "objective.json")
 
 
-def load_objective(board):
+def _load_objective_from_disk(board):
     """The standing objective the master drives toward (`atm objective`).
     {} when none is set."""
     try:
@@ -1412,6 +1511,10 @@ def load_objective(board):
             return json.load(f)
     except (IOError, ValueError):
         return {}
+
+
+def load_objective(board):
+    return _board_reads_get(board, "objective", lambda: _load_objective_from_disk(board))
 
 
 OBJECTIVE_STATES = ("active", "achieved", "blocked", "replaced")
@@ -1477,7 +1580,7 @@ def drive_status(board, tickets=None):
     idle = []
     for r in load_agents(board):
         who = r.get("owner", "")
-        if not who or r.get("limit") or hours_since(r.get("seen", "")) > 2:
+        if not who or _route_headroom().seat_limit(r) or hours_since(r.get("seen", "")) > 2:
             continue
         holds = any(t.get("owner") == who and t.get("status") in ("claimed", "review") for t in tickets)
         if holds:
@@ -1494,12 +1597,24 @@ def master_state_path(board):
     return os.path.join(board, "master.json")
 
 
-def current_master(board):
+def _keep_lead(state, prev):
+    """A master/CoS change never drops the user's lead choice (T-1103)."""
+    lead = ((prev or {}).get("lead") or "").strip()
+    if lead:
+        state["lead"] = lead
+    return state
+
+
+def _current_master_from_disk(board):
     try:
         with open(master_state_path(board)) as f:
             return json.load(f)
     except (IOError, ValueError):
         return None
+
+
+def current_master(board):
+    return _board_reads_get(board, "master", lambda: _current_master_from_disk(board))
 
 
 def _notify_review_submitted(board, author, tid, text, master_state=None):
@@ -1555,12 +1670,20 @@ def wake_mode_of(board, owner, master_state=None, workforce=None):
     every other seat stays task-only. The setting is harness-neutral, so the
     same policy applies to Claude, Codex, Cursor, or a remote/custom bridge.
     """
+    if (master_state is None and workforce is None
+            and getattr(_BOARD_READS, "bound", False)):
+        return _board_reads_get(
+            board, "wake_mode:%s" % owner,
+            lambda: wake_mode_of(board, owner,
+                                 master_state=current_master(board) or {},
+                                 workforce=load_workforce(board)))
     wf = workforce if workforce is not None else _safe(lambda: load_workforce(board), {})
     configured = ((wf or {}).get(owner, {}) or {}).get("wake_mode")
     if configured in WAKE_MODES:
         return configured
     state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
-    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos"),
+                           (state or {}).get("lead")):
         return "continuous"
     return "task-only"
 
@@ -1577,7 +1700,8 @@ def lifecycle_of(board, owner, master_state=None, workforce=None):
     if configured in LIFECYCLES:
         return configured
     state = master_state if master_state is not None else _safe(lambda: current_master(board), {})
-    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos")):
+    if owner and owner in ((state or {}).get("owner"), (state or {}).get("cos"),
+                           (state or {}).get("lead")):
         return "persistent"
     return "ephemeral"
 
@@ -1881,7 +2005,9 @@ def _agent_update(board, owner, mutate):
     """
     path = os.path.join(agents_dir(board), owner + ".json")
     with _AgentLock(board, owner):
-        rec = _agent_rec(board, owner) or {}
+        # Snapshot pins must not supply this pre-image (T-1074): a concurrent
+        # writer landing mid-board.json would otherwise be rolled back.
+        rec = _agent_rec_from_disk(board, owner) or {}
         if mutate(rec) is False:
             return None
         tmp = "%s.tmp.%d" % (path, os.getpid())
@@ -2024,7 +2150,9 @@ def _watch_bind_ticket(board, owner):
 
 
 def load_agents(board):
-    return _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else []
+    return _board_reads_get(
+        board, "agents",
+        lambda: _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else [])
 
 
 def worktree_warning(owner):
@@ -2435,8 +2563,7 @@ def _route_seat_limit(board, name):
     tickets.py also persists an expired reset so later reads see it cleared.
     """
     rec = _agent_rec(board, name) or {}
-    _active_seat_limit(board, name, rec)
-    return _route_headroom().seat_limit(rec)
+    return _active_seat_limit(board, name, rec)
 
 
 def _refuse_limited_seat(board, seat, verb):
@@ -3721,6 +3848,10 @@ def cmd_board(a, board):
     ready = unblocked(board, tickets)
     if ready:
         print("  -> ready to claim: %s" % ", ".join(t["id"] for t in ready))
+    for rec in load_agents(board):
+        warning = _stale_limit_warning(board, rec)
+        if warning:
+            print("  attention: " + warning)
     if not a.quiet:
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
@@ -4592,14 +4723,42 @@ def cmd_accept(a, board):
 
 
 def cmd_reject(a, board):
-    """Record a structured reject bound to the submitted review head (T-944)."""
+    """Record a structured reject and return the ticket to its author (T-944/T-1460).
+
+    API decideReview(reject) already flips state to claimed with the same owner.
+    CLI used to leave status=review, so atm mine stayed empty and the author
+    idled until a coordinator ran reopen+assign. Reject now matches the API.
+    """
     t = load(board, a.id)
+    reviewer = whoami()
     ev, err = _review_verdict().apply(
-        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+        t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
     if err:
         sys.exit(err)
+    author = _review_verdict().return_to_author_for_revision(
+        t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
+        kind="reject")
+    tc = _recovery()
+    if tc is not None and author:
+        harness = ""
+        try:
+            harness = _agent_harness(board, author)[0]
+        except Exception:
+            harness = ""
+        tc.issue_owner_lease(
+            t, author, harness=harness, reason="reject-revision",
+            previous_owner=author)
+        tc.rewrite_claim_lock(board, t["id"], author)
     save(board, t)
-    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
+    if author:
+        _safe(lambda: _bind_agent_ticket(board, author, t["id"]), None)
+        _safe(lambda: post_message(
+            board, reviewer,
+            "%s rejected %s -- revise and resubmit: %s" % (
+                t["id"], ev["sha"][:12], ev.get("reason") or ""),
+            to=author, re=t["id"], task=True, source="review"), None)
+    print("%s rejected %s by %s; returned to %s as claimed for revision" % (
+        a.id, ev["sha"], ev["by"], author or "?"))
 
 
 def _trunk(cwd=None):
@@ -5726,7 +5885,7 @@ def _is_desk_merge_pytest_cmd(cmd):
     with gaps). Live counterexample 10:03Z pid 51475:
     `pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude`
     -- contiguous pgrep `pytest -x --ignore=.worktrees` is empty. Never
-    cwd (51475 chdirs into /tmp/pytest-of-kavana mid-run; a cwd==desk-WT
+    cwd (51475 chdirs into /tmp/pytest-of-<user> mid-run; a cwd==desk-WT
     gate reads CLEAR while the suite is still alive). Never the full
     `ps aux` line. QUIET-BOX / T-486 (e) `desk_pytest_alive` /
     `desk_merge_alive` must call `_desk_pytest_alive`, not cwd and not
@@ -5738,27 +5897,49 @@ def _is_desk_merge_pytest_cmd(cmd):
     return "-x" in argv and _argv_has_ignore_worktrees(argv)
 
 
-def _desk_pytest_pids(extra_pids=()):
-    """Pids of desk-merge-shaped pytest processes, plus any still-alive extra.
+def _process_table_snapshot():
+    """All (pid, full_command) rows. Linux /proc is not truncated at COLUMNS=80.
 
-    Extra pids are the ACCEPT "or the pid" fallback (T-554 waiter also
-    checked `ps -p 51475`). Never filters on cwd. Does not spawn --stop.
+    Returns ``(rows, available)``. ``available`` is False when the table
+    could not be read at all; an empty ``rows`` then means unknown, not idle.
+
+    On Linux, read ``/proc/<pid>/cmdline`` only. Kernel threads have an
+    empty cmdline; a per-pid ``ps -ww -p`` fallback is the pile-up T-604
+    forbids (~one fork per thread, per snapshot). When ``/proc`` is absent,
+    one ``ps -axww`` covers the table.
     """
     import subprocess
 
-    extra = set()
-    for p in extra_pids or ():
+    proc = "/proc"
+    if os.path.isdir(proc):
         try:
-            extra.add(int(p))
-        except (TypeError, ValueError):
-            continue
-    out = [p for p in extra if _pid_alive(p)]
+            names = os.listdir(proc)
+        except OSError:
+            return [], False
+        me = os.getpid()
+        rows = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == me:
+                continue
+            cmd = _proc_cmdline(pid)
+            if cmd:
+                rows.append((pid, cmd))
+        return rows, True
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,args="],
+            capture_output=True, text=True, env=env,
+        )
     except OSError:
-        return sorted(set(out))
-    me = os.getpid()
+        return [], False
+    if r.returncode != 0:
+        return [], False
+    rows = []
     for line in (r.stdout or "").splitlines():
         line = line.strip()
         if not line:
@@ -5770,11 +5951,33 @@ def _desk_pytest_pids(extra_pids=()):
             pid = int(parts[0])
         except ValueError:
             continue
+        rows.append((pid, parts[1]))
+    return rows, True
+
+
+def _desk_pytest_pids(extra_pids=()):
+    """Pids of desk-merge-shaped pytest processes, plus any still-alive extra.
+
+    Extra pids are the ACCEPT "or the pid" fallback (T-554 waiter also
+    checked `ps -p 51475`). Never filters on cwd. Does not spawn --stop.
+    """
+    extra = set()
+    for p in extra_pids or ():
+        try:
+            extra.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    out = [p for p in extra if _pid_alive(p)]
+    rows, ok = _process_table_snapshot()
+    if not ok:
+        return sorted(set(out))
+    me = os.getpid()
+    for pid, cmd in rows:
         if pid == me:
             continue
         if pid in extra:
             continue
-        if _is_desk_merge_pytest_cmd(parts[1]) and _pid_alive(pid):
+        if _is_desk_merge_pytest_cmd(cmd) and _pid_alive(pid):
             out.append(pid)
     return sorted(set(out))
 
@@ -5829,28 +6032,12 @@ def _parse_watch_table():
     callers that are about to signal or to report absence must say so rather
     than claim the fleet is idle (T-926).
     """
-    import subprocess
-
     out = []
-    try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
-    except OSError:
-        return out, False
-    if r.returncode != 0:
+    rows, ok = _process_table_snapshot()
+    if not ok:
         return out, False
     me = os.getpid()
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        cmd = parts[1]
+    for pid, cmd in rows:
         # T-875 (12): installed `tickets`/`atm` shims do not contain tickets.py.
         if pid == me or " watch" not in cmd:
             continue
@@ -6135,8 +6322,10 @@ def _process_command(pid):
     """Full, untruncated command line for pid, or '' if gone/unreadable.
 
     T-875 (12): mere PID existence is not evidence of a watcher -- PIDs get
-    recycled. Callers must read this string. Linux /proc is preferred; macOS
-    `ps -ww` avoids the default ARG_MAX truncation.
+    recycled. Callers must read this string. When ``/proc`` exists, read
+    ``/proc/<pid>/cmdline`` only: an empty cmdline (kernel threads) is
+    ``''``, never a per-pid ``ps`` fork (T-604). Use ``ps -ww`` only when
+    there is no ``/proc`` (macOS).
     """
     import subprocess
 
@@ -6144,22 +6333,25 @@ def _process_command(pid):
         pid = int(pid)
     except (TypeError, ValueError):
         return ""
-    proc_path = "/proc/%d/cmdline" % pid
+    if os.path.isdir("/proc"):
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                raw = f.read()
+        except (OSError, IOError):
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
-        with open(proc_path, "rb") as f:
-            raw = f.read()
-        if raw:
-            return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
-    except (OSError, IOError):
-        pass
-    try:
-        r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "args="],
+            capture_output=True, text=True, env=env,
+        )
     except (OSError, ValueError):
-        return _proc_cmdline(pid)
+        return ""
     if r.returncode != 0:
-        return _proc_cmdline(pid)
-    return (r.stdout or "").strip() or _proc_cmdline(pid)
+        return ""
+    return (r.stdout or "").strip()
 
 
 def _validated_owned_watch_pid(board, owner):
@@ -6417,6 +6609,9 @@ def _finish_followup(board, tid, event):
 
 
 def _watcher_count(owner, board=None):
+    if board and getattr(_WATCH_TABLE, "read_only", False):
+        # T-1103: a read route runs no `ps`; the board pid file is the evidence.
+        return 1 if _watcher_pid(board, owner) else 0
     return len(_live_watch_pids(owner, board=board))
 
 
@@ -6481,7 +6676,7 @@ def _watch_log_state(board, owner):
     # speed dropped it the moment one of those failures happened to take
     # longer than the usual few seconds.
     streak = []
-    expired_at = ((_agent_rec(board, owner) or {}).get("limit_expired_at") or "")
+    expired_at = _seat_limit_expired_at(_agent_rec(board, owner) or {})
     for r in reversed(runs):
         if expired_at and (r["exit_at"] or r["start"]) <= expired_at:
             break
@@ -6651,9 +6846,9 @@ def agent_liveness(board, rec, peers=None):
             # which two we looked for, rather than picking one's error message.
             tdetail = "no Claude or Codex transcript for %s" % _tilde(cwd)
 
-    expired_age = _age_secs(((_agent_rec(board, owner) or {}).get("limit_expired_at")))
+    expired_age = _age_secs(_seat_limit_expired_at(_agent_rec(board, owner) or {}))
     if tstate == "limited" and expired_age is not None and tage is not None and tage >= expired_age:
-        tstate, tdetail = "unknown", "previous provider reset elapsed; awaiting fresh session evidence"
+        tstate, tdetail = "unknown", "previous limit expired; awaiting fresh session evidence"
     if tstate != "unknown":
         out.update(state=tstate, source=tsource, heuristic=False, detail=tdetail)
         # A dead watcher under a quiet transcript is a real dead lane; a dead
@@ -6796,7 +6991,8 @@ def cmd_limit(a, board):
         msg = "%s is back (limit cleared)" % owner
     else:
         limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
-        mutate = lambda rec: rec.update({"limit": limit})
+        limit["reset_at"] = _provider_reset_at(limit["until"] or limit["note"], limit["at"])
+        mutate = lambda rec: rec.update({"limit": limit, "expired_limit": None, "limit_expired_reason": ""})
         msg = "%s hit a usage limit%s%s" % (owner, (" until %s" % a.until) if a.until else "",
                                             (": %s" % a.note) if a.note else "")
     # Read-modify-write under the lock: a watch-loop heartbeat lands on this
@@ -6814,13 +7010,18 @@ def cmd_limits(a, board):
     """Who is limited: manual records + silence + a scan of local tool logs."""
     print("Recorded limits:")
     any_ = False
-    for r in load_agents(board):
-        lim = r.get("limit")
+    records = load_agents(board)
+    records.sort(key=lambda r: _route_headroom()._stamp(
+        (r.get("limit") or r.get("expired_limit") or {}).get("at")) or datetime.min.replace(tzinfo=timezone.utc))
+    for r in records:
+        lim = r.get("limit") or r.get("expired_limit")
         if lim:
             any_ = True
-            print("  %-14s hit %s ago%s%s" % (r["owner"], fmt_hours(hours_since(lim["at"])),
+            expired, _, reason = _route_headroom().limit_expiry(lim)
+            print("  %-14s hit %s ago%s%s%s" % (r["owner"], fmt_hours(hours_since(lim.get("at", ""))),
                                              (", back %s" % lim["until"]) if lim.get("until") else "",
-                                             (" -- %s" % lim["note"]) if lim.get("note") else ""))
+                                             (" -- %s" % lim["note"]) if lim.get("note") else "",
+                                             (" [STALE: %s; no longer blocks]" % reason) if expired else ""))
     if not any_:
         print("  none (agents record one with `atm limit --until \"...\"`)")
     print("")
@@ -7232,6 +7433,48 @@ def cmd_assign(a, board):
                     t = got
                     changed.append("claimed for %s" % a.owner)
                     bind_owner = a.owner
+            elif t["status"] == "review" and a.owner:
+                # T-1460: retarget an IN REVIEW ticket so the assignee can act.
+                # Free seat → claimed; already holding another → open+reserved
+                # (same one-active-hold rule as assign on open).
+                held = _held_claimed(board, a.owner, except_id=t["id"])
+                if held:
+                    t["status"] = "open"
+                    t["owner"] = ""
+                    t["reserved_for"] = a.owner
+                    if prev_owner:
+                        clear_prev = prev_owner
+                    lock = os.path.join(board, t["id"] + ".lock")
+                    if os.path.exists(lock):
+                        try:
+                            os.unlink(lock)
+                        except OSError:
+                            pass
+                    changed.append("reserved for %s (already holds %s); left IN REVIEW for revision" % (
+                        a.owner, ", ".join(x["id"] for x in held)))
+                else:
+                    if prev_owner and prev_owner != a.owner:
+                        clear_prev = prev_owner
+                        tc = _recovery()
+                        if tc is not None:
+                            harness = ""
+                            try:
+                                harness = _agent_harness(board, a.owner)[0]
+                            except Exception:
+                                harness = ""
+                            expected_generation = tc.owner_generation(t)
+                            tc.issue_owner_lease(
+                                t, a.owner, harness=harness,
+                                reason="review-retarget",
+                                previous_owner=prev_owner)
+                            rewrite_lock_to = a.owner
+                    t["status"] = "claimed"
+                    t["owner"] = a.owner
+                    if not t.get("claimed_at"):
+                        t["claimed_at"] = now()
+                    bind_owner = a.owner
+                    transfer_owner = a.owner
+                    changed.append("claimed for %s (returned from review)" % a.owner)
             elif t["status"] in ("claimed", "review"):
                 if t["status"] == "claimed" and a.owner and a.owner != prev_owner:
                     transfer_owner = a.owner
@@ -7922,7 +8165,7 @@ def cmd_master(a, board):
         owner = whoami(a.owner)
         prev = current_master(board)
         with open(master_state_path(board), "w") as f:
-            json.dump({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, f)
+            json.dump(_keep_lead({"owner": owner, "since": now(), "cos": (prev or {}).get("cos", "")}, prev), f)
         _master_log(board, "%s took over as master%s" % (
             owner, (" from %s" % prev["owner"]) if prev and prev.get("owner") != owner else ""))
         print("%s is master now. Run `atm master` for the briefing." % owner)
@@ -8163,7 +8406,11 @@ def _health_body(board, tickets):
                     t["id"], ",".join(missing)),
                     "atm join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
     for r in load_agents(board):
-        if r.get("limit"):
+        warning = _stale_limit_warning(board, r)
+        if warning:
+            out.append(("WARN", warning, "atm pending --agent %s" % r["owner"]))
+            continue
+        if _route_headroom().seat_limit(r):
             held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
             out.append(("WARN", "%s hit a usage limit %s ago%s%s" % (
                 r["owner"], fmt_hours(hours_since(r["limit"]["at"])),
@@ -8187,7 +8434,7 @@ def _health_body(board, tickets):
             continue
         rec = agents_by.get(who) or {}
         reason = ""
-        if rec.get("limit"):
+        if _route_headroom().seat_limit(rec):
             reason = "limited"
         elif not rec.get("seen"):
             reason = "no heartbeat"
@@ -8212,14 +8459,58 @@ def cmd_reopen(a, board):
     t = load(board, a.id)
     _refuse_unreleased_deps(t, load_all(board), only_done=True)
     notes = getattr(a, "notes", "") or ""
+    revision = bool(getattr(a, "revision", False))
     # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
     # ticket to `next` while notes still read as REVIEW. Claimed work that
     # never entered review stays reopenable without notes (T-246).
-    if (t["status"] == "review" or t.get("review_at")) and not notes.strip():
+    if (t["status"] == "review" or t.get("review_at") or revision) and not notes.strip():
         sys.exit(
             'reopen of IN REVIEW work needs --notes "why" '
             "(silent reopen returns it to next and looks like a next-reissue bug)"
         )
+    # T-1460: explicit revise request -- return to the author as claimed,
+    # distinct from release-to-pool reopen (which clears owner → open).
+    if revision:
+        if t.get("status") != "review":
+            sys.exit("--revision only applies while the ticket is IN REVIEW")
+        prev_owner = (t.get("owner") or "").strip()
+        if not prev_owner:
+            sys.exit("%s has no owner to return the revision to" % a.id)
+        actor = whoami(getattr(a, "by", ""))
+        before = t["status"]
+        _work_view().supersede_release_evidence(t)
+        author = _review_verdict().return_to_author_for_revision(
+            t, actor=actor, reason=notes, sha="", kind="revision")
+        t["owner"] = prev_owner
+        t["reopened_at"] = now()
+        t["reopened_seen"] = [
+            _msg_id(m) for m in load_messages(board)
+            if (m.get("re") or "").strip() == t["id"]
+        ]
+        tc = _recovery()
+        if tc is not None:
+            harness = ""
+            try:
+                harness = _agent_harness(board, prev_owner)[0]
+            except Exception:
+                harness = ""
+            tc.issue_owner_lease(
+                t, prev_owner, harness=harness, reason="revision-request",
+                previous_owner=prev_owner)
+            tc.rewrite_claim_lock(board, t["id"], prev_owner)
+        save(board, t)
+        _safe(lambda: traj_event(
+            board, "reopen", agent=actor, ticket=t,
+            state_before=before, state_after="claimed",
+            outcome="revision", prev_owner=prev_owner,
+            notes_len=len(notes), **_traj_git()), None)
+        _safe(lambda: _bind_agent_ticket(board, prev_owner, t["id"]), None)
+        _safe(lambda: post_message(
+            board, actor,
+            "%s returned for revision: %s" % (t["id"], notes[:160]),
+            to=prev_owner, re=t["id"], task=True, source="review"), None)
+        print("%s returned to %s as claimed for revision" % (a.id, author or prev_owner))
+        return
     if notes:
         # Attribute to the acting agent, not the ticket's outgoing owner --
         # reopen is very often one agent (a reviewer, the master) sending
@@ -8315,8 +8606,31 @@ def cmd_board_restore(a, board):
     print(json.dumps(result, indent=2))
 
 
+def _board_source(board):
+    """How board_dir() found `board`, in words, for `atm where` (stderr)."""
+    if os.environ.get("TICKETS_DIR"):
+        return "TICKETS_DIR"
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    real = os.path.realpath(board)
+    if configured and os.path.realpath(configured) == real:
+        return "the board linked to repo %s in %s" % (root, _atman_config_path())
+    if _is_marked_primary(board):
+        return "this repo's own .tickets (marked primary)"
+    return "the nearest .tickets directory; no board is linked for this repo"
+
+
 def cmd_where(a, board):
+    # stdout line 1 is always the board path (scripts read it); the
+    # explanation goes to stderr so it never changes that contract.
     print(board)
+    source = _board_source(board)
+    sys.stderr.write("found via: %s\n" % source)
+    if source.startswith("the nearest") and _repo_root():
+        sys.stderr.write(
+            "to make every checkout of this repo use one shared board: "
+            "atm board-link <path to that board's .tickets>\n"
+        )
     kids = child_boards(os.getcwd())
     if len(kids) > 1:
         print("other live boards in child dirs:")
@@ -8435,6 +8749,72 @@ def cmd_doctor(a):
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
         print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+
+
+def _read_board_config():
+    path = _atman_config_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return path, {"boards": {}}
+    except (OSError, ValueError) as e:
+        sys.exit("cannot read %s (%s) -- fix or move it aside; nothing changed" % (path, e))
+    if not isinstance(data, dict) or not isinstance(data.get("boards", {}), dict):
+        sys.exit("%s is not {\"boards\": {...}} -- fix or move it aside; nothing changed" % path)
+    data.setdefault("boards", {})
+    return path, data
+
+
+def cmd_board_link(a):
+    """Link a repo to a shared board in the machine config (T-959 map), so
+    every checkout and worktree of that repo resolves it without TICKETS_DIR."""
+    path, data = _read_board_config()
+    boards = data["boards"]
+    if a.show:
+        if not boards:
+            print("no boards linked (%s)" % path)
+        for repo, board in sorted(boards.items()):
+            print("%s -> %s" % (repo, board))
+        return
+    if a.repo:
+        repo = os.path.realpath(os.path.expanduser(a.repo))
+    else:
+        repo = _repo_root()
+        if not repo:
+            sys.exit("not inside a git repo -- pass --repo PATH")
+        repo = os.path.realpath(repo)
+    if a.unlink:
+        if boards.pop(repo, None) is None:
+            sys.exit("no board linked for %s; nothing changed" % repo)
+        _write_board_config(path, data)
+        print("unlinked %s" % repo)
+        return
+    if not a.board:
+        sys.exit("usage: atm board-link <board dir> [--repo PATH] | --show | --unlink")
+    board = os.path.realpath(os.path.expanduser(a.board))
+    if not os.path.isdir(board):
+        sys.exit("no such directory: %s" % board)
+    if not _board_has_content(board):
+        sys.exit("%s does not look like a board (no tickets, messages or agents); nothing changed" % board)
+    boards[repo] = board
+    _write_board_config(path, data)
+    print("linked %s -> %s (%s)" % (repo, board, path))
+    local = os.path.join(repo, ".tickets")
+    if os.path.realpath(local) != board and _is_marked_primary(local):
+        print(
+            "note: %s is marked primary and still wins for this repo; remove %s "
+            "to use the linked board" % (local, os.path.join(local, PRIMARY_BOARD_MARKER))
+        )
+
+
+def _write_board_config(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def cmd_board_mark_primary(a):
@@ -8577,7 +8957,7 @@ def cmd_who(a, board):
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
         entry = wf.get(r["owner"], {}) or {}
-        harness_name = entry.get("harness") or entry.get("tool") or "claude"
+        harness_name = _seat_harness(board, r["owner"])
         ep, _ = sa.live_endpoint(board, r["owner"])
         life = lifecycle_of(board, r["owner"], workforce=wf)
         native = sa.native_wake_online(board, r["owner"])
@@ -8588,10 +8968,11 @@ def cmd_who(a, board):
         reachable = sa.is_reachable(native_online=native, watcher_online=watcher_on,
                                     remote_online=remote_on)
         print("%-14s lifecycle=%s provider=%s session=%s reachable=%s" % (
-            "", life, (ep or {}).get("provider") or harness_name,
+            "", life, (ep or {}).get("provider") or harness_name or "unknown",
             (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
             "yes" if reachable else "no"))
-        usage = _provider_usage().get_reading(board, harness_name)
+        usage = _provider_usage().get_reading(
+            board, _usage_ledger_key(board, r["owner"]))
         print("%-14s %s" % ("", _provider_usage().format_usage_line(usage).strip()))
     # collisions
     by_branch = {}
@@ -8734,7 +9115,7 @@ def cmd_steer(a, board):
             payload = st.frame_payload(kind, sender, text, tid, steer_id, at)
             # Native Claude inject only. Persist-watch poke would start a new
             # run; that is kill-and-replace, not a mid-run steer.
-            label = sa.wake_seat(board, seat, payload, harness=harness or "claude",
+            label = sa.wake_seat(board, seat, payload, harness=harness or provider,
                                  message_id=steer_id)
     record = st.steer_record(kind, sender, seat, text, label, steer_id, tid, at)
     note = st.ticket_note(kind, sender, seat, text, label, steer_id, at)
@@ -9618,7 +9999,7 @@ def parse_mentions(text):
     return out
 
 
-def _registered_handles(board):
+def _registered_handles_uncached(board):
     """Lowercase names from workforce.json and agents/*.json, plus broadcast words."""
     names = set(_MENTION_BROADCAST)
     for key in load_workforce(board):
@@ -9630,6 +10011,10 @@ def _registered_handles(board):
         if owner:
             names.add(owner.lower())
     return names
+
+
+def _registered_handles(board):
+    return _board_reads_get(board, "registered", lambda: _registered_handles_uncached(board))
 
 
 def _split_to_tokens(to):
@@ -9696,7 +10081,7 @@ def resolve_to_and_mentions(text, to="", registered=None, master_owner=""):
 
 
 def post_message(board, sender, text, to="", re="", kind="", task=False, source="",
-                 explicit=None):
+                 explicit=None, via="", sender_kind=""):
     _rotate_messages_if_big(board)
     holder = ((current_master(board) or {}) or {}).get("owner") or ""
     to, mentions, unknown, explicit_unknown, dropped = resolve_to_and_mentions(
@@ -9713,13 +10098,24 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
                                 if t.lower() != retired_name.lower()]
     rec = {"id": "msg_" + uuid.uuid4().hex, "at": now(), "from": sender,
            "to": to, "re": re, "text": text}
-    prov = _message_provenance(board, sender, explicit=explicit)
-    rec["session"] = prov["session"]
-    rec["via"] = prov["via"]
-    rec["endpoint_pid"] = prov["endpoint_pid"]
-    rec["unverified"] = prov["unverified"]
-    if prov["leadership_flag"]:
-        rec["leadership_flag"] = prov["leadership_flag"]
+    if sender_kind == "operator":
+        # T-1104: UI-operator posts must not inherit the atm ui process's
+        # session, endpoint_pid, or leadership_flag (those belong to the
+        # server shell, not the person who clicked Post).
+        rec["session"] = "ui-operator"
+        rec["via"] = via or "ui-operator"
+        rec["endpoint_pid"] = "ui-operator"
+        rec["unverified"] = False
+    else:
+        prov = _message_provenance(board, sender, explicit=explicit)
+        rec["session"] = prov["session"]
+        rec["via"] = via or prov["via"]
+        rec["endpoint_pid"] = prov["endpoint_pid"]
+        rec["unverified"] = False if via else prov["unverified"]
+        if prov["leadership_flag"]:
+            rec["leadership_flag"] = prov["leadership_flag"]
+    if sender_kind:
+        rec["sender_kind"] = sender_kind
     if forwarded:
         rec["forwarded_from"] = forwarded["from"]
         rec["forward_role"] = forwarded["role"]
@@ -9755,7 +10151,7 @@ def post_message(board, sender, text, to="", re="", kind="", task=False, source=
     return rec
 
 
-def load_messages(board, include_archives=False):
+def _load_messages_from_disk(board, include_archives=False):
     """By default reads only the live messages.jsonl (cheap, since the UI and
     every watch poll re-read this every few seconds). Pass include_archives=True
     to also read rotated messages.<date>.jsonl archives, oldest first, for
@@ -9781,6 +10177,12 @@ def load_messages(board, include_archives=False):
     return out
 
 
+def load_messages(board, include_archives=False):
+    key = "messages_all" if include_archives else "messages"
+    return _board_reads_get(
+        board, key, lambda: _load_messages_from_disk(board, include_archives))
+
+
 def _agent_set(board, owner, **fields):
     """Update fields on an agent record without touching the rest of it."""
     if not _agent_rec(board, owner):  # bootstrap outside the lock: checkin takes it too
@@ -9792,13 +10194,30 @@ def _agent_set(board, owner, **fields):
     return _agent_update(board, owner, lambda rec: rec.update(fields))
 
 
-def _agent_rec(board, owner):
+def _agent_rec_from_disk(board, owner):
     path = os.path.join(agents_dir(board), owner + ".json")
     try:
         with open(path) as f:
             return json.load(f)
     except (IOError, ValueError):
         return {}
+
+
+def _agent_rec(board, owner):
+    if getattr(_BOARD_READS, "bound", False) and os.path.realpath(board) == getattr(_BOARD_READS, "board", None):
+        by = _BOARD_READS.data.get("agent_by")
+        if by is None:
+            by = {}
+            for rec in load_agents(board):
+                if not isinstance(rec, dict):
+                    continue
+                name = rec.get("owner") or ""
+                if name:
+                    by[name] = rec
+            _BOARD_READS.data["agent_by"] = by
+        if owner in by:
+            return by[owner]
+    return _agent_rec_from_disk(board, owner)
 
 
 def _msg_id(m):
@@ -9981,7 +10400,7 @@ def _seen_since(rec):
     return ceiling if since > ceiling else since
 
 
-def _is_unread(m, since, remaining):
+def _is_unread(m, since, remaining, mid=None):
     """Is `m` new to an agent whose watermark is `since`?
 
     Two whole-second stamps cannot order events inside one second, so a strict
@@ -10006,7 +10425,7 @@ def _is_unread(m, since, remaining):
     at = m.get("at", "")
     if not at or at < since:
         return False
-    k = _msg_id(m)
+    k = mid if mid is not None else _msg_id(m)
     if remaining.get(k):
         # Explicit IDs are delivery identities: every replay of the same
         # record is already seen. Legacy content hashes remain a multiset so
@@ -10015,6 +10434,54 @@ def _is_unread(m, since, remaining):
             remaining[k] -= 1
         return False
     return True
+
+
+def _message_address_index(board, msgs):
+    """One (recipients, mentions, broadcast, msg_id) row per message.
+
+    Built once per pinned snapshot so `_inbox_scan` does not rebuild mention
+    sets for every seat. `mentions` is registered-filtered for addressing
+    (T-490). `broadcast` is exactly `is_board_broadcast` (unfiltered mentions)
+    so pending_work's pin shortcut cannot hide a queued wake.
+    """
+    def _build():
+        registered = _registered_handles(board)
+        out = []
+        for m in msgs:
+            recipients = _to_recipient_set(m.get("to") or "")
+            mentions = {h.lower() for h in (m.get("mentions") or [])}
+            mentions = {h for h in mentions if h in registered}
+            broadcast = is_board_broadcast(m)
+            out.append((m, recipients, mentions, broadcast, _msg_id(m)))
+        return out
+    if not getattr(_BOARD_READS, "bound", False):
+        return _build()
+    return _board_reads_get(board, "addr:%s" % id(msgs), _build)
+
+
+def _visible_addressed(board, msgs, owner, joined, registered=None):
+    """Same filter as `_addressed` + `_visible_after_join`, using a pinned index."""
+    target = (owner or "").lower()
+    visible = []
+    for m, recipients, mentions, _channel_broadcast, _mid in _message_address_index(board, msgs):
+        if m.get("from") == owner:
+            continue
+        # Addressing uses the registered-filtered mention set, not the
+        # channel-broadcast flag. Empty --to plus only an unknown @mention
+        # is visible to every seat (T-490) even though is_board_broadcast
+        # is false (the mention is unfiltered there).
+        if not (
+            (not recipients and not mentions)
+            or (recipients & _MENTION_BROADCAST)
+            or (mentions & _MENTION_BROADCAST)
+            or target in recipients
+            or target in mentions
+        ):
+            continue
+        if joined and target not in recipients and m.get("at", "") < joined:
+            continue
+        visible.append(m)
+    return visible
 
 
 def _inbox_scan(board, owner):
@@ -10065,13 +10532,26 @@ def _inbox_scan(board, owner):
             msgs = load_messages(board, include_archives=True)
     remaining = _seen_counts(seen_ids)
     registered = _registered_handles(board)
-    visible = _visible_after_join(
-        [m for m in msgs if _addressed(m, owner, registered)],
-        owner, joined)
+    mid_of = None
+    if getattr(_BOARD_READS, "bound", False):
+        visible = _visible_addressed(board, msgs, owner, joined, registered)
+        mid_of = {id(m): mid for m, _r, _n, _b, mid in _message_address_index(board, msgs)}
+    else:
+        visible = _visible_after_join(
+            [m for m in msgs if _addressed(m, owner, registered)],
+            owner, joined)
+
+    def _mid(message):
+        if mid_of is not None:
+            cached = mid_of.get(id(message))
+            if cached is not None:
+                return cached
+        return _msg_id(message)
+
     out = []
     explicit_ids = set()
     for message in visible:
-        if not _is_unread(message, since, remaining):
+        if not _is_unread(message, since, remaining, mid=_mid(message)):
             continue
         explicit = message.get("id")
         if explicit and explicit in explicit_ids:
@@ -10079,7 +10559,9 @@ def _inbox_scan(board, owner):
         if explicit:
             explicit_ids.add(explicit)
         out.append(message)
-    watermark = max([m.get("at", "") for m in msgs] or [""])
+    watermark = _board_reads_get(
+        board, "msg_watermark:%s" % id(msgs),
+        lambda: max([m.get("at", "") for m in msgs] or [""]))
     ceiling = now()
     if watermark > ceiling:
         watermark = ceiling    # a future stamp is not something anyone observed
@@ -10101,7 +10583,7 @@ def _inbox_scan(board, owner):
     for message in visible:
         if message.get("at", "") < watermark:
             continue
-        identity = _msg_id(message)
+        identity = _mid(message)
         if message.get("id") and identity in retained_explicit:
             continue
         if message.get("id"):
@@ -10194,7 +10676,9 @@ def _task_life_actionable(board, message):
         return True
     try:
         t = load(board, tid)
-    except Exception:
+    except (Exception, SystemExit):
+        # load() sys.exits on a missing ticket; SystemExit is BaseException, so
+        # a bare `except Exception` lets it kill the UI handler thread (T-1381).
         return True
     if not t:
         return True
@@ -10305,20 +10789,42 @@ def cmd_msg(a, board):
         print("forward: %s -> %s [%s] receipt=%s" % (
             forwarded.get("from"), forwarded.get("to"),
             forwarded.get("role") or "-", forwarded.get("state") or "forwarded"))
+    deliver_wakes(board, m)
+
+
+def _seat_harness(board, seat):
+    """Workforce harness, then tool. Empty means unknown -- never invent claude."""
+    entry = load_workforce(board).get(seat, {}) or {}
+    return (entry.get("harness") or entry.get("tool") or "").strip()
+
+
+def deliver_wakes(board, m, announce=None):
+    """Native/persist wake after a board post. cmd_msg and atm ui share this (T-1106).
+
+    `announce` defaults to None, not to `print` itself: a default argument is
+    bound at import time, so `announce=print` captured the builtin before a
+    test could replace it, and the wake lines bypassed the capture.
+    """
+    if announce is None:
+        def announce(*a, **kw):
+            print(*a, **kw)
     sa = None
     mid = _msg_id(m)
+    labels = []
     for to in _split_to_tokens(m.get("to") or ""):
         if to.lower() in _MENTION_BROADCAST:
             continue
         if not _message_wakes_seat(board, to, m):
             continue
         if _already_autonomous_wake(board, to, mid):
-            print("wake: %s -> deduped" % to)
+            announce("wake: %s -> deduped" % to)
+            labels.append((to, "deduped"))
             continue
         limit = _active_seat_limit(board, to)
         if limit:
-            print("wake: %s -> limited (reset %s)" % (
+            announce("wake: %s -> limited (reset %s)" % (
                 to, limit.get("reset_at") or limit.get("until") or "unknown"))
+            labels.append((to, "limited"))
             continue
         harness = _seat_harness(board, to)
         if sa is None:
@@ -10331,23 +10837,44 @@ def cmd_msg(a, board):
             if poked:
                 label = "watch-poked"
         if label == "queued-offline":
-            print("wake: %s -> %s (%s)" % (
+            announce("wake: %s -> %s (%s)" % (
                 to, label, "run the thread in terminal Codex to enable native wake"))
         else:
-            print("wake: %s -> %s" % (to, label))
+            announce("wake: %s -> %s" % (to, label))
         if label == "held":
-            print("  recovery: %s" % getattr(
+            announce("  recovery: %s" % getattr(
                 sa, "CLAUDE_HELD_RECOVERY",
                 "approve in the recipient session or set crossSessionInbound accept"))
         _note_wake_delivery(board, to, label, mid, poked=poked)
         _safe(lambda to=to, label=label: _note_native_wake_result(
             board, to, label, mid), None)
+        labels.append((to, label))
+    return labels
 
 
-def _seat_harness(board, seat):
-    """Workforce harness, then tool. Empty means unknown -- never invent claude."""
-    entry = load_workforce(board).get(seat, {}) or {}
-    return (entry.get("harness") or entry.get("tool") or "").strip()
+def _usage_ledger_key(board, seat):
+    """Provider the usage ledger is filed under for this seat.
+
+    Display stays unknown when join recorded no harness. The ledger is
+    still the launch default from harness_of (claude, unless a harness
+    was stored), so a bare `atm join` keeps its USAGE line.
+    """
+    return harness_of(board, seat)[0]
+
+
+def _display_harness(board, seat):
+    """Who/list/self/brief: unknown, never an invented claude badge."""
+    return _seat_harness(board, seat) or "unknown"
+
+
+def _launch_harness_label(board, owner, explicit="", resolved=""):
+    """Spawn/check print: recorded name, or 'claude (default)' when invented."""
+    if (explicit or "").strip():
+        return (resolved or explicit).strip()
+    recorded = _seat_harness(board, owner)
+    if recorded:
+        return recorded
+    return "%s (default)" % ((resolved or "claude").strip() or "claude")
 
 
 def _should_poke_persist(label):
@@ -11493,7 +12020,11 @@ def cmd_join(a, board):
     save_workforce(board, wf)
     if getattr(a, "persistent", False):
         sa = _session_adapters()
-        reg = sa.register_persistent(board, owner, harness or entry.get("harness") or "claude", now())
+        persist_harness = (harness or entry.get("harness") or "").strip()
+        persist_defaulted = not persist_harness
+        if persist_defaulted:
+            persist_harness = "claude"
+        reg = sa.register_persistent(board, owner, persist_harness, now())
         if reg.get("ok"):
             pid = (reg.get("record") or {}).get("pid")
             mode = reg.get("mode") or (reg.get("record") or {}).get("mode") or "native"
@@ -11502,10 +12033,15 @@ def cmd_join(a, board):
             lease = reg.get("lease_id") or (reg.get("record") or {}).get("lease_id") or ""
             if lease:
                 extra += "; lease %s" % lease
-            print("persistent: %s %s endpoint registered for %s (%s)" % (
-                mode, reg.get("provider"), owner, extra))
+            print("persistent: %s %s endpoint registered for %s (%s)%s" % (
+                mode, reg.get("provider"), owner, extra,
+                " [claude (default); pass --harness to pick a provider]"
+                if persist_defaulted else ""))
         else:
-            print("persistent: %s" % reg.get("reason", "registration failed"))
+            print("persistent: %s%s" % (
+                reg.get("reason", "registration failed"),
+                " [claude (default); pass --harness to pick a provider]"
+                if persist_defaulted else ""))
     join_cwd = os.path.abspath(getattr(a, "worktree", "") or "") or None
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""),
                   cwd=join_cwd)
@@ -11648,7 +12184,7 @@ def _apply_connect_roles(board, a):
     prev = current_master(board) or {}
     os.makedirs(board, exist_ok=True)
     if master:
-        rec = {"owner": master, "since": now(), "cos": cos or (prev.get("cos") or "")}
+        rec = _keep_lead({"owner": master, "since": now(), "cos": cos or (prev.get("cos") or "")}, prev)
         with open(master_state_path(board), "w") as f:
             json.dump(rec, f)
         print("applied master=%s CoS=%s" % (master, rec["cos"] or "no CoS yet"))
@@ -11769,7 +12305,12 @@ def pending_work(board, owner):
     def task_released(message):
         ticket = by_id.get(message.get("re"))
         return not ticket or not _work_view().unreleased_dep_id(ticket, tickets)
-    direct = [m for m in msgs if not is_board_broadcast(m)]
+    if getattr(_BOARD_READS, "bound", False):
+        bcast = {id(m): flag for m, _r, _n, flag, _mid
+                 in _message_address_index(board, load_messages(board))}
+        direct = [m for m in msgs if not bcast.get(id(m), is_board_broadcast(m))]
+    else:
+        direct = [m for m in msgs if not is_board_broadcast(m)]
     if direct:
         out["messages_to_me"] = [_wake_message_summary(m) for m in direct[-WAKE_MESSAGE_LIMIT:]]
         tasks = [_wake_message_summary(m) for m in direct
@@ -11783,7 +12324,8 @@ def pending_work(board, owner):
     if held:
         out["holding"] = [t["id"] + " " + t.get("title", "")[:60] for t in held]
     roles = _safe(lambda: roles_for(board, owner, None), None)
-    ready = _safe(lambda: [t for t in _filter_ready(unblocked(board, tickets), roles)
+    ready_pool = _board_reads_get(board, "unblocked", lambda: unblocked(board, tickets))
+    ready = _safe(lambda: [t for t in _filter_ready(ready_pool, roles)
                            if can_do(board, owner, t)
                            and not _reservation_blocks(t, owner)
                            and not _ticket_on_hold(t)
@@ -12337,48 +12879,37 @@ def cmd_remote(a, board):
 
 
 def _provider_reset_at(text, observed_at):
-    """Normalize only explicit, unambiguous provider reset times.
+    return _route_headroom().provider_reset_at(text, observed_at)
 
-    Bare clock times without a timezone remain display-only. Resolve a daily
-    clock against detection time once, never against each subsequent poll.
-    """
-    from datetime import timedelta
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-    value = (text or "").strip()
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if stamp.tzinfo is not None:
-            return stamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except ValueError:
-        pass
-    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^()]+)\)", value, re.I)
-    if not match:
+
+def _stale_limit_warning(board, rec):
+    lim = rec.get("limit") or rec.get("expired_limit")
+    if not lim:
         return ""
-    hour, minute, meridiem, zone = match.groups()
-    if not 1 <= int(hour) <= 12 or not 0 <= int(minute or 0) < 60:
+    expired, deadline, reason = _route_headroom().limit_expiry(lim)
+    started = _route_headroom()._stamp(_read_run(board, rec["owner"]).get("started"))
+    if not expired or (started and started > deadline):
         return ""
-    try:
-        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(ZoneInfo(zone))
-    except (ValueError, ZoneInfoNotFoundError):
-        return ""
-    reset = observed.replace(hour=int(hour) % 12 + (12 if meridiem.lower() == "pm" else 0),
-                             minute=int(minute or 0), second=0, microsecond=0)
-    if reset <= observed:
-        reset += timedelta(days=1)
-    return reset.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return "%s stale usage limit no longer blocks: %s; check seat resumed" % (rec["owner"], reason)
+
+
+def _seat_limit_expired_at(rec):
+    # Read-only snapshots must suppress the same old rejection as mutating reads.
+    lim = rec.get("limit")
+    if lim:
+        expired, deadline, _ = _route_headroom().limit_expiry(lim)
+        if expired:
+            return deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return rec.get("limit_expired_at") or ""
 
 
 def _active_seat_limit(board, owner, rec=None):
-    """Expire observed limits atomically; unknown resets require explicit clear."""
+    """Expire limits atomically using the shared bounded retry policy."""
     rec = rec if rec is not None else (_agent_rec(board, owner) or {})
     lim = rec.get("limit")
-    if not lim or not lim.get("reset_at"):
-        return lim
-    try:
-        reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-        expired = reset.tzinfo is not None and reset <= datetime.now(timezone.utc)
-    except (ValueError, TypeError):
-        expired = False
+    if not lim:
+        return None
+    expired, deadline, reason = _route_headroom().limit_expiry(lim)
     if not expired:
         return lim
     if getattr(_WATCH_TABLE, "read_only", False):
@@ -12387,11 +12918,13 @@ def _active_seat_limit(board, owner, rec=None):
         if current.get("limit") != lim:
             return False
         current.pop("limit", None)
-        current["limit_expired_at"] = lim["reset_at"]
+        current["limit_expired_at"] = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+        current["limit_expired_reason"] = reason
+        current["expired_limit"] = lim
         # A quota failure must not keep the same trigger exhausted after reset.
         current.pop("adapter_failure", None)
     current = _agent_update(board, owner, clear)
-    return (current if current is not None else (_agent_rec(board, owner) or {})).get("limit")
+    return (current if current is not None else (_agent_rec_from_disk(board, owner) or {})).get("limit")
 
 
 def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
@@ -12426,20 +12959,23 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
     if match:
         until = match.group(1).strip()
     observed = now()
+    _active_seat_limit(board, owner)
     lim = {"at": observed, "until": until, "note": note[:400],
            "source": "provider", "harness": harness,
-           "reset_at": _provider_reset_at(until, observed)}
+           "reset_at": _provider_reset_at(note, observed)}
     def record(rec):
         if rec.get("limit"):
             return False
         rec["limit"] = lim
         rec.pop("limit_expired_at", None)
+        rec.pop("limit_expired_reason", None)
+        rec.pop("expired_limit", None)
     if _agent_update(board, owner, record) is None:
         return
     reason = "LIMITED: %s; %s. Automatic retrigger paused %s." % (
         owner, lim["note"],
         ("until " + lim["reset_at"]) if lim["reset_at"] else
-        ("(provider reset %s; explicit limit clear required)" % (until or "unknown")))
+        ("(provider reset %s; bounded retry window applies)" % (until or "unknown")))
     # Scan actual held claims; a run's stale binding must never annotate work
     # already transferred to a different seat.
     from contextlib import nullcontext
@@ -12851,7 +13387,8 @@ def seat_brief_text(board, owner):
     second usage formatter is a second thing to keep honest.
     """
     sb = _seat_brief()
-    harness, _ = _safe(lambda: harness_of(board, owner), ("claude", "")) or ("claude", "")
+    harness = _safe(lambda: _seat_harness(board, owner), "") or ""
+    usage_key = _safe(lambda: _usage_ledger_key(board, owner), "") or "claude"
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     roles = _safe(lambda: roles_for(board, owner), None) or []
     m = _safe(lambda: current_master(board), None) or {}
@@ -12862,7 +13399,7 @@ def seat_brief_text(board, owner):
     if reviewer == owner:
         reviewer = ""  # a seat is never its own reviewer
     usage = _safe(lambda: _provider_usage().brief_usage_line(
-        _provider_usage().get_reading(board, harness)), "") or ""
+        _provider_usage().get_reading(board, usage_key)), "") or ""
     t = _seat_ticket(board, owner) or {}
     return sb.compose(
         owner,
@@ -15432,7 +15969,7 @@ def cmd_spawn(a, board):
             entry = wf.get(r["owner"], {})
             print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
                 r["owner"][:14], wlabel,
-                (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                _display_harness(board, r["owner"])[:9],
                 wake_mode_of(board, r["owner"], workforce=wf)[:10],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
@@ -15445,8 +15982,6 @@ def cmd_spawn(a, board):
     warn = run_timeout_floor_warning(getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN))
     if warn and not a.stop:
         print(warn)
-    if not a.stop:
-        _refuse_limited_seat(board, owner, "spawn")
     if a.stop:
         return _spawn_stop(board, owner, all_boards=bool(getattr(a, "all_boards", False)))
     requested_harness = getattr(a, "harness", "") or a.tool
@@ -15458,6 +15993,9 @@ def cmd_spawn(a, board):
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
+    # Reuse/transfer first: a leftover limit is identity-bound state, not a
+    # live dispatch block on a name we are about to refuse or strip.
+    _refuse_limited_seat(board, owner, "spawn")
     git_root, wt, expected_origin, base, origin_err = _resolve_spawn_target(
         board, owner,
         worktree_arg=getattr(a, "worktree", "") or "",
@@ -15538,7 +16076,7 @@ def cmd_spawn(a, board):
     if a.master:
         prev = current_master(board) or {}
         with open(master_state_path(board), "w") as f:
-            json.dump({"owner": owner, "since": now(), "cos": prev.get("cos", "")}, f)
+            json.dump(_keep_lead({"owner": owner, "since": now(), "cos": prev.get("cos", "")}, prev), f)
         _master_log(board, "%s spawned as persistent master (planner)" % owner, by=whoami())
     if a.cos:
         prev = current_master(board) or {}
@@ -15623,7 +16161,8 @@ def cmd_spawn(a, board):
                  "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
     print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; run-timeout=%sm; seat=%s pinned; log %s" % (
-        owner, pid, harness, model,
+        owner, pid, _launch_harness_label(
+            board, owner, getattr(a, "harness", "") or a.tool, harness), model,
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs,
         getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner, log_path))
     print("cmd: %s" % cmd)
@@ -16733,7 +17272,7 @@ def cmd_harness(a, board):
             e = wf.get(n, {}) or {}
             rec = _agent_rec(board, n) or {}
             print("%-16s %-12s %-14s %s" % (
-                n[:16], (e.get("harness") or e.get("tool") or "claude")[:12],
+                n[:16], _display_harness(board, n)[:12],
                 _harness_check_label(rec.get("harness_check")),
                 e.get("cmd") or "(built-in)"))
         return
@@ -16741,7 +17280,9 @@ def cmd_harness(a, board):
     if owner.startswith("agent-"):
         sys.exit("harness check needs an agent name: atm harness check <name>")
     harness, cmd_template = harness_of(board, owner, a.harness, a.cmd_template)
-    print("checking %s: harness=%s%s" % (owner, harness, (" cmd=%s" % cmd_template) if cmd_template else ""))
+    print("checking %s: harness=%s%s" % (
+        owner, _launch_harness_label(board, owner, a.harness, harness),
+        (" cmd=%s" % cmd_template) if cmd_template else ""))
     res = harness_probe(board, owner, a.harness, a.cmd_template, a.model, a.cwd, a.timeout)
     _safe(lambda: _agent_set(board, owner, harness_check=res), None)
     print("  cmd:      %s" % res["cmd"])
@@ -17241,7 +17782,7 @@ body[data-work-view=columns] #workJump{display:none}
       <div class="msgs" id="msgs"></div>
       <section id="composer">
         <div id="composerRow">
-          <label class="who"><small>from</small> <select id="cFrom"></select></label>
+          <label class="who"><small>from</small> <span id="cFrom" class="operator-from" data-operator="">set an operator: atm ui --operator &lt;name&gt;</span></label>
           <label class="who"><small>to</small> <select id="cTo"><option value="">everyone</option></select></label>
           <label class="who"><small>re</small> <input id="cRe" placeholder="ticket id" size="8" style="width:88px" autocomplete="off"></label>
           <label class="who"><small>type</small> <select id="cKind"><option value="message">message</option><option value="task">task</option></select></label>
@@ -17257,6 +17798,7 @@ body[data-work-view=columns] #workJump{display:none}
 <script>
 const UI_TOKEN="";
 function writeHeaders(){const h={'Content-Type':'application/json'};if(UI_TOKEN)h['X-Atman-Token']=UI_TOKEN;return h}
+const UI_OPERATOR="";
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const h=x=>x==null?'-':(x<1?Math.round(x*60)+'m':x<48?x.toFixed(1)+'h':(x/24).toFixed(1)+'d');
 // Server sends timestamps as raw ISO-8601 UTC. Render in whatever timezone
@@ -17645,13 +18187,25 @@ function ensureToOption(name){
     const o=document.createElement('option');o.value=name;o.textContent=name;to.appendChild(o);
   }
 }
+function setComposerOperator(name){
+  const from=document.getElementById('cFrom');
+  const btn=document.getElementById('cSend');
+  const ta=document.getElementById('cText');
+  const msg=document.getElementById('composerMsg');
+  const op=String(name||UI_OPERATOR||'').trim();
+  if(from){
+    from.dataset.operator=op;
+    from.textContent=op?(op+' (operator)'):'set an operator: atm ui --operator <name>';
+  }
+  if(btn)btn.disabled=!op;
+  if(ta)ta.disabled=!op;
+  if(!op&&msg&&!msg.textContent){msg.className='mute';msg.textContent='set an operator: atm ui --operator <name>'}
+}
 function loadAgentPickers(){
-  const from=document.getElementById('cFrom'),to=document.getElementById('cTo');
-  const savedFrom=localStorage.getItem('tickets-ui-from')||'';
-  const prevFrom=from.value||savedFrom, prevTo=to.value;
-  from.innerHTML='<option value="">(pick agent)</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  const to=document.getElementById('cTo');
+  if(!to)return;
+  const prevTo=to.value;
   to.innerHTML='<option value="">everyone</option>'+AGENTS.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
-  if(AGENTS.includes(prevFrom))from.value=prevFrom;
   if(THREAD_SEAT){ensureToOption(THREAD_SEAT);to.value=THREAD_SEAT;to.disabled=true}
   else{to.disabled=false;if(AGENTS.includes(prevTo))to.value=prevTo}
 }
@@ -17834,19 +18388,18 @@ document.getElementById('cText').addEventListener('input',renderMentionBar);
 document.getElementById('cText').addEventListener('click',renderMentionBar);
 document.getElementById('cText').addEventListener('keyup',e=>{if(e.key!=='Enter')renderMentionBar()});
 document.getElementById('cSend').addEventListener('click',async()=>{
-  const from=document.getElementById('cFrom').value.trim();
+  const from=(document.getElementById('cFrom').dataset.operator||UI_OPERATOR||'').trim();
   const text=document.getElementById('cText').value.trim();
   const to=document.getElementById('cTo').value.trim();
   const re=document.getElementById('cRe').value.trim();
   const kind=document.getElementById('cKind').value.trim()||'message';
   const btn=document.getElementById('cSend'),msg=document.getElementById('composerMsg');
-  if(!from){msg.className='bad';msg.textContent='pick who you are posting as';return}
+  if(!from){msg.className='bad';msg.textContent='set an operator: atm ui --operator <name>';return}
   if(!text){msg.className='bad';msg.textContent='message is empty';return}
-  localStorage.setItem('tickets-ui-from',from);
   btn.disabled=true;msg.className='';msg.textContent='posting…';
   try{
     const r=await fetch('/msg',{method:'POST',headers:writeHeaders(),
-      body:JSON.stringify({from,text,to,re,kind})});
+      body:JSON.stringify({text,to,re,kind})});
     const out=await r.json();
     if(out.ok){document.getElementById('cText').value='';document.getElementById('cRe').value='';
       document.getElementById('mentionBar').innerHTML='';msg.className='ok';msg.textContent='posted';
@@ -17952,6 +18505,7 @@ async function load(manual){
   renderAgentMap(d.agent_map);
   renderSeats(d);
   AGENTS=(d.agents||[]).map(a=>a.name).filter(Boolean).sort();loadAgentPickers();
+  setComposerOperator(d.operator||UI_OPERATOR);
   defaultComposeTicket(d);
   renderChatRail(d);renderChatHead();
   const utilBy={};(d.util||[]).forEach(u=>{utilBy[u.agent]=u});
@@ -18103,7 +18657,7 @@ document.getElementById('refreshBtn').addEventListener('click',()=>load(true));
   sync();
   if(mq.addEventListener)mq.addEventListener('change',sync);else if(mq.addListener)mq.addListener(sync);
 })();
-load();setInterval(load,5000);setInterval(tickClock,1000);
+setComposerOperator(UI_OPERATOR);load();setInterval(load,5000);setInterval(tickClock,1000);
 </script></body></html>"""
 
 
@@ -18509,7 +19063,8 @@ def _snapshot_single_flight(board, messages=40):
 def board_snapshot(board, messages=40):
     """Everything the UI shows, as plain data. Read-only."""
     with _shared_watch_table():
-        return _board_snapshot_body(board, messages)
+        with _reuse_board_reads(board):
+            return _board_snapshot_body(board, messages)
 
 
 def _board_snapshot_body(board, messages=40):
@@ -18540,14 +19095,19 @@ def _board_snapshot_body(board, messages=40):
     for r in rows:
         rec = agents.get(r["agent"], {})
         agent_wf = wf.get(r["agent"], {}) or {}
-        harness_name = agent_wf.get("harness") or agent_wf.get("tool") or "claude"
+        recorded_harness = _seat_harness(board, r["agent"])
+        display_harness = recorded_harness or "unknown"
+        harness_name = recorded_harness  # empty is unknown; never invent claude
         lim = _active_seat_limit(board, r["agent"], rec)
         wc = _watcher_count(r["agent"], board)
         wake = pending_view(_safe(lambda name=r["agent"]: pending_work(board, name), {}))
         wake_pending = actionable(wake)
+        sa = _session_adapters()
+        if not harness_name:
+            ep, _ = sa.live_endpoint(board, r["agent"])
+            harness_name = ((ep or {}).get("provider") or (ep or {}).get("harness") or "")
         remote = (_remote_public_state(load_remote_state(board, r["agent"]))
                   if harness_name == "remote" else {})
-        sa = _session_adapters()
         local_failure = _local_adapter_failure(rec, harness_name)
         failure_state = remote.get("failure_state", "") or local_failure.get("state", "")
         failure_reason = remote.get("failure_reason", "") or local_failure.get("reason", "")
@@ -18597,7 +19157,7 @@ def _board_snapshot_body(board, messages=40):
         if life == "ephemeral" and not reachable and adapter_state == "offline":
             adapter_extra["adapter_delivery"] = "exited"
         out_agents.append({"name": r["agent"], "state": r["state"], "model": agent_wf.get("model", ""),
-                           "harness": harness_name,
+                           "harness": display_harness,
                            "agent_id": agent_wf.get("agent_id") or r["agent"],
                            "lifecycle": life,
                            "reachable": reachable,
@@ -18686,6 +19246,7 @@ def _board_snapshot_body(board, messages=40):
         row = {"id": _msg_id(x), "at": x.get("at", ""), "from": x.get("from", ""), "to": x.get("to", ""),
                "re": x.get("re", ""), "text": x.get("text", ""), "mentions": x.get("mentions") or [],
                "kind": x.get("kind") or "message",
+               "harness": x.get("harness") or _seat_harness(board, x.get("from") or "") or "unknown",
                "delivery": _message_delivery(board, x, agents_by=agents)}
         raw_msgs.append(row)
     seat_names = []
@@ -18729,6 +19290,12 @@ def _board_snapshot_body(board, messages=40):
             # 9f50606 work_payload has no agents=; revised T-889 does.
             return fn(tickets, graph, all_msgs, **kwargs)
     work = _safe(_work_payload, None)
+    # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
+    amap = _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
+                                        live=live, events=events), None)
+    # T-1103: typed blocker chips and the running pulse, joined onto plan nodes
+    # from records the snapshot already holds (no new reads, no writes).
+    _safe(lambda: _annotate_plan(work, tickets, out_agents, amap), None)
     return {
         "project": os.path.basename(os.path.dirname(board)), "generated": now(),
         "master": m.get("owner", ""), "cos": m.get("cos", ""), "counts": counts, "sprint": sprint, "burn": burn,
@@ -18755,9 +19322,7 @@ def _board_snapshot_body(board, messages=40):
         # T-1076: per-provider quota for the Team header. Same ledger reader as
         # `atm agents`; still read-only, so board.json spawns nothing.
         "provider_usage": _safe(lambda: provider_usage_snapshot(board), []) or [],
-        # T-1072: same data as `atm agents --json`, from this snapshot's liveness.
-        "agent_map": _safe(lambda: agent_map_data(board, tickets=tickets, agent_list=agent_list,
-                                                  live=live, events=events), None),
+        "agent_map": amap,
         "promise": promise,
         "objective": {
             **objective_view,
@@ -18770,6 +19335,79 @@ def _board_snapshot_body(board, messages=40):
         "work": work,
         "first_screen": _first_screen(work),
     }
+
+
+_UI_SEAT_OFFLINE = ("offline", "queued-offline", "failed")
+
+
+def _ui_seat_blockers(node, seats):
+    """The seat-shaped blocker chips: seat_limited, seat_offline, auth, plus the
+    node's own hold / capture / blocked wait. Pure; records only.
+
+    ``seats`` maps a seat name to {limited, limit_until, adapter_state, state,
+    auth_state, auth_label, auth_cmd}. The record-only chips (unaccepted,
+    dep_unaccepted, dep_open) come from work_view.blockers_of.
+    """
+    phase = (node.get("phase") or "").strip()
+    if phase == "done":
+        return []
+    out = []
+    wait = node.get("wait") or {}
+    if wait.get("kind") in ("hold", "capture", "blocked"):
+        out.append({"kind": wait["kind"], "on": node.get("id") or "",
+                    "text": wait.get("text") or wait["kind"], "cmd": wait.get("cmd") or ""})
+    seat = (node.get("owner") or node.get("reserved_for")
+            or ((node.get("dispatch") or {}).get("to") or "")).strip()
+    s = (seats or {}).get(seat) if seat else None
+    if not s:
+        return out
+    if s.get("limited"):
+        out.append({"kind": "seat_limited", "on": seat,
+                    "text": "seat %s limited until %s" % (seat, s.get("limit_until") or "reset unknown"),
+                    "cmd": "atm harness usage"})
+    offline = s.get("adapter_state") in _UI_SEAT_OFFLINE
+    if (offline and phase in ("posted", "reserved", "ready")) or \
+            (phase in ("working", "review") and s.get("state") == "DOWN"):
+        out.append({"kind": "seat_offline", "on": seat,
+                    "text": "seat %s offline" % seat + (" (%s)" % s["adapter_state"] if offline else ""),
+                    "cmd": "atm spawn %s --persist" % seat})
+    if s.get("auth_state") in _UI_AUTH_BLOCKING:
+        out.append({"kind": "auth", "on": seat,
+                    "text": "seat %s %s" % (seat, (s.get("auth_label") or "logged out").lower()),
+                    "cmd": s.get("auth_cmd") or ""})
+    return out
+
+
+def _annotate_plan(work, tickets, out_agents, amap):
+    if not work:
+        return
+    wv = _work_view()
+    by_id = dict((t["id"], t) for t in tickets)
+    seats = {}
+    for a in out_agents or []:
+        surf = a.get("auth_surface") or {}
+        seats[a["name"]] = {
+            "limited": bool(a.get("limit")), "limit_until": a.get("limit_until") or "",
+            "adapter_state": a.get("adapter_state") or "", "state": a.get("state") or "",
+            "auth_state": surf.get("state") or "", "auth_label": surf.get("label") or "",
+            "auth_cmd": (surf.get("recovery") or {}).get("cmd") or "",
+        }
+    running = {}
+    for g in (amap or {}).get("groups") or []:
+        for r in g.get("rows") or []:
+            if r.get("state") == "running" and g.get("ticket"):
+                running.setdefault(g["ticket"], {"seat": r.get("seat") or "", "elapsed_s": r.get("elapsed_s")})
+    for n in work.get("nodes") or []:
+        # work_payload already carries the record-only chips (unaccepted,
+        # dep_unaccepted, dep_open). The seat-shaped ones are the app API's,
+        # as work_view.blockers_of says.
+        base = n.get("blockers")
+        if base is None:
+            base = wv.blockers_of(n, by_id)
+        n["blockers"] = list(base) + _ui_seat_blockers(n, seats)
+        n["running"] = running.get(n.get("id"))
+        # the shared-board repo lens (until the split) filters on this
+        n["repo"] = ((by_id.get(n.get("id")) or {}).get("repo") or "").strip()
 
 
 def _first_screen(work):
@@ -18892,7 +19530,7 @@ def _ui_payload_has_secrets(payload):
     return False
 
 
-def _ui_read_json_body(handler):
+def _ui_read_json_body(handler, origin_ok=None):
     try:
         length = int(handler.headers.get("Content-Length") or 0)
     except ValueError:
@@ -18902,7 +19540,7 @@ def _ui_read_json_body(handler):
     raw = handler.rfile.read(length) if length else b"{}"
     if not _ui_msg_is_json(handler.headers):
         raise ValueError("Content-Type must be application/json")
-    if not _ui_msg_origin_ok(handler.headers):
+    if not (origin_ok or _ui_msg_origin_ok)(handler.headers):
         raise ValueError("origin mismatch")
     payload = json.loads(raw or b"{}")
     if not isinstance(payload, dict):
@@ -19000,6 +19638,7 @@ def _ui_msg_origin_ok(headers):
 
     Local API clients (curl, urllib, tickets tests) omit Origin — that is
     allowed once Content-Type is JSON and the launch token is present.
+    Sender is the configured operator, never a seat chosen in the page (T-1104).
     A present Origin that is missing, `null`, or a different host is rejected.
     Host loopback is a separate check (_ui_host_header_is_loopback).
     """
@@ -19016,7 +19655,7 @@ def _ui_msg_origin_ok(headers):
     return parsed.netloc.lower() == host.lower()
 
 
-def _ui_page(token=""):
+def _ui_page(operator="", token=""):
     """T-889 hook: UI_HTML with the Work view module spliced in at its three
     named placeholders. Missing module -> the shell's own fallback graph."""
     mod = _safe(_work_view, None)
@@ -19026,8 +19665,160 @@ def _ui_page(token=""):
     page = (UI_HTML.replace("<!--WORK_VIEW:css-->", css)
             .replace("<!--WORK_VIEW:html-->", html)
             .replace("<!--WORK_VIEW:js-->", js))
-    return page.replace('const UI_TOKEN="";',
+    page = page.replace('const UI_TOKEN="";',
                         "const UI_TOKEN=%s;" % json.dumps(token or ""))
+    return page.replace('const UI_OPERATOR="";',
+                        "const UI_OPERATOR=%s;" % json.dumps(operator or ""))
+
+
+def _ui_operator_name(args):
+    """Launch-configured operator. Not a seat picker and not TICKET_AGENT."""
+    return (getattr(args, "operator", None) or "").strip()
+
+
+def _casefold_map_key(mapping, name):
+    """The unique mapping key whose casefold equals name, else empty."""
+    want = (name or "").casefold()
+    if not want or not isinstance(mapping, dict):
+        return ""
+    hits = [k for k in mapping if str(k).casefold() == want]
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _agent_canonical_owner(board, configured):
+    """agents/<owner>.json stem matching configured by casefold (not the FS)."""
+    want = (configured or "").casefold()
+    if not want:
+        return ""
+    hits = []
+    try:
+        for fn in os.listdir(agents_dir(board)):
+            if fn.endswith(".json") and fn[:-5].casefold() == want:
+                hits.append(fn[:-5])
+    except OSError:
+        return ""
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _endpoint_casefold(board, name):
+    """Session endpoint for name, matching the seat file by casefold."""
+    sa = _session_adapters()
+    ep = _safe(lambda: sa.read_endpoint(board, name), None)
+    if ep:
+        return ep
+    want = (name or "").casefold()
+    if not want:
+        return {}
+    try:
+        for fn in os.listdir(sa.endpoint_dir(board)):
+            if fn.endswith(".json") and fn[:-5].casefold() == want:
+                found = _safe(lambda stem=fn[:-5]: sa.read_endpoint(board, stem), None)
+                if found:
+                    return found
+    except OSError:
+        pass
+    return {}
+
+
+def _harness_run_mark(*records):
+    """First non-empty harness, tool, or provider across workforce / agent recs."""
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for key in ("harness", "tool", "provider"):
+            val = rec.get(key)
+            if isinstance(val, str):
+                val = val.strip()
+            if val:
+                return val if isinstance(val, str) else key
+    return ""
+
+
+def ui_operator(board, configured):
+    """(operator, why_not). The operator posts from the app; seats never do.
+
+    The name must have agents/<name>.json on this board and must not be a
+    harness-run seat. Match workforce keys, the session endpoint, and the
+    agent record's owner by casefold, then rewrite to the canonical owner
+    (or refuse). A seat with harness, tool, or provider in workforce.json
+    or agents/<name>.json is harness-run. `atm join <name>` with no
+    --harness is how a person registers.
+    """
+    name = (configured or "").strip()
+    if not name:
+        return "", "set an operator: atm ui --operator <name>"
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", name):
+        return "", "operator name %r is not a valid seat name" % name
+    owner = _agent_canonical_owner(board, name)
+    rec = _agent_rec(board, owner) if owner else {}
+    if not rec:
+        return "", "operator %s has no agents/%s.json on this board: atm join %s" % (
+            name, name, name)
+    canonical = (rec.get("owner") or owner or "").strip()
+    if not canonical or canonical.casefold() != name.casefold():
+        return "", ("operator %s does not match the registered owner %s"
+                    % (name, canonical or owner or "?"))
+    wf = load_workforce(board)
+    wf_key = _casefold_map_key(wf, canonical)
+    entry = (wf.get(wf_key) if wf_key else {}) or {}
+    mark = _harness_run_mark(entry, rec)
+    if mark:
+        return "", ("operator %s is a %s seat; the app posts as a person, "
+                    "never as a harness-run seat" % (canonical, mark))
+    ep = _endpoint_casefold(board, canonical)
+    if ep.get("provider") or ep.get("socket"):
+        return "", ("operator %s has a registered harness session on this board; the app posts "
+                    "as a person, never as a harness-run seat" % canonical)
+    return canonical, ""
+
+
+def _ui_refuse_harness_operator(board, configured):
+    """Exit when --operator names a harness-run seat. Unregistered stays a POST error."""
+    name = (configured or "").strip()
+    if not name:
+        return
+    _resolved, why = ui_operator(board, name)
+    if why and ("harness-run seat" in why):
+        sys.exit(why)
+
+
+def _ui_attach_operator(snapshot, operator):
+    if not isinstance(snapshot, dict):
+        return snapshot
+    out = dict(snapshot)
+    out["operator"] = operator or ""
+    return out
+
+
+def _ui_post_as_operator(board, payload, operator):
+    """POST /msg always posts as the configured operator (T-1104 / T-1103 §5).
+
+    A payload `from` that names anyone else is refused. Provenance is the
+    explicit ui-operator marker, never the atm ui process session.
+    """
+    operator, why = ui_operator(board, operator)
+    if not operator:
+        raise ValueError(why)
+    claimed = str((payload or {}).get("from") or "").strip()
+    if claimed and claimed.casefold() != operator.casefold():
+        raise ValueError("from must be the operator (%s), not a seat" % operator)
+    text = str((payload or {}).get("text") or "").strip()
+    if not text:
+        raise ValueError("text is required")
+    to = str((payload or {}).get("to") or "").strip()
+    re_ = str((payload or {}).get("re") or "").strip()
+    kind = str((payload or {}).get("kind") or "message").strip() or "message"
+    if kind not in _UI_MSG_KINDS:
+        raise ValueError("kind must be message or task")
+    # Match cmd_msg: refuse a missing --re before anything is posted (T-1381).
+    # Without this, post_message succeeds and deliver_wakes -> load() sys.exits,
+    # which escapes the handler's `except Exception` and drops the connection.
+    if re_ and not os.path.isfile(ticket_path(board, re_)):
+        raise ValueError("no such ticket: %s" % re_)
+    return post_message(
+        board, operator, text, to, re_, kind=kind, explicit=operator,
+        via="ui-operator", sender_kind="operator",
+    )
 
 
 def cmd_ui(a, board):
@@ -19035,16 +19826,28 @@ def cmd_ui(a, board):
     composer POST at /msg that posts through post_message() -- same board,
     same messages.jsonl, no second store. /board.json?seat=<name> filters
     messages to that agent-scoped thread (Advitiya PRIORITY agent chats).
+    Composer posts as the launch --operator only (T-1104).
     Writes require a per-launch token; Host must be loopback (T-1105)."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    configured = _ui_operator_name(a)
+    _ui_refuse_harness_operator(board, configured)
+    resolved, _why = ui_operator(board, configured) if configured else ("", "")
+    operator = resolved or configured
     if a.json:
-        print(json.dumps(board_snapshot(board), indent=2))
+        print(json.dumps(_ui_attach_operator(board_snapshot(board), operator), indent=2))
         return
     if not _ui_bind_host_ok(a.host):
         sys.exit("atm ui: --host must be loopback (127.0.0.1, localhost, ::1); got %s"
                  % (a.host or ""))
     token = _ui_new_launch_token()
+    try:
+        # T-1103: the /api/v1 JSON API for the TypeScript app shares this gate.
+        api = UiApi(board, token, port=a.port, operator=getattr(a, "operator", "") or "",
+                    dev_origins=getattr(a, "dev_origin", None) or (),
+                    app_dir=getattr(a, "app_dir", "") or None)
+    except ValueError as e:
+        sys.exit("atm ui: %s" % e)
 
     class H(BaseHTTPRequestHandler):
         def _send_json(self, status, out):
@@ -19068,19 +19871,23 @@ def cmd_ui(a, board):
         def do_GET(self):
             if not self._gate(write=False):
                 return
+            if _ui_api_route(self.path):
+                ui_api_do_get(self, api)
+                return
             if self.path.startswith("/board.json"):
                 from urllib.parse import parse_qs, urlparse
                 seat = (parse_qs(urlparse(self.path).query).get("seat") or [""])[0]
-                body = json.dumps(_safe(lambda: board_snapshot_for_request(board, seat=seat), {
+                body = json.dumps(_ui_attach_operator(_safe(
+                    lambda: board_snapshot_for_request(board, seat=seat), {
                     "error": "snapshot failed",
                     "counts": {"total": 0, "done": 0},
                     "next_step": {"kind": "unreachable", "label": "Snapshot failed",
                                   "message": "Could not read the board — check TICKETS_DIR and board files.",
                                   "cmd": "atm ui --json"},
-                })).encode()
+                }), operator)).encode()
                 ctype = "application/json"
             else:
-                body = _ui_page(token).encode()
+                body = _ui_page(operator, token).encode()
                 ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
@@ -19091,6 +19898,9 @@ def cmd_ui(a, board):
 
         def do_POST(self):
             if not self._gate(write=True):
+                return
+            if _ui_api_route(self.path):
+                ui_api_do_post(self, api)
                 return
             if self.path.startswith("/auth-reconnect"):
                 try:
@@ -19106,18 +19916,12 @@ def cmd_ui(a, board):
                 return
             try:
                 payload = _ui_read_json_body(self)
-                sender = str(payload.get("from") or "").strip()
-                text = str(payload.get("text") or "").strip()
-                to = str(payload.get("to") or "").strip()
-                re_ = str(payload.get("re") or "").strip()
-                kind = str(payload.get("kind") or "message").strip() or "message"
-                if not sender or not text:
-                    raise ValueError("from and text are required")
-                if kind not in _UI_MSG_KINDS:
-                    raise ValueError("kind must be message or task")
-                if not _agent_rec(board, sender):
-                    raise ValueError("from must be a registered agent")
-                rec = post_message(board, sender, text, to, re_, kind=kind)
+                # T-1104 decides WHO the post is from (the operator, never a
+                # seat); T-1106 decides that it wakes its recipients the way
+                # `atm msg` does. Both, or the app is either a forgery or a
+                # message nobody is woken for.
+                rec = _ui_post_as_operator(board, payload, operator)
+                _safe(lambda: deliver_wakes(board, rec), None)
                 status, out = 200, {"ok": True, "posted": fmt_msg(rec)}
             except Exception as e:  # noqa: BLE001 - always answer the composer, never hang it
                 status, out = 400, {"ok": False, "error": str(e)}
@@ -19126,7 +19930,9 @@ def cmd_ui(a, board):
         def log_message(self, *args):
             pass
 
+    H.do_OPTIONS = lambda self: self._gate(write=False) and ui_api_options(self, api)
     srv = ThreadingHTTPServer((a.host, a.port), H)
+    api.port = srv.server_address[1]
     srv.daemon_threads = True
     print("board UI: http://%s:%d  (Ctrl-C to stop; localhost-only; composer posts via atm msg)" % (a.host, a.port))
     if a.open:
@@ -19154,6 +19960,1128 @@ def cmd_ui(a, board):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# --- T-1103: the local JSON API for the TypeScript app (/api/v1) -------------
+#
+# Every function in this block that serves a GET is a pure read: no
+# subprocess, no write-mode open, no watermark move (audit-hook tested). The
+# one write, POST /api/v1/lead, passes cmd_ui's T-1105 gate (loopback Host +
+# per-launch token) and an origin allowlist. Contract: docs/api/app-v2.md and
+# docs/api/schemas/.
+
+_UI_TOKEN_HEADER = "X-Atman-Token"
+_UI_THREAD_LIMIT_MAX = 200
+_UI_TICKET_ID_RE = re.compile(r"^T-\d{1,7}$")
+_UI_SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_UI_AUTH_BLOCKING = ("login_required", "expired")
+
+
+def _ui_registry():
+    """The machine registry (~/.config/atman/board.json or ATMAN_BOARD_CONFIG).
+
+    Missing or unparsable -> {}. Never raises, never exits.
+    """
+    try:
+        with open(_atman_config_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _ui_slug(text):
+    s = _UI_SLUG_RE.sub("-", str(text or "")).strip("-.")[:40]
+    return s or "board"
+
+
+def ui_projects(started_board, registry=None):
+    """[{slug, board, repos, source}] -- the board `atm ui` started on first.
+
+    A project is a board (T-1103 decision 1). `projects` in the registry
+    names boards; every distinct `boards` value is listed too, under
+    basename(dirname(board)). Boards that are not directories are skipped.
+    Never calls board_dir(), which can exit on a shadow board.
+    """
+    reg = _ui_registry() if registry is None else (registry if isinstance(registry, dict) else {})
+    projects = reg.get("projects") if isinstance(reg.get("projects"), dict) else {}
+    boards = reg.get("boards") if isinstance(reg.get("boards"), dict) else {}
+    out, by_real, slugs = [], {}, set()
+
+    def _real(path):
+        try:
+            return os.path.realpath(os.path.expanduser(str(path)))
+        except (TypeError, ValueError, OSError):
+            return ""
+
+    def add(slug, board, repos, source):
+        real = _real(board) if board else ""
+        if not real or not os.path.isdir(real):
+            return
+        repos = [str(r) for r in (repos or []) if isinstance(r, str) and r]
+        if real in by_real:
+            row = by_real[real]
+            row["repos"] = row["repos"] + [r for r in repos if r not in row["repos"]]
+            return
+        base = _ui_slug(slug or os.path.basename(os.path.dirname(real)))
+        slug, n = base, 2
+        while slug in slugs:
+            slug, n = "%s-%d" % (base, n), n + 1
+        slugs.add(slug)
+        row = {"slug": slug, "board": real, "repos": repos, "source": source}
+        by_real[real] = row
+        out.append(row)
+
+    started_real = _real(started_board)
+    started_slug = ""
+    for s, p in projects.items():
+        if isinstance(p, dict) and _real(p.get("board") or "") == started_real:
+            started_slug = s
+            break
+    add(started_slug, started_board, [], "started")
+    for s, p in projects.items():
+        if isinstance(p, dict):
+            add(s, p.get("board"), p.get("repos") if isinstance(p.get("repos"), list) else [], "registry")
+    for repo, b in boards.items():
+        if isinstance(b, str):
+            add("", b, [repo], "boards")
+    return out
+
+
+def _ui_project_counts(board):
+    """Cheap per-board counts: ticket statuses plus the chosen lead. No liveness."""
+    counts = {"open": 0, "blocked": 0, "claimed": 0, "review": 0, "done": 0}
+    for t in load_all(board):
+        st = t.get("status") or ""
+        if st in counts:
+            counts[st] += 1
+    m = current_master(board) or {}
+    return counts, (m.get("lead") or "").strip()
+
+
+def _ui_registered(board, name):
+    name = (name or "").strip()
+    if not name or "/" in name or name.startswith("."):
+        return False
+    return bool(_agent_rec(board, name)) or name in load_workforce(board)
+
+
+def ui_lead(board, master_state=None):
+    """(lead, note). The lead is master.json.lead, a per-project user choice.
+
+    There is no default: unset means '' and the app asks. A lead that is no
+    longer registered is reported, never silently replaced by master or CoS.
+    """
+    m = master_state if master_state is not None else (current_master(board) or {})
+    lead = ((m or {}).get("lead") or "").strip()
+    if not lead:
+        return "", "no lead picked for this project"
+    if not _ui_registered(board, lead):
+        return "", "lead %s is not registered on this board; pick again" % lead
+    return lead, ""
+
+
+def _ui_receipt_words(seen, wake):
+    """Receipts only. Never an agent acknowledgement (T-1103 invariant)."""
+    words = ["posted"]
+    if seen is True:
+        words.append("inbox read")
+    elif seen is False:
+        words.append("not read")
+    if wake and wake.get("confirmed"):
+        words.append("wake confirmed")
+    elif wake and wake.get("label"):
+        label = str(wake.get("label"))
+        if "ack" in label.lower():
+            label = "receipt recorded"
+        words.append("wake: " + label)
+    return words
+
+
+def _ui_harness_badge(m, operator, wf):
+    frm = (m.get("from") or "").strip()
+    if (operator and frm.lower() == operator.lower()) or m.get("sender_kind") == "operator":
+        return {"value": "operator", "recorded": True, "note": "operator"}
+    stamped = (m.get("harness") or "").strip()
+    if stamped:
+        return {"value": stamped, "recorded": True, "note": "recorded at post time"}
+    entry = wf.get(frm) or {}
+    cur = (entry.get("harness") or entry.get("tool") or "").strip()
+    if cur:
+        return {"value": cur, "recorded": False, "note": "current harness; not recorded at post time"}
+    return {"value": "unknown", "recorded": False, "note": "harness not recorded"}
+
+
+def _ui_post_row(board, m, project, operator, wf, agents_by):
+    delivery = _message_delivery(board, m, agents_by=agents_by)
+    if delivery.get("status") == "broadcast":
+        receipts = [{"agent": "", "words": ["posted", "broadcast"]}]
+    else:
+        receipts = [{"agent": r["agent"], "words": _ui_receipt_words(r.get("seen"), r.get("wake"))}
+                    for r in delivery.get("receipts") or []]
+    frm = m.get("from") or ""
+    return {
+        "id": _msg_id(m), "at": m.get("at", ""), "from": frm,
+        "author": "%s@%s" % (frm or "?", project),
+        "to": m.get("to", ""), "re": m.get("re", ""), "text": m.get("text", ""),
+        "mentions": m.get("mentions") or [], "kind": m.get("kind") or "message",
+        "harness": _ui_harness_badge(m, operator, wf),
+        "operator": bool(operator and frm.lower() == operator.lower()),
+        "broadcast": is_board_broadcast(m),
+        "receipts": receipts,
+    }
+
+
+def _ui_in_thread(m, operator, seat):
+    frm = (m.get("from") or "").strip().lower()
+    op, s = (operator or "").lower(), (seat or "").lower()
+    if not s:
+        return False
+    if op:
+        if frm == op:
+            return message_involves_seat(m, seat)
+        if frm == s:
+            return message_involves_seat(m, operator) or is_board_broadcast(m)
+        return False
+    return message_involves_seat(m, seat) or (frm == s and is_board_broadcast(m))
+
+
+def _ui_reachable(board, seat):
+    """Read-only: a watcher pid file with a live pid, or a native endpoint whose
+    transport still exists. Never live_endpoint() (it prunes), never ps."""
+    try:
+        with open(os.path.join(agents_dir(board), seat + ".watch.pid")) as f:
+            pid = int((f.read() or "0").strip() or 0)
+        if pid and _pid_alive(pid):
+            return True
+    except (OSError, ValueError):
+        pass
+    ep = _session_adapters().read_endpoint(board, seat) or {}
+    sock = ep.get("socket") or ""
+    if sock and os.path.exists(sock):
+        return True
+    return False
+
+
+def ui_capability(board, seat, harness):
+    """'takes mid-run messages' only for a steerable harness with a live socket.
+
+    Same table as `atm steer` (steer.harness_refuse_reason), so it cannot drift.
+    """
+    st = _steer()
+    ep = _session_adapters().read_endpoint(board, seat) or {}
+    refuse = st.harness_refuse_reason(harness, ep.get("provider") or "")
+    sock = ep.get("socket") or ""
+    if not refuse and sock and os.path.exists(sock):
+        return {"midrun": True, "line": "takes mid-run messages", "reason": ""}
+    return {"midrun": False, "line": "answers on its next turn",
+            "reason": refuse or "no live messaging socket right now"}
+
+
+def _ui_usage_view(board, harness):
+    pu = _provider_usage()
+    reading = pu.get_reading(board, harness)
+    ui = pu.ui_reading(reading)
+    compact = pu.compact_reading(reading)
+    age = ui.get("age") or ""
+    return {"provider": ui.get("provider") or (harness or "unknown"),
+            "status": ui.get("status") or "unknown",
+            "level": compact.get("level") or "unknown",
+            "text": compact.get("text") or "",
+            "remaining_pct": compact.get("remaining_pct"),
+            "reset": compact.get("reset") or "",
+            "checked_at": ui.get("checked_at") or "",
+            "age": age or "age unknown"}
+
+
+def ui_lead_status(board, lead, agent_map=None):
+    """The lead status strip: liveness, run, last output, limit, auth, usage.
+
+    Also says plainly when the lead cannot answer (limited, logged out, no
+    live session, quota), so the chat never hangs on a promise.
+    """
+    agent_list = load_agents(board)
+    rec = next((r for r in agent_list if (r.get("owner") or "") == lead), {}) or {}
+    wf = load_workforce(board)
+    entry = wf.get(lead) or {}
+    harness = (entry.get("harness") or entry.get("tool") or "").strip()
+    with _read_only_liveness():
+        live = (_safe(lambda: agent_liveness(board, rec, agent_list), {}) or {}) if rec else {}
+        lim = _active_seat_limit(board, lead, rec) if rec else None
+        if agent_map is None:
+            agent_map = _safe(lambda: agent_map_data(board, agent_list=agent_list,
+                                                     live={lead: live} if rec else {}), None)
+    running = None
+    for g in (agent_map or {}).get("groups") or []:
+        for row in g.get("rows") or []:
+            if row.get("seat") == lead and row.get("state") == "running":
+                running = {"ticket": g.get("ticket") or "", "elapsed_s": row.get("elapsed_s"),
+                           "tokens": row.get("tokens")}
+    last_at, last_src = _steer().last_output(rec, watch_log_ts=_steer_watch_log_ts(board, lead))
+    auth = _agent_auth_surface(board, rec, lead, harness) if rec else {}
+    usage = _ui_usage_view(board, harness)
+    reachable = _ui_reachable(board, lead)
+    cap = ui_capability(board, lead, harness)
+    state = live.get("state") or "unknown"
+    blocked = None
+    rec_cmd = ((auth or {}).get("recovery") or {}).get("cmd") or ""
+    if (auth or {}).get("state") in _UI_AUTH_BLOCKING:
+        blocked = {"kind": "logged_out",
+                   "text": "Lead's harness is logged out. Recovery (run on the enrolled host): %s"
+                           % (rec_cmd or "atm harness auth %s" % lead),
+                   "cmd": rec_cmd}
+    elif lim:
+        until = lim.get("until") or lim.get("reset_at") or "unknown"
+        blocked = {"kind": "limited",
+                   "text": "Lead is limited until %s (usage %s). Your message is queued."
+                           % (until, usage["age"]),
+                   "cmd": "atm harness usage"}
+    elif usage["level"] == "limited":
+        blocked = {"kind": "quota",
+                   "text": "Provider quota exhausted (%s). %s" % (
+                       usage["age"], ("Resets %s." % usage["reset"]) if usage["reset"] else "Reset unknown."),
+                   "cmd": "atm harness usage"}
+    elif state in ("dead", "stalled") or not reachable:
+        blocked = {"kind": "offline",
+                   "text": "No live session for the lead. Message queued; it runs when a watcher is up: "
+                           "atm spawn %s --persist" % lead,
+                   "cmd": "atm spawn %s --persist" % lead}
+    return {
+        "seat": lead, "harness": harness or "unknown",
+        "state": state, "detail": live.get("detail") or "",
+        "running": running,
+        "last_output_at": last_at, "last_output_source": last_src,
+        "limit": lim or None,
+        "limit_until": (lim or {}).get("until") or (lim or {}).get("reset_at") or "" if lim else "",
+        "auth": {"state": (auth or {}).get("state") or "", "label": (auth or {}).get("label") or "Not checked",
+                 "cmd": rec_cmd},
+        "usage": usage,
+        "reachable": reachable,
+        "capability": cap,
+        "wake_mode": wake_mode_of(board, lead),
+        "cannot_answer": blocked,
+    }
+
+
+def ui_thread(board, operator, seat, project, before="", limit=100, include_archives=False):
+    """Operator <-> seat thread, paged back through the whole live log (and
+    the archives on request) -- not the 40-message snapshot window."""
+    try:
+        limit = max(1, min(int(limit or 100), _UI_THREAD_LIMIT_MAX))
+    except (TypeError, ValueError):
+        limit = 100
+    msgs = load_messages(board, include_archives=include_archives)
+    rows = [m for m in msgs if _ui_in_thread(m, operator, seat)]
+    if before:
+        idx = next((i for i, m in enumerate(rows) if _msg_id(m) == before), None)
+        if idx is None:
+            return {"messages": [], "has_more": False, "error": "unknown cursor %s" % before}
+        rows = rows[:idx]
+    page = rows[-limit:]
+    wf = load_workforce(board)
+    agents_by = dict((r.get("owner"), r) for r in load_agents(board) if r.get("owner"))
+    return {
+        "messages": [_ui_post_row(board, m, project, operator, wf, agents_by) for m in page],
+        "has_more": len(rows) > len(page),
+        "oldest_id": _msg_id(page[0]) if page else "",
+        "total_in_window": len(rows),
+        "archives": bool(include_archives),
+    }
+
+
+def ui_needs_you(board, operator, project, tickets=None, now_dt=None):
+    """Read-only 'Needs you' queue. Unstructured asks only: state is always
+    'asked'. Prose is never a ruling (T-944), so nothing here says 'ruled'."""
+    now_dt = now_dt or datetime.now(timezone.utc)
+    msgs = load_messages(board)
+    op = (operator or "").lower()
+    items, seen_ids = [], set()
+    registered = _registered_handles(board)
+
+    def _age_h(at):
+        try:
+            d = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            return (now_dt - d).total_seconds() / 3600.0
+        except (TypeError, ValueError):
+            return None
+
+    def _push(m, why):
+        mid = _msg_id(m)
+        if mid in seen_ids:
+            return
+        seen_ids.add(mid)
+        frm = m.get("from") or ""
+        items.append({"kind": "message", "why": why, "id": mid, "at": m.get("at", ""),
+                      "from": frm, "author": "%s@%s" % (frm or "?", project),
+                      "re": m.get("re", ""), "text": (m.get("text") or "")[:400],
+                      "state": "asked", "label": "asked (unstructured)"})
+
+    for i, m in enumerate(msgs):
+        frm = (m.get("from") or "").strip()
+        if op and frm.lower() == op:
+            continue
+        text = (m.get("text") or "").strip()
+        low = text.lower()
+        directed = bool(op) and not is_board_broadcast(m) and _addressed_to(m, operator, registered)
+        if directed:
+            answered = any((x.get("from") or "").lower() == op and message_involves_seat(x, frm)
+                           for x in msgs[i + 1:])
+            if not answered:
+                _push(m, "addressed to you, no reply from you since")
+                continue
+        if text.upper().startswith("DECIDE") or "@owner" in low or (op and ("@" + op) in low):
+            _push(m, "decision asked in prose")
+            continue
+        if low.startswith("stuck:"):
+            age = _age_h(m.get("at"))
+            if age is not None and age > 1.0:
+                _push(m, "stuck for over an hour")
+    for t in (tickets if tickets is not None else load_all(board)):
+        auto = t.get("automated") or {}
+        if (t.get("kind") == "automated" and auto.get("escalated")
+                and t.get("status") not in ("done",)):
+            items.append({"kind": "escalated", "why": "escalated automated node: keep or remove",
+                          "id": t["id"], "at": auto.get("escalated_at") or t.get("created") or "",
+                          "from": "", "author": "", "re": t["id"],
+                          "text": (auto.get("escalate_reason") or t.get("title") or "")[:400],
+                          "state": "asked", "label": "asked (unstructured)"})
+    items.sort(key=lambda x: x.get("at") or "")
+    return {"items": items[:100], "count": len(items),
+            "operator": operator or "",
+            "note": "" if operator else "no operator configured; showing prose asks only"}
+
+
+def _ui_dep_state(dep):
+    if dep is None:
+        return "missing"
+    wv = _work_view()
+    if dep.get("status") == "done":
+        if wv.structured_accept(dep) or wv.structured_merge(dep):
+            return "accepted"
+        if wv.dep_released(dep):
+            return "released by override"
+        return "done, not accepted"
+    return dep.get("status") or "open"
+
+
+def _ui_newest_accept_verdict(verdicts, *, applies=None):
+    """Newest non-superseded accept verdict, optionally filtered by applies.
+
+    Matches ``work_view._unbound_accept_event`` (newest wins), not first-match.
+    """
+    latest = None
+    for v in verdicts or []:
+        if (v.get("kind") or "").lower() != "accept":
+            continue
+        if v.get("superseded"):
+            continue
+        if applies is True and not v.get("applies"):
+            continue
+        if applies is False and v.get("applies"):
+            continue
+        latest = v
+    return latest
+
+
+def _ui_unbound_accept_message(verdicts, tid=""):
+    """Plain sentence when an accept exists but is not bound to review_head.
+
+    ``done --force`` then ``accept --sha`` records the event without
+    ``review_head``, so ``accepted`` stays false and the verdict's
+    ``applies`` is false. Name that gap instead of "no proof recorded".
+    ``atm review`` refuses DONE work — reopen + claim + review + accept.
+    """
+    v = _ui_newest_accept_verdict(verdicts, applies=False)
+    if not v:
+        return ""
+    by = (v.get("by") or "").strip() or "?"
+    sha = (v.get("sha") or "").strip()
+    short = sha[:7] if sha else "?"
+    slot = (tid or "").strip() or "<id>"
+    return (
+        "accept by @%s on %s is not bound to a review head: "
+        'run atm reopen %s --notes "...", then claim, then atm review, '
+        "then atm accept --sha <new head>" % (by, short, slot)
+    )
+
+
+def _ui_applying_accept_not_done_message(verdicts):
+    """Accept applies at the current head, but status is not yet done."""
+    v = _ui_newest_accept_verdict(verdicts, applies=True)
+    if not v:
+        return ""
+    by = (v.get("by") or "").strip() or "?"
+    sha = (v.get("sha") or "").strip()
+    short = sha[:7] if sha else "?"
+    return "Accepted by @%s on %s (not marked done yet)" % (by, short)
+
+
+def _ui_acceptance_proof(t, accepted, review_label, verdicts=None):
+    """What the drill-down shows under ACCEPTANCE PROOF.
+
+    ``t.proof`` is the sounding/capture sentence when one exists. An accepted
+    ticket without that sentence still has a verification record — the
+    structured accept/merge (who + sha). Prefer that label over silence so the
+    app never says "no proof recorded" next to "Accepted by @seat on <sha>".
+    When an accept exists but does not apply (no review_head), say so plainly.
+    When an accept applies while the ticket is still IN REVIEW, name that too.
+    """
+    sounding = (t.get("proof") or "").strip()
+    if sounding:
+        return sounding
+    if not accepted:
+        applying = _ui_applying_accept_not_done_message(verdicts)
+        if applying:
+            return applying
+        return _ui_unbound_accept_message(verdicts, tid=t.get("id") or "")
+    label = (review_label or "").strip()
+    if label:
+        return label
+    v = _ui_newest_accept_verdict(verdicts, applies=True)
+    if v:
+        by = (v.get("by") or "").strip() or "?"
+        sha = (v.get("sha") or "").strip()
+        short = sha[:7] if sha else "unrecorded artifact"
+        return "Accepted by @%s on %s" % (by, short)
+    return ""
+
+
+def ui_ticket(board, tid, operator, project, include_archives=False):
+    """GET /ticket/<id>.json: the drill-down. Board files only; no git.
+
+    The diff is a copyable command, never run on a read.
+    """
+    try:
+        with open(ticket_path(board, tid)) as f:
+            t = json.load(f)
+    except (OSError, ValueError):
+        return None
+    wv = _work_view()
+    rv = _review_verdict()
+    tickets = load_all(board)
+    by_id = dict((x["id"], x) for x in tickets)
+    msgs = load_messages(board, include_archives=include_archives)
+    about = [m for m in msgs if (m.get("re") or "") == tid]
+    review = wv.review_of(t, about)
+    status = t.get("status") or ""
+    # Only a structured accept or merge record makes done "accepted"; prose,
+    # a done flag or a release override never does (T-992 / T-1031).
+    accepted = bool(status == "done" and (wv.structured_accept(t) or wv.structured_merge(t)))
+    released = bool(wv.dep_released(t))
+    verified = bool(review.get("verified"))
+    if status == "done" and accepted:
+        status_label = "done, accepted"
+    elif status == "done" and released:
+        status_label = "done, released by override (not accepted)"
+    elif status == "done":
+        status_label = "done, not accepted"
+    else:
+        status_label = LABEL.get(status, status)
+    head = rv.displayed_review_head(t)
+    verdicts = []
+    for ev in rv.iter_structured(t):
+        verdicts.append({"kind": (ev.get("kind") or "").lower(), "by": ev.get("by") or "",
+                         "at": ev.get("at") or "", "sha": ev.get("sha") or "",
+                         "superseded": bool(ev.get("superseded")),
+                         "applies": bool(head and rv.sha_match(ev.get("sha"), head)),
+                         "notes": (ev.get("notes") or ev.get("reason") or "")[:600]})
+    agent_list = load_agents(board)
+    with _read_only_liveness():
+        amap = _safe(lambda: agent_map_data(board, show_all=True, tickets=tickets,
+                                            agent_list=agent_list), None)
+    runs = []
+    for g in (amap or {}).get("groups") or []:
+        if g.get("ticket") != tid:
+            continue
+        for r in g.get("rows") or []:
+            v = r.get("verdict")
+            verdict = ("%s @%s" % (v.get("kind") or "", v.get("sha") or "?")) if isinstance(v, dict) else (v or "")
+            runs.append({"seat": r.get("seat") or "", "author": "%s@%s" % (r.get("seat") or "?", project),
+                         "harness": r.get("harness") or "unknown", "role": r.get("role") or "",
+                         "state": r.get("state") or "", "verdict": verdict,
+                         "started": r.get("started") or "", "ended": r.get("ended") or "",
+                         "elapsed_s": r.get("elapsed_s"),
+                         "tokens": r.get("tokens"), "tokens_in": r.get("tokens_in"),
+                         "tokens_out": r.get("tokens_out"),
+                         "tokens_label": ("unknown" if r.get("tokens") is None
+                                          else "{:,}".format(int(r.get("tokens"))))})
+    wf = load_workforce(board)
+    harnesses = []
+    for seat in [x["seat"] for x in runs] + [(t.get("owner") or "").strip()]:
+        entry = wf.get(seat) or {}
+        h = (entry.get("harness") or entry.get("tool") or "").strip()
+        if seat and h and h not in harnesses:
+            harnesses.append(h)
+    usage = [_ui_usage_view(board, h) for h in harnesses]
+    handoff = []
+    for d in t.get("deps") or []:
+        dep = by_id.get(d)
+        if dep and dep.get("status") == "done":
+            for n in wv.handoff_notes(dep)[-1:]:
+                handoff.append({"from": d, "by": n.get("by") or "", "at": n.get("at") or "",
+                                "text": (n.get("text") or "")[:1200]})
+    own_handoff = [{"from": tid, "by": n.get("by") or "", "at": n.get("at") or "",
+                    "text": (n.get("text") or "")[:1200]} for n in wv.handoff_notes(t)[-3:]]
+    agents_by = dict((r.get("owner"), r) for r in agent_list if r.get("owner"))
+    msg_rows = [_ui_post_row(board, m, project, operator, wf, agents_by) for m in about[-50:]][::-1]
+    sha = head or rv.submitted_sha(t) or ""
+    branch = (t.get("branch") or "").strip()
+    commit = (t.get("commit") or "").strip()
+    if not branch and "@" in commit:
+        branch = commit.rsplit("@", 1)[0]
+    target = sha or branch
+    deps = [{"id": d, "state": _ui_dep_state(by_id.get(d)),
+             "title": (by_id.get(d) or {}).get("title") or ""} for d in t.get("deps") or []]
+    review_label = (review.get("label") or "").strip()
+    return {
+        "id": tid, "project": project, "title": t.get("title") or "",
+        "status": status, "status_label": status_label,
+        "accepted": accepted,
+        "released": released,
+        "owner": (t.get("owner") or "").strip(),
+        "owner_at_project": ("%s@%s" % (t.get("owner"), project)) if t.get("owner") else "",
+        "deps": deps,
+        # Sounding proof (cause/change/proof) when present; for an accepted
+        # ticket the structured accept/merge label is the verification proof
+        # (who + sha). Never leave "no proof recorded" beside "Accepted by".
+        "acceptance": {"proof": _ui_acceptance_proof(t, accepted, review_label, verdicts)},
+        "review": {"head": head, "head_len": len(head), "label": review_label,
+                   "verified": verified, "verdicts": verdicts},
+        "runs": runs,
+        "usage": usage,
+        "handoff": handoff + own_handoff,
+        "messages": msg_rows,
+        "messages_total": len(about),
+        "steers": [dict((k, s.get(k)) for k in ("id", "kind", "from", "to", "seat", "text", "at",
+                                               "receipt", "reply") if k in s)
+                   for s in (t.get("steers") or []) if isinstance(s, dict)],
+        "artifact": {"commit": commit, "branch": branch, "pr": str(t.get("pr") or ""), "sha": sha},
+        "diff_cmd": ("git diff main...%s" % target) if target else "",
+        "diff_note": "copy and run it in the repo; the app never runs git on a read",
+    }
+
+
+def _write_master_state(board, state):
+    os.makedirs(board, exist_ok=True)
+    path = master_state_path(board)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def set_lead(board, seat, by):
+    """master.json.lead = seat (T-1103 decision 2), plus a master log line."""
+    seat = (seat or "").strip()
+    prev = dict(current_master(board) or {})
+    if not seat:
+        old = prev.pop("lead", "")
+        _write_master_state(board, prev)
+        _master_log(board, "lead cleared (was %s)" % (old or "unset"), by=by)
+        return ""
+    if not _ui_registered(board, seat):
+        raise ValueError("%s is not a registered seat on this board" % seat)
+    prev["lead"] = seat
+    _write_master_state(board, prev)
+    _master_log(board, "lead set to %s (the seat the operator talks to on this project)" % seat, by=by)
+    return seat
+
+
+def cmd_lead(a, board):
+    """`atm lead` / `atm lead set <seat>` / `atm lead clear` (T-1103)."""
+    action = (getattr(a, "action", "") or "show").strip()
+    if action == "show":
+        lead, note = ui_lead(board)
+        print("lead: %s" % (lead or "(none) -- %s; pick one: atm lead set <seat>" % note))
+        return
+    if action == "clear":
+        set_lead(board, "", by=whoami(getattr(a, "owner", None)))
+        print("lead cleared; the app will ask who to talk to")
+        return
+    if action == "set":
+        seat = (getattr(a, "seat", "") or "").strip()
+        if not seat:
+            sys.exit("atm lead set <seat>")
+        try:
+            set_lead(board, seat, by=whoami(getattr(a, "owner", None)))
+        except ValueError as e:
+            sys.exit("lead: %s" % e)
+        harness = _seat_harness(board, seat)
+        cap = ui_capability(board, seat, harness)
+        print("lead: %s (%s; %s)" % (seat, harness or "harness unknown", cap["line"]))
+        return
+    sys.exit("atm lead [show|set <seat>|clear]")
+
+
+_UI_API_PREFIX = "/api/v1/"
+_UI_API_VERSION = 1
+_UI_CLIENT_HEADER = "X-Atman-Client"
+_UI_APP_PREFIX = "/app/"
+# Keep in sync with install.sh UI_BUILD_CMD (T-1443).
+_UI_BUILD_CMD = "npm install && npm run build -w ui"
+_UI_STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+    ".json": "application/json", ".map": "application/json", ".svg": "image/svg+xml",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
+def _ui_origin_of(value):
+    """'http://localhost:5173/' -> 'http://localhost:5173' when loopback http(s); else ''."""
+    from urllib.parse import urlparse
+    raw = (value or "").strip()
+    try:
+        u = urlparse(raw)
+    except ValueError:
+        return ""
+    if u.scheme not in ("http", "https") or not u.netloc or u.path not in ("", "/") \
+            or u.query or u.fragment or "@" in u.netloc:
+        return ""
+    try:
+        name = u.hostname or ""
+        u.port  # noqa: B018 - raises ValueError on a malformed port
+    except ValueError:
+        return ""
+    if not _ui_loopback_name(name):
+        return ""
+    return "%s://%s" % (u.scheme, u.netloc.lower())
+
+
+def _ui_default_app_dir():
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui", "dist")
+
+
+class UiApi:
+    """Per-launch state the /api/v1 routes need: the started board, the T-1105
+    launch token, the bound port, the launch operator, the origins allowed to
+    call the API (the app's own, plus loopback --dev-origin values) and the
+    built app bundle served at /app/."""
+
+    def __init__(self, board, token, port=0, operator="", dev_origins=(), app_dir=None):
+        self.board = os.path.abspath(board)
+        self.token = token
+        self.port = int(port or 0)
+        self.operator_flag = (operator or "").strip()
+        self.dev_origins = []
+        for o in dev_origins or ():
+            norm = _ui_origin_of(o)
+            if not norm:
+                raise ValueError("--dev-origin %s is not a loopback http origin "
+                                 "(e.g. http://localhost:5173)" % o)
+            if norm not in self.dev_origins:
+                self.dev_origins.append(norm)
+        self.app_dir = os.path.realpath(app_dir) if app_dir else _ui_default_app_dir()
+        # Import lazily-loaded modules now, so a read route never writes a
+        # bytecode cache file on its first request.
+        for load_mod in (_work_view, _steer, _review_verdict, _provider_usage,
+                         _agent_map_mod, _session_adapters, _turns_mod):
+            _safe(load_mod, None)
+        _safe(lambda: __import__("auth_v2_contract"), None)
+
+    def own_origins(self):
+        p = self.port
+        return ["http://127.0.0.1:%d" % p, "http://localhost:%d" % p, "http://[::1]:%d" % p]
+
+    def origin_allowed(self, origin):
+        """The app's own origin (served bundle) or a configured loopback dev origin."""
+        norm = _ui_origin_of(origin)
+        return bool(norm) and (norm in self.own_origins() or norm in self.dev_origins)
+
+    def projects(self):
+        return ui_projects(self.board)
+
+    def resolve(self, slug):
+        """(board, slug) for ?project=; (None, slug) for an unknown slug."""
+        rows = self.projects()
+        slug = (slug or "").strip()
+        if not slug:
+            return rows[0]["board"] if rows else self.board, (rows[0]["slug"] if rows else "board")
+        for row in rows:
+            if row["slug"] == slug:
+                return row["board"], slug
+        return None, slug
+
+    def operator(self, board):
+        """(operator, why_not) from the launch --operator (T-1104's flag)."""
+        return ui_operator(board, self.operator_flag)
+
+
+def _ui_query(path):
+    from urllib.parse import parse_qs, urlparse
+    u = urlparse(path)
+    q = parse_qs(u.query)
+    return u.path, (lambda k, d="": (q.get(k) or [d])[0])
+
+
+def _ui_snapshot_ro(board, seat=""):
+    """board_snapshot for a read route: no `ps`, no writes (pid files are the
+    watcher evidence). Not single-flighted with the embedded page's refresh,
+    which still probes the process table."""
+    with _read_only_liveness():
+        snap = board_snapshot(board)
+    seat = (seat or "").strip()
+    if seat:
+        snap = dict(snap)
+        snap["messages"] = [m for m in snap.get("messages") or [] if message_involves_seat(m, seat)]
+        snap["seat"] = seat
+    return snap
+
+
+def _ui_node_accept_state(node, by_id):
+    """(accepted, released, status_label) for one plan node. Records only."""
+    wv = _work_view()
+    t = by_id.get(node.get("id")) or {}
+    if (t.get("status") or node.get("status")) != "done":
+        return False, False, LABEL.get(node.get("status") or "", node.get("status") or "")
+    accepted = bool(wv.structured_accept(t) or wv.structured_merge(t))
+    released = bool(wv.dep_released(t))
+    if accepted:
+        return True, True, "done, accepted"
+    if released:
+        return False, True, "done, released by override (not accepted)"
+    return False, False, "done, not accepted"
+
+
+def ui_plan(board, slug, snap=None):
+    """GET /api/v1/plan: the execution plan with typed blocker reasons per step.
+
+    The Work payload (same planner as the embedded page) plus, per node:
+    blockers[] (dep_unaccepted / dep_open / seat_limited / seat_offline / auth /
+    hold / capture / blocked / unaccepted), running, accepted, released.
+    """
+    snap = snap if snap is not None else _ui_snapshot_ro(board)
+    work = snap.get("work") or {}
+    by_id = dict((t["id"], t) for t in load_all(board))
+    nodes = []
+    for n in work.get("nodes") or []:
+        n = dict(n)
+        accepted, released, label = _ui_node_accept_state(n, by_id)
+        n["accepted"], n["released"], n["status_label"] = accepted, released, label
+        n.setdefault("blockers", [])
+        n.setdefault("running", None)
+        nodes.append(n)
+    return {
+        "project": slug, "generated": snap.get("generated") or now(),
+        "available": bool(work),
+        "objective": snap.get("objective") or {},
+        "summary": work.get("summary") or {},
+        "counts": work.get("counts") or {},
+        "nodes": nodes,
+        "edges": work.get("edges") or [],
+        "layers": work.get("layers") or [],
+        "order": work.get("order") or [],
+        "blocker_kinds": list(_UI_BLOCKER_KINDS),
+    }
+
+
+_UI_BLOCKER_KINDS = ("dep_unaccepted", "dep_open", "seat_limited", "seat_offline", "auth",
+                     "hold", "capture", "blocked", "unaccepted")
+
+
+def ui_lead_view(board, slug, operator, operator_note):
+    """GET /api/v1/lead: who the operator talks to here, and whether it can answer.
+
+    No lead picked -> a picker (every registered seat with its harness and the
+    steer table's capability line). The app never guesses master or CoS.
+    """
+    lead, lead_note = ui_lead(board)
+    out = {"project": slug, "operator": operator, "operator_note": operator_note,
+           "lead": lead, "lead_note": lead_note, "needs_lead": not lead,
+           "picker": [], "status": None}
+    if not lead:
+        out["picker"] = _ui_lead_picker(board, operator)
+        return out
+    out["status"] = ui_lead_status(board, lead)
+    return out
+
+
+def _ui_lead_picker(board, operator):
+    wf = load_workforce(board)
+    names = sorted(set([r.get("owner") for r in load_agents(board) if r.get("owner")]) | set(wf))
+    picks = []
+    for n in names:
+        if n == operator or n.startswith("agent-"):
+            continue
+        entry = wf.get(n) or {}
+        h = (entry.get("harness") or entry.get("tool") or "").strip()
+        picks.append({"seat": n, "harness": h or "unknown",
+                      "capability": ui_capability(board, n, h)["line"]})
+    return picks
+
+
+def _ui_json(status, obj):
+    return status, "application/json", json.dumps(obj).encode()
+
+
+def ui_api_get(ctx, route, q):
+    """Route one GET under /api/v1/. Returns (status, ctype, body). Read-only:
+    no subprocess, no write-mode open, no watermark move."""
+    name = route[len(_UI_API_PREFIX):]
+    if name == "session":
+        return _ui_json(500, {"error": "session is answered by the handler"})
+    board, slug = ctx.resolve(q("project"))
+    if board is None:
+        return _ui_json(404, {"error": "unknown project %s" % slug})
+    op, why = ctx.operator(board)
+    if name == "projects":
+        rows = []
+        for row in ctx.projects():
+            counts, lead = _safe(lambda b=row["board"]: _ui_project_counts(b), ({}, ""))
+            rows.append(dict(row, counts=counts or {}, lead=lead or "", current=row["slug"] == slug))
+        return _ui_json(200, {"projects": rows, "current": slug})
+    if name == "board":
+        snap = dict(_ui_snapshot_ro(board, seat=q("seat")))
+        lead, lead_note = ui_lead(board)
+        snap["app"] = {"project": slug, "operator": op, "operator_note": why,
+                       "lead": lead, "lead_note": lead_note}
+        return _ui_json(200, snap)
+    if name == "plan":
+        return _ui_json(200, ui_plan(board, slug))
+    if name == "lead":
+        return _ui_json(200, ui_lead_view(board, slug, op, why))
+    if name == "thread":
+        seat = q("with")
+        lead, lead_note = ui_lead(board)
+        seat = seat or lead
+        out = {"project": slug, "operator": op, "operator_note": why,
+               "lead": lead, "lead_note": lead_note, "with": seat,
+               "needs_lead": False, "messages": [], "has_more": False,
+               "oldest_id": "", "total_in_window": 0, "archives": q("all") == "1"}
+        if not seat:
+            out["needs_lead"] = True
+            return _ui_json(200, out)
+        if not _ui_registered(board, seat):
+            out["error"] = "%s is not registered on this board" % seat
+            return _ui_json(404, out)
+        out.update(ui_thread(board, op, seat, slug, before=q("before"), limit=q("limit", "100"),
+                             include_archives=q("all") == "1"))
+        if out.get("error"):
+            return _ui_json(400, out)
+        return _ui_json(200, out)
+    if name == "needs-you":
+        return _ui_json(200, ui_needs_you(board, op, slug))
+    m = re.match(r"^ticket/([^/]+)$", name)
+    if m:
+        tid = m.group(1)
+        if not _UI_TICKET_ID_RE.match(tid):
+            return _ui_json(400, {"error": "bad ticket id"})
+        data = ui_ticket(board, tid, op, slug, include_archives=q("all") == "1")
+        if data is None:
+            return _ui_json(404, {"error": "no such ticket %s" % tid})
+        return _ui_json(200, data)
+    return _ui_json(404, {"error": "no such route"})
+
+
+
+def _ui_missing_app_page(app_dir):
+    """HTML 200 when ui/dist is absent: name the build command, never a bare 404."""
+    import html as _html
+    cmd = _html.escape(_UI_BUILD_CMD)
+    where = _html.escape(app_dir)
+    body = (
+        "<!doctype html><html lang=\"en\"><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>atman — build the local app</title>"
+        "<style>"
+        "body{font:16px/1.45 system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;"
+        "color:#ece8e1;background:#0c0e12}"
+        "code,pre{font:14px/1.4 ui-monospace,Menlo,monospace;background:#161a22;padding:.15rem .4rem;"
+        "border-radius:4px}"
+        "pre{display:block;padding:.75rem 1rem;overflow:auto}"
+        "a{color:#6aa9ff}"
+        "</style></head><body>"
+        "<h1>Build the local app</h1>"
+        "<p>No bundle at <code>%s</code>. From the Atman checkout run:</p>"
+        "<pre>%s</pre>"
+        "<p>Then restart <code>atm ui</code> and open <code>/app/</code>. "
+        "Or pass <code>atm ui --app-dir DIR</code> if the bundle lives elsewhere.</p>"
+        "<p><code>./install.sh</code> runs that build when Node and npm are on PATH.</p>"
+        "</body></html>"
+    ) % (where, cmd)
+    return 200, "text/html; charset=utf-8", body.encode()
+
+
+def ui_app_file(ctx, route):
+    """GET /app/...: the built TypeScript app. index.html carries the
+    per-launch token in <meta name="atman-token"> (same-origin page load; the
+    token is never in a URL). Paths never leave the bundle directory."""
+    import html as _html
+    rel = route[len(_UI_APP_PREFIX):] if route.startswith(_UI_APP_PREFIX) else ""
+    rel = rel or "index.html"
+    root = ctx.app_dir
+    if not os.path.isfile(os.path.join(root, "index.html")):
+        # Never a bare JSON 404: strangers who skipped the UI build still get
+        # a page that names the one-line fix (T-1443).
+        return _ui_missing_app_page(root)
+    path = os.path.realpath(os.path.join(root, rel))
+    if not (path == root or path.startswith(root + os.sep)):
+        return _ui_json(404, {"error": "not found"})
+    if not os.path.isfile(path):
+        # client-side routes fall back to the app shell; real assets 404
+        if "." in os.path.basename(rel):
+            return _ui_json(404, {"error": "not found"})
+        path = os.path.join(root, "index.html")
+    try:
+        with open(path, "rb") as f:
+            body = f.read()
+    except OSError:
+        return _ui_json(404, {"error": "not found"})
+    ext = os.path.splitext(path)[1].lower()
+    ctype = _UI_STATIC_TYPES.get(ext, "application/octet-stream")
+    if os.path.basename(path) == "index.html":
+        meta = ('<meta name="atman-token" content="%s"><meta name="atman-api" content="%s">'
+                % (_html.escape(ctx.token, quote=True), _UI_API_PREFIX.rstrip("/")))
+        text = body.decode("utf-8", "replace")
+        low = text.lower()
+        at = low.find("</head>")
+        text = (text[:at] + meta + text[at:]) if at >= 0 else meta + text
+        body = text.encode("utf-8")
+    return 200, ctype, body
+
+
+def ui_post_lead(ctx, board, payload):
+    """POST /api/v1/lead {seat}: the operator picks this project's lead (§9 #2)."""
+    extra = set(payload) - {"seat", "project"}
+    if extra:
+        return 400, {"ok": False, "error": "lead accepts only seat"}
+    op, why = ctx.operator(board)
+    if not op:
+        return 400, {"ok": False, "error": "only the operator picks the lead: " + why}
+    seat = str(payload.get("seat") or "").strip()
+    if not seat:
+        return 400, {"ok": False, "error": "seat is required"}
+    if seat.lower() == op.lower():
+        return 400, {"ok": False, "error": "the lead is a seat, not you"}
+    try:
+        set_lead(board, seat, by=op)
+    except ValueError as e:
+        return 400, {"ok": False, "error": str(e)}
+    harness = _seat_harness(board, seat)
+    return 200, {"ok": True, "lead": seat, "harness": harness or "unknown",
+                 "capability": ui_capability(board, seat, harness)["line"]}
+
+
+
+
+def _ui_api_route(path):
+    """'api', 'app' or '' for a request path."""
+    route = _ui_query(path)[0]
+    if route.startswith(_UI_API_PREFIX):
+        return "api"
+    if route == _UI_APP_PREFIX.rstrip("/") or route.startswith(_UI_APP_PREFIX):
+        return "app"
+    return ""
+
+
+def _ui_api_send(handler, api, status, ctype, body, extra=None):
+    handler.send_response(status)
+    handler.send_header("Content-Type", ctype)
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("X-Frame-Options", "DENY")
+    handler.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+    handler.send_header("Referrer-Policy", "no-referrer")
+    origin = (handler.headers.get("Origin") or "").strip()
+    if origin and api.origin_allowed(origin) and _ui_api_route(handler.path) == "api":
+        # CORS only for the app's own origin or a --dev-origin
+        handler.send_header("Access-Control-Allow-Origin", _ui_origin_of(origin))
+        handler.send_header("Vary", "Origin")
+    for k, v in (extra or {}).items():
+        handler.send_header(k, v)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _ui_api_refuse_foreign(handler, api):
+    """403 when the request carries an Origin that is not allowed, or the
+    browser says it is cross-site without one (a no-cors embed). Runs after
+    cmd_ui's loopback-Host gate. Returns True when it answered."""
+    origin = (handler.headers.get("Origin") or "").strip()
+    if origin and not api.origin_allowed(origin):
+        _ui_api_send(handler, api, *_ui_json(403, {"ok": False, "error": "origin %s is not allowed" % origin[:80]}))
+        return True
+    site = (handler.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if not origin and site in ("cross-site", "same-site"):
+        _ui_api_send(handler, api, *_ui_json(403, {"ok": False, "error": "cross-site request without an allowed origin"}))
+        return True
+    return False
+
+
+def ui_api_options(handler, api):
+    """CORS preflight for /api/v1: answered only for an allowed origin."""
+    origin = (handler.headers.get("Origin") or "").strip()
+    if _ui_api_route(handler.path) != "api" or not origin or not api.origin_allowed(origin):
+        _ui_api_send(handler, api, *_ui_json(403, {"ok": False, "error": "preflight refused"}))
+        return
+    _ui_api_send(handler, api, 204, "text/plain", b"", {
+        "Access-Control-Allow-Methods": "GET, POST",
+        "Access-Control-Allow-Headers": "Content-Type, %s, %s" % (_UI_TOKEN_HEADER, _UI_CLIENT_HEADER),
+        "Access-Control-Max-Age": "600",
+    })
+
+
+def ui_api_session(api):
+    board, slug = api.resolve("")
+    op, why = api.operator(board)
+    lead, lead_note = ui_lead(board)
+    return {"api_version": _UI_API_VERSION, "token": api.token, "token_header": _UI_TOKEN_HEADER,
+            "project": slug, "operator": op, "operator_note": why, "lead": lead, "lead_note": lead_note}
+
+
+def ui_api_do_get(handler, api):
+    """GET /api/v1/* and /app/*. Called after cmd_ui's loopback-Host gate."""
+    if _ui_api_refuse_foreign(handler, api):
+        return
+    route, q = _ui_query(handler.path)
+    try:
+        if _ui_api_route(handler.path) == "app":
+            status, ctype, body = ui_app_file(api, route)
+        elif route == _UI_API_PREFIX + "session":
+            # The token for the app on a dev origin. X-Atman-Client cannot be
+            # sent cross-origin without a preflight, and the preflight is
+            # answered only for an allowed origin. The token never rides a URL.
+            if not (handler.headers.get(_UI_CLIENT_HEADER) or "").strip():
+                status, ctype, body = _ui_json(400, {"error": "send the %s header" % _UI_CLIENT_HEADER})
+            else:
+                status, ctype, body = _ui_json(200, ui_api_session(api))
+        else:
+            status, ctype, body = ui_api_get(api, route, q)
+    except Exception as e:  # noqa: BLE001 - a read must answer, never hang
+        status, ctype, body = _ui_json(500, {"error": str(e)})
+    _ui_api_send(handler, api, status, ctype, body)
+
+
+def ui_api_do_post(handler, api):
+    """POST /api/v1/*. Called after cmd_ui's gate (loopback Host + launch token)."""
+    if _ui_api_refuse_foreign(handler, api):
+        return
+    route, q = _ui_query(handler.path)
+    if route != _UI_API_PREFIX + "lead":
+        _ui_api_send(handler, api, *_ui_json(404, {"ok": False, "error": "no such route"}))
+        return
+    try:
+        payload = _ui_read_json_body(handler, origin_ok=lambda h: True)  # origin checked above
+    except Exception as e:  # noqa: BLE001 - always answer, never hang
+        _ui_api_send(handler, api, *_ui_json(400, {"ok": False, "error": str(e)}))
+        return
+    board, slug = api.resolve(str(payload.get("project") or q("project") or ""))
+    if board is None:
+        _ui_api_send(handler, api, *_ui_json(404, {"ok": False, "error": "unknown project %s" % slug}))
+        return
+    try:
+        status, out = ui_post_lead(api, board, payload)
+    except Exception as e:  # noqa: BLE001
+        status, out = 400, {"ok": False, "error": str(e)}
+    if isinstance(out, dict):
+        out.setdefault("project", slug)
+    _ui_api_send(handler, api, *_ui_json(status, out))
 
 
 QUICKSTART_MARKER = "quickstart.json"
@@ -20022,7 +21950,7 @@ def cmd_hook_run(a, board):
         # fires do not (the brief's own "no second briefing" line).
         cmd_prompt(argparse.Namespace(
             agent=owner, master=kind == "master", cos=kind == "cos", extra="",
-            run_no=_task_wake_run_no(board, owner)), board)
+            run_no=_safe(lambda: _task_wake_run_no(board, owner), "")), board)
         return
     sys.exit("unsupported hook event %s" % a.event)
 
@@ -20549,7 +22477,20 @@ class _LoudArgumentParser(argparse.ArgumentParser):
     stderr, but with an explicit NO CHANGE WAS MADE as the trailing line, so
     the tail of the output is the warning rather than the caller's own text.
     add_subparsers() propagates this class to every subparser by default
-    (parser_class defaults to type(self)), so this covers all of them."""
+    (parser_class defaults to type(self)), so this covers all of them.
+
+    ``_lazy_release_epilog`` defers ``release_status()`` until help is formatted
+    so ``atm --version`` hashes the release tree only once (T-1080).
+    """
+    def __init__(self, *args, lazy_release_epilog=False, **kwargs):
+        self._lazy_release_epilog = lazy_release_epilog
+        argparse.ArgumentParser.__init__(self, *args, **kwargs)
+
+    def format_help(self):
+        if self._lazy_release_epilog and not self.epilog:
+            self.epilog = release_status()
+        return argparse.ArgumentParser.format_help(self)
+
     def error(self, message):
         self.print_usage(sys.stderr)
         self.exit(2, "%(prog)s: error: %(message)s\n%(prog)s: NO CHANGE WAS MADE\n" % {
@@ -20642,6 +22583,73 @@ def release_status():
 release_version = release_status
 
 
+def _source_behind_lines(root, head, remote):
+    """Warn when this checkout's HEAD is a strict ancestor of origin/main."""
+    if not (root and head and remote and head != remote):
+        return []
+    if git("merge-base", "--is-ancestor", head, remote, cwd=root) is None:
+        return []
+    quoted = shlex.quote(root)
+    return [
+        "WARNING: running source %s is behind origin/main %s"
+        % (head[:12], remote[:12]),
+        "refresh: git -C %s fetch origin && git -C %s merge --ff-only origin/main"
+        % (quoted, quoted),
+    ]
+
+
+def _same_commit(left, right):
+    a = (left or "").strip()
+    b = (right or "").strip()
+    if not a or not b:
+        return False
+    n = min(len(a), len(b), 40)
+    if n < 7:
+        return False
+    return a[:n] == b[:n]
+
+
+def _pinned_release_upgrade_line(pinned):
+    short = pinned[:12] if len(pinned or "") >= 12 else (pinned or "")
+    return (
+        "pinned release %s; newer releases can't be checked from here: "
+        "brew upgrade atman (or re-run install_live)" % short
+    )
+
+
+def runtime_version_report():
+    """What `atm --version` prints: package version, provenance, the file
+    that is running, and a behind warning when this checkout is older than
+    origin/main.
+
+    First line is ``PACKAGE_VERSION`` (e.g. ``0.3.0``) on every install shape
+    that executes this file. Second line is ``release_status()``. Extra lines
+    are T-1080: an operator worktree must not silently pin last week's CLI
+    (``atm steer`` missing from ``--help``).
+
+    When release.json names a commit, that commit is the running source.
+    An enclosing git repo (dotfiles / ~/.claude) is probed only when its
+    HEAD equals that commit. Otherwise print the brew/tarball upgrade path.
+    """
+    status = release_status()
+    script = os.path.realpath(__file__)
+    lines = [PACKAGE_VERSION, status, "source: %s" % script]
+    pinned = _release_commit()
+    root = _git_root_from(script)
+    head = (git("rev-parse", "HEAD", cwd=root) if root else None) or ""
+    if pinned and not (head and _same_commit(head, pinned)):
+        lines.append(_pinned_release_upgrade_line(pinned))
+        return "\n".join(lines)
+    if head:
+        lines.append("source-sha: %s" % head)
+        remote = (
+            git("rev-parse", "-q", "--verify", "origin/main", cwd=root)
+            or git("rev-parse", "-q", "--verify", "origin/master", cwd=root)
+            or "")
+        lines.extend(_source_behind_lines(root, head, remote))
+    return "\n".join(lines)
+
+
 def cmd_self(a, board):
     """Print which tickets.py is executing and how it was installed."""
     import shutil
@@ -20660,7 +22668,7 @@ def cmd_self(a, board):
     print("why:    %s" % why)
     print("whoami: %s" % whoami())
     if board and seat and not seat.startswith("agent-"):
-        harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+        harness = _seat_harness(board, seat)
         sa = _session_adapters()
         ep, was_stale = sa.live_endpoint(board, seat)
         stored = sa.read_endpoint(board, seat)
@@ -20674,6 +22682,9 @@ def cmd_self(a, board):
         elif was_stale:
             print("persistent: no -- seat %s had a native endpoint but it went stale "
                   "(re-register with `atm join %s --persistent`)" % (seat, seat))
+        elif not harness:
+            print("persistent: no -- seat %s has no harness recorded (unknown); "
+                  "will not probe claude" % seat)
         else:
             probe = sa.probe_provider(sa.provider_for_harness(harness) or harness)
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
@@ -20771,7 +22782,7 @@ def _feedback_seat_counts(board):
 
     agent_liveness() scans the process table (`ps`, sometimes `lsof`) and
     clears expired limits by rewriting the agent file, so feedback cannot
-    use it. LIMITED is a recorded limit that has not reached its reset_at;
+    use it. LIMITED is a recorded limit whose shared expiry policy is active;
     "stalled" is a seat whose recorded watcher pid (agents/<seat>.watch.pid)
     is no longer running -- a signal-0 probe, not a process scan.
     """
@@ -20782,19 +22793,9 @@ def _feedback_seat_counts(board):
         if not owner:
             continue
         lim = rec.get("limit")
-        if lim:
-            active = True
-            if lim.get("reset_at"):
-                try:
-                    reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-                    if reset.tzinfo is None:
-                        reset = reset.replace(tzinfo=timezone.utc)  # naive stamps are UTC
-                    active = reset > now_utc
-                except (ValueError, TypeError):
-                    pass
-            if active:
-                limited += 1
-                continue
+        if lim and _route_headroom().seat_limit(rec, now_utc):
+            limited += 1
+            continue
         try:
             with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
                 pid = int((f.read() or "0").strip() or 0)
@@ -20895,11 +22896,26 @@ def cmd_feedback(a, board):
     print(text)
 
 
+class _RawVersion(argparse.Action):
+    """Print runtime_version_report() without HelpFormatter wrapping (T-1080)."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help=None):
+        argparse.Action.__init__(
+            self, option_strings=option_strings, dest=dest, default=default,
+            nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        sys.stdout.write(runtime_version_report() + "\n")
+        parser.exit()
+
+
 def main():
-    status = release_status()
+    # Defer release_status() until help; --version calls it once inside
+    # runtime_version_report() (T-1080 REQUEST CHANGES).
     p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
-                           epilog=status)
-    p.add_argument("--version", action="version", version=status)
+                           lazy_release_epilog=True)
+    p.add_argument("--version", action=_RawVersion, help="show program's version number and exit")
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
@@ -21077,6 +23093,13 @@ def main():
 
     c = sub.add_parser("doctor", help="diagnose board resolution and detect shadow boards (T-959)")
     c.set_defaults(fn=cmd_doctor)
+
+    c = sub.add_parser("board-link", help="link this repo to a shared board so every checkout finds it")
+    c.add_argument("board", nargs="?", help="the shared board's .tickets directory")
+    c.add_argument("--repo", help="repo to link (default: the repo you are in)")
+    c.add_argument("--show", action="store_true", help="list linked repos and boards")
+    c.add_argument("--unlink", action="store_true", help="remove this repo's link")
+    c.set_defaults(fn=cmd_board_link)
 
     c = sub.add_parser("board-mark-primary", help="opt this repo's local .tickets in as its board of record")
     c.set_defaults(fn=cmd_board_mark_primary)
@@ -21292,7 +23315,20 @@ def main():
     c.add_argument("--json", action="store_true", help="print the snapshot instead of serving")
     c.add_argument("--parent-pid", type=int, default=0,
                    help="exit when this pid disappears (test/supervisor watchdog)")
+    c.add_argument("--operator", default="",
+                   help="identity the composer posts as; required to write. Never a seat picker.")
+    c.add_argument("--dev-origin", action="append", default=[],
+                   help="also let this loopback origin call /api/v1 (the app's dev server, "
+                        "e.g. http://localhost:5173); repeatable")
+    c.add_argument("--app-dir", default="",
+                   help="serve this built app bundle at /app/ (default: ui/dist next to tickets.py)")
     c.set_defaults(fn=cmd_ui)
+
+    c = sub.add_parser("lead", help="who the operator talks to on this project: atm lead set <seat>")
+    c.add_argument("action", nargs="?", default="show", choices=("show", "set", "clear"))
+    c.add_argument("seat", nargs="?", default="")
+    c.add_argument("--owner", default=None, help="who is recording this (default: $TICKET_AGENT)")
+    c.set_defaults(fn=cmd_lead)
 
     c = sub.add_parser("quickstart", help="zero to a first ticket claimed by an agent, in one command")
     c.add_argument("--agent", help="register under this name (default: $TICKET_AGENT)")
@@ -21465,7 +23501,7 @@ def main():
     c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
     c.set_defaults(fn=cmd_accept)
 
-    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c = sub.add_parser("reject", help="reject the submitted SHA and return the ticket to its author as claimed")
     c.add_argument("id")
     c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
     c.add_argument("--reason", required=True, help="why this artifact is rejected")
@@ -21660,6 +23696,9 @@ def main():
     c.add_argument("id")
     c.add_argument("--notes", "-n", default="",
                    help="why it's being reopened (required for IN REVIEW / review_at)")
+    c.add_argument("--revision", action="store_true",
+                   help="T-1460: return IN REVIEW work to its owner as claimed for revision "
+                        "(instead of releasing to open)")
     c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
     c.set_defaults(fn=cmd_reopen)
 
@@ -21768,6 +23807,8 @@ def main():
         register(sub, globals())
 
     a = p.parse_args()
+    # After --version may have exited: hash once for drift warning / help epilog.
+    status = release_status()
     if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
         print("WARNING: %s -- see 'atm --version'" % status, file=sys.stderr)
     if not a.cmd:
@@ -21787,7 +23828,7 @@ def main():
             found = None
         cmd_self(a, found if found and os.path.isdir(found) else None)
         return
-    if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
+    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow"):
         # Diagnose/repair board resolution itself; must not go through
         # board_dir() or a shadow board is refused before we can report it.
         a.fn(a)

@@ -22,8 +22,10 @@ Review evidence is separate from ticket status: ``review_of`` reports the
 latest *structured* verdict (``review_events`` from ``atm accept`` /
 ``atm reject``) with reviewer and artifact SHA, marks verdicts on an older
 SHA as superseded, and never turns a done flag or a prose note into
-"accepted". Legacy text that looks like accept/approved is an unstructured
-note.
+"accepted" or ``review.verified``. Legacy text that looks like
+accept/approved/merged is an unstructured note. ``verified`` is true only
+for a structured accept (or ``atm merge`` record) bound to the current
+review head.
 """
 from __future__ import annotations
 
@@ -223,12 +225,27 @@ def _verdict_entries(t, msgs_re):
     return entries
 
 
+def _review_verified(t, latest):
+    """True only for a structured accept/merge bound to the current head.
+
+    A prose ``merged`` / ``ACCEPT`` note is never evidence (T-1111). Short-SHA
+    ``review_events`` accepts still count when they apply to the recorded
+    artifact, matching ``atm accept`` before a full 40-char ``review_head``.
+    """
+    if structured_accept(t) or structured_merge(t):
+        return True
+    return bool(latest and latest.get("source") == "event"
+                and latest["kind"] == "ACCEPT" and latest["applies"] == "exact")
+
+
 def review_of(t, msgs_re=None):
     """Ticket status stays separate from review evidence.
 
     ``label`` is what the UI shows next to the artifact; ``latest`` the newest
     verdict that applies to the recorded artifact (or the newest of unknown
     applicability); ``history`` everything else, newest first.
+    ``verified`` is a structured accept (or merge record) at the current head,
+    never a free-text note.
     """
     st = t.get("status")
     art = artifact_sha(t)
@@ -272,7 +289,7 @@ def review_of(t, msgs_re=None):
         if sup:
             label = "earlier %s by @%s on %s (before resubmission)" % (sup[0]["kind"], sup[0]["by"] or "?", sup[0]["sha"][:7] or "?")
     return {"artifact": art, "label": label, "latest": latest, "history": history,
-            "verified": bool(merged) or bool(latest and latest["kind"] == "ACCEPT" and latest["applies"] == "exact")}
+            "verified": _review_verified(t, latest)}
 
 
 def verdict_of(t, msgs_re=None):
@@ -421,6 +438,99 @@ def make_release_override(kind, by, at, reason=""):
     return {"kind": kind, "by": by, "at": at, "reason": reason or ""}
 
 
+def _unbound_accept_event(t):
+    """Newest non-superseded accept that is not bound to review_head, or None.
+
+    ``done --force`` then ``accept --sha`` leaves an accept event without a
+    review_head, so structured_accept is false. Callers name that gap instead
+    of offering bare ``atm accept`` as if nobody had accepted.
+    """
+    if structured_accept(t):
+        return None
+    latest = None
+    for ev in t.get("review_events") or []:
+        if not isinstance(ev, dict):
+            continue
+        if (ev.get("kind") or "").strip().lower() != "accept":
+            continue
+        if ev.get("superseded"):
+            continue
+        latest = ev
+    return latest
+
+
+def unbound_accept_fix_cmd(tid):
+    """Copyable path when an accept exists on a DONE ticket without review_head.
+
+    ``atm review`` refuses DONE work; reopen + claim + review + accept is the
+    path that actually binds a new head.
+    """
+    tid = tid or "<id>"
+    return (
+        'atm reopen %s --notes "..."; '
+        "atm claim %s; "
+        'atm review %s --notes "..."; '
+        'atm accept %s --sha <new head> --notes "..."'
+        % (tid, tid, tid, tid)
+    )
+
+
+def blockers_of(node, by_id, seats=None):
+    """Why this node cannot move. Records only; prose is never evidence.
+
+    ``by_id`` maps ticket id -> ticket record. Kinds on this tree:
+    ``unaccepted`` (this node is done without a structured accept at the
+    current head), ``dep_unaccepted`` (a predecessor is done but unreleased),
+    and ``dep_open``. Seat/auth chips stay with the app API.
+    """
+    del seats
+    out = []
+    tid = node.get("id") or ""
+    if (node.get("phase") or "") == "done":
+        if node.get("unverified"):
+            # Plan nodes may only carry id/phase/unverified; full ticket is in by_id.
+            unbound = _unbound_accept_event(by_id.get(tid) or node)
+            if unbound:
+                by = (unbound.get("by") or "").strip() or "?"
+                sha = ((unbound.get("sha") or "").strip()[:7] or "?")
+                out.append({
+                    "kind": "unaccepted", "on": tid,
+                    "text": ("accept by @%s on %s is not bound to a review head"
+                             % (by, sha)),
+                    "cmd": unbound_accept_fix_cmd(tid),
+                })
+            else:
+                out.append({"kind": "unaccepted", "on": tid, "text": "done, not accepted",
+                            "cmd": "atm accept %s --sha <review head> --notes \"...\"" % tid})
+        return out
+    for d in node.get("deps") or []:
+        dep = by_id.get(d)
+        if dep is None:
+            out.append({"kind": "dep_open", "on": d, "text": "dep %s is not on this board" % d,
+                        "cmd": "atm show %s" % d})
+        elif dep_released(dep):
+            continue
+        elif dep.get("status") == "done":
+            unbound = _unbound_accept_event(dep)
+            if unbound:
+                by = (unbound.get("by") or "").strip() or "?"
+                sha = ((unbound.get("sha") or "").strip()[:7] or "?")
+                out.append({
+                    "kind": "dep_unaccepted", "on": d,
+                    "text": ("dep %s accept by @%s on %s is not bound to a review head"
+                             % (d, by, sha)),
+                    "cmd": unbound_accept_fix_cmd(d),
+                })
+            else:
+                out.append({"kind": "dep_unaccepted", "on": d, "text": "dep %s done, not accepted" % d,
+                            "cmd": "atm accept %s --sha <review head> --notes \"...\"" % d})
+        else:
+            out.append({"kind": "dep_open", "on": d,
+                        "text": "dep %s still %s" % (d, dep.get("status") or "open"),
+                        "cmd": "atm show %s" % d})
+    return out
+
+
 def refuse_unreleased_reason(t, tickets, only_done=False):
     """Exit text when t's deps are not released, or ''."""
     pred = unreleased_dep_id(t, tickets, only_done=only_done)
@@ -455,14 +565,26 @@ def _accepted_pin_branch(t):
     return ""
 
 
-def done_pin_mismatch_warning(tree_sha, accepted_sha):
-    """Remedy when a done tree's HEAD is not the accepted commit."""
+def done_pin_mismatch_warning(tree_sha, accepted_sha, used_artifact=False):
+    """Remedy when a done tree's HEAD is not the accepted commit.
+
+    The second remedy names the tree's sha (the unreviewed commit), never
+    the already-accepted one. ``--artifact`` is only suggested when the
+    closer actually passed that flag.
+    """
     tree = (tree_sha or "")[:12]
     accepted = (accepted_sha or "")[:12] if len(accepted_sha or "") >= 12 else (accepted_sha or "")
+    if used_artifact:
+        return (
+            "WARNING: that tree is at %s, the accepted commit is %s -- "
+            "point --artifact at the accepted worktree, or review and accept %s"
+            % (tree, accepted, tree)
+        )
     return (
         "WARNING: that tree is at %s, the accepted commit is %s -- "
-        "point --artifact at the accepted worktree, or re-accept %s"
-        % (tree, accepted, accepted)
+        "this close records the accepted commit; review and accept %s "
+        "if that commit is the deliverable"
+        % (tree, accepted, tree)
     )
 
 
@@ -476,8 +598,9 @@ def done_pin_state(t, g, honor_cwd=False):
 
     ``honor_cwd`` is True when the closer passed --artifact. That flag names
     a LOCATION, not a verdict, so it never short-circuits this rewrite: a
-    tree whose HEAD moved past the accept still pins the accepted sha and
-    always warns with the named remedy.
+    tree whose HEAD moved past the accept still pins the accepted sha.
+    It only selects the warning remedy (suggest ``--artifact`` only when
+    that flag was actually passed).
 
     Returns ``(g_for_pin, warning_or_None)``. ``g_for_pin`` is ``g`` when
     there is nothing to rewrite.
@@ -494,7 +617,7 @@ def done_pin_state(t, g, honor_cwd=False):
     cwd = (g.get("sha_full") or g.get("sha") or "").strip()
     warn = None
     if cwd and not _event_sha_match(cwd, sha):
-        warn = done_pin_mismatch_warning(cwd, sha)
+        warn = done_pin_mismatch_warning(cwd, sha, used_artifact=honor_cwd)
     if cwd and _event_sha_match(cwd, sha):
         return g, None
     out = dict(g)
@@ -510,8 +633,6 @@ def done_pin_state(t, g, honor_cwd=False):
     branch = _accepted_pin_branch(t)
     if branch:
         out["branch"] = branch
-    # honor_cwd used to skip the rewrite; callers still pass it.
-    _ = honor_cwd
     return out, warn
 
 
@@ -1149,6 +1270,10 @@ def work_payload(tickets, graph, messages, objective=None, acked=None, agents=No
             node["evidence"] = "Escalated automated node · needs keep/remove · " + (
                 auto.get("escalate_reason") or "judgment")
         nodes.append(node)
+
+    ticket_by = dict((x["id"], x) for x in tickets)
+    for node in nodes:
+        node["blockers"] = blockers_of(node, ticket_by)
 
     node_by = dict((n["id"], n) for n in nodes)
     edges = [e for e in (graph.get("edges") or []) if e.get("from") in node_by and e.get("to") in node_by]

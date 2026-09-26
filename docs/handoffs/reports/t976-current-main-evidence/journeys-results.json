@@ -1,0 +1,14 @@
+{
+  "normal": {
+    "status": "PASS CLI mechanics; stub identities, no provider certification",
+    "sha": "ad72b8cb3626b954ace2ba6b9307119e34de322c",
+    "repo": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-86rz4g6b/normal"
+  },
+  "interrupted": {
+    "status": "PASS killed subprocess / same custom harness mechanics only",
+    "sha": "fcdaba983aaf769a7718403a49498c9450a7f903",
+    "repo": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-86rz4g6b/interrupted",
+    "killed_returncode": -9,
+    "handoff": "568acdf3-512b-4b27-9d5d-5d0b9d387eb9"
+  }
+}

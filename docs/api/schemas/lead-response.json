@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/lead-response.json",
+  "title": "POST /api/v1/lead (200 response)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "lead", "harness", "capability", "project"],
+  "properties": {
+    "ok": {"const": true},
+    "lead": {"type": "string"},
+    "harness": {"$ref": "common.json#/$defs/harness_value"},
+    "capability": {"enum": ["takes mid-run messages", "answers on its next turn"]},
+    "project": {"$ref": "common.json#/$defs/slug"}
+  }
+}

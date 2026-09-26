@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/lead.json",
+  "title": "GET /api/v1/lead",
+  "description": "Who the operator talks to on this project and whether it can answer now. No lead -> needs_lead with a picker; the app never falls back to master or CoS.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "operator", "operator_note", "lead", "lead_note", "needs_lead", "picker", "status"],
+  "properties": {
+    "project": {"$ref": "common.json#/$defs/slug"},
+    "operator": {"type": "string"},
+    "operator_note": {"type": "string"},
+    "lead": {"type": "string"},
+    "lead_note": {"type": "string"},
+    "needs_lead": {"type": "boolean"},
+    "picker": {"type": "array", "items": {"$ref": "common.json#/$defs/picker_row"}},
+    "status": {"oneOf": [{"type": "null"}, {"$ref": "common.json#/$defs/lead_status"}]}
+  },
+  "if": {"properties": {"needs_lead": {"const": true}}},
+  "then": {"properties": {"lead": {"const": ""}, "status": {"type": "null"}}},
+  "else": {"properties": {"picker": {"maxItems": 0}, "status": {"type": "object"}}}
+}
