@@ -217,11 +217,24 @@ def test_assign_target_repo_attributes_and_clears_an_existing_ticket(tmp_path):
     assert record["target_repo"] == "https://github.com/example/other.git"
     # It names another repository, so this checkout must not be offered it.
     assert filter_for_checkout([record], str(repo)) == ([], [record])
+    # And the refusal is the real CLI's, not just the filter's: this is the
+    # reported bug -- a seat checked out on one repo being handed the other's
+    # ticket by `atm next`.
+    assert cli("join", "alice", "--roles", "backend", agent="alice").returncode == 0
+    refused = cli("next", agent="alice")
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "T-001" in refused.stdout
+    assert "repository is not this checkout's" in refused.stdout
+    assert json.loads((board / "T-001.json").read_text())["status"] == "open"
 
     fixed = cli("assign", "T-001", "--target-repo", "https://github.com/example/project.git")
     assert fixed.returncode == 0, fixed.stderr + fixed.stdout
     record = json.loads((board / "T-001.json").read_text())
     assert filter_for_checkout([record], str(repo)) == ([record], [])
+    # Corrected attribution, so the same seat now gets it.
+    claimed = cli("next", agent="alice")
+    assert claimed.returncode == 0, claimed.stdout + claimed.stderr
+    assert "T-001" in claimed.stdout
 
     cleared = cli("assign", "T-001", "--target-repo", "-")
     assert cleared.returncode == 0, cleared.stderr + cleared.stdout
