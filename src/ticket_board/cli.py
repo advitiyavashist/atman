@@ -1038,11 +1038,21 @@ def _target_repo_stamp(explicit=""):
     explicit = (explicit or "").strip()
     if explicit:
         return {"target_repo": explicit}
-    try:
-        origin = _repo_routing().checkout_repo(os.getcwd())
-    except Exception:
-        return {}
+    cwd = os.getcwd()
+    if cwd not in _TARGET_REPO_CACHE:
+        # One probe per directory per process: `atm plan` creates a whole
+        # graph in one run, and 40 tickets should not mean 40 `git config`
+        # calls. Scoped to this process, so a test that rewrites a remote
+        # between CLI invocations still sees the change.
+        try:
+            _TARGET_REPO_CACHE[cwd] = _repo_routing().checkout_repo(cwd)
+        except Exception:
+            _TARGET_REPO_CACHE[cwd] = ""
+    origin = _TARGET_REPO_CACHE[cwd]
     return {"target_repo": origin} if origin else {}
+
+
+_TARGET_REPO_CACHE = {}
 
 
 # --------------------------------------------------------------------------
