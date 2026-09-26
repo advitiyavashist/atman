@@ -77,3 +77,12 @@ Acceptance probe: CEO sends CoS a unique nonce and asks for a board ACK plus one
 ## Current approval and efficiency rules
 
 Review [coordination and success](../onboarding/coordination-and-success.md), committed separately at `f430403` / T-848 IN REVIEW; read its local worktree file if not merged yet. Batch stale packets, reuse correction/verification tickets, one review/merge executor, accept exact work rather than merge counts. Cost includes retries/review/coordination; unknown cost stays null. T-811/T-831 must validate the scorecard before publication.
+
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
