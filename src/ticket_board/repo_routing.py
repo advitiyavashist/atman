@@ -27,12 +27,26 @@ def _normalize(origin):
     return origin
 
 
-def filter_for_checkout(tickets, cwd):
-    """Explicit repo wins; otherwise use a real worktree/branch hint.
+def checkout_repo(cwd):
+    """This checkout's repository identity, or "" when it has no origin."""
+    return _normalize(_git(cwd, "config", "--get", "remote.origin.url"))
 
-    Unknown callers retain legacy behavior. Known checkouts never infer a
-    ticket's repository from the board directory, title, or branch spelling.
-    Probes are cached only for this claim attempt, not across CLI invocations.
+
+def filter_for_checkout(tickets, cwd):
+    """Skip a ticket only when its KNOWN repository differs from this checkout.
+
+    A ticket whose repository cannot be established stays claimable: no
+    `repo`, no `target_repo`, an unresolvable worktree hint and an unknown
+    branch name are absence of evidence, not a mismatch. Making them skip
+    (the first cut of this filter) broke `atm next` on every ordinary board,
+    because a freshly created ticket carries none of these fields while any
+    real clone has an origin -- see tests/test_t946_worktree_gc.py
+    ::test_next_and_claim_skip_automated and test_fresh_clone_* below.
+
+    Unknown callers (a checkout with no origin) retain legacy behavior.
+    Known checkouts never infer a ticket's repository from the board
+    directory, its title, or a branch spelling that only exists elsewhere.
+    Probes are cached for this claim attempt only, not across invocations.
     """
     @lru_cache(maxsize=None)
     def identity(path):
@@ -42,29 +56,38 @@ def filter_for_checkout(tickets, cwd):
         common = _git(path, "rev-parse", "--git-common-dir")
         return os.path.realpath(os.path.join(path, common)) if common else ""
 
-    actual = _normalize(_git(cwd, "config", "--get", "remote.origin.url"))
+    actual = checkout_repo(cwd)
     if not actual:
         return list(tickets), []
     branches = None
 
-    def matches(ticket):
+    def known_repo(ticket):
+        """The ticket's established repository, or "" when unattributed."""
         nonlocal branches
-        expected = (ticket.get("repo") or "").strip()
-        if expected:
-            return _normalize(expected) == actual
+        for field in ("repo", "target_repo"):
+            explicit = (ticket.get(field) or "").strip()
+            if explicit:
+                return _normalize(explicit)
         worktree = ticket.get("worktree") or ""
-        if worktree:
-            # Relative stale hints must not resolve in an unrelated caller's tree.
-            return os.path.isabs(worktree) and identity(worktree) == actual
-        branch = ticket.get("branch") or ""
-        if not branch:
-            return False
-        if branches is None:
-            branches = set(_git(cwd, "for-each-ref", "--format=%(refname:short)",
-                                "refs/heads/").splitlines())
-        return branch.removeprefix("refs/heads/") in branches
+        # A relative hint would resolve inside an unrelated caller's tree,
+        # and an absolute one can name a directory that no longer exists.
+        if worktree and os.path.isabs(worktree):
+            resolved = identity(worktree)
+            if resolved:
+                return resolved
+        branch = (ticket.get("branch") or "").removeprefix("refs/heads/")
+        if branch:
+            if branches is None:
+                branches = set(_git(cwd, "for-each-ref", "--format=%(refname:short)",
+                                    "refs/heads/").splitlines())
+            # The branch existing here is evidence for this checkout; it
+            # existing nowhere is evidence for no repository at all.
+            if branch in branches:
+                return actual
+        return ""
 
     ready, skipped = [], []
     for ticket in tickets:
-        (ready if matches(ticket) else skipped).append(ticket)
+        found = known_repo(ticket)
+        (skipped if found and found != actual else ready).append(ticket)
     return ready, skipped
