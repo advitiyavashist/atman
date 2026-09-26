@@ -79,6 +79,16 @@ def test_seat_may_spawn_rule_is_deterministic():
     assert ss.seat_may_spawn({"state": "active", "backoff_until": past}, 0) is True
 
 
+def test_backoff_seconds_grows_to_30():
+    ss = _seat_service()
+    assert ss.backoff_seconds(1) == 1
+    assert ss.backoff_seconds(2) == 2
+    assert ss.backoff_seconds(3) == 4
+    assert ss.backoff_seconds(5) == 16
+    assert ss.backoff_seconds(6) == 30
+    assert ss.backoff_seconds(20) == 30
+
+
 def test_spawn_persist_records_desired_without_service(board, service_home):
     run(board, "join", "doc", "--roles", "docs")
     r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist",
@@ -95,16 +105,70 @@ def test_spawn_persist_records_desired_without_service(board, service_home):
     assert stopped["state"] == "stopped"
 
 
+def test_nonpersist_spawn_after_stop_survives_reconcile(board, service_home):
+    """Reject blocker: stop must not leave desired=stopped that kills max-runs>0."""
+    ss = _seat_service()
+    ss.mark_installed(str(service_home))
+    run(board, "join", "doc", "--roles", "docs")
+    env = {"ATMAN_SERVICE_HOME": str(service_home)}
+    r = run(board, "spawn", "doc", "--exec", "sleep 30", "--every", "5", "--max-runs", "3",
+            agent="master", env=env)
+    assert r.returncode == 0, r.stderr
+    assert not (board / "agents" / "doc.desired").exists()
+    pids = _wait_live(board, "doc")
+    assert pids
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+    assert _wait_gone(board, "doc")
+    assert not (board / "agents" / "doc.desired").exists()
+    r2 = run(board, "spawn", "doc", "--exec", "sleep 30", "--every", "5", "--max-runs", "3",
+             agent="master", env=env)
+    assert r2.returncode == 0, r2.stderr
+    live = _wait_live(board, "doc")
+    assert live
+    r3 = run(board, "service", "reconcile", agent="master", env=env)
+    assert r3.returncode == 0, r3.stderr
+    assert _live(board, "doc"), "reconcile must not kill non-persist runner: %s" % r3.stdout
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+
+
+def test_nonpersist_inactivates_prior_persist_desired(board, service_home):
+    ss = _seat_service()
+    ss.mark_installed(str(service_home))
+    run(board, "join", "doc", "--roles", "docs")
+    env = {"ATMAN_SERVICE_HOME": str(service_home)}
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist",
+            agent="master", env=env)
+    assert r.returncode == 0, r.stderr
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+    stopped = json.loads((board / "agents" / "doc.desired").read_text())
+    assert stopped["state"] == "stopped"
+    r2 = run(board, "spawn", "doc", "--exec", "sleep 30", "--every", "5", "--max-runs", "3",
+             agent="master", env=env)
+    assert r2.returncode == 0, r2.stderr
+    desired = json.loads((board / "agents" / "doc.desired").read_text())
+    assert desired["state"] == "inactive"
+    live = _wait_live(board, "doc")
+    assert live
+    r3 = run(board, "service", "reconcile", agent="master", env=env)
+    assert r3.returncode == 0, r3.stderr
+    assert _live(board, "doc"), r3.stdout
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+
+
 def test_service_install_writes_unit_and_login_env(board, service_home):
     ss = _seat_service()
     r = run(board, "service", "install", "--no-load", agent="master",
             env={"ATMAN_SERVICE_HOME": str(service_home)})
     assert r.returncode == 0, r.stderr + r.stdout
     assert ss.service_installed(str(service_home))
-    env_path = ss.env_snapshot_path(str(service_home))
-    assert Path(env_path).is_file()
-    snap = json.loads(Path(env_path).read_text())
+    env_path = Path(ss.env_snapshot_path(str(service_home)))
+    assert env_path.is_file()
+    mode = env_path.stat().st_mode & 0o777
+    assert mode == 0o600, oct(mode)
+    snap = json.loads(env_path.read_text())
     assert "env" in snap and isinstance(snap["env"], dict)
+    for key in snap["env"]:
+        assert not ss._LOGIN_ENV_SECRET_RE.search(key), key
     plist = Path(ss.plist_path(str(service_home)))
     marker = Path(ss.service_home(str(service_home))) / "installed"
     assert plist.is_file() or marker.is_file()
@@ -112,6 +176,29 @@ def test_service_install_writes_unit_and_login_env(board, service_home):
              env={"ATMAN_SERVICE_HOME": str(service_home)})
     assert r2.returncode == 0, r2.stderr
     assert not ss.service_installed(str(service_home))
+    assert not env_path.exists(), "uninstall must remove login-env.json"
+
+
+def test_login_env_filters_secrets_and_keeps_path(tmp_path):
+    ss = _seat_service()
+    filtered = ss.filter_login_env({
+        "PATH": "/login/bin:/usr/bin",
+        "HOME": "/Users/operator",
+        "ANTHROPIC_API_KEY": "sk-secret",
+        "OPENAI_API_KEY": "sk-other",
+        "CURSOR_API_KEY": "tok",
+        "XDG_CONFIG_HOME": "/Users/operator/.config",
+        "TICKET_AGENT": "ignore",
+    })
+    assert filtered["PATH"].startswith("/login/bin")
+    assert filtered["HOME"] == "/Users/operator"
+    assert filtered["XDG_CONFIG_HOME"].endswith(".config")
+    assert "ANTHROPIC_API_KEY" not in filtered
+    assert "OPENAI_API_KEY" not in filtered
+    assert "CURSOR_API_KEY" not in filtered
+    assert "TICKET_AGENT" not in filtered
+    path = ss.save_login_env(filtered, home=str(tmp_path))
+    assert (os.stat(path).st_mode & 0o777) == 0o600
 
 
 def test_kill_runner_reconcile_restarts(board, service_home):
@@ -199,11 +286,13 @@ def test_merge_launch_env_prefers_login_path():
     ss = _seat_service()
     merged = ss.merge_launch_env(
         {"PATH": "/base/bin", "TICKET_AGENT": "keep"},
-        {"PATH": "/login/bin:/usr/bin", "HOME": "/Users/x", "TICKET_AGENT": "ignore"})
+        {"PATH": "/login/bin:/usr/bin", "HOME": "/Users/operator",
+         "ANTHROPIC_API_KEY": "sk-no", "TICKET_AGENT": "ignore"})
     assert merged["PATH"].startswith("/login/bin")
     assert "/base/bin" in merged["PATH"]
     assert merged["TICKET_AGENT"] == "keep"
-    assert merged["HOME"] == "/Users/x"
+    assert merged["HOME"] == "/Users/operator"
+    assert "ANTHROPIC_API_KEY" not in merged
 
 
 def test_render_launchd_has_keepalive():

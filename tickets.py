@@ -15878,14 +15878,28 @@ def _record_desired_active(board, owner, spec, *, who=""):
     ss.register_board(board)
     return ss.save_desired(
         board, owner, "active", spec=spec, backoff_until=None,
-        updated_by=who or whoami())
+        start_failures=0, updated_by=who or whoami())
 
 
 def _record_desired_stopped(board, owner, *, who=""):
+    """Mark a persist seat stopped. No-op when no desired sidecar exists."""
     ss = _seat_service()
+    if not ss.load_desired(board, owner):
+        return None
     ss.register_board(board)
     return ss.save_desired(
         board, owner, "stopped", backoff_until=None,
+        updated_by=who or whoami(), keep_spec=True)
+
+
+def _record_desired_inactive_if_present(board, owner, *, who=""):
+    """Non-persist spawn: clear a prior desired=stopped so reconcile won't kill us."""
+    ss = _seat_service()
+    if not ss.load_desired(board, owner):
+        return None
+    ss.register_board(board)
+    return ss.save_desired(
+        board, owner, "inactive", backoff_until=None,
         updated_by=who or whoami(), keep_spec=True)
 
 
@@ -15970,7 +15984,10 @@ def _spawn_stop(board, owner, all_boards=False):
     """
     import signal
 
-    # T-1499: desired=stopped so the per-user service does not restart this seat.
+    # T-1499: desired=stopped only when a persist sidecar already exists.
+    # Non-persist seats never write desired state; writing stopped for every
+    # --stop made a later max-runs>0 spawn look "stopped" to reconcile, which
+    # then killed the live runner.
     try:
         _record_desired_stopped(board, owner)
     except Exception:
@@ -16267,16 +16284,20 @@ def cmd_spawn(a, board):
     # its own yet -- otherwise a worker would be hidden from the very
     # mail it was launched to handle.
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
-    persist = max_runs == 0
+    # Desired state is owned by explicit --persist only (not max_runs==0 from
+    # continuous wake). Non-persist must inactivate any prior sidecar so
+    # reconcile cannot kill a live finite-run watcher.
+    explicit_persist = bool(getattr(a, "persist", False))
     spec = _spawn_spec_from_argv(
         argv, worktree=wt, cmd=cmd, harness=harness, model=model,
         max_runs=max_runs, safe=bool(getattr(a, "safe", False)))
-    if persist:
-        # T-1499: desired state on the board; the per-user service owns restarts.
+    if explicit_persist:
         _record_desired_active(board, owner, spec)
+    else:
+        _record_desired_inactive_if_present(board, owner)
     ss = _seat_service()
     service_home = os.environ.get("ATMAN_SERVICE_HOME") or os.path.expanduser("~")
-    service_owns = persist and ss.service_installed(service_home) and not os.environ.get(
+    service_owns = explicit_persist and ss.service_installed(service_home) and not os.environ.get(
         "ATMAN_SPAWN_DIRECT")
     if service_owns:
         result = _service_try_start_seat(board, owner, home=service_home)
@@ -16318,7 +16339,7 @@ def cmd_spawn(a, board):
         os.path.join(agents_dir(board), owner + ".watch.log")))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
-    if persist and not ss.service_installed(service_home):
+    if explicit_persist and not ss.service_installed(service_home):
         print("note: install `atm service install` so seats survive parent-session "
               "restarts and reboot (desired=active already recorded)")
     # T-1076: what this seat's provider has left, from the recorded reading.

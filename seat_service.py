@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -17,9 +18,20 @@ from datetime import datetime, timezone
 
 DESIRED_STATES = ("active", "inactive", "stopped")
 RECONCILE_INTERVAL_SECS = 5
-DEFAULT_BACKOFF_SECS = 15
+# Match T-1500 seat_failures.backoff_seconds (1s → 30s) for crash-loop starts.
+BACKOFF_FLOOR_SECS = 1
+BACKOFF_CAP_SECS = 30
+DEFAULT_BACKOFF_SECS = BACKOFF_FLOOR_SECS
 SERVICE_LABEL = "com.atman.seat-service"
 SYSTEMD_UNIT = "atman-seat-service.service"
+
+# Login-env snapshot: PATH + shell/home/xdg only — never API keys/tokens.
+_LOGIN_ENV_KEYS = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "USERNAME", "SHELL", "LANG", "TERM",
+})
+_LOGIN_ENV_PREFIXES = ("LC_", "XDG_")
+_LOGIN_ENV_SECRET_RE = re.compile(
+    r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTHORIZATION|COOKIE)", re.I)
 
 
 def _utc_now():
@@ -72,17 +84,24 @@ def load_desired(board, owner):
 
 
 def save_desired(board, owner, state, *, spec=None, backoff_until=None,
-                 updated_by="", keep_spec=True):
+                 updated_by="", keep_spec=True, start_failures=None):
     """Write desired state. Spec is replaced when provided; else prior spec kept."""
     if state not in DESIRED_STATES:
         raise ValueError("desired state must be one of %s" % (", ".join(DESIRED_STATES),))
     os.makedirs(os.path.join(board, "agents"), exist_ok=True)
     prev = load_desired(board, owner) or {}
+    fails = (start_failures if start_failures is not None
+             else prev.get("start_failures") or 0)
+    try:
+        fails = int(fails or 0)
+    except (TypeError, ValueError):
+        fails = 0
     rec = {
         "state": state,
         "backoff_until": backoff_until if backoff_until is not None else prev.get("backoff_until"),
         "updated_at": _utc_now(),
         "updated_by": updated_by or prev.get("updated_by") or "",
+        "start_failures": fails,
         "spec": dict(spec) if spec is not None else (
             dict(prev.get("spec") or {}) if keep_spec else {}),
     }
@@ -97,24 +116,36 @@ def save_desired(board, owner, state, *, spec=None, backoff_until=None,
     return rec
 
 
+def backoff_seconds(identical_count):
+    """Exponential 1s → 30s (same curve as T-1500 seat_failures)."""
+    n = max(1, int(identical_count or 1))
+    return min(BACKOFF_CAP_SECS, BACKOFF_FLOOR_SECS * (2 ** (n - 1)))
+
+
 def clear_backoff(board, owner):
     rec = load_desired(board, owner)
     if not rec:
         return None
     return save_desired(
         board, owner, rec["state"],
-        spec=rec.get("spec"), backoff_until=None,
+        spec=rec.get("spec"), backoff_until=None, start_failures=0,
         updated_by=rec.get("updated_by") or "")
 
 
-def set_backoff(board, owner, seconds=DEFAULT_BACKOFF_SECS):
+def set_backoff(board, owner, seconds=None):
+    """Record a failed start; grow backoff 1s→30s with the failure streak."""
     rec = load_desired(board, owner)
     if not rec:
         return None
-    until = time.time() + max(0, int(seconds))
+    try:
+        fails = int(rec.get("start_failures") or 0) + 1
+    except (TypeError, ValueError):
+        fails = 1
+    delay = backoff_seconds(fails) if seconds is None else max(0, int(seconds))
+    until = time.time() + delay
     return save_desired(
         board, owner, rec["state"],
-        spec=rec.get("spec"), backoff_until=until,
+        spec=rec.get("spec"), backoff_until=until, start_failures=fails,
         updated_by=rec.get("updated_by") or "")
 
 
@@ -294,10 +325,10 @@ def list_desired_seats(board):
 
 
 def capture_login_env(shell=None):
-    """Capture the user's login-shell environment (PATH, provider CLIs).
+    """Capture the user's login-shell environment, then scrub to safe vars.
 
-    launchd's default PATH is bare; without this, reconciler-started watchers
-    often fail with 'X is not installed'.
+    launchd's default PATH is bare; without PATH from the login shell,
+    reconciler-started watchers often fail with 'X is not installed'.
     """
     shell = shell or os.environ.get("SHELL") or "/bin/zsh"
     # Prefer a login interactive env dump; fall back to current process.
@@ -306,9 +337,9 @@ def capture_login_env(shell=None):
             [shell, "-l", "-c", "env -0"],
             capture_output=True, timeout=20, check=False)
     except (OSError, subprocess.TimeoutExpired):
-        return dict(os.environ)
+        return filter_login_env(dict(os.environ))
     if proc.returncode != 0 or not proc.stdout:
-        return dict(os.environ)
+        return filter_login_env(dict(os.environ))
     env = {}
     for chunk in proc.stdout.split(b"\0"):
         if not chunk or b"=" not in chunk:
@@ -318,7 +349,20 @@ def capture_login_env(shell=None):
             env[key.decode("utf-8", "replace")] = val.decode("utf-8", "replace")
         except Exception:
             continue
-    return env or dict(os.environ)
+    return filter_login_env(env or dict(os.environ))
+
+
+def filter_login_env(env):
+    """Keep PATH + shell/home/xdg only. Drop API keys, tokens, and secrets."""
+    out = {}
+    for key, val in (env or {}).items():
+        if not isinstance(key, str) or not isinstance(val, str) or not key:
+            continue
+        if _LOGIN_ENV_SECRET_RE.search(key):
+            continue
+        if key in _LOGIN_ENV_KEYS or any(key.startswith(p) for p in _LOGIN_ENV_PREFIXES):
+            out[key] = val
+    return out
 
 
 def save_login_env(env, home=None):
@@ -326,13 +370,15 @@ def save_login_env(env, home=None):
     os.makedirs(service_home(home_root), exist_ok=True)
     path = env_snapshot_path(home_root)
     tmp = path + ".tmp"
-    # Drop empty keys; keep strings only.
-    clean = {str(k): str(v) for k, v in (env or {}).items()
-             if k and isinstance(k, str) and isinstance(v, str)}
+    clean = filter_login_env(env)
     with open(tmp, "w") as f:
         json.dump({"captured_at": _utc_now(), "env": clean}, f, indent=2, sort_keys=True)
         f.write("\n")
     os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     return path
 
 
@@ -346,13 +392,14 @@ def load_login_env(home=None):
     env = data.get("env") if isinstance(data, dict) else {}
     if not isinstance(env, dict):
         return {}
-    return {str(k): str(v) for k, v in env.items() if k}
+    # Re-filter so an older world-readable dump cannot reintroduce secrets.
+    return filter_login_env({str(k): str(v) for k, v in env.items() if k})
 
 
 def merge_launch_env(base, login_env):
-    """Overlay login-shell PATH and provider-relevant vars onto a launch env."""
+    """Overlay login-shell PATH and safe home/xdg vars onto a launch env."""
     out = dict(base or {})
-    login = login_env or {}
+    login = filter_login_env(login_env or {})
     # Login PATH first so provider CLIs resolve; keep base extras after.
     login_path = login.get("PATH") or ""
     base_path = out.get("PATH") or ""
@@ -364,18 +411,12 @@ def merge_launch_env(base, login_env):
                 seen.add(chunk)
                 parts.append(chunk)
         out["PATH"] = os.pathsep.join(parts)
-    keep_prefixes = (
-        "ANTHROPIC", "CLAUDE", "CODEX", "CURSOR", "OPENAI", "OPENROUTER", "XAI",
-        "HOME", "USER", "LOGNAME", "USERNAME", "SHELL", "LANG", "LC_",
-        "XDG_", "SSH_", "TERM",
-    )
     for key, val in login.items():
         if key in ("PATH", "TICKET_AGENT", "TICKET_SEAT", "TICKETS_DIR",
                    "TICKETS_PY", "TICKET_SESSION_ID", "TICKETS_WATCH_PINNED",
                    "PYTHONHOME", "PYTHONPATH"):
             continue
-        if any(key == p or key.startswith(p) for p in keep_prefixes):
-            out.setdefault(key, val)
+        out.setdefault(key, val)
     return out
 
 
@@ -455,12 +496,15 @@ def clear_installed(home=None):
 
 
 def install_service(python_exe, tickets_py, home=None, *, load=True):
-    """Install launchd or systemd --user unit. Captures login env at install."""
+    """Install launchd or systemd --user unit. Captures login env at install.
+
+    The installed marker is written only after the unit loads successfully
+    (or immediately when load=False / unsupported OS).
+    """
     home_root = home if home is not None else (
         os.environ.get("ATMAN_SERVICE_HOME") or os.path.expanduser("~"))
     os.makedirs(service_home(home_root), exist_ok=True)
     save_login_env(capture_login_env(), home=home_root)
-    mark_installed(home_root)
     system = platform.system()
     log_path = os.path.join(service_home(home_root), "seat-service.log")
     if system == "Darwin":
@@ -479,7 +523,12 @@ def install_service(python_exe, tickets_py, home=None, *, load=True):
                 r2 = subprocess.run(["launchctl", "load", "-w", path],
                                     capture_output=True, text=True)
                 if r2.returncode != 0:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
                     return path, (r.stderr or r2.stderr or "launchctl load failed").strip()
+        mark_installed(home_root)
         return path, None
     if system == "Linux":
         path = systemd_unit_path(home_root)
@@ -491,9 +540,15 @@ def install_service(python_exe, tickets_py, home=None, *, load=True):
             r = subprocess.run(["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT],
                                capture_output=True, text=True)
             if r.returncode != 0:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
                 return path, (r.stderr or r.stdout or "systemctl enable failed").strip()
+        mark_installed(home_root)
         return path, None
     # Unsupported OS: marker file only (tests use this).
+    mark_installed(home_root)
     return os.path.join(service_home(home_root), "installed"), None
 
 
@@ -522,6 +577,11 @@ def uninstall_service(home=None, *, unload=True):
         except OSError as exc:
             err = str(exc)
     clear_installed(home_root)
+    # Never leave a secret-bearing (or formerly secret-bearing) env snapshot.
+    try:
+        os.unlink(env_snapshot_path(home_root))
+    except OSError:
+        pass
     return err
 
 
