@@ -83,7 +83,11 @@ checkout:
 ```sh
 brew tap advitiyavashist/tap
 brew install atman
-atm --version                # tickets commit b34d423cac00266a2cc6fc23b94759ee04894f71 (verified release)
+atm --version
+# 0.3.0
+# tickets commit b34d423cac00266a2cc6fc23b94759ee04894f71 (verified release)
+# source: ...
+# pinned release b34d423cac00; newer releases can't be checked from here: brew upgrade atman (or re-run install_live)
 ```
 
 The formula `depends_on "python@3.13"`, so Homebrew installs and uses its own
@@ -306,7 +310,7 @@ Known first-run defects, each with the workaround that was tested:
 - [Agent onboarding](docs/onboarding/README.md) and [Master onboarding](docs/onboarding/master-howto.md)
 - [Bring your own agent](docs/byoa.md), [Messages and runners](docs/messages-and-runners.md), [Team knowledge](docs/knowledge/README.md)
 - [Recovery contract](docs/recovery-contract.md)
-- [Contributing](CONTRIBUTING.md), [Community](docs/community.md), [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Contributing](CONTRIBUTING.md), [Community](docs/community.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md)
 
 Operator and historical notes, not a first read: the author's
 [Mac runbook](docs/onboarding/ceo-mac-runbook.md) and the
@@ -314,4 +318,6 @@ Operator and historical notes, not a first read: the author's
 
 [License](LICENSE) (MIT). Fork, branch off `main`, and open a pull request.
 Questions and bug reports go to
-[GitHub issues](https://github.com/advitiyavashist/atman/issues).
+[GitHub issues](https://github.com/advitiyavashist/atman/issues); what belongs
+there is in [SUPPORT.md](SUPPORT.md). A vulnerability goes through
+[SECURITY.md](SECURITY.md) instead, never a public issue.

@@ -592,6 +592,25 @@ code {
   border-bottom: 1px solid var(--line);
   padding-bottom: 6px;
 }
+.plan-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.plan-summary-row .field-label {
+  display: block;
+  margin-bottom: 2px;
+}
+.plan-summary-row ul {
+  margin: 0;
+  padding-left: 1.1em;
+}
+.plan-summary-row p {
+  margin: 0;
+}
 .counts {
   display: flex;
   gap: 10px;

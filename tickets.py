@@ -83,6 +83,39 @@ PRIMARY_CLI_NAME = "atm"
 COMPAT_CLI_NAME = "tickets"
 
 
+def _package_version():
+    """Semver printed as the first line of `atm --version` (T-1080).
+
+    Reads ``ticket_board.__version__`` from the ``src/`` next to this file so
+    the monolith cannot drift from the package (and cannot silently adopt a
+    different site-packages install). Falls back to parsing ``__init__.py``.
+    """
+    root = os.path.dirname(os.path.realpath(__file__))
+    src = os.path.join(root, "src")
+    if os.path.isdir(src) and src not in sys.path:
+        sys.path.insert(0, src)
+    try:
+        import importlib
+        tb = importlib.import_module("ticket_board")
+        ver = getattr(tb, "__version__", None)
+        if ver:
+            return str(ver)
+    except Exception:
+        pass
+    init = os.path.join(src, "ticket_board", "__init__.py")
+    try:
+        with open(init, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+PACKAGE_VERSION = _package_version()
+
+
 def cli_prog(argv=None):
     """argparse/help/error name from how this process was invoked."""
     raw = (argv if argv is not None else sys.argv) or [""]
@@ -289,15 +322,12 @@ PROVIDER_SESSION_ID_VARS = (
 def _supervisor_launch_env(board, owner):
     """Environment for a supervisor-launched watch/spawn/probe child.
 
-    Inherited provider session ids are stripped so the child cannot adopt a
-    parent seat's `.identities/` record or register its ambient transport.
-    TICKET_SEAT is the authoritative assignment; TICKET_SESSION_ID is a fresh
-    launch key bound to `owner`.
+    Inherited provider identity and transport are stripped so the child cannot
+    adopt a parent seat's record or endpoint. TICKET_SEAT is the authoritative
+    assignment; TICKET_SESSION_ID is a fresh launch key bound to `owner`.
+    Explicit attach does not use this path.
     """
-    env = _clean_git_env()
-    sa = _session_adapters()
-    for var in PROVIDER_SESSION_ID_VARS + sa.AMBIENT_TRANSPORT_VARS + (sa.TRANSPORT_BOARD_ENV,):
-        env.pop(var, None)
+    env = _session_boundary().fresh_child_env(_clean_git_env())
     env.pop("TICKET_SEAT", None)
     env.pop("TICKET_AGENT", None)
     sid = "launch:%s:%s" % (owner, hashlib.sha256(os.urandom(16)).hexdigest()[:16])
@@ -4693,14 +4723,42 @@ def cmd_accept(a, board):
 
 
 def cmd_reject(a, board):
-    """Record a structured reject bound to the submitted review head (T-944)."""
+    """Record a structured reject and return the ticket to its author (T-944/T-1460).
+
+    API decideReview(reject) already flips state to claimed with the same owner.
+    CLI used to leave status=review, so atm mine stayed empty and the author
+    idled until a coordinator ran reopen+assign. Reject now matches the API.
+    """
     t = load(board, a.id)
+    reviewer = whoami()
     ev, err = _review_verdict().apply(
-        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+        t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
     if err:
         sys.exit(err)
+    author = _review_verdict().return_to_author_for_revision(
+        t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
+        kind="reject")
+    tc = _recovery()
+    if tc is not None and author:
+        harness = ""
+        try:
+            harness = _agent_harness(board, author)[0]
+        except Exception:
+            harness = ""
+        tc.issue_owner_lease(
+            t, author, harness=harness, reason="reject-revision",
+            previous_owner=author)
+        tc.rewrite_claim_lock(board, t["id"], author)
     save(board, t)
-    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
+    if author:
+        _safe(lambda: _bind_agent_ticket(board, author, t["id"]), None)
+        _safe(lambda: post_message(
+            board, reviewer,
+            "%s rejected %s -- revise and resubmit: %s" % (
+                t["id"], ev["sha"][:12], ev.get("reason") or ""),
+            to=author, re=t["id"], task=True, source="review"), None)
+    print("%s rejected %s by %s; returned to %s as claimed for revision" % (
+        a.id, ev["sha"], ev["by"], author or "?"))
 
 
 def _trunk(cwd=None):
@@ -5827,7 +5885,7 @@ def _is_desk_merge_pytest_cmd(cmd):
     with gaps). Live counterexample 10:03Z pid 51475:
     `pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude`
     -- contiguous pgrep `pytest -x --ignore=.worktrees` is empty. Never
-    cwd (51475 chdirs into /tmp/pytest-of-kavana mid-run; a cwd==desk-WT
+    cwd (51475 chdirs into /tmp/pytest-of-<user> mid-run; a cwd==desk-WT
     gate reads CLEAR while the suite is still alive). Never the full
     `ps aux` line. QUIET-BOX / T-486 (e) `desk_pytest_alive` /
     `desk_merge_alive` must call `_desk_pytest_alive`, not cwd and not
@@ -7375,6 +7433,48 @@ def cmd_assign(a, board):
                     t = got
                     changed.append("claimed for %s" % a.owner)
                     bind_owner = a.owner
+            elif t["status"] == "review" and a.owner:
+                # T-1460: retarget an IN REVIEW ticket so the assignee can act.
+                # Free seat → claimed; already holding another → open+reserved
+                # (same one-active-hold rule as assign on open).
+                held = _held_claimed(board, a.owner, except_id=t["id"])
+                if held:
+                    t["status"] = "open"
+                    t["owner"] = ""
+                    t["reserved_for"] = a.owner
+                    if prev_owner:
+                        clear_prev = prev_owner
+                    lock = os.path.join(board, t["id"] + ".lock")
+                    if os.path.exists(lock):
+                        try:
+                            os.unlink(lock)
+                        except OSError:
+                            pass
+                    changed.append("reserved for %s (already holds %s); left IN REVIEW for revision" % (
+                        a.owner, ", ".join(x["id"] for x in held)))
+                else:
+                    if prev_owner and prev_owner != a.owner:
+                        clear_prev = prev_owner
+                        tc = _recovery()
+                        if tc is not None:
+                            harness = ""
+                            try:
+                                harness = _agent_harness(board, a.owner)[0]
+                            except Exception:
+                                harness = ""
+                            expected_generation = tc.owner_generation(t)
+                            tc.issue_owner_lease(
+                                t, a.owner, harness=harness,
+                                reason="review-retarget",
+                                previous_owner=prev_owner)
+                            rewrite_lock_to = a.owner
+                    t["status"] = "claimed"
+                    t["owner"] = a.owner
+                    if not t.get("claimed_at"):
+                        t["claimed_at"] = now()
+                    bind_owner = a.owner
+                    transfer_owner = a.owner
+                    changed.append("claimed for %s (returned from review)" % a.owner)
             elif t["status"] in ("claimed", "review"):
                 if t["status"] == "claimed" and a.owner and a.owner != prev_owner:
                     transfer_owner = a.owner
@@ -8353,14 +8453,58 @@ def cmd_reopen(a, board):
     t = load(board, a.id)
     _refuse_unreleased_deps(t, load_all(board), only_done=True)
     notes = getattr(a, "notes", "") or ""
+    revision = bool(getattr(a, "revision", False))
     # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
     # ticket to `next` while notes still read as REVIEW. Claimed work that
     # never entered review stays reopenable without notes (T-246).
-    if (t["status"] == "review" or t.get("review_at")) and not notes.strip():
+    if (t["status"] == "review" or t.get("review_at") or revision) and not notes.strip():
         sys.exit(
             'reopen of IN REVIEW work needs --notes "why" '
             "(silent reopen returns it to next and looks like a next-reissue bug)"
         )
+    # T-1460: explicit revise request -- return to the author as claimed,
+    # distinct from release-to-pool reopen (which clears owner → open).
+    if revision:
+        if t.get("status") != "review":
+            sys.exit("--revision only applies while the ticket is IN REVIEW")
+        prev_owner = (t.get("owner") or "").strip()
+        if not prev_owner:
+            sys.exit("%s has no owner to return the revision to" % a.id)
+        actor = whoami(getattr(a, "by", ""))
+        before = t["status"]
+        _work_view().supersede_release_evidence(t)
+        author = _review_verdict().return_to_author_for_revision(
+            t, actor=actor, reason=notes, sha="", kind="revision")
+        t["owner"] = prev_owner
+        t["reopened_at"] = now()
+        t["reopened_seen"] = [
+            _msg_id(m) for m in load_messages(board)
+            if (m.get("re") or "").strip() == t["id"]
+        ]
+        tc = _recovery()
+        if tc is not None:
+            harness = ""
+            try:
+                harness = _agent_harness(board, prev_owner)[0]
+            except Exception:
+                harness = ""
+            tc.issue_owner_lease(
+                t, prev_owner, harness=harness, reason="revision-request",
+                previous_owner=prev_owner)
+            tc.rewrite_claim_lock(board, t["id"], prev_owner)
+        save(board, t)
+        _safe(lambda: traj_event(
+            board, "reopen", agent=actor, ticket=t,
+            state_before=before, state_after="claimed",
+            outcome="revision", prev_owner=prev_owner,
+            notes_len=len(notes), **_traj_git()), None)
+        _safe(lambda: _bind_agent_ticket(board, prev_owner, t["id"]), None)
+        _safe(lambda: post_message(
+            board, actor,
+            "%s returned for revision: %s" % (t["id"], notes[:160]),
+            to=prev_owner, re=t["id"], task=True, source="review"), None)
+        print("%s returned to %s as claimed for revision" % (a.id, author or prev_owner))
+        return
     if notes:
         # Attribute to the acting agent, not the ticket's outgoing owner --
         # reopen is very often one agent (a reviewer, the master) sending
@@ -8456,8 +8600,31 @@ def cmd_board_restore(a, board):
     print(json.dumps(result, indent=2))
 
 
+def _board_source(board):
+    """How board_dir() found `board`, in words, for `atm where` (stderr)."""
+    if os.environ.get("TICKETS_DIR"):
+        return "TICKETS_DIR"
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    real = os.path.realpath(board)
+    if configured and os.path.realpath(configured) == real:
+        return "the board linked to repo %s in %s" % (root, _atman_config_path())
+    if _is_marked_primary(board):
+        return "this repo's own .tickets (marked primary)"
+    return "the nearest .tickets directory; no board is linked for this repo"
+
+
 def cmd_where(a, board):
+    # stdout line 1 is always the board path (scripts read it); the
+    # explanation goes to stderr so it never changes that contract.
     print(board)
+    source = _board_source(board)
+    sys.stderr.write("found via: %s\n" % source)
+    if source.startswith("the nearest") and _repo_root():
+        sys.stderr.write(
+            "to make every checkout of this repo use one shared board: "
+            "atm board-link <path to that board's .tickets>\n"
+        )
     kids = child_boards(os.getcwd())
     if len(kids) > 1:
         print("other live boards in child dirs:")
@@ -8576,6 +8743,72 @@ def cmd_doctor(a):
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
         print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+
+
+def _read_board_config():
+    path = _atman_config_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return path, {"boards": {}}
+    except (OSError, ValueError) as e:
+        sys.exit("cannot read %s (%s) -- fix or move it aside; nothing changed" % (path, e))
+    if not isinstance(data, dict) or not isinstance(data.get("boards", {}), dict):
+        sys.exit("%s is not {\"boards\": {...}} -- fix or move it aside; nothing changed" % path)
+    data.setdefault("boards", {})
+    return path, data
+
+
+def cmd_board_link(a):
+    """Link a repo to a shared board in the machine config (T-959 map), so
+    every checkout and worktree of that repo resolves it without TICKETS_DIR."""
+    path, data = _read_board_config()
+    boards = data["boards"]
+    if a.show:
+        if not boards:
+            print("no boards linked (%s)" % path)
+        for repo, board in sorted(boards.items()):
+            print("%s -> %s" % (repo, board))
+        return
+    if a.repo:
+        repo = os.path.realpath(os.path.expanduser(a.repo))
+    else:
+        repo = _repo_root()
+        if not repo:
+            sys.exit("not inside a git repo -- pass --repo PATH")
+        repo = os.path.realpath(repo)
+    if a.unlink:
+        if boards.pop(repo, None) is None:
+            sys.exit("no board linked for %s; nothing changed" % repo)
+        _write_board_config(path, data)
+        print("unlinked %s" % repo)
+        return
+    if not a.board:
+        sys.exit("usage: atm board-link <board dir> [--repo PATH] | --show | --unlink")
+    board = os.path.realpath(os.path.expanduser(a.board))
+    if not os.path.isdir(board):
+        sys.exit("no such directory: %s" % board)
+    if not _board_has_content(board):
+        sys.exit("%s does not look like a board (no tickets, messages or agents); nothing changed" % board)
+    boards[repo] = board
+    _write_board_config(path, data)
+    print("linked %s -> %s (%s)" % (repo, board, path))
+    local = os.path.join(repo, ".tickets")
+    if os.path.realpath(local) != board and _is_marked_primary(local):
+        print(
+            "note: %s is marked primary and still wins for this repo; remove %s "
+            "to use the linked board" % (local, os.path.join(local, PRIMARY_BOARD_MARKER))
+        )
+
+
+def _write_board_config(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def cmd_board_mark_primary(a):
@@ -20107,6 +20340,88 @@ def _ui_dep_state(dep):
     return dep.get("status") or "open"
 
 
+def _ui_newest_accept_verdict(verdicts, *, applies=None):
+    """Newest non-superseded accept verdict, optionally filtered by applies.
+
+    Matches ``work_view._unbound_accept_event`` (newest wins), not first-match.
+    """
+    latest = None
+    for v in verdicts or []:
+        if (v.get("kind") or "").lower() != "accept":
+            continue
+        if v.get("superseded"):
+            continue
+        if applies is True and not v.get("applies"):
+            continue
+        if applies is False and v.get("applies"):
+            continue
+        latest = v
+    return latest
+
+
+def _ui_unbound_accept_message(verdicts, tid=""):
+    """Plain sentence when an accept exists but is not bound to review_head.
+
+    ``done --force`` then ``accept --sha`` records the event without
+    ``review_head``, so ``accepted`` stays false and the verdict's
+    ``applies`` is false. Name that gap instead of "no proof recorded".
+    ``atm review`` refuses DONE work — reopen + claim + review + accept.
+    """
+    v = _ui_newest_accept_verdict(verdicts, applies=False)
+    if not v:
+        return ""
+    by = (v.get("by") or "").strip() or "?"
+    sha = (v.get("sha") or "").strip()
+    short = sha[:7] if sha else "?"
+    slot = (tid or "").strip() or "<id>"
+    return (
+        "accept by @%s on %s is not bound to a review head: "
+        'run atm reopen %s --notes "...", then claim, then atm review, '
+        "then atm accept --sha <new head>" % (by, short, slot)
+    )
+
+
+def _ui_applying_accept_not_done_message(verdicts):
+    """Accept applies at the current head, but status is not yet done."""
+    v = _ui_newest_accept_verdict(verdicts, applies=True)
+    if not v:
+        return ""
+    by = (v.get("by") or "").strip() or "?"
+    sha = (v.get("sha") or "").strip()
+    short = sha[:7] if sha else "?"
+    return "Accepted by @%s on %s (not marked done yet)" % (by, short)
+
+
+def _ui_acceptance_proof(t, accepted, review_label, verdicts=None):
+    """What the drill-down shows under ACCEPTANCE PROOF.
+
+    ``t.proof`` is the sounding/capture sentence when one exists. An accepted
+    ticket without that sentence still has a verification record — the
+    structured accept/merge (who + sha). Prefer that label over silence so the
+    app never says "no proof recorded" next to "Accepted by @seat on <sha>".
+    When an accept exists but does not apply (no review_head), say so plainly.
+    When an accept applies while the ticket is still IN REVIEW, name that too.
+    """
+    sounding = (t.get("proof") or "").strip()
+    if sounding:
+        return sounding
+    if not accepted:
+        applying = _ui_applying_accept_not_done_message(verdicts)
+        if applying:
+            return applying
+        return _ui_unbound_accept_message(verdicts, tid=t.get("id") or "")
+    label = (review_label or "").strip()
+    if label:
+        return label
+    v = _ui_newest_accept_verdict(verdicts, applies=True)
+    if v:
+        by = (v.get("by") or "").strip() or "?"
+        sha = (v.get("sha") or "").strip()
+        short = sha[:7] if sha else "unrecorded artifact"
+        return "Accepted by @%s on %s" % (by, short)
+    return ""
+
+
 def ui_ticket(board, tid, operator, project, include_archives=False):
     """GET /ticket/<id>.json: the drill-down. Board files only; no git.
 
@@ -20193,6 +20508,7 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
     target = sha or branch
     deps = [{"id": d, "state": _ui_dep_state(by_id.get(d)),
              "title": (by_id.get(d) or {}).get("title") or ""} for d in t.get("deps") or []]
+    review_label = (review.get("label") or "").strip()
     return {
         "id": tid, "project": project, "title": t.get("title") or "",
         "status": status, "status_label": status_label,
@@ -20201,8 +20517,11 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
         "owner": (t.get("owner") or "").strip(),
         "owner_at_project": ("%s@%s" % (t.get("owner"), project)) if t.get("owner") else "",
         "deps": deps,
-        "acceptance": {"proof": (t.get("proof") or "").strip()},
-        "review": {"head": head, "head_len": len(head), "label": review.get("label") or "",
+        # Sounding proof (cause/change/proof) when present; for an accepted
+        # ticket the structured accept/merge label is the verification proof
+        # (who + sha). Never leave "no proof recorded" beside "Accepted by".
+        "acceptance": {"proof": _ui_acceptance_proof(t, accepted, review_label, verdicts)},
+        "review": {"head": head, "head_len": len(head), "label": review_label,
                    "verified": verified, "verdicts": verdicts},
         "runs": runs,
         "usage": usage,
@@ -22123,7 +22442,20 @@ class _LoudArgumentParser(argparse.ArgumentParser):
     stderr, but with an explicit NO CHANGE WAS MADE as the trailing line, so
     the tail of the output is the warning rather than the caller's own text.
     add_subparsers() propagates this class to every subparser by default
-    (parser_class defaults to type(self)), so this covers all of them."""
+    (parser_class defaults to type(self)), so this covers all of them.
+
+    ``_lazy_release_epilog`` defers ``release_status()`` until help is formatted
+    so ``atm --version`` hashes the release tree only once (T-1080).
+    """
+    def __init__(self, *args, lazy_release_epilog=False, **kwargs):
+        self._lazy_release_epilog = lazy_release_epilog
+        argparse.ArgumentParser.__init__(self, *args, **kwargs)
+
+    def format_help(self):
+        if self._lazy_release_epilog and not self.epilog:
+            self.epilog = release_status()
+        return argparse.ArgumentParser.format_help(self)
+
     def error(self, message):
         self.print_usage(sys.stderr)
         self.exit(2, "%(prog)s: error: %(message)s\n%(prog)s: NO CHANGE WAS MADE\n" % {
@@ -22214,6 +22546,73 @@ def release_status():
 
 # Backward-compatible alias: scripts/tests may still import the old name.
 release_version = release_status
+
+
+def _source_behind_lines(root, head, remote):
+    """Warn when this checkout's HEAD is a strict ancestor of origin/main."""
+    if not (root and head and remote and head != remote):
+        return []
+    if git("merge-base", "--is-ancestor", head, remote, cwd=root) is None:
+        return []
+    quoted = shlex.quote(root)
+    return [
+        "WARNING: running source %s is behind origin/main %s"
+        % (head[:12], remote[:12]),
+        "refresh: git -C %s fetch origin && git -C %s merge --ff-only origin/main"
+        % (quoted, quoted),
+    ]
+
+
+def _same_commit(left, right):
+    a = (left or "").strip()
+    b = (right or "").strip()
+    if not a or not b:
+        return False
+    n = min(len(a), len(b), 40)
+    if n < 7:
+        return False
+    return a[:n] == b[:n]
+
+
+def _pinned_release_upgrade_line(pinned):
+    short = pinned[:12] if len(pinned or "") >= 12 else (pinned or "")
+    return (
+        "pinned release %s; newer releases can't be checked from here: "
+        "brew upgrade atman (or re-run install_live)" % short
+    )
+
+
+def runtime_version_report():
+    """What `atm --version` prints: package version, provenance, the file
+    that is running, and a behind warning when this checkout is older than
+    origin/main.
+
+    First line is ``PACKAGE_VERSION`` (e.g. ``0.3.0``) on every install shape
+    that executes this file. Second line is ``release_status()``. Extra lines
+    are T-1080: an operator worktree must not silently pin last week's CLI
+    (``atm steer`` missing from ``--help``).
+
+    When release.json names a commit, that commit is the running source.
+    An enclosing git repo (dotfiles / ~/.claude) is probed only when its
+    HEAD equals that commit. Otherwise print the brew/tarball upgrade path.
+    """
+    status = release_status()
+    script = os.path.realpath(__file__)
+    lines = [PACKAGE_VERSION, status, "source: %s" % script]
+    pinned = _release_commit()
+    root = _git_root_from(script)
+    head = (git("rev-parse", "HEAD", cwd=root) if root else None) or ""
+    if pinned and not (head and _same_commit(head, pinned)):
+        lines.append(_pinned_release_upgrade_line(pinned))
+        return "\n".join(lines)
+    if head:
+        lines.append("source-sha: %s" % head)
+        remote = (
+            git("rev-parse", "-q", "--verify", "origin/main", cwd=root)
+            or git("rev-parse", "-q", "--verify", "origin/master", cwd=root)
+            or "")
+        lines.extend(_source_behind_lines(root, head, remote))
+    return "\n".join(lines)
 
 
 def cmd_self(a, board):
@@ -22462,11 +22861,26 @@ def cmd_feedback(a, board):
     print(text)
 
 
+class _RawVersion(argparse.Action):
+    """Print runtime_version_report() without HelpFormatter wrapping (T-1080)."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help=None):
+        argparse.Action.__init__(
+            self, option_strings=option_strings, dest=dest, default=default,
+            nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        sys.stdout.write(runtime_version_report() + "\n")
+        parser.exit()
+
+
 def main():
-    status = release_status()
+    # Defer release_status() until help; --version calls it once inside
+    # runtime_version_report() (T-1080 REQUEST CHANGES).
     p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
-                           epilog=status)
-    p.add_argument("--version", action="version", version=status)
+                           lazy_release_epilog=True)
+    p.add_argument("--version", action=_RawVersion, help="show program's version number and exit")
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
@@ -22644,6 +23058,13 @@ def main():
 
     c = sub.add_parser("doctor", help="diagnose board resolution and detect shadow boards (T-959)")
     c.set_defaults(fn=cmd_doctor)
+
+    c = sub.add_parser("board-link", help="link this repo to a shared board so every checkout finds it")
+    c.add_argument("board", nargs="?", help="the shared board's .tickets directory")
+    c.add_argument("--repo", help="repo to link (default: the repo you are in)")
+    c.add_argument("--show", action="store_true", help="list linked repos and boards")
+    c.add_argument("--unlink", action="store_true", help="remove this repo's link")
+    c.set_defaults(fn=cmd_board_link)
 
     c = sub.add_parser("board-mark-primary", help="opt this repo's local .tickets in as its board of record")
     c.set_defaults(fn=cmd_board_mark_primary)
@@ -23045,7 +23466,7 @@ def main():
     c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
     c.set_defaults(fn=cmd_accept)
 
-    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c = sub.add_parser("reject", help="reject the submitted SHA and return the ticket to its author as claimed")
     c.add_argument("id")
     c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
     c.add_argument("--reason", required=True, help="why this artifact is rejected")
@@ -23240,6 +23661,9 @@ def main():
     c.add_argument("id")
     c.add_argument("--notes", "-n", default="",
                    help="why it's being reopened (required for IN REVIEW / review_at)")
+    c.add_argument("--revision", action="store_true",
+                   help="T-1460: return IN REVIEW work to its owner as claimed for revision "
+                        "(instead of releasing to open)")
     c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
     c.set_defaults(fn=cmd_reopen)
 
@@ -23348,6 +23772,8 @@ def main():
         register(sub, globals())
 
     a = p.parse_args()
+    # After --version may have exited: hash once for drift warning / help epilog.
+    status = release_status()
     if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
         print("WARNING: %s -- see 'atm --version'" % status, file=sys.stderr)
     if not a.cmd:
@@ -23367,7 +23793,7 @@ def main():
             found = None
         cmd_self(a, found if found and os.path.isdir(found) else None)
         return
-    if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
+    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow"):
         # Diagnose/repair board resolution itself; must not go through
         # board_dir() or a shadow board is refused before we can report it.
         a.fn(a)

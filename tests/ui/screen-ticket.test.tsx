@@ -136,6 +136,40 @@ describe("the drill-down", () => {
     expect(pane).toHaveTextContent("in flight");
   });
 
+  it("shows the accept record as proof when sounding proof is empty (T-1459)", async () => {
+    const HEAD_A = "6cf57003447931cf822f50ee8aeca2389700507b";
+    await open({
+      id: "T-3",
+      title: "Accepted",
+      status: "done",
+      status_label: "done, accepted",
+      accepted: true,
+      owner: "alice",
+      owner_at_project: "alice@alpha",
+      acceptance: { proof: "" },
+      review: {
+        head: HEAD_A,
+        head_len: 40,
+        label: "Accepted by @bob on 6cf5700",
+        verified: true,
+        verdicts: [
+          {
+            kind: "accept",
+            by: "bob",
+            at: "2026-09-23T11:42:00Z",
+            sha: HEAD_A,
+            superseded: false,
+            applies: true,
+            notes: "Independently read committed JSON",
+          },
+        ],
+      },
+    });
+    const proof = await screen.findByTestId("acceptance-proof");
+    expect(proof).toHaveTextContent("Accepted by @bob on 6cf5700");
+    expect(proof).not.toHaveTextContent("no proof recorded");
+  });
+
   it("shows each dependency's accept state, and never calls an unaccepted dep accepted", async () => {
     const { pane } = await open();
     const deps = await screen.findByTestId("deps");

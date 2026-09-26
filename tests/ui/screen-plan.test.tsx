@@ -107,7 +107,12 @@ const OFFLINE = node({
 const PLAN: Partial<Plan> = {
   available: true,
   objective: { text: "Cut an honest developer preview", exit_criterion: "a fresh clone follows the README", state: "active" },
-  counts: { open: 4, done: 2 },
+  counts: { open: 4, working: 1, done: 2 },
+  summary: {
+    finishing: [{ id: "T-3", title: "In flight", owner: "coder", who: "coder", phase: "working" }],
+    blocked: [{ id: "T-5", title: "Waits on an unaccepted dep", text: "dep T-2 done, not accepted", kind: "dep_unaccepted" }],
+    next: { id: "T-4", title: "Waits on an open dep", who: "rev", owner: "", who_kind: "reserved" },
+  },
   nodes: [ACCEPTED, DONE_NOT_ACCEPTED, RUNNING, WAITS_ON_OPEN, WAITS_ON_UNACCEPTED, OFFLINE],
   layers: [["T-1", "T-2"], ["T-3", "T-5"], ["T-4", "T-6"]],
   order: ["T-1", "T-2", "T-3", "T-5", "T-4", "T-6"],
@@ -126,6 +131,42 @@ describe("the execution plan", () => {
     const objective = await screen.findByTestId("objective");
     expect(objective).toHaveTextContent("Cut an honest developer preview");
     expect(objective).toHaveTextContent("a fresh clone follows the README");
+  });
+
+  it("shows finishing, blocked and next owner from the plan summary (T-1459)", async () => {
+    const { api } = fakeApi({ plan: PLAN });
+    render(<App api={api} />);
+    expect(await screen.findByTestId("plan-summary")).toBeInTheDocument();
+    expect(screen.getByTestId("plan-finishing")).toHaveTextContent("T-3");
+    expect(screen.getByTestId("plan-finishing")).toHaveTextContent("@coder");
+    expect(screen.getByTestId("plan-blocked")).toHaveTextContent("T-5");
+    expect(screen.getByTestId("plan-blocked")).toHaveTextContent("dep T-2 done, not accepted");
+    expect(screen.getByTestId("plan-next-owner")).toHaveTextContent("T-4");
+    expect(screen.getByTestId("plan-next-owner")).toHaveTextContent("@rev");
+  });
+
+  it("sidebar says working when the board has claimed work, not 0 open (T-1459)", async () => {
+    const { api } = fakeApi({
+      plan: PLAN,
+      projects: {
+        current: "alpha",
+        projects: [
+          {
+            slug: "alpha",
+            board: "/tmp/alpha/.tickets",
+            repos: [],
+            source: "started",
+            counts: { open: 0, claimed: 1, review: 0, blocked: 0, done: 1 },
+            lead: "planner",
+            current: true,
+          },
+        ],
+      },
+    });
+    render(<App api={api} />);
+    const counts = await screen.findAllByTestId("project-count");
+    expect(counts[0]).toHaveTextContent("1 working");
+    expect(counts[0]).not.toHaveTextContent("0 open");
   });
 
   it("shows every step with its owner and state", async () => {
