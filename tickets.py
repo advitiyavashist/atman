@@ -1399,7 +1399,8 @@ def _alloc(directory, prefix, width, record):
         return record
 
 
-def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None):
+def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="",
+           needs=None, target_repo=""):
     return _alloc(board, "T", 3, {
         "title": title,
         "body": body,
@@ -1414,7 +1415,42 @@ def create(board, title, body="", role="", deps=None, priority=2, epic="", sprin
         "created": now(),
         "updated": now(),
         "notes": [],
+        **_target_repo_stamp(target_repo),
     })
+
+
+def _target_repo_stamp(explicit=""):
+    """T-1135: record which repository a ticket's deliverable lives in.
+
+    Defaults to the repository the ticket was typed in, which is the right
+    answer whenever an author files follow-up work from the checkout they
+    are working in. It is a guess, so `atm create --target-repo` and
+    `atm assign --target-repo` can state or correct it, and an unset value
+    means "unknown", which keeps the ticket claimable from anywhere.
+
+    Deliberately NOT the `repo` field: that one is the review pin's
+    repository. `atm done` refuses to close from anywhere else and the
+    merge auto-close reads it as evidence about a reviewed sha, so a
+    create-time guess written there would fence off honest closes.
+    """
+    explicit = (explicit or "").strip()
+    if explicit:
+        return {"target_repo": explicit}
+    cwd = os.getcwd()
+    if cwd not in _TARGET_REPO_CACHE:
+        # One probe per directory per process: `atm plan` creates a whole
+        # graph in one run, and 40 tickets should not mean 40 `git config`
+        # calls. Scoped to this process, so a test that rewrites a remote
+        # between CLI invocations still sees the change.
+        try:
+            _TARGET_REPO_CACHE[cwd] = _repo_routing().checkout_repo(cwd)
+        except Exception:
+            _TARGET_REPO_CACHE[cwd] = ""
+    origin = _TARGET_REPO_CACHE[cwd]
+    return {"target_repo": origin} if origin else {}
+
+
+_TARGET_REPO_CACHE = {}
 
 
 # --------------------------------------------------------------------------
@@ -2545,6 +2581,18 @@ def _refuse_preflight(board, owner, harness, verb):
     return result
 
 
+def _repo_routing():
+    try:
+        from ticket_board import repo_routing as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import repo_routing as m
+        return m
+
+
 def _route_headroom():
     try:
         from ticket_board import route_headroom as m
@@ -3122,7 +3170,8 @@ def cmd_create(a, board):
     cur = active_sprint(board)
     sprint = a.sprint if a.sprint is not None else (cur["id"] if cur and a.in_sprint else "")
     t = create(board, a.title, a.body or "", a.role or "", deps, a.priority,
-               a.epic or "", sprint, _ids(a.needs))
+               a.epic or "", sprint, _ids(a.needs),
+               getattr(a, "target_repo", "") or "")
     pending = {}
     for other in blocks:
         o = load(board, other)
@@ -4486,6 +4535,7 @@ def cmd_next(a, board):
     ready = [t for t in ready if not _ticket_on_hold(t)]
     ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
     ready = [t for t in ready if not _worktree_gc().is_automated(t)]
+    ready, repo_miss = _repo_routing().filter_for_checkout(ready, os.getcwd())
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -4540,14 +4590,26 @@ def cmd_next(a, board):
     role_miss, reserved_miss = _next_refusal_parts(
         ready_all, roles, owner, steal_id, board)
     parts = []
+    if repo_miss:
+        # The attribution can be a create-time guess, so name the escape
+        # hatches: an explicit claim still works, and "-" clears a wrong stamp.
+        parts.append(
+            "%d ticket(s) whose repository is not this checkout's: %s"
+            " (claim one explicitly if it really is yours, or correct it with"
+            " `atm assign <id> --target-repo -`)" % (
+                len(repo_miss), ", ".join(t["id"] for t in repo_miss)))
     if role_miss:
         parts.append("%d ready for other roles: %s" % (
             len(role_miss), ", ".join(t["id"] for t in role_miss)))
     if reserved_miss:
         parts.append("%d reserved for other agents: %s" % (
             len(reserved_miss), ", ".join(t["id"] for t in reserved_miss)))
-    if roles is not None and parts:
-        print("no ticket for roles %s; %s" % (roles, "; ".join(parts)))
+    if parts:
+        # A seat that registered no roles has roles None; say that instead
+        # of printing "no ticket for roles None" at it.
+        who = (("roles %s" % (roles,)) if roles else
+               "this seat (no roles registered, so every role was considered)")
+        print("no ticket for %s; %s" % (who, "; ".join(parts)))
         sys.exit(1)
     cyc = find_cycle(tickets)
     if cyc:
@@ -7390,6 +7452,17 @@ def cmd_assign(a, board):
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
+    if getattr(a, "target_repo", None) is not None:
+        # T-1135: attribute an existing ticket so automatic claims stop
+        # offering it to seats checked out on a different repository. "-"
+        # clears it, which makes the ticket claimable from anywhere again.
+        want = a.target_repo.strip()
+        if want and want != "-":
+            t["target_repo"] = want
+            changed.append("target_repo=%s" % want)
+        else:
+            t.pop("target_repo", None)
+            changed.append("target_repo=(unknown)")
     if getattr(a, "worktree", None) is not None:
         wt = (a.worktree or "").strip()
         if wt:
@@ -22895,6 +22968,8 @@ def main():
     c.add_argument("--in-sprint", action="store_true", help="tag with the active sprint")
     c.add_argument("--needs", default="", help="capabilities required: docker,browser,own-machine")
     c.add_argument("--worktree", default="", help="implementation checkout; adds automated cleanup child")
+    c.add_argument("--target-repo", default="",
+                   help="repository the deliverable lives in; default: this checkout's origin")
     c.set_defaults(fn=cmd_create)
 
     c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, priority")
@@ -22904,6 +22979,8 @@ def main():
     c.add_argument("--role", default=None)
     c.add_argument("--owner", default=None, help="hard-assign (claims on their behalf)")
     c.add_argument("--needs", default=None)
+    c.add_argument("--target-repo", default=None,
+                   help="repository the deliverable lives in; '-' clears it")
     c.add_argument("--priority", type=int, default=None)
     c.add_argument("--title", default="")
     c.add_argument("--by", default="")
